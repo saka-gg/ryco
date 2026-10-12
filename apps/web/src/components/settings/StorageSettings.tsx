@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type ServerSettingsPatch,
   type StorageRetentionPolicy,
+  DEFAULT_STORAGE_RETENTION_POLICY,
 } from "@ryco/contracts";
 import { createStorageManagementController } from "@ryco/client-runtime/state/storage";
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
@@ -84,7 +85,7 @@ function StorageEditor({
   const settings = config?.settings;
   const policy = settings
     ? resolveStorageRetentionPolicy(settings, projectId || null)
-    : { automatic: false, completedWorktreeDays: null, temporaryDataDays: null };
+    : DEFAULT_STORAGE_RETENTION_POLICY;
   const projects = state.snapshot?.entries.filter((entry) => entry.category === "repository") ?? [];
   const busy = disabled || saving || state.busy;
   async function save(next: StorageRetentionPolicy | null) {

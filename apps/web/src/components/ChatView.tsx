@@ -419,6 +419,9 @@ function providerStatusesContentKey(providers: ReadonlyArray<ServerProvider>): s
       provider.auth.label ?? "",
       provider.auth.email ?? "",
       provider.message ?? "",
+      // The composer's usage popup reads limits from these snapshots.
+      provider.checkedAt,
+      JSON.stringify(provider.rateLimits) ?? "",
     );
     for (const model of provider.models) {
       parts.push(
@@ -552,6 +555,7 @@ export default function ChatView(props: ChatViewProps) {
   const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
   const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen);
   const sideChatCapability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
+  const cliProxyHubsCapability = useHostedRpcCapability(WS_METHODS.serverReadCliProxyHubs);
   const {
     environmentId,
     threadId,
@@ -1660,6 +1664,14 @@ export default function ChatView(props: ChatViewProps) {
       stabilizeProviderStatusesSnapshot(providerStatuses, composerProviderStatusesCacheRef.current),
     [providerStatuses],
   );
+  // Hub reads are owner-only. Other Hub roles and client sessions paired to the node see the
+  // hub settings but cannot read them; a primary session's role is only known from its reads.
+  const cliProxyHubsEnabled =
+    cliProxyHubsCapability.allowed &&
+    !activeEnvironmentUnavailable &&
+    (activeSavedEnvironmentRuntime?.role ?? "owner") === "owner" &&
+    serverConfig?.environment.capabilities.cliProxyHubs === true &&
+    Object.values(serverConfig.settings.cliProxyHubs).some((hub) => hub.enabled);
   const activeThreadSessionProviderInstanceId = activeThread?.session?.providerInstanceId ?? null;
   const phase = derivePhase(activeThread?.session ?? null);
 
@@ -5629,6 +5641,7 @@ export default function ChatView(props: ChatViewProps) {
                   lockedProvider={lockedProvider}
                   providerStatuses={composerProviderStatuses}
                   activeThreadModelSelection={activeThread?.modelSelection}
+                  cliProxyHubsEnabled={cliProxyHubsEnabled}
                   activeThreadActivities={threadActivities}
                   phoneThreadDock={phoneThreadDock}
                   resolvedTheme={resolvedTheme}

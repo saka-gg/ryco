@@ -216,6 +216,13 @@ HOME=~/.claude_router_home claude auth login
 Claude Code Router's setup can change over time. Use its upstream README for the current install and
 configuration steps: <https://github.com/musistudio/claude-code-router>.
 
+## I Want To Use CLIProxyAPI
+
+CLIProxyAPI pools several Claude Code subscriptions behind one proxy. Route a Claude provider
+through it with the same environment variables as a router, and connect the hub itself under
+Settings → Providers → CLIProxyAPI hubs to see each subscription's usage on Statistics → Limits.
+See [CLIProxyAPI hubs](./cliproxyapi.md).
+
 ## I Want Different Claude Settings, Not A Different Account
 
 Create another Claude provider with the same account if you want a named preset.

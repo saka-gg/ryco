@@ -12,6 +12,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       getConfig: rpcClient.server.getConfig,
       readCodexResetCredits: rpcClient.server.readCodexResetCredits,
       consumeCodexResetCredit: rpcClient.server.consumeCodexResetCredit,
+      readCliProxyHubs: rpcClient.server.readCliProxyHubs,
+      testCliProxyHub: rpcClient.server.testCliProxyHub,
       refreshProviders: rpcClient.server.refreshProviders,
       searchAcpRegistry: rpcClient.server.searchAcpRegistry,
       installAcpRegistry: rpcClient.server.installAcpRegistry,

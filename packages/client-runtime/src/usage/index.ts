@@ -11,3 +11,5 @@ export * from "./resetCredits.ts";
 export * from "./providers.ts";
 
 export * from "./compatibility.ts";
+
+export * from "./cliProxy.ts";

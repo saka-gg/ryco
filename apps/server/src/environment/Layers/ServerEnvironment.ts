@@ -100,6 +100,8 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       worktreeNotes: true,
       threadFork: true,
       projectSearchEmptyQuery: true,
+      cliProxyHubs: true,
+      cliProxyCloudflareAccess: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

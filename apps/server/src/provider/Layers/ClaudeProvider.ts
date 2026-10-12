@@ -43,6 +43,7 @@ import {
 } from "../ClaudeModelCatalog.ts";
 import type { ModelManifest } from "../ModelManifest.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { type ClaudeCredentialStore, resolveClaudeLoginStore } from "./ClaudeUsage.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -230,7 +231,7 @@ type ResolveClaudeCapabilities = (
 ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>;
 
 type ResolveClaudeRateLimits = (
-  claudeSettings: ClaudeSettings,
+  store: ClaudeCredentialStore,
   version: string | null,
 ) => Effect.Effect<ServerProviderRateLimits | undefined>;
 
@@ -324,6 +325,8 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * servers (each a Node process tree of 100+ MiB). Slash commands contributed by
  * MCP prompts are therefore absent from the probed list; live sessions still
  * load MCP normally.
+ * The reported subscription and token source also decide whether the
+ * instance's usage limits may be read from the local claude.ai login.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -514,11 +517,6 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     : undefined;
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
-  const rateLimits = resolveRateLimits
-    ? yield* resolveRateLimits(claudeSettings, parsedVersion).pipe(
-        Effect.orElseSucceed(() => undefined),
-      )
-    : undefined;
 
   if (!capabilities) {
     return buildServerProvider({
@@ -527,7 +525,6 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       checkedAt,
       models,
       slashCommands: dedupedSlashCommands,
-      ...(rateLimits ? { rateLimits } : {}),
       probe: {
         installed: true,
         version: parsedVersion,
@@ -537,6 +534,19 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       },
     });
   }
+
+  // Usage is read only from the store of the claude.ai login this instance's Claude Code reports
+  // using; without that report, or under any other authentication, no login's usage is shown.
+  const credentialStore = resolveClaudeLoginStore(
+    yield* makeClaudeEnvironment(claudeSettings, environment),
+    capabilities,
+  );
+  const rateLimits =
+    resolveRateLimits && credentialStore
+      ? yield* resolveRateLimits(credentialStore, parsedVersion).pipe(
+          Effect.orElseSucceed(() => undefined),
+        )
+      : undefined;
 
   const authMetadata = claudeAuthMetadata({
     subscriptionType: capabilities.subscriptionType,

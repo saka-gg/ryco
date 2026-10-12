@@ -1,7 +1,13 @@
-import { StorageRetentionPolicy } from "./storage.ts";
+import {
+  DEFAULT_STORAGE_RETENTION_POLICY,
+  StorageRetentionPolicy,
+  StorageRetentionPolicyInput,
+} from "./storage.ts";
+import { CliProxyHubConfigInput, CliProxyHubId, CliProxyHubs } from "./cliProxy.ts";
 import {
   DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
   LifecycleSuggestionPolicy,
+  LifecycleSuggestionPolicyInput,
 } from "./workspaceLifecycle.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -627,9 +633,7 @@ export const ServerSettings = Schema.Struct({
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   storageRetention: StorageRetentionPolicy.pipe(
-    Schema.withDecodingDefault(
-      Effect.succeed({ automatic: false, completedWorktreeDays: null, temporaryDataDays: null }),
-    ),
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_STORAGE_RETENTION_POLICY)),
   ),
   projectStorageRetention: Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -705,6 +709,8 @@ export const ServerSettings = Schema.Struct({
   providerEventLogs: Schema.NullOr(ProviderEventLogMode).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  // CLIProxyAPI hubs read as usage sources. Management keys live in the secret store.
+  cliProxyHubs: CliProxyHubs.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   agentControl: AgentControlSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -812,13 +818,13 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
-  storageRetention: Schema.optionalKey(StorageRetentionPolicy),
+  storageRetention: Schema.optionalKey(StorageRetentionPolicyInput),
   projectStorageRetention: Schema.optionalKey(
-    Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicy)),
+    Schema.Record(Schema.String, Schema.NullOr(StorageRetentionPolicyInput)),
   ),
-  lifecycleSuggestions: Schema.optionalKey(LifecycleSuggestionPolicy),
+  lifecycleSuggestions: Schema.optionalKey(LifecycleSuggestionPolicyInput),
   projectLifecycleSuggestions: Schema.optionalKey(
-    Schema.Record(Schema.String, Schema.NullOr(LifecycleSuggestionPolicy)),
+    Schema.Record(Schema.String, Schema.NullOr(LifecycleSuggestionPolicyInput)),
   ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
   chatsRoot: Schema.optionalKey(WorktreeRoot),
@@ -862,6 +868,10 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  // Per-hub replacement; `null` removes the hub (and its stored management key).
+  cliProxyHubs: Schema.optionalKey(
+    Schema.Record(CliProxyHubId, Schema.NullOr(CliProxyHubConfigInput)),
+  ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

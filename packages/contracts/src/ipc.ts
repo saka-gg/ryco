@@ -972,6 +972,12 @@ export interface LocalApi {
     consumeCodexResetCredit?: (
       input: CodexResetCreditInput,
     ) => Promise<{ outcome: CodexResetCreditOutcome }>;
+    readCliProxyHubs?: (
+      input: import("./cliProxy.ts").CliProxyReadHubsInput,
+    ) => Promise<import("./cliProxy.ts").CliProxyReadHubsResult>;
+    testCliProxyHub?: (
+      input: import("./cliProxy.ts").CliProxyTestHubInput,
+    ) => Promise<import("./cliProxy.ts").CliProxyTestHubResult>;
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;
@@ -1069,6 +1075,12 @@ export interface EnvironmentApi {
     consumeCodexResetCredit?: (
       input: CodexResetCreditInput,
     ) => Promise<{ outcome: CodexResetCreditOutcome }>;
+    readCliProxyHubs?: (
+      input: import("./cliProxy.ts").CliProxyReadHubsInput,
+    ) => Promise<import("./cliProxy.ts").CliProxyReadHubsResult>;
+    testCliProxyHub?: (
+      input: import("./cliProxy.ts").CliProxyTestHubInput,
+    ) => Promise<import("./cliProxy.ts").CliProxyTestHubResult>;
     refreshProviders: (input?: {
       readonly instanceId?: ProviderInstanceId;
     }) => Promise<ServerProviderUpdatedPayload>;

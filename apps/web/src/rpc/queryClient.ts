@@ -652,10 +652,10 @@ export function useQuery<TQueryFnData = unknown, TData = TQueryFnData>(
 
     const shouldForce = refetchOnMount === "always";
     if (shouldForce || client.isStale(current.queryKey, staleTime)) {
-      void client.fetch(current.queryKey, current.queryFn, {
-        retry: current.retry,
-        force: shouldForce,
-      });
+      // A failure is recorded in the query state; only keep it from surfacing as unhandled.
+      client
+        .fetch(current.queryKey, current.queryFn, { retry: current.retry, force: shouldForce })
+        .catch(() => undefined);
     }
     return removeObserver;
   }, [client, hash, enabled, staleTime, refetchOnMount]);
@@ -735,7 +735,7 @@ export function useQueries<TQueryFnData = unknown, TData = TQueryFnData>(config:
 
     for (const query of queriesRef.current) {
       if ((query.enabled ?? true) && client.isStale(query.queryKey, query.staleTime ?? 0)) {
-        void client.fetch(query.queryKey, query.queryFn, { retry: query.retry });
+        client.fetch(query.queryKey, query.queryFn, { retry: query.retry }).catch(() => undefined);
       }
     }
 

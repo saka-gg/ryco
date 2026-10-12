@@ -47,6 +47,17 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("reads the endpoints even when an unrelated setting is invalid", () => {
+    expect(
+      parsePersistedServerObservabilitySettings(
+        JSON.stringify({
+          lifecycleSuggestions: { archiveInactiveThreadsDays: "soon" },
+          observability: { otlpTracesUrl: "http://localhost:4318/v1/traces" },
+        }),
+      ),
+    ).toEqual({ otlpTracesUrl: "http://localhost:4318/v1/traces", otlpMetricsUrl: undefined });
+  });
+
   it("falls back cleanly when persisted settings are invalid", () => {
     expect(parsePersistedServerObservabilitySettings("{")).toEqual({
       otlpTracesUrl: undefined,

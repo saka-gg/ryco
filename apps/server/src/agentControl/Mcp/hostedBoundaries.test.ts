@@ -45,6 +45,8 @@ describe("pre-auth server environment descriptor", () => {
       "serverVersion",
     ]);
     expect(Object.keys(ExecutionEnvironmentCapabilities.fields).toSorted()).toEqual([
+      "cliProxyCloudflareAccess",
+      "cliProxyHubs",
       "environmentIcon",
       "fileAttachments",
       "projectIcons",

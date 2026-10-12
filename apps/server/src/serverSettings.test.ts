@@ -3,8 +3,10 @@ import {
   type ServerSecretStoreShape,
 } from "./auth/Services/ServerSecretStore.ts";
 import { acquireStorageSettingsLease, storageLifecycleLock } from "./storage/lifecycle.ts";
+import { isDeepStrictEqual } from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CliProxyHubId,
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -12,18 +14,29 @@ import {
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
-import { assert, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem, Layer, Schema } from "effect";
+import { fromLenientJson } from "@ryco/shared/schemaJson";
+import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import { resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
+import { assert, describe, it } from "@effect/vitest";
+import { Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Predicate, Schema } from "effect";
 import { ServerConfig } from "./config.ts";
-import { ServerSettingsLive, ServerSettingsService, makeServerSettings } from "./serverSettings.ts";
+import {
+  ServerSettingsLive,
+  ServerSettingsService,
+  makePersistedSettingsEncoder,
+  makeServerSettings,
+  redactServerSettingsForClient,
+} from "./serverSettings.ts";
 
-const makeServerSettingsLayer = (store?: ServerSecretStoreShape) =>
-  (store
+const serverSettingsServiceLayer = (store?: ServerSecretStoreShape) =>
+  store
     ? Layer.effect(ServerSettingsService, makeServerSettings).pipe(
         Layer.provide(Layer.succeed(ServerSecretStore, store)),
       )
-    : ServerSettingsLive
-  ).pipe(
+    : ServerSettingsLive;
+
+const makeServerSettingsLayer = (store?: ServerSecretStoreShape) =>
+  serverSettingsServiceLayer(store).pipe(
     Layer.provideMerge(
       Layer.fresh(
         ServerConfig.layerTest(process.cwd(), {
@@ -32,6 +45,77 @@ const makeServerSettingsLayer = (store?: ServerSecretStoreShape) =>
       ),
     ),
   );
+
+/** Loads settings.json the way a restarted server does: a new service with an empty cache. */
+const loadSettingsInFreshService = (store?: ServerSecretStoreShape) =>
+  Effect.gen(function* () {
+    return yield* (yield* ServerSettingsService).getSettings;
+  }).pipe(Effect.provide(Layer.fresh(serverSettingsServiceLayer(store))));
+
+/** Runs `effect` against a new service over the same settings file, as after a restart. */
+const inFreshService = <A, E>(
+  effect: (settings: typeof ServerSettingsService.Service) => Effect.Effect<A, E>,
+  store?: ServerSecretStoreShape,
+) =>
+  Effect.gen(function* () {
+    return yield* effect(yield* ServerSettingsService);
+  }).pipe(Effect.provide(Layer.fresh(serverSettingsServiceLayer(store))));
+
+const unreadableSettingsBackups = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const { settingsPath } = yield* ServerConfig;
+  const directory = path.dirname(settingsPath);
+  return (yield* fs.readDirectory(directory))
+    .filter((name) => name.includes(".unreadable-"))
+    .map((name) => path.join(directory, name));
+});
+
+const decodeSettingsFile = Schema.decodeUnknownSync(fromLenientJson(ServerSettings));
+
+const leafAt = (value: unknown, path: ReadonlyArray<string>): unknown =>
+  path.reduce<unknown>((node, key) => (node as Record<string, unknown>)[key], value);
+
+const withLeaf = (value: unknown, path: ReadonlyArray<string>, leaf: unknown): unknown => {
+  const [key, ...rest] = path;
+  if (key === undefined) return leaf;
+  const record = value as Record<string, unknown>;
+  return { ...record, [key]: withLeaf(record[key], rest, leaf) };
+};
+
+/** Leaf paths inside nested settings structs, e.g. `storageRetention.automatic`. */
+const nestedLeafPaths = (
+  value: unknown,
+  path: ReadonlyArray<string> = [],
+): Array<ReadonlyArray<string>> =>
+  Predicate.isObject(value) && Object.keys(value).length > 0
+    ? Object.entries(value).flatMap(([key, child]) => nestedLeafPaths(child, [...path, key]))
+    : path.length > 1
+      ? [path]
+      : [];
+
+/** A valid value for the leaf at `path` that differs from its default. */
+const changedLeaf = (path: ReadonlyArray<string>): unknown => {
+  const current = leafAt(DEFAULT_SERVER_SETTINGS, path);
+  const candidates =
+    typeof current === "boolean"
+      ? [!current]
+      : typeof current === "number"
+        ? [current + 1]
+        : typeof current === "string"
+          ? [`${current}-changed`, "changed"]
+          : Array.isArray(current)
+            ? [current.length > 0 ? [] : ["changed"]]
+            : [1, "changed", true];
+  const changed = candidates.find((candidate) => {
+    const decoded = Schema.decodeUnknownExit(ServerSettings)(
+      withLeaf(DEFAULT_SERVER_SETTINGS, path, candidate),
+    );
+    return Exit.isSuccess(decoded) && isDeepStrictEqual(leafAt(decoded.value, path), candidate);
+  });
+  assert.isDefined(changed, `no valid changed value for ${path.join(".")}`);
+  return changed;
+};
 
 const syntheticSecretStore = () => {
   const values = new Map<string, Uint8Array>();
@@ -859,4 +943,625 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
+
+  it.effect("keeps CLIProxyAPI management and Cloudflare secrets out of files and clients", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const serverConfig = yield* ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const hubId = CliProxyHubId.make("home-hub");
+
+      const saved = yield* serverSettings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            url: "http://127.0.0.1:8317",
+            managementKey: " mgmt-secret ",
+            enabled: true,
+            cloudflareAccessClientId: "token.access",
+            cloudflareAccessClientSecret: " cf-secret ",
+          },
+        },
+      });
+      // The server keeps working with the materialized key.
+      assert.equal(saved.cliProxyHubs[hubId]?.managementKey, "mgmt-secret");
+      assert.equal(saved.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "cf-secret");
+      assert.deepEqual(redactServerSettingsForClient(saved).cliProxyHubs[hubId], {
+        url: "http://127.0.0.1:8317",
+        managementKey: "",
+        managementKeyRedacted: true,
+        enabled: true,
+        cloudflareAccessClientId: "token.access",
+        cloudflareAccessClientSecret: "",
+        cloudflareAccessClientSecretRedacted: true,
+      });
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      assert.notInclude(raw, "mgmt-secret");
+      assert.notInclude(raw, "cf-secret");
+      assert.equal(fake.values.size, 2);
+      const restarted = yield* loadSettingsInFreshService(fake.store);
+      assert.equal(restarted.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "cf-secret");
+
+      // Sending the redacted entry back (an edit of other fields) keeps the stored key.
+      const relabeled = yield* serverSettings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            url: "http://127.0.0.1:8317",
+            label: "Home",
+            managementKey: "",
+            managementKeyRedacted: true,
+            enabled: true,
+          },
+        },
+      });
+      assert.equal(relabeled.cliProxyHubs[hubId]?.managementKey, "mgmt-secret");
+      assert.equal(relabeled.cliProxyHubs[hubId]?.label, "Home");
+      // A client that predates Cloudflare fields preserves the token when relabeling.
+      assert.equal(relabeled.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "cf-secret");
+
+      // The saved key never follows the hub to another address; a loopback alias is the same one.
+      const moved = yield* serverSettings
+        .updateSettings({
+          cliProxyHubs: {
+            [hubId]: {
+              url: "https://other.example:8317",
+              managementKey: "",
+              managementKeyRedacted: true,
+              enabled: true,
+            },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(moved.detail, "its address changed");
+      assert.equal(
+        (yield* serverSettings.getSettings).cliProxyHubs[hubId]?.url,
+        "http://127.0.0.1:8317",
+      );
+      const aliased = yield* serverSettings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            url: "http://localhost:8317/v0/management",
+            label: "Home",
+            managementKey: "",
+            managementKeyRedacted: true,
+            enabled: true,
+          },
+        },
+      });
+      assert.equal(aliased.cliProxyHubs[hubId]?.managementKey, "mgmt-secret");
+      assert.equal(aliased.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "cf-secret");
+
+      const visible = redactServerSettingsForClient(aliased).cliProxyHubs[hubId]!;
+      const changedId = yield* serverSettings
+        .updateSettings({
+          cliProxyHubs: { [hubId]: { ...visible, cloudflareAccessClientId: "new-token.access" } },
+        })
+        .pipe(Effect.flip);
+      assert.include(changedId.detail, "its Client ID changed");
+      const changedAddress = yield* serverSettings
+        .updateSettings({
+          cliProxyHubs: {
+            [hubId]: {
+              ...visible,
+              url: "https://other.example",
+              managementKey: "new-management-key",
+              managementKeyRedacted: false,
+            },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(changedAddress.detail, "Cloudflare Access Client Secret");
+      assert.include(changedAddress.detail, "its address changed");
+      assert.equal(
+        (yield* serverSettings.getSettings).cliProxyHubs[hubId]?.managementKey,
+        "mgmt-secret",
+      );
+
+      const rotated = yield* serverSettings.updateSettings({
+        cliProxyHubs: { [hubId]: { ...visible, cloudflareAccessClientSecret: "rotated-secret" } },
+      });
+      assert.equal(rotated.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "rotated-secret");
+      const cleared = yield* serverSettings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            ...redactServerSettingsForClient(rotated).cliProxyHubs[hubId]!,
+            cloudflareAccessClientId: "",
+            cloudflareAccessClientSecret: "",
+            cloudflareAccessClientSecretRedacted: false,
+          },
+        },
+      });
+      assert.equal(cleared.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "");
+      assert.equal(fake.values.size, 1);
+      assert.notInclude(JSON.stringify(redactServerSettingsForClient(cleared)), "rotated-secret");
+
+      yield* serverSettings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            ...redactServerSettingsForClient(cleared).cliProxyHubs[hubId]!,
+            cloudflareAccessClientId: "token.access",
+            cloudflareAccessClientSecret: "cf-secret",
+          },
+        },
+      });
+      assert.equal(fake.values.size, 2);
+
+      // Removing the hub removes its key.
+      const removed = yield* serverSettings.updateSettings({ cliProxyHubs: { [hubId]: null } });
+      assert.deepEqual(removed.cliProxyHubs, {});
+      assert.equal(fake.values.size, 0);
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("does not bind a leftover hub secret to a newly created address", () => {
+    const fake = syntheticSecretStore();
+    const store = { ...fake.store, remove: () => Effect.void };
+    return Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const hubId = CliProxyHubId.make("home");
+      const saved = yield* settings.updateSettings({
+        cliProxyHubs: {
+          [hubId]: {
+            url: "https://old.example",
+            managementKey: "mgmt-secret",
+            enabled: true,
+            cloudflareAccessClientId: "token.access",
+            cloudflareAccessClientSecret: "cf-secret",
+          },
+        },
+      });
+      yield* settings.updateSettings({ cliProxyHubs: { [hubId]: null } });
+      assert.equal(fake.values.size, 2, "the stale-secret cleanup left records behind");
+      const refused = yield* settings
+        .updateSettings({
+          cliProxyHubs: {
+            [hubId]: {
+              ...redactServerSettingsForClient(saved).cliProxyHubs[hubId]!,
+              url: "https://new.example",
+            },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(refused.detail, "no saved value exists");
+      assert.deepEqual((yield* settings.getSettings).cliProxyHubs, {});
+    }).pipe(Effect.provide(makeServerSettingsLayer(store)));
+  });
+
+  it.effect("reloads policies saved with one field at its default without losing other keys", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const instanceId = ProviderInstanceId.make("codex_work");
+      const saved = yield* settings.updateSettings({
+        lifecycleSuggestions: { archiveInactiveThreadsDays: 14, removeArchivedCheckoutsDays: 7 },
+        storageRetention: { automatic: true, completedWorktreeDays: 30, temporaryDataDays: null },
+        agentControl: { enabled: true },
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: {},
+            environment: [
+              { name: "CODEX_HOME", value: "/fixture/codex-home", sensitive: false },
+              { name: "OPENAI_API_KEY", value: "sk-fixture", sensitive: true },
+            ],
+          },
+        },
+      });
+
+      const reloaded = yield* loadSettingsInFreshService();
+      assert.deepEqual(reloaded, saved);
+      assert.deepEqual(reloaded.lifecycleSuggestions, {
+        archiveInactiveThreadsDays: 14,
+        removeArchivedCheckoutsDays: 7,
+      });
+      assert.equal(reloaded.providerInstances[instanceId]?.environment?.[1]?.value, "sk-fixture");
+      assert.deepEqual(yield* unreadableSettingsBackups, []);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("loads files that older builds wrote with default policy fields stripped", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          lifecycleSuggestions: { archiveInactiveThreadsDays: 14 },
+          storageRetention: { automatic: true, completedWorktreeDays: 30 },
+          agentControl: { enabled: true },
+          providerInstances: {
+            codex_work: {
+              driver: "codex",
+              config: {},
+              environment: [{ name: "CODEX_HOME", value: "/fixture/codex-home" }],
+            },
+          },
+        }),
+      );
+
+      const loaded = yield* (yield* ServerSettingsService).getSettings;
+      assert.deepEqual(loaded.lifecycleSuggestions, {
+        archiveInactiveThreadsDays: 14,
+        removeArchivedCheckoutsDays: 7,
+      });
+      assert.deepEqual(loaded.storageRetention, {
+        automatic: true,
+        completedWorktreeDays: 30,
+        temporaryDataDays: null,
+      });
+      assert.isTrue(loaded.agentControl.enabled);
+      assert.deepEqual(
+        loaded.providerInstances[ProviderInstanceId.make("codex_work")]?.environment,
+        [{ name: "CODEX_HOME", value: "/fixture/codex-home", sensitive: false }],
+      );
+      assert.deepEqual(yield* unreadableSettingsBackups, []);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("persists a change to any single nested settings field so a fresh load reads it", () =>
+    Effect.gen(function* () {
+      for (const path of nestedLeafPaths(DEFAULT_SERVER_SETTINGS)) {
+        const label = path.join(".");
+        const key = path[0] as keyof ServerSettings;
+        const intended = withLeaf(
+          DEFAULT_SERVER_SETTINGS,
+          path,
+          changedLeaf(path),
+        ) as ServerSettings;
+        const patch = { [key]: intended[key] } as ServerSettingsPatch;
+        const expected = Schema.decodeUnknownSync(ServerSettings)(
+          applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, patch),
+        );
+        assert.notDeepEqual(leafAt(expected, path), leafAt(DEFAULT_SERVER_SETTINGS, path), label);
+
+        yield* Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const { settingsPath } = yield* ServerConfig;
+          const saved = yield* (yield* ServerSettingsService).updateSettings(patch);
+          assert.deepEqual(
+            decodeSettingsFile(yield* fs.readFileString(settingsPath)),
+            expected,
+            label,
+          );
+          assert.deepEqual(yield* loadSettingsInFreshService(), saved, label);
+        }).pipe(Effect.provide(makeServerSettingsLayer()));
+      }
+    }),
+  );
+
+  it.effect("keeps every valid key of a partly invalid file and backs the original up once", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { settingsPath } = yield* ServerConfig;
+      const instanceId = ProviderInstanceId.make("codex_work");
+      const saved = yield* (yield* ServerSettingsService).updateSettings({
+        enableLegacyTokenStreaming: true,
+        lifecycleSuggestions: { archiveInactiveThreadsDays: 14, removeArchivedCheckoutsDays: 3 },
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            config: {},
+            environment: [
+              { name: "CODEX_HOME", value: "/fixture/codex-home", sensitive: false },
+              { name: "OPENAI_API_KEY", value: "sk-fixture", sensitive: true },
+            ],
+          },
+        },
+      });
+      const original = `${JSON.stringify(
+        {
+          ...JSON.parse(yield* fs.readFileString(settingsPath)),
+          lifecycleSuggestions: { archiveInactiveThreadsDays: 0 },
+        },
+        null,
+        2,
+      )}\n`;
+      yield* fs.writeFileString(settingsPath, original);
+
+      const recovered = yield* loadSettingsInFreshService(fake.store);
+      assert.deepEqual(
+        recovered.lifecycleSuggestions,
+        DEFAULT_SERVER_SETTINGS.lifecycleSuggestions,
+      );
+      assert.deepEqual({ ...recovered, lifecycleSuggestions: saved.lifecycleSuggestions }, saved);
+      assert.deepEqual(yield* loadSettingsInFreshService(fake.store), recovered);
+      const backups = yield* unreadableSettingsBackups;
+      assert.equal(backups.length, 1);
+      assert.match(path.basename(backups[0]!), /^settings\.unreadable-[0-9a-f]{8}\.json$/);
+      assert.equal(yield* fs.readFileString(backups[0]!), original);
+      assert.equal(yield* fs.readFileString(settingsPath), original);
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("never lets recovery hand a project that opted out to automatic cleanup", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const node = { automatic: true, completedWorktreeDays: 7, temporaryDataDays: null };
+      const optedOut = { automatic: false, completedWorktreeDays: null, temporaryDataDays: null };
+      const custom = { automatic: true, completedWorktreeDays: 14, temporaryDataDays: null };
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          storageRetention: node,
+          projectStorageRetention: {
+            "project-a": optedOut,
+            // Out of range, e.g. hand-edited: it must not fall back to the node policy.
+            "project-b": { automatic: false, completedWorktreeDays: 0, temporaryDataDays: null },
+            "project-c": custom,
+          },
+        }),
+      );
+      const recovered = yield* loadSettingsInFreshService(fake.store);
+      assert.deepEqual(recovered.storageRetention, node);
+      assert.deepEqual(recovered.projectStorageRetention, {
+        "project-a": optedOut,
+        "project-b": optedOut,
+        "project-c": custom,
+      });
+      for (const projectId of ["project-a", "project-b"]) {
+        assert.isFalse(resolveStorageRetentionPolicy(recovered, projectId).automatic);
+      }
+
+      // With no readable overrides at all, automatic cleanup pauses for the whole node.
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({ storageRetention: node, projectStorageRetention: ["project-a"] }),
+      );
+      const unreadable = yield* loadSettingsInFreshService(fake.store);
+      assert.deepEqual(unreadable.storageRetention, { ...node, automatic: false });
+      assert.deepEqual(unreadable.projectStorageRetention, {});
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("drops only the invalid entries of a hand-edited hub or instance map", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const hubId = CliProxyHubId.make("home");
+      const instanceId = ProviderInstanceId.make("codex_work");
+      yield* (yield* ServerSettingsService).updateSettings({
+        cliProxyHubs: {
+          [hubId]: { url: "http://127.0.0.1:8317", managementKey: "mgmt-secret", enabled: true },
+        },
+        providerInstances: {
+          [instanceId]: { driver: ProviderDriverKind.make("codex"), config: {} },
+        },
+      });
+      const saved = JSON.parse(yield* fs.readFileString(settingsPath));
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          ...saved,
+          cliProxyHubs: {
+            ...saved.cliProxyHubs,
+            "office.lan": { url: "http://10.0.0.2:8317" },
+            blank: { url: "" },
+          },
+          providerInstances: {
+            ...saved.providerInstances,
+            codex_bad: {
+              driver: "codex",
+              environment: [{ name: "MY-VAR", value: "x", sensitive: false }],
+            },
+          },
+        }),
+      );
+
+      const recovered = yield* loadSettingsInFreshService(fake.store);
+      assert.deepEqual(Object.keys(recovered.cliProxyHubs), [hubId]);
+      assert.equal(recovered.cliProxyHubs[hubId]?.managementKey, "mgmt-secret");
+      assert.deepEqual(Object.keys(recovered.providerInstances), [instanceId]);
+
+      // An unrelated save keeps the valid entries in the file.
+      yield* inFreshService(
+        (settings) => settings.updateSettings({ enableLegacyTokenStreaming: true }),
+        fake.store,
+      );
+      const rewritten = JSON.parse(yield* fs.readFileString(settingsPath));
+      assert.deepEqual(Object.keys(rewritten.cliProxyHubs), [hubId]);
+      assert.deepEqual(Object.keys(rewritten.providerInstances), [instanceId]);
+      assert.equal(fake.values.size, 1);
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("stores hand-edited plaintext hub secrets once a client saves its hub", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const hubId = CliProxyHubId.make("home");
+      yield* fs.writeFileString(
+        settingsPath,
+        JSON.stringify({
+          cliProxyHubs: {
+            [hubId]: {
+              url: "https://admin:pass@hub.example.com",
+              managementKey: "plain-mgmt-key",
+              cloudflareAccessClientId: "token.access",
+              cloudflareAccessClientSecret: "plain-cf-secret",
+            },
+          },
+        }),
+      );
+      const saved = yield* inFreshService(
+        (settings) =>
+          Effect.gen(function* () {
+            const client = redactServerSettingsForClient(yield* settings.getSettings);
+            const hub = client.cliProxyHubs[hubId]!;
+            assert.deepEqual(hub, {
+              url: "https://hub.example.com/",
+              managementKey: "",
+              managementKeyRedacted: true,
+              enabled: true,
+              cloudflareAccessClientId: "token.access",
+              cloudflareAccessClientSecret: "",
+              cloudflareAccessClientSecretRedacted: true,
+            });
+            // The client toggles the hub off, sending back the redacted entry.
+            return yield* settings.updateSettings({
+              cliProxyHubs: { [hubId]: { ...hub, enabled: false } },
+            });
+          }),
+        fake.store,
+      );
+      assert.equal(saved.cliProxyHubs[hubId]?.managementKey, "plain-mgmt-key");
+      assert.equal(saved.cliProxyHubs[hubId]?.cloudflareAccessClientSecret, "plain-cf-secret");
+      assert.equal(fake.values.size, 2);
+      assert.notInclude(yield* fs.readFileString(settingsPath), "plain-mgmt-key");
+      assert.notInclude(yield* fs.readFileString(settingsPath), "plain-cf-secret");
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("restores both hub secrets when settings.json cannot be written", () => {
+    const fake = syntheticSecretStore();
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { settingsPath } = yield* ServerConfig;
+      const settings = yield* ServerSettingsService;
+      const hubId = CliProxyHubId.make("home");
+      const hub = {
+        url: "http://127.0.0.1:8317",
+        managementKey: "old-key",
+        enabled: true,
+        cloudflareAccessClientId: "token.access",
+        cloudflareAccessClientSecret: "old-cf-secret",
+      };
+      yield* settings.updateSettings({ cliProxyHubs: { [hubId]: hub } });
+
+      const directory = path.dirname(settingsPath);
+      const failures = yield* Effect.gen(function* () {
+        yield* fs.chmod(directory, 0o500);
+        const removal = yield* Effect.exit(
+          settings.updateSettings({ cliProxyHubs: { [hubId]: null } }),
+        );
+        const replacement = yield* Effect.exit(
+          settings.updateSettings({
+            cliProxyHubs: {
+              [hubId]: {
+                ...hub,
+                url: "http://10.0.0.2:8317",
+                managementKey: "new-key",
+                cloudflareAccessClientSecret: "new-cf-secret",
+              },
+            },
+          }),
+        );
+        return [removal, replacement];
+      }).pipe(Effect.ensuring(fs.chmod(directory, 0o700).pipe(Effect.orDie)));
+      assert.isTrue(failures.every(Exit.isFailure));
+
+      const current = yield* settings.getSettings;
+      assert.deepEqual(current.cliProxyHubs[hubId], {
+        ...hub,
+        managementKeyRedacted: true,
+        cloudflareAccessClientSecretRedacted: true,
+      });
+      assert.deepEqual(
+        [...fake.values.values()].map((value) => new TextDecoder().decode(value)),
+        ["old-key", "old-cf-secret"],
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+  });
+
+  it.effect("falls back to defaults for an unparseable file and keeps its exact bytes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      // A byte-order mark and an invalid UTF-8 byte do not survive a decode/encode round trip.
+      const original = Uint8Array.from([
+        0xef,
+        0xbb,
+        0xbf,
+        ...new TextEncoder().encode('{ "enableLegacyTokenStreaming": tru'),
+        0xff,
+      ]);
+      yield* fs.writeFile(settingsPath, original);
+
+      assert.deepEqual(yield* (yield* ServerSettingsService).getSettings, DEFAULT_SERVER_SETTINGS);
+      const backups = yield* unreadableSettingsBackups;
+      assert.equal(backups.length, 1);
+      assert.deepEqual(yield* fs.readFile(backups[0]!), original);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "does not present a sensitive value or management key as stored once it is gone",
+    () => {
+      const fake = syntheticSecretStore();
+      return Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("codex_work");
+        const hubId = CliProxyHubId.make("home-hub");
+        yield* settings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: {},
+              environment: [{ name: "OPENAI_API_KEY", value: "sk-fixture", sensitive: true }],
+            },
+          },
+          cliProxyHubs: {
+            [hubId]: { url: "http://127.0.0.1:8317", managementKey: "mgmt-secret", enabled: true },
+          },
+        });
+        fake.values.clear();
+
+        const client = redactServerSettingsForClient(yield* settings.getSettings);
+        assert.deepEqual(client.providerInstances[instanceId]?.environment, [
+          { name: "OPENAI_API_KEY", value: "", sensitive: true },
+        ]);
+        assert.deepEqual(client.cliProxyHubs[hubId], {
+          url: "http://127.0.0.1:8317",
+          managementKey: "",
+          enabled: true,
+        });
+      }).pipe(Effect.provide(makeServerSettingsLayer(fake.store)));
+    },
+  );
+});
+
+describe("makePersistedSettingsEncoder", () => {
+  const SyntheticSettings = Schema.Struct({
+    // Without per-field decoding defaults, a stored policy must list every field.
+    strictPolicy: Schema.Struct({ days: Schema.Number, enabled: Schema.Boolean }).pipe(
+      Schema.withDecodingDefault(Effect.succeed({ days: 7, enabled: false })),
+    ),
+    lenientPolicy: Schema.Struct({
+      days: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(7))),
+      enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    ratio: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(1))),
+  });
+  const defaults = Schema.decodeSync(SyntheticSettings)({});
+  const toPersisted = makePersistedSettingsEncoder(SyntheticSettings, defaults);
+  const decodeFile = Schema.decodeUnknownSync(fromLenientJson(SyntheticSettings));
+
+  it("writes a struct whole when its default-stripped form would not read back", () => {
+    const intended = {
+      ...defaults,
+      strictPolicy: { days: 30, enabled: false },
+      lenientPolicy: { days: 30, enabled: false },
+    };
+    assert.throws(() => decodeFile(JSON.stringify({ strictPolicy: { days: 30 } })));
+
+    const { persisted, unreadableKeys } = toPersisted(intended);
+    assert.deepEqual(persisted, {
+      strictPolicy: { days: 30, enabled: false },
+      lenientPolicy: { days: 30 },
+    });
+    assert.deepEqual(unreadableKeys, []);
+    assert.deepEqual(decodeFile(JSON.stringify(persisted)), intended);
+    assert.deepEqual(toPersisted(defaults), { persisted: {}, unreadableKeys: [] });
+  });
+
+  it("reports a key whose whole value does not survive the file either", () => {
+    const { persisted, unreadableKeys } = toPersisted({ ...defaults, ratio: Number.NaN });
+    assert.deepEqual(persisted, { ratio: Number.NaN });
+    assert.deepEqual(unreadableKeys, ["ratio"]);
+  });
 });

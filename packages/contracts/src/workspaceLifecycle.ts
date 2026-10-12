@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -211,17 +212,25 @@ const SuggestionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
 
-/** `null` turns a suggestion off. Suggestions never act on their own; each needs approval. */
-export const LifecycleSuggestionPolicy = Schema.Struct({
+/** A complete policy as sent in settings patches; a partial one is rejected, not reset. */
+export const LifecycleSuggestionPolicyInput = Schema.Struct({
   archiveInactiveThreadsDays: SuggestionDays,
   removeArchivedCheckoutsDays: SuggestionDays,
 });
+
+/**
+ * `null` turns a suggestion off. Suggestions never act on their own; each needs approval.
+ * Per-field defaults: settings files written sparsely by older builds omit default fields.
+ */
+export const LifecycleSuggestionPolicy = Schema.Struct({
+  archiveInactiveThreadsDays: SuggestionDays.pipe(Schema.withDecodingDefault(Effect.succeed(30))),
+  removeArchivedCheckoutsDays: SuggestionDays.pipe(Schema.withDecodingDefault(Effect.succeed(7))),
+});
 export type LifecycleSuggestionPolicy = typeof LifecycleSuggestionPolicy.Type;
 
-export const DEFAULT_LIFECYCLE_SUGGESTION_POLICY: LifecycleSuggestionPolicy = {
-  archiveInactiveThreadsDays: 30,
-  removeArchivedCheckoutsDays: 7,
-};
+export const DEFAULT_LIFECYCLE_SUGGESTION_POLICY: LifecycleSuggestionPolicy = Schema.decodeSync(
+  LifecycleSuggestionPolicy,
+)({});
 
 export const ThreadArchiveSuggestion = Schema.Struct({
   threadId: ThreadId,

@@ -13,7 +13,7 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
@@ -28,9 +28,11 @@ import { ColorSwatchPicker } from "./ColorSwatchPicker";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { normalizeProviderAccentColor } from "../../providerInstances";
+import { useSettingsTarget } from "../../settingsTarget";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
+import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -41,7 +43,7 @@ import { AcpRegistrySettings } from "./AcpRegistrySettings";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { RedactedSensitiveText } from "./RedactedSensitiveText";
+import { AccountEmail } from "../usage/AccountEmail";
 import {
   getProviderCompatibilityNotice,
   getProviderVersionAdvisoryPresentation,
@@ -50,6 +52,17 @@ import {
 } from "./providerStatus";
 import { deriveProviderInstancePresentation } from "./providerInstancePresentation";
 import { describeRateLimitWindow } from "./codexUsageLimits";
+import {
+  blankEnvironmentDraftRow,
+  environmentDraftRowFromVariable,
+  parseEnvironmentAssignment,
+  reconcileEnvironmentDraftRows,
+  resolveEnvironmentDrafts,
+  revertEnvironmentDraftRow,
+  sameEnvironment,
+  withEnvironmentDraftValue,
+  type EnvironmentDraftRow,
+} from "./ProviderInstanceEnvironment.logic";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -60,31 +73,7 @@ const PROVIDER_ACCENT_SWATCHES = [
   "#0891b2",
 ] as const;
 
-const ENVIRONMENT_VARIABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-
-let environmentVariableDraftId = 0;
-const nextEnvironmentVariableDraftId = () => `provider-env-${environmentVariableDraftId++}`;
-
-type EnvironmentDraftRow = {
-  readonly id: string;
-  readonly name: string;
-  readonly value: string;
-  readonly sensitive: boolean;
-  readonly valueRedacted?: boolean;
-};
-
-function makeEnvironmentDraftRow(
-  variable: ProviderInstanceEnvironmentVariable,
-  index: number,
-): EnvironmentDraftRow {
-  return {
-    id: `${index}:${variable.name}`,
-    name: variable.name,
-    value: variable.value,
-    sensitive: variable.sensitive,
-    ...(variable.valueRedacted !== undefined ? { valueRedacted: variable.valueRedacted } : {}),
-  };
-}
+const EMPTY_ENVIRONMENT: ReadonlyArray<ProviderInstanceEnvironmentVariable> = [];
 
 /**
  * Read a string[] at `key` from the opaque config blob, filtering out
@@ -138,28 +127,6 @@ export function deriveProviderModelsForDisplay(input: {
       },
   );
   return [...serverModels, ...customModels];
-}
-
-function ProviderAuthEmail(props: {
-  readonly email: string | undefined;
-  readonly prefix?: string;
-  readonly separator?: boolean;
-}) {
-  const trimmed = props.email?.trim();
-  if (!trimmed) return null;
-
-  return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
-      {props.separator ? <span aria-hidden>·</span> : null}
-      {props.prefix ? <span className="text-muted-foreground/80">{props.prefix}</span> : null}
-      <RedactedSensitiveText
-        value={trimmed}
-        ariaLabel="Toggle account email visibility"
-        revealTooltip="Click to reveal email"
-        hideTooltip="Click to hide email"
-      />
-    </span>
-  );
 }
 
 function ProviderAccentColorPicker(props: {
@@ -238,58 +205,46 @@ function ProviderUsageLimitsSection(props: {
   );
 }
 
+function blurOnEnter(event: KeyboardEvent<HTMLInputElement>) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+}
+
+/**
+ * Typing and pasting edit local drafts that publish on blur; the Sensitive box and removal
+ * publish immediately. Every publish sends all complete rows, while a row with an issue keeps
+ * its saved version on the server until it is fixed or cancelled.
+ */
 function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
 }) {
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
-    props.environment.map(makeEnvironmentDraftRow),
+    props.environment.map((variable) => environmentDraftRowFromVariable(variable)),
   );
+  // The environment the server holds as far as this editor knows: the latest prop or publish.
+  // Drafts are rebuilt only when its content changes, never for a new array identity alone.
+  const knownEnvironmentRef = useRef(props.environment);
+  const { issues } = resolveEnvironmentDrafts(rows);
 
   useEffect(() => {
-    setRows(props.environment.map(makeEnvironmentDraftRow));
+    if (sameEnvironment(props.environment, knownEnvironmentRef.current)) return;
+    knownEnvironmentRef.current = props.environment;
+    setRows((current) => reconcileEnvironmentDraftRows(current, props.environment));
   }, [props.environment]);
 
   const publishRows = (nextRows: ReadonlyArray<EnvironmentDraftRow>) => {
-    const published: ProviderInstanceEnvironmentVariable[] = [];
-    for (const row of nextRows) {
-      const name = row.name.trim();
-      if (!ENVIRONMENT_VARIABLE_NAME_PATTERN.test(name)) {
-        if (
-          name.length > 0 ||
-          row.value.length > 0 ||
-          row.sensitive !== true ||
-          row.valueRedacted !== undefined
-        ) {
-          return;
-        }
-        continue;
-      }
-      const { id: _id, ...rest } = row;
-      published.push({ ...rest, name });
-    }
-    props.onChange(published);
+    const resolution = resolveEnvironmentDrafts(nextRows);
+    setRows(resolution.rows);
+    if (sameEnvironment(resolution.environment, knownEnvironmentRef.current)) return;
+    knownEnvironmentRef.current = resolution.environment;
+    props.onChange(resolution.environment);
   };
 
-  const updateVariable = (id: string, patch: Partial<Omit<EnvironmentDraftRow, "id">>) => {
-    const nextRows = rows.map((row) =>
-      row.id === id
-        ? {
-            ...row,
-            ...patch,
-            ...(patch.value !== undefined ? { valueRedacted: false } : {}),
-          }
-        : row,
-    );
-    setRows(nextRows);
-    publishRows(nextRows);
-  };
-
-  const removeVariable = (id: string) => {
-    const nextRows = rows.filter((row) => row.id !== id);
-    setRows(nextRows);
-    publishRows(nextRows);
-  };
+  const editRow = (id: string, edit: (row: EnvironmentDraftRow) => EnvironmentDraftRow) =>
+    rows.map((row) => (row.id === id ? edit(row) : row));
 
   return (
     <div className="grid gap-2">
@@ -300,17 +255,7 @@ function ProviderEnvironmentSection(props: {
           size="sm"
           variant="outline"
           className="h-7 gap-1.5 px-2 text-xs"
-          onClick={() =>
-            setRows([
-              ...rows,
-              {
-                id: nextEnvironmentVariableDraftId(),
-                name: "",
-                value: "",
-                sensitive: true,
-              },
-            ])
-          }
+          onClick={() => setRows([...rows, blankEnvironmentDraftRow()])}
         >
           <PlusIcon className="size-3" />
           Add
@@ -322,58 +267,114 @@ function ProviderEnvironmentSection(props: {
         </p>
       ) : (
         <div className="grid gap-2">
-          {rows.map((variable, index) => (
-            <div
-              key={variable.id}
-              className="grid gap-2 rounded-md border border-border/70 bg-muted/20 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto_auto] sm:items-center"
-            >
-              <DraftInput
-                value={variable.name}
-                onCommit={(name) => updateVariable(variable.id, { name: name.trim() })}
-                placeholder="VARIABLE_NAME"
-                spellCheck={false}
-                aria-label={`Environment variable name ${index + 1}`}
-              />
-              <DraftInput
-                value={variable.valueRedacted ? "" : variable.value}
-                onCommit={(value) => updateVariable(variable.id, { value })}
-                type={variable.sensitive ? "password" : undefined}
-                autoComplete="off"
-                placeholder={
-                  variable.valueRedacted ? "Stored secret - enter a new value to replace" : "Value"
-                }
-                spellCheck={false}
-                aria-label={`Environment variable value ${index + 1}`}
-              />
-              <label className="inline-flex h-8 items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  className="size-3.5"
-                  checked={variable.sensitive}
-                  onChange={(event) => {
-                    const sensitive = event.currentTarget.checked;
-                    updateVariable(variable.id, {
-                      sensitive,
-                      ...(sensitive && variable.valueRedacted === undefined
-                        ? {}
-                        : { valueRedacted: sensitive ? variable.valueRedacted : false }),
-                    });
-                  }}
-                />
-                Sensitive
-              </label>
-              <Button
-                type="button"
-                size="icon-sm"
-                variant="ghost"
-                className="size-8 justify-self-start text-muted-foreground hover:text-destructive sm:justify-self-end"
-                onClick={() => removeVariable(variable.id)}
-                aria-label={`Remove environment variable ${variable.name || index + 1}`}
+          {rows.map((variable, index) => {
+            const issue = issues.get(variable.id);
+            const issueId = `${variable.id}-issue`;
+            return (
+              <div
+                key={variable.id}
+                className="grid gap-2 rounded-md border border-border/70 bg-muted/20 p-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto_auto] sm:items-center"
               >
-                <XIcon className="size-3.5" />
-              </Button>
-            </div>
-          ))}
+                <Input
+                  value={variable.name}
+                  onChange={(event) =>
+                    setRows(editRow(variable.id, (row) => ({ ...row, name: event.target.value })))
+                  }
+                  onPaste={(event) => {
+                    const assignment = parseEnvironmentAssignment(
+                      event.clipboardData.getData("text/plain"),
+                    );
+                    if (assignment === null) return;
+                    event.preventDefault();
+                    setRows(
+                      editRow(variable.id, (row) =>
+                        withEnvironmentDraftValue(
+                          { ...row, name: assignment.name },
+                          assignment.value,
+                        ),
+                      ),
+                    );
+                  }}
+                  onBlur={() => publishRows(rows)}
+                  onKeyDown={blurOnEnter}
+                  placeholder="VARIABLE_NAME"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label={`Environment variable name ${index + 1}`}
+                  aria-invalid={issue?.kind === "error" || undefined}
+                  aria-describedby={issue?.kind === "error" ? issueId : undefined}
+                />
+                <Input
+                  value={variable.valueRedacted ? "" : variable.value}
+                  onChange={(event) =>
+                    setRows(
+                      editRow(variable.id, (row) =>
+                        withEnvironmentDraftValue(row, event.target.value),
+                      ),
+                    )
+                  }
+                  onBlur={() => publishRows(rows)}
+                  onKeyDown={blurOnEnter}
+                  type={variable.sensitive ? "password" : undefined}
+                  autoComplete="off"
+                  placeholder={
+                    variable.valueRedacted
+                      ? "Stored secret - enter a new value to replace"
+                      : "Value"
+                  }
+                  spellCheck={false}
+                  aria-label={`Environment variable value ${index + 1}`}
+                  aria-describedby={issue?.kind === "pending" ? issueId : undefined}
+                />
+                <label className="inline-flex h-8 items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="size-3.5"
+                    checked={variable.sensitive}
+                    onChange={(event) => {
+                      const sensitive = event.currentTarget.checked;
+                      publishRows(editRow(variable.id, (row) => ({ ...row, sensitive })));
+                    }}
+                  />
+                  Sensitive
+                </label>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  className="size-8 justify-self-start text-muted-foreground hover:text-destructive sm:justify-self-end"
+                  onClick={() => publishRows(rows.filter((row) => row.id !== variable.id))}
+                  aria-label={`Remove environment variable ${variable.name || index + 1}`}
+                >
+                  <XIcon className="size-3.5" />
+                </Button>
+                {issue ? (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 sm:col-span-4">
+                    <p
+                      id={issueId}
+                      className={cn(
+                        "text-xs",
+                        issue.kind === "error" ? "text-destructive-foreground" : "text-warning",
+                      )}
+                    >
+                      {issue.message}
+                    </p>
+                    {variable.saved ? (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => publishRows(editRow(variable.id, revertEnvironmentDraftRow))}
+                        aria-label={`Cancel changes to environment variable ${variable.saved.name}`}
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       )}
       <span className="text-xs text-muted-foreground">
@@ -465,6 +466,7 @@ export function ProviderInstanceCard({
     liveProvider,
   });
   const { enabled, displayName, driverKind, accentColor, summary, statusKey } = presentation;
+  const settingsTarget = useSettingsTarget();
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const authEmail = liveProvider?.auth.email;
   const hasAuthenticatedEmail =
@@ -548,11 +550,10 @@ export function ProviderInstanceCard({
   };
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
-    const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
     const { environment: _omit, ...rest } = instance;
     onUpdate(
-      cleaned.length > 0
-        ? ({ ...rest, environment: cleaned } as ProviderInstanceConfig)
+      environment.length > 0
+        ? ({ ...rest, environment } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
     );
   };
@@ -628,13 +629,13 @@ export function ProviderInstanceCard({
       {hasAuthenticatedEmail ? (
         <>
           <span>Authenticated as</span>
-          <ProviderAuthEmail email={authEmail} />
+          <AccountEmail email={authEmail} />
           {authenticatedDetail ? <span>· {authenticatedDetail}</span> : null}
         </>
       ) : (
         <>
           <span>{summary.headline}</span>
-          <ProviderAuthEmail email={authEmail} separator prefix="Email" />
+          <AccountEmail email={authEmail} separator prefix="Email" />
         </>
       )}
       {summary.detail ? <span>- {summary.detail}</span> : null}
@@ -806,7 +807,9 @@ export function ProviderInstanceCard({
 
         <div className="border-t border-border/60 px-4 py-3 sm:px-5">
           <ProviderEnvironmentSection
-            environment={instance.environment ?? []}
+            // Built-in instance ids exist on every node, so drafts must not follow a node switch.
+            key={settingsTarget?.environmentId ?? "primary"}
+            environment={instance.environment ?? EMPTY_ENVIRONMENT}
             onChange={updateEnvironment}
           />
         </div>

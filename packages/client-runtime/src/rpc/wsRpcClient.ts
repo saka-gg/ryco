@@ -349,6 +349,8 @@ export interface WsRpcClient {
     readonly consumeCodexResetCredit: RpcUnaryMethod<
       typeof WS_METHODS.serverConsumeCodexResetCredit
     >;
+    readonly readCliProxyHubs: RpcUnaryMethod<typeof WS_METHODS.serverReadCliProxyHubs>;
+    readonly testCliProxyHub: RpcUnaryMethod<typeof WS_METHODS.serverTestCliProxyHub>;
     readonly listLocalTasks: RpcUnaryMethod<typeof WS_METHODS.serverListLocalTasks>;
     readonly getLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverGetLocalTask>;
     readonly createLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverCreateLocalTask>;
@@ -867,6 +869,10 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverReadCodexResetCredits](input)),
       consumeCodexResetCredit: (input) =>
         transport.request((client) => client[WS_METHODS.serverConsumeCodexResetCredit](input)),
+      readCliProxyHubs: (input) =>
+        transport.request((client) => client[WS_METHODS.serverReadCliProxyHubs](input)),
+      testCliProxyHub: (input) =>
+        transport.request((client) => client[WS_METHODS.serverTestCliProxyHub](input)),
       listLocalTasks: (input) =>
         transport.request((client) => client[WS_METHODS.serverListLocalTasks](input)),
       getLocalTask: (input) =>

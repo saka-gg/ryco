@@ -62,8 +62,12 @@ const parseLenientJsonGetter = SchemaGetter.transformEffect((input: string) =>
         (match, stringLiteral: string | undefined) => (stringLiteral ? match : ""),
       );
 
-      // Strip trailing commas before `}` or `]`.
-      stripped = stripped.replace(/,(\s*[}\]])/g, "$1");
+      // Strip trailing commas before `}` or `]`, leaving string literals untouched.
+      stripped = stripped.replace(
+        /("(?:[^"\\]|\\.)*")|,(\s*[}\]])/g,
+        (match, stringLiteral: string | undefined, closing: string | undefined) =>
+          stringLiteral ?? closing ?? match,
+      );
 
       return JSON.parse(stripped);
     },

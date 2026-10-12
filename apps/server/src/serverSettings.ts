@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   storageLifecycleLock,
   hasStorageSettingsLease,
@@ -17,6 +19,7 @@ import {
  * @module ServerSettings
  */
 import {
+  type CliProxyHubConfig,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER,
@@ -30,6 +33,7 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  type StorageRetentionPolicy,
 } from "@ryco/contracts";
 import {
   Cache,
@@ -40,10 +44,11 @@ import {
   FileSystem,
   Layer,
   Path,
-  Equal,
+  Predicate,
   PubSub,
   Ref,
   Schema,
+  SchemaAST,
   SchemaIssue,
   Scope,
   Context,
@@ -51,13 +56,15 @@ import {
   Cause,
 } from "effect";
 import * as Semaphore from "effect/Semaphore";
-import { writeFileStringAtomically } from "./atomicWrite.ts";
+import { writeFileAtomically, writeFileStringAtomically } from "./atomicWrite.ts";
 import { ServerConfig } from "./config.ts";
 import { type DeepPartial } from "@ryco/shared/Struct";
-import { fromLenientJson } from "@ryco/shared/schemaJson";
+import { formatSchemaError, fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
+import { hubKeyAddress } from "@ryco/shared/cliProxyHubUrl";
+import { validateCloudflareAccessCredentials } from "@ryco/shared/cliProxyHubCredentials";
 
 import { validateWorktreeRoot } from "./project/worktreeRoot.ts";
 import { makeWorkspaceAccessPolicy } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
@@ -86,6 +93,51 @@ function redactProviderEnvironmentVariable(
   };
 }
 
+const CLI_PROXY_HUB_SECRETS = [
+  {
+    value: "managementKey",
+    redacted: "managementKeyRedacted",
+    label: "management key",
+    suffix: "",
+  },
+  {
+    value: "cloudflareAccessClientSecret",
+    redacted: "cloudflareAccessClientSecretRedacted",
+    label: "Cloudflare Access Client Secret",
+    suffix: "-cloudflare-access",
+  },
+] as const;
+
+function cliProxyHubSecretName(hubId: string, suffix: string): string {
+  return `cliproxy-hub-${Buffer.from(hubId, "utf8").toString("base64url")}${suffix}`;
+}
+
+function redactCliProxyHub(hub: CliProxyHubConfig): CliProxyHubConfig {
+  const redacted = { ...hub };
+  for (const field of CLI_PROXY_HUB_SECRETS) {
+    if ((hub[field.value]?.length ?? 0) > 0 || hub[field.redacted]) {
+      redacted[field.value] = "";
+      redacted[field.redacted] = true;
+    } else {
+      delete redacted[field.redacted];
+    }
+  }
+  return redacted;
+}
+
+/** A hub URL without a user name or password; the server never uses such a URL anyway. */
+function withoutUrlCredentials(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!url.username && !url.password) return raw;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
   const providerInstances = Object.fromEntries(
     Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
@@ -98,7 +150,13 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
         : instance,
     ]),
   );
-  return { ...settings, providerInstances };
+  const cliProxyHubs = Object.fromEntries(
+    Object.entries(settings.cliProxyHubs).map(([hubId, hub]) => [
+      hubId,
+      { ...redactCliProxyHub(hub), url: withoutUrlCredentials(hub.url) },
+    ]),
+  ) as ServerSettings["cliProxyHubs"];
+  return { ...settings, providerInstances, cliProxyHubs };
 }
 
 export interface ServerSettingsShape {
@@ -181,7 +239,9 @@ export class ServerSettingsService extends Context.Service<
     );
 }
 
-const ServerSettingsJson = fromLenientJson(ServerSettings);
+const decodeServerSettings = Schema.decodeUnknownExit(ServerSettings);
+const decodeServerSettingsJson = Schema.decodeUnknownExit(fromLenientJson(ServerSettings));
+const decodeLenientJson = Schema.decodeUnknownExit(fromLenientJson(Schema.Unknown));
 
 type LegacyProviderSettings = ServerSettings["providers"][keyof ServerSettings["providers"]];
 
@@ -242,7 +302,7 @@ const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
 
 function stripDefaultServerSettings(current: unknown, defaults: unknown): unknown | undefined {
   if (Array.isArray(current) || Array.isArray(defaults)) {
-    return Equal.equals(current, defaults) ? undefined : current;
+    return isDeepStrictEqual(current, defaults) ? undefined : current;
   }
 
   if (
@@ -257,7 +317,7 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
 
     for (const key of Object.keys(currentRecord)) {
       if (ATOMIC_SETTINGS_KEYS.has(key)) {
-        if (!Equal.equals(currentRecord[key], defaultsRecord[key])) {
+        if (!isDeepStrictEqual(currentRecord[key], defaultsRecord[key])) {
           next[key] = currentRecord[key];
         }
       } else {
@@ -272,6 +332,126 @@ function stripDefaultServerSettings(current: unknown, defaults: unknown): unknow
   }
 
   return Object.is(current, defaults) ? undefined : current;
+}
+
+/**
+ * Builds the sparse form of a settings struct written to disk. A top-level key keeps its
+ * default-stripped value only when the lenient loader reads that value back unchanged (a struct
+ * field without a decoding default cannot be dropped); otherwise the key is written whole.
+ * `unreadableKeys` lists keys whose whole value does not read back either.
+ */
+export function makePersistedSettingsEncoder<A extends object>(
+  schema: Schema.Codec<A, unknown>,
+  defaults: A,
+): (settings: A) => {
+  readonly persisted: Record<string, unknown>;
+  readonly unreadableKeys: ReadonlyArray<string>;
+} {
+  const decodeJson = Schema.decodeUnknownExit(fromLenientJson(schema));
+  const readsBackAs = (key: string, persisted: unknown, value: unknown) => {
+    const decoded = decodeJson(JSON.stringify({ [key]: persisted }));
+    return (
+      Exit.isSuccess(decoded) &&
+      isDeepStrictEqual((decoded.value as Record<string, unknown>)[key], value)
+    );
+  };
+  return (settings) => {
+    const sparse = stripDefaultServerSettings(settings, defaults) as
+      | Record<string, unknown>
+      | undefined;
+    const persisted: Record<string, unknown> = {};
+    const unreadableKeys: string[] = [];
+    for (const [key, value] of Object.entries(settings)) {
+      const candidate = sparse?.[key];
+      if (readsBackAs(key, candidate, value)) {
+        if (candidate !== undefined) persisted[key] = candidate;
+        continue;
+      }
+      persisted[key] = value;
+      if (candidate === value || !readsBackAs(key, value, value)) unreadableKeys.push(key);
+    }
+    return { persisted, unreadableKeys };
+  };
+}
+
+const toPersistedServerSettings = makePersistedSettingsEncoder(
+  ServerSettings,
+  DEFAULT_SERVER_SETTINGS,
+);
+
+// Keys holding a record of independent entries (per project, instance or hub). Recovery drops
+// an invalid entry on its own rather than the whole record.
+const RECORD_SETTINGS_KEYS: ReadonlySet<string> = new Set(
+  Object.entries(ServerSettings.fields).flatMap(([key, field]) =>
+    SchemaAST.isObjects(field.ast) &&
+    field.ast.indexSignatures.length > 0 &&
+    field.ast.propertySignatures.length === 0
+      ? [key]
+      : [],
+  ),
+);
+
+// Retention deletes data on its own. A project override that cannot be read is recovered as
+// never automatic: dropping it would hand the project to the node policy.
+const UNREADABLE_PROJECT_RETENTION: StorageRetentionPolicy = {
+  automatic: false,
+  completedWorktreeDays: null,
+  temporaryDataDays: null,
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Decodes each top-level key on its own so an invalid value resets only that key, and each
+ * entry of a record key on its own so an invalid entry drops only that entry. Undefined when
+ * the file is not a JSON object.
+ */
+function recoverServerSettings(
+  raw: string,
+): { readonly settings: ServerSettings; readonly invalidKeys: Record<string, string> } | undefined {
+  const parsed = decodeLenientJson(raw);
+  if (Exit.isFailure(parsed) || !Predicate.isObject(parsed.value)) return undefined;
+  const valid: Record<string, unknown> = {};
+  const invalidKeys: Record<string, string> = {};
+  for (const key of Object.keys(ServerSettings.fields)) {
+    if (!Object.hasOwn(parsed.value, key)) continue;
+    const value = parsed.value[key];
+    const decoded = decodeServerSettings({ [key]: value });
+    if (Exit.isSuccess(decoded)) {
+      valid[key] = value;
+      continue;
+    }
+    if (!RECORD_SETTINGS_KEYS.has(key) || !isPlainObject(value)) {
+      invalidKeys[key] = formatSchemaError(decoded.cause);
+      continue;
+    }
+    const entries: Record<string, unknown> = {};
+    const issues: string[] = [];
+    for (const [entryKey, entry] of Object.entries(value)) {
+      const entryDecoded = decodeServerSettings({ [key]: { [entryKey]: entry } });
+      if (Exit.isSuccess(entryDecoded)) {
+        entries[entryKey] = entry;
+        continue;
+      }
+      issues.push(formatSchemaError(entryDecoded.cause));
+      if (key === "projectStorageRetention") entries[entryKey] = UNREADABLE_PROJECT_RETENTION;
+    }
+    if (Exit.isSuccess(decodeServerSettings({ [key]: entries }))) valid[key] = entries;
+    invalidKeys[key] = issues.length > 0 ? issues.join("; ") : formatSchemaError(decoded.cause);
+  }
+  // With no readable project overrides, no project's opt-out is known: pause automatic cleanup.
+  if (
+    Object.hasOwn(invalidKeys, "projectStorageRetention") &&
+    !Object.hasOwn(valid, "projectStorageRetention")
+  ) {
+    valid.storageRetention = {
+      ...(isPlainObject(valid.storageRetention) ? valid.storageRetention : {}),
+      automatic: false,
+    };
+  }
+  const settings = decodeServerSettings(valid);
+  return Exit.isSuccess(settings) ? { settings: settings.value, invalidKeys } : undefined;
 }
 
 export const makeServerSettings = Effect.gen(function* () {
@@ -302,7 +482,7 @@ export const makeServerSettings = Effect.gen(function* () {
     ),
   );
 
-  const readRawConfig = fs.readFileString(settingsPath).pipe(
+  const readRawConfig = fs.readFile(settingsPath).pipe(
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -313,21 +493,57 @@ export const makeServerSettings = Effect.gen(function* () {
     ),
   );
 
+  // A byte-exact copy of a file the loader could not fully read, named by its content so
+  // repeated reloads of the same file keep a single copy. Returns null when it cannot be kept.
+  const backupUnreadableSettings = (bytes: Uint8Array) => {
+    const { dir, name, ext } = pathService.parse(settingsPath);
+    const digest = createHash("sha256").update(bytes).digest("hex").slice(0, 8);
+    const backupPath = pathService.join(dir, `${name}.unreadable-${digest}${ext}`);
+    return Effect.gen(function* () {
+      if (yield* fs.exists(backupPath)) return;
+      yield* writeFileAtomically({ filePath: backupPath, contents: bytes }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, pathService),
+      );
+    }).pipe(
+      Effect.as(backupPath),
+      Effect.catch((cause) =>
+        Effect.logWarning("failed to back up the unreadable settings file", {
+          path: backupPath,
+          cause,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+  };
+
   const loadSettingsFromDisk = Effect.gen(function* () {
     if (!(yield* readConfigExists)) {
       return DEFAULT_SERVER_SETTINGS;
     }
 
-    const raw = yield* readRawConfig;
-    const decoded = Schema.decodeUnknownExit(ServerSettingsJson)(raw);
-    if (decoded._tag === "Failure") {
+    const bytes = yield* readRawConfig;
+    const raw = textDecoder.decode(bytes);
+    const decoded = decodeServerSettingsJson(raw);
+    if (Exit.isSuccess(decoded)) {
+      return decoded.value;
+    }
+    // Keep the original before a later save can overwrite it with the recovered settings.
+    const backupPath = yield* backupUnreadableSettings(bytes);
+    const recovered = recoverServerSettings(raw);
+    if (recovered === undefined) {
       yield* Effect.logWarning("failed to parse settings.json, using defaults", {
         path: settingsPath,
+        backupPath,
         issues: Cause.pretty(decoded.cause),
       });
       return DEFAULT_SERVER_SETTINGS;
     }
-    return decoded.value;
+    yield* Effect.logWarning("settings.json has invalid values, using defaults for them", {
+      path: settingsPath,
+      backupPath,
+      invalidKeys: recovered.invalidKeys,
+    });
+    return recovered.settings;
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -374,10 +590,13 @@ export const makeServerSettings = Effect.gen(function* () {
                 ),
               ),
             );
-          environment.push({
-            ...variable,
-            value: secret ? textDecoder.decode(secret) : "",
-          });
+          if (secret) {
+            environment.push({ ...variable, value: textDecoder.decode(secret) });
+          } else {
+            // Nothing is stored, so clients must ask for a value rather than show one as saved.
+            const { valueRedacted: _omit, ...rest } = variable;
+            environment.push({ ...rest, value: "" });
+          }
         }
         providerInstances[instanceId] = {
           ...instance,
@@ -389,6 +608,180 @@ export const makeServerSettings = Effect.gen(function* () {
         providerInstances: providerInstances as ServerSettings["providerInstances"],
       };
     });
+
+  const materializeCliProxyHubSecrets = (
+    settings: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const cliProxyHubs: Record<string, CliProxyHubConfig> = {};
+      for (const [hubId, hub] of Object.entries(settings.cliProxyHubs)) {
+        const materialized = { ...hub };
+        for (const field of CLI_PROXY_HUB_SECRETS) {
+          if (!hub[field.redacted]) continue;
+          const secret = yield* secretStore
+            .get(cliProxyHubSecretName(hubId, field.suffix))
+            .pipe(
+              Effect.mapError((cause) =>
+                toSettingsError(`failed to read the ${field.label} of hub ${hubId}`, cause),
+              ),
+            );
+          materialized[field.value] = secret ? textDecoder.decode(secret) : "";
+          if (!secret) delete materialized[field.redacted];
+        }
+        cliProxyHubs[hubId] = materialized;
+      }
+      return { ...settings, cliProxyHubs: cliProxyHubs as ServerSettings["cliProxyHubs"] };
+    });
+
+  const materializeSecrets = (settings: ServerSettings) =>
+    materializeProviderEnvironmentSecrets(settings).pipe(
+      Effect.flatMap(materializeCliProxyHubSecrets),
+    );
+
+  /**
+   * Same contract as sensitive environment variables: a redacted entry keeps the stored key, a
+   * submitted value replaces it, and an empty unredacted value removes it.
+   *
+   * New keys are stored before settings.json is written, and `restore` puts back the keys they
+   * replaced if that write fails. Keys are only removed by `removeStale`, once the written file
+   * no longer refers to them: a leftover key is harmless, a missing one loses the hub's key.
+   */
+  const persistCliProxyHubSecrets = (
+    current: ServerSettings,
+    next: ServerSettings,
+  ): Effect.Effect<
+    {
+      readonly settings: ServerSettings;
+      readonly restore: Effect.Effect<void>;
+      readonly removeStale: Effect.Effect<void>;
+    },
+    ServerSettingsError
+  > => {
+    const replaced: Array<{ readonly name: string; readonly previous: Uint8Array | null }> = [];
+    const stale: Array<{ readonly hubId: string; readonly name: string }> = [];
+    const restore = Effect.suspend(() =>
+      Effect.forEach(
+        replaced.toReversed(),
+        ({ name, previous }) =>
+          (previous ? secretStore.set(name, previous) : secretStore.remove(name)).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("failed to restore a CLIProxyAPI hub secret", {
+                name,
+                cause,
+              }),
+            ),
+          ),
+        { discard: true },
+      ),
+    );
+    const removeStale = Effect.suspend(() =>
+      Effect.forEach(
+        stale,
+        ({ hubId, name }) =>
+          secretStore.remove(name).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("failed to remove an unused CLIProxyAPI hub secret", {
+                hubId,
+                cause,
+              }),
+            ),
+          ),
+        { discard: true },
+      ),
+    );
+    const storeKey = (hubId: string, name: string, label: string, value: string) =>
+      Effect.gen(function* () {
+        const previous = yield* secretStore.get(name);
+        yield* secretStore.set(name, textEncoder.encode(value));
+        replaced.push({ name, previous });
+      }).pipe(
+        Effect.mapError((cause) =>
+          toSettingsError(`failed to persist the ${label} of hub ${hubId}`, cause),
+        ),
+      );
+    return Effect.gen(function* () {
+      const cliProxyHubs: Record<string, CliProxyHubConfig> = {};
+      for (const [hubId, entry] of Object.entries(next.cliProxyHubs)) {
+        const stored = (current.cliProxyHubs as Record<string, CliProxyHubConfig>)[hubId];
+        const hub = { ...entry };
+        // An older client cannot edit these fields. Preserve its saved token unless the
+        // patch explicitly includes Cloudflare fields (empty values remove the token).
+        if (
+          stored &&
+          entry.cloudflareAccessClientId === undefined &&
+          entry.cloudflareAccessClientSecret === undefined &&
+          entry.cloudflareAccessClientSecretRedacted === undefined
+        ) {
+          for (const key of [
+            "cloudflareAccessClientId",
+            "cloudflareAccessClientSecret",
+            "cloudflareAccessClientSecretRedacted",
+          ] as const) {
+            if (stored[key] !== undefined) Object.assign(hub, { [key]: stored[key] });
+          }
+        }
+        const invalid = validateCloudflareAccessCredentials({
+          clientId: hub.cloudflareAccessClientId,
+          clientSecret: hub.cloudflareAccessClientSecret,
+          hasSavedSecret: hub.cloudflareAccessClientSecretRedacted,
+        });
+        if (invalid) return yield* toSettingsError(invalid, undefined);
+
+        for (const field of CLI_PROXY_HUB_SECRETS) {
+          const secretName = cliProxyHubSecretName(hubId, field.suffix);
+          const value = hub[field.value]?.trim() ?? "";
+          if (value.length > 0) {
+            yield* storeKey(hubId, secretName, field.label, value);
+            hub[field.value] = "";
+            hub[field.redacted] = true;
+          } else if (hub[field.redacted]) {
+            if (!stored || !(stored[field.value]?.length || stored[field.redacted])) {
+              return yield* toSettingsError(
+                `Enter the ${field.label} of hub ${hubId}: no saved value exists.`,
+                undefined,
+              );
+            }
+            // A saved secret only ever goes to the address it was entered for.
+            if (hubKeyAddress(stored.url) !== hubKeyAddress(hub.url)) {
+              return yield* toSettingsError(
+                `Enter the ${field.label} of hub ${hubId} again: its address changed.`,
+                undefined,
+              );
+            }
+            if (
+              field.value === "cloudflareAccessClientSecret" &&
+              stored?.cloudflareAccessClientId?.trim() !== hub.cloudflareAccessClientId?.trim()
+            ) {
+              return yield* toSettingsError(
+                `Enter the Cloudflare Access Client Secret of hub ${hubId} again: its Client ID changed.`,
+                undefined,
+              );
+            }
+            // Migrate a hand-edited plaintext secret before replacing it with a marker.
+            const plaintext = stored && !stored[field.redacted] ? stored[field.value]?.trim() : "";
+            if (plaintext) yield* storeKey(hubId, secretName, field.label, plaintext);
+            hub[field.value] = "";
+          } else {
+            stale.push({ hubId, name: secretName });
+            delete hub[field.redacted];
+            if (hub[field.value] !== undefined) hub[field.value] = "";
+          }
+        }
+        cliProxyHubs[hubId] = hub;
+      }
+      for (const hubId of Object.keys(current.cliProxyHubs)) {
+        if (Object.hasOwn(next.cliProxyHubs, hubId)) continue;
+        for (const field of CLI_PROXY_HUB_SECRETS) {
+          stale.push({ hubId, name: cliProxyHubSecretName(hubId, field.suffix) });
+        }
+      }
+      return {
+        settings: { ...next, cliProxyHubs: cliProxyHubs as ServerSettings["cliProxyHubs"] },
+        restore,
+        removeStale,
+      };
+    }).pipe(Effect.onError(() => restore));
+  };
 
   const persistProviderEnvironmentSecrets = (
     current: ServerSettings,
@@ -481,11 +874,10 @@ export const makeServerSettings = Effect.gen(function* () {
     });
 
   const writeSettingsAtomically = (settings: ServerSettings) => {
-    const sparseSettings = stripDefaultServerSettings(settings, DEFAULT_SERVER_SETTINGS) ?? {};
-
+    const { persisted, unreadableKeys } = toPersistedServerSettings(settings);
     return writeFileStringAtomically({
       filePath: settingsPath,
-      contents: `${JSON.stringify(sparseSettings, null, 2)}\n`,
+      contents: `${JSON.stringify(persisted, null, 2)}\n`,
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, pathService),
@@ -496,6 +888,14 @@ export const makeServerSettings = Effect.gen(function* () {
             detail: "failed to write settings file",
             cause,
           }),
+      ),
+      Effect.tap(() =>
+        unreadableKeys.length > 0
+          ? Effect.logWarning("settings.json does not read back these keys as saved", {
+              path: settingsPath,
+              keys: unreadableKeys,
+            })
+          : Effect.void,
       ),
     );
   };
@@ -574,7 +974,7 @@ export const makeServerSettings = Effect.gen(function* () {
     start,
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(
-      Effect.flatMap(materializeProviderEnvironmentSecrets),
+      Effect.flatMap(materializeSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
     updateSettings: (patch) =>
@@ -648,11 +1048,18 @@ export const makeServerSettings = Effect.gen(function* () {
             );
             yield* Effect.addFinalizer(() => Effect.sync(release));
           }
-          const nextPersisted =
+          const withProviderSecrets =
             JSON.stringify(current.providerInstances) === JSON.stringify(rawNext.providerInstances)
               ? validated
               : yield* persistProviderEnvironmentSecrets(current, validated);
-          const next = yield* Schema.decodeEffect(ServerSettings)(nextPersisted).pipe(
+          const hubSecrets =
+            JSON.stringify(current.cliProxyHubs) === JSON.stringify(rawNext.cliProxyHubs)
+              ? undefined
+              : yield* persistCliProxyHubSecrets(current, withProviderSecrets);
+          const restoreHubSecrets = hubSecrets?.restore ?? Effect.void;
+          const next = yield* Schema.decodeEffect(ServerSettings)(
+            hubSecrets?.settings ?? withProviderSecrets,
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new ServerSettingsError({
@@ -661,24 +1068,26 @@ export const makeServerSettings = Effect.gen(function* () {
                   cause,
                 }),
             ),
+            Effect.onError(() => restoreHubSecrets),
           );
           yield* storageLifecycleLock.withPermit(
             Effect.gen(function* () {
-              yield* writeSettingsAtomically(next);
+              yield* writeSettingsAtomically(next).pipe(Effect.onError(() => restoreHubSecrets));
               yield* Cache.set(settingsCache, cacheKey, next);
               yield* emitChange(next);
             }),
           );
-          const materialized = yield* materializeProviderEnvironmentSecrets(next);
+          if (hubSecrets) yield* hubSecrets.removeStale;
+          const materialized = yield* materializeSecrets(next);
           return resolveTextGenerationProvider(materialized);
         }).pipe(Effect.scoped, Effect.uninterruptible),
       ),
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub).pipe(
         Stream.mapEffect((settings) =>
-          materializeProviderEnvironmentSecrets(settings).pipe(
+          materializeSecrets(settings).pipe(
             Effect.catch((error: ServerSettingsError) =>
-              Effect.logWarning("failed to materialize provider environment secrets", {
+              Effect.logWarning("failed to materialize settings secrets", {
                 detail: error.detail,
               }).pipe(Effect.as(settings)),
             ),

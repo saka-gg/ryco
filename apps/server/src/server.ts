@@ -111,6 +111,7 @@ import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScrip
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
 import { UsageServiceLive } from "./usage/UsageService.ts";
+import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { StartupStallMonitorLive } from "./startupStallMonitor.ts";
@@ -549,6 +550,7 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
 const RuntimeCoreBaseWithSettingsLive = Layer.mergeAll(
   RuntimeCoreBaseDependenciesLive,
   UsageServiceLive,
+  CliProxyServiceLive,
 ).pipe(Layer.provideMerge(ServerSettingsLive));
 
 const RuntimeCoreDependenciesLive = RuntimeCoreBaseWithSettingsLive.pipe(
