@@ -1,7 +1,7 @@
 import { AccountEmail, CliProxyAccountName } from "../usage/AccountEmail";
 import { cliProxyHubsQueryOptions } from "../usage/cliProxyHubsQuery";
 import { ProviderLimitWindow } from "../usage/ProviderLimitWindow";
-import { useRelativeTimeTick } from "../settings/settingsLayout";
+import { useRelativeLabelTick } from "../settings/settingsLayout";
 import {
   cliProxyCurrentAccount,
   cliProxyWindowLabel,
@@ -19,7 +19,7 @@ import type {
 } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import { cn } from "~/lib/utils";
 import { type ContextWindowUsage, formatContextWindowTokens } from "~/lib/contextWindow";
@@ -129,7 +129,10 @@ function AccountSection(props: { readonly account: ContextWindowAccount }) {
 }
 
 /** Observed counters from Claude's last main-loop request; no future-hit claim. */
-function PromptCacheSection(props: { readonly observation: ClaudeCacheObservation }) {
+function PromptCacheSection(props: {
+  readonly observation: ClaudeCacheObservation;
+  readonly now: number;
+}) {
   const { observation } = props;
   const lifetimeMinutes = observation.observedTtlSeconds
     ? Math.round(observation.observedTtlSeconds / 60)
@@ -145,7 +148,7 @@ function PromptCacheSection(props: { readonly observation: ClaudeCacheObservatio
         {formatContextWindowTokens(observation.directInputTokens)} uncached
       </div>
       <div className="text-xs text-muted-foreground">
-        Last request {formatRelativeTimeLabel(observation.observedAt)}
+        Last request {formatRelativeTimeLabel(observation.observedAt, props.now)}
         {lifetimeMinutes !== null ? ` · ${lifetimeMinutes}m write lifetime` : null}
       </div>
     </div>
@@ -168,7 +171,7 @@ function CliProxyRouteSection(props: {
   const quota = current?.account.quota;
   const plan = formatCliProxyPlan(quota?.planType);
   const lastUsed = current?.account.lastUsedAt
-    ? formatRelativeTimeLabel(current.account.lastUsedAt)
+    ? formatRelativeTimeLabel(current.account.lastUsedAt, now)
     : undefined;
   const pooled = poolCliProxyWindows(
     hub.accounts.filter((account) => account.provider === CLI_PROXY_CLAUDE_PROVIDER),
@@ -258,6 +261,30 @@ function CliProxyRouteSection(props: {
   );
 }
 
+const secondsToMs = (seconds: number | undefined) =>
+  seconds === undefined ? undefined : seconds * 1000;
+
+/** The instants the popup labels relative to now: resets, the last cache read, the hub's last use. */
+export function contextWindowLabelInstants(
+  rateLimits: ServerProviderRateLimits | undefined,
+  claudeCache: ClaudeCacheObservation | null | undefined,
+  route: CliProxyHubSnapshot | undefined,
+): ReadonlyArray<number | undefined> {
+  const instants: Array<number | undefined> = [
+    secondsToMs(rateLimits?.primary?.resetsAt),
+    secondsToMs(rateLimits?.secondary?.resetsAt),
+    secondsToMs(rateLimits?.tertiary?.resetsAt),
+  ];
+  if (claudeCache) instants.push(Date.parse(claudeCache.observedAt));
+  for (const hubAccount of route?.accounts ?? []) {
+    if (hubAccount.lastUsedAt) instants.push(Date.parse(hubAccount.lastUsedAt));
+    if (hubAccount.quota?.status === "ok") {
+      for (const window of hubAccount.quota.windows) instants.push(secondsToMs(window.resetsAt));
+    }
+  }
+  return instants;
+}
+
 /** The popup body. It mounts only while the popup is open, so nothing ticks or reads when closed. */
 function ContextWindowDetails(
   props: ContextWindowMeterProps & {
@@ -266,7 +293,6 @@ function ContextWindowDetails(
   },
 ) {
   const { usage, rateLimits, account, usedPercentage, normalizedPercentage } = props;
-  const now = useRelativeTimeTick();
   const phone = usePresentationTier() === "phone";
   const hubsQuery = useQuery(
     cliProxyHubsQueryOptions(account?.checkCliProxyRoute && !phone ? account.environmentId : null),
@@ -275,6 +301,13 @@ function ContextWindowDetails(
     account && hubsQuery.data
       ? findCliProxyRouteForInstance(hubsQuery.data, account.instanceId)
       : undefined;
+  // Re-render when one of the popup's relative labels changes, not every second.
+  const now = useRelativeLabelTick(
+    useMemo(
+      () => contextWindowLabelInstants(rateLimits, props.claudeCache, route),
+      [rateLimits, props.claudeCache, route],
+    ),
+  );
   // A routed instance's own limits describe no account the hub uses.
   const showUsageLimits =
     route === undefined &&
@@ -315,7 +348,9 @@ function ContextWindowDetails(
           </div>
         ) : null}
       </div>
-      {props.claudeCache ? <PromptCacheSection observation={props.claudeCache} /> : null}
+      {props.claudeCache ? (
+        <PromptCacheSection observation={props.claudeCache} now={now} />
+      ) : null}
       {route && account ? (
         <CliProxyRouteSection
           hub={route}
