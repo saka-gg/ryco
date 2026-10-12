@@ -2605,6 +2605,43 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
   );
 });
 
+it.live("ProviderServiceLive reads and keeps an instance's project commands per directory", () =>
+  Effect.gen(function* () {
+    const fake = makeFakeCodexAdapter();
+    let reads = 0;
+    const readProjectCommands = (cwd: string) =>
+      Effect.sync(() => {
+        reads += 1;
+        return {
+          skills: [{ name: `skill-${cwd}`, path: `${cwd}/SKILL.md`, enabled: true }],
+          slashCommands: [],
+        };
+      });
+    const providerLayer = makeStandaloneProviderServiceLayer([
+      { ...fake, adapter: { ...fake.adapter, readProjectCommands } },
+    ]);
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const read = (cwd: string) => provider.readProjectCommands!(codexInstanceId, cwd);
+      const first = yield* read("/repo-a");
+      assert.deepEqual(
+        first.skills.map((skill) => skill.name),
+        ["skill-/repo-a"],
+      );
+      yield* read("/repo-a");
+      assert.equal(reads, 1);
+      yield* read("/repo-b");
+      assert.equal(reads, 2);
+      // An unknown instance answers empty instead of failing the composer.
+      const unknown = yield* provider.readProjectCommands!(
+        ProviderInstanceId.make("missing"),
+        "/repo-a",
+      );
+      assert.deepEqual(unknown, { skills: [], slashCommands: [] });
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("ProviderServiceLive retains the caller's path lease instead of acquiring its own", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();

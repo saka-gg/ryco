@@ -8,6 +8,7 @@ import { Effect, Exit, Scope } from "effect";
 import { assert, describe } from "vite-plus/test";
 
 import { makeCodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
+import { parseCodexSkillsListResponse } from "./CodexProvider.ts";
 import { requestStoredCodexThread } from "./CodexSessionRuntime.ts";
 
 const peerPath = NodePath.join(import.meta.dirname, "../testFixtures/codexCollabMockPeer.sh");
@@ -119,6 +120,40 @@ describe("CodexStoredThreadReader", () => {
       assert.isFalse(reader.isRunning());
       yield* read(reader, "thread-a");
       assert.equal(reader.starts(), 2);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("lists a directory's skills over the same process", () =>
+    Effect.gen(function* () {
+      const script = writeScript({
+        projectSkills: {
+          "/repo": [
+            {
+              name: "deploy",
+              description: "Ship it",
+              enabled: true,
+              path: "/repo/.codex/skills/deploy/SKILL.md",
+              scope: "repo",
+            },
+          ],
+        },
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(script.cleanup));
+      const reader = yield* makeReader(script.scriptPath);
+      yield* read(reader, "thread-a");
+      const response = yield* reader.withClient((client) =>
+        client.request("skills/list", { cwds: ["/repo"] }),
+      );
+      assert.deepEqual(parseCodexSkillsListResponse(response, "/repo"), [
+        {
+          name: "deploy",
+          description: "Ship it",
+          enabled: true,
+          path: "/repo/.codex/skills/deploy/SKILL.md",
+          scope: "repo",
+        },
+      ]);
+      assert.equal(reader.starts(), 1);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

@@ -35,6 +35,7 @@ import {
   TurnId,
   type ProviderInstanceId,
   ProviderDriverKind,
+  type ProviderProjectCommands,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
@@ -58,6 +59,7 @@ import {
   SynchronizedRef,
 } from "effect";
 import * as Semaphore from "effect/Semaphore";
+import { makeStaleWhileRevalidateCache } from "../staleWhileRevalidateCache.ts";
 
 import {
   increment,
@@ -133,6 +135,11 @@ export interface ProviderServiceLiveOptions {
 const DEFAULT_MAX_CONCURRENT_PROVIDER_STARTS_PER_INSTANCE = 4;
 const DEFAULT_MAX_PENDING_PROVIDER_STARTS_PER_INSTANCE = 64;
 const DEFAULT_STALE_SESSION_STOP_TIMEOUT_MS = 2_000;
+/** Project skills and commands change rarely; a stale list is refreshed behind the reader. */
+const PROJECT_COMMANDS_FRESH_MS = 5 * 60_000;
+/** A Claude probe boots the CLI in the directory; a hung one must not hold the composer. */
+const PROJECT_COMMANDS_TIMEOUT_MS = 20_000;
+const EMPTY_PROJECT_COMMANDS: ProviderProjectCommands = { skills: [], slashCommands: [] };
 
 function bindingKey(binding: ProviderRuntimeBinding): string {
   return `${binding.threadId}:${binding.providerInstanceId ?? "legacy"}:${binding.runtimeSessionId ?? "legacy"}`;
@@ -1334,6 +1341,33 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
     );
 
+  const projectCommands = makeStaleWhileRevalidateCache<ProviderProjectCommands>({
+    freshMs: PROJECT_COMMANDS_FRESH_MS,
+    capacity: 128,
+    scope: serviceScope,
+  });
+  const readProjectCommands: NonNullable<ProviderServiceShape["readProjectCommands"]> = (
+    instanceId,
+    cwd,
+  ) =>
+    projectCommands.get(
+      `${instanceId}\u0000${cwd}`,
+      registry.getByInstance(instanceId).pipe(
+        Effect.flatMap((adapter) =>
+          adapter.readProjectCommands
+            ? adapter.readProjectCommands(cwd)
+            : Effect.succeed(EMPTY_PROJECT_COMMANDS),
+        ),
+        Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
+        Effect.catchCause((cause) =>
+          Effect.logDebug("provider.project-commands.read-failed", {
+            instanceId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(EMPTY_PROJECT_COMMANDS)),
+        ),
+      ),
+    );
+
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
     function* (threadId, rawInput, options) {
       const parsed = yield* decodeInputOrValidationError({
@@ -2518,6 +2552,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
     startSession,
     startFreshSession,
+    readProjectCommands,
     getSession,
     restoreSessionBinding,
     retireSessionBinding,

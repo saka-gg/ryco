@@ -56,6 +56,19 @@ rl.on("line", (line) => {
     write({ id, result: fixture.responses.threadStart });
     return;
   }
+  if (method === "skills/list") {
+    write({
+      id,
+      result: {
+        data: (message.params.cwds ?? []).map((cwd) => ({
+          cwd,
+          errors: [],
+          skills: script.projectSkills?.[cwd] ?? [],
+        })),
+      },
+    });
+    return;
+  }
   if (method === "thread/read") {
     // A stored thread the server does not know, and a server that dies mid-read.
     if (script.readErrorFor === message.params.threadId) {

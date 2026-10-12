@@ -1118,6 +1118,10 @@ export interface EnvironmentApi {
     prewarmProviderSession?: (
       input: import("./provider.ts").ProviderSessionPrewarmInput,
     ) => Promise<import("./provider.ts").ProviderSessionPrewarmResult>;
+    /** Absent on transports without it; call only when the server advertises the capability. */
+    readProjectProviderCommands?: (
+      input: import("./provider.ts").ProviderProjectCommandsInput,
+    ) => Promise<import("./server.ts").ProviderProjectCommands>;
     getSettings: () => Promise<ServerSettings>;
     getProjectPreferences?: (input: {
       readonly projectId?: ProjectId;

@@ -96,6 +96,13 @@ export const ServerProviderSkill = Schema.Struct({
 });
 export type ServerProviderSkill = typeof ServerProviderSkill.Type;
 
+/** See `ProviderProjectCommandsInput`. Empty when the instance cannot list per directory. */
+export const ProviderProjectCommands = Schema.Struct({
+  skills: Schema.Array(ServerProviderSkill),
+  slashCommands: Schema.Array(ServerProviderSlashCommand),
+});
+export type ProviderProjectCommands = typeof ProviderProjectCommands.Type;
+
 /**
  * Availability of a configured provider instance from the runtime's POV.
  *

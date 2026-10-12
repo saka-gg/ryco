@@ -12,6 +12,7 @@ import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
+  ProviderProjectCommands,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -197,6 +198,13 @@ export interface ProviderAdapterShape<TError> {
    * Read a provider thread snapshot.
    */
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
+  /**
+   * The skills and slash commands the provider offers in `cwd` (project and local ones
+   * included), without starting a session or a turn. Optional: the instance's status snapshot
+   * lists only what it probed outside any project.
+   */
+  readonly readProjectCommands?: (cwd: string) => Effect.Effect<ProviderProjectCommands, TError>;
+
   /** Read stored history without resuming, acquiring a writer, or starting a turn. */
   readonly readThreadHistory?: (input: {
     readonly threadId: ThreadId;

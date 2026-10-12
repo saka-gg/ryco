@@ -25,3 +25,4 @@ export * from "./claudeCacheReview.ts";
 export * from "./sendReadiness.ts";
 export * from "./usageLimitResume.ts";
 export * from "./sessionPrewarm.ts";
+export * from "./projectProviderCommands.ts";

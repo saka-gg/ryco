@@ -13,6 +13,7 @@ import type {
   RuntimeMode,
   AgentTokenMode,
   ScopedThreadRef,
+  ServerConfig,
   ServerProvider,
   ThreadId,
   TurnId,
@@ -35,6 +36,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   clampCollapsedComposerCursor,
@@ -49,11 +51,18 @@ import { serializeComposerMentionPath } from "../../composerMentionSyntax";
 import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
+  ensureProjectProviderCommands,
   latestClaudeCacheObservation,
+  mergeProjectProviderCommands,
+  projectProviderCommandsKey,
   PROMPT_STASH_MAX_ENTRIES,
+  readProjectProviderCommands,
   stripInlineTerminalContextPlaceholders,
+  subscribeProjectProviderCommands,
   type PromptStashEntry,
 } from "@ryco/client-runtime/state/composer";
+import { readEnvironmentApi } from "../../environmentApi";
+import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { webAttachmentCodec } from "../../platform/attachmentCodec";
 import {
   deriveComposerFileUploadSendBlock,
@@ -473,6 +482,9 @@ function useSetPromptFromTraits(input: {
 // Component
 // --------------------------------------------------------------------------
 
+const selectProjectProviderCommandsSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.providerProjectCommands === true;
+
 export const ChatComposer = memo(
   forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(props, ref) {
     const {
@@ -720,10 +732,28 @@ export const ChatComposer = memo(
       () => providerInstanceEntries.find((entry) => entry.instanceId === selectedInstanceId),
       [providerInstanceEntries, selectedInstanceId],
     );
-    const selectedProviderStatus = useMemo(
-      () => selectedProviderEntry?.snapshot ?? null,
-      [selectedProviderEntry],
+    const snapshotProviderStatus = selectedProviderEntry?.snapshot ?? null;
+    // Project and local skills and slash commands of this directory, read on the first `/`
+    // or `$` here (the snapshot was probed outside any project) and merged into its lists.
+    const projectCommandsSupported = useEnvironmentServerConfigSelector(
+      environmentId,
+      selectProjectProviderCommandsSupported,
     );
+    const projectCommandsKey =
+      gitCwd && selectedInstanceId
+        ? projectProviderCommandsKey({ environmentId, instanceId: selectedInstanceId, cwd: gitCwd })
+        : null;
+    const projectCommands = useSyncExternalStore(subscribeProjectProviderCommands, () =>
+      projectCommandsKey ? readProjectProviderCommands(projectCommandsKey) : undefined,
+    );
+    const selectedProviderStatus = useMemo(() => {
+      if (!snapshotProviderStatus || !projectCommands) return snapshotProviderStatus;
+      const merged = mergeProjectProviderCommands(snapshotProviderStatus, projectCommands);
+      return merged.skills === snapshotProviderStatus.skills &&
+        merged.slashCommands === snapshotProviderStatus.slashCommands
+        ? snapshotProviderStatus
+        : { ...snapshotProviderStatus, ...merged };
+    }, [snapshotProviderStatus, projectCommands]);
     const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
       () => selectedProviderEntry?.models ?? [],
       [selectedProviderEntry],
@@ -858,6 +888,18 @@ export const ChatComposer = memo(
     const [composerTrigger, setComposerTrigger] = useState<ComposerTrigger | null>(() =>
       detectComposerTrigger(prompt, prompt.length),
     );
+    const wantsProjectCommands =
+      composerTrigger?.kind === "slash-command" || composerTrigger?.kind === "skill";
+    useEffect(() => {
+      if (!wantsProjectCommands || !gitCwd || !selectedInstanceId) return;
+      ensureProjectProviderCommands({
+        api: readEnvironmentApi(environmentId),
+        supported: projectCommandsSupported,
+        environmentId,
+        instanceId: selectedInstanceId,
+        cwd: gitCwd,
+      });
+    }, [wantsProjectCommands, gitCwd, selectedInstanceId, environmentId, projectCommandsSupported]);
     const [composerHighlightedItemId, setComposerHighlightedItemId] = useState<string | null>(null);
     const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
       null,

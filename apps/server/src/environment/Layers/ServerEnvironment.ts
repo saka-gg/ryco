@@ -100,6 +100,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       worktreeNotes: true,
       threadFork: true,
       providerSessionPrewarm: true,
+      providerProjectCommands: true,
       projectSearchEmptyQuery: true,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,

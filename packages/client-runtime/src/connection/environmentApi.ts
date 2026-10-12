@@ -28,6 +28,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       delegateLocalTask: rpcClient.server.delegateLocalTask,
       getDailyRecap: rpcClient.server.getDailyRecap,
       prewarmProviderSession: rpcClient.server.prewarmProviderSession,
+      readProjectProviderCommands: rpcClient.server.readProjectProviderCommands,
       getSettings: rpcClient.server.getSettings,
       getProjectPreferences: rpcClient.server.getProjectPreferences,
       updateSettings: rpcClient.server.updateSettings,

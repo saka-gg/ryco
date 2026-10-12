@@ -223,3 +223,16 @@ export const ProviderSessionPrewarmResult = Schema.Struct({
   reason: Schema.optional(Schema.String),
 });
 export type ProviderSessionPrewarmResult = typeof ProviderSessionPrewarmResult.Type;
+
+/**
+ * `provider.readProjectCommands`: the skills and slash commands a provider instance offers in
+ * one working directory (project and local ones included), which the instance's status
+ * snapshot cannot carry because it is probed once, outside any project. Clients ask on the
+ * first `/` or `$` in a directory and merge the result into the snapshot's lists. Clients call
+ * it only when the server advertises `providerProjectCommands`.
+ */
+export const ProviderProjectCommandsInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  cwd: TrimmedNonEmptyString,
+});
+export type ProviderProjectCommandsInput = typeof ProviderProjectCommandsInput.Type;

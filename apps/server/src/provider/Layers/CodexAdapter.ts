@@ -101,6 +101,7 @@ import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
+import { parseCodexSkillsListResponse } from "./CodexProvider.ts";
 import { makeCodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
 import {
   agentControlHostContext,
@@ -2557,6 +2558,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
 
+  // Project skills come from the same shared read-only app-server: skills/list starts no
+  // thread and no MCP server.
+  const readProjectCommands: NonNullable<CodexAdapterShape["readProjectCommands"]> = (cwd) =>
+    storedThreadReader
+      .withClient((client) => client.request("skills/list", { cwds: [cwd] }))
+      .pipe(
+        Effect.map((response) => ({
+          skills: parseCodexSkillsListResponse(response, cwd),
+          slashCommands: [],
+        })),
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "skills/list",
+              detail: formatCodexRuntimeErrorDetail(cause),
+              cause,
+            }),
+        ),
+      );
+
   const readThreadHistory: NonNullable<CodexAdapterShape["readThreadHistory"]> = (input) =>
     Effect.gen(function* () {
       if (!Schema.is(CodexResumeCursorSchema)(input.resumeCursor)) {
@@ -2821,6 +2843,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     readThreadHistory,
+    readProjectCommands,
     rollbackThread,
     setThreadGoal,
     getThreadGoal,

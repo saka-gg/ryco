@@ -14,6 +14,7 @@
 import type {
   ProviderInterruptTurnInput,
   ProviderInstanceId,
+  ProviderProjectCommands,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
   ProviderRuntimeEvent,
@@ -116,6 +117,16 @@ export interface ProviderServiceShape {
     }>,
     ProviderServiceError
   >;
+  /**
+   * The skills and slash commands `instanceId` offers in `cwd`, read without a session and
+   * kept for five minutes (stale-while-revalidate). Empty when the instance cannot list per
+   * directory or the read fails. Optional so existing test doubles stay valid.
+   */
+  readonly readProjectCommands?: (
+    instanceId: ProviderInstanceId,
+    cwd: string,
+  ) => Effect.Effect<ProviderProjectCommands>;
+
   /**
    * Start a provider session.
    */

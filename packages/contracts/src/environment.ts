@@ -79,6 +79,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   cliProxyCloudflareAccess: Schema.optionalKey(Schema.Boolean),
   /** `provider.prewarmSession` (start a thread's session ahead of its send); absent on older servers. */
   providerSessionPrewarm: Schema.optionalKey(Schema.Boolean),
+  /** `provider.readProjectCommands` (per-directory skills and slash commands); absent on older servers. */
+  providerProjectCommands: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

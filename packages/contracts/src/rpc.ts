@@ -57,7 +57,11 @@ import {
   AutomationCentreSnapshot,
 } from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
-import { ProviderSessionPrewarmInput, ProviderSessionPrewarmResult } from "./provider.ts";
+import {
+  ProviderProjectCommandsInput,
+  ProviderSessionPrewarmInput,
+  ProviderSessionPrewarmResult,
+} from "./provider.ts";
 import {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -289,6 +293,7 @@ import {
   ServerUpsertKeybindingResult,
   KeybindingsReplaceCustomInput,
   KeybindingsReplaceCustomResult,
+  ProviderProjectCommands,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
@@ -505,6 +510,7 @@ export const WS_METHODS = {
 
   serverRefreshProviders: "server.refreshProviders",
   providerPrewarmSession: "provider.prewarmSession",
+  providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
@@ -934,6 +940,12 @@ export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap,
 export const WsProviderPrewarmSessionRpc = Rpc.make(WS_METHODS.providerPrewarmSession, {
   payload: ProviderSessionPrewarmInput,
   success: ProviderSessionPrewarmResult,
+  error: AuthRpcError,
+});
+
+export const WsProviderReadProjectCommandsRpc = Rpc.make(WS_METHODS.providerReadProjectCommands, {
+  payload: ProviderProjectCommandsInput,
+  success: ProviderProjectCommands,
   error: AuthRpcError,
 });
 
@@ -2338,6 +2350,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
   | typeof WsProviderPrewarmSessionRpc
+  | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
@@ -2543,6 +2556,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
   WsProviderPrewarmSessionRpc,
+  WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,

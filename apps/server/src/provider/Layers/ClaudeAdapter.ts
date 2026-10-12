@@ -156,6 +156,7 @@ import {
   getClaudeModelCapabilities,
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
+  probeClaudeCapabilities,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "./ClaudeProvider.ts";
@@ -6738,6 +6739,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     listSessions,
     hasSession,
     stopAll,
+    // The capabilities probe run in the directory: no prompt, nothing persisted, no MCP.
+    readProjectCommands: (cwd) =>
+      probeClaudeCapabilities(claudeSettings, options?.environment, cwd).pipe(
+        Effect.map((probe) => ({ skills: [], slashCommands: probe?.slashCommands ?? [] })),
+        Effect.provideService(Path.Path, path),
+      ),
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue).pipe(
         Stream.tap(() => runtimeEventQueueMetrics.recordDequeued()),
