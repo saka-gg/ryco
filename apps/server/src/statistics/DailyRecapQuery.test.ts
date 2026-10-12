@@ -4,7 +4,17 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
 import { DailyRecapRequest, DailyRecapSnapshot } from "@ryco/contracts";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../persistence/Layers/Sqlite.ts";
+import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import { DailyRecapQuery, DailyRecapQueryLive, dailyRecapWindow } from "./DailyRecapQuery.ts";
 
 const request = { date: "2026-10-02", timeZone: "Europe/Berlin" };
@@ -357,4 +367,35 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
       }),
     );
   },
+);
+
+it.effect("reads the recap on the read-only worker connection of a file database", () =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.sync(() => mkdtempSync(join(tmpdir(), "ryco-daily-recap-worker-"))),
+      (directory) => Effect.sync(() => rmSync(directory, { recursive: true, force: true })),
+    );
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const reader = yield* SqliteReadClient;
+      yield* clean(sql);
+      yield* thread(sql, "worker-thread");
+      yield* turn(sql, "worker-thread", "turn-1", "completed", "2026-10-02T10:00:00.000Z");
+      const stats = () =>
+        (
+          reader as unknown as { readWorkerStats: () => { workerStatements: number } }
+        ).readWorkerStats().workerStatements;
+      const before = stats();
+      const result = yield* (yield* DailyRecapQuery).getDailyRecap(request);
+      assert.equal(result.counts.completedTurns, 1);
+      assert.isAtLeast(stats() - before, 4);
+    }).pipe(
+      Effect.provide(
+        DailyRecapQueryLive.pipe(
+          Layer.provideMerge(makeSqlitePersistenceLive(join(directory, "state.sqlite"))),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped),
 );
