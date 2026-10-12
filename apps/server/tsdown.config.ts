@@ -2,6 +2,7 @@ import { parseOptInSourcemapEnv, readEnv } from "@ryco/shared/runtimeEnv";
 import { defineConfig } from "tsdown";
 
 import { latin1OutputPlugin } from "./scripts/latin1Output.ts";
+import { isBundledPatchedPackageImport } from "./scripts/patchedPackages.ts";
 
 const buildSourcemap = parseOptInSourcemapEnv(readEnv("RYCO_SERVER_SOURCEMAP"));
 
@@ -17,7 +18,8 @@ export default defineConfig({
   sourcemap: buildSourcemap,
   clean: true,
   deps: {
-    alwaysBundle: (id) => id.startsWith("@ryco/") || id.startsWith("effect-acp"),
+    alwaysBundle: (id) =>
+      id.startsWith("@ryco/") || id.startsWith("effect-acp") || isBundledPatchedPackageImport(id),
     onlyBundle: false,
   },
   outputOptions: {
