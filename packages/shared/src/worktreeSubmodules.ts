@@ -1,4 +1,9 @@
-import type { ServerSettings, ServerSettingsPatch, WorktreeSubmodules } from "@ryco/contracts";
+import type {
+  ServerSettings,
+  ServerSettingsPatch,
+  WorktreeSubmoduleInitialization,
+  WorktreeSubmodules,
+} from "@ryco/contracts";
 
 export const WORKTREE_SUBMODULE_OPTIONS = [
   {
@@ -43,4 +48,17 @@ export function worktreeSubmodulesPatch(
   return projectId
     ? { projectWorktreeSubmodules: { [projectId]: mode } }
     : { worktreeSubmodules: mode ?? "recursive" };
+}
+
+/**
+ * What to tell the user about a new checkout's submodules: the server's skip reason when settings
+ * turned initialization off. Null when there is nothing to say. Every new-worktree flow (the
+ * worktree dialog, agent handoffs, chat forks) shows this one notice.
+ */
+export function worktreeSubmoduleSetupNotice(
+  outcome: WorktreeSubmoduleInitialization | undefined,
+): string | null {
+  if (outcome?.status !== "skipped" || outcome.mode !== "none") return null;
+  const reason = outcome.reason.trim();
+  return reason.length > 0 ? reason : null;
 }

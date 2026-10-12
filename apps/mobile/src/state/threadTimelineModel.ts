@@ -31,6 +31,7 @@ export function createThreadTimelineBuilder() {
       workEntries: viewModel.workLogEntries,
       contextCompactionEntries: viewModel.contextCompactionEntries,
       contextHandoffEntries: viewModel.contextHandoffEntries,
+      forkOriginEntries: viewModel.forkOriginEntries,
     });
     return { viewModel, timeline };
   };

@@ -104,6 +104,15 @@ describe("inbox context handoff", () => {
   it("never presents a folder move as a model transfer", async () => {
     expect(await load(apiWith([relocation(1)]))).toBeNull();
   });
+  it("never presents a fork's first fresh session as a model transfer", async () => {
+    const forkHandoff = activity(3, "consumed", target, { reason: "fork", sources: [target] });
+    expect(await load(apiWith([forkHandoff]))).toBeNull();
+    // A transfer before it still names how the thread got to its model.
+    const result = await load(
+      apiWith([forkHandoff, activity(2, "consumed", opus, { reason: "model-change" })]),
+    );
+    expect(result?.source.modelDisplayName).toBe("Opus 5");
+  });
   it("does not label an old target as the current model", async () => {
     expect(await load(apiWith([activity(1)]), { ...selection, model: "another-model" })).toBeNull();
   });

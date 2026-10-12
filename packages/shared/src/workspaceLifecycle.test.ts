@@ -151,6 +151,14 @@ describe("lifecycle suggestions", () => {
     expect(plan([thread("t", overrides)]).threads).toEqual([]);
   });
 
+  it("suggests archiving an inactive fork that never sent a message of its own", () => {
+    // A fork's inherited prompts are not its own recency, yet it holds a conversation.
+    const fork = thread("fork", { latestUserMessageAt: null, lineage: { relationship: "forked" } });
+    expect(plan([fork]).threads).toEqual([
+      { threadId: "fork", projectId: "p", title: "fork", lastActivityAt: ago(40) },
+    ]);
+  });
+
   it("excludes pinned threads and threads with live terminals", () => {
     expect(plan([thread("pinned")], ["pinned"]).threads).toEqual([]);
   });

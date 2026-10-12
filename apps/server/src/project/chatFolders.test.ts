@@ -464,6 +464,8 @@ describe("deleteChatFolder", () => {
     lineageParentThreadId: null,
     lineageRootThreadId: null,
     lineageRelationship: null,
+    lineageSourceMessageId: null,
+    lineageSourceTurnId: null,
     ...overrides,
   });
 

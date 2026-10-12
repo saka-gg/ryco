@@ -1,4 +1,5 @@
 import type { WorkspaceLifecycleAction } from "@ryco/contracts";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 
 /**
  * The lifecycle action inventory shared by every client surface (sidebar, Inbox,
@@ -21,6 +22,8 @@ export interface ThreadLifecycleActionItem {
 export interface ThreadLifecycleSubject {
   readonly archivedAt: string | null;
   readonly latestUserMessageAt?: string | null | undefined;
+  /** A fork holds its inherited conversation before it sends anything (`threadHasConversation`). */
+  readonly lineage?: { readonly relationship: string } | null | undefined;
   readonly session: {
     readonly status: string;
     readonly activeTurnId?: string | null | undefined;
@@ -46,7 +49,7 @@ export function listThreadLifecycleActions(
   if (isThreadTurnRunning(thread)) items.push({ id: "interrupt-turn", label: "Interrupt turn" });
   else if (isThreadSessionLive(thread)) items.push({ id: "stop-session", label: "Stop session" });
   if (thread.archivedAt !== null) items.push({ id: "unarchive", label: "Unarchive thread" });
-  else if (thread.latestUserMessageAt) items.push({ id: "archive", label: "Archive thread" });
+  else if (threadHasConversation(thread)) items.push({ id: "archive", label: "Archive thread" });
   items.push({ id: "trash", label: "Move to Trash", destructive: true });
   return items;
 }

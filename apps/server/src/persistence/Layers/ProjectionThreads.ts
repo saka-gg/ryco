@@ -73,7 +73,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           trashed_at,
           lineage_parent_thread_id,
           lineage_root_thread_id,
-          lineage_relationship
+          lineage_relationship,
+          lineage_source_message_id,
+          lineage_source_turn_id
         )
         VALUES (
           ${row.threadId},
@@ -106,7 +108,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.trashedAt ?? null},
           ${row.lineageParentThreadId},
           ${row.lineageRootThreadId},
-          ${row.lineageRelationship}
+          ${row.lineageRelationship},
+          ${row.lineageSourceMessageId},
+          ${row.lineageSourceTurnId}
         )
         ON CONFLICT (thread_id)
         DO UPDATE SET
@@ -139,7 +143,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           trashed_at = excluded.trashed_at,
           lineage_parent_thread_id = excluded.lineage_parent_thread_id,
           lineage_root_thread_id = excluded.lineage_root_thread_id,
-          lineage_relationship = excluded.lineage_relationship
+          lineage_relationship = excluded.lineage_relationship,
+          lineage_source_message_id = excluded.lineage_source_message_id,
+          lineage_source_turn_id = excluded.lineage_source_turn_id
       `,
   });
 
@@ -179,7 +185,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
-          lineage_relationship AS "lineageRelationship"
+          lineage_relationship AS "lineageRelationship",
+          lineage_source_message_id AS "lineageSourceMessageId",
+          lineage_source_turn_id AS "lineageSourceTurnId"
         FROM projection_threads
         WHERE thread_id = ${threadId}
       `,
@@ -221,7 +229,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
-          lineage_relationship AS "lineageRelationship"
+          lineage_relationship AS "lineageRelationship",
+          lineage_source_message_id AS "lineageSourceMessageId",
+          lineage_source_turn_id AS "lineageSourceTurnId"
         FROM projection_threads
         WHERE project_id = ${projectId}
         ORDER BY created_at ASC, thread_id ASC

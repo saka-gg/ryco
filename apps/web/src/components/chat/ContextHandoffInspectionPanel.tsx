@@ -14,6 +14,7 @@ import {
   FileJsonIcon,
   FileTextIcon,
   FolderInputIcon,
+  GitForkIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
   ShieldAlertIcon,
@@ -24,7 +25,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ensureEnvironmentApi } from "../../environmentApi";
 import {
   CWD_RELOCATION_HANDOFF_COPY,
+  FORK_HANDOFF_COPY,
+  forkHandoffEndpointLabels,
+  forkHandoffHeadline,
   isCwdRelocationHandoff,
+  isForkHandoff,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import {
@@ -35,7 +40,10 @@ import {
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
-import { ContextHandoffEndpointLabel } from "./ContextHandoffEndpointLabel";
+import {
+  CONTEXT_HANDOFF_ENDPOINT_LABELERS,
+  ContextHandoffEndpointLabel,
+} from "./ContextHandoffEndpointLabel";
 
 const SECTION_LABELS: Record<ContextHandoffInspectionSection, string> = {
   messages: "Messages",
@@ -288,7 +296,27 @@ export function ContextHandoffInspectionPanel(props: {
   const activeScope = summary?.[scope] ?? null;
   const sourceEndpoints = summary?.sources ?? props.marker.sources;
   const targetEndpoint = summary?.target ?? props.marker.target;
-  const relocation = isCwdRelocationHandoff(props.marker);
+  // Relocations and a fork's first session keep their model: the header names
+  // the fresh session instead of a model transition.
+  const freshSession = isForkHandoff(props.marker)
+    ? {
+        reason: "fork",
+        Icon: GitForkIcon,
+        label: forkHandoffHeadline(
+          props.marker.status,
+          null,
+          forkHandoffEndpointLabels(props.marker, CONTEXT_HANDOFF_ENDPOINT_LABELERS).source,
+        ),
+        explanation: FORK_HANDOFF_COPY.explanation,
+      }
+    : isCwdRelocationHandoff(props.marker)
+      ? {
+          reason: "cwd-relocation",
+          Icon: FolderInputIcon,
+          label: CWD_RELOCATION_HANDOFF_COPY.attempted,
+          explanation: CWD_RELOCATION_HANDOFF_COPY.explanation,
+        }
+      : null;
 
   return (
     <section
@@ -304,13 +332,13 @@ export function ContextHandoffInspectionPanel(props: {
             <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Context handoff
             </p>
-            {relocation ? (
+            {freshSession ? (
               <div
                 className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium"
-                data-context-handoff-reason="cwd-relocation"
+                data-context-handoff-reason={freshSession.reason}
               >
-                <FolderInputIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                <span>{CWD_RELOCATION_HANDOFF_COPY.attempted}</span>
+                <freshSession.Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span>{freshSession.label}</span>
                 <span className="text-muted-foreground/45" aria-hidden>
                   ·
                 </span>
@@ -329,9 +357,9 @@ export function ContextHandoffInspectionPanel(props: {
                 <ContextHandoffEndpointLabel endpoint={targetEndpoint} className="max-w-44" />
               </div>
             )}
-            {relocation ? (
+            {freshSession ? (
               <p className="mt-1.5 text-xs leading-4 text-muted-foreground">
-                {CWD_RELOCATION_HANDOFF_COPY.explanation}
+                {freshSession.explanation}
               </p>
             ) : null}
           </div>

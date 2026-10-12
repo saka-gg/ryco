@@ -5,9 +5,12 @@ import type { ChatAttachment } from "../threads/types.ts";
 import {
   collectTurnHtmlRenders,
   deriveTerminalAssistantMessageIds,
+  findTimelineMessageRowIndex,
   isBlankSettledReply,
   isHtmlRenderOnlyMessage,
   placeRepliesAfterHtmlRenders,
+  timelineRowShowsMessage,
+  type TimelineRowMessages,
 } from "./htmlRenderTimeline.ts";
 import type { TimelineEntry } from "./session-logic.ts";
 
@@ -114,5 +117,30 @@ describe("htmlRenderTimeline", () => {
       },
     });
     expect(isHtmlRenderOnlyMessage(carrier.message)).toBe(true);
+  });
+});
+
+describe("the row a link to a message lands on", () => {
+  const user = MessageId.make("user");
+  const page = MessageId.make("page");
+  const blank = MessageId.make("blank");
+  // A turn that answered with a page and a blank reply: the page's row stands in for the reply.
+  const rows: ReadonlyArray<TimelineRowMessages> = [
+    { messageId: user },
+    { messageId: null },
+    { messageId: page, standsInFor: blank },
+  ];
+
+  it("is the message's own row, else the row standing in for it", () => {
+    expect(findTimelineMessageRowIndex(rows, user, (row) => row)).toBe(0);
+    expect(findTimelineMessageRowIndex(rows, page, (row) => row)).toBe(2);
+    expect(findTimelineMessageRowIndex(rows, blank, (row) => row)).toBe(2);
+    expect(findTimelineMessageRowIndex(rows, MessageId.make("later"), (row) => row)).toBe(-1);
+  });
+
+  it("highlights the stand-in for the reply, and nothing for no message", () => {
+    expect(timelineRowShowsMessage(rows[2]!, blank)).toBe(true);
+    expect(timelineRowShowsMessage(rows[0]!, blank)).toBe(false);
+    expect(timelineRowShowsMessage(rows[1]!, null)).toBe(false);
   });
 });

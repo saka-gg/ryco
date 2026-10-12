@@ -18,8 +18,8 @@ import type { DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
-import type { PendingContextHandoffPresentation } from "./contextHandoffModel";
-import { PendingContextHandoffChip } from "./PendingContextHandoffChip";
+import type { PendingComposerHandoff } from "./contextHandoffModel";
+import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingContextHandoffChip";
 
 // Floating glass composer capsule (§3.5.2, §5). It uses the shared native
 // ComposerEditor so mentions/skills, hardware-keyboard submit, and pasted images
@@ -51,7 +51,8 @@ export function ThreadComposer(props: {
   readonly modelSelection?: ModelSelection | null;
   readonly onSelectModel: (selection: ModelSelection) => void;
   readonly onOpenSideChat?: () => void;
-  readonly pendingContextHandoff?: PendingContextHandoffPresentation | null;
+  /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
+  readonly pendingHandoff?: PendingComposerHandoff | null;
 }) {
   const policyModel = props.policyModel;
   const modelPicker = props.modelPicker;
@@ -102,8 +103,10 @@ export function ThreadComposer(props: {
           {visibleAttachmentError}
         </Text>
       ) : null}
-      {props.pendingContextHandoff ? (
-        <PendingContextHandoffChip {...props.pendingContextHandoff} />
+      {props.pendingHandoff?.kind === "fork" ? (
+        <PendingForkHandoffChip />
+      ) : props.pendingHandoff?.kind === "model-change" ? (
+        <PendingContextHandoffChip {...props.pendingHandoff} />
       ) : null}
       <GlassSurface
         radius={26}

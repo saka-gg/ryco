@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   CONTEXT_HANDOFF_CONTEXT_VERSION,
   ContextHandoffActivityPayload,
@@ -18,7 +16,10 @@ import {
   TurnId,
 } from "@ryco/contracts";
 import { truncateUnicodeSafe } from "@ryco/shared/String";
+import { isInheritedItemId } from "@ryco/shared/threadFork";
 import { Option, Schema } from "effect";
+
+import { canonicalJson as canonicalJsonText, sha256Hex } from "../../canonicalJson.ts";
 
 const MESSAGE_TEXT_MAX_CHARS = 32_000;
 const PLAN_TEXT_MAX_CHARS = 16_000;
@@ -193,11 +194,6 @@ interface OrderedValue {
   readonly sequence?: number | undefined;
 }
 
-type JsonCompatible = null | boolean | number | string | JsonCompatible[] | JsonObject;
-interface JsonObject {
-  readonly [key: string]: JsonCompatible;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -244,35 +240,27 @@ function compareOrdered(left: OrderedValue, right: OrderedValue): number {
   return left.id.localeCompare(right.id);
 }
 
-function stableJsonValue(value: unknown): JsonCompatible {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return value;
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (Array.isArray(value)) {
-    return value.map(stableJsonValue);
-  }
-  if (value && typeof value === "object") {
-    const result: Record<string, JsonCompatible> = {};
-    for (const key of Object.keys(value).toSorted()) {
-      const entry = (value as Record<string, unknown>)[key];
-      if (entry !== undefined) {
-        result[key] = stableJsonValue(entry);
-      }
-    }
-    return result;
-  }
-  return null;
+type EntryOrder = (left: OrderedValue, right: OrderedValue) => number;
+
+/**
+ * Order of a handoff's history in `threadId`: a fork's inherited items first, then its own, each
+ * band by time. Inherited items keep the source's server timestamps while the fork's own sends
+ * carry the device's clock, which can date them before the inherited reply; the inherited band
+ * always precedes them, as in the fork's timeline. A thread that was never forked has no
+ * inherited items, so its order (and every stored digest) is plain `(createdAt, sequence, id)`.
+ */
+export function contextHandoffEntryOrder(threadId: ThreadId | string): EntryOrder {
+  const band = (entry: OrderedValue) => (isInheritedItemId(threadId, entry.id) ? 0 : 1);
+  return (left, right) => band(left) - band(right) || compareOrdered(left, right);
 }
 
+/** Canonical JSON (sorted keys, no `undefined`); the bytes every handoff digest covers. */
 export function stableStringifyContextHandoff(value: unknown): string {
-  return JSON.stringify(stableJsonValue(value));
+  return canonicalJsonText(value);
 }
 
 export function digestContextHandoffDocument(document: ContextHandoffDocument): string {
-  return createHash("sha256").update(stableStringifyContextHandoff(document)).digest("hex");
+  return sha256Hex(stableStringifyContextHandoff(document));
 }
 
 function endpointKey(endpoint: ContextHandoffEndpointSnapshot): string {
@@ -313,12 +301,46 @@ function beforeTarget<T extends { readonly createdAt: string }>(
   return targetCreatedAt === undefined || value.createdAt <= targetCreatedAt;
 }
 
+/**
+ * What of the thread precedes the target message: the boundary every section applies. A fork's
+ * inherited items all precede its own sends, so only its own items are cut at the target (own
+ * messages by their detail-read position, other own items by time); inherited items are always
+ * kept, however the device that sent the target dated it.
+ */
+interface HandoffHistory {
+  readonly messages: ReadonlyArray<OrchestrationThread["messages"][number]>;
+  readonly targetCreatedAt: string | undefined;
+  /** Inherited items always; own items stamped no later than the target. */
+  readonly includes: (item: { readonly id: string; readonly createdAt: string }) => boolean;
+}
+
+function handoffHistory(thread: OrchestrationThread, targetMessageId: MessageId): HandoffHistory {
+  const inherited = (id: string) => isInheritedItemId(thread.id, id);
+  const inheritedMessages = thread.messages.filter((message) => inherited(message.id));
+  // Never forked: every message is its own, and this is the whole detail-read list.
+  const ownMessages =
+    inheritedMessages.length === 0
+      ? thread.messages
+      : thread.messages.filter((message) => !inherited(message.id));
+  const targetIndex = ownMessages.findIndex((message) => message.id === targetMessageId);
+  const targetCreatedAt = targetIndex >= 0 ? ownMessages[targetIndex]?.createdAt : undefined;
+  return {
+    messages:
+      targetIndex >= 0
+        ? [...inheritedMessages, ...ownMessages.slice(0, targetIndex)]
+        : thread.messages,
+    targetCreatedAt,
+    includes: (item) => inherited(item.id) || beforeTarget(item, targetCreatedAt),
+  };
+}
+
 function collectPriorHandoffs(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
   targetMessageId: MessageId,
+  order: EntryOrder,
 ): ContextHandoffBoundaryEntry[] {
   const result: ContextHandoffBoundaryEntry[] = [];
-  for (const activity of activities.toSorted(compareOrdered)) {
+  for (const activity of activities.toSorted(order)) {
     const payload = decodeHandoffPayload(activity);
     if (
       !payload ||
@@ -371,13 +393,9 @@ function collectSources(
   return sources;
 }
 
-function collectMessages(
-  thread: OrchestrationThread,
-  targetIndex: number,
-): ContextHandoffMessageEntry[] {
-  const history = targetIndex >= 0 ? thread.messages.slice(0, targetIndex) : thread.messages;
+function collectMessages(history: HandoffHistory, order: EntryOrder): ContextHandoffMessageEntry[] {
   const messages: ContextHandoffMessageEntry[] = [];
-  for (const message of history) {
+  for (const message of history.messages) {
     if (message.role !== "user" && message.role !== "assistant") {
       continue;
     }
@@ -391,16 +409,16 @@ function collectMessages(
       ...(text.length !== message.text.length ? { truncated: true } : {}),
     });
   }
-  return messages.toSorted(compareOrdered);
+  return messages.toSorted(order);
 }
 
 function collectProposedPlans(
   thread: OrchestrationThread,
-  targetCreatedAt: string | undefined,
+  history: HandoffHistory,
 ): ContextHandoffPlanEntry[] {
   const plans: ContextHandoffPlanEntry[] = [];
   for (const plan of thread.proposedPlans) {
-    if (plan.implementedAt !== null || !beforeTarget(plan, targetCreatedAt)) {
+    if (plan.implementedAt !== null || !history.includes(plan)) {
       continue;
     }
     const planMarkdown = truncateUnicodeSafe(plan.planMarkdown, PLAN_TEXT_MAX_CHARS);
@@ -419,9 +437,10 @@ function collectProposedPlans(
 
 function collectRuntimePlan(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
+  order: EntryOrder,
 ): ContextHandoffPlanEntry[] {
   let latest: ContextHandoffPlanEntry | undefined;
-  for (const activity of activities.toSorted(compareOrdered)) {
+  for (const activity of activities.toSorted(order)) {
     if (activity.kind !== "turn.plan.updated") {
       continue;
     }
@@ -757,9 +776,10 @@ function mergeTools(
 
 function collectTools(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
+  order: EntryOrder,
 ): ContextHandoffToolEntry[] {
   const tools = new Map<string, ContextHandoffToolEntry>();
-  for (const activity of activities.toSorted(compareOrdered)) {
+  for (const activity of activities.toSorted(order)) {
     const tool = extractTool(activity);
     if (!tool) {
       continue;
@@ -769,7 +789,7 @@ function collectTools(
     const previous = tools.get(key);
     tools.set(key, previous ? mergeTools(previous, tool) : tool);
   }
-  return [...tools.values()].toSorted(compareOrdered);
+  return [...tools.values()].toSorted(order);
 }
 
 function collectCheckpoints(
@@ -867,10 +887,11 @@ function failureFromActivity(
 
 function collectNotices(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
+  order: EntryOrder,
 ): ContextHandoffNoticeEntry[] {
   const failures: ContextHandoffNoticeEntry[] = [];
   const pendingQuestions = new Map<string, ContextHandoffNoticeEntry>();
-  for (const activity of activities.toSorted(compareOrdered)) {
+  for (const activity of activities.toSorted(order)) {
     const failure = failureFromActivity(activity);
     if (failure) {
       failures.push(failure);
@@ -902,14 +923,15 @@ function collectNotices(
       ...(parsed.truncated ? { truncated: true } : {}),
     });
   }
-  return [...failures, ...pendingQuestions.values()].toSorted(compareOrdered);
+  return [...failures, ...pendingQuestions.values()].toSorted(order);
 }
 
 function collectSubagents(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
+  order: EntryOrder,
 ): ContextHandoffSubagentEntry[] {
   const result: ContextHandoffSubagentEntry[] = [];
-  for (const activity of activities.toSorted(compareOrdered)) {
+  for (const activity of activities.toSorted(order)) {
     if (activity.kind !== "subagent.completed") {
       continue;
     }
@@ -959,21 +981,18 @@ export function countContextHandoffEntries(document: ContextHandoffDocument): nu
 export function buildContextHandoffDocument(
   input: BuildContextHandoffDocumentInput,
 ): ContextHandoffArtifact {
-  const targetIndex = input.thread.messages.findIndex(
-    (message) => message.id === input.targetMessageId,
-  );
-  const targetCreatedAt =
-    targetIndex >= 0 ? input.thread.messages[targetIndex]?.createdAt : undefined;
+  const order = contextHandoffEntryOrder(input.thread.id);
+  const history = handoffHistory(input.thread, input.targetMessageId);
   const activities = input.thread.activities.filter(
     (activity) =>
-      beforeTarget(activity, targetCreatedAt) &&
+      history.includes(activity) &&
       decodeHandoffPayload(activity)?.targetMessageId !== input.targetMessageId,
   );
-  const priorHandoffs = collectPriorHandoffs(activities, input.targetMessageId);
+  const priorHandoffs = collectPriorHandoffs(activities, input.targetMessageId, order);
   const plans = [
-    ...collectProposedPlans(input.thread, targetCreatedAt),
-    ...collectRuntimePlan(activities),
-  ].toSorted(compareOrdered);
+    ...collectProposedPlans(input.thread, history),
+    ...collectRuntimePlan(activities, order),
+  ].toSorted(order);
   const document: ContextHandoffDocument = {
     version: CONTEXT_HANDOFF_CONTEXT_VERSION,
     mode: "full-context-fresh-session",
@@ -989,19 +1008,19 @@ export function buildContextHandoffDocument(
       sources: collectSources(priorHandoffs, input.source),
       target: boundedEndpoint(input.target),
     },
-    messages: collectMessages(input.thread, targetIndex),
+    messages: collectMessages(history, order),
     plans,
-    tools: collectTools(activities),
-    checkpoints: collectCheckpoints(input.thread, targetCreatedAt),
-    notices: collectNotices(activities),
-    subagents: collectSubagents(activities),
+    tools: collectTools(activities, order),
+    checkpoints: collectCheckpoints(input.thread, history.targetCreatedAt),
+    notices: collectNotices(activities, order),
+    subagents: collectSubagents(activities, order),
     priorHandoffs,
   };
   const canonicalJson = stableStringifyContextHandoff(document);
   return {
     document,
     canonicalJson,
-    digest: createHash("sha256").update(canonicalJson).digest("hex"),
+    digest: sha256Hex(canonicalJson),
     entryCount: countContextHandoffEntries(document),
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { EnvironmentId, ThreadId, type ThreadLineage } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId, TurnId, type ThreadLineage } from "@ryco/contracts";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
 import {
@@ -22,6 +22,14 @@ const delegated = (parent: string, root: string = parent): ThreadLineage => ({
   parentThreadId: ThreadId.make(parent),
   rootThreadId: ThreadId.make(root),
   relationship: "delegated",
+});
+
+const forked = (parent: string, sourceMessageId = "reply-1"): ThreadLineage => ({
+  parentThreadId: ThreadId.make(parent),
+  rootThreadId: ThreadId.make(parent),
+  relationship: "forked",
+  sourceMessageId: MessageId.make(sourceMessageId),
+  sourceTurnId: TurnId.make("turn-1"),
 });
 
 function item(
@@ -143,6 +151,66 @@ describe("planDelegatedNesting", () => {
     expect(hostOf(plan, "forked")).toBeNull();
   });
 
+  it("renders forks flat even when they are quiet", () => {
+    const plan = planDelegatedNesting([
+      item("parent"),
+      item("fork", { lineage: forked("parent"), urgency: "settled" }),
+    ]);
+    expect(hostOf(plan, "fork")).toBeNull();
+    expect(
+      selectDelegatedChildThreads(
+        [
+          {
+            id: ThreadId.make("fork"),
+            environmentId: ENV,
+            createdAt: "",
+            archivedAt: null,
+            lineage: forked("parent"),
+          },
+        ],
+        scopeThreadRef(ENV, ThreadId.make("parent")),
+      ),
+    ).toEqual([]);
+  });
+
+  it("never folds a child delegated from a hidden fork under the fork's source", () => {
+    // The fork F of S is archived or filtered out; its delegated child C carries S as its root.
+    const plan = planDelegatedNesting(
+      [item("source"), item("child", { lineage: delegated("fork", "source"), urgency: "settled" })],
+      { lineageByKey: new Map([[keyOf("fork"), forked("source")]]) },
+    );
+    expect(hostOf(plan, "child")).toBeNull();
+  });
+
+  it("stops at a hidden fork reached through hidden delegated intermediates", () => {
+    const plan = planDelegatedNesting(
+      [
+        item("source"),
+        item("grandchild", { lineage: delegated("child", "source"), urgency: "settled" }),
+      ],
+      {
+        lineageByKey: new Map([
+          [keyOf("child"), delegated("fork", "source")],
+          [keyOf("fork"), forked("source")],
+        ]),
+      },
+    );
+    expect(hostOf(plan, "grandchild")).toBeNull();
+  });
+
+  it("nests a child delegated from a visible fork under that fork", () => {
+    const plan = planDelegatedNesting(
+      [
+        item("source"),
+        item("fork", { lineage: forked("source") }),
+        item("child", { lineage: delegated("fork", "source"), urgency: "settled" }),
+      ],
+      { lineageByKey: new Map([[keyOf("fork"), forked("source")]]) },
+    );
+    expect(hostOf(plan, "child")).toBe(keyOf("fork"));
+    expect(hostOf(plan, "fork")).toBeNull();
+  });
+
   it("terminates a two-node cycle with both items top-level", () => {
     const plan = planDelegatedNesting([
       item("a", { lineage: delegated("b") }),
@@ -219,6 +287,16 @@ describe("thread lineage helpers", () => {
     expect(threadLineagesEqual(delegated("a"), delegated("a", "b"))).toBe(false);
   });
 
+  it("compares a fork's source message and turn", () => {
+    expect(threadLineagesEqual(forked("a"), forked("a"))).toBe(true);
+    expect(threadLineagesEqual(forked("a"), forked("a", "reply-2"))).toBe(false);
+    expect(
+      threadLineagesEqual(forked("a"), { ...forked("a"), sourceTurnId: TurnId.make("turn-2") }),
+    ).toBe(false);
+    const { sourceMessageId: _message, sourceTurnId: _turn, ...withoutSource } = forked("a");
+    expect(threadLineagesEqual(forked("a"), withoutSource)).toBe(false);
+  });
+
   it("narrows delegated lineage and validates untrusted lineage", () => {
     expect(isDelegatedThreadLineage(delegated("a"))).toBe(true);
     expect(isDelegatedThreadLineage(null)).toBe(false);
@@ -228,5 +306,11 @@ describe("thread lineage helpers", () => {
       false,
     );
     expect(isThreadLineage({ parentThreadId: "a" })).toBe(false);
+  });
+
+  it("validates forked lineage and its source fields", () => {
+    expect(isDelegatedThreadLineage(forked("a"))).toBe(false);
+    expect(isThreadLineage(forked("a"))).toBe(true);
+    expect(isThreadLineage({ ...forked("a"), sourceMessageId: "" })).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlStatement from "effect/sql/Statement";
 import { DailyRecapRequest, DailyRecapSnapshot } from "@ryco/contracts";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -45,13 +46,14 @@ const turn = (
   turnId: string,
   state: string,
   completedAt: string | null,
+  assistantMessageId: string | null = null,
 ) => sql`
   INSERT INTO projection_turns (
     thread_id, turn_id, pending_message_id, assistant_message_id, state,
     requested_at, started_at, completed_at, checkpoint_turn_count,
     checkpoint_ref, checkpoint_status, checkpoint_files_json
   ) VALUES (
-    ${threadId}, ${turnId}, NULL, NULL, ${state},
+    ${threadId}, ${turnId}, NULL, ${assistantMessageId}, ${state},
     '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', ${completedAt},
     NULL, NULL, NULL, '[]'
   )
@@ -217,6 +219,80 @@ it.layer(DailyRecapQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))(
         const completed = yield* service.getDailyRecap(request);
         assert.equal(completed.counts.completedTurns, 2);
         assert.equal(completed.completed.threads[0]?.lastActivityAt, "2026-10-02T01:00:00.000Z");
+      }),
+    );
+
+    it.effect("recaps a fork's own turns only, never the history it inherited", () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* clean(sql);
+        yield* thread(sql, "source");
+        yield* thread(sql, "fork");
+        // The source's turns and the fork's inherited copies of them, as fork publication
+        // projects them: same turn ids and times, inherited assistant message ids.
+        for (const [turnId, completedAt] of [
+          ["turn-done", "2026-10-02T01:00:00.000Z"],
+          ["turn-later", "2026-10-02T02:00:00.000Z"],
+        ] as const) {
+          yield* turn(sql, "source", turnId, "completed", completedAt, `message-${turnId}`);
+          yield* turn(
+            sql,
+            "fork",
+            turnId,
+            "completed",
+            completedAt,
+            `fork:inherited:message-${turnId}`,
+          );
+        }
+        const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const capture: SqlStatement.Transformer = (statement) =>
+          Effect.sync(() => {
+            const compiled = statement.compile();
+            if (compiled[0].includes("FROM projection_turns turns")) statements.push(compiled);
+            return statement;
+          });
+        const service = yield* DailyRecapQuery;
+        const inheritedOnly = yield* service
+          .getDailyRecap(request)
+          .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+        assert.equal(inheritedOnly.counts.completedTurns, 2);
+        assert.deepStrictEqual(
+          inheritedOnly.completed.threads.map((item) => item.threadId),
+          ["source"],
+        );
+
+        yield* turn(sql, "fork", "turn-own", "error", "2026-10-02T03:00:00.000Z", "message-own");
+        const withOwnTurn = yield* service.getDailyRecap(request);
+        assert.deepStrictEqual(withOwnTurn.counts, {
+          completedTurns: 2,
+          failedTurns: 1,
+          interruptedTurns: 0,
+        });
+        assert.deepStrictEqual(
+          withOwnTurn.failed.threads.map((item) => item.threadId),
+          ["fork"],
+        );
+        assert.deepStrictEqual(
+          withOwnTurn.completed.threads.map((item) => item.threadId),
+          ["source"],
+        );
+
+        // The inherited-turn filter is residual: the day range still drives every query.
+        assert.lengthOf(statements, 3);
+        for (const [statement, params] of statements) {
+          const plan = yield* sql.unsafe<{ detail: string }>(
+            `EXPLAIN QUERY PLAN ${statement}`,
+            params,
+          );
+          assert.ok(
+            plan.some((row) =>
+              /^SEARCH turns USING (COVERING )?INDEX idx_projection_turns_completed_at/.test(
+                row.detail,
+              ),
+            ),
+            JSON.stringify(plan),
+          );
+        }
       }),
     );
 

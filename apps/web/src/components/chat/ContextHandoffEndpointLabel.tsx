@@ -1,4 +1,5 @@
 import type { ContextHandoffEndpointSnapshot } from "@ryco/contracts";
+import type { ContextHandoffEndpointLabelers } from "../../session-logic";
 import { memo } from "react";
 
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
@@ -30,6 +31,12 @@ export function contextHandoffEndpointAccessibleLabel(
 ): string {
   return `${contextHandoffProviderLabel(endpoint)} ${contextHandoffModelLabel(endpoint)}`;
 }
+
+/** The web's endpoint labels for the shared fork divider rule (`forkHandoffEndpointLabels`). */
+export const CONTEXT_HANDOFF_ENDPOINT_LABELERS: ContextHandoffEndpointLabelers = {
+  endpoint: contextHandoffEndpointAccessibleLabel,
+  model: contextHandoffModelLabel,
+};
 
 export const ContextHandoffEndpointLabel = memo(function ContextHandoffEndpointLabel(props: {
   endpoint: ContextHandoffEndpointSnapshot;

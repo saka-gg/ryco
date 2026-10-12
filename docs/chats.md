@@ -36,7 +36,10 @@ sidebar. When the node starts, it removes every chat that has no conversation at
 sidebar, the archive or Trash) and was created more than an hour earlier. It also removes the chat's folder, but only when
 the folder is empty and strictly inside the current chats folder. Files are never deleted. The
 cleanup runs in the background after startup. A chat that it cannot remove, or that gained a
-conversation in the meantime, stays, and a failed cleanup is tried again at the next start.
+conversation in the meantime, stays, and a failed cleanup is tried again at the next start. The new
+chat of a [fork](thread-forks.md) exists before the fork's thread does; the cleanup keeps it while
+the fork is still being prepared or could still be retried, and skips its run altogether when it
+cannot read the node's fork records.
 
 A draft whose chat was removed this way cannot reuse that chat. The node refuses the send before
 creating anything, and Ryco then gives the draft a new chat and sends the same message once more,
@@ -115,6 +118,15 @@ A chat row's menu has these items:
   when the chat is on this machine.
 - **Copy folder path**.
 - **Turn into project…**.
+
+## Forking a chat
+
+**Fork from here** on a reply of a chat creates a new chat with its own, empty folder. The new chat
+inherits the conversation up to that reply. Files in the original chat's folder are not copied, and
+the original chat keeps its folder and conversation unchanged. A chat cannot be forked into the
+same folder, because Ryco's apps keep one thread per chat. The new chat holds the inherited
+conversation, so it can be archived before you send anything in it. See
+[Forking a thread](thread-forks.md).
 
 ## Deleting a chat
 
@@ -327,6 +339,7 @@ running session. See
   chat's folder became a Git repository (for example, you ran `git init` in it), such a client can
   also create a worktree for it.
 - Agent Control lists chats (`kind: "chat"`) but cannot create them.
-- Only the first send and **Turn into project…** can create a chat, move its folder or change its
-  kind. Clients cannot do this through ordinary project updates.
+- Only the first send, a fork of a chat and **Turn into project…** can create a chat, and only
+  **Turn into project…** can move its folder or change its kind. Clients cannot do this through
+  ordinary project updates.
 - Usage statistics and daily recaps list a chat under its title, like a project.

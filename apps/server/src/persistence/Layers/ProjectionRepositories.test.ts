@@ -115,6 +115,8 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         lineageParentThreadId: null,
         lineageRootThreadId: null,
         lineageRelationship: null,
+        lineageSourceMessageId: null,
+        lineageSourceTurnId: null,
       });
 
       const rows = yield* sql<{

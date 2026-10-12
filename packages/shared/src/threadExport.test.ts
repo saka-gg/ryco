@@ -102,3 +102,93 @@ it("exports recorded provider boundaries without retaining private payload field
   expect(output).toContain("consumed: codex_work/source-model → claude_work/target-model");
   expect(output).not.toContain("private");
 });
+
+const forkHandoffPayload = {
+  schemaVersion: 1,
+  handoffId: "handoff",
+  mode: "full-context-fresh-session",
+  reason: "fork",
+  targetMessageId: "m",
+  sourceSelection: { instanceId: "opencode_work", model: "fork-model" },
+  targetSelection: { instanceId: "opencode_work", model: "fork-model" },
+  sources: [
+    { providerInstanceId: "opencode_work", driverKind: "opencode", modelSlug: "fork-model" },
+  ],
+  target: { providerInstanceId: "opencode_work", driverKind: "opencode", modelSlug: "fork-model" },
+  contextVersion: 1,
+  contextDigest: "a".repeat(64),
+  status: "consumed",
+};
+
+it("exports a fork handoff as the delivery of the inherited conversation", () => {
+  const activity = projectThreadExportActivity({
+    id: "fork-handoff",
+    createdAt: "2026-09-15T00:00:01Z",
+    kind: "context-handoff",
+    summary: "Handoff",
+    payload: forkHandoffPayload,
+  } as unknown as OrchestrationThreadActivity);
+  const output = serializeThreadMarkdown({ ...thread, activities: [activity] });
+  expect(output).toContain(
+    "consumed: inherited conversation → fresh opencode_work/fork-model session",
+  );
+  expect(output).not.toContain("opencode_work/fork-model → opencode_work/fork-model");
+});
+
+it("exports a fork handoff that also switched provider with the provider it left", () => {
+  const activity = projectThreadExportActivity({
+    id: "fork-handoff",
+    createdAt: "2026-09-15T00:00:01Z",
+    kind: "context-handoff",
+    summary: "Handoff",
+    payload: {
+      ...forkHandoffPayload,
+      targetSelection: { instanceId: "claude_work", model: "sonnet" },
+      target: { providerInstanceId: "claude_work", driverKind: "claudeAgent", modelSlug: "sonnet" },
+    },
+  } as unknown as OrchestrationThreadActivity);
+  expect(serializeThreadMarkdown({ ...thread, activities: [activity] })).toContain(
+    "consumed: inherited conversation → fresh claude_work/sonnet session (switched from opencode_work/fork-model)",
+  );
+});
+
+it("exports where a fork's inherited history came from before its messages", () => {
+  const activity = projectThreadExportActivity({
+    id: "fork:forked",
+    createdAt: "2026-09-15T00:00:05Z",
+    kind: "thread.forked",
+    summary: "Forked from Source",
+    payload: {
+      schemaVersion: 1,
+      sourceThreadId: "source-thread",
+      sourceMessageId: "source-reply",
+      sourceTurnId: "source-turn",
+      sourceTitle: "Source title",
+      inheritedMessageCount: 6,
+      providerContext: "handoff",
+      handoffReason: "provider-unsupported",
+      checkout: {
+        kind: "new-worktree",
+        worktreeId: "worktree-fork",
+        worktreePath: "/worktrees/fork",
+        branch: "ryco/fork-abcd1234",
+        start: "base-ref",
+        baseRef: "main",
+      },
+      notices: ["Attachments over the size limit were not copied."],
+      privateField: "MUST-NOT-EXPORT",
+    },
+  } as unknown as OrchestrationThreadActivity);
+  expect(activity).not.toHaveProperty("payload");
+  const output = serializeThreadMarkdown({ ...thread, activities: [activity] });
+  expect(output).toContain("## Fork origin · 2026-09-15T00:00:05.000Z");
+  expect(output).toContain("Forked from: Source title");
+  expect(output).toContain("Source message: source-reply (turn source-turn, inclusive)");
+  expect(output).toContain("Provider context: handoff (provider-unsupported)");
+  expect(output).toContain(
+    "Checkout: new worktree /worktrees/fork on ryco/fork-abcd1234, from main",
+  );
+  expect(output).toContain("Notice: Attachments over the size limit were not copied.");
+  expect(output.indexOf("## Fork origin")).toBeLessThan(output.indexOf("## Messages"));
+  expect(output).not.toContain("MUST-NOT-EXPORT");
+});

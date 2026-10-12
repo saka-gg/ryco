@@ -8,6 +8,7 @@ import {
   type DailyRecapSnapshot,
 } from "@ryco/contracts";
 
+import { inheritedTurnRowSql } from "../orchestration/forkInheritanceSql.ts";
 import { makeUsageDayFormatter } from "../usage/usageAggregation.ts";
 
 export interface DailyRecapQueryShape {
@@ -97,6 +98,9 @@ export const DailyRecapQueryLive = Layer.effect(
       SELECT 1 FROM projection_thread_sessions sessions
       WHERE sessions.thread_id = turns.thread_id AND sessions.active_turn_id = turns.turn_id
     ))`;
+    // A fork's inherited turns are its source's work, already recapped on the source's
+    // day. A residual filter: the completed_at index still bounds the scan.
+    const ownTurn = sql`NOT ${inheritedTurnRowSql(sql, "turns")}`;
     const counts = SqlSchema.findAll({
       Request: Window,
       Result: Schema.Struct({
@@ -114,7 +118,7 @@ export const DailyRecapQueryLive = Layer.effect(
         JOIN projection_projects projects ON projects.project_id = threads.project_id
         WHERE turns.completed_at >= ${from} AND turns.completed_at < ${to}
           AND threads.deleted_at IS NULL AND projects.deleted_at IS NULL
-          AND ${terminalOutcome}
+          AND ${terminalOutcome} AND ${ownTurn}
       `,
     });
     const outcomes = SqlSchema.findAll({
@@ -130,7 +134,7 @@ export const DailyRecapQueryLive = Layer.effect(
         WHERE turns.completed_at >= ${from} AND turns.completed_at < ${to}
           AND turns.state = ${state}
           AND threads.deleted_at IS NULL AND projects.deleted_at IS NULL
-          AND ${terminalOutcome}
+          AND ${terminalOutcome} AND ${ownTurn}
         GROUP BY threads.thread_id
         ORDER BY "lastActivityAt" DESC, threads.thread_id ASC
         LIMIT ${limit}

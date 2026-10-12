@@ -22,8 +22,7 @@ import { useLayoutEffect, useMemo, useRef } from "react";
 import { useComposerDraftStore, type ComposerThreadTarget } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { nodeIdForHostedEnvironment } from "../../hostedHub/hostedConnectionCoordinator";
-import { adoptRoutedHostedNode } from "../../hostedHub/nodeRoutes";
+import { adoptHostedEnvironmentRoute } from "../../hostedHub/adoptHostedEnvironmentRoute";
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { fetchSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
@@ -118,8 +117,7 @@ function errorText(error: unknown): string {
 }
 
 function adoptHostedTarget(projectRef: ScopedProjectRef): void {
-  const nodeId = nodeIdForHostedEnvironment(projectRef.environmentId);
-  if (nodeId) adoptRoutedHostedNode(nodeId);
+  adoptHostedEnvironmentRoute(projectRef.environmentId);
 }
 
 /** Where the change request's head is (or will be) checked out. */

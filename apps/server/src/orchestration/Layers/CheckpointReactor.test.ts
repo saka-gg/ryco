@@ -15,6 +15,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  RuntimeSessionId,
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
@@ -1568,12 +1569,13 @@ describe("CheckpointReactor", () => {
     harness: Awaited<ReturnType<typeof createHarness>>,
     commandId: string,
     turnCount: number,
+    threadId: ThreadId = ThreadId.make("thread-1"),
   ) {
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.checkpoint.revert",
         commandId: CommandId.make(commandId),
-        threadId: ThreadId.make("thread-1"),
+        threadId,
         turnCount,
         createdAt: new Date().toISOString(),
       }),
@@ -2056,6 +2058,304 @@ describe("CheckpointReactor", () => {
     expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
     expect(readme(harness.cwd)).toBe("v3\n");
     expect(gitRefExists(harness.cwd, ref(2))).toBe(true);
+  });
+
+  type Harness = Awaited<ReturnType<typeof createHarness>>;
+
+  /** Publishes a fork of thread-1 that shares its checkout, as ThreadFork does. */
+  async function publishFork(
+    harness: Harness,
+    forkId: ThreadId,
+    providerContext: "native" | "handoff",
+  ) {
+    // The source's turns ran before the fork was made.
+    const inheritedAt = new Date(Date.now() - 60_000).toISOString();
+    const createdAt = new Date().toISOString();
+    const forked = {
+      schemaVersion: 1 as const,
+      sourceThreadId: ThreadId.make("thread-1"),
+      sourceMessageId: MessageId.make("message-source-boundary"),
+      sourceTurnId: asTurnId("turn-source-boundary"),
+      sourceTitle: "Thread",
+      inheritedMessageCount: 2,
+      providerContext,
+      ...(providerContext === "handoff" ? { handoffReason: "provider-unsupported" as const } : {}),
+      checkout: { kind: "current-checkout" as const, worktreePath: harness.cwd, branch: null },
+      notices: [],
+    };
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.fork.create",
+        commandId: CommandId.make(`cmd-fork-${forkId}`),
+        threadId: forkId,
+        projectId: asProjectId("project-1"),
+        title: "Thread (fork)",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: harness.cwd,
+        createdAt,
+        sourceThreadId: forked.sourceThreadId,
+        sourceMessageId: forked.sourceMessageId,
+        sourceTurnId: forked.sourceTurnId,
+        worktreeId: null,
+        newWorktree: null,
+        messages: [
+          {
+            id: MessageId.make(`${forkId}:inherited:message-source-question`),
+            role: "user",
+            text: "Question",
+            turnId: forked.sourceTurnId,
+            streaming: false,
+            createdAt: inheritedAt,
+            updatedAt: inheritedAt,
+          },
+          {
+            id: MessageId.make(`${forkId}:inherited:message-source-boundary`),
+            role: "assistant",
+            text: "Answer",
+            turnId: forked.sourceTurnId,
+            streaming: false,
+            createdAt: inheritedAt,
+            updatedAt: inheritedAt,
+          },
+        ],
+        proposedPlans: [],
+        activities: [],
+        forked,
+      }),
+    );
+  }
+
+  /**
+   * The fork's first own turn: sent through the real decider, then run by the provider on the
+   * fork's own runtime (`runtimeSessionId`), which captures checkpoints 0 and 1. A handoff
+   * fork's turn carries its inherited conversation; the coordinator records it consumed once the
+   * provider accepts the turn. Returns the handoff activity the decider requested, if any.
+   */
+  async function runFirstForkTurn(harness: Harness, forkId: ThreadId, runtimeSessionId: string) {
+    const turnId = asTurnId(`${forkId}-turn-1`);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-${forkId}-turn-1`),
+        threadId: forkId,
+        message: {
+          messageId: MessageId.make(`${forkId}-message-own-1`),
+          role: "user",
+          text: "Continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const requested = (await readAllEvents(harness.engine)).flatMap((event) =>
+      event.type === "thread.activity-appended" &&
+      event.payload.threadId === forkId &&
+      event.payload.activity.kind === "context-handoff"
+        ? [event.payload.activity]
+        : [],
+    )[0];
+
+    const sessionAt = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(`cmd-${forkId}-session`),
+        threadId: forkId,
+        session: {
+          threadId: forkId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make(runtimeSessionId),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: sessionAt,
+        },
+        createdAt: sessionAt,
+      }),
+    );
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make(`evt-${forkId}-turn-started`),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: new Date().toISOString(),
+      threadId: forkId,
+      turnId,
+    });
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(forkId, 0));
+
+    if (requested !== undefined) {
+      const consumedAt = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`cmd-${forkId}-handoff-consumed`),
+          threadId: forkId,
+          activity: {
+            ...requested,
+            summary: "Context handoff completed",
+            payload: {
+              ...(requested.payload as object),
+              status: "consumed",
+              targetTurnId: turnId,
+              targetRuntimeSessionId: runtimeSessionId,
+              sources: [
+                { providerInstanceId: "codex", driverKind: "codex", modelSlug: "gpt-5-codex" },
+              ],
+              target: {
+                providerInstanceId: "codex",
+                driverKind: "codex",
+                modelSlug: "gpt-5-codex",
+              },
+              contextVersion: 1,
+              contextDigest: "a".repeat(64),
+            },
+          },
+          createdAt: consumedAt,
+        }),
+      );
+    }
+
+    fs.writeFileSync(path.join(harness.cwd, "README.md"), "v2\n", "utf8");
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make(`evt-${forkId}-turn-completed`),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: new Date().toISOString(),
+      threadId: forkId,
+      turnId,
+      payload: { state: "completed" },
+    });
+    await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.turn-diff-completed" &&
+        (event as unknown as { readonly payload: { readonly threadId: string } }).payload
+          .threadId === forkId,
+    );
+    await harness.drain();
+    return { turnId, requested };
+  }
+
+  // A handoff fork's first own turn carried its inherited conversation to a fresh provider
+  // session: undoing that turn would leave the provider without it while the inherited
+  // history stays visible. The model-change rule applies: the boundary turn stays.
+  it("refuses to undo the turn that carried a handoff fork's inherited conversation", async () => {
+    const harness = await createHarness({ hasSession: false, seedFilesystemCheckpoints: false });
+    const forkId = ThreadId.make("fork-handoff");
+    await publishFork(harness, forkId, "handoff");
+    const { requested } = await runFirstForkTurn(harness, forkId, "runtime-fork-handoff");
+    expect(requested?.payload).toMatchObject({ reason: "fork", status: "requested" });
+
+    await requestRevert(harness, "cmd-revert-handoff-fork", 0, forkId);
+    const activity = await waitForRevertStatus(harness.engine, "cmd-revert-handoff-fork", "failed");
+
+    expect(activity.reason).toBe("handoff-boundary");
+    expect(activity.detail).toContain(
+      "Reverting to checkpoint 0 would discard the turn that carried the context handoff (checkpoint 1).",
+    );
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    expect(readme(harness.cwd)).toBe("v2\n");
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(forkId, 1))).toBe(true);
+  });
+
+  it("rewinds a native fork to the end of its inherited conversation on a revert to 0", async () => {
+    const harness = await createHarness({ hasSession: false, seedFilesystemCheckpoints: false });
+    const forkId = ThreadId.make("fork-native");
+    await publishFork(harness, forkId, "native");
+    const { turnId, requested } = await runFirstForkTurn(harness, forkId, "runtime-fork-native");
+    expect(requested).toBeUndefined();
+
+    await requestRevert(harness, "cmd-revert-native-fork", 0, forkId);
+    await waitForRevertStatus(harness.engine, "cmd-revert-native-fork", "completed");
+
+    // Not a fresh session: the provider keeps the inherited turns (Claude rewinds before the
+    // first dropped prompt; Codex drops the fork's own turns by count and first dropped turn).
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+      threadId: forkId,
+      numTurns: 1,
+      targetTurnId: asTurnId("turn-source-boundary"),
+      droppedTurnIds: [turnId],
+      cwd: harness.cwd,
+    });
+    expect(readme(harness.cwd)).toBe("v1\n");
+  });
+
+  it("captures no pre-turn baseline for a fork's inherited prompts, only for its own", async () => {
+    const harness = await createHarness({ hasSession: false, seedFilesystemCheckpoints: false });
+    const forkId = ThreadId.make("fork-baseline");
+    const createdAt = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.fork.create",
+        commandId: CommandId.make("cmd-fork-baseline"),
+        threadId: forkId,
+        projectId: asProjectId("project-1"),
+        title: "Thread (fork)",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: harness.cwd,
+        createdAt,
+        sourceThreadId: ThreadId.make("thread-1"),
+        sourceMessageId: MessageId.make("message-source-answer"),
+        sourceTurnId: asTurnId("turn-source"),
+        worktreeId: null,
+        newWorktree: null,
+        messages: [
+          {
+            // An inherited prompt without a known turn looks like a live send to the reactor.
+            id: MessageId.make(`${forkId}:inherited:message-source-question`),
+            role: "user",
+            text: "Question",
+            turnId: null,
+            streaming: false,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        ],
+        proposedPlans: [],
+        activities: [],
+        forked: {
+          schemaVersion: 1,
+          sourceThreadId: ThreadId.make("thread-1"),
+          sourceMessageId: MessageId.make("message-source-answer"),
+          sourceTurnId: asTurnId("turn-source"),
+          sourceTitle: "Thread",
+          inheritedMessageCount: 1,
+          providerContext: "native",
+          checkout: { kind: "current-checkout", worktreePath: harness.cwd, branch: null },
+          notices: [],
+        },
+      }),
+    );
+    await harness.drain();
+    expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(forkId, 0))).toBe(false);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-fork-baseline-turn"),
+        threadId: forkId,
+        message: {
+          messageId: MessageId.make("message-fork-own"),
+          role: "user",
+          text: "Continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitForGitRefExists(harness.cwd, checkpointRefForThreadTurn(forkId, 0));
   });
 
   describe("startup recovery", () => {

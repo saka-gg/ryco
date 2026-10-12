@@ -2,6 +2,7 @@ import type { OrchestrationReadModel, OrchestrationThreadShell } from "@ryco/con
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import type { ThreadSettlementInput } from "@ryco/shared/threadSettlement";
 import { findThreadWorktree as threadWorktree } from "./commandInvariants.ts";
+import { countsTowardUserRecency } from "./forkInheritance.ts";
 
 /**
  * Server-side settlement input. The server only checks manual settle and snooze
@@ -86,10 +87,11 @@ export function threadShellSettlementInput(
   };
 }
 
+/** The thread's own latest prompt: the same rule as the projected shell's `latestUserMessageAt`. */
 function latestUserMessageAt(thread: OrchestrationReadModel["threads"][number]): string | null {
   return (
     thread.messages
-      .filter((message) => message.role === "user")
+      .filter((message) => countsTowardUserRecency(thread.id, message))
       .map((message) => message.createdAt)
       .toSorted()
       .at(-1) ?? null

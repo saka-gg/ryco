@@ -14,6 +14,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { Effect } from "effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { OrchestrationCommandInvariantError } from "./Errors.ts";
 
 const createdAt = "2026-08-17T10:00:00.000Z";
 const requestedAt = "2026-08-17T10:00:01.000Z";
@@ -80,6 +81,29 @@ const message = {
 };
 
 describe("turn steering decider", () => {
+  it("refuses a steer whose message id is reserved for forked history", async () => {
+    for (const reservedId of [`${threadId}:inherited:message-x`, `${threadId}:forked`]) {
+      const error = await Effect.runPromise(
+        Effect.flip(
+          decideOrchestrationCommand({
+            readModel,
+            command: {
+              type: "thread.turn.steer",
+              commandId: CommandId.make("command-steer-reserved"),
+              threadId,
+              expectedTurnId: turnId,
+              message: { ...message, messageId: MessageId.make(reservedId) },
+              createdAt,
+              requestedAt,
+            },
+          }),
+        ),
+      );
+      expect(error).toBeInstanceOf(OrchestrationCommandInvariantError);
+      expect(error.detail).toContain("reserved for forked history");
+    }
+  });
+
   it("persists only a request before the provider accepts", async () => {
     const result = await Effect.runPromise(
       decideOrchestrationCommand({

@@ -14,6 +14,7 @@ import {
   type ContextHandoffPlanEntry,
   type ContextHandoffSubagentEntry,
   type ContextHandoffToolEntry,
+  contextHandoffEntryOrder,
   countContextHandoffEntries,
   stableStringifyContextHandoff,
 } from "./ContextHandoffBuilder.ts";
@@ -43,6 +44,9 @@ type SectionEntryByName = {
 };
 
 type AnySectionEntry = SectionEntryByName[SectionName];
+
+/** The builder's entry order: a fork's inherited band first, then by time. */
+type EntryOrder = (left: AnySectionEntry, right: AnySectionEntry) => number;
 
 type RenderedDocument = ContextHandoffRenderedDocument;
 
@@ -126,25 +130,18 @@ const CONTENT_STRING_KEYS = new Set([
   "error",
 ]);
 
-function compareChronological(left: AnySectionEntry, right: AnySectionEntry): number {
-  const createdAt = left.createdAt.localeCompare(right.createdAt);
-  if (createdAt !== 0) {
-    return createdAt;
-  }
-  const sequence =
-    (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER);
-  if (sequence !== 0) {
-    return sequence;
-  }
-  return left.id.localeCompare(right.id);
+function entryOrder(document: ContextHandoffDocument): EntryOrder {
+  return contextHandoffEntryOrder(document.thread.id);
 }
 
-function compareCandidateRecency(left: Candidate, right: Candidate): number {
-  if (left.priority !== right.priority) {
-    return right.priority - left.priority;
-  }
-  const chronological = compareChronological(left.entry, right.entry);
-  return chronological === 0 ? left.section.localeCompare(right.section) : -chronological;
+function compareCandidateRecency(order: EntryOrder) {
+  return (left: Candidate, right: Candidate): number => {
+    if (left.priority !== right.priority) {
+      return right.priority - left.priority;
+    }
+    const chronological = order(left.entry, right.entry);
+    return chronological === 0 ? left.section.localeCompare(right.section) : -chronological;
+  };
 }
 
 function emptySections(): MutableSections {
@@ -244,7 +241,7 @@ function candidatesForDocument(document: ContextHandoffDocument): Candidate[] {
       } as Candidate);
     }
   }
-  return candidates.toSorted(compareCandidateRecency);
+  return candidates.toSorted(compareCandidateRecency(entryOrder(document)));
 }
 
 function documentHasTruncatedEntry(document: ContextHandoffDocument): boolean {
@@ -257,7 +254,7 @@ function newestCandidateForSection(
   document: ContextHandoffDocument,
   section: SectionName,
 ): Candidate | undefined {
-  const entries = [...sectionEntries(document, section)].toSorted(compareChronological);
+  const entries = [...sectionEntries(document, section)].toSorted(entryOrder(document));
   const entry = entries.at(-1);
   return entry ? ({ section, entry, priority: SECTION_PRIORITY[section] } as Candidate) : undefined;
 }
@@ -266,10 +263,10 @@ function candidateKey(candidate: Candidate): string {
   return `${candidate.section}\u0000${candidate.entry.id}`;
 }
 
-function pushCandidate(sections: MutableSections, candidate: Candidate): void {
+function pushCandidate(sections: MutableSections, candidate: Candidate, order: EntryOrder): void {
   const target = sections[candidate.section] as AnySectionEntry[];
   target.push(candidate.entry);
-  target.sort(compareChronological);
+  target.sort(order);
 }
 
 function removeCandidate(sections: MutableSections, candidate: Candidate): void {
@@ -287,6 +284,7 @@ function tryIncludeCandidate(input: {
   readonly availableContextChars: number;
   readonly includeThread: boolean;
   readonly includeFullProvenance: boolean;
+  readonly order: EntryOrder;
 }): { readonly included: boolean; readonly compacted: boolean } {
   const variants = [
     input.candidate,
@@ -303,7 +301,7 @@ function tryIncludeCandidate(input: {
       continue;
     }
     seen.add(serializedEntry);
-    pushCandidate(input.sections, variant);
+    pushCandidate(input.sections, variant, input.order);
     const json = stableStringifyContextHandoff(
       renderedDocument(
         input.document,
@@ -395,6 +393,7 @@ export function renderContextHandoffInput(
 
   let compactedAny = false;
   const includedKeys = new Set<string>();
+  const order = entryOrder(input.document);
   for (const section of FIRST_PASS_ORDER) {
     const candidate = newestCandidateForSection(input.document, section);
     if (!candidate) {
@@ -407,6 +406,7 @@ export function renderContextHandoffInput(
       availableContextChars,
       includeThread,
       includeFullProvenance,
+      order,
     });
     if (result.included) {
       includedKeys.add(candidateKey(candidate));
@@ -425,6 +425,7 @@ export function renderContextHandoffInput(
       availableContextChars,
       includeThread,
       includeFullProvenance,
+      order,
     });
     if (result.included) {
       includedKeys.add(candidateKey(candidate));

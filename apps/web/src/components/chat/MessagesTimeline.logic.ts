@@ -30,9 +30,16 @@ import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import {
   collectTurnHtmlRenders,
   deriveTerminalAssistantMessageIds,
+  findTimelineMessageRowIndex,
   isBlankSettledReply,
   placeRepliesAfterHtmlRenders,
+  type ForkOriginTimelineEntry,
+  type TimelineRowMessages,
 } from "@ryco/client-runtime/state/session";
+import {
+  deriveForkableReplyMessageIds,
+  isMaterializableCheckpointSummary,
+} from "@ryco/client-runtime/state/threads";
 import { isHtmlRenderOnlyMessage, readHtmlRenderAttachment } from "./htmlRender.logic";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
 import { summarizeToolCallGroup, type ToolCallGroupSummary } from "./toolCallGroup.logic";
@@ -197,6 +204,12 @@ export interface TimelineMessageActionsRequest {
   canRevert: boolean;
 }
 
+/** The reply "Fork from here" was pressed on: the fork's inclusive boundary. */
+export interface TimelineForkRequest {
+  messageId: MessageId;
+  turnId: TurnId;
+}
+
 /** Infrequently changing state — settings, per-thread context, and callbacks. */
 export interface TimelineStableState {
   timestampFormat: TimestampFormat;
@@ -224,6 +237,11 @@ export interface TimelineStableState {
     marker: ContextHandoffTimelineEntry,
     trigger: HTMLButtonElement,
   ) => void;
+  /**
+   * Opens the fork dialog for an eligible reply. Absent where forking is not offered (the
+   * frozen phone tier, drafts, nodes without the capability); the button is then not rendered.
+   */
+  onForkFromMessage?: (request: TimelineForkRequest, trigger: HTMLButtonElement) => void;
   /** Driver of the thread's provider, for the live turn header's mark. */
   providerDriverKind?: ProviderDriverKind | null;
 }
@@ -272,6 +290,7 @@ export function buildTimelineStableState(input: TimelineStableState): TimelineSt
     ...(input.onInspectContextHandoff
       ? { onInspectContextHandoff: input.onInspectContextHandoff }
       : {}),
+    ...(input.onForkFromMessage ? { onForkFromMessage: input.onForkFromMessage } : {}),
     ...(input.providerDriverKind ? { providerDriverKind: input.providerDriverKind } : {}),
   };
 }
@@ -318,6 +337,13 @@ export type MessagesTimelineRow =
        * card for each, and a page-only turn (no reply) has none.
        */
       turnHtmlRenders?: ReadonlyArray<TimelineTurnHtmlRender> | undefined;
+      /**
+       * "Fork from here" on the row that ends its turn: the turn's forkable reply (shared rule,
+       * `deriveForkableReplyMessageIds`). That is this message, or the text reply before it
+       * when this row is an attachment carrier the turn ended on. Only set where forking is
+       * offered.
+       */
+      forkFrom?: TimelineForkRequest | undefined;
     }
   | {
       kind: "turn-fold";
@@ -360,6 +386,13 @@ export type MessagesTimelineRow =
       marker: ContextHandoffTimelineEntry;
     }
   | {
+      /** A fork's divider between its inherited history and its own. */
+      kind: "fork-origin";
+      id: string;
+      createdAt: string;
+      marker: ForkOriginTimelineEntry;
+    }
+  | {
       /**
        * One commentary paragraph plus the steps (tool calls, reasoning) that
        * followed it inside an expanded turn. Finished chapters fold to a single
@@ -397,6 +430,16 @@ export type MessagesTimelineRow =
       /** The turn's changed-files card, when the turn keyed it on this render's message. */
       assistantTurnDiffSummary?: TurnDiffSummary | undefined;
       assistantUndoTurnCount?: number | undefined;
+      /**
+       * "Fork from here" when the turn ended on its pages: on the last render of a page-only
+       * turn (the carrier is the reply), or of a turn whose blank reply this render stands in for.
+       */
+      forkFrom?: TimelineForkRequest | undefined;
+      /**
+       * The turn's blank reply this render stands in for: it renders no row of its own, so a
+       * link to it (a fork's origin) lands here. Set whether or not forking is offered.
+       */
+      standsInFor?: MessageId | undefined;
     }
   | { kind: "working"; id: string; createdAt: string | null };
 
@@ -757,11 +800,11 @@ export function deriveRevertTurnCountByUserMessageId(input: {
 /**
  * Rollback target for each turn whose edits can still be undone, keyed by turn.
  *
- * A turn is undoable only when its checkpoint is real and reachable: a missing
- * or errored summary has nothing to restore, and a `provider-diff:` ref is a
- * reported diff rather than a checkpoint we captured, so there is no commit to
- * roll back to. The stored count is the turn *before* this one — undoing means
- * returning the tree to how it looked when the turn started.
+ * A turn is undoable only when its checkpoint is real and reachable — the
+ * shared `isMaterializableCheckpointSummary` rule, which also decides whether a
+ * fork's worktree can start from the turn's checkpoint. The stored count is the
+ * turn *before* this one — undoing means returning the tree to how it looked
+ * when the turn started.
  */
 export function deriveUndoTurnCountByTurnId(input: {
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
@@ -770,10 +813,7 @@ export function deriveUndoTurnCountByTurnId(input: {
   const byTurnId = new Map<TurnId, number>();
 
   for (const summary of input.turnDiffSummaries) {
-    if (summary.status === "missing" || summary.status === "error") {
-      continue;
-    }
-    if (summary.checkpointRef === undefined || summary.checkpointRef.startsWith("provider-diff:")) {
+    if (!isMaterializableCheckpointSummary(summary)) {
       continue;
     }
     if (summary.files.length === 0) {
@@ -926,6 +966,32 @@ function chapterLastActivity(row: ChapterRow): string {
   return latest;
 }
 
+/**
+ * Each turn's forkable reply (shared `deriveForkableReplyMessageIds`: the reply the turn ended
+ * on, settled), by turn, so the row that ends the turn can offer it whatever kind of row it is.
+ */
+function deriveForkReplyByTurn(
+  timelineEntries: ReadonlyArray<TimelineEntry>,
+  latestTurn: TimelineLatestTurn | null,
+  unsettledTurnId: TurnId | null,
+): ReadonlyMap<TurnId, MessageId> {
+  const messages = timelineEntries.flatMap((entry) =>
+    entry.kind === "message" ? [entry.message] : [],
+  );
+  const forkable = deriveForkableReplyMessageIds({
+    messages,
+    latestTurn,
+    // A turn this view still treats as running is the session's active turn.
+    session: { activeTurnId: unsettledTurnId ?? undefined },
+  });
+  const byTurn = new Map<TurnId, MessageId>();
+  if (forkable.size === 0) return byTurn;
+  for (const message of messages) {
+    if (message.turnId && forkable.has(message.id)) byTurn.set(message.turnId, message.id);
+  }
+  return byTurn;
+}
+
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestTurn?: TimelineLatestTurn | null;
@@ -942,6 +1008,10 @@ export function deriveMessagesTimelineRows(input: {
   liveSettledTurnIds?: ReadonlySet<TurnId> | undefined;
   /** Messages a search or deep link points at — their chapter renders open. */
   revealedMessageIds?: ReadonlySet<string> | undefined;
+  /** Offers "Fork from here" (`forkFrom`) on the row that ends each forkable turn. */
+  offerFork?: boolean | undefined;
+  /** Renders a fork's origin divider; the frozen phone tier shows nothing new. */
+  showForkOrigin?: boolean | undefined;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
   const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(input.timelineEntries);
@@ -949,6 +1019,13 @@ export function deriveMessagesTimelineRows(input: {
     input.latestTurn ?? null,
     input.runningTurnId ?? null,
   );
+  const forkReplyByTurn = input.offerFork
+    ? deriveForkReplyByTurn(input.timelineEntries, input.latestTurn ?? null, unsettledTurnId)
+    : null;
+  const forkFromTurn = (turnId: TurnId | null | undefined): TimelineForkRequest | undefined => {
+    const messageId = turnId ? forkReplyByTurn?.get(turnId) : undefined;
+    return turnId && messageId ? { messageId, turnId } : undefined;
+  };
   const timelineEntries = placeRepliesAfterHtmlRenders(
     input.timelineEntries,
     terminalAssistantMessageIds,
@@ -1139,6 +1216,18 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    if (timelineEntry.kind === "fork-origin") {
+      if (input.showForkOrigin) {
+        nextRows.push({
+          kind: "fork-origin",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          marker: timelineEntry.marker,
+        });
+      }
+      continue;
+    }
+
     // Resolved once: the summary supplies both the changed-files card and the
     // turn identity its Undo action rolls back to.
     const assistantTurnDiffSummary =
@@ -1155,6 +1244,9 @@ export function deriveMessagesTimelineRows(input: {
         const render = readHtmlRenderAttachment(attachment);
         return render === undefined ? [] : [render];
       });
+      // A page-only turn ends on its latest carrier, which is then its reply.
+      const pageForkFrom = forkFromTurn(message.turnId);
+      const forkFrom = pageForkFrom?.messageId === message.id ? pageForkFrom : undefined;
       renders.forEach(({ attachment, htmlRender }, renderIndex) => {
         const last = renderIndex === renders.length - 1;
         if (last && message.turnId) lastRenderRowIndexByTurn.set(message.turnId, nextRows.length);
@@ -1168,6 +1260,7 @@ export function deriveMessagesTimelineRows(input: {
           // A turn whose last message is a render keys its changed files on it.
           assistantTurnDiffSummary: last ? assistantTurnDiffSummary : undefined,
           assistantUndoTurnCount: last ? assistantUndoTurnCount : undefined,
+          ...(last && forkFrom ? { forkFrom } : {}),
         });
       });
       continue;
@@ -1183,11 +1276,17 @@ export function deriveMessagesTimelineRows(input: {
     ) {
       // The turn answered with its page alone: no "(empty response)" under it.
       const renderRow = nextRows[renderRowIndex];
-      if (renderRow?.kind === "html-render" && renderRow.assistantTurnDiffSummary === undefined) {
+      // The page stands in for the blank reply, so it offers the fork from that reply.
+      const blankForkFrom = forkFromTurn(timelineEntry.message.turnId);
+      const forkFrom =
+        blankForkFrom?.messageId === timelineEntry.message.id ? blankForkFrom : undefined;
+      if (renderRow?.kind === "html-render") {
+        const takesSummary = renderRow.assistantTurnDiffSummary === undefined;
         nextRows[renderRowIndex] = {
           ...renderRow,
-          assistantTurnDiffSummary,
-          assistantUndoTurnCount,
+          ...(takesSummary ? { assistantTurnDiffSummary, assistantUndoTurnCount } : {}),
+          ...(forkFrom ? { forkFrom } : {}),
+          standsInFor: timelineEntry.message.id,
         };
       }
       continue;
@@ -1221,6 +1320,9 @@ export function deriveMessagesTimelineRows(input: {
       isReply && timelineEntry.message.turnId
         ? htmlRendersByTurn.get(timelineEntry.message.turnId)
         : undefined;
+    // The turn's last row offers its fork, also when that row is a file the
+    // turn published after its text reply (the fork still ends with the turn).
+    const replyForkFrom = isReply ? forkFromTurn(timelineEntry.message.turnId) : undefined;
     nextRows.push({
       kind: "message",
       id: timelineEntry.id,
@@ -1241,6 +1343,7 @@ export function deriveMessagesTimelineRows(input: {
         attachment: render.attachment,
         htmlRender: render.htmlRender,
       })),
+      ...(replyForkFrom ? { forkFrom: replyForkFrom } : {}),
     });
   }
 
@@ -1256,6 +1359,31 @@ export function deriveMessagesTimelineRows(input: {
   }
 
   return nextRows;
+}
+
+/**
+ * The messages a row shows, for scrolling to and highlighting one (a fork's origin, a search hit,
+ * a deep link). A render row also stands in for the blank reply its turn ended on.
+ */
+export function messagesOfTimelineRow(row: MessagesTimelineRow): TimelineRowMessages {
+  switch (row.kind) {
+    case "message":
+      return { messageId: row.message.id };
+    case "chapter":
+      return { messageId: row.message?.id ?? null };
+    case "html-render":
+      return { messageId: row.messageId, standsInFor: row.standsInFor ?? null };
+    default:
+      return { messageId: null };
+  }
+}
+
+/** The row a link to `messageId` lands on (the shared rule), or -1 while it is not loaded. */
+export function findMessagesTimelineRowIndex(
+  rows: ReadonlyArray<MessagesTimelineRow>,
+  messageId: MessageId,
+): number {
+  return findTimelineMessageRowIndex(rows, messageId, messagesOfTimelineRow);
 }
 
 export function computeStableMessagesTimelineRows(
@@ -1350,6 +1478,10 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     case "context-handoff":
       return a.marker === (b as typeof a).marker;
 
+    case "fork-origin":
+      // The shared decoder caches one marker per activity record.
+      return a.marker === (b as typeof a).marker;
+
     case "html-render": {
       // Rows rebuild on every thread update; an equal page must keep its
       // mounted frame, or the page would reload.
@@ -1360,7 +1492,9 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         areChatAttachmentUnchanged(a.attachment, bh.attachment) &&
         htmlRenderMetadataEqual(a.htmlRender, bh.htmlRender) &&
         a.assistantTurnDiffSummary === bh.assistantTurnDiffSummary &&
-        a.assistantUndoTurnCount === bh.assistantUndoTurnCount
+        a.assistantUndoTurnCount === bh.assistantUndoTurnCount &&
+        a.forkFrom?.messageId === bh.forkFrom?.messageId &&
+        a.standsInFor === bh.standsInFor
       );
     }
 
@@ -1373,6 +1507,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
         a.revertTurnCount === bm.revertTurnCount &&
         a.assistantUndoTurnCount === bm.assistantUndoTurnCount &&
+        a.forkFrom?.messageId === bm.forkFrom?.messageId &&
         areTurnHtmlRendersUnchanged(a.turnHtmlRenders, bm.turnHtmlRenders)
       );
     }

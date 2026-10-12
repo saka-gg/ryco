@@ -70,6 +70,38 @@ export function isBlankSettledReply(message: ChatMessage): boolean {
   );
 }
 
+/**
+ * The messages a rendered timeline row shows, as a client maps its own rows: what a link to a
+ * message (a fork's origin, a deep link) scrolls to and highlights.
+ */
+export interface TimelineRowMessages {
+  /** The message the row renders, if any. */
+  readonly messageId: MessageId | null;
+  /**
+   * The message the row stands in for: a turn that answered with a page and a blank reply
+   * renders no row for the reply (`isBlankSettledReply`), so its last page row stands in for it
+   * (and forks from it).
+   */
+  readonly standsInFor?: MessageId | null | undefined;
+}
+
+/** Whether a link to `messageId` lands on the row: the message's own row, or its stand-in. */
+export function timelineRowShowsMessage(
+  row: TimelineRowMessages,
+  messageId: MessageId | null,
+): boolean {
+  return messageId !== null && (row.messageId === messageId || row.standsInFor === messageId);
+}
+
+/** The index of the row a link to `messageId` lands on, or -1 while it is not loaded. */
+export function findTimelineMessageRowIndex<Row>(
+  rows: ReadonlyArray<Row>,
+  messageId: MessageId,
+  messagesOfRow: (row: Row) => TimelineRowMessages,
+): number {
+  return rows.findIndex((row) => timelineRowShowsMessage(messagesOfRow(row), messageId));
+}
+
 /** The last assistant message of each response, never a render carrier. */
 export function deriveTerminalAssistantMessageIds(
   timelineEntries: ReadonlyArray<TimelineEntry>,

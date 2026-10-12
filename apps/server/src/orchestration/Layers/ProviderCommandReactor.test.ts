@@ -5109,6 +5109,120 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeSessionId).toBeUndefined();
   });
 
+  // A fork runs on its own provider session: sending and stopping in it never reach the
+  // source thread's session or binding.
+  it("sends and stops a fork on its own session, never on its source's", async () => {
+    const harness = await createHarness();
+    const source = ThreadId.make("thread-1");
+    const fork = ThreadId.make("fork-of-thread-1");
+    const turnStart = (threadId: ThreadId, tag: string) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-turn-start-${tag}`),
+        threadId,
+        message: {
+          messageId: asMessageId(`user-message-${tag}`),
+          role: "user",
+          text: tag,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      });
+
+    await Effect.runPromise(turnStart(source, "source"));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const sourceSession = (await harness.readModel()).threads.find(
+      (entry) => entry.id === source,
+    )?.session;
+    expect(sourceSession?.runtimeSessionId).toBeDefined();
+    const sourceBinding = harness.persistedBindings.get(source);
+    expect(sourceBinding).toBeDefined();
+
+    const inheritedAt = new Date(Date.now() - 60_000).toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.fork.create",
+        commandId: CommandId.make("cmd-fork-of-thread-1"),
+        threadId: fork,
+        projectId: asProjectId("project-1"),
+        title: "Thread (fork)",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: new Date().toISOString(),
+        sourceThreadId: source,
+        sourceMessageId: asMessageId("message-source-boundary"),
+        sourceTurnId: asTurnId("turn-1"),
+        worktreeId: null,
+        newWorktree: null,
+        messages: [
+          {
+            id: asMessageId(`${fork}:inherited:user-message-source`),
+            role: "user",
+            text: "source",
+            turnId: asTurnId("turn-1"),
+            streaming: false,
+            createdAt: inheritedAt,
+            updatedAt: inheritedAt,
+          },
+          {
+            id: asMessageId(`${fork}:inherited:message-source-boundary`),
+            role: "assistant",
+            text: "Answer",
+            turnId: asTurnId("turn-1"),
+            streaming: false,
+            createdAt: inheritedAt,
+            updatedAt: inheritedAt,
+          },
+        ],
+        proposedPlans: [],
+        activities: [],
+        forked: {
+          schemaVersion: 1,
+          sourceThreadId: source,
+          sourceMessageId: asMessageId("message-source-boundary"),
+          sourceTurnId: asTurnId("turn-1"),
+          sourceTitle: "Thread",
+          inheritedMessageCount: 2,
+          providerContext: "native",
+          checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+          notices: [],
+        },
+      }),
+    );
+
+    await Effect.runPromise(turnStart(fork, "fork"));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-session-stop-fork"),
+        threadId: fork,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+
+    const threadIdOf = (input: unknown) => (input as { readonly threadId?: unknown }).threadId;
+    const forkCalls = [
+      ...harness.startSession.mock.calls.slice(1).map((call) => call[0]),
+      ...harness.startFreshSession.mock.calls.map((call) => call[0]),
+      ...harness.sendTurn.mock.calls.slice(1).map((call) => threadIdOf(call[0])),
+      ...harness.interruptTurn.mock.calls.map((call) => threadIdOf(call[0])),
+      ...harness.stopSession.mock.calls.map((call) => threadIdOf(call[0])),
+    ];
+    expect(forkCalls.length).toBeGreaterThanOrEqual(3);
+    expect(forkCalls.every((threadId) => threadId === fork)).toBe(true);
+
+    const after = (await harness.readModel()).threads.find((entry) => entry.id === source);
+    expect(after?.session).toEqual(sourceSession);
+    expect(harness.persistedBindings.get(source)).toEqual(sourceBinding);
+  });
+
   describe("turn finalization", () => {
     const threadId = ThreadId.make("thread-1");
 

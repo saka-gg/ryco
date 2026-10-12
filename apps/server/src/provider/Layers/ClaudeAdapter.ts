@@ -144,6 +144,10 @@ import {
 } from "../../providerTools/deviceToolGateway.ts";
 import { buildTokenReductionInstructions, checkRtkAvailability } from "../../tokenReduction.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import {
+  type ClaudeChainPositionBeforePrompt,
+  claudeEntryBeforePrompt,
+} from "../claudeTranscriptCutoff.ts";
 import { formatProjectCustomSystemPrompt } from "../ProjectCustomSystemPrompt.ts";
 import {
   getClaudeModelCapabilities,
@@ -203,7 +207,7 @@ type PromptQueueItem =
       readonly type: "terminate";
     };
 
-interface ClaudeResumeState {
+export interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
   readonly resumeSessionAt?: string;
@@ -776,7 +780,7 @@ function asRuntimeRequestId(value: ApprovalRequestId): RuntimeRequestId {
   return RuntimeRequestId.make(value);
 }
 
-function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undefined {
+export function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undefined {
   if (!resumeCursor || typeof resumeCursor !== "object") {
     return undefined;
   }
@@ -6403,17 +6407,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.resumeSessionId !== undefined && firstDropped !== undefined
             ? yield* readMainTranscriptChain(context.resumeSessionId, context.session.cwd)
             : [];
-        const index =
-          firstDropped === undefined ? -1 : chain.findIndex((entry) => entry.uuid === firstDropped);
-        if (index > 0) {
+        const before: ClaudeChainPositionBeforePrompt =
+          firstDropped === undefined
+            ? { kind: "missing" }
+            : claudeEntryBeforePrompt(
+                chain.map((entry) => entry.uuid),
+                firstDropped,
+              );
+        if (before.kind === "entry") {
           plan = {
             kind: "rewind",
-            at: chain[index - 1]!.uuid,
+            at: before.uuid,
             ...(input.droppedTurnIds.length === 1 && firstDropped !== undefined
               ? { dropsTurn: firstDropped }
               : {}),
           };
-        } else if (index === 0) {
+        } else if (before.kind === "chain-start") {
           plan = { kind: "fresh" };
         } else {
           const head = context.turnHeads.find((entry) => entry.turnId === input.targetTurnId)?.head;

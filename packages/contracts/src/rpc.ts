@@ -39,6 +39,7 @@ import {
   SessionImportResult,
   SessionImportError,
 } from "./sessionImport.ts";
+import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
@@ -450,6 +451,7 @@ export const WS_METHODS = {
   // Sidebar hierarchy methods
   threadsSetManualBucket: "threads.setManualBucket",
   threadsSetManualPosition: "threads.setManualPosition",
+  threadsFork: "threads.fork",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -1782,6 +1784,12 @@ export const WsThreadsSetManualPositionRpc = Rpc.make(WS_METHODS.threadsSetManua
   error: Schema.Union([GitManagerServiceError, AuthRpcError]),
 });
 
+export const WsThreadsForkRpc = Rpc.make(WS_METHODS.threadsFork, {
+  payload: ThreadForkInput,
+  success: ThreadForkResult,
+  error: Schema.Union([ThreadForkError, AuthRpcError]),
+});
+
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
   payload: SearchThreadMessagesInput,
   success: SearchThreadMessagesResult,
@@ -2385,6 +2393,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsLifecycleSuggestionsRpc
   | typeof WsLifecycleListTrashRpc
   | typeof WsThreadsSetManualBucketRpc
+  | typeof WsThreadsForkRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
   | typeof WsThreadPriorityEnsureCurrentRpc
@@ -2585,6 +2594,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsLifecycleSuggestionsRpc,
   WsLifecycleListTrashRpc,
   WsThreadsSetManualBucketRpc,
+  WsThreadsForkRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
   WsThreadPriorityEnsureCurrentRpc,

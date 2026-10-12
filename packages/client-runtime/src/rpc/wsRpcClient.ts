@@ -298,6 +298,8 @@ export interface WsRpcClient {
     readonly setManualBucket: RpcUnaryMethod<typeof WS_METHODS.threadsSetManualBucket>;
     readonly setManualPosition: RpcUnaryMethod<typeof WS_METHODS.threadsSetManualPosition>;
     readonly searchMessages: RpcUnaryMethod<typeof WS_METHODS.searchThreadMessages>;
+    /** Idempotent per `forkKey`; never retried here (see `runThreadFork`). */
+    readonly fork: RpcUnaryMethod<typeof WS_METHODS.threadsFork>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -792,6 +794,7 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.threadsSetManualPosition](input)),
       searchMessages: (input) =>
         transport.request((client) => client[WS_METHODS.searchThreadMessages](input)),
+      fork: (input) => transport.request((client) => client[WS_METHODS.threadsFork](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),

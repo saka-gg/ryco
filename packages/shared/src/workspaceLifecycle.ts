@@ -6,6 +6,8 @@ import type {
 } from "@ryco/contracts";
 import { DEFAULT_LIFECYCLE_SUGGESTION_POLICY } from "@ryco/contracts";
 
+import { threadHasConversation } from "./threadFork.ts";
+
 const DAY_MS = 86_400_000;
 
 export function resolveLifecycleSuggestionPolicy(
@@ -125,6 +127,8 @@ export interface LifecycleThreadLike {
   readonly worktreeId?: string | null | undefined;
   readonly worktreePath: string | null;
   readonly latestUserMessageAt?: string | null | undefined;
+  /** A fork holds its inherited conversation before it sends anything (`threadHasConversation`). */
+  readonly lineage?: { readonly relationship: string } | null | undefined;
   readonly session: {
     readonly status: string;
     readonly activeTurnId?: string | null | undefined;
@@ -234,7 +238,7 @@ export function planLifecycleSuggestions(input: {
       if (
         days === null ||
         thread.archivedAt !== null ||
-        !thread.latestUserMessageAt ||
+        !threadHasConversation(thread) ||
         input.excludedThreadIds.has(thread.id) ||
         threadPendingWork(thread, input.nowMs).length > 0
       )

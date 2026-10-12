@@ -31,6 +31,7 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ComposerSourceControlContext } from "./sourceControl.ts";
 import { WorkItemProviderKind, WorkItemState } from "./workItems.ts";
 import { ThreadGoal, ThreadGoalEventOrigin, ThreadGoalUpdate } from "./threadGoal.ts";
+import { ThreadForkedActivityPayload } from "./threadFork.ts";
 import {
   IssueState,
   PullRequestState,
@@ -165,8 +166,10 @@ export type ContextHandoffMode = typeof ContextHandoffMode.Type;
  * - `model-change`: the user switched to another provider instance.
  * - `cwd-relocation`: the thread's working directory moved (for example, a chat became a project)
  *   and the provider cannot resume its conversation there.
+ * - `fork`: a forked thread's first turn delivers the inherited conversation, because no
+ *   provider-native copy could stop at the fork's boundary.
  */
-export const ContextHandoffReason = Schema.Literals(["model-change", "cwd-relocation"]);
+export const ContextHandoffReason = Schema.Literals(["model-change", "cwd-relocation", "fork"]);
 export type ContextHandoffReason = typeof ContextHandoffReason.Type;
 
 export const ContextHandoffEndpointSnapshot = Schema.Struct({
@@ -1008,12 +1011,16 @@ export type UsageLimitResumeGuard = typeof UsageLimitResumeGuard.Type;
  * Absent on root threads. Immutable for a thread incarnation. Never authority.
  * `relationship` is deliberately an open string: a newer server may add kinds
  * without failing older clients' shell decode. Clients must treat values they
- * do not know as "no known relationship". Known values: "delegated".
+ * do not know as "no known relationship". Known values: "delegated", "forked".
  */
 export const ThreadLineage = Schema.Struct({
   parentThreadId: ThreadId,
   rootThreadId: ThreadId,
   relationship: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+  /** "forked" only: the parent's message the inherited history ends at (inclusive). */
+  sourceMessageId: Schema.optional(MessageId),
+  /** "forked" only: the parent's completed turn that message ends. */
+  sourceTurnId: Schema.optional(TurnId),
 });
 export type ThreadLineage = typeof ThreadLineage.Type;
 
@@ -2271,8 +2278,37 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * Server-originated only (`threads.fork`). Publishes a fork atomically: optional new worktree
+ * record, the thread with "forked" lineage, its inherited history (fresh ids, original order and
+ * timestamps), the `thread.forked` provenance activity, and the worktree attachment.
+ */
+const ThreadForkCreateCommand = Schema.Struct({
+  ...ThreadCreateCommand.fields,
+  type: Schema.Literal("thread.fork.create"),
+  sourceThreadId: ThreadId,
+  sourceMessageId: MessageId,
+  sourceTurnId: TurnId,
+  /** Worktree the fork attaches to (the source's, or `newWorktree`); null for none. */
+  worktreeId: Schema.NullOr(WorktreeId),
+  /** Recorded in the same commit when the fork created this checkout. */
+  newWorktree: Schema.NullOr(
+    Schema.Struct({
+      worktreeId: WorktreeId,
+      branch: TrimmedNonEmptyString,
+      worktreePath: TrimmedNonEmptyString,
+    }),
+  ),
+  messages: Schema.Array(OrchestrationMessage).check(Schema.isMaxLength(2000)),
+  proposedPlans: Schema.Array(OrchestrationProposedPlan).check(Schema.isMaxLength(200)),
+  activities: Schema.Array(OrchestrationThreadActivity).check(Schema.isMaxLength(2000)),
+  forked: ThreadForkedActivityPayload,
+});
+export type ThreadForkCreateCommand = typeof ThreadForkCreateCommand.Type;
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadDelegatedCreateCommand,
+  ThreadForkCreateCommand,
   Schema.Struct({
     ...ThreadCreateCommand.fields,
     type: Schema.Literal("thread.history.import"),

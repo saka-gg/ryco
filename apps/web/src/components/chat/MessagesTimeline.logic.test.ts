@@ -24,6 +24,7 @@ import {
   deriveRevertTurnCountByUserMessageId,
   deriveTimelineMinimapItems,
   deriveUndoTurnCountByTurnId,
+  findMessagesTimelineRowIndex,
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
   normalizeCompactToolLabel,
@@ -1385,6 +1386,291 @@ describe("deriveUndoTurnCountByTurnId", () => {
   });
 });
 
+describe("fork from here", () => {
+  const turn1 = TurnId.make("turn-1");
+  const turn2 = TurnId.make("turn-2");
+  const message = (
+    id: string,
+    role: "user" | "assistant",
+    second: number,
+    turnId: TurnId | null,
+    streaming = false,
+  ): TimelineEntry => ({
+    id: `${id}-entry`,
+    kind: "message",
+    createdAt: `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`,
+    message: {
+      id: MessageId.make(id),
+      role,
+      text: `${id} text`,
+      turnId,
+      createdAt: `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`,
+      ...(streaming ? {} : { completedAt: `2026-01-01T00:00:${String(second).padStart(2, "0")}Z` }),
+      streaming,
+    },
+  });
+  const entries = [
+    message("user-1", "user", 0, null),
+    message("commentary-1", "assistant", 5, turn1),
+    message("reply-1", "assistant", 10, turn1),
+    message("user-2", "user", 20, null),
+    message("reply-2", "assistant", 30, turn2),
+  ];
+  const forkableIds = (rows: ReturnType<typeof deriveMessagesTimelineRows>) =>
+    rows.flatMap((row) =>
+      (row.kind === "message" || row.kind === "html-render") && row.forkFrom
+        ? [row.forkFrom.messageId]
+        : [],
+    );
+  const derive = (input: Partial<Parameters<typeof deriveMessagesTimelineRows>[0]>) =>
+    deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+      ...input,
+    });
+
+  it("marks only the terminal reply of each completed turn, and only where forking is offered", () => {
+    const latestTurn = {
+      turnId: turn2,
+      state: "completed" as const,
+      startedAt: "2026-01-01T00:00:20Z",
+      completedAt: "2026-01-01T00:00:31Z",
+    };
+    expect(forkableIds(derive({ latestTurn, offerFork: true }))).toEqual(["reply-1", "reply-2"]);
+    expect(forkableIds(derive({ latestTurn }))).toEqual([]);
+  });
+
+  it("never marks a reply whose turn is running, streaming or ended without completing", () => {
+    const running = {
+      turnId: turn2,
+      state: "running" as const,
+      startedAt: "2026-01-01T00:00:20Z",
+      completedAt: null,
+    };
+    expect(forkableIds(derive({ latestTurn: running, offerFork: true }))).toEqual(["reply-1"]);
+    const interrupted = { ...running, state: "interrupted" as const, completedAt: null };
+    expect(forkableIds(derive({ latestTurn: interrupted, offerFork: true }))).toEqual(["reply-1"]);
+    const streaming = [...entries.slice(0, 4), message("reply-2", "assistant", 30, turn2, true)];
+    expect(
+      forkableIds(
+        derive({
+          timelineEntries: streaming,
+          latestTurn: { ...running, state: "completed", completedAt: "2026-01-01T00:00:31Z" },
+          offerFork: true,
+        }),
+      ),
+    ).toEqual(["reply-1"]);
+  });
+
+  it("re-renders a reply row when it becomes forkable", () => {
+    const latestTurn = {
+      turnId: turn2,
+      state: "running" as const,
+      startedAt: "2026-01-01T00:00:20Z",
+      completedAt: null,
+    };
+    const before = computeStableMessagesTimelineRows(derive({ latestTurn, offerFork: true }), {
+      byId: new Map(),
+      result: [],
+    });
+    const after = computeStableMessagesTimelineRows(
+      derive({
+        latestTurn: { ...latestTurn, state: "completed", completedAt: "2026-01-01T00:00:31Z" },
+        offerFork: true,
+      }),
+      before,
+    );
+    const reply = (state: typeof before) => state.result.find((row) => row.id === "reply-2-entry");
+    expect(reply(after)).not.toBe(reply(before));
+    expect(reply(after)?.kind === "message" && reply(after)).toMatchObject({
+      forkFrom: { messageId: "reply-2", turnId: turn2 },
+    });
+  });
+
+  describe("turns that end on a page or a file", () => {
+    const completed = {
+      turnId: turn1,
+      state: "completed" as const,
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:00:40Z",
+    };
+    const carrier = (
+      id: string,
+      second: number,
+      attachment: "page" | "file" | "none",
+    ): TimelineEntry => {
+      const at = `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`;
+      return {
+        id: `${id}-entry`,
+        kind: "message",
+        createdAt: at,
+        message: {
+          id: MessageId.make(id),
+          role: "assistant",
+          text: "",
+          turnId: turn1,
+          createdAt: at,
+          completedAt: at,
+          streaming: false,
+          ...(attachment === "page"
+            ? {
+                attachments: [
+                  {
+                    type: "file" as const,
+                    id: `${id}-attachment`,
+                    name: "report.html",
+                    mimeType: "text/html",
+                    sizeBytes: 12,
+                    htmlRender: { title: "Report", height: 320 },
+                  },
+                ],
+              }
+            : attachment === "file"
+              ? {
+                  attachments: [
+                    {
+                      type: "file" as const,
+                      id: `${id}-attachment`,
+                      name: "data.csv",
+                      mimeType: "text/csv",
+                      sizeBytes: 12,
+                    },
+                  ],
+                }
+              : {}),
+        },
+      };
+    };
+    const offers = (rows: ReturnType<typeof deriveMessagesTimelineRows>) =>
+      rows.flatMap((row) =>
+        (row.kind === "message" || row.kind === "html-render") && row.forkFrom
+          ? [{ kind: row.kind, id: row.id, from: row.forkFrom.messageId }]
+          : [],
+      );
+
+    it("offers a page-only turn's fork on its page, from the page's message", () => {
+      const pageOnly = [message("user-1", "user", 0, null), carrier("page-1", 10, "page")];
+      const rows = derive({ timelineEntries: pageOnly, latestTurn: completed, offerFork: true });
+      expect(offers(rows)).toEqual([
+        { kind: "html-render", id: "html-render:page-1:page-1-attachment", from: "page-1" },
+      ]);
+      expect(offers(derive({ timelineEntries: pageOnly, latestTurn: completed }))).toEqual([]);
+      // The page row re-renders when its turn settles and the fork appears.
+      const running = { ...completed, state: "running" as const, completedAt: null };
+      const before = computeStableMessagesTimelineRows(
+        derive({ timelineEntries: pageOnly, latestTurn: running, offerFork: true }),
+        { byId: new Map(), result: [] },
+      );
+      expect(offers(before.result)).toEqual([]);
+      const after = computeStableMessagesTimelineRows(rows, before);
+      expect(offers(after.result)).toHaveLength(1);
+    });
+
+    it("forks from a blank reply that a page stands in for, on that page", () => {
+      const pageThenBlank = [
+        message("user-1", "user", 0, null),
+        carrier("page-1", 10, "page"),
+        carrier("blank-1", 20, "none"),
+      ];
+      expect(
+        offers(derive({ timelineEntries: pageThenBlank, latestTurn: completed, offerFork: true })),
+      ).toEqual([
+        { kind: "html-render", id: "html-render:page-1:page-1-attachment", from: "blank-1" },
+      ]);
+    });
+
+    it("offers the fork on a file published after the reply, still from the reply", () => {
+      const replyThenFile = [
+        message("user-1", "user", 0, null),
+        message("reply-1", "assistant", 10, turn1),
+        carrier("file-1", 20, "file"),
+      ];
+      expect(
+        offers(derive({ timelineEntries: replyThenFile, latestTurn: completed, offerFork: true })),
+      ).toEqual([{ kind: "message", id: "file-1-entry", from: "reply-1" }]);
+    });
+
+    it("keeps a page before the reply off the fork: the reply ends the turn", () => {
+      const pageThenReply = [
+        message("user-1", "user", 0, null),
+        carrier("page-1", 10, "page"),
+        message("reply-1", "assistant", 20, turn1),
+      ];
+      expect(
+        offers(derive({ timelineEntries: pageThenReply, latestTurn: completed, offerFork: true })),
+      ).toEqual([{ kind: "message", id: "reply-1-entry", from: "reply-1" }]);
+    });
+  });
+
+  it("renders the fork-origin divider only where it is shown, keeping its row across rebuilds", () => {
+    const marker = {
+      id: "fork-origin:fork:forked",
+      activityId: "fork:forked",
+      createdAt: "2026-01-01T00:00:40Z",
+      sourceThreadId: "source" as never,
+      sourceMessageId: MessageId.make("source-reply"),
+      sourceTurnId: turn2,
+      sourceTitle: "Source",
+      inheritedMessageCount: 5,
+      providerContext: "native" as const,
+      checkout: { kind: "current-checkout" as const, worktreePath: null, branch: "main" },
+      notices: [],
+    };
+    const withDivider: TimelineEntry[] = [
+      ...entries,
+      { id: marker.id, kind: "fork-origin", createdAt: marker.createdAt, marker },
+    ];
+    expect(
+      derive({ timelineEntries: withDivider, showForkOrigin: true })
+        .map((row) => row.kind)
+        .at(-1),
+    ).toBe("fork-origin");
+    expect(derive({ timelineEntries: withDivider }).some((row) => row.kind === "fork-origin")).toBe(
+      false,
+    );
+    const first = computeStableMessagesTimelineRows(
+      derive({ timelineEntries: withDivider, showForkOrigin: true }),
+      { byId: new Map(), result: [] },
+    );
+    const second = computeStableMessagesTimelineRows(
+      derive({ timelineEntries: withDivider, showForkOrigin: true }),
+      first,
+    );
+    expect(second).toBe(first);
+  });
+
+  it("carries the fork callback through the stable context only when given", () => {
+    const base = {
+      timestampFormat: "locale" as const,
+      routeThreadKey: "environment-local:thread-1",
+      markdownCwd: undefined,
+      resolvedTheme: "light" as const,
+      workspaceRoot: undefined,
+      skills: [],
+      activeThreadEnvironmentId: EnvironmentId.make("environment-local"),
+      highlightedMessageId: null,
+      threadMessageSearchQuery: "",
+      threadMessageSearchOccurrencesByMessageId: new Map(),
+      activeThreadMessageSearchOccurrence: null,
+      onRevertUserMessage: () => {},
+      onUndoTurn: () => {},
+      onImageExpand: () => {},
+      onOpenTurnDiff: () => {},
+      onCloseDiff: () => {},
+      onOpenAgents: () => {},
+      onOpenMessageActions: () => {},
+    };
+    const onForkFromMessage = () => {};
+    expect(buildTimelineStableState({ ...base, onForkFromMessage }).onForkFromMessage).toBe(
+      onForkFromMessage,
+    );
+    expect("onForkFromMessage" in buildTimelineStableState(base)).toBe(false);
+  });
+});
+
 describe("deriveRevertTurnCountByUserMessageId", () => {
   it("projects the first assistant diff summary after each user message", () => {
     const result = deriveRevertTurnCountByUserMessageId({
@@ -1995,6 +2281,22 @@ describe("HTML renders in the timeline", () => {
     // Without a render, a blank reply still says so.
     const plain = rowsFor([userEntry, assistantEntry("final", 1, "")]);
     expect(plain.map((row) => row.kind)).toEqual(["message", "message"]);
+  });
+
+  it.each([
+    ["the page, then the blank reply", [userEntry, renderEntry(2), assistantEntry("final", 3, "")]],
+    [
+      "a blank placeholder opened before the page",
+      [userEntry, assistantEntry("final", 1, ""), renderEntry(2)],
+    ],
+  ])("lands a link to the blank reply on the page standing in for it (%s)", (_shape, entries) => {
+    // Forking is not offered here: the page stands in for the reply all the same.
+    const rows = rowsFor(entries);
+    expect(rows.map((row) => row.kind)).toEqual(["message", "html-render"]);
+    expect(findMessagesTimelineRowIndex(rows, MessageId.make("final"))).toBe(1);
+    expect(findMessagesTimelineRowIndex(rows, MessageId.make("render"))).toBe(1);
+    expect(findMessagesTimelineRowIndex(rows, MessageId.make("user-1"))).toBe(0);
+    expect(findMessagesTimelineRowIndex(rows, MessageId.make("elsewhere"))).toBe(-1);
   });
 
   it("splits an expanded turn's chapters around the render", () => {

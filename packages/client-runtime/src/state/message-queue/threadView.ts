@@ -11,6 +11,7 @@ import type { TurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 
 import { derivePendingApprovals, derivePendingUserInputs } from "../session/session-logic.ts";
 import { indexTurnSteerRejections } from "./logic.ts";
+import { PROVIDER_DIFF_CHECKPOINT_REF_PREFIX } from "../threads/checkpointSummary.ts";
 import { selectEnvironmentState, type AppState } from "../threads/store.ts";
 import { selectThreadDetailLoaded } from "../threads/storeSelectors.ts";
 
@@ -78,13 +79,6 @@ interface ActivityDerivedView {
   readonly pendingApproval: boolean;
   readonly pendingUserInput: boolean;
 }
-
-/**
- * `ProviderRuntimeIngestion` dispatches a `missing` checkpoint with this ref on a
- * turn's first `turn.diff.updated`, before `CheckpointReactor` captures the
- * real one.
- */
-const PLACEHOLDER_CHECKPOINT_REF_PREFIX = "provider-diff:";
 
 const EMPTY_MESSAGE_ID_SET: ReadonlySet<string> = new Set();
 const EMPTY_ACTIVITY_VIEW: ActivityDerivedView = {
@@ -183,7 +177,7 @@ function isPlaceholderCheckpoint(
 ): boolean {
   return (
     summary?.status === "missing" &&
-    (summary.checkpointRef?.startsWith(PLACEHOLDER_CHECKPOINT_REF_PREFIX) ?? false)
+    (summary.checkpointRef?.startsWith(PROVIDER_DIFF_CHECKPOINT_REF_PREFIX) ?? false)
   );
 }
 

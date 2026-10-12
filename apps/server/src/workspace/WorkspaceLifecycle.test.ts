@@ -432,6 +432,47 @@ describe("workspace lifecycle service", () => {
     });
   });
 
+  it("archives a fork that has not sent anything yet: it holds its inherited conversation", async () => {
+    const f = fixture();
+    const forkId = ThreadId.make("fork-unused");
+    const pristine = f.state.snapshot.threads.find((thread) => thread.id === pristineId)!;
+    f.state.snapshot = {
+      ...f.state.snapshot,
+      threads: [
+        ...f.state.snapshot.threads,
+        Schema.decodeUnknownSync(OrchestrationThreadShell)({
+          ...pristine,
+          id: forkId,
+          title: "Thread active (fork)",
+          latestUserMessageAt: null,
+          lineage: {
+            parentThreadId: activeId,
+            rootThreadId: activeId,
+            relationship: "forked",
+            sourceMessageId: "message-reply",
+            sourceTurnId: "turn-1",
+          },
+        }),
+      ],
+    };
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+    });
+    expect(preview.effects.archiveConversationIds.toSorted()).toEqual(
+      [activeId, forkId].toSorted(),
+    );
+    // The never-used thread stays where it is; the archived one already is archived.
+    expect(preview.effects.unchangedConversations).toBe(2);
+    expect(result.outcome).toBe("completed");
+    expect(
+      f.state.commands.flatMap((command) =>
+        command.type === "thread.archive" ? [command.threadId] : [],
+      ),
+    ).toContain(forkId);
+    neverDeletesConversations(f.commandTypes());
+  });
+
   it("blocks modified, untracked, protected ignored content and unmerged work", async () => {
     const f = fixture();
     const blockers = async () =>

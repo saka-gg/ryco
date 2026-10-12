@@ -1,4 +1,4 @@
-import { ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@ryco/contracts";
+import { MessageId, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -47,6 +47,8 @@ const BASE_ROW = {
   lineageParentThreadId: null,
   lineageRootThreadId: null,
   lineageRelationship: null,
+  lineageSourceMessageId: null,
+  lineageSourceTurnId: null,
 } as const;
 
 layer("ProjectionThreadRepository settlement", (it) => {
@@ -168,6 +170,40 @@ layer("ProjectionThreadRepository lineage", (it) => {
         assert.isNull(reset.value.lineageRootThreadId);
         assert.isNull(reset.value.lineageRelationship);
       }
+    }),
+  );
+
+  it.effect("round-trips fork provenance on every read and resets it on re-creation", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadRepository;
+      const threadId = ThreadId.make("thread-lineage-fork");
+      const forkColumns = {
+        lineageParentThreadId: ThreadId.make("thread-lineage-source"),
+        lineageRootThreadId: ThreadId.make("thread-lineage-source"),
+        lineageRelationship: "forked",
+        lineageSourceMessageId: MessageId.make("message-lineage-boundary"),
+        lineageSourceTurnId: TurnId.make("turn-lineage-boundary"),
+      };
+
+      yield* repository.upsert({ ...BASE_ROW, threadId, ...forkColumns });
+      // Every later projection rewrites the row from a read: provenance must survive it.
+      const read = yield* repository.getById({ threadId });
+      assert.isTrue(Option.isSome(read));
+      if (Option.isSome(read)) {
+        yield* repository.upsert({ ...read.value, title: "Renamed fork" });
+      }
+      const fork = yield* repository.getById({ threadId });
+      assert.deepInclude(Option.getOrThrow(fork), { ...forkColumns, title: "Renamed fork" });
+      const listed = yield* repository.listByProjectId({ projectId: BASE_ROW.projectId });
+      assert.deepInclude(
+        listed.find((row) => row.threadId === threadId),
+        forkColumns,
+      );
+
+      yield* repository.upsert({ ...BASE_ROW, threadId });
+      const reset = Option.getOrThrow(yield* repository.getById({ threadId }));
+      assert.isNull(reset.lineageSourceMessageId);
+      assert.isNull(reset.lineageSourceTurnId);
     }),
   );
 });

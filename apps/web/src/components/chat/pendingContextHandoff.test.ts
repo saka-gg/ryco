@@ -3,7 +3,7 @@ import { createModelCapabilities, createModelSelection } from "@ryco/shared/mode
 import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries } from "../../providerInstances";
-import { derivePendingContextHandoff } from "./pendingContextHandoff";
+import { derivePendingComposerHandoff, derivePendingContextHandoff } from "./pendingContextHandoff";
 
 const sourceSelection = createModelSelection(ProviderInstanceId.make("codex_work"), "gpt-5.6-sol");
 const targetSelection = createModelSelection(
@@ -159,5 +159,78 @@ describe("derivePendingContextHandoff", () => {
       providerDisplayName: "Claude Work",
       modelSlug: "custom/unknown",
     });
+  });
+});
+
+describe("derivePendingComposerHandoff", () => {
+  const forked = (providerContext: "native" | "handoff") => ({
+    kind: "thread.forked",
+    payload: {
+      schemaVersion: 1,
+      sourceThreadId: "source",
+      sourceMessageId: "reply",
+      sourceTurnId: "turn",
+      sourceTitle: "Source",
+      inheritedMessageCount: 2,
+      providerContext,
+      ...(providerContext === "handoff" ? { handoffReason: "provider-unsupported" } : {}),
+      checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+      notices: [],
+    },
+  });
+  const consumedHandoff = {
+    kind: "context-handoff",
+    payload: {
+      schemaVersion: 1,
+      handoffId: "handoff-1",
+      mode: "full-context-fresh-session",
+      reason: "fork",
+      targetMessageId: "own-1",
+      sourceSelection: { instanceId: "opencode", model: "m" },
+      targetSelection: { instanceId: "opencode", model: "m" },
+      sources: [{ providerInstanceId: "opencode", driverKind: "opencode", modelSlug: "m" }],
+      target: { providerInstanceId: "opencode", driverKind: "opencode", modelSlug: "m" },
+      contextVersion: 1,
+      contextDigest: "a".repeat(64),
+      status: "consumed",
+    },
+  };
+
+  const modelChange = derivePendingContextHandoff({
+    threadStarted: true,
+    isPhoneTier: false,
+    canonicalSelection: sourceSelection,
+    targetSelection,
+    providerInstanceEntries: entries,
+    modelOptionsByInstance,
+  });
+  const derive = (
+    activities: Parameters<typeof derivePendingComposerHandoff>[0]["activities"],
+    isPhoneTier = false,
+  ) => derivePendingComposerHandoff({ isPhoneTier, activities, modelChange });
+
+  it("says a handoff fork's next message sends its conversation, even when the model changed", () => {
+    expect(modelChange).not.toBeNull();
+    expect(derive([forked("handoff")])).toEqual({ kind: "fork" });
+  });
+
+  it("keeps the model-change chip for native forks and once the fork's handoff was delivered", () => {
+    expect(derive([forked("native")])).toMatchObject({
+      kind: "model-change",
+      target: { driverKind: "claudeAgent" },
+    });
+    expect(derive([forked("handoff"), consumedHandoff])).toMatchObject({ kind: "model-change" });
+    expect(derive(undefined)).toMatchObject({ kind: "model-change" });
+    expect(
+      derivePendingComposerHandoff({
+        isPhoneTier: false,
+        activities: [forked("handoff"), consumedHandoff],
+        modelChange: null,
+      }),
+    ).toBeNull();
+  });
+
+  it("is never shown on the frozen phone tier", () => {
+    expect(derive([forked("handoff")], true)).toBeNull();
   });
 });

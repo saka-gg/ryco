@@ -80,6 +80,7 @@ import type {
 } from "./rpc.ts";
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
+import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import type {
   ComputerUseState,
   ComputerUsePolicy,
@@ -1240,6 +1241,8 @@ export interface EnvironmentApi {
   threads?: {
     setManualBucket: (input: ThreadsSetManualBucketInput) => Promise<EmptyRpcResult>;
     setManualPosition: (input: ThreadsSetManualPositionInput) => Promise<EmptyRpcResult>;
+    /** Optional so clients can feature-detect against older environments. */
+    fork?: (input: ThreadForkInput) => Promise<ThreadForkResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;

@@ -32,6 +32,7 @@ import { Schema } from "effect";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { projectKindOf } from "@ryco/shared/projectKind";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import { isForkBaseItemId } from "@ryco/shared/threadFork";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import {
   applySourceControlStateToPullRequestLinks,
@@ -1449,21 +1450,52 @@ function retainThreadMessagesAfterRevert(
   return messages.filter((message) => retainedMessageIds.has(message.id));
 }
 
+/**
+ * The messages a revert of `threadId` keeps. A fork's inherited history (and its provenance)
+ * predates every checkpoint the fork owns, so it always stays; it is kept apart from the
+ * count-based fallback, which only ever fills in the fork's own messages. The server's
+ * projections apply the same rule (`isForkBaseItemId`).
+ */
+function retainThreadMessagesAfterForkRevert(
+  threadId: ThreadId,
+  messages: ReadonlyArray<ChatMessage>,
+  retainedTurnIds: ReadonlySet<string>,
+  turnCount: number,
+): ChatMessage[] {
+  const ownMessages = retainThreadMessagesAfterRevert(
+    messages.filter((message) => !isForkBaseItemId(threadId, message.id)),
+    retainedTurnIds,
+    turnCount,
+  );
+  const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
+  return messages.filter(
+    (message) => isForkBaseItemId(threadId, message.id) || keptOwnMessageIds.has(message.id),
+  );
+}
+
 function retainThreadActivitiesAfterRevert(
+  threadId: ThreadId,
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   retainedTurnIds: ReadonlySet<string>,
 ): OrchestrationThreadActivity[] {
   return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
+    (activity) =>
+      activity.turnId === null ||
+      isForkBaseItemId(threadId, activity.id) ||
+      retainedTurnIds.has(activity.turnId),
   );
 }
 
 function retainThreadProposedPlansAfterRevert(
+  threadId: ThreadId,
   proposedPlans: ReadonlyArray<ProposedPlan>,
   retainedTurnIds: ReadonlySet<string>,
 ): ProposedPlan[] {
   return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
+    (proposedPlan) =>
+      proposedPlan.turnId === null ||
+      isForkBaseItemId(threadId, proposedPlan.id) ||
+      retainedTurnIds.has(proposedPlan.turnId),
   );
 }
 
@@ -2713,16 +2745,22 @@ function applyEnvironmentOrchestrationEvent(
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
         const retainedTurnIds = new Set(turnDiffSummaries.map((entry) => entry.turnId));
-        const messages = retainThreadMessagesAfterRevert(
+        const messages = retainThreadMessagesAfterForkRevert(
+          thread.id,
           thread.messages,
           retainedTurnIds,
           event.payload.turnCount,
         ).slice(-MAX_THREAD_MESSAGES);
         const proposedPlans = retainThreadProposedPlansAfterRevert(
+          thread.id,
           thread.proposedPlans,
           retainedTurnIds,
         ).slice(-MAX_THREAD_PROPOSED_PLANS);
-        const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
+        const activities = retainThreadActivitiesAfterRevert(
+          thread.id,
+          thread.activities,
+          retainedTurnIds,
+        );
         const latestCheckpoint = turnDiffSummaries.at(-1) ?? null;
 
         return {
@@ -3242,6 +3280,24 @@ export function selectThreadExistsByRef(
   return ref
     ? selectEnvironmentState(state, ref.environmentId).threadShellById[ref.threadId] !== undefined
     : false;
+}
+
+/**
+ * Whether a thread is on its environment, as far as this client can tell:
+ * - `available`: its shell is on the stream;
+ * - `missing`: the environment's shell snapshot arrived without it (deleted or trashed);
+ * - `unknown`: the snapshot has not arrived yet (cold start, deep link, reconnect), so a thread
+ *   that is not loaded is never called gone just because this client has not heard of it yet.
+ */
+export type ThreadAvailability = "available" | "missing" | "unknown";
+
+export function selectThreadAvailabilityByRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): ThreadAvailability {
+  if (!ref) return "unknown";
+  if (selectThreadExistsByRef(state, ref)) return "available";
+  return selectBootstrapCompleteForEnvironment(state, ref.environmentId) ? "missing" : "unknown";
 }
 
 export function selectSidebarThreadSummaryByRef(

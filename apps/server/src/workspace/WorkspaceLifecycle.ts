@@ -32,6 +32,7 @@ import {
   type WorkspaceLifecycleSummary,
   type WorktreeId,
 } from "@ryco/contracts";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 import {
   planLifecycleSuggestions,
   resolveLifecycleSuggestionPolicy,
@@ -536,11 +537,12 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       request.action === "remove-checkout" || request.action === "remove-stale-record";
     const discard = request.action === "remove-checkout" && request.discard === true;
     const checkoutRemoved = state.worktree.checkoutRemovedAt != null;
-    // Never-used conversations cannot be archived; they stay where they are.
+    // Never-used conversations cannot be archived; they stay where they are. A fork that has not
+    // sent anything yet still holds the conversation it inherited, so it is archived too.
     const archiveConversationIds =
       removal && request.archiveConversations
         ? state.conversations
-            .filter((thread) => thread.archivedAt === null && thread.latestUserMessageAt !== null)
+            .filter((thread) => thread.archivedAt === null && threadHasConversation(thread))
             .map((thread) => thread.id)
         : [];
     const trashConversationIds = discard ? state.conversations.map((thread) => thread.id) : [];

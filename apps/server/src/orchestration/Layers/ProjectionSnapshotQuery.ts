@@ -39,6 +39,7 @@ import {
   type OrchestrationThreadWindowSnapshot,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  THREAD_FORKED_ACTIVITY_KIND,
   ThreadPriorityProjectedRanking,
   OrchestrationWorktreeShell,
   ModelSelection,
@@ -76,6 +77,7 @@ import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
 import { projectionThreadLineage, withThreadLineage } from "../threadLineage.ts";
+import { inheritedTurnRowSql } from "../forkInheritanceSql.ts";
 import {
   isPendingCheckpointRevertStatus,
   latestCheckpointRevert,
@@ -511,13 +513,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const sql = yield* SqlClient.SqlClient;
   // Walk the thread/requested-at index backwards, keeping prior completion stable
-  // while the current turn emits non-streaming commentary or tool updates.
+  // while the current turn emits non-streaming commentary or tool updates. A fork's
+  // inherited turns are the source's history, not activity of the fork. Every filter
+  // here must stay residual: the plan guard test pins the index walk.
   const latestCompletedTurnAt = sql`(
     SELECT turns.completed_at
     FROM projection_turns AS turns
     WHERE turns.thread_id = projection_threads.thread_id
       AND turns.state = 'completed'
       AND turns.completed_at IS NOT NULL
+      AND NOT ${inheritedTurnRowSql(sql, "turns")}
       AND NOT EXISTS (
         SELECT 1 FROM projection_thread_sessions AS sessions
         WHERE sessions.thread_id = turns.thread_id AND sessions.active_turn_id = turns.turn_id
@@ -659,7 +664,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
-          lineage_relationship AS "lineageRelationship"
+          lineage_relationship AS "lineageRelationship",
+          lineage_source_message_id AS "lineageSourceMessageId",
+          lineage_source_turn_id AS "lineageSourceTurnId"
         FROM projection_threads
         ORDER BY created_at ASC, thread_id ASC
       `,
@@ -901,8 +908,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   // Idle-only command invariants need the lifecycle pairs that can block a
-  // handoff even after restart. Keep this intentionally narrow instead of
-  // hydrating arbitrary activity history into the command read model.
+  // handoff even after restart, and a fork's provenance decides whether its next
+  // turn hands off. Keep this intentionally narrow instead of hydrating
+  // arbitrary activity history into the command read model.
   const listActionableThreadActivityRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadActivityDbRowSchema,
@@ -928,7 +936,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           'approval.response.submitted',
           'user-input.resolved',
           'provider.user-input.respond.failed',
-          'context-handoff'
+          'context-handoff',
+          ${THREAD_FORKED_ACTIVITY_KIND}
         )
         ORDER BY
           thread_id ASC,
@@ -1182,7 +1191,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           trashed_at AS "trashedAt",
           lineage_parent_thread_id AS "lineageParentThreadId",
           lineage_root_thread_id AS "lineageRootThreadId",
-          lineage_relationship AS "lineageRelationship"
+          lineage_relationship AS "lineageRelationship",
+          lineage_source_message_id AS "lineageSourceMessageId",
+          lineage_source_turn_id AS "lineageSourceTurnId"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL

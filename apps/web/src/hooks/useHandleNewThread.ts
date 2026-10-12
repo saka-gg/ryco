@@ -53,7 +53,7 @@ import {
   useHostedWorkspaceState,
   waitForHostedNodeMutationLease,
 } from "../hostedHub/hostedConnectionCoordinator";
-import { adoptRoutedHostedNode } from "../hostedHub/nodeRoutes";
+import { adoptHostedEnvironmentRoute } from "../hostedHub/adoptHostedEnvironmentRoute";
 import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 
@@ -91,8 +91,7 @@ function useNewThreadState() {
   }));
   const router = useRouter();
   const adoptHostedTarget = useCallback((environmentId: ScopedProjectRef["environmentId"]) => {
-    const nodeId = nodeIdForHostedEnvironment(environmentId);
-    if (nodeId) adoptRoutedHostedNode(nodeId);
+    adoptHostedEnvironmentRoute(environmentId);
   }, []);
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};

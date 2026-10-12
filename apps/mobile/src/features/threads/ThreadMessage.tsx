@@ -4,6 +4,7 @@ import {
 } from "@ryco/client-runtime/state/session";
 import {
   isChatImageAttachment,
+  THREAD_FORK_COPY,
   type ChatFileAttachment,
   type ChatImageAttachment,
   type ChatMessage,
@@ -16,6 +17,7 @@ import * as Linking from "expo-linking";
 import { useMemo } from "react";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
+import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
 import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
@@ -180,6 +182,12 @@ export function ThreadMessage(props: {
   readonly message: ChatMessage;
   /** On a turn's settled reply: the pages the turn published, listed at its foot. */
   readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
+  /**
+   * Present only on a reply that can be forked (the terminal reply of a completed turn, on a
+   * thread whose node can fork right now). An explicit footer button rather than a long press,
+   * which would fight the reply's text selection.
+   */
+  readonly onForkFromHere?: (() => void) | undefined;
 }) {
   const isUser = props.message.role === "user";
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
@@ -396,6 +404,26 @@ export function ThreadMessage(props: {
               buttonSize={28}
             />
           ) : null}
+        </View>
+      ) : props.message.role === "assistant" && props.onForkFromHere ? (
+        <View className="mt-1 flex-row items-center pl-1">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={THREAD_FORK_COPY.action}
+            hitSlop={8}
+            onPress={props.onForkFromHere}
+            className="h-7 flex-row items-center gap-1 rounded-full px-2 active:bg-subtle"
+          >
+            <SymbolView
+              name="arrow.triangle.branch"
+              size={12}
+              tintColor={metadataColor}
+              type="monochrome"
+            />
+            <Text className="text-2xs font-ryco-medium text-foreground-tertiary">
+              {THREAD_FORK_COPY.action}
+            </Text>
+          </Pressable>
         </View>
       ) : null}
     </View>

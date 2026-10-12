@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import {
   selectWorktreeSubmodules,
+  worktreeSubmoduleSetupNotice,
   worktreeSubmodulesPatch,
   WORKTREE_SUBMODULE_OPTIONS,
 } from "./worktreeSubmodules.ts";
@@ -49,5 +50,39 @@ describe("worktree submodule selection", () => {
       expect(worktreeSubmodulesPatch(null, option.value)).toEqual({
         worktreeSubmodules: option.value,
       });
+  });
+});
+
+describe("worktreeSubmoduleSetupNotice", () => {
+  it("names the skip reason only when settings turned submodule initialization off", () => {
+    const reason = "Submodule initialization disabled by project settings.";
+    expect(
+      worktreeSubmoduleSetupNotice({ mode: "none", source: "project", status: "skipped", reason }),
+    ).toBe(reason);
+    expect(
+      worktreeSubmoduleSetupNotice({
+        mode: "none",
+        source: "node",
+        status: "skipped",
+        reason: `  ${reason}\n`,
+      }),
+    ).toBe(reason);
+    expect(worktreeSubmoduleSetupNotice(undefined)).toBeNull();
+    expect(
+      worktreeSubmoduleSetupNotice({
+        mode: "recursive",
+        source: "node",
+        status: "initialized",
+        reason: "Initialized.",
+      }),
+    ).toBeNull();
+    expect(
+      worktreeSubmoduleSetupNotice({
+        mode: "none",
+        source: "node",
+        status: "skipped",
+        reason: " ",
+      }),
+    ).toBeNull();
   });
 });

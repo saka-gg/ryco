@@ -26,6 +26,7 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import {
   deriveTimelineEntries,
   formatElapsed,
+  timelineRowShowsMessage,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 import {
@@ -50,6 +51,7 @@ import {
   EyeIcon,
   FileDiffIcon,
   GitBranchIcon,
+  GitForkIcon,
   GlobeIcon,
   HammerIcon,
   type LucideIcon,
@@ -78,6 +80,8 @@ import {
   isErroredWorkEntry,
   isTimelineScrolledToEnd,
   deriveMessagesTimelineRows,
+  findMessagesTimelineRowIndex,
+  messagesOfTimelineRow,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineMinimapHasPersistentGutter,
@@ -89,6 +93,7 @@ import {
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   type TimelineMinimapItem,
+  type TimelineForkRequest,
   type TimelineMessageActionsRequest,
   type TimelineStableState,
   type TimelineStreamingState,
@@ -97,6 +102,8 @@ import {
 } from "./MessagesTimeline.logic";
 import { MessageActionsSheet } from "./MessageActionsSheet";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
+import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
+import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
 import { useLongPress } from "~/hooks/useLongPress";
 import { usePresentationTier } from "~/hooks/usePresentationTier";
 import type { ThreadMessageSearchOccurrence } from "./ThreadMessageSearch.logic";
@@ -256,6 +263,11 @@ interface MessagesTimelineProps {
     marker: ContextHandoffTimelineEntry,
     trigger: HTMLButtonElement,
   ) => void;
+  /**
+   * Offers "Fork from here" on eligible terminal replies. Never offered on the
+   * frozen phone tier, even when passed.
+   */
+  onForkFromMessage?: (request: TimelineForkRequest, trigger: HTMLButtonElement) => void;
   /** Driver of the thread's provider; its mark animates on the live turn header. */
   providerDriverKind?: ProviderDriverKind | null;
 }
@@ -307,9 +319,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   loadOlderError = null,
   onLoadOlder,
   onInspectContextHandoff,
+  onForkFromMessage,
   providerDriverKind = null,
 }: MessagesTimelineProps) {
   usePerfMark("MessagesTimeline");
+  // The frozen phone tier gets nothing new: no fork action, no fork divider.
+  const isPhoneTier = usePresentationTier() === "phone";
+  const offerFork = onForkFromMessage !== undefined && !isPhoneTier;
   const initialScrollOffset = useMemo(
     () => readHostedThreadScroll(routeThreadKey),
     [routeThreadKey],
@@ -357,10 +373,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         undoTurnCountByTurnId: undoTurnCountRef.current,
         liveSettledTurnIds: observedRunningTurnIds,
         revealedMessageIds,
+        offerFork,
+        showForkOrigin: !isPhoneTier,
       }),
     [
       observedRunningTurnIds,
       revealedMessageIds,
+      offerFork,
+      isPhoneTier,
       timelineEntries,
       latestTurn,
       activeTurnInProgress,
@@ -660,12 +680,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       return;
     }
 
-    const targetRowIndex = rows.findIndex(
-      (row) =>
-        (row.kind === "message" && row.message.id === targetMessageId) ||
-        (row.kind === "chapter" && row.message?.id === targetMessageId) ||
-        (row.kind === "html-render" && row.messageId === targetMessageId),
-    );
+    // A page row also stands in for the blank reply its turn ended on (a fork's boundary).
+    const targetRowIndex = findMessagesTimelineRowIndex(rows, targetMessageId);
     if (targetRowIndex < 0) {
       setHighlightedMessageId(null);
       return;
@@ -763,8 +779,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         onOpenMessageActions,
         providerDriverKind,
         ...(onInspectContextHandoff ? { onInspectContextHandoff } : {}),
+        ...(offerFork ? { onForkFromMessage } : {}),
       }),
     [
+      offerFork,
+      onForkFromMessage,
       providerDriverKind,
       timestampFormat,
       routeThreadKey,
@@ -1143,8 +1162,10 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
     },
     { disabled: !isPhoneTier || row.kind !== "message" },
   );
+  // A message row, or the page row standing in for its turn's blank reply.
+  const highlightable = row.kind === "message" || row.kind === "html-render";
   const isHighlightedMessage =
-    row.kind === "message" && ctx.highlightedMessageId === row.message.id;
+    highlightable && timelineRowShowsMessage(messagesOfTimelineRow(row), ctx.highlightedMessageId);
   const messageSearchOccurrences =
     row.kind === "message"
       ? ctx.threadMessageSearchOccurrencesByMessageId.get(row.message.id)
@@ -1194,11 +1215,14 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                 !row.showAssistantCopyButton)
             ? "pb-2"
             : "pb-4",
-        row.kind === "message"
+        highlightable
           ? "scroll-mt-12 rounded-xl transition-[background-color,box-shadow] duration-500"
           : null,
         isHighlightedMessage ? "bg-primary/10 ring-1 ring-primary/30" : null,
-        row.kind === "message" && row.message.role === "assistant" ? "group/assistant" : null,
+        (row.kind === "message" && row.message.role === "assistant") ||
+          (row.kind === "html-render" && row.forkFrom !== undefined)
+          ? "group/assistant"
+          : null,
       )}
       data-timeline-row-id={row.id}
       data-timeline-row-kind={row.kind}
@@ -1231,6 +1255,10 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           marker={row.marker}
           {...(ctx.onInspectContextHandoff ? { onInspect: ctx.onInspectContextHandoff } : {})}
         />
+      )}
+
+      {row.kind === "fork-origin" && !isPhoneTier && (
+        <ForkOriginMarkerRow marker={row.marker} environmentId={ctx.activeThreadEnvironmentId} />
       )}
 
       {row.kind === "message" &&
@@ -1310,6 +1338,12 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             (row.message.streaming || row.message.attachments?.length ? "" : "(empty response)");
           const assistantResponseStillInProgress = resolveAssistantRowInProgress(row, ctx);
           const assistantCopyState = resolveAssistantRowCopyState(row, ctx);
+          // The phone tier is frozen: its rows never carry the fork action.
+          const forkFrom =
+            ctx.onForkFromMessage !== undefined && !isPhoneTier && !assistantResponseStillInProgress
+              ? row.forkFrom
+              : undefined;
+          const canForkReply = forkFrom !== undefined;
           return (
             <>
               <div className="min-w-0 px-1 py-0.5" {...messageLongPress}>
@@ -1371,15 +1405,24 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                       )
                     )}
                   </p>
-                  {assistantCopyState.visible ? (
-                    <div className="flex items-center opacity-0 transition-opacity duration-200 group-hover/assistant:opacity-100 phone:opacity-100">
-                      <MessageCopyButton
-                        text={assistantCopyState.text ?? ""}
-                        size="icon-xs"
-                        variant="ghost"
-                        className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
-                        ariaLabel="Copy response"
-                      />
+                  {assistantCopyState.visible || canForkReply ? (
+                    <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100 phone:opacity-100">
+                      {assistantCopyState.visible ? (
+                        <MessageCopyButton
+                          text={assistantCopyState.text ?? ""}
+                          size="icon-xs"
+                          variant="ghost"
+                          className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+                          ariaLabel="Copy response"
+                        />
+                      ) : null}
+                      {forkFrom ? (
+                        <ForkFromReplyButton
+                          request={forkFrom}
+                          disabled={ctx.isRevertingCheckpoint}
+                          onFork={ctx.onForkFromMessage}
+                        />
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
@@ -1426,6 +1469,16 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
               onCloseDiff={ctx.onCloseDiff}
             />
           )}
+          {/* A turn that ended on its pages forks from here (never on the frozen phone tier). */}
+          {row.forkFrom && ctx.onForkFromMessage && !isPhoneTier ? (
+            <div className="mt-1.5 flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+              <ForkFromReplyButton
+                request={row.forkFrom}
+                disabled={ctx.isRevertingCheckpoint}
+                onFork={ctx.onForkFromMessage}
+              />
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -2035,6 +2088,41 @@ function ChangedFileRow(props: {
 // ---------------------------------------------------------------------------
 // Leaf components
 // ---------------------------------------------------------------------------
+
+/**
+ * "Fork from here" on the row that ends a turn; the dialog grows out of this button. `request`
+ * names the turn's reply, which is the fork's boundary.
+ */
+const ForkFromReplyButton = memo(function ForkFromReplyButton(props: {
+  request: TimelineForkRequest;
+  disabled: boolean;
+  onFork: TimelineStableState["onForkFromMessage"];
+}) {
+  const { request, onFork } = props;
+  const { messageId } = request;
+  if (!onFork) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            className={MESSAGE_ACTION_BUTTON_CLASS_NAME}
+            disabled={props.disabled}
+            aria-label={THREAD_FORK_COPY.action}
+            data-fork-from-message={messageId}
+            onClick={(event) => onFork(request, event.currentTarget)}
+          >
+            <GitForkIcon className="size-3" aria-hidden />
+          </Button>
+        }
+      />
+      <TooltipPopup side="top">{THREAD_FORK_COPY.action}</TooltipPopup>
+    </Tooltip>
+  );
+});
 
 const UserMessageTerminalContextInlineLabel = memo(
   function UserMessageTerminalContextInlineLabel(props: { context: ParsedTerminalContextEntry }) {

@@ -126,6 +126,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
           threads: {
             setManualBucket: rpcClient.threads.setManualBucket,
             setManualPosition: rpcClient.threads.setManualPosition,
+            ...(rpcClient.threads.fork ? { fork: rpcClient.threads.fork } : {}),
           },
         }
       : {}),

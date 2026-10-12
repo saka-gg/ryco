@@ -19,6 +19,7 @@ import {
   resolveAttachmentPath,
   toSafeThreadAttachmentSegment,
   toSafeFileAttachmentExtensionSegment,
+  uuidFromSha256Hex,
 } from "./attachmentStore.ts";
 
 export class AssistantAttachmentError extends Data.TaggedError("AssistantAttachmentError")<{}> {}
@@ -110,9 +111,6 @@ const isInside = (root: string, candidate: string) => {
   );
 };
 
-const hashToUuid = (hash: string) =>
-  `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
-
 /** A fresh `.part` file in the attachments root. The caller removes it once published. */
 async function openStagingFile(attachmentsDir: string) {
   await fs.mkdir(attachmentsDir, { recursive: true });
@@ -149,7 +147,7 @@ async function publishStagedAttachment(input: {
   const suffix = input.extensionSegment === undefined ? "" : `-${input.extensionSegment}`;
   const attachment = Schema.decodeUnknownSync(ChatAttachment)({
     ...input.fields,
-    id: `${input.thread}-${hashToUuid(input.contentHash)}${suffix}`,
+    id: `${input.thread}-${uuidFromSha256Hex(input.contentHash)}${suffix}`,
   });
   const destination = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
   if (!destination) throw new Error("Invalid attachment destination.");

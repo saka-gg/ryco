@@ -107,6 +107,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
       };
     case "thread.create":
     case "thread.delegated.create":
+    case "thread.fork.create":
     case "thread.delete":
     case "thread.trash":
     case "thread.untrash":
@@ -241,8 +242,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         }
 
         const storageCommand = envelope.command;
+        // Publications prepared outside the engine (imports, forks) keep their command id
+        // retryable: a blocked checkout never writes a rejected receipt for them.
         const storageReadinessError = (detail: string, cause?: unknown) =>
-          storageCommand.type === "thread.history.import"
+          storageCommand.type === "thread.history.import" ||
+          storageCommand.type === "thread.fork.create"
             ? new OrchestrationCommandAdmissionError({ detail })
             : new OrchestrationCommandInvariantError({
                 commandType: storageCommand.type,
@@ -295,20 +299,27 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 commandReadModel.projects.find((project) => project.id === storageCommand.projectId)
                   ?.workspaceRoot,
               ]
-            : "worktreePath" in storageCommand
-              ? [storageCommand.worktreePath]
-              : storageCommand.type === "thread.attach-to-worktree"
-                ? [
-                    commandReadModel.worktrees?.find(
-                      (worktree) => worktree.worktreeId === storageCommand.worktreeId,
-                    )?.worktreePath,
-                  ]
-                : storageCommand.type === "thread.sidebar.undo" ||
-                    storageCommand.type === "thread.turn.start" ||
-                    storageCommand.type === "thread.turn.steer" ||
-                    storageCommand.type === "thread.goal.set"
-                  ? storageThreadPaths
-                  : [];
+            : storageCommand.type === "thread.fork.create"
+              ? [
+                  storageCommand.worktreePath ??
+                    commandReadModel.projects.find(
+                      (project) => project.id === storageCommand.projectId,
+                    )?.workspaceRoot,
+                ]
+              : "worktreePath" in storageCommand
+                ? [storageCommand.worktreePath]
+                : storageCommand.type === "thread.attach-to-worktree"
+                  ? [
+                      commandReadModel.worktrees?.find(
+                        (worktree) => worktree.worktreeId === storageCommand.worktreeId,
+                      )?.worktreePath,
+                    ]
+                  : storageCommand.type === "thread.sidebar.undo" ||
+                      storageCommand.type === "thread.turn.start" ||
+                      storageCommand.type === "thread.turn.steer" ||
+                      storageCommand.type === "thread.goal.set"
+                    ? storageThreadPaths
+                    : [];
         // ID attachment and legacy path metadata can coexist. Neither may
         // replace the other's admission guard; providers still use the legacy
         // path (or project cwd). Resolve aliases and check their complete union.

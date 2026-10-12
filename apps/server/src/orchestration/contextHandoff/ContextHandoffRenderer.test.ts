@@ -1,5 +1,6 @@
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -163,6 +164,86 @@ describe("renderContextHandoffInput", () => {
       expect((error as ContextHandoffRenderError).reason).toBe("message-too-large");
     }
   });
+});
+
+it("keeps a fork's inherited history ahead of its own when it trims the context", () => {
+  const fork = ThreadId.make("fork-render");
+  const at = (seconds: string) => `2026-10-01T12:00:${seconds}.000Z`;
+  const message = (
+    id: string,
+    role: "user" | "assistant",
+    text: string,
+    createdAt: string,
+  ): OrchestrationThread["messages"][number] => ({
+    id: MessageId.make(id),
+    role,
+    text,
+    turnId: null,
+    streaming: false,
+    createdAt,
+    updatedAt: createdAt,
+  });
+  const thread: OrchestrationThread = {
+    id: fork,
+    projectId: ProjectId.make("project-render"),
+    title: "Render fork",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex_a"), model: "gpt-a" },
+    runtimeMode: "full-access",
+    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    createdAt: at("00"),
+    updatedAt: at("20"),
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+    // A retried first send: the failed one was stamped by a device clock behind the node.
+    messages: [
+      message(`${fork}:inherited:message-prompt`, "user", "Prompt 1", at("10")),
+      message("message-own-failed", "user", "First try", at("11")),
+      message(`${fork}:inherited:message-reply`, "assistant", "Reply 1", at("13")),
+      message("message-own-retry", "user", "Try again", at("15")),
+    ],
+    proposedPlans: [],
+    // Too large to fit: the renderer must trim, and re-sorts what it keeps.
+    activities: [
+      {
+        id: EventId.make(`${fork}:inherited:activity-tool`),
+        kind: "tool.completed",
+        tone: "tool",
+        summary: "Large output",
+        turnId: null,
+        createdAt: at("13"),
+        payload: {
+          itemType: "command_execution",
+          data: { item: { type: "commandExecution", aggregatedOutput: "x".repeat(8_000) } },
+        },
+      },
+    ],
+    checkpoints: [],
+    session: null,
+  };
+  const artifact = buildContextHandoffDocument({
+    thread,
+    targetMessageId: MessageId.make("message-own-retry"),
+    source: endpoint("codex_a", "gpt-a"),
+    target: endpoint("codex_a", "gpt-a"),
+  });
+
+  const result = renderContextHandoffInput({
+    document: artifact.document,
+    currentMessage: "Try again",
+    maxInputChars: 2_500,
+  });
+
+  expect(result.truncated).toBe(true);
+  expect(result.renderedContext.messages?.map((entry) => entry.text)).toEqual([
+    "Prompt 1",
+    "Reply 1",
+    "First try",
+  ]);
 });
 
 it("retains more history for a 1M destination than the default budget", () => {

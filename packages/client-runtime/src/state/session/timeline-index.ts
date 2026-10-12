@@ -7,6 +7,11 @@ import type {
   WorkLogEntry,
 } from "./session-logic.ts";
 import type { ContextHandoffTimelineEntry } from "./contextHandoff.ts";
+import {
+  forkTimelineBand,
+  forkTimelineInheritedPrefix,
+  type ForkOriginTimelineEntry,
+} from "./forkOrigin.ts";
 
 export interface TimelineEntrySources {
   readonly messages: ReadonlyArray<ChatMessage>;
@@ -14,6 +19,8 @@ export interface TimelineEntrySources {
   readonly workEntries: ReadonlyArray<WorkLogEntry>;
   readonly contextCompactionEntries: ReadonlyArray<ContextCompactionTimelineEntry>;
   readonly contextHandoffEntries: ReadonlyArray<ContextHandoffTimelineEntry>;
+  /** `ThreadActivityViewModel.forkOriginEntries`: at most one, on forked threads. */
+  readonly forkOriginEntries: ReadonlyArray<ForkOriginTimelineEntry>;
 }
 
 export interface TimelineEntryIndex {
@@ -28,6 +35,8 @@ type SourceKind = TimelineEntry["kind"];
 
 interface IndexedTimelineEntry {
   readonly key: string;
+  /** `forkTimelineBand`: a fork's inherited history, its divider, then its own items. */
+  readonly band: number;
   readonly sourceKind: SourceKind;
   readonly sourceRank: number;
   readonly sourceIndex: number;
@@ -41,10 +50,13 @@ const SOURCE_RANK: Record<SourceKind, number> = {
   work: 2,
   "context-compaction": 3,
   "context-handoff": 4,
+  // Its own band on a fork (`forkTimelineBand`); the rank only matters without one.
+  "fork-origin": 5,
 };
 
 function compareIndexedEntries(left: IndexedTimelineEntry, right: IndexedTimelineEntry): number {
   return (
+    left.band - right.band ||
     left.entry.createdAt.localeCompare(right.entry.createdAt) ||
     left.sourceRank - right.sourceRank ||
     left.sourceIndex - right.sourceIndex ||
@@ -79,6 +91,7 @@ function isSorted(entries: ReadonlyArray<IndexedTimelineEntry>): boolean {
 
 function indexedEntry(
   previousByKey: ReadonlyMap<string, IndexedTimelineEntry>,
+  inheritedPrefix: string | null,
   input: {
     readonly sourceKind: SourceKind;
     readonly sourceIndex: number;
@@ -96,6 +109,7 @@ function indexedEntry(
       : input.entry;
   return {
     key,
+    band: forkTimelineBand(input.entry, inheritedPrefix),
     sourceKind: input.sourceKind,
     sourceRank: SOURCE_RANK[input.sourceKind],
     sourceIndex: input.sourceIndex,
@@ -115,6 +129,8 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
   let sortedBaseEntries: IndexedTimelineEntry[] = [];
   let result: TimelineEntry[] = [];
   let mode: "full" | "incremental" | "reuse" = "full";
+  // The bands `sortedBaseEntries` was ordered with; when the divider arrives, they all change.
+  let sortedInheritedPrefix: string | null = null;
 
   return {
     update: (sources) => {
@@ -122,6 +138,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
       const nextByKey = new Map<string, IndexedTimelineEntry>();
       const baseByKey = new Map<string, IndexedTimelineEntry>();
       const anchoredHandoffs = new Map<MessageId, IndexedTimelineEntry[]>();
+      const inheritedPrefix = forkTimelineInheritedPrefix(sources.forkOriginEntries);
       const add = (entry: IndexedTimelineEntry, base: boolean) => {
         nextByKey.set(entry.key, entry);
         if (base) baseByKey.set(entry.key, entry);
@@ -129,7 +146,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
 
       sources.messages.forEach((message, sourceIndex) =>
         add(
-          indexedEntry(indexedByKey, {
+          indexedEntry(indexedByKey, inheritedPrefix, {
             sourceKind: "message",
             sourceIndex,
             source: message,
@@ -140,7 +157,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
       );
       sources.proposedPlans.forEach((proposedPlan, sourceIndex) =>
         add(
-          indexedEntry(indexedByKey, {
+          indexedEntry(indexedByKey, inheritedPrefix, {
             sourceKind: "proposed-plan",
             sourceIndex,
             source: proposedPlan,
@@ -156,7 +173,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
       );
       sources.workEntries.forEach((workEntry, sourceIndex) =>
         add(
-          indexedEntry(indexedByKey, {
+          indexedEntry(indexedByKey, inheritedPrefix, {
             sourceKind: "work",
             sourceIndex,
             source: workEntry,
@@ -172,7 +189,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
       );
       sources.contextCompactionEntries.forEach((marker, sourceIndex) =>
         add(
-          indexedEntry(indexedByKey, {
+          indexedEntry(indexedByKey, inheritedPrefix, {
             sourceKind: "context-compaction",
             sourceIndex,
             source: marker,
@@ -187,7 +204,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
         ),
       );
       sources.contextHandoffEntries.forEach((marker, sourceIndex) => {
-        const indexed = indexedEntry(indexedByKey, {
+        const indexed = indexedEntry(indexedByKey, inheritedPrefix, {
           sourceKind: "context-handoff",
           sourceIndex,
           source: marker,
@@ -205,6 +222,18 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
           else anchoredHandoffs.set(marker.targetMessageId, [indexed]);
         }
       });
+
+      sources.forkOriginEntries.forEach((marker, sourceIndex) =>
+        add(
+          indexedEntry(indexedByKey, inheritedPrefix, {
+            sourceKind: "fork-origin",
+            sourceIndex,
+            source: marker,
+            entry: { id: marker.id, kind: "fork-origin", createdAt: marker.createdAt, marker },
+          }),
+          true,
+        ),
+      );
 
       const tieCounts = new Map<string, number>();
       for (const entry of baseByKey.values()) {
@@ -228,7 +257,11 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
       const changeCount = changedEntries.length + deletedCount;
       const incrementalLimit = Math.max(32, Math.ceil(baseByKey.size / 3));
 
-      if (sortedBaseEntries.length === 0 || changeCount > incrementalLimit) {
+      if (
+        sortedBaseEntries.length === 0 ||
+        changeCount > incrementalLimit ||
+        inheritedPrefix !== sortedInheritedPrefix
+      ) {
         sortedBaseEntries = [...baseByKey.values()].toSorted(compareIndexedEntries);
         mode = "full";
       } else if (changeCount === 0) {
@@ -254,6 +287,7 @@ export function createTimelineEntryIndex(): TimelineEntryIndex {
         nextResult.push(indexed.entry);
       }
       indexedByKey = nextByKey;
+      sortedInheritedPrefix = inheritedPrefix;
       result = reuseResult(result, nextResult);
       return result;
     },

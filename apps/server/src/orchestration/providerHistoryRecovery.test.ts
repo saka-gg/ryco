@@ -7,6 +7,7 @@ import {
   type OrchestrationMessage,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { inheritedItemId } from "./forkInheritance.ts";
 import { historyMessagesToRestore, missingHistoryActivities } from "./providerHistoryRecovery.ts";
 import type { ProviderThreadHistory } from "../provider/Services/ProviderAdapter.ts";
 
@@ -279,7 +280,94 @@ it("never restores question callbacks or settlements from provider history", () 
     createdAt: at,
     payload: { requestId: "reused-id" },
   }));
-  expect(missingHistoryActivities([], recovered).map((activity) => activity.kind)).toEqual([
-    "tool.completed",
-  ]);
+  expect(
+    missingHistoryActivities({ ...thread(), activities: [] }, recovered).map(
+      (activity) => activity.kind,
+    ),
+  ).toEqual(["tool.completed"]);
+});
+
+describe("provider history recovery of a native fork", () => {
+  // A Codex fork's native thread repeats the source's turns (same turn and item ids) before
+  // its own; the fork already shows those turns as inherited copies under its own ids.
+  const forkId = ThreadId.make("fork-1");
+  const inheritedTurn = TurnId.make("turn-inherited");
+  const ownTurn = TurnId.make("turn-own");
+  const inherited = (sourceItemId: string, role: "user" | "assistant", text: string) => ({
+    id: MessageId.make(
+      inheritedItemId({ forkThreadId: forkId, sourceThreadId: "source-1", sourceItemId }),
+    ),
+    role,
+    text,
+    turnId: inheritedTurn,
+    streaming: false,
+    createdAt: at,
+    updatedAt: at,
+  });
+  const fork = (messages: readonly OrchestrationMessage[]) => ({
+    id: forkId,
+    createdAt: at,
+    messages,
+    activities: [] as OrchestrationThreadActivity[],
+  });
+  const nativeHistory: ProviderThreadHistory = {
+    messages: [
+      {
+        ...message,
+        id: MessageId.make("user:inherited"),
+        role: "user",
+        text: "question",
+        turnId: inheritedTurn,
+      },
+      // Even a reply the fork's copy does not match textually is never restored.
+      {
+        ...message,
+        id: MessageId.make("assistant:inherited"),
+        text: "answer v2",
+        turnId: inheritedTurn,
+      },
+      { ...message, id: MessageId.make("assistant:own"), text: "own reply", turnId: ownTurn },
+    ],
+    items: [],
+    completedTurnIds: [inheritedTurn, ownTurn],
+    failedTurnIds: [],
+  };
+
+  it("restores nothing for inherited turns and still repairs the fork's own", () => {
+    const copies = [
+      inherited("user-source", "user", "question"),
+      inherited("assistant:inherited", "assistant", "answer"),
+    ];
+    const restored = historyMessagesToRestore(fork(copies), nativeHistory, at);
+    expect(restored.map((entry) => entry.id)).toEqual(["history:fork-1:assistant:own"]);
+    expect(historyMessagesToRestore(fork([...copies, ...restored]), nativeHistory, at)).toEqual([]);
+  });
+
+  it("never rewrites an inherited copy of a native message", () => {
+    // An inherited copy without a turn: only its id identifies the native message.
+    const copy = { ...inherited("assistant:own", "assistant", "own"), turnId: null };
+    expect(
+      historyMessagesToRestore(
+        fork([copy]),
+        { ...nativeHistory, messages: nativeHistory.messages.slice(2) },
+        at,
+      ),
+    ).toEqual([]);
+  });
+
+  it("never restores activities of inherited turns", () => {
+    const recovered: OrchestrationThreadActivity[] = [inheritedTurn, ownTurn].map((turn) => ({
+      id: EventId.make(`history:${turn}:reasoning`),
+      kind: "task.started",
+      summary: "Task started",
+      tone: "info",
+      turnId: turn,
+      createdAt: at,
+      payload: {},
+    }));
+    const thread = fork([inherited("assistant:inherited", "assistant", "answer")]);
+    expect(missingHistoryActivities(thread, recovered).map((activity) => activity.turnId)).toEqual([
+      ownTurn,
+    ]);
+  });
 });
