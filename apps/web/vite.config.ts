@@ -10,8 +10,15 @@ import { ciTestReporting } from "../../scripts/lib/vitestReporting.ts";
 import { createHostedPwaBuildPlugin } from "./src/pwa/buildArtifacts";
 import { createClientModeSeamPlugin } from "./src/clientModeSeams";
 import { createBootFontPreloadPlugin } from "./src/viteBuild/bootFontPreload";
-import { createWebCodeSplittingOptions, webChunkFileName } from "./src/viteBuild/codeSplitting";
-import { resolveWebModulePreloadDependencies } from "./src/viteBuild/modulePreload";
+import {
+  createWebCodeSplittingOptions,
+  BOOT_ROOT_MODULES,
+  webChunkFileName,
+} from "./src/viteBuild/codeSplitting";
+import {
+  createBootPreloadPlugin,
+  resolveWebModulePreloadDependencies,
+} from "./src/viteBuild/modulePreload";
 import { createPrecompressedAssetsPlugin } from "./src/viteBuild/precompressAssets";
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
@@ -117,6 +124,7 @@ export function createWebViteConfig(
         presets: [reactCompilerPreset()],
       }),
       tailwindcss(),
+      createBootPreloadPlugin(),
       ...(resolvedClientMode === "hosted-hub" ? [createHostedPwaBuildPlugin()] : []),
       // The Ryco server serves these siblings by Accept-Encoding, and the node
       // app paints in DM Sans. Hosted builds deploy to a CDN that compresses on
@@ -201,7 +209,8 @@ export function createWebViteConfig(
       outDir: "dist",
       emptyOutDir: true,
       // Each dynamic import preloads its own static closure in one round;
-      // index.html stays free of eager preloads (see the resolver).
+      // index.html preloads only the boot chain (see the resolver and
+      // `createBootPreloadPlugin`).
       modulePreload: {
         polyfill: false,
         resolveDependencies: resolveWebModulePreloadDependencies,
@@ -210,6 +219,9 @@ export function createWebViteConfig(
         output: {
           codeSplitting: createWebCodeSplittingOptions({
             bootEntry: fileURLToPath(new URL("./src/main.tsx", import.meta.url)),
+            bootRoots: BOOT_ROOT_MODULES.map((module) =>
+              fileURLToPath(new URL(`./${module}`, import.meta.url)),
+            ),
           }),
           chunkFileNames: webChunkFileName,
         },

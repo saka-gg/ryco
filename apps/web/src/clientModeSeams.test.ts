@@ -19,6 +19,10 @@ const SEAM_LOADERS: Record<
     () => import("./hostedHub/state"),
     () => import("./hostedHub/state.standard"),
   ],
+  "hostedHub/bootGate.ts": [
+    () => import("./hostedHub/bootGate"),
+    () => import("./hostedHub/bootGate.standard"),
+  ],
   "hostedHub/transport.ts": [
     () => import("./hostedHub/transport"),
     () => import("./hostedHub/transport.standard"),
@@ -106,6 +110,13 @@ describe("client-mode seams", () => {
       null,
     );
     expect(() => standard.getHostedRelayAttemptFactory()).toThrow(/hosted-hub builds/u);
+  });
+
+  it("keeps the hosted boot gate loud in standard builds", async () => {
+    const standard = await import("./hostedHub/bootGate.standard");
+    expect(() =>
+      standard.runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() }),
+    ).toThrow(/hosted-hub builds/u);
   });
 
   it("has no PWA lifecycle outside hosted builds", async () => {

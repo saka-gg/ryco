@@ -166,6 +166,19 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("keeps the chat route bodies and the preview guard off the boot's static graph", () => {
+    // The chat layout and index rejoin the boot chunk as lazy roots
+    // (`BOOT_ROOT_MODULES`): their bytes arrive with boot, their modules
+    // evaluate when the router first renders them.
+    expect(
+      forbiddenChains("main.tsx", [
+        /^apps\/web\/src\/components\/routeViews\/Chat(?:Layout|Index)RouteView\.tsx$/u,
+        /^apps\/web\/src\/components\/NoActiveThreadState\.tsx$/u,
+        /^apps\/web\/src\/components\/PreviewFileNavigationGuard\.tsx$/u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("keeps the preview editor session out of the boot graph", () => {
     // The root navigation guard needs only the session registry.
     expect(

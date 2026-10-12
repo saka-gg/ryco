@@ -50,6 +50,73 @@ describe("web bundle splitting boundaries", () => {
     expect(settingsRouteModule).toContain("SettingsRouteComponent.preload");
   });
 
+  it("keeps the chat layout and index bodies out of the route registration graph", async () => {
+    const layoutRoute = await readSource("../routes/_chat.tsx");
+    const indexRoute = await readSource("../routes/_chat.index.tsx");
+
+    expect(layoutRoute).toContain('import("../components/routeViews/ChatLayoutRouteView")');
+    expect(indexRoute).toContain('import("../components/routeViews/ChatIndexRouteView")');
+    for (const source of [layoutRoute, indexRoute]) {
+      expect(source).toContain("lazyRouteComponent(");
+      expect(source).not.toMatch(REACT_LAZY_IMPORT);
+      // Only the route helpers stay eager; stores and views load with the body.
+      expect(source.match(/^import [^;]+;$/gmu)?.length ?? 0).toBeLessThanOrEqual(2);
+    }
+    expect(indexRoute).not.toContain("NoActiveThreadState");
+    expect(layoutRoute).not.toContain("useHandleNewThread");
+  });
+
+  it("loads the preview navigation guard after the first render", async () => {
+    const rootRoute = await readSource("../routes/__root.tsx");
+
+    // File Preview drafts only exist once the preview panel has loaded.
+    expect(rootRoute).not.toMatch(/^import \{ PreviewFileNavigationGuard \}/mu);
+    expect(rootRoute).toContain('import("../components/PreviewFileNavigationGuard")');
+  });
+
+  it("runs the hosted access check from the boot chunk without a chunk round trip", async () => {
+    const rootRoute = await readSource("../routes/__root.tsx");
+    const bootGate = await readSource("../hostedHub/bootGate.ts");
+    const hostedState = await readSource("../hostedHub/state.ts");
+
+    expect(rootRoute).toContain('import { runHostedBootGate } from "../hostedHub/bootGate";');
+    expect(rootRoute).not.toContain("hostedHub/logging");
+    expect(rootRoute).not.toContain('import("../hostedHub/state")');
+    expect(rootRoute).not.toContain('import("../hostedHub/readCache")');
+    expect(bootGate).toMatch(/^import \{[^}]*\} from "\.\/readCache";$/mu);
+    expect(bootGate).toMatch(/^import \{[^}]*\} from "\.\/state";$/mu);
+    // The console boundary goes in before the hosted runtime is wired.
+    const ensure = hostedState.slice(
+      hostedState.indexOf("function ensureWebHostedRuntimeConfigured"),
+    );
+    expect(ensure.indexOf("installHostedConsoleBoundary()")).toBeGreaterThan(0);
+    expect(ensure.indexOf("installHostedConsoleBoundary()")).toBeLessThan(
+      ensure.indexOf("configureWebHostedRuntime("),
+    );
+  });
+
+  it("loads feature stylesheets with the chunks that render them", async () => {
+    const indexCss = await readSource("../index.css");
+    const owners: ReadonlyArray<readonly [string, string]> = [
+      ["../components/pullRequests/PullRequestsPage.tsx", "./pullRequests.css"],
+      ["../components/pullRequests/workspace/WorkspacePullRequestPanel.tsx", "../pullRequests.css"],
+      ["../components/projects/ProjectsPage.tsx", "./projects.css"],
+      ["../components/automations/dialog/AutomationsDialog.tsx", "../styles/automations.css"],
+      ["../components/overview/crown/CrownOverview.tsx", "../overview.css"],
+    ];
+    for (const sheet of ["pullRequests.css", "projects.css", "automations.css", "overview.css"]) {
+      expect(indexCss).not.toContain(sheet);
+    }
+    for (const [owner, sheet] of owners) {
+      expect(await readSource(owner), owner).toContain(`import "${sheet}";`);
+    }
+    // The sidebar's workspace pull request popover renders the rail's marks.
+    expect(indexCss).toContain('@import "./components/pullRequests/styles/rail.css";');
+    expect(await readSource("../components/pullRequests/pullRequests.css")).not.toContain(
+      '@import "./styles/rail.css";',
+    );
+  });
+
   it("loads the root shell during beforeLoad instead of through React.lazy", async () => {
     const rootRoute = await readSource("../routes/__root.tsx");
 

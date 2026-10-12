@@ -1,4 +1,6 @@
 import "../../../index.css";
+// The feature stylesheet loads with its page or dialog chunk in the app.
+import "../styles/automations.css";
 
 import { AUTOMATION_LIMITS, DAY_MS, HOUR_MS, MINUTE_MS } from "@ryco/shared/automationSchedule";
 import { useState } from "react";

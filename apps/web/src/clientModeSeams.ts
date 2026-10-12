@@ -28,6 +28,7 @@ import type { Plugin } from "vite";
  */
 export const CLIENT_MODE_SEAM_MODULES = [
   "hostedHub/state.ts",
+  "hostedHub/bootGate.ts",
   "hostedHub/transport.ts",
   "hostedHub/hostedConnectionCoordinator.ts",
   "components/hostedHub/HostedConnectionControls.tsx",

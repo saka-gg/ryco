@@ -1,4 +1,6 @@
 import "../../../index.css";
+// The feature stylesheet loads with its page or dialog chunk in the app.
+import "../overview.css";
 
 import {
   EnvironmentId,

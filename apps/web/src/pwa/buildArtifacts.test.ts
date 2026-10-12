@@ -46,11 +46,10 @@ describe("hosted PWA build artifacts", () => {
   it("allows only fingerprinted immutable shell assets plus the offline document", () => {
     const precache = resolveHostedPwaPrecache({ base: "/", entries, offlineDocument });
     // Installed up front: the entry's static closure and the boot document.
+    // Fonts and images the stylesheet references are runtime-cached instead.
     expect(precache.urls).toEqual([
-      "/assets/logo-MnOp3456.png",
       "/assets/main-AbCd1234.js",
       "/assets/main-EfGh5678.css",
-      "/assets/mono-IjKl9012.woff2",
       "/assets/vendor-QrSt7890.js",
       "/offline.html",
     ]);
@@ -64,6 +63,29 @@ describe("hosted PWA build artifacts", () => {
       "/assets/mono-IjKl9012.woff2",
       "/assets/vendor-QrSt7890.js",
     ]);
+  });
+
+  it("installs only the fonts and images the boot document paints with", () => {
+    const precache = resolveHostedPwaPrecache({
+      base: "/",
+      entries,
+      offlineDocument,
+      bootDocumentAssets: ["assets/mono-IjKl9012.woff2"],
+    });
+    expect(precache.urls).toContain("/assets/mono-IjKl9012.woff2");
+    expect(precache.urls).not.toContain("/assets/logo-MnOp3456.png");
+    // Every asset stays cacheable on first use; only what is installed changes.
+    expect(precache.cacheableUrls).toContain("/assets/logo-MnOp3456.png");
+    expect(precache.cacheableUrls).toContain("/assets/mono-IjKl9012.woff2");
+    // A boot-document asset this build cannot load is not installed.
+    expect(
+      resolveHostedPwaPrecache({
+        base: "/",
+        entries,
+        offlineDocument,
+        bootDocumentAssets: ["assets/missing-Miss1234.woff2"],
+      }).urls,
+    ).not.toContain("/assets/missing-Miss1234.woff2");
   });
 
   it("precaches the static closure of the boot-critical lazy modules", () => {
@@ -100,10 +122,8 @@ describe("hosted PWA build artifacts", () => {
   it("respects a configured public base path", () => {
     const precache = resolveHostedPwaPrecache({ base: "/ryco/", entries, offlineDocument });
     expect(precache.urls).toEqual([
-      "/ryco/assets/logo-MnOp3456.png",
       "/ryco/assets/main-AbCd1234.js",
       "/ryco/assets/main-EfGh5678.css",
-      "/ryco/assets/mono-IjKl9012.woff2",
       "/ryco/assets/vendor-QrSt7890.js",
       "/ryco/offline.html",
     ]);

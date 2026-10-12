@@ -3,6 +3,7 @@ import {
   hostedHubController,
   hostedHubStore,
   hostedRecoveryCodeDisplayStore,
+  installHostedConsoleBoundary,
   markHostedSessionReady,
   markHostedSessionReplaying,
   reportHostedShellSnapshotFailure,
@@ -25,7 +26,12 @@ import { hostedHubApi } from "./api";
  */
 setHostedRuntimeConfigurator(() => configureWebHostedRuntime(hostedHubApi));
 
+/**
+ * The boot gate's eager wiring. The fail-closed console boundary goes in first,
+ * in the same synchronous step, so no hosted runtime code runs before it.
+ */
 export function ensureWebHostedRuntimeConfigured(): void {
+  installHostedConsoleBoundary();
   configureWebHostedRuntime(hostedHubApi);
 }
 

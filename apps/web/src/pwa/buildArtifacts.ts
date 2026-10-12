@@ -7,26 +7,27 @@ import {
   NATIVE_E2EE_GRANT_KEYS_PATH,
 } from "@ryco/contracts/native-e2ee";
 
+import { findBootFontAsset } from "../viteBuild/bootFontPreload";
+import {
+  APP_ENTRY_MODULE,
+  bundleGraphEntries,
+  isChunkOfModule,
+  reachableFiles,
+  resolveBootAssets,
+  type BundleGraphEntry,
+} from "../viteBuild/bundleGraph";
 import { renderHostedPwaBootDocument, renderHostedPwaOfflineDocument } from "./offlineDocument";
 
-export interface HostedPwaBundleEntry {
-  readonly dynamicImports?: ReadonlyArray<string>;
-  /** The source module a chunk was built for, when it has one (Rollup's `facadeModuleId`). */
-  readonly facadeModuleId?: string | null;
-  readonly fileName: string;
-  readonly importedAssets?: ReadonlyArray<string>;
-  readonly importedCss?: ReadonlyArray<string>;
-  readonly imports?: ReadonlyArray<string>;
-  readonly isEntry?: boolean;
-  readonly referencedFiles?: ReadonlyArray<string>;
-}
+export type HostedPwaBundleEntry = BundleGraphEntry;
 
 export interface HostedPwaPrecache {
   readonly cacheName: string;
   /**
    * What the worker installs before it activates: the boot closure, the hosted
    * root and the workspace and thread-route closures, plus the boot document —
-   * everything a remembered browser needs to start offline.
+   * everything a remembered browser needs to start offline. Fonts and images
+   * are left to the runtime cache, except the ones the boot document paints
+   * with.
    */
   readonly urls: ReadonlyArray<string>;
   /**
@@ -49,11 +50,11 @@ export interface HostedPwaPrecache {
  * node connection loads (kept off the boot path, but not off the shell cache).
  */
 export const HOSTED_PWA_PRECACHE_MODULES = [
-  "src/main.tsx",
-  "src/hostedHub/logging.ts",
+  APP_ENTRY_MODULE,
   "src/hostedHub/state.ts",
   "src/hostedHub/readCache.ts",
   "src/hostedHub/e2eeRuntime.ts",
+  "src/components/PreviewFileNavigationGuard.tsx",
   "src/hostedHub/hostedWorkspaceOwners.ts",
   "src/components/hostedHub/HostedHubRoot.tsx",
   "src/components/hostedHub/hostedRootAppShell.tsx",
@@ -65,6 +66,14 @@ export const HOSTED_PWA_PRECACHE_MODULES = [
 
 const IMMUTABLE_ASSET_PATTERN =
   /(?:^|\/)[^/]+-[A-Za-z0-9_-]{8,}\.(?:css|gif|jpe?g|js|mjs|png|svg|ttf|webp|woff2?)$/i;
+/**
+ * Assets the precache leaves to the runtime cache. Every user-selectable font
+ * family and every editor logo the stylesheet references is reachable from the
+ * boot closure (about 600 KiB, a third of the install); a page that paints
+ * with one fetches it once and the worker keeps it from then on, and an offline
+ * start without it falls back to the system face.
+ */
+const RUNTIME_CACHED_ASSET_PATTERN = /\.(?:gif|jpe?g|png|svg|ttf|webp|woff2?)$/i;
 const CACHE_NAME_PREFIX = "ryco-pwa-shell-";
 const FNV_OFFSET_BASIS = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
@@ -103,43 +112,6 @@ function stableDigest(value: string): string {
   return hash.toString(16).padStart(16, "0");
 }
 
-function isPrecacheModule(
-  facadeModuleId: string | null | undefined,
-  modules: ReadonlyArray<string>,
-): boolean {
-  if (!facadeModuleId) return false;
-  const normalized = facadeModuleId.replaceAll("\\", "/");
-  return modules.some((module) => normalized === module || normalized.endsWith(`/${module}`));
-}
-
-/**
- * Every file reachable from `roots`, following static imports and their
- * assets always and dynamic imports only when `followDynamic` is set.
- */
-function reachableFiles(
-  entriesByFileName: ReadonlyMap<string, HostedPwaBundleEntry>,
-  roots: ReadonlyArray<string>,
-  followDynamic: boolean,
-): ReadonlySet<string> {
-  const pendingFileNames = [...roots];
-  const reachableFileNames = new Set<string>();
-  for (let index = 0; index < pendingFileNames.length; index += 1) {
-    const fileName = pendingFileNames[index];
-    if (!fileName || reachableFileNames.has(fileName)) continue;
-    reachableFileNames.add(fileName);
-    const entry = entriesByFileName.get(fileName);
-    if (!entry) continue;
-    pendingFileNames.push(
-      ...(followDynamic ? (entry.dynamicImports ?? []) : []),
-      ...(entry.imports ?? []),
-      ...(entry.importedCss ?? []),
-      ...(entry.importedAssets ?? []),
-      ...(entry.referencedFiles ?? []),
-    );
-  }
-  return reachableFileNames;
-}
-
 function immutableUrls(base: string, fileNames: Iterable<string>): string[] {
   return [
     ...new Set(
@@ -159,13 +131,7 @@ export function resolveHostedPwaBootModules(input: {
   readonly base: string;
   readonly entries: ReadonlyArray<HostedPwaBundleEntry>;
 }): ReadonlyArray<string> {
-  const entriesByFileName = new Map(input.entries.map((entry) => [entry.fileName, entry]));
-  const roots = input.entries
-    .filter((entry) => entry.isEntry || isPrecacheModule(entry.facadeModuleId, ["src/main.tsx"]))
-    .map((entry) => entry.fileName);
-  return immutableUrls(input.base, reachableFiles(entriesByFileName, roots, false))
-    .filter((url) => /\.m?js$/i.test(url))
-    .toSorted();
+  return immutableUrls(input.base, resolveBootAssets(input.entries).modules).toSorted();
 }
 
 export function resolveHostedPwaPrecache(input: {
@@ -174,6 +140,11 @@ export function resolveHostedPwaPrecache(input: {
   readonly offlineDocument: string;
   /** Defaults to {@link HOSTED_PWA_PRECACHE_MODULES}. */
   readonly precacheModules?: ReadonlyArray<string>;
+  /**
+   * Fonts or images the boot document paints with (the default UI face), which
+   * are installed up front although assets are otherwise runtime-cached.
+   */
+  readonly bootDocumentAssets?: ReadonlyArray<string>;
 }): HostedPwaPrecache {
   const entriesByFileName = new Map(input.entries.map((entry) => [entry.fileName, entry]));
   const entryFileNames = input.entries
@@ -183,21 +154,25 @@ export function resolveHostedPwaPrecache(input: {
   const precacheRoots = [
     ...entryFileNames,
     ...input.entries
-      .filter((entry) => isPrecacheModule(entry.facadeModuleId, precacheModules))
+      .filter((entry) => isChunkOfModule(entry.facadeModuleId, precacheModules))
       .map((entry) => entry.fileName),
   ];
+  const bootDocumentAssets = new Set(input.bootDocumentAssets ?? []);
   const offlineUrl = pathAtBase(input.base, "offline.html");
   const cacheableUrls = immutableUrls(
     input.base,
-    reachableFiles(entriesByFileName, entryFileNames, true),
+    reachableFiles(entriesByFileName, entryFileNames, { followDynamic: true }),
   ).toSorted();
   const cacheable = new Set(cacheableUrls);
+  const precachedFiles = [
+    ...reachableFiles(entriesByFileName, precacheRoots, { followDynamic: false }),
+  ].filter(
+    (fileName) => !RUNTIME_CACHED_ASSET_PATTERN.test(fileName) || bootDocumentAssets.has(fileName),
+  );
   const urls = [
     // Only what this build can load: a precache root outside the reachable
     // graph is not an asset of this app.
-    ...immutableUrls(input.base, reachableFiles(entriesByFileName, precacheRoots, false)).filter(
-      (url) => cacheable.has(url),
-    ),
+    ...immutableUrls(input.base, precachedFiles).filter((url) => cacheable.has(url)),
     offlineUrl,
   ].toSorted();
 
@@ -377,34 +352,6 @@ self.addEventListener("fetch", (event) => {
 `;
 }
 
-function entriesFromBundle(
-  bundle: Readonly<Record<string, { readonly fileName: string }>>,
-): ReadonlyArray<HostedPwaBundleEntry> {
-  return Object.values(bundle).map((entry) => {
-    const output = entry as typeof entry & {
-      readonly dynamicImports?: ReadonlyArray<string>;
-      readonly facadeModuleId?: string | null;
-      readonly imports?: ReadonlyArray<string>;
-      readonly isEntry?: boolean;
-      readonly referencedFiles?: ReadonlyArray<string>;
-      readonly viteMetadata?: {
-        readonly importedAssets?: ReadonlySet<string>;
-        readonly importedCss?: ReadonlySet<string>;
-      };
-    };
-    return {
-      dynamicImports: output.dynamicImports ?? [],
-      facadeModuleId: output.facadeModuleId ?? null,
-      fileName: output.fileName,
-      imports: output.imports ?? [],
-      isEntry: output.isEntry ?? false,
-      referencedFiles: output.referencedFiles ?? [],
-      importedAssets: [...(output.viteMetadata?.importedAssets ?? [])],
-      importedCss: [...(output.viteMetadata?.importedCss ?? [])],
-    };
-  });
-}
-
 export function createHostedPwaBuildPlugin(): Plugin {
   let publicBase = "/";
   return {
@@ -418,7 +365,7 @@ export function createHostedPwaBuildPlugin(): Plugin {
     generateBundle: {
       order: "post",
       handler(_outputOptions, bundle) {
-        const entries = entriesFromBundle(bundle);
+        const entries = bundleGraphEntries(bundle);
         const startUrl = normalizeBase(publicBase);
         const indexHtml = bundle["index.html"];
         const builtDocument =
@@ -445,10 +392,12 @@ export function createHostedPwaBuildPlugin(): Plugin {
               .filter((fileName) => IMMUTABLE_ASSET_PATTERN.test(fileName))
               .map((fileName) => pathAtBase(publicBase, fileName)),
           });
+        const bootFont = findBootFontAsset(bundle);
         const precache = resolveHostedPwaPrecache({
           base: publicBase,
           entries,
           offlineDocument,
+          ...(bootFont ? { bootDocumentAssets: [bootFont] } : {}),
         });
         this.emitFile({
           type: "asset",

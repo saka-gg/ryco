@@ -1,4 +1,6 @@
 import "~/index.css";
+// The feature stylesheet loads with its page or dialog chunk in the app.
+import "../pullRequests.css";
 
 import { useRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";

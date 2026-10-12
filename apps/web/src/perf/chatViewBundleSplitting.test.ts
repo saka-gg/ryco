@@ -28,6 +28,9 @@ describe("chat route first-frame graph", () => {
       // and the raw-HTML markdown stack (parse5), about 330 KiB raw.
       "./worktrees/LinkedWorktreeItemDialog",
       "./worktrees/NewWorktreeDialog",
+      "./chat/ExpandedImageDialog",
+      "./agent-control/AgentControlApprovals",
+      "./shell/phone/PhoneWorkSurface",
     ]) {
       expect(staticValueImports(chatView, specifier)).toEqual([]);
       expect(staticValueImports(branchToolbar, specifier)).toEqual([]);
@@ -37,6 +40,9 @@ describe("chat route first-frame graph", () => {
     expect(lazySurfaces).toContain('import("./ContextHandoffInspectionPanel")');
     expect(lazySurfaces).toContain('import("./ComputerBetaPreview")');
     expect(lazySurfaces).toContain('import("../PullRequestThreadDialog")');
+    expect(lazySurfaces).toContain('import("./ExpandedImageDialog")');
+    expect(lazySurfaces).toContain('import("../agent-control/AgentControlApprovals")');
+    expect(lazySurfaces).toContain('import("../shell/phone/PhoneWorkSurface")');
     // The worktree dialogs are split once for the chat and the sidebar.
     const worktreeDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
     expect(worktreeDialogs).toContain('import("./LinkedWorktreeItemDialog")');
