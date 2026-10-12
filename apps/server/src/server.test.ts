@@ -25,6 +25,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationProjectShell,
   type ServerChatsCapability,
+  type ServerSubscribeConfigInput,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderDriverKind,
@@ -3532,6 +3533,70 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.isFalse("models" in update);
         assert.isFalse("skills" in update);
         assert.isFalse("slashCommands" in update);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc subscribeServerConfig leaves out catalogs the client already holds",
+    () =>
+      Effect.gen(function* () {
+        const provider = (instanceId: string, slug: string) => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status: "ready" as const,
+          auth: { status: "authenticated" as const },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [{ slug, name: slug, isCustom: false, capabilities: null }],
+          slashCommands: [],
+          skills: [],
+        });
+        const codex = provider("codex", "gpt-5");
+        const claude = provider("claude", "opus");
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed([codex, claude]),
+              streamChanges: Stream.empty,
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const subscribe = (input: ServerSubscribeConfigInput) =>
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.subscribeServerConfig](input).pipe(
+                Stream.take(1),
+                Stream.runCollect,
+                Effect.map((events) => Array.from(events)[0]),
+              ),
+            ),
+          );
+        const first = yield* subscribe({ knownProviderCatalogs: [] });
+        assert.equal(first?.type, "snapshot");
+        if (first?.type !== "snapshot") return;
+        const codexDigest = first.providerCatalogs?.digests[codex.instanceId];
+        assert.isString(codexDigest);
+        assert.deepEqual(first.providerCatalogs?.omitted, []);
+
+        const second = yield* subscribe({ knownProviderCatalogs: [codexDigest!] });
+        if (second?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.deepEqual(second.providerCatalogs?.omitted.map(String), ["codex"]);
+        assert.deepEqual(second.config.providers[0]?.models, []);
+        assert.deepEqual(second.config.providers[1]?.models, claude.models);
+
+        // A client that names nothing gets the snapshot older clients get.
+        const legacy = yield* subscribe({});
+        if (legacy?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.isFalse("providerCatalogs" in legacy);
+        assert.deepEqual(legacy.config.providers[0]?.models, codex.models);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

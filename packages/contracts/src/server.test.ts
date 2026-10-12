@@ -214,4 +214,13 @@ describe("provider status deltas", () => {
     expect(decodeInput({})).toEqual({});
     expect(decodeInput({ providerStatuses: "delta" })).toEqual({ providerStatuses: "delta" });
   });
+
+  it("bounds the catalog digests a client may name", () => {
+    expect(() =>
+      decodeInput({ knownProviderCatalogs: Array.from({ length: 65 }, (_, index) => `d${index}`) }),
+    ).toThrow();
+    expect(decodeInput({ knownProviderCatalogs: ["digest-a"] })).toEqual({
+      knownProviderCatalogs: ["digest-a"],
+    });
+  });
 });

@@ -256,12 +256,17 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   // The primary environment's last-known shell is read while the auth and
   // descriptor requests are on the wire, so the sidebar can paint it before
   // the live snapshot arrives (see persistence/primaryShellCache).
+  const keepsLocalCaches = isPrimaryShellCacheEligible({
+    hostname: currentUrl.hostname,
+    desktop: isElectron,
+  });
   const primaryShellCache =
-    pathname !== "/pair" &&
-    !isNativeAuthorizationPath(pathname) &&
-    isPrimaryShellCacheEligible({ hostname: currentUrl.hostname, desktop: isElectron })
+    keepsLocalCaches && pathname !== "/pair" && !isNativeAuthorizationPath(pathname)
       ? loadPrimaryShellCache()
       : null;
+  // Provider catalogs this page already holds, so the config snapshot can
+  // leave them out (loaded here, ahead of the first config subscription).
+  const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
   const { ensurePrimaryEnvironmentReady, resolveInitialServerAuthGateState } =
     await import("../environments/primary");
   const [, authGateState] = await Promise.all([
@@ -271,15 +276,37 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
     startPrimaryConnectionEarly();
     if (primaryShellCache !== null) await restorePrimaryShellCache(primaryShellCache);
-  } else if (primaryShellCache !== null && authGateState.status !== "authenticated") {
+  } else if (authGateState.status !== "authenticated") {
     // The server no longer accepts this browser's session: what it cached goes.
-    void primaryShellCache.then((loaded) => loaded?.cache.clearPrimaryShellCache());
+    void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
+    void providerCatalogs?.then((clear) => clear?.());
   }
   markStartupPhase("root-before-load-ready");
   measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
   return {
     authGateState,
   };
+}
+
+/** Resolves to a function that drops the persisted catalogs, or `null` when unavailable. */
+function attachProviderCatalogPersistence(): Promise<(() => Promise<void>) | null> {
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  return Promise.all([
+    import("@ryco/client-runtime/rpc"),
+    import("../persistence/providerCatalogStore"),
+  ])
+    .then(async ([{ providerCatalogCache }, { createIndexedDbProviderCatalogStore }]) => {
+      const store = createIndexedDbProviderCatalogStore({
+        factory: indexedDB,
+        origin: window.location.origin,
+      });
+      await providerCatalogCache.attachStore(store);
+      return async () => {
+        providerCatalogCache.clear();
+        await store.clear().catch(() => undefined);
+      };
+    })
+    .catch(() => null);
 }
 
 type PrimaryShellCacheModule = typeof import("../persistence/primaryShellCache");

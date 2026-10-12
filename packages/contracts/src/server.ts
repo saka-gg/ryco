@@ -435,10 +435,28 @@ export const ServerConfigSettingsUpdatedPayload = Schema.Struct({
 });
 export type ServerConfigSettingsUpdatedPayload = typeof ServerConfigSettingsUpdatedPayload.Type;
 
+/** Identifies one provider's catalogs (models, skills, slash commands) by content. */
+export const ServerProviderCatalogDigest = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
+export type ServerProviderCatalogDigest = typeof ServerProviderCatalogDigest.Type;
+
+/**
+ * Catalog bookkeeping of a snapshot sent to a client that named the catalogs
+ * it holds (`knownProviderCatalogs`). Each provider's catalog digest, and the
+ * instances whose catalogs were left out (sent empty) because the client
+ * already holds them under that digest.
+ */
+export const ServerConfigProviderCatalogs = Schema.Struct({
+  digests: Schema.Record(ProviderInstanceId, ServerProviderCatalogDigest),
+  omitted: Schema.Array(ProviderInstanceId),
+});
+export type ServerConfigProviderCatalogs = typeof ServerConfigProviderCatalogs.Type;
+
 export const ServerConfigStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("snapshot"),
   config: ServerConfig,
+  /** Only for a client that sent `knownProviderCatalogs`; older servers never send it. */
+  providerCatalogs: Schema.optionalKey(ServerConfigProviderCatalogs),
 });
 export type ServerConfigStreamSnapshotEvent = typeof ServerConfigStreamSnapshotEvent.Type;
 
@@ -496,6 +514,14 @@ export const ServerSubscribeConfigInput = Schema.Struct({
    * every change. Older servers ignore the field and keep sending the list.
    */
   providerStatuses: Schema.optional(Schema.Literal("delta")),
+  /**
+   * Catalog digests the client already holds. The snapshot then leaves out
+   * (sends empty) every provider catalog with one of these digests and says
+   * which in `providerCatalogs`. Older servers ignore the field.
+   */
+  knownProviderCatalogs: Schema.optional(
+    Schema.Array(ServerProviderCatalogDigest).check(Schema.isMaxLength(64)),
+  ),
 });
 export type ServerSubscribeConfigInput = typeof ServerSubscribeConfigInput.Type;
 

@@ -6,6 +6,7 @@ import {
 } from "@ryco/client-runtime/state/workspace";
 
 import { selectEnvironmentState, useStore, type AppState } from "../store";
+import { openIndexedDbRecords } from "./indexedDbRecords";
 import {
   readWorkspaceMetadataSnapshot,
   workspaceMetadataToCachedShellSnapshot,
@@ -60,56 +61,17 @@ export function decodePrimaryShellCacheRecord(
   return record as PrimaryShellCacheRecord;
 }
 
-const request = <T>(operation: IDBRequest<T>): Promise<T> =>
-  new Promise((resolve, reject) => {
-    operation.addEventListener("success", () => resolve(operation.result), { once: true });
-    operation.addEventListener("error", () => reject(operation.error), { once: true });
-  });
-
 export function createIndexedDbPrimaryShellCacheStorage(
   factory: IDBFactory,
-  name = DATABASE_NAME,
+  databaseName = DATABASE_NAME,
 ): PrimaryShellCacheStorage {
-  let database: Promise<IDBDatabase> | undefined;
-  const open = () =>
-    (database ??= new Promise<IDBDatabase>((resolve, reject) => {
-      const operation = factory.open(name, 1);
-      operation.addEventListener(
-        "upgradeneeded",
-        () => operation.result.createObjectStore(STORE_NAME, { keyPath: "origin" }),
-        { once: true },
-      );
-      operation.addEventListener(
-        "success",
-        () => {
-          operation.result.addEventListener("versionchange", () => operation.result.close(), {
-            once: true,
-          });
-          resolve(operation.result);
-        },
-        { once: true },
-      );
-      operation.addEventListener("error", () => reject(operation.error), { once: true });
-      operation.addEventListener(
-        "blocked",
-        () => reject(new Error("Primary shell cache is unavailable.")),
-        { once: true },
-      );
-    }).catch((error: unknown) => {
-      database = undefined;
-      throw error;
-    }));
-  const store = async (mode: IDBTransactionMode) =>
-    (await open()).transaction(STORE_NAME, mode).objectStore(STORE_NAME);
-  return {
-    read: async (origin) => request((await store("readonly")).get(origin)),
-    write: async (record) => {
-      await request((await store("readwrite")).put(record));
-    },
-    remove: async (origin) => {
-      await request((await store("readwrite")).delete(origin));
-    },
-  };
+  const records = openIndexedDbRecords<PrimaryShellCacheRecord>({
+    factory,
+    databaseName,
+    storeName: STORE_NAME,
+    keyPath: "origin",
+  });
+  return { read: records.get, write: records.put, remove: records.delete };
 }
 
 let browserStorage: PrimaryShellCacheStorage | null = null;

@@ -31,6 +31,11 @@ import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
 import { createShellSnapshotAssembler } from "./shellSnapshotAssembly.ts";
+import {
+  providerCatalogCache,
+  restoreSnapshotCatalogs,
+  type ProviderCatalog,
+} from "./providerCatalogCache.ts";
 
 type RpcTag = keyof WsRpcProtocolClient & string;
 type RpcMethod<TTag extends RpcTag> = WsRpcProtocolClient[TTag];
@@ -929,13 +934,49 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         ),
       installOpinionatedPlugin: (input) =>
         transport.request((client) => client[WS_METHODS.serverInstallOpinionatedPlugin](input)),
-      subscribeConfig: (listener, options) =>
-        transport.subscribe(
-          // Provider changes as deltas; older servers ignore this and send the list.
-          (client) => client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }),
-          listener,
-          { ...options, tag: WS_METHODS.subscribeServerConfig },
-        ),
+      subscribeConfig: (listener, options) => {
+        let disposed = false;
+        let unsubscribeCurrent: () => void = () => undefined;
+        const start = (claimCatalogs: boolean) => {
+          let pinned: ReadonlyMap<string, ProviderCatalog> = new Map();
+          unsubscribeCurrent = transport.subscribe(
+            (client) => {
+              // Name the catalogs this page holds so the snapshot leaves them
+              // out, and take provider changes as deltas. Older servers ignore
+              // both and send everything.
+              pinned = claimCatalogs ? providerCatalogCache.pin() : new Map();
+              return client[WS_METHODS.subscribeServerConfig]({
+                providerStatuses: "delta",
+                ...(pinned.size === 0 ? {} : { knownProviderCatalogs: [...pinned.keys()] }),
+              });
+            },
+            (event) => {
+              if (event.type !== "snapshot") {
+                listener(event);
+                return;
+              }
+              const restored = restoreSnapshotCatalogs(event, pinned, providerCatalogCache);
+              if (restored !== null) {
+                listener(restored);
+                return;
+              }
+              // The server left out a catalog this subscription never named:
+              // start over without naming any.
+              void Promise.resolve().then(() => {
+                if (disposed) return;
+                unsubscribeCurrent();
+                start(false);
+              });
+            },
+            { ...options, tag: WS_METHODS.subscribeServerConfig },
+          );
+        };
+        start(true);
+        return () => {
+          disposed = true;
+          unsubscribeCurrent();
+        };
+      },
       subscribeLifecycle: (listener, options) =>
         transport.subscribe((client) => client[WS_METHODS.subscribeServerLifecycle]({}), listener, {
           ...options,

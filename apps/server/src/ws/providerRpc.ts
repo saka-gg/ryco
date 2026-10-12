@@ -26,6 +26,7 @@ import {
   listOpinionatedPlugins,
 } from "../opinionatedPlugins.ts";
 import { redactServerSettingsForClient } from "../serverSettings.ts";
+import { omitKnownProviderCatalogs } from "./providerCatalogs.ts";
 import { makeProviderStatusDeltaTracker } from "./providerStatusDelta.ts";
 import type { BootstrapCredentialChange } from "../auth/Services/BootstrapCredentialService.ts";
 import type { SessionCredentialChange } from "../auth/Services/SessionCredentialService.ts";
@@ -752,10 +753,16 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
             ),
           );
 
-          return Stream.concat(
-            Stream.make({ version: 1 as const, type: "snapshot" as const, config }),
-            liveUpdatesAfterRevalidation,
-          );
+          // A client that names the catalogs it holds gets them left out.
+          const snapshot: ServerConfigStreamEvent =
+            input.knownProviderCatalogs === undefined
+              ? { version: 1 as const, type: "snapshot" as const, config }
+              : {
+                  version: 1 as const,
+                  type: "snapshot" as const,
+                  ...omitKnownProviderCatalogs(config, input.knownProviderCatalogs),
+                };
+          return Stream.concat(Stream.make(snapshot), liveUpdatesAfterRevalidation);
         }),
         { "rpc.aggregate": "server" },
       ),

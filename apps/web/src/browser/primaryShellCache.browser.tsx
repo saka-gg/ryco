@@ -14,6 +14,7 @@ import {
   hydratePrimaryShellFromCache,
   readPrimaryShellCache,
 } from "../persistence/primaryShellCache";
+import { createIndexedDbProviderCatalogStore } from "../persistence/providerCatalogStore";
 import { selectEnvironmentState, useStore } from "../store";
 
 const environmentId = EnvironmentId.make("environment-browser-primary");
@@ -102,5 +103,30 @@ describe("primary shell cache in IndexedDB", () => {
       remove: () => Promise.reject(new Error("blocked")),
     };
     expect(await readPrimaryShellCache(broken, window.location.origin)).toBeNull();
+  });
+
+  it("persists provider catalogs per origin", async () => {
+    const name = `ryco-provider-catalogs-test-${crypto.randomUUID()}`;
+    databases.push(name);
+    const catalog = {
+      models: [{ slug: "gpt-5", name: "GPT-5", isCustom: false, capabilities: null }],
+      skills: [],
+      slashCommands: [],
+    };
+    const store = createIndexedDbProviderCatalogStore({
+      factory: indexedDB,
+      origin: window.location.origin,
+      databaseName: name,
+    });
+    await store.save([["digest-a", catalog]]);
+    expect(await store.load()).toEqual([["digest-a", catalog]]);
+    const otherOrigin = createIndexedDbProviderCatalogStore({
+      factory: indexedDB,
+      origin: "http://localhost:1",
+      databaseName: name,
+    });
+    expect(await otherOrigin.load()).toEqual([]);
+    await store.clear();
+    expect(await store.load()).toEqual([]);
   });
 });
