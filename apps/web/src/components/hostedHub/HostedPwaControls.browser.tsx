@@ -19,6 +19,7 @@ function lifecycle(snapshot: HostedPwaSnapshot): HostedPwaLifecycle {
     dismissInstall: vi.fn(),
     getSnapshot: () => snapshot,
     promptInstall: vi.fn(async () => undefined),
+    reloadApp: vi.fn(),
     start: vi.fn(async () => undefined),
     stop: vi.fn(),
     subscribe: () => () => undefined,
