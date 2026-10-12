@@ -9,6 +9,7 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
 import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./Sqlite.ts";
 
 const lockHolderSource = `
@@ -56,12 +57,43 @@ it.effect("waits out a concurrent writer instead of failing with SQLITE_BUSY", (
   );
 });
 
-it.effect("applies busy_timeout in the shared persistence setup", () =>
-  Effect.gen(function* () {
+it.effect("keeps the event loop running while it waits for another process's write lock", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "ryco-sqlite-busy-loop-"));
+  const dbPath = NodePath.join(tempDir, "state.sqlite");
+
+  return Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    const rows = yield* sql<{ readonly timeout: number }>`PRAGMA busy_timeout`;
-    assert.equal(rows[0]?.timeout, 5000);
-  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    yield* sql`CREATE TABLE busy_probe(id INTEGER PRIMARY KEY)`;
+    yield* spawnWriteLockHolder(dbPath, 600);
+    let lastTick = performance.now();
+    let maxGapMs = 0;
+    const interval = setInterval(() => {
+      const now = performance.now();
+      maxGapMs = Math.max(maxGapMs, now - lastTick);
+      lastTick = now;
+    }, 5);
+    const startedAt = performance.now();
+    yield* sql`INSERT INTO busy_probe(id) VALUES (${1})`.pipe(
+      Effect.ensuring(Effect.sync(() => clearInterval(interval))),
+    );
+    // The insert waited for the lock holder...
+    assert.isAbove(performance.now() - startedAt, 300);
+    // ...without one synchronous sleep: busy_timeout used to block the loop for the whole wait.
+    assert.isBelow(maxGapMs, 250);
+  }).pipe(
+    Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+it.effect(
+  "applies a short busy_timeout in the shared persistence setup (retried asynchronously)",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql<{ readonly timeout: number }>`PRAGMA busy_timeout`;
+      assert.equal(rows[0]?.timeout, MAIN_CONNECTION_BUSY_TIMEOUT_MS);
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
 );
 
 it.effect("applies the A/B-tested read tuning to file databases", () => {
