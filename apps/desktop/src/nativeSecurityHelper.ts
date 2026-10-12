@@ -135,52 +135,158 @@ export function resolveDesktopNativeSecurityHelperPath(input: {
     : Path.resolve(input.moduleDirectory, "../resources", HELPER_FILE_NAME);
 }
 
-/** One-request-per-process runner. No request, response, or stderr is ever logged. */
-export function createNativeSecurityHelperRunner(helperPath: string): NativeSecurityHelperRunner {
-  return async (request) =>
-    await new Promise<unknown>((resolve, reject) => {
-      const child = ChildProcess.spawn(helperPath, [], {
-        stdio: ["pipe", "pipe", "ignore"],
-        windowsHide: true,
-      });
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      let settled = false;
-      const settle = (error?: Error, value?: unknown) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (error) reject(error);
-        else resolve(value);
-      };
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-        settle(new DesktopNativeSecurityError("operation_failed"));
-      }, HELPER_TIMEOUT_MS);
-      timer.unref();
+/**
+ * How long an idle helper stays up for the next request. A Hub resume or an
+ * E2EE handshake signs several times in a burst; one helper serves the burst
+ * instead of a process launch (and Secure Enclave key reload) per signature.
+ */
+const HELPER_IDLE_MS = 2_000;
 
-      child.once("error", () => settle(new DesktopNativeSecurityError("hardware_unavailable")));
-      child.stdout.on("data", (chunk: Buffer) => {
-        bytes += chunk.byteLength;
-        if (bytes > HELPER_RESPONSE_BYTES) {
-          child.kill("SIGKILL");
-          settle(new DesktopNativeSecurityError("operation_failed"));
-          return;
+interface HelperSession {
+  readonly child: ChildProcess.ChildProcess;
+  buffer: Buffer;
+  pending: {
+    readonly resolve: (value: unknown) => void;
+    readonly reject: (error: Error) => void;
+  } | null;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  closed: boolean;
+}
+
+/**
+ * Runs helper requests one at a time over a helper process that answers one
+ * JSON line per request and exits when stdin closes. The process is kept for
+ * {@link HELPER_IDLE_MS} after its last answer; any timeout, oversized or
+ * malformed answer, or unexpected exit discards it, so a later request always
+ * starts from a fresh process. No request, response, or stderr is ever logged.
+ */
+export function createNativeSecurityHelperRunner(
+  helperPath: string,
+  options: {
+    readonly idleMs?: number;
+    readonly timeoutMs?: number;
+    readonly spawn?: typeof ChildProcess.spawn;
+  } = {},
+): NativeSecurityHelperRunner {
+  const idleMs = options.idleMs ?? HELPER_IDLE_MS;
+  const timeoutMs = options.timeoutMs ?? HELPER_TIMEOUT_MS;
+  const spawn = options.spawn ?? ChildProcess.spawn;
+  let session: HelperSession | null = null;
+  let queue: Promise<unknown> = Promise.resolve();
+
+  const discard = (current: HelperSession, error: Error) => {
+    if (current.closed) return;
+    current.closed = true;
+    if (session === current) session = null;
+    if (current.idleTimer) clearTimeout(current.idleTimer);
+    current.buffer = Buffer.alloc(0);
+    const pending = current.pending;
+    current.pending = null;
+    current.child.kill("SIGKILL");
+    pending?.reject(error);
+  };
+
+  const open = (): HelperSession => {
+    const child = spawn(helperPath, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+    const current: HelperSession = {
+      child,
+      buffer: Buffer.alloc(0),
+      pending: null,
+      idleTimer: null,
+      closed: false,
+    };
+    child.once("error", () => discard(current, new DesktopNativeSecurityError("hardware_unavailable")));
+    child.once("exit", () => discard(current, new DesktopNativeSecurityError("operation_failed")));
+    child.stdin?.on("error", () =>
+      discard(current, new DesktopNativeSecurityError("operation_failed")),
+    );
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (current.closed) return;
+      const pending = current.pending;
+      if (pending === null) {
+        // Output nobody asked for: the stream can no longer be trusted.
+        discard(current, new DesktopNativeSecurityError("operation_failed"));
+        return;
+      }
+      current.buffer = Buffer.concat([current.buffer, chunk]);
+      const newline = current.buffer.indexOf(0x0a);
+      if (newline < 0) {
+        if (current.buffer.byteLength > HELPER_RESPONSE_BYTES) {
+          discard(current, new DesktopNativeSecurityError("operation_failed"));
         }
-        chunks.push(Buffer.from(chunk));
-      });
-      child.once("close", (code) => {
-        if (settled) return;
-        if (code !== 0) return settle(new DesktopNativeSecurityError("operation_failed"));
-        try {
-          settle(undefined, JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
-        } catch {
-          settle(new DesktopNativeSecurityError("operation_failed"));
-        }
-      });
-      child.stdin.on("error", () => settle(new DesktopNativeSecurityError("operation_failed")));
-      child.stdin.end(`${JSON.stringify(request)}\n`);
+        return;
+      }
+      const line = current.buffer.subarray(0, newline);
+      const rest = current.buffer.subarray(newline + 1);
+      current.pending = null;
+      if (line.byteLength > HELPER_RESPONSE_BYTES || rest.byteLength > 0) {
+        discard(current, new DesktopNativeSecurityError("operation_failed"));
+        pending.reject(new DesktopNativeSecurityError("operation_failed"));
+        return;
+      }
+      current.buffer = Buffer.alloc(0);
+      let value: unknown;
+      try {
+        value = JSON.parse(line.toString("utf8")) as unknown;
+      } catch {
+        discard(current, new DesktopNativeSecurityError("operation_failed"));
+        pending.reject(new DesktopNativeSecurityError("operation_failed"));
+        return;
+      }
+      pending.resolve(value);
     });
+    return current;
+  };
+
+  /** Only a request in flight keeps the process alive; an idle helper never does. */
+  const holdOpen = (current: HelperSession, hold: boolean) => {
+    for (const handle of [current.child, current.child.stdin, current.child.stdout]) {
+      const refs = handle as { ref?: () => void; unref?: () => void } | null;
+      if (hold) refs?.ref?.();
+      else refs?.unref?.();
+    }
+  };
+
+  const request = (input: NativeSecurityRequest): Promise<unknown> =>
+    new Promise<unknown>((resolve, reject) => {
+      const current = session && !session.closed ? session : (session = open());
+      if (current.idleTimer) clearTimeout(current.idleTimer);
+      current.idleTimer = null;
+      holdOpen(current, true);
+      const timer = setTimeout(
+        () => discard(current, new DesktopNativeSecurityError("operation_failed")),
+        timeoutMs,
+      );
+      timer.unref();
+      current.pending = {
+        resolve: (value) => {
+          clearTimeout(timer);
+          holdOpen(current, false);
+          current.idleTimer = setTimeout(() => {
+            current.idleTimer = null;
+            if (current.closed || current.pending !== null) return;
+            // End of input: the helper answers nothing further and exits.
+            current.closed = true;
+            if (session === current) session = null;
+            current.child.stdin?.end();
+          }, idleMs);
+          current.idleTimer.unref();
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      };
+      current.child.stdin?.write(`${JSON.stringify(input)}\n`);
+    });
+
+  return (input) => {
+    // One request at a time per helper: answers are matched to requests by order.
+    const result = queue.then(() => request(input));
+    queue = result.catch(() => undefined);
+    return result;
+  };
 }
 
 export class DesktopNativeSecurityHelper {
