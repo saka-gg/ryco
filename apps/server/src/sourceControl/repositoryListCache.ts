@@ -18,7 +18,8 @@ interface Entry {
   readonly repository: string;
   /** Infinity while the read is in flight. */
   expiresAtMs: number;
-  readonly result: Deferred.Deferred<unknown, unknown>;
+  /** The read's outcome, typed by the caller that started it. */
+  readonly result: Deferred.Deferred<Exit.Exit<unknown, never>>;
 }
 
 export interface RepositoryListCache {
@@ -48,7 +49,8 @@ export function makeRepositoryListCache(options?: {
       const id = `${input.repository}\u0000${input.key}`;
       const hit = entries.get(id);
       if (hit && hit.expiresAtMs > nowMs()) {
-        return (Deferred.await(hit.result) as Effect.Effect<A, E>).pipe(
+        return Deferred.await(hit.result).pipe(
+          Effect.flatMap((exit) => exit as unknown as Exit.Exit<A, E>),
           // The read it joined was cancelled: read again.
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause) ? get(input) : Effect.failCause(cause),
@@ -59,7 +61,7 @@ export function makeRepositoryListCache(options?: {
       const entry: Entry = {
         repository: input.repository,
         expiresAtMs: Number.POSITIVE_INFINITY,
-        result: Deferred.makeUnsafe<unknown, unknown>(),
+        result: Deferred.makeUnsafe<Exit.Exit<unknown, never>>(),
       };
       entries.set(id, entry);
       while (entries.size > REPOSITORY_LIST_CACHE_CAPACITY) {
@@ -70,13 +72,15 @@ export function makeRepositoryListCache(options?: {
       const forget = Effect.sync(() => {
         if (entries.get(id) === entry) entries.delete(id);
       });
+      const publish = (exit: Exit.Exit<A, E>) =>
+        Deferred.succeed(entry.result, exit as unknown as Exit.Exit<unknown, never>);
       return input.load.pipe(
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.sync(() => {
                 entry.expiresAtMs = nowMs() + ttlMs;
-              }).pipe(Effect.andThen(Deferred.done(entry.result, exit)))
-            : forget.pipe(Effect.andThen(Deferred.done(entry.result, exit))),
+              }).pipe(Effect.andThen(publish(exit)))
+            : forget.pipe(Effect.andThen(publish(exit))),
         ),
       );
     });

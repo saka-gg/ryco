@@ -4956,39 +4956,42 @@ export default function ChatView(props: ChatViewProps) {
     selectProviderSessionPrewarmSupported,
   );
   const prewarmProviderSessionRef = useRef<() => void>(() => undefined);
-  prewarmProviderSessionRef.current = () => {
-    const thread = activeThread;
-    if (
-      !thread ||
-      isPendingChat ||
-      !dispatchCapability.allowed ||
-      hostedDraftTarget.pending !== null ||
-      (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
-    )
-      return;
-    const isFirstMessage = !isServerThread || thread.messages.length === 0;
-    const plan = resolveChatSendWorktreePlan({
-      isServerThread,
-      isFirstMessage,
-      threadWorktreePath: thread.worktreePath,
-      activeThreadBranch,
-      currentGitRefName: gitStatusQuery.data?.refName ?? null,
-      sendEnvMode,
-    });
-    if (plan.shouldCreateWorktree || plan.shouldMaterializeLegacyBranchWorktree) return;
-    const modelSelection = readComposer()?.getSendContext().selectedModelSelection;
-    requestProviderSessionPrewarm({
-      api: readEnvironmentApi(environmentId),
-      supported: providerSessionPrewarmSupported,
-      request: {
-        threadId: thread.id,
-        ...(isServerThread ? {} : { projectId: thread.projectId }),
-        ...(modelSelection ? { modelSelection } : {}),
-        runtimeMode,
-        tokenMode,
-      },
-    });
-  };
+  // Refreshed after each commit, never during render.
+  useLayoutEffect(() => {
+    prewarmProviderSessionRef.current = () => {
+      const thread = activeThread;
+      if (
+        !thread ||
+        isPendingChat ||
+        !dispatchCapability.allowed ||
+        hostedDraftTarget.pending !== null ||
+        (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
+      )
+        return;
+      const isFirstMessage = !isServerThread || thread.messages.length === 0;
+      const plan = resolveChatSendWorktreePlan({
+        isServerThread,
+        isFirstMessage,
+        threadWorktreePath: thread.worktreePath,
+        activeThreadBranch,
+        currentGitRefName: gitStatusQuery.data?.refName ?? null,
+        sendEnvMode,
+      });
+      if (plan.shouldCreateWorktree || plan.shouldMaterializeLegacyBranchWorktree) return;
+      const modelSelection = readComposer()?.getSendContext().selectedModelSelection;
+      requestProviderSessionPrewarm({
+        api: readEnvironmentApi(environmentId),
+        supported: providerSessionPrewarmSupported,
+        request: {
+          threadId: thread.id,
+          ...(isServerThread ? {} : { projectId: thread.projectId }),
+          ...(modelSelection ? { modelSelection } : {}),
+          runtimeMode,
+          tokenMode,
+        },
+      });
+    };
+  });
   const onComposerIntent = useCallback(() => prewarmProviderSessionRef.current(), []);
   // "Fork from here": desktop and tablet only (the frozen phone tier never
   // offers it), on server threads of machines that advertise `threadFork`.

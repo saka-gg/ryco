@@ -10,9 +10,9 @@ import {
 const threadId = "thread-1" as ThreadId;
 
 function makeApi() {
-  const prewarmProviderSession = vi.fn((_: ProviderSessionPrewarmInput) =>
-    Promise.resolve({ status: "started" as const }),
-  );
+  const prewarmProviderSession = vi.fn<
+    (input: ProviderSessionPrewarmInput) => Promise<{ status: "started" }>
+  >(() => Promise.resolve({ status: "started" as const }));
   return {
     api: { server: { prewarmProviderSession } } as unknown as EnvironmentApi,
     prewarmProviderSession,
