@@ -15,8 +15,10 @@ import type { NativeE2eePlatformService } from "../platform/index.ts";
 import { encodeBase64Url } from "../relay/base64url.ts";
 import { HostedHubApiError, type HostedHubApi } from "./api.ts";
 import {
+  awaitNativeE2eeEnrollmentSettled,
   createNativeE2eeEnrollmentCoordinator,
   NativeE2eeEnrollmentError,
+  type NativeE2eeEnrollmentState,
 } from "./nativeE2eeEnrollment.ts";
 
 const NOW = 1_788_451_200_000;
@@ -490,5 +492,64 @@ describe("native E2EE enrollment recovery", () => {
 
     expect(lifecycle.timers.size).toBe(0);
     expect(coordinator.getState().status).toBe("idle");
+  });
+});
+
+describe("awaitNativeE2eeEnrollmentSettled", () => {
+  const timers = {
+    setTimeout: (callback: () => void, delayMs: number) => globalThis.setTimeout(callback, delayMs),
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => globalThis.clearTimeout(timer),
+  };
+  const state = (status: NativeE2eeEnrollmentState["status"]): NativeE2eeEnrollmentState => ({
+    status,
+    generation: 1,
+    ready: null,
+    errorCode: null,
+  });
+
+  it("answers a settled enrollment at once and an in-progress one at its next settled state", async () => {
+    let current = state("unavailable");
+    const listeners = new Set<() => void>();
+    const coordinator = {
+      getState: () => current,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    await expect(
+      awaitNativeE2eeEnrollmentSettled(coordinator, { timeoutMs: 1_000, timers }),
+    ).resolves.toBe(current);
+
+    current = state("securing");
+    const waiting = awaitNativeE2eeEnrollmentSettled(coordinator, { timeoutMs: 1_000, timers });
+    current = state("retrying");
+    for (const listener of listeners) listener();
+    current = state("revoked");
+    for (const listener of listeners) listener();
+    await expect(waiting).resolves.toMatchObject({ status: "revoked" });
+    expect(listeners.size).toBe(0);
+  });
+
+  it("gives up at its bound with the state it then has", async () => {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Set<() => void>();
+      const waiting = awaitNativeE2eeEnrollmentSettled(
+        {
+          getState: () => state("idle"),
+          subscribe: (listener) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+        },
+        { timeoutMs: 1_000, timers },
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(waiting).resolves.toMatchObject({ status: "idle" });
+      expect(listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
