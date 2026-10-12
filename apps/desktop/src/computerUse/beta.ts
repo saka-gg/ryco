@@ -5,7 +5,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, existsSync } from "node:fs";
 import { app, dialog, powerMonitor, shell, type BrowserWindow } from "electron";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   ComputerEvent,
   ComputerTurnIntent,

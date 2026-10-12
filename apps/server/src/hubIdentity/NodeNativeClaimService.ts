@@ -19,21 +19,8 @@ import type {
 } from "./LocalHubIdentityState.ts";
 import type { NodeSigningIdentity, NodeSigningPublicDescriptor } from "./NodeSigningIdentity.ts";
 
-export type NodeNativeClaimErrorCode =
-  | "native_node_claim_unavailable"
-  | "native_node_claim_rejected"
-  | "native_node_claim_conflict"
-  | "native_node_claim_expired";
-
-export class NodeNativeClaimError extends Error {
-  readonly code: NodeNativeClaimErrorCode;
-
-  constructor(code: NodeNativeClaimErrorCode) {
-    super("Automatic native node claim failed.");
-    this.name = "NodeNativeClaimError";
-    this.code = code;
-  }
-}
+export { type NodeNativeClaimErrorCode, NodeNativeClaimError } from "./NodeNativeClaimError.ts";
+import { type NodeNativeClaimErrorCode, NodeNativeClaimError } from "./NodeNativeClaimError.ts";
 
 export interface NodeNativeClaimDescriptor extends NodeSigningPublicDescriptor {
   readonly state: "prepared" | "active";

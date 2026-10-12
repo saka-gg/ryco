@@ -16,7 +16,7 @@ import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts"
 import {
   NodeNativeClaimError,
   type NodeNativeClaimErrorCode,
-} from "../hubIdentity/NodeNativeClaimService.ts";
+} from "../hubIdentity/NodeNativeClaimError.ts";
 import {
   DESKTOP_LOCAL_NO_STORE_HEADERS,
   DesktopLocalControlRefused,
@@ -24,7 +24,7 @@ import {
   requireDesktopLocalControl,
 } from "./localIntroductionHttp.ts";
 import { resolveHubEnrollmentLabel } from "./HubEnrollmentLabel.ts";
-import { HubConnectorService } from "./HubConnectorLive.ts";
+import { awaitHubConnector } from "./HubConnectorService.ts";
 
 class NativeClaimOperationFailed extends Data.TaggedError("NativeClaimOperationFailed")<{
   readonly cause: unknown;
@@ -86,7 +86,7 @@ export const desktopNativeNodeClaimDescriptorRouteLayer = HttpRouter.add(
     const hub = activeHubConfig(config);
     const environment = yield* ServerEnvironment;
     const environmentDescriptor = yield* environment.getDescriptor;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const descriptor = yield* Effect.tryPromise({
       try: () => connector.nativeNodeClaim.prepare(hub.origin),
       catch: (cause) => new NativeClaimOperationFailed({ cause }),
@@ -125,7 +125,7 @@ export const desktopNativeNodeClaimSignRouteLayer = HttpRouter.add(
       Effect.mapError(() => new DesktopLocalControlRefused({ reason: "body" })),
     );
     const hub = activeHubConfig(yield* ServerConfig);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const signature = yield* Effect.tryPromise({
       try: () =>
         connector.nativeNodeClaim.sign({
@@ -162,7 +162,7 @@ export const desktopNativeNodeClaimCommitRouteLayer = HttpRouter.add(
       machineLabel: environmentDescriptor.label,
       environmentId: body.claim.environmentId,
     });
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     yield* Effect.tryPromise({
       try: () =>
         connector.nativeNodeClaim.commit({

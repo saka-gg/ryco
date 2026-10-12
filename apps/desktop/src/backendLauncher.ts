@@ -53,6 +53,20 @@ export function desktopBackendSpawnArgs(input: {
   ];
 }
 
+/**
+ * libuv threadpool size for the backend when the user's environment sets none.
+ *
+ * Node's default pool has 4 threads, shared by every async `fs` call, `dns.lookup`,
+ * and async crypto/zlib work. The backend fans fs work out across project roots,
+ * provider probes and git, and a few calls stuck on a slow volume (File Provider,
+ * network or cloud-synced folders) or a slow resolver used to occupy all four, so
+ * every other async fs call — including startup — queued behind them. 16 tolerates
+ * a dozen stuck calls with the default 4 still free. The pool only does blocking
+ * I/O and short CPU jobs, idle threads cost little (stacks are reserved, not
+ * resident), and going much higher only adds contention for CPU-bound pool work.
+ */
+export const DESKTOP_BACKEND_UV_THREADPOOL_SIZE = "16";
+
 export function createDesktopBackendChildEnv(
   base: NodeJS.ProcessEnv,
   input: {
@@ -83,6 +97,9 @@ export function createDesktopBackendChildEnv(
   // shell exports it, the server's Config.url parser throws and the backend
   // exits before HTTP listen, causing the desktop to spin in a restart loop.
   deleteEnv(env, "VITE_DEV_SERVER_URL");
+  // Read by libuv when the child's pool starts. A value the user set wins; the
+  // child's own children inherit it, which is harmless for them.
+  if (!env.UV_THREADPOOL_SIZE?.trim()) env.UV_THREADPOOL_SIZE = DESKTOP_BACKEND_UV_THREADPOOL_SIZE;
   if (input.isPackaged && input.platform === "darwin") {
     env.RYCO_DEVICE_HELPER_SOURCE_DIR = Path.join(input.resourcesPath, "device-helper");
   }

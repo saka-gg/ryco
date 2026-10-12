@@ -48,7 +48,10 @@ import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
-import { HubConnectorLive } from "./hubConnector/HubConnectorLive.ts";
+import {
+  HubConnectorDeferredLive,
+  HubConnectorStart,
+} from "./hubConnector/HubConnectorDeferred.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
@@ -68,11 +71,7 @@ import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReap
 import { OpenCodeRuntimeLive } from "./provider/opencodeRuntime.ts";
 import { CheckpointDiffQueryLive } from "./checkpointing/Layers/CheckpointDiffQuery.ts";
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
-import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
-import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
-import * as GitHubCli from "./sourceControl/GitHubCli.ts";
-import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ThreadPriorityCandidateQueryLive } from "./threadPriority/ThreadPriorityCandidateQuery.ts";
 import { ThreadPriorityCoordinatorLive } from "./threadPriority/ThreadPriorityCoordinator.ts";
@@ -403,15 +402,7 @@ const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
 );
 
 const SourceControlProviderRegistryLayerLive = SourceControlProviderRegistry.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      AzureDevOpsCli.layer,
-      BitbucketApi.layer,
-      ForgejoApi.layer,
-      GitHubCli.layer,
-      GitLabCli.layer,
-    ),
-  ),
+  Layer.provide(ForgejoApi.layer),
   Layer.provideMerge(AtlassianConnectionRepositoryLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provide(ServerSecretStoreLive),
@@ -708,10 +699,14 @@ export const makeServerLayer = Layer.unwrap(
       Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup;
+        const hubConnector = yield* HubConnectorStart;
         const port = boundTcpPort(server.address);
         if (port !== null) writeDesktopLifecycleFrame({ type: "http-serving", port });
         recordDesktopStartupPhase("http-serving");
         yield* startup.markHttpServing;
+        // Process lock and key custody: built now that handlers are attached;
+        // Hub routes wait for it rather than the whole server.
+        yield* hubConnector.start;
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(
@@ -794,7 +789,7 @@ export const makeServerLayer = Layer.unwrap(
         Layer.provide(
           HttpRouter.serve(makeRoutesLayer, {
             disableLogger: !config.logWebSocketEvents,
-          }).pipe(Layer.provide(HubConnectorLive)),
+          }).pipe(Layer.provideMerge(HubConnectorDeferredLive)),
         ),
       ),
       runtimeStateLayer,

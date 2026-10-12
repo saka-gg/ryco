@@ -7,7 +7,7 @@ import {
   type ClientSettings,
   type PersistedSavedEnvironmentRecord,
 } from "@ryco/contracts";
-import { Predicate } from "effect";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 interface ClientSettingsDocument {

@@ -1,4 +1,3 @@
-import { withComputerBetaTools } from "../Mcp/computerBetaTools.ts";
 import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
@@ -151,15 +150,21 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     policy,
     registry,
   });
+  // The native Computer stack (CUA backend, UI tree, browser tools) is only
+  // loaded when Desktop hands over a native bridge; other servers never
+  // evaluate it.
   const beta =
     Option.isSome(config) && config.value.computerUseBridge?.native
-      ? withComputerBetaTools(legacyComputerTools, {
-          config: config.value.computerUseBridge,
-          stateDir: config.value.stateDir,
-          registry,
-          policy,
-          projections,
-        })
+      ? (yield* Effect.promise(() => import("../Mcp/computerBetaTools.ts"))).withComputerBetaTools(
+          legacyComputerTools,
+          {
+            config: config.value.computerUseBridge,
+            stateDir: config.value.stateDir,
+            registry,
+            policy,
+            projections,
+          },
+        )
       : undefined;
   if (beta) yield* Effect.addFinalizer(() => Effect.promise(() => beta.dispose()));
   const tools = withCompleteAgentControlCatalog(beta?.tools ?? legacyComputerTools);

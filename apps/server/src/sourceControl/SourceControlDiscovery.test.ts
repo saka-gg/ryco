@@ -14,14 +14,14 @@ import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlDiscovery from "./SourceControlDiscovery.ts";
-import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+import { layerFromClientServices } from "./sourceControlProviderRegistryTestLayer.ts";
 
 const sourceControlProviderRegistryTestLayer = (input: {
   readonly bitbucket: Partial<BitbucketApi.BitbucketApiShape>;
   readonly forgejo?: Partial<ForgejoApi.ForgejoApiShape>;
   readonly process: Partial<VcsProcess.VcsProcessShape>;
 }) =>
-  SourceControlProviderRegistry.layer.pipe(
+  layerFromClientServices.pipe(
     Layer.provide(
       Layer.mergeAll(
         ServerConfig.layerTest(process.cwd(), {

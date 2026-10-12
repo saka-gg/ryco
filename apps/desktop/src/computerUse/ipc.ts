@@ -1,6 +1,6 @@
 import { ipcMain, type BrowserWindow } from "electron";
 import { ComputerBrowser } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import type { DesktopComputerUseRuntime } from "./runtime.ts";
 
 export function registerComputerUseIpc(

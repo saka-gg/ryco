@@ -168,7 +168,7 @@ import {
 } from "./atlassian/JiraWorkItemService.ts";
 import { TextGeneration, type TextGenerationShape } from "./textGeneration/TextGeneration.ts";
 import {
-  HubConnectorService,
+  hubConnectorReadyLayer,
   type HubConnectorServiceShape,
 } from "./hubConnector/HubConnectorLive.ts";
 import {
@@ -721,7 +721,7 @@ const buildAppUnderTest = (options?: {
     }).pipe(
       Layer.provide(
         Layer.mergeAll(
-          Layer.succeed(HubConnectorService, {
+          hubConnectorReadyLayer({
             connectorEnabled: false,
             status: () => ({
               state: "disabled",

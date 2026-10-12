@@ -16,8 +16,8 @@ import { ServerConfig } from "../config.ts";
 import {
   NodeLocalIntroductionError,
   type NodeLocalIntroductionErrorCode,
-} from "../hubIdentity/NodeLocalIntroductionService.ts";
-import { HubConnectorService } from "./HubConnectorLive.ts";
+} from "../hubIdentity/NodeLocalIntroductionError.ts";
+import { awaitHubConnector } from "./HubConnectorService.ts";
 
 const CONTROL_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const LOOPBACK_BIND_HOSTS = new Set(["127.0.0.1", "::1", "[::1]", "localhost"]);
@@ -162,7 +162,7 @@ export const desktopLocalIntroductionDescriptorRouteLayer = HttpRouter.add(
   LOCAL_INTRODUCTION_DESCRIPTOR_PATH,
   Effect.gen(function* () {
     yield* requireDesktopLocalControl;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const descriptor = yield* Effect.tryPromise({
       try: () => connector.localIntroduction.descriptor(),
       catch: (cause) => new LocalIntroductionOperationFailed({ cause }),
@@ -194,7 +194,7 @@ export const desktopLocalIntroductionCompleteRouteLayer = HttpRouter.add(
     const body = yield* HttpServerRequest.schemaBodyJson(LocalIntroductionCompleteRequest).pipe(
       Effect.mapError(() => new DesktopLocalControlRefused({ reason: "body" })),
     );
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () =>
         connector.localIntroduction.complete({

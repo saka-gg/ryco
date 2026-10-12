@@ -20,7 +20,7 @@ import {
   LocalIntroductionErrorResponse,
   type LocalIntroductionCompleteRequest,
 } from "@ryco/contracts/local-introduction";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 const RESPONSE_MAX_BYTES = 32 * 1024;
 

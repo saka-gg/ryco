@@ -18,7 +18,7 @@ import {
   desktopHubReachabilityRouteLayer,
   hubConnectorIsReachable,
 } from "./desktopHubReachabilityHttp.ts";
-import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorLive.ts";
+import { hubConnectorReadyLayer, type HubConnectorServiceShape } from "./HubConnectorService.ts";
 import {
   stubE2eeOperator,
   stubLocalIntroductionService,
@@ -112,7 +112,7 @@ const withRoute = <A, E, R>(
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
-      Layer.provide(Layer.succeed(HubConnectorService, service)),
+      Layer.provide(hubConnectorReadyLayer(service)),
       Layer.provide(Layer.succeed(ServerConfig, config)),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),

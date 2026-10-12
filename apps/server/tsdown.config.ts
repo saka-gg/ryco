@@ -6,6 +6,27 @@ import { isBundledPatchedPackageImport } from "./scripts/patchedPackages.ts";
 
 const buildSourcemap = parseOptInSourcemapEnv(readEnv("RYCO_SERVER_SOURCEMAP"));
 
+/**
+ * Pure-JS runtime dependencies compiled into the server's own chunks. As
+ * externals Node resolved, stat'ed and compiled them file by file at every boot
+ * (effect alone is several hundred modules); bundled, only the code the server
+ * reaches ships, in a few chunks, and the `patchedDependencies` this repository
+ * applies to them travel with the build. Native addons and provider SDKs stay
+ * external (sharp, node-pty, @github/keytar, the agent SDKs), and nothing that
+ * stays external may depend on these packages, or it would load a second copy.
+ */
+const BUNDLED_RUNTIME_PACKAGES = [
+  "effect",
+  "@effect/platform-node",
+  "@effect/platform-node-shared",
+  "@effect/platform-bun",
+  "@effect/sql-sqlite-bun",
+  "mime",
+];
+
+const isBundledRuntimePackage = (id: string) =>
+  BUNDLED_RUNTIME_PACKAGES.some((name) => id === name || id.startsWith(`${name}/`));
+
 export default defineConfig({
   entry: ["src/bin.ts"],
   tsconfig: "tsconfig.build.json",
@@ -19,7 +40,12 @@ export default defineConfig({
   clean: true,
   deps: {
     alwaysBundle: (id) =>
-      id.startsWith("@ryco/") || id.startsWith("effect-acp") || isBundledPatchedPackageImport(id),
+      id.startsWith("@ryco/") ||
+      id.startsWith("effect-acp") ||
+      isBundledRuntimePackage(id) ||
+      isBundledPatchedPackageImport(id),
+    // Bun's own modules (the Bun-runtime SQLite client) exist only under Bun.
+    neverBundle: [/^bun:/],
     onlyBundle: false,
   },
   outputOptions: {
