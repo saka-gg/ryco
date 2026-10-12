@@ -1162,12 +1162,9 @@ function agentSpawnGroupKey(entry: DerivedWorkLogEntry): string {
   if (entry.isWorkflowCoordinator) {
     return `wf:${taskId}`;
   }
-  // No turn id means no batch signal at all: fall back to one group per
-  // task. Unrelated turn-less spawns (separate fleets whose rows lost their
-  // turn) must not collapse into one immortal "direct:no-turn" CTA
-  // accumulating every agent the thread ever ran. Adapters stamp spawn
-  // turns (Codex spawnTurnId; Claude rows ride real turns), so this path
-  // is defensive.
+  // No turn id means no batch signal: the caller joins it to the fleet still
+  // in flight, or starts a per-task group. Adapters stamp spawn turns (Codex
+  // spawnTurnId, Claude launch turn), so this path covers older history.
   return entry.turnId ? `direct:${entry.turnId}` : `direct:task:${taskId}`;
 }
 
@@ -1187,6 +1184,12 @@ function collapseDerivedWorkLogEntries(
   // own turn would splinter one batch into a stream of "Kicked off N
   // subagents" rows.
   const groupKeyByTaskId = new Map<string, string>();
+  // Unsettled members per direct-spawn group, newest group last. A turn-less
+  // spawn joins the newest group still in flight: it belongs to the running
+  // fleet, and one row per agent turns the chat into a wall of "Kicked off 1
+  // subagent". Settled fleets never absorb later spawns, so no single CTA
+  // accumulates every agent the thread ever ran.
+  const liveDirectMembersByGroup = new Map<string, Set<string>>();
   // A tool call's open row by its call id. Calls a provider runs in parallel
   // interleave their lifecycle events, so a call's next event is not always
   // next to its row; without this each would leave a stuck "running" copy.
@@ -1206,9 +1209,23 @@ function collapseDerivedWorkLogEntries(
         entry.activityKind === "task.completed");
     if (isTaskRow && entry.taskId !== undefined) {
       const rememberedKey = groupKeyByTaskId.get(entry.taskId);
-      const groupKey = rememberedKey ?? agentSpawnGroupKey(entry);
+      let groupKey = rememberedKey ?? agentSpawnGroupKey(entry);
       if (rememberedKey === undefined) {
+        // A completion for an agent never seen starting is no evidence it
+        // belonged to the running fleet.
+        if (groupKey.startsWith("direct:task:") && entry.activityKind !== "task.completed") {
+          groupKey = newestLiveGroupKey(liveDirectMembersByGroup) ?? groupKey;
+        }
         groupKeyByTaskId.set(entry.taskId, groupKey);
+      }
+      if (groupKey.startsWith("direct:")) {
+        let liveMembers = liveDirectMembersByGroup.get(groupKey);
+        if (!liveMembers) {
+          liveMembers = new Set();
+          liveDirectMembersByGroup.set(groupKey, liveMembers);
+        }
+        if (entry.activityKind === "task.completed") liveMembers.delete(entry.taskId);
+        else if (rememberedKey === undefined) liveMembers.add(entry.taskId);
       }
       const workflowId = groupKey.startsWith("wf:") ? groupKey.slice(3) : null;
       const existingIndex = spawnRowIndex.get(groupKey);
@@ -1269,6 +1286,14 @@ function collapseDerivedWorkLogEntries(
     trackToolRow(collapsed.length - 1);
   }
   return collapsed;
+}
+
+function newestLiveGroupKey(liveMembersByGroup: ReadonlyMap<string, ReadonlySet<string>>) {
+  let newest: string | undefined;
+  for (const [groupKey, liveMembers] of liveMembersByGroup) {
+    if (liveMembers.size > 0) newest = groupKey;
+  }
+  return newest;
 }
 
 function shouldCollapseToolLifecycleEntries(

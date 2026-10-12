@@ -1199,6 +1199,7 @@ export function deriveMessagesTimelineRows(input: {
         groupedEntries.push(nextEntry.entry);
         cursor += 1;
       }
+      mergeDirectSpawnEntries(groupedEntries);
       if (groupedEntries.length < MIN_COLLAPSIBLE_WORK_LOG_ENTRIES) {
         nextRows.push({
           kind: "work",
@@ -1601,6 +1602,39 @@ function areTurnHtmlRendersUnchanged(
   });
 }
 
+/**
+ * At most one direct-spawn CTA per work block. Agents spawned across turns
+ * (or reported without a turn) land as separate batches; side by side they
+ * read as a wall of "Kicked off 1 subagent". The first row anchors the merged
+ * batch; the Agents panel and composer chip carry the per-agent detail.
+ * Workflow CTAs stay separate: each names its own run.
+ */
+function mergeDirectSpawnEntries(entries: WorkLogEntry[]): void {
+  let anchorIndex = -1;
+  let agentTaskIds: string[] | null = null;
+  let writeIndex = 0;
+  for (const entry of entries) {
+    if (entry.agentSpawn && entry.agentSpawn.workflowId === null) {
+      if (anchorIndex === -1) {
+        anchorIndex = writeIndex;
+      } else {
+        agentTaskIds ??= [...entries[anchorIndex]!.agentSpawn!.agentTaskIds];
+        for (const taskId of entry.agentSpawn.agentTaskIds) {
+          if (!agentTaskIds.includes(taskId)) agentTaskIds.push(taskId);
+        }
+        continue;
+      }
+    }
+    entries[writeIndex] = entry;
+    writeIndex += 1;
+  }
+  entries.length = writeIndex;
+  if (agentTaskIds) {
+    const anchor = entries[anchorIndex]!;
+    entries[anchorIndex] = { ...anchor, agentSpawn: { workflowId: null, agentTaskIds } };
+  }
+}
+
 function areWorkRowsUnchanged(
   previous: Extract<MessagesTimelineRow, { kind: "work" }>,
   next: Extract<MessagesTimelineRow, { kind: "work" }>,
@@ -1658,7 +1692,21 @@ function areWorkLogEntriesUnchanged(previous: WorkLogEntry, next: WorkLogEntry):
       previous.output === next.output &&
       previous.exitCode === next.exitCode &&
       previous.startedAt === next.startedAt &&
-      previous.lastActivityAt === next.lastActivityAt)
+      previous.lastActivityAt === next.lastActivityAt &&
+      areAgentSpawnsUnchanged(previous.agentSpawn, next.agentSpawn))
+  );
+}
+
+function areAgentSpawnsUnchanged(
+  previous: WorkLogEntry["agentSpawn"],
+  next: WorkLogEntry["agentSpawn"],
+): boolean {
+  return (
+    previous === next ||
+    (previous !== undefined &&
+      next !== undefined &&
+      previous.workflowId === next.workflowId &&
+      areStringArraysUnchanged(previous.agentTaskIds, next.agentTaskIds))
   );
 }
 

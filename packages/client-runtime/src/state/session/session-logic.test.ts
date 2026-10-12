@@ -31,6 +31,7 @@ import {
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
+  type WorkLogEntry,
 } from "./session-logic.ts";
 
 function makeActivity(overrides: {
@@ -1834,6 +1835,75 @@ describe("deriveWorkLogEntries", () => {
     const [entry] = deriveWorkLogEntries(activities, undefined);
     expect(entry?.output).toBeUndefined();
     expect(entry?.exitCode).toBeUndefined();
+  });
+});
+
+describe("deriveWorkLogEntries agent spawn batches", () => {
+  const agentRow = (
+    id: string,
+    kind: "task.started" | "task.progress" | "task.completed",
+    taskId: string,
+    createdAt: string,
+    turnId?: string,
+  ) =>
+    makeActivity({
+      id,
+      kind,
+      createdAt,
+      summary: kind,
+      tone: "info",
+      payload: { taskId, taskType: "local_agent", agentKind: "agent" },
+      ...(turnId ? { turnId } : {}),
+    });
+  const spawnRows = (entries: ReadonlyArray<WorkLogEntry>) =>
+    entries.filter((entry) => entry.agentSpawn !== undefined);
+
+  it("batches turn-less spawns into the fleet still in flight", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        agentRow("a-start", "task.started", "a", "2026-02-23T00:00:01.000Z"),
+        agentRow("b-start", "task.started", "b", "2026-02-23T00:00:02.000Z"),
+        agentRow("a-done", "task.completed", "a", "2026-02-23T00:00:03.000Z", "wake-1"),
+        agentRow("c-start", "task.started", "c", "2026-02-23T00:00:04.000Z"),
+      ],
+      undefined,
+    );
+
+    expect(spawnRows(entries).map((entry) => entry.agentSpawn?.agentTaskIds)).toEqual([
+      ["a", "b", "c"],
+    ]);
+  });
+
+  it("starts a new batch once the previous turn-less fleet settled", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        agentRow("a-start", "task.started", "a", "2026-02-23T00:00:01.000Z"),
+        agentRow("a-done", "task.completed", "a", "2026-02-23T00:00:02.000Z"),
+        agentRow("b-start", "task.started", "b", "2026-02-23T00:00:03.000Z"),
+      ],
+      undefined,
+    );
+
+    expect(spawnRows(entries).map((entry) => entry.agentSpawn?.agentTaskIds)).toEqual([
+      ["a"],
+      ["b"],
+    ]);
+  });
+
+  it("keeps a turn's spawns in that turn's batch", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        agentRow("a-start", "task.started", "a", "2026-02-23T00:00:01.000Z", "turn-1"),
+        agentRow("b-start", "task.started", "b", "2026-02-23T00:00:02.000Z", "turn-2"),
+        agentRow("c-start", "task.started", "c", "2026-02-23T00:00:03.000Z", "turn-1"),
+      ],
+      undefined,
+    );
+
+    expect(spawnRows(entries).map((entry) => entry.agentSpawn?.agentTaskIds)).toEqual([
+      ["a", "c"],
+      ["b"],
+    ]);
   });
 });
 
