@@ -2,6 +2,7 @@
  * Measures the persistence read paths on a copy of a Ryco home; run with Node (server runtime).
  *
  *   node apps/server/scripts/measure-persistence-reads.ts --home /tmp/ryco-fixture-home [--runs 3]
+ *     [--out results.json]
  *
  * Generate a home with `bun run perf:fixture-home --out <dir>`. Each run copies the home's
  * database, so the source stays untouched, and reports:
@@ -13,7 +14,7 @@
  *   restart of the runtime, each with its duration, the longest event-loop stall observed while
  *   it ran (5 ms sampler) and the slowest main-connection `SELECT 1` issued every 5 ms meanwhile.
  */
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -202,6 +203,7 @@ const { values } = parseArgs({
   options: {
     home: { type: "string" },
     runs: { type: "string", default: "3" },
+    out: { type: "string" },
   },
 });
 if (!values.home) {
@@ -212,4 +214,6 @@ const runs = [];
 for (let run = 0; run < Number(values.runs); run += 1) {
   runs.push(await measureOnce(resolve(values.home)));
 }
-console.log(JSON.stringify(runs, null, 2));
+const report = JSON.stringify(runs, null, 2);
+if (values.out) writeFileSync(values.out, report);
+console.log(report);
