@@ -146,6 +146,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       ...(rpcClient.orchestration.getThreadHistoryPage
         ? { getThreadHistoryPage: rpcClient.orchestration.getThreadHistoryPage }
         : {}),
+      ...(rpcClient.orchestration.getActivityPayload
+        ? { getActivityPayload: rpcClient.orchestration.getActivityPayload }
+        : {}),
       subscribeShell: (callback, options) =>
         rpcClient.orchestration.subscribeShell(callback, options),
       subscribeThread: (input, callback, options) =>

@@ -16,6 +16,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -120,6 +121,16 @@ import { type TimestampFormat } from "@ryco/contracts/settings";
 import { formatTimestamp } from "../../timestampFormat";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
+import {
+  readTimelineRowHeight,
+  readTimelineWidth,
+  rememberTimelineRowHeight,
+  rememberTimelineWidth,
+} from "./timelineRowHeights";
+import {
+  type ActivityPayloadOutput,
+  useActivityPayloadOutput,
+} from "../../rpc/useActivityPayloadOutput";
 
 import {
   buildInlineTerminalContextText,
@@ -178,6 +189,14 @@ function TimelineStableProvider({
     content
   );
 }
+/**
+ * The first-pass height of a row type nothing has measured yet; per-type averages
+ * take over after one row of each type renders. Real rows are compact work rows
+ * (~32 px), user bubbles (~70 px) and replies of a few hundred px, and the list
+ * renders (viewport + 2 x draw distance) / estimate rows up front: the old 56 px
+ * rendered about 25 rows to fill one screen. Overshooting only costs one more pass.
+ */
+const TIMELINE_ESTIMATED_ROW_HEIGHT = 120;
 const NOOP_CLOSE_DIFF = () => {};
 /* Top clearance mirrors the footer: when the desktop header overlays the
    transcript, the chat shell publishes `--chat-header-clearance` and the
@@ -398,6 +417,49 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
+  );
+  // The width rows wrap at, which remembered row heights are keyed by. Until the
+  // viewport is attached, the width this thread last laid out at is the best guess.
+  const listWidthRef = useRef<number | undefined>(readTimelineWidth(routeThreadKey));
+  const attachTimelineViewport = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (element) {
+        listWidthRef.current = Math.round(element.getBoundingClientRect().width);
+        rememberTimelineWidth(routeThreadKey, listWidthRef.current);
+      }
+      setTimelineViewportElement(element);
+    },
+    [routeThreadKey],
+  );
+  // A revisited thread lays out from the heights its rows measured last time.
+  // The list has no per-row estimate, and `getFixedItemSize` would make it
+  // ignore a row that measures differently, so the remembered heights go into
+  // its known sizes before its first layout (that waits for the scroller's
+  // first resize observation, after this commit). Every rendered row is still
+  // measured: one that matches costs nothing more, and one whose content or
+  // expansion changed since is corrected like any estimate.
+  const rowsAtMountRef = useRef(rows);
+  useLayoutEffect(() => {
+    const knownSizes = listRef.current?.getState?.()?.sizes;
+    if (!knownSizes) return;
+    for (const row of rowsAtMountRef.current) {
+      if (knownSizes.has(row.id)) continue;
+      const height = readTimelineRowHeight(routeThreadKey, row.id, listWidthRef.current);
+      if (height !== undefined) knownSizes.set(row.id, height);
+    }
+    // The timeline mounts per thread, so this runs once: later rows are measured as they arrive.
+  }, [listRef, routeThreadKey]);
+  const rememberRowHeight = useCallback(
+    (info: { readonly itemKey: string; readonly size: number }) =>
+      rememberTimelineRowHeight(
+        routeThreadKey,
+        info.itemKey,
+        listWidthRef.current,
+        // The size the list keeps (and compares a measurement against), which can
+        // differ from the reported one by sub-pixel rounding.
+        listRef.current?.getState?.()?.sizes.get(info.itemKey) ?? info.size,
+      ),
+    [listRef, routeThreadKey],
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
@@ -637,6 +699,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
     const measure = () => {
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
+      listWidthRef.current = Math.round(viewportWidth);
+      rememberTimelineWidth(routeThreadKey, viewportWidth);
       const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
@@ -655,7 +719,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [evaluateIsAtEnd, timelineViewportElement]);
+  }, [evaluateIsAtEnd, routeThreadKey, timelineViewportElement]);
 
   const previousRowCountRef = useRef(rows.length);
   useEffect(() => {
@@ -831,14 +895,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
         <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
-          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+          <div ref={attachTimelineViewport} className="relative h-full min-h-0">
             <LegendList<MessagesTimelineRow>
               ref={listRef}
               data={rows}
               keyExtractor={keyExtractor}
               getItemType={timelineRowItemType}
+              onItemSizeChanged={rememberRowHeight}
               renderItem={renderItem}
-              estimatedItemSize={56}
+              estimatedItemSize={TIMELINE_ESTIMATED_ROW_HEIGHT}
               recycleItems={false}
               initialScrollAtEnd={initialScrollOffset === undefined}
               {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
@@ -2801,9 +2866,18 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
   headingLabel: string;
 }) {
   const { workEntry, panelId, headingLabel } = props;
-  const { activeThreadEnvironmentId, markdownCwd, timestampFormat } = use(TimelineStableCtx);
+  const { activeThreadEnvironmentId, markdownCwd, routeThreadKey, timestampFormat } =
+    use(TimelineStableCtx);
   const inputLine = workEntryRawCommand(workEntry);
-  const cleanedOutput = workEntry.output ? workEntry.output.replace(ANSI_SGR_RE, "") : "";
+  // A window sends large tool payloads as previews; the panel reads the stored one.
+  const fullOutput = useActivityPayloadOutput({
+    environmentId: activeThreadEnvironmentId,
+    threadId: parseScopedThreadKey(routeThreadKey)?.threadId ?? null,
+    activityId: workEntry.outputPreviewActivityId ?? null,
+  });
+  const output = fullOutput.output ?? workEntry.output;
+  const exitCode = fullOutput.status === "loaded" ? (fullOutput.exitCode ?? undefined) : undefined;
+  const cleanedOutput = output ? output.replace(ANSI_SGR_RE, "") : "";
   const hasOutput = cleanedOutput.length > 0;
   // The collapsed row truncates its detail behind a hover tooltip, which taps
   // cannot reach; the panel carries the full text so it stays available.
@@ -2824,17 +2898,68 @@ const WorkEntryExpandedPanel = memo(function WorkEntryExpandedPanel(props: {
 
       {inputLine || hasOutput ? (
         <ChatMarkdown
-          text={buildShellTranscriptFence(inputLine, cleanedOutput, workEntry.exitCode)}
+          text={buildShellTranscriptFence(
+            inputLine,
+            cleanedOutput,
+            exitCode ?? workEntry.exitCode,
+          )}
           cwd={markdownCwd}
           environmentId={activeThreadEnvironmentId}
           isStreaming={false}
         />
-      ) : (
+      ) : fullOutput.status === "loading" ? null : (
         <p className="text-[11px] italic text-muted-foreground/45">No output was captured.</p>
       )}
+      <WorkEntryOutputStatus fullOutput={fullOutput} />
     </div>
   );
 });
+
+/** How complete the panel's output is, when the window only sent a preview of it. */
+function WorkEntryOutputStatus(props: { fullOutput: ActivityPayloadOutput }) {
+  const { fullOutput } = props;
+  if (fullOutput.status === "loading") {
+    return (
+      <p
+        data-work-entry-output-status="loading"
+        className="text-[11px] italic text-muted-foreground/45"
+      >
+        Loading full output…
+      </p>
+    );
+  }
+  if (fullOutput.status === "error") {
+    return (
+      <p
+        data-work-entry-output-status="error"
+        className="flex items-center gap-2 text-[11px] text-muted-foreground/60"
+      >
+        <span>Showing a preview. The full output could not be loaded.</span>
+        <button
+          type="button"
+          className="rounded px-1 text-foreground/80 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+          onClick={(event) => {
+            event.stopPropagation();
+            fullOutput.retry();
+          }}
+        >
+          Retry
+        </button>
+      </p>
+    );
+  }
+  if (fullOutput.status === "loaded" && fullOutput.truncated) {
+    return (
+      <p
+        data-work-entry-output-status="truncated"
+        className="text-[11px] italic text-muted-foreground/45"
+      >
+        This output is too large to show in full.
+      </p>
+    );
+  }
+  return null;
+}
 
 /**
  * Status/timing card for one tool call. Rows are omitted rather than shown

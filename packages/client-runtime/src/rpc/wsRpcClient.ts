@@ -434,6 +434,10 @@ export interface WsRpcClient {
     readonly getThreadHistoryPage?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadHistoryPage
     >;
+    /** Only meaningful for an activity a server sent as a preview, which older servers never do. */
+    readonly getActivityPayload?: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.getActivityPayload
+    >;
     /** Absent on clients built without it; older servers answer "Unknown request tag". */
     readonly setThreadHistoryRecovery?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery
@@ -978,6 +982,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadWindow](input)),
       getThreadHistoryPage: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
+      getActivityPayload: (input) =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getActivityPayload](input)),
       setThreadHistoryRecovery: (input) =>
         transport.request((client) =>
           client[ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery](input),

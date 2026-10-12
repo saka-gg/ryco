@@ -97,6 +97,12 @@ export interface WorkLogEntry {
   turnId?: TurnId | null;
   /** Full untruncated output text for the expanded panel. */
   output?: string;
+  /**
+   * The activity `output` came from, when the server sent its payload as a
+   * preview: `output` is then cut short, and the expanded panel fetches the
+   * stored payload (`orchestration.getActivityPayload`) for the full text.
+   */
+  outputPreviewActivityId?: string;
   /** Process exit code when the activity reported one. */
   exitCode?: number;
   /**
@@ -1110,6 +1116,9 @@ function toDerivedWorkLogEntry(
   if (fullOutput) {
     entry.output = fullOutput;
   }
+  if (activity.payloadPreview !== undefined) {
+    entry.outputPreviewActivityId = activity.id;
+  }
   if (exitCode !== null) {
     entry.exitCode = exitCode;
   }
@@ -1336,12 +1345,16 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const output = next.output ?? previous.output;
+  // The preview marker follows the output it describes: a later full output clears it.
+  const outputPreviewActivityId = next.output
+    ? next.outputPreviewActivityId
+    : (previous.outputPreviewActivityId ?? next.outputPreviewActivityId);
   const exitCode = next.exitCode ?? previous.exitCode;
   // `previous` is the earlier lifecycle event, so its own timestamp stands in as
   // the start when no `tool.started` was recorded for this call.
   const startedAt = previous.startedAt ?? next.startedAt ?? previous.createdAt;
   const lastActivityAt = next.lastActivityAt ?? next.createdAt;
-  return {
+  const merged: DerivedWorkLogEntry = {
     ...previous,
     ...next,
     startedAt,
@@ -1359,6 +1372,9 @@ function mergeDerivedWorkLogEntries(
     ...(output ? { output } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
   };
+  if (outputPreviewActivityId) merged.outputPreviewActivityId = outputPreviewActivityId;
+  else delete merged.outputPreviewActivityId;
+  return merged;
 }
 
 function mergeChangedFiles(
@@ -1796,6 +1812,19 @@ function extractCodexItemOutput(item: Record<string, unknown> | null): string | 
   }
 
   return null;
+}
+
+/**
+ * The expanded-panel output and exit code of one activity payload: what the
+ * work log derives for an entry, applied to a payload fetched in full after
+ * the window sent a preview of it.
+ */
+export function deriveActivityPayloadOutput(payload: unknown): {
+  readonly output: string | null;
+  readonly exitCode: number | null;
+} {
+  const record = asRecord(payload);
+  return { output: extractToolFullOutput(record), exitCode: extractToolExitCode(record) };
 }
 
 function extractToolFullOutput(payload: Record<string, unknown> | null): string | null {

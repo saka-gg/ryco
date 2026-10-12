@@ -32,6 +32,7 @@ function makeSupervisor(
     ) => boolean;
     readonly stateSink?: unknown;
     readonly scheduleShellFrame?: (callback: () => void) => void;
+    readonly threadWindowActivityPayloads?: "preview";
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -76,6 +77,9 @@ function makeSupervisor(
       reconcileSnapshotDerivedState: () => undefined,
     },
     ...(overrides.scheduleShellFrame ? { scheduleShellFrame: overrides.scheduleShellFrame } : {}),
+    ...(overrides.threadWindowActivityPayloads
+      ? { threadWindowActivityPayloads: overrides.threadWindowActivityPayloads }
+      : {}),
     onShellSnapshotReceived: () => undefined,
     onShellSnapshotCurrent: () => undefined,
     onShellSnapshotApplied: () => undefined,
@@ -552,6 +556,45 @@ describe("thread window failures", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(thread.windows).toHaveLength(2);
     expect(thread.windows[1]!.limits).toMatchObject({ messages: 150, activities: 150 });
+  });
+});
+
+describe("thread window activity previews", () => {
+  function recordingConnection() {
+    const windowInputs: Array<Record<string, unknown>> = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (input: Record<string, unknown>) => {
+            windowInputs.push(input);
+            return () => undefined;
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    return { connection, windowInputs };
+  }
+
+  it("asks for previews only when the client fetches full payloads on demand", () => {
+    for (const threadWindowActivityPayloads of ["preview", undefined] as const) {
+      const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+        ...(threadWindowActivityPayloads ? { threadWindowActivityPayloads } : {}),
+      });
+      const thread = recordingConnection();
+      supervisor.register(thread.connection);
+      supervisor.retainThreadDetailSubscription(remote, "thread-1" as ThreadId);
+      expect(thread.windowInputs).toHaveLength(1);
+      if (threadWindowActivityPayloads) {
+        expect(thread.windowInputs[0]).toMatchObject({ activityPayloads: "preview" });
+      } else {
+        // Older clients' requests stay byte-identical: the field is absent, not "full".
+        expect(thread.windowInputs[0]).not.toHaveProperty("activityPayloads");
+      }
+    }
   });
 });
 

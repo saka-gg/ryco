@@ -190,6 +190,8 @@ function getEnvironmentSupervisor() {
       useStore
         .getState()
         .syncServerThreadDetail((snapshot as { readonly thread: never }).thread, environmentId),
+    // The timeline fetches a previewed activity's full payload when its row expands.
+    threadWindowActivityPayloads: "preview",
     syncThreadWindowSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerThreadWindow(snapshot, environmentId),
     syncThreadHistoryPage: (environmentId, threadId, page) =>
