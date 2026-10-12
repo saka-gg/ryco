@@ -31,6 +31,7 @@ import {
   isFileUploadTokenUsable,
   resolveChatProjectTitleSeed,
   resolveThreadCreateModelSelection,
+  type CommitSendTurnDispatchInput,
 } from "@ryco/client-runtime/state/composer";
 import { truncate } from "@ryco/shared/String";
 import { webAttachmentCodec } from "../platform/attachmentCodec";
@@ -192,6 +193,8 @@ export interface ExecuteChatSendTurnInput {
   preserveComposerDraft?: boolean;
   /** undefined = the dialog presentation (default); null = never review interactively. */
   claudeCacheReview?: ClaudeCacheReviewPresentation | null;
+  /** The live subscribed thread for the Claude resume review (see the send engine). */
+  readSubscribedClaudeReviewState?: CommitSendTurnDispatchInput["readSubscribedClaudeReviewState"];
   /** Background sends never toast. */
   suppressToasts?: boolean;
   /** Runs immediately before the final `thread.turn.start`. */
@@ -612,6 +615,10 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         : (input.claudeCacheReview ?? undefined);
     await commitSendTurnDispatch({
       ...(claudeCacheReview ? { claudeCacheReview } : {}),
+      // A prepared thread is new: there is no subscribed state of it to review from.
+      ...(input.readSubscribedClaudeReviewState && !prepared
+        ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
+        : {}),
       ...(input.onBeforeTurnStart ? { onBeforeTurnStart: input.onBeforeTurnStart } : {}),
       providerDriver: composer.selectedProvider,
       sourceProviderDriver: thread.sourceProviderDriver,

@@ -2,6 +2,7 @@ import {
   reviewClaudeResumeBeforeSend,
   revalidateClaudeResumeBeforeCommit,
   type ClaudeCacheReviewPresentation,
+  type SubscribedClaudeReviewState,
 } from "./claudeCacheReview.ts";
 import type { ClaudeResumeGuard, ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -275,6 +276,12 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 
 export interface CommitSendTurnDispatchInput {
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  /**
+   * The thread as the client's live subscription holds it (undefined when it is not live or
+   * not loaded). The Claude resume review is assessed from it first: a send that needs no
+   * review then skips the review's thread read.
+   */
+  readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
   readonly providerDriver?: ProviderDriverKind | null;
   /** Known source session; null means no session, undefined means unavailable. */
   readonly sourceProviderDriver?: ProviderDriverKind | null | undefined;

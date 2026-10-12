@@ -18,6 +18,7 @@ import {
   appendSelectionQuote,
   checkpointRevertUnsupportedMessage,
   requestProviderSessionPrewarm,
+  type SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -263,6 +264,7 @@ import {
   deriveThreadSnoozeEligibility,
   isMaterializableCheckpointSummary,
   threadForkBoundaryQuote,
+  selectEnvironmentShellLive,
   selectThreadDetailLoaded,
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
@@ -3793,6 +3795,35 @@ export default function ChatView(props: ChatViewProps) {
     [getSteerEligibility],
   );
 
+  // The Claude resume review reads what the live thread subscription already holds: only a
+  // server thread whose shell is live (not cache) and whose detail is loaded qualifies.
+  const activeThreadShellLive = useStore((store) =>
+    selectEnvironmentShellLive(store, activeThread?.environmentId),
+  );
+  const readSubscribedClaudeReviewState = (): SubscribedClaudeReviewState | undefined => {
+    const thread = activeThread;
+    if (!thread || !isServerThread || !activeThreadShellLive || !activeThreadDetailLoaded) {
+      return undefined;
+    }
+    return {
+      thread: {
+        modelSelection: thread.modelSelection,
+        activities: thread.activities,
+        session: thread.session
+          ? {
+              providerName: thread.session.provider,
+              ...(thread.session.runtimeSessionId === undefined
+                ? {}
+                : { runtimeSessionId: RuntimeSessionId.make(thread.session.runtimeSessionId) }),
+              status: thread.session.orchestrationStatus,
+              activeTurnId: thread.session.activeTurnId ?? null,
+            }
+          : null,
+      },
+      workspaceCwd: thread.worktreePath ?? activeProject?.cwd,
+    };
+  };
+
   // Build the executeChatSendTurn input from a composer snapshot and dispatch it.
   // Shared by direct sends and queue flushes, so a queued message replays exactly
   // like a live send.
@@ -3904,6 +3935,7 @@ export default function ChatView(props: ChatViewProps) {
 
       const accepted = await executeChatSendTurn({
         ...(messageId !== undefined ? { messageId } : {}),
+        readSubscribedClaudeReviewState: readSubscribedClaudeReviewState,
         ...(hooks?.onBeforeTurnStart ? { onBeforeTurnStart: hooks.onBeforeTurnStart } : {}),
         ...(hooks?.onSendError ? { onSendError: hooks.onSendError } : {}),
         preserveComposerDraft: messageId !== undefined || composerChangedDuringPreparation(),
