@@ -1,4 +1,5 @@
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
+import { type ClaudeResumeState, readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
 import {
@@ -210,18 +211,6 @@ type PromptQueueItem =
   | {
       readonly type: "terminate";
     };
-
-export interface ClaudeResumeState {
-  readonly threadId?: ThreadId;
-  readonly resume?: string;
-  readonly resumeSessionAt?: string;
-  /**
-   * Set by a checkpoint revert: later resumes stay truncated at this chain
-   * entry until a turn completes on the rewound branch.
-   */
-  readonly rewindAt?: string;
-  readonly turnCount?: number;
-}
 
 /** Transcript chain entry, as read by `getSessionMessages`. */
 export interface ClaudeTranscriptEntry {
@@ -625,14 +614,6 @@ function claudeSubagentLaunchModel(input: Record<string, unknown> | undefined): 
   return model?.toLowerCase() === "inherit" ? undefined : model;
 }
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function isSyntheticClaudeThreadId(value: string): boolean {
-  return value.startsWith("claude-thread-");
-}
-
 function hasDurableClaudeSessionId(message: SDKMessage): boolean {
   if (message.type !== "system") {
     return true;
@@ -816,53 +797,6 @@ function asCanonicalTurnId(value: TurnId): TurnId {
 
 function asRuntimeRequestId(value: ApprovalRequestId): RuntimeRequestId {
   return RuntimeRequestId.make(value);
-}
-
-export function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undefined {
-  if (!resumeCursor || typeof resumeCursor !== "object") {
-    return undefined;
-  }
-  const cursor = resumeCursor as {
-    threadId?: unknown;
-    resume?: unknown;
-    sessionId?: unknown;
-    resumeSessionAt?: unknown;
-    turnCount?: unknown;
-  };
-
-  const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
-  const threadId =
-    threadIdCandidate && !isSyntheticClaudeThreadId(threadIdCandidate)
-      ? ThreadId.make(threadIdCandidate)
-      : undefined;
-  const resumeCandidate =
-    typeof cursor.resume === "string"
-      ? cursor.resume
-      : typeof cursor.sessionId === "string"
-        ? cursor.sessionId
-        : undefined;
-  const resume = resumeCandidate && isUuid(resumeCandidate) ? resumeCandidate : undefined;
-  const resumeSessionAt =
-    typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
-  const rewind = (resumeCursor as { rewind?: unknown }).rewind;
-  const rewindAt =
-    rewind !== null &&
-    typeof rewind === "object" &&
-    typeof (rewind as { at?: unknown }).at === "string" &&
-    (rewind as { at: string }).at.length > 0
-      ? (rewind as { at: string }).at
-      : undefined;
-  const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
-
-  return {
-    ...(threadId ? { threadId } : {}),
-    ...(resume ? { resume } : {}),
-    ...(resumeSessionAt ? { resumeSessionAt } : {}),
-    ...(rewindAt ? { rewindAt } : {}),
-    ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
-      ? { turnCount: turnCountValue }
-      : {}),
-  };
 }
 
 /**

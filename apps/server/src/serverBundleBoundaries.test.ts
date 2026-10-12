@@ -91,6 +91,10 @@ function staticGraph(entry: string) {
   return { files: relativeFiles, externals: [...externals] };
 }
 
+/** Provider SDK packages, each tens of megabytes of evaluated code (or a native binary). */
+const PROVIDER_SDKS =
+  /^(?:@anthropic-ai\/(?:claude-agent-sdk|sdk)|@github\/copilot-sdk|@opencode-ai\/sdk)(?:\/|$)/u;
+
 describe("server boot import boundaries", () => {
   it("keeps the process entry free of the server graph", () => {
     const graph = staticGraph("src/bin.ts");
@@ -114,6 +118,9 @@ describe("server boot import boundaries", () => {
     expect(graph.externals).not.toContain("sharp");
     // Only the patch parser; the package root pulls in shiki and its grammars.
     expect(graph.externals).not.toContain("@pierre/diffs");
+    // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
+    // SDK-free cursor modules).
+    expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
     // Protocol schemas load with the Codex/ACP features that use them. The error classes are
     // schema-free (chat forks classify Codex request failures with them).
     expect(
@@ -153,7 +160,7 @@ const hasCurrentBuild =
   existsSync(builtEntry) && readFileSync(builtEntry, "utf8").includes("enableCompileCache");
 
 describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
-  it("keeps sharp, the @pierre/diffs root and the Codex schema out of the boot chunks", () => {
+  it("keeps sharp, the @pierre/diffs root, provider SDKs and the Codex schema out of the boot chunks", () => {
     const entryClosure = builtStaticClosure(builtEntry);
     expect(entryClosure.chunks).toEqual([builtEntry]);
 
@@ -162,6 +169,7 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
     expect(serve.externals).not.toContain("sharp");
     expect(serve.externals).not.toContain("@pierre/diffs");
+    expect(serve.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
     for (const chunk of serve.chunks) {
       // A type name only the generated Codex protocol schema defines.
       expect(readFileSync(chunk, "utf8")).not.toContain("V2ListMcpServerStatusResponse");
