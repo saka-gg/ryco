@@ -1130,6 +1130,25 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       );
       expect(document.querySelector('[data-testid="phone-settings-surface"]')).toBeNull();
 
+      // An open popup takes Escape before the page, which stays put.
+      const openMenu = document.createElement("div");
+      openMenu.setAttribute("role", "menu");
+      document.body.append(openMenu);
+      const back = vi.spyOn(mounted.router.history, "back");
+      const navigate = vi.spyOn(mounted.router, "navigate");
+      try {
+        await userEvent.keyboard("{Escape}");
+        expect(back).not.toHaveBeenCalled();
+        expect(navigate).not.toHaveBeenCalled();
+      } finally {
+        openMenu.remove();
+        back.mockRestore();
+        navigate.mockRestore();
+      }
+
+      // Closed popups that stay mounted (the sidebar Omnifield's inert menu)
+      // do not hold the key.
+      expect(document.querySelector('[role="listbox"][inert]')).not.toBeNull();
       await userEvent.keyboard("{Escape}");
       await vi.waitFor(() => {
         expect(mounted.router.state.location.pathname).toBe(threadPath);
