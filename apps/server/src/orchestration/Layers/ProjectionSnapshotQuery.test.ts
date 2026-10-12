@@ -252,22 +252,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             `EXPLAIN QUERY PLAN ${statement}`,
             params,
           );
-          // The shell is re-read for every thread event, per subscriber: the subquery must
-          // stop at the newest completed turn instead of sorting the thread's whole history.
-          const turnsAccess = plan.filter((row) => /^(SEARCH|SCAN) turns\b/.test(row.detail));
-          assert.lengthOf(turnsAccess, 1, JSON.stringify(plan));
-          assert.match(
-            turnsAccess[0]!.detail,
-            /^SEARCH turns USING INDEX idx_projection_turns_thread_requested \(thread_id=\?\)/,
-            JSON.stringify(plan),
-          );
-          // Only the turn id tie-break may sort ("LAST TERM OF ORDER BY"), never every turn.
+          // The shell is re-read for every thread event, per subscriber: recency is a
+          // trigger-maintained column (migration 087), so no read touches the turn history.
           assert.isFalse(
-            plan.some(
-              (row) =>
-                row.parent === turnsAccess[0]!.parent &&
-                row.detail === "USE TEMP B-TREE FOR ORDER BY",
-            ),
+            plan.some((row) => /\b(projection_turns|turns)\b/.test(row.detail)),
             JSON.stringify(plan),
           );
         }
@@ -2151,8 +2139,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const capture: SqlStatement.Transformer = (statement) =>
         Effect.sync(() => {
           const compiled = statement.compile();
-          // Not just "latest_user": listThreadRows selects latest_user_message_at.
-          if (compiled[0].includes("projection_thread_messages latest_user")) {
+          if (compiled[0].includes("threads.first_user_message_id")) {
             anchorQueries.push(compiled);
           }
           return statement;
@@ -2182,7 +2169,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         );
       }
 
-      // A3: the anchor query probes per thread and never scans message history.
+      // A3: anchors are primary-key lookups of the trigger-maintained ids (migration 087);
+      // no read walks a thread's message history.
       assert.equal(anchorQueries.length, 1);
       const [anchorStatement, anchorParams] = anchorQueries[0]!;
       const plan = yield* sql.unsafe<{ detail: string }>(
@@ -2191,21 +2179,17 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       );
       const planText = JSON.stringify(plan);
       assert.isFalse(
-        plan.some((row) => /SCAN (messages|first_user|latest_user)\b/.test(row.detail)),
+        plan.some((row) => /SCAN messages\b/.test(row.detail)),
         planText,
       );
       assert.isTrue(
         plan.some((row) => /SEARCH messages .*\(message_id=\?\)/.test(row.detail)),
         planText,
       );
-      assert.isTrue(
-        plan.some((row) => /SEARCH first_user .*\(thread_id=\?\)/.test(row.detail)),
-        planText,
-      );
-      assert.isTrue(
-        plan.some((row) => /SEARCH latest_user .*\(thread_id=\?\)/.test(row.detail)),
-        planText,
-      );
+      // Anchors carry no text: the engine only needs their id, role and order.
+      for (const thread of commandReadModel.threads) {
+        for (const message of thread.messages) assert.equal(message.text, "");
+      }
 
       yield* sql`DELETE FROM projection_thread_messages`;
       yield* sql`DELETE FROM projection_threads`;

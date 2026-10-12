@@ -572,7 +572,7 @@ describe("orchestration projector", () => {
     expect(afterUpdate.threads[0]?.updatedAt).toBe(updatedAt);
   });
 
-  it("marks assistant messages completed with non-streaming updates", async () => {
+  it("keeps no assistant messages in the command model, only their updatedAt", async () => {
     const createdAt = "2026-02-23T09:00:00.000Z";
     const deltaAt = "2026-02-23T09:00:01.000Z";
     const completeAt = "2026-02-23T09:00:03.500Z";
@@ -654,11 +654,11 @@ describe("orchestration projector", () => {
       ),
     );
 
-    const message = afterComplete.threads[0]?.messages[0];
-    expect(message?.id).toBe("assistant:msg-1");
-    expect(message?.text).toBe("hello");
-    expect(message?.streaming).toBe(false);
-    expect(message?.updatedAt).toBe(completeAt);
+    // The decider never reads assistant messages: streaming must not rewrite the message list.
+    expect(afterDelta.threads[0]?.messages).toEqual([]);
+    expect(afterComplete.threads[0]?.messages).toEqual([]);
+    expect(afterDelta.threads[0]?.updatedAt).toBe(deltaAt);
+    expect(afterComplete.threads[0]?.updatedAt).toBe(completeAt);
   });
 
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {
@@ -863,11 +863,9 @@ describe("orchestration projector", () => {
     );
 
     const thread = afterRevert.threads[0];
+    // User-message anchors only, without text (see commandModelMessage).
     expect(thread?.messages.map((message) => ({ role: message.role, text: message.text }))).toEqual(
-      [
-        { role: "user", text: "First edit" },
-        { role: "assistant", text: "Updated README to v2.\n" },
-      ],
+      [{ role: "user", text: "" }],
     );
     expect(
       thread?.activities.map((activity) => ({ id: activity.id, turnId: activity.turnId })),
@@ -1026,7 +1024,8 @@ describe("orchestration projector", () => {
         role: message.role,
         turnId: message.turnId,
       })),
-    ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
+      // Assistant messages are not kept, and the removed turn's user message is not retained.
+    ).toEqual([]);
   });
 
   it("caps message and checkpoint retention for long-lived threads", async () => {
@@ -1074,7 +1073,7 @@ describe("orchestration projector", () => {
           payload: {
             threadId: "thread-capped",
             messageId: `msg-${index}`,
-            role: "assistant",
+            role: "user",
             text: `message-${index}`,
             turnId: `turn-${index}`,
             streaming: false,
@@ -1122,8 +1121,10 @@ describe("orchestration projector", () => {
     );
 
     const thread = finalState.threads[0];
+    // The cap keeps the first user message (the thread-started anchor) and the newest window.
     expect(thread?.messages).toHaveLength(2_000);
-    expect(thread?.messages[0]?.id).toBe("msg-100");
+    expect(thread?.messages[0]?.id).toBe("msg-0");
+    expect(thread?.messages[1]?.id).toBe("msg-101");
     expect(thread?.messages.at(-1)?.id).toBe("msg-2099");
     expect(thread?.checkpoints).toHaveLength(500);
     expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
@@ -1188,16 +1189,17 @@ describe("orchestration projector", () => {
           statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
         Promise.resolve(createEmptyReadModel(createdAt)),
       );
-    const assistantEvents = (firstSequence: number) =>
+    // Older user messages: they fill the cap without becoming the latest anchor.
+    const olderUserEvents = (firstSequence: number) =>
       Array.from({ length: 2_100 }, (_, index) =>
-        messageEvent(firstSequence + index, `msg-${index}`, "assistant"),
+        messageEvent(firstSequence + index, `msg-${index}`, "user", "2026-03-01T09:00:00.000Z"),
       );
 
     it("keeps the first and latest user messages when the message cap evicts history", async () => {
       const state = await reduceEvents([
         messageEvent(2, "u-first", "user"),
         messageEvent(3, "u-latest", "user"),
-        ...assistantEvents(4),
+        ...olderUserEvents(4),
       ]);
 
       const messages = state.threads[0]?.messages ?? [];
@@ -1206,7 +1208,7 @@ describe("orchestration projector", () => {
       expect(messages[1]?.id).toBe("u-latest");
       expect(messages[2]?.id).toBe("msg-102");
       expect(messages.at(-1)?.id).toBe("msg-2099");
-      expect(messages.findLast((message) => message.role === "user")?.id).toBe("u-latest");
+      expect(latestUserMessage(messages)?.id).toBe("u-latest");
     });
 
     it("keeps the user message with the greatest createdAt even when it is not the last user message", async () => {
@@ -1216,7 +1218,7 @@ describe("orchestration projector", () => {
         messageEvent(2, "u-first", "user"),
         messageEvent(3, "u-max", "user", "2026-03-02T10:00:00.000Z"),
         messageEvent(4, "u-skewed", "user", "2026-03-01T10:00:01.000Z"),
-        ...assistantEvents(5),
+        ...olderUserEvents(5),
       ]);
 
       const messages = state.threads[0]?.messages ?? [];
@@ -1229,15 +1231,12 @@ describe("orchestration projector", () => {
       expect(latestUserMessage(messages)?.id).toBe("u-max");
     });
 
-    it("caps exactly like slice when the only user message is in the newest window", async () => {
-      const events = [...assistantEvents(2), messageEvent(2_102, "u-only", "user")];
-      const state = await reduceEvents(events);
-
-      const expectedIds = events
-        .map((event) => (event.payload as { messageId: string }).messageId)
-        .slice(-2_000);
-      expect(expectedIds[0]).toBe("msg-101");
-      expect(state.threads[0]?.messages.map((message) => message.id)).toEqual(expectedIds);
+    it("never counts assistant messages against the cap", async () => {
+      const assistants = Array.from({ length: 2_100 }, (_, index) =>
+        messageEvent(2 + index, `msg-${index}`, "assistant"),
+      );
+      const state = await reduceEvents([...assistants, messageEvent(2_102, "u-only", "user")]);
+      expect(state.threads[0]?.messages.map((message) => message.id)).toEqual(["u-only"]);
     });
   });
 });

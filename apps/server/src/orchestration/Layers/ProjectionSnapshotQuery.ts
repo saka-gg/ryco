@@ -7,10 +7,6 @@ import {
   decodeMessageText,
 } from "../../persistence/messageText.ts";
 import {
-  firstUserMessageIdQuery,
-  latestUserMessageIdQuery,
-} from "../../persistence/userMessageAnchors.ts";
-import {
   CHECKPOINT_REVERT_ACTIVITY_KIND,
   ChatAttachment,
   DEFAULT_AGENT_TOKEN_MODE,
@@ -77,8 +73,8 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
+import { COMMAND_MODEL_OMITTED_PLAN_MARKDOWN } from "../projector.ts";
 import { projectionThreadLineage, withThreadLineage } from "../threadLineage.ts";
-import { inheritedTurnRowSql } from "../forkInheritanceSql.ts";
 import {
   isPendingCheckpointRevertStatus,
   latestCheckpointRevert,
@@ -646,24 +642,10 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const sql = yield* SqlClient.SqlClient;
-  // Walk the thread/requested-at index backwards, keeping prior completion stable
-  // while the current turn emits non-streaming commentary or tool updates. A fork's
-  // inherited turns are the source's history, not activity of the fork. Every filter
-  // here must stay residual: the plan guard test pins the index walk.
-  const latestCompletedTurnAt = sql`(
-    SELECT turns.completed_at
-    FROM projection_turns AS turns
-    WHERE turns.thread_id = projection_threads.thread_id
-      AND turns.state = 'completed'
-      AND turns.completed_at IS NOT NULL
-      AND NOT ${inheritedTurnRowSql(sql, "turns")}
-      AND NOT EXISTS (
-        SELECT 1 FROM projection_thread_sessions AS sessions
-        WHERE sessions.thread_id = turns.thread_id AND sessions.active_turn_id = turns.turn_id
-      )
-    ORDER BY turns.requested_at DESC, turns.turn_id DESC
-    LIMIT 1
-  )`;
+  // Kept by triggers (migration 087) under the rule this used to evaluate per row: the latest
+  // completed, non-inherited turn that is not the session's active turn, so prior completion
+  // stays stable while the current turn emits commentary or tool updates.
+  const latestCompletedTurnAt = sql.literal("latest_completed_turn_at");
 
   /** Current projected rankings, of every thread or of one. */
   const listThreadPriorityRows = (threadId?: ThreadId) => {
@@ -1020,11 +1002,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // - latest: the delegated-return fence (decider thread.turn.start) and the projector's
   //   message cap read latestUserMessage (orchestration/userMessageOrder.ts), the
   //   in-memory twin of latestUserMessageIdQuery. It MUST be the row
-  //   CompletionReturnDelivery reads, hence the shared query.
-  // Rows are ordered (created_at, rowid) like that query, so a thread's latest anchor is
-  // always its last row.
-  // Do NOT add `messages.thread_id = threads.thread_id`: it flips the plan to a
-  // full SCAN of projection_thread_messages (guarded by a test).
+  //   CompletionReturnDelivery reads: projection_threads carries both ids, kept by triggers
+  //   under the rules of firstUserMessageIdQuery and latestUserMessageIdQuery (migration 087).
+  // Anchors are looked up by primary key and carry no text: the engine only needs their id,
+  // role and order. Rows are ordered (created_at, rowid) like the latest-anchor rule, so a
+  // thread's latest anchor is always its last row.
   const listUserMessageAnchorRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -1035,18 +1017,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           messages.thread_id AS "threadId",
           messages.turn_id AS "turnId",
           messages.role,
-          ${messageTextColumns(sql, "messages")},
-          messages.attachments_json AS "attachments",
+          '' AS text,
+          NULL AS "assembledText",
+          NULL AS "attachments",
           messages.dispatch_mode AS "dispatchMode",
           messages.is_streaming AS "isStreaming",
           messages.created_at AS "createdAt",
           messages.updated_at AS "updatedAt"
         FROM projection_threads threads
         JOIN projection_thread_messages messages
-          ON messages.message_id IN (
-            (${firstUserMessageIdQuery(sql, sql.literal("threads.thread_id"))}),
-            (${latestUserMessageIdQuery(sql, sql.literal("threads.thread_id"))})
-          )
+          ON messages.message_id IN (threads.first_user_message_id, threads.latest_user_message_id)
         ORDER BY messages.thread_id ASC, messages.created_at ASC, messages.rowid ASC
       `,
   });
@@ -1061,6 +1041,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           plan_markdown AS "planMarkdown",
+          implemented_at AS "implementedAt",
+          implementation_thread_id AS "implementationThreadId",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_proposed_plans
+        ORDER BY thread_id ASC, created_at ASC, plan_id ASC
+      `,
+  });
+
+  // The command read model's plans: ids and timestamps only (see commandModelProposedPlan).
+  const listCommandModelProposedPlanRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadProposedPlanDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          plan_id AS "planId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          ${COMMAND_MODEL_OMITTED_PLAN_MARKDOWN} AS "planMarkdown",
           implemented_at AS "implementedAt",
           implementation_thread_id AS "implementationThreadId",
           created_at AS "createdAt",
@@ -2555,7 +2555,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
-          listThreadProposedPlanRows(undefined).pipe(
+          listCommandModelProposedPlanRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getCommandReadModel:listThreadProposedPlans:query",
