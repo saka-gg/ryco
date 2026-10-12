@@ -116,6 +116,7 @@ import {
   isLatestTurnSettled,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
+import { selectEnvironmentShellLive } from "@ryco/client-runtime/state/threads";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadSummaryByRef,
@@ -936,6 +937,11 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  // Rows painted from a cache (or kept after a disconnect) are last-known
+  // state: a send into them waits in the queue until the shell is live.
+  const activeEnvironmentShellLive = useStore((store) =>
+    selectEnvironmentShellLive(store, activeThreadRef?.environmentId ?? null),
+  );
   // Whether the open server thread's history window has been applied; drafts
   // have none to wait for.
   const activeThreadDetailLoaded = useStore((store) =>
@@ -4356,7 +4362,14 @@ export default function ChatView(props: ChatViewProps) {
     // messages auto-dispatch, in order, once the thread reaches quiescence. A
     // queued send whose turn has not started yet (an off-screen background send
     // included) counts too: a direct send would race it into the bind window.
-    if (activeThreadKey && (phase === "running" || hasOutstandingQueuedDispatch(activeThreadKey))) {
+    // So does a thread shown from last-known state: the queue only drains once
+    // its environment's shell is live again.
+    if (
+      activeThreadKey &&
+      (phase === "running" ||
+        hasOutstandingQueuedDispatch(activeThreadKey) ||
+        (isServerThread && !activeEnvironmentShellLive))
+    ) {
       if (editorSendPreparationRef.current) return;
       editorSendPreparationRef.current = true;
       const composerChangedDuringPreparation = captureComposerContentGuard();
