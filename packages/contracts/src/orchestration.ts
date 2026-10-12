@@ -58,6 +58,7 @@ export const ORCHESTRATION_WS_METHODS = {
   searchThreadMessages: "orchestration.searchThreadMessages",
   getThreadWindow: "orchestration.getThreadWindow",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
+  getActivityPayload: "orchestration.getActivityPayload",
   setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
   replayEvents: "orchestration.replayEvents",
   replayEventsPage: "orchestration.replayEventsPage",
@@ -927,6 +928,18 @@ export const OrchestrationThreadActivity = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   sequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
+  /**
+   * Present when `payload` is a bounded preview of a larger stored payload: a
+   * window or history page served with `activityPayloads: "preview"`. The
+   * preview keeps the payload's structure with long strings and arrays cut, and
+   * `orchestration.getActivityPayload` returns the stored payload.
+   */
+  payloadPreview: Schema.optional(
+    Schema.Struct({
+      /** Encoded size of the stored payload. */
+      fullBytes: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
@@ -1354,9 +1367,20 @@ export const OrchestrationThreadHistoryState = Schema.Struct({
 });
 export type OrchestrationThreadHistoryState = typeof OrchestrationThreadHistoryState.Type;
 
+/**
+ * How a window or history page sends activity payloads. `"preview"` bounds each
+ * large payload (see `OrchestrationThreadActivity.payloadPreview`); absent means
+ * full payloads, which is all an older client understands. Older servers ignore
+ * the field and send full payloads, which a client that asked for previews
+ * handles unchanged.
+ */
+export const OrchestrationActivityPayloadMode = Schema.Literals(["full", "preview"]);
+export type OrchestrationActivityPayloadMode = typeof OrchestrationActivityPayloadMode.Type;
+
 export const OrchestrationGetThreadWindowInput = Schema.Struct({
   threadId: ThreadId,
   limits: OrchestrationThreadHistoryLimits,
+  activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
 
@@ -1377,6 +1401,7 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   limits: OrchestrationThreadHistoryLimits,
   resumeFromSequence: ThreadResumeFromSequence,
   historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
+  activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -1406,6 +1431,7 @@ export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
     collection: OrchestrationThreadHistoryCollection,
     mode: OrchestrationThreadHistoryPageMode,
     limit: PositiveInt,
+    activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -1452,6 +1478,33 @@ export const OrchestrationThreadHistoryPage = Schema.Union([
   OrchestrationThreadCheckpointHistoryPage,
 ]);
 export type OrchestrationThreadHistoryPage = typeof OrchestrationThreadHistoryPage.Type;
+
+export const OrchestrationGetActivityPayloadInput = Schema.Struct({
+  threadId: ThreadId,
+  activityId: EventId,
+});
+export type OrchestrationGetActivityPayloadInput = typeof OrchestrationGetActivityPayloadInput.Type;
+
+export const OrchestrationGetActivityPayloadResult = Schema.Struct({
+  activityId: EventId,
+  /** The stored payload, or a preview of it when it exceeds what one response carries. */
+  payload: Schema.Unknown,
+  /** Encoded size of the stored payload. */
+  fullBytes: NonNegativeInt,
+  /** Whether `payload` is still a preview: the stored payload is larger than a response carries. */
+  truncated: Schema.Boolean,
+});
+export type OrchestrationGetActivityPayloadResult =
+  typeof OrchestrationGetActivityPayloadResult.Type;
+
+export class OrchestrationGetActivityPayloadError extends Schema.TaggedError<OrchestrationGetActivityPayloadError>()(
+  "OrchestrationGetActivityPayloadError",
+  {
+    reason: Schema.Literals(["not-found", "unavailable"]),
+    threadId: ThreadId,
+    activityId: EventId,
+  },
+) {}
 
 export class OrchestrationThreadHistoryError extends Schema.TaggedError<OrchestrationThreadHistoryError>()(
   "OrchestrationThreadHistoryError",
@@ -3539,6 +3592,10 @@ export const OrchestrationRpcSchemas = {
   getThreadHistoryPage: {
     input: OrchestrationGetThreadHistoryPageInput,
     output: OrchestrationThreadHistoryPage,
+  },
+  getActivityPayload: {
+    input: OrchestrationGetActivityPayloadInput,
+    output: OrchestrationGetActivityPayloadResult,
   },
   setThreadHistoryRecovery: {
     input: OrchestrationSetThreadHistoryRecoveryInput,

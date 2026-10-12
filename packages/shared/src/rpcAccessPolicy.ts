@@ -92,6 +92,8 @@ export const RPC_ACCESS_POLICY = {
   // not viewer — scripts and task outputs can carry prompts and secrets.
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "operator",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "viewer",
+  // The full payload of an activity the window already sent as a preview.
+  [ORCHESTRATION_WS_METHODS.getActivityPayload]: "viewer",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "viewer",
   // Steers the history recovery a viewer's own thread subscription runs.
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "viewer",
@@ -339,6 +341,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: "read",
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "read",
+  [ORCHESTRATION_WS_METHODS.getActivityPayload]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "read",
   // Idempotent: it sets a mode and the server spaces recovery reads per thread.
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "read",

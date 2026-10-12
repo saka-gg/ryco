@@ -38,6 +38,8 @@ import {
   type OrchestrationThreadHistoryPageInfo,
   type OrchestrationThreadWindowSnapshot,
   type OrchestrationThreadActivity,
+  type OrchestrationActivityPayloadMode,
+  EventId,
   OrchestrationThreadShell,
   THREAD_FORKED_ACTIVITY_KIND,
   ThreadPriorityProjectedRanking,
@@ -77,6 +79,7 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
+import { previewActivityPayload } from "../activityPayloadPreview.ts";
 import { projectionThreadLineage, withThreadLineage } from "../threadLineage.ts";
 import { inheritedTurnRowSql } from "../forkInheritanceSql.ts";
 import {
@@ -198,6 +201,37 @@ export function takeNewestRowsWithinByteBudget<Row extends { readonly payloadByt
     bytes += row.payloadBytes;
   }
   return { rows: kept, hasMoreBefore: rows.length > kept.length };
+}
+
+type ProjectionActivityWindowRow = Schema.Schema.Type<
+  typeof ProjectionThreadActivityWindowDbRowSchema
+>;
+type SentActivityRow = ProjectionActivityWindowRow & {
+  readonly payloadPreview?: { readonly fullBytes: number };
+};
+
+/**
+ * The activity rows as a window or page sends them. With previews each large
+ * payload is bounded (`previewActivityPayload`) and `payloadBytes` becomes the
+ * size actually sent, so the byte budget counts what crosses the connection and
+ * one oversized activity can no longer exceed it on its own.
+ */
+export function toSentActivityRows(
+  rows: ReadonlyArray<ProjectionActivityWindowRow>,
+  mode: OrchestrationActivityPayloadMode | undefined,
+): ReadonlyArray<SentActivityRow> {
+  if (mode !== "preview") return rows;
+  return rows.map((row) => {
+    const preview = previewActivityPayload(row);
+    return preview.truncated
+      ? {
+          ...row,
+          payload: preview.payload,
+          payloadBytes: preview.bytes,
+          payloadPreview: { fullBytes: row.payloadBytes },
+        }
+      : row;
+  });
 }
 
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
@@ -508,7 +542,9 @@ function mapMessageRow(
 }
 
 function mapActivityRow(
-  row: Schema.Schema.Type<typeof ProjectionThreadActivityDbRowSchema>,
+  row: Schema.Schema.Type<typeof ProjectionThreadActivityDbRowSchema> & {
+    readonly payloadPreview?: { readonly fullBytes: number };
+  },
 ): OrchestrationThreadActivity {
   const activity = {
     id: row.activityId,
@@ -519,7 +555,11 @@ function mapActivityRow(
     turnId: row.turnId,
     createdAt: row.createdAt,
   };
-  return row.sequence === null ? activity : Object.assign(activity, { sequence: row.sequence });
+  return Object.assign(
+    activity,
+    row.sequence === null ? {} : { sequence: row.sequence },
+    row.payloadPreview === undefined ? {} : { payloadPreview: row.payloadPreview },
+  );
 }
 
 function mapCheckpointRow(
@@ -1980,6 +2020,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         created_at DESC,
         activity_id DESC
       LIMIT ${limit}
+    `,
+  });
+
+  const getActivityPayloadRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({ threadId: ThreadId, activityId: EventId }),
+    Result: Schema.Struct({
+      kind: Schema.String,
+      payload: Schema.fromJsonString(Schema.Unknown),
+      payloadBytes: NonNegativeInt,
+    }),
+    execute: ({ threadId, activityId }) => sql`
+      SELECT
+        activity.kind AS "kind",
+        activity.payload_json AS "payload",
+        length(CAST(activity.payload_json AS BLOB)) AS "payloadBytes"
+      FROM projection_thread_activities AS activity
+      INNER JOIN projection_threads AS thread
+        ON thread.thread_id = activity.thread_id
+      WHERE activity.thread_id = ${threadId}
+        AND activity.activity_id = ${activityId}
+        AND thread.deleted_at IS NULL
+      LIMIT 1
     `,
   });
 
@@ -3662,7 +3724,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       const messageRows = rawMessageRows.slice(0, limits.messages).toReversed();
       const proposedPlanRows = rawProposedPlanRows.slice(0, limits.proposedPlans).toReversed();
       const boundedActivities = takeNewestRowsWithinByteBudget(
-        rawActivityRows,
+        toSentActivityRows(rawActivityRows, input.activityPayloads),
         limits.activities,
         THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
       );
@@ -3748,6 +3810,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         },
       } satisfies OrchestrationThreadWindowSnapshot;
     });
+
+  const getActivityPayload: ProjectionSnapshotQueryShape["getActivityPayload"] = (input) =>
+    getActivityPayloadRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getActivityPayload:query",
+          "ProjectionSnapshotQuery.getActivityPayload:decodeRow",
+        ),
+      ),
+    );
 
   const getThreadHistoryPage: ProjectionSnapshotQueryShape["getThreadHistoryPage"] = (input) =>
     Effect.gen(function* () {
@@ -4049,7 +4121,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         // Byte-bounded like the window: 150 heavy tool outputs would pass the relay's message
         // cap. A page cut short by bytes still reports more, so paging continues from its edge.
         const bounded = takeNewestRowsWithinByteBudget(
-          rawRows,
+          toSentActivityRows(rawRows, input.activityPayloads),
           limit,
           THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
         );
@@ -4271,6 +4343,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getProjectWorkspaceRows,
     getThreadDetailById,
     getThreadWindow,
+    getActivityPayload,
     getCompletedSideQuestionContext,
     getThreadHistoryPage,
     getThreadMessageById,

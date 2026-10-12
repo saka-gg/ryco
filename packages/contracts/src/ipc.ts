@@ -204,6 +204,8 @@ import type {
   ContextHandoffRawPayloadChunkInput,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
+  OrchestrationGetActivityPayloadInput,
+  OrchestrationGetActivityPayloadResult,
   OrchestrationGetThreadHistoryPageInput,
   OrchestrationGetThreadWindowInput,
   OrchestrationThreadHistoryPage,
@@ -1304,6 +1306,10 @@ export interface EnvironmentApi {
     getThreadHistoryPage?: (
       input: OrchestrationGetThreadHistoryPageInput,
     ) => Promise<OrchestrationThreadHistoryPage>;
+    /** Optional so clients can feature-detect against older environments. */
+    getActivityPayload?: (
+      input: OrchestrationGetActivityPayloadInput,
+    ) => Promise<OrchestrationGetActivityPayloadResult>;
     replayEvents?: (
       input: OrchestrationReplayEventsInput,
     ) => Promise<OrchestrationReplayEventsResult>;

@@ -31,6 +31,7 @@ export const SERVER_PURE_TEST_FILES = [
   "src/orchestration/ActivityPayloadProjection.test.ts",
   "src/orchestration/ThreadBackgroundLiveness.test.ts",
   "src/orchestration/activityDataCap.test.ts",
+  "src/orchestration/activityPayloadPreview.test.ts",
   "src/orchestration/commandInvariants.test.ts",
   "src/orchestration/contextHandoff/ContextHandoffBuilder.test.ts",
   "src/orchestration/contextHandoff/ContextHandoffInspection.test.ts",

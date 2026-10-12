@@ -225,6 +225,7 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadMessagesInput,
   OrchestrationThreadHistoryError,
+  OrchestrationGetActivityPayloadError,
   OrchestrationGetTurnDiffError,
   OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
@@ -2030,6 +2031,15 @@ export const WsOrchestrationGetThreadHistoryPageRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetActivityPayloadRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getActivityPayload,
+  {
+    payload: OrchestrationRpcSchemas.getActivityPayload.input,
+    success: OrchestrationRpcSchemas.getActivityPayload.output,
+    error: OrchestrationGetActivityPayloadError,
+  },
+);
+
 export const WsOrchestrationSetThreadHistoryRecoveryRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
   {
@@ -2487,6 +2497,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationSearchThreadMessagesRpc
   | typeof WsOrchestrationGetThreadWindowRpc
   | typeof WsOrchestrationGetThreadHistoryPageRpc
+  | typeof WsOrchestrationGetActivityPayloadRpc
   | typeof WsOrchestrationSetThreadHistoryRecoveryRpc
   | typeof WsOrchestrationReplayEventsRpc
   | typeof WsOrchestrationReplayEventsPageRpc
@@ -2691,6 +2702,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationSearchThreadMessagesRpc,
   WsOrchestrationGetThreadWindowRpc,
   WsOrchestrationGetThreadHistoryPageRpc,
+  WsOrchestrationGetActivityPayloadRpc,
   WsOrchestrationSetThreadHistoryRecoveryRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationReplayEventsPageRpc,
