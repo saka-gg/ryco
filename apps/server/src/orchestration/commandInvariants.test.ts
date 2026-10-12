@@ -13,6 +13,7 @@ import { Effect } from "effect";
 
 import {
   findThreadById,
+  isThreadPristine,
   listThreadsByProjectId,
   requireNonNegativeInteger,
   requireThread,
@@ -201,6 +202,40 @@ describe("commandInvariants", () => {
     );
 
     expect(thread.id).toBe(ThreadId.make("thread-1"));
+  });
+
+  it("treats a fork as used before it sends anything, even without an inherited prompt", async () => {
+    const lineage = {
+      parentThreadId: ThreadId.make("thread-2"),
+      rootThreadId: ThreadId.make("thread-2"),
+      relationship: "forked",
+    };
+    const forkReadModel: OrchestrationReadModel = {
+      ...readModel,
+      threads: readModel.threads.map((entry) =>
+        entry.id === ThreadId.make("thread-1") ? { ...entry, lineage } : entry,
+      ),
+    };
+    const fork = findThreadById(forkReadModel, ThreadId.make("thread-1"))!;
+    expect(fork.messages.some((message) => message.role === "user")).toBe(false);
+
+    const archived = await Effect.runPromise(
+      requireThreadHasUserMessage({
+        readModel: forkReadModel,
+        command: {
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-archive-fork"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        threadId: ThreadId.make("thread-1"),
+      }),
+    );
+    expect(archived.id).toBe(ThreadId.make("thread-1"));
+    expect(isThreadPristine(fork)).toBe(false);
+    // Other lineage (a delegated child) is not a conversation by itself.
+    expect(isThreadPristine({ ...fork, lineage: { ...lineage, relationship: "delegated" } })).toBe(
+      true,
+    );
   });
 
   it("requires missing thread for create flows", async () => {

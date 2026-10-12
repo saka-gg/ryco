@@ -86,8 +86,9 @@ second one. At startup, a relocation turn start that never reached the provider 
 through the same deterministic reference. It ends as a failed divider, and sending the message
 again retries it.
 
-Handoff activity payloads carry a `reason`. It is `model-change` for a selection staged by the user
-and `cwd-relocation` for a working-directory move. Records written before reasons existed have no
+Handoff activity payloads carry a `reason`. It is `model-change` for a selection staged by the user,
+`cwd-relocation` for a working-directory move, and `fork` for the first message of a fork that
+continues by handoff (see [Forks](#forks)). Records written before reasons existed have no
 `reason`; they are model changes. The operation record does not persist the reason, so the
 terminal activity copies it from the `requested` activity it replaces. Clients present a relocation
 divider as a fresh session in the new folder, not as a model switch.
@@ -104,3 +105,43 @@ and the next turn moves the conversation. Restarts keep their own failure behavi
 handoff fallback, because they have no message to carry the context. Relocation handoffs are
 started by the server. They therefore also run for messages sent from clients that cannot stage a
 handoff themselves.
+
+## Forks
+
+A [fork](thread-forks.md) whose provider cannot make an exact native copy of the original's session
+continues by handoff. The fork owes its provider the conversation it inherited: its `thread.forked`
+provenance activity records `providerContext: "handoff"`, and no provider session or binding
+exists for it yet.
+
+The first message sent in such a fork becomes a `full-context-fresh-session` handoff with reason
+`fork`. The decider adds it to that `thread.turn.start`, exactly like a staged model change: the
+same ids (`context-handoff:<command id>`), operation record, durability rules and divider. The
+target is the selection the message is sent with: the model the fork inherited, or the one you
+switched to before sending. A switch does not add a second handoff; the `fork` handoff carries the
+conversation to the new selection, and clients name the model it switched from. The context
+document is built from the fork's own history, which consists of the inherited messages and
+therefore ends at the reply the fork was made from; the original thread is never read, and its
+later messages are never included.
+
+The handoff stays owed until one is consumed. A failed or `delivery-uncertain` handoff leaves it
+owed, so the next message tries again with a new handoff. The rule reads only the fork's
+`thread.forked` activity and its consumed `context-handoff` activities, which both survive the
+activity cap and a restart. A fork that continues natively never gets this handoff; switching its
+model before the first message is an ordinary `model-change` handoff. The handoff does not depend
+on the inherited history holding a prompt: a fork whose inherited history starts with a reply (an
+imported turn whose prompt had no text) still hands it over on its first message. The document
+lists every inherited item before the fork's own, whatever time the sending device stamped on the
+fork's messages.
+
+Reverts in such a fork follow the handoff boundary rule above. The fork's first own turn carried
+the inherited conversation into the fresh session, so a checkpoint revert that would undo that turn
+(undoing the fork's first message reverts to checkpoint 0) is refused with `handoff-boundary`
+before anything changes, exactly like a revert across a model change; reverting to that turn's
+checkpoint or later works. The web app still offers undo on that turn, as on the turn after a model
+change; the node then reports the revert as failed and changes nothing. A fork that continues
+natively has no such boundary: a revert to checkpoint 0 rewinds its copied session to the end of
+the inherited turn.
+
+Clients present a fork divider as the inherited conversation being sent to a fresh session. When
+that first message also switched model past the model-change threshold, the divider names the model
+it switched from, and lists such as the Inbox count it as a model change too.

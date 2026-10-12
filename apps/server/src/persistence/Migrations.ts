@@ -112,6 +112,10 @@ import Migration0077, {
 import Migration0082, {
   ensureWorktreePullRequestLinksColumn,
 } from "./Migrations/082_WorktreePullRequestLinks.ts";
+import Migration0083, {
+  ensureProjectionThreadLineageForkColumns,
+} from "./Migrations/083_ProjectionThreadLineageFork.ts";
+import Migration0084, { ensureThreadForksTable } from "./Migrations/084_ThreadForks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -205,6 +209,8 @@ export const migrationEntries = [
   [80, "ProjectKindAndRelocations", Migration0080],
   [81, "NotesDocuments", Migration0081],
   [82, "WorktreePullRequestLinks", Migration0082],
+  [83, "ProjectionThreadLineageFork", Migration0083],
+  [84, "ThreadForks", Migration0084],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -468,6 +474,16 @@ export const repairWorktreePullRequestLinksColumn = Effect.fn(
   }
 });
 
+// Fork lineage provenance: run 083 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id).
+export const repairProjectionThreadLineageForkColumns = Effect.fn(
+  "repairProjectionThreadLineageForkColumns",
+)(function* () {
+  if (yield* ensureProjectionThreadLineageForkColumns) {
+    yield* Effect.log("Repaired projection_threads fork lineage columns");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -631,6 +647,13 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   }
   if (toMigrationInclusive === undefined || toMigrationInclusive >= 82) {
     yield* repairWorktreePullRequestLinksColumn();
+  }
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 83) {
+    yield* repairProjectionThreadLineageForkColumns();
+  }
+  // Repair: 084 is skipped by the migrator when a later number was recorded first.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 84) {
+    yield* ensureThreadForksTable;
   }
   yield* Effect.log("Migrations ran successfully").pipe(
     Effect.annotateLogs({

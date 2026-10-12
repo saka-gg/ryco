@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
-import { lstat, open, type FileHandle } from "node:fs/promises";
+import { link, lstat, open, rm, unlink, type FileHandle } from "node:fs/promises";
+import path from "node:path";
 
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
@@ -30,6 +31,7 @@ const ATTACHMENT_ID_WITH_EXTENSION_PATTERN = new RegExp(
   "i",
 );
 
+const ATTACHMENT_ID_MAX_CHARS = 128;
 const PART_EXTENSION_SEGMENT = "part";
 const FALLBACK_EXTENSION_SEGMENT = "bin";
 
@@ -87,6 +89,11 @@ export function createFileAttachmentId(threadId: string, name: string): string |
     return null;
   }
   return `${threadSegment}-${randomUUID()}-${toSafeFileAttachmentExtensionSegment(name)}`;
+}
+
+/** The first 32 hex digits of a sha-256 digest, formatted like a UUID (no version bits). */
+export function uuidFromSha256Hex(hash: string): string {
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
 }
 
 export function parseThreadSegmentFromAttachmentId(attachmentId: string): string | null {
@@ -293,4 +300,169 @@ export function parseAttachmentIdFromRelativePath(relativePath: string): string 
 export function attachmentIdExtensionSegment(attachmentId: string): string | null {
   const match = attachmentId.toLowerCase().match(ATTACHMENT_ID_WITH_EXTENSION_PATTERN);
   return match?.[3] ? `.${match[3]}` : null;
+}
+
+/**
+ * The id a fork's copy of an inherited attachment gets: in the fork's own thread segment, so
+ * deleting or reverting the source never touches it, and derived from (fork, source id), so a
+ * retried fork links the same file again. The extension segment of a streamed-upload id is
+ * kept, so the copy's on-disk name follows the same rule as the source's.
+ */
+export function inheritedAttachmentId(input: {
+  readonly forkThreadId: string;
+  readonly sourceAttachmentId: string;
+}): string | null {
+  const threadSegment = toSafeThreadAttachmentSegment(input.forkThreadId);
+  if (!threadSegment) {
+    return null;
+  }
+  const extension = input.sourceAttachmentId.match(ATTACHMENT_ID_WITH_EXTENSION_PATTERN)?.[3];
+  const uuid = uuidFromSha256Hex(
+    createHash("sha256")
+      .update(`${input.forkThreadId}\0${input.sourceAttachmentId}`, "utf8")
+      .digest("hex"),
+  );
+  const id = `${threadSegment}-${uuid}${extension ? `-${extension.toLowerCase()}` : ""}`;
+  return id.length <= ATTACHMENT_ID_MAX_CHARS ? id : null;
+}
+
+/**
+ * The inherited copy of an attachment, with only its id rewritten. Attachments without a stored
+ * file (unknown types) are inherited as they are; null when no valid copy id exists.
+ */
+export function inheritedChatAttachment(
+  attachment: ChatAttachment,
+  forkThreadId: string,
+): ChatAttachment | null {
+  if (!isPersistableChatAttachment(attachment)) {
+    return attachment;
+  }
+  const id = inheritedAttachmentId({ forkThreadId, sourceAttachmentId: attachment.id });
+  return id === null ? null : { ...attachment, id };
+}
+
+function errorCode(cause: unknown): string | undefined {
+  return cause instanceof Error && "code" in cause ? String(cause.code) : undefined;
+}
+
+/** Copy through a private staging file, then publish without overwriting. */
+async function copyAttachmentFile(source: string, destination: string, attachmentsDir: string) {
+  const staging = path.join(attachmentsDir, `.${randomUUID()}.part`);
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let input: FileHandle | undefined;
+  let output: FileHandle | undefined;
+  try {
+    input = await open(source, constants.O_RDONLY | noFollow);
+    output = await open(staging, "wx", 0o600);
+    const chunk = Buffer.allocUnsafe(64 * 1024);
+    for (let offset = 0; ;) {
+      const { bytesRead } = await input.read(chunk, 0, chunk.length, offset);
+      if (bytesRead === 0) break;
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await output.write(chunk, written, bytesRead - written, offset + written);
+        written += result.bytesWritten;
+      }
+      offset += bytesRead;
+    }
+    await output.sync();
+    await output.close();
+    output = undefined;
+    try {
+      await link(staging, destination);
+      return true;
+    } catch (cause) {
+      if (errorCode(cause) === "EEXIST") return false;
+      throw cause;
+    }
+  } finally {
+    await input?.close();
+    await output?.close();
+    await rm(staging, { force: true });
+  }
+}
+
+/**
+ * Materializes a fork's copy of an inherited attachment: a hard link to the source file (no
+ * bytes copied), or a staged copy when the link crosses filesystems. Never follows a symlink and
+ * never overwrites: an existing copy (a retry) counts as done. Returns the rewritten attachment;
+ * `created` is false when nothing was written.
+ */
+export async function materializeInheritedAttachment(input: {
+  readonly attachmentsDir: string;
+  readonly forkThreadId: string;
+  readonly attachment: ChatAttachment;
+}): Promise<{ readonly attachment: ChatAttachment; readonly created: boolean }> {
+  const copy = inheritedChatAttachment(input.attachment, input.forkThreadId);
+  if (copy === null) {
+    throw new Error(`Attachment '${input.attachment.id ?? "unknown"}' cannot be inherited.`);
+  }
+  if (!isPersistableChatAttachment(input.attachment)) {
+    return { attachment: copy, created: false };
+  }
+  const source = resolveAttachmentPath({
+    attachmentsDir: input.attachmentsDir,
+    attachment: input.attachment,
+  });
+  const destination = resolveAttachmentPath({
+    attachmentsDir: input.attachmentsDir,
+    attachment: copy,
+  });
+  if (!source || !destination) {
+    throw new Error(`Invalid attachment id '${input.attachment.id}'.`);
+  }
+  const sourceInfo = await lstat(source);
+  if (!sourceInfo.isFile() || sourceInfo.size !== input.attachment.sizeBytes) {
+    throw new Error(`Attachment '${input.attachment.name}' is missing or changed.`);
+  }
+  let created: boolean;
+  try {
+    await link(source, destination);
+    created = true;
+  } catch (cause) {
+    const code = errorCode(cause);
+    if (code === "EEXIST") {
+      created = false;
+    } else if (code === "EXDEV" || code === "EPERM" || code === "ENOTSUP") {
+      created = await copyAttachmentFile(source, destination, input.attachmentsDir);
+    } else {
+      throw cause;
+    }
+  }
+  const copied = await lstat(destination);
+  if (!copied.isFile() || copied.size !== input.attachment.sizeBytes) {
+    throw new Error(`Attachment '${input.attachment.name}' could not be inherited.`);
+  }
+  return { attachment: copy, created };
+}
+
+/**
+ * Deletes a thread's attachment files by id, e.g. a failed fork's copies. Refuses (before
+ * deleting anything) ids outside the thread's segment; missing files count as deleted. Links are
+ * removed, never followed.
+ */
+export async function deleteThreadAttachmentFiles(input: {
+  readonly attachmentsDir: string;
+  readonly threadId: string;
+  readonly attachmentIds: ReadonlyArray<string>;
+}): Promise<void> {
+  const threadSegment = toSafeThreadAttachmentSegment(input.threadId);
+  if (
+    !threadSegment ||
+    input.attachmentIds.some((id) => parseThreadSegmentFromAttachmentId(id) !== threadSegment)
+  ) {
+    throw new Error("Refusing to delete attachments of another thread.");
+  }
+  for (const attachmentId of input.attachmentIds) {
+    const filePath = resolveAttachmentPathById({
+      attachmentsDir: input.attachmentsDir,
+      attachmentId,
+    });
+    if (filePath === null) continue;
+    try {
+      await unlink(filePath);
+    } catch (cause) {
+      if (errorCode(cause) !== "ENOENT") throw cause;
+    }
+  }
 }

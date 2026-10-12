@@ -40,6 +40,20 @@ export interface DeleteCheckpointRefsInput {
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
 }
 
+export interface ResolveCommitInput {
+  readonly cwd: string;
+  /** A ref, branch, tag or commit expression. Refused (null) when it looks like an option. */
+  readonly ref: string;
+}
+
+export interface PinRefInput {
+  readonly cwd: string;
+  /** A Ryco-owned hidden ref, e.g. a fork pin ref. Overwritten when it exists. */
+  readonly ref: CheckpointRef;
+  /** A full commit id, as returned by `resolveCommit`. */
+  readonly commit: string;
+}
+
 /**
  * CheckpointStoreShape - Service API for checkpoint capture/restore and diff access.
  */
@@ -96,6 +110,22 @@ export interface CheckpointStoreShape {
   readonly deleteCheckpointRefs: (
     input: DeleteCheckpointRefsInput,
   ) => Effect.Effect<void, CheckpointStoreError>;
+
+  /**
+   * Resolve a ref to the full id of the commit it names, or null when it does not resolve.
+   *
+   * Refs are mutable (a revert deletes and reuses checkpoint refs), so callers that act later
+   * resolve once and keep the commit id.
+   */
+  readonly resolveCommit: (
+    input: ResolveCommitInput,
+  ) => Effect.Effect<string | null, CheckpointStoreError>;
+
+  /**
+   * Point a Ryco-owned hidden ref at a commit, so Git keeps the commit while the ref exists.
+   * Delete it with `deleteCheckpointRefs`.
+   */
+  readonly pinRef: (input: PinRefInput) => Effect.Effect<void, CheckpointStoreError>;
 }
 
 /**

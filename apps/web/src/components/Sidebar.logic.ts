@@ -13,6 +13,7 @@ import {
   applicableUsageLimit,
   deriveThreadActivityStatus,
 } from "@ryco/client-runtime/state/threads";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -135,15 +136,15 @@ export function shouldSuggestArchive(input: ShouldSuggestArchiveInput): boolean 
 }
 
 export function canArchiveSidebarThread(
-  thread: Pick<SidebarThreadSummary, "latestUserMessageAt">,
+  thread: Pick<SidebarThreadSummary, "latestUserMessageAt" | "lineage">,
 ): boolean {
-  return thread.latestUserMessageAt !== null;
+  return threadHasConversation(thread);
 }
 
 export function shouldConfirmCloseSidebarThread(
-  thread: Pick<SidebarThreadSummary, "latestUserMessageAt">,
+  thread: Pick<SidebarThreadSummary, "latestUserMessageAt" | "lineage">,
 ): boolean {
-  return thread.latestUserMessageAt !== null;
+  return threadHasConversation(thread);
 }
 
 export function shouldConfirmSidebarThreadDelete(input: {

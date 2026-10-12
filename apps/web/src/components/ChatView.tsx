@@ -215,9 +215,11 @@ import {
   type LinkedWorktreeItem,
 } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { openForkThreadDialog, useCanForkThread } from "./chat/forkThreadDialogStore";
 import {
   deriveRevertTurnCountByUserMessageId,
   deriveUndoTurnCountByTurnId,
+  type TimelineForkRequest,
 } from "./chat/MessagesTimeline.logic";
 import { NewThreadContextBar } from "./chat/NewThreadContextBar";
 import { NewThreadHero } from "./chat/NewThreadHero";
@@ -258,6 +260,8 @@ import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
   applicableUsageLimit,
   deriveThreadSnoozeEligibility,
+  isMaterializableCheckpointSummary,
+  threadForkBoundaryQuote,
 } from "@ryco/client-runtime/state/threads";
 import {
   ChatOverviewPanel,
@@ -1659,6 +1663,7 @@ export default function ChatView(props: ChatViewProps) {
     workLogEntries,
     contextCompactionEntries,
     contextHandoffEntries,
+    forkOriginEntries,
     pendingApprovals,
     pendingUserInputs,
     optionalUserInputs,
@@ -1962,12 +1967,14 @@ export default function ChatView(props: ChatViewProps) {
       workEntries: workLogEntries,
       contextCompactionEntries,
       contextHandoffEntries,
+      forkOriginEntries,
     });
   }, [
     activeThreadId,
     activeThread?.proposedPlans,
     contextCompactionEntries,
     contextHandoffEntries,
+    forkOriginEntries,
     timelineMessages,
     workLogEntries,
   ]);
@@ -4709,6 +4716,31 @@ export default function ChatView(props: ChatViewProps) {
   const onUndoTurn = useCallback((turnCount: number) => {
     void onRevertToTurnCountRef.current(turnCount);
   }, []);
+  // "Fork from here": desktop and tablet only (the frozen phone tier never
+  // offers it), on server threads of machines that advertise `threadFork`.
+  // Same ref indirection: the callback identity never changes.
+  const threadForkSupported = useCanForkThread(environmentId);
+  const offerThreadFork = threadForkSupported && isServerThread && presentationTier !== "phone";
+  const forkSourceRef = useRef({ thread: activeThread, turnDiffSummaries });
+  forkSourceRef.current = { thread: activeThread, turnDiffSummaries };
+  const onForkFromMessage = useCallback(
+    (request: TimelineForkRequest, trigger: HTMLButtonElement) => {
+      const { thread, turnDiffSummaries: summaries } = forkSourceRef.current;
+      if (!thread) return;
+      openForkThreadDialog({
+        sourceThreadRef: scopeThreadRef(thread.environmentId, thread.id),
+        sourceMessageId: request.messageId,
+        sourceTurnId: request.turnId,
+        // A page-only turn, or a blank reply under a page, quotes what the turn published.
+        boundaryText: threadForkBoundaryQuote(thread.messages, request.messageId),
+        checkpointAvailable: isMaterializableCheckpointSummary(
+          summaries.find((summary) => summary.turnId === request.turnId),
+        ),
+        origin: trigger,
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     setOverviewOpenedOnEmptyThread(false);
@@ -5117,6 +5149,7 @@ export default function ChatView(props: ChatViewProps) {
                 {...(presentationTier !== "phone"
                   ? { onInspectContextHandoff: openContextHandoffInspection }
                   : {})}
+                {...(offerThreadFork ? { onForkFromMessage } : {})}
                 providerDriverKind={selectedProvider}
               />
             ) : (

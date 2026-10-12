@@ -1870,6 +1870,112 @@ describe("orchestration projector checkpoint revert", () => {
     ]);
   });
 
+  it("always keeps a fork's inherited history, apart from the count fallback", async () => {
+    const forkId = "fork-1";
+    const inherited = (id: string) => `${forkId}:inherited:${id}`;
+    const message = (
+      id: string,
+      role: "user" | "assistant",
+      turnId: string | null,
+      minute: number,
+    ) => ({
+      id: MessageId.make(id),
+      role,
+      text: id,
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      streaming: false,
+      createdAt: t(minute),
+      updatedAt: t(minute),
+    });
+    const checkpoint = (count: number) => ({
+      turnId: TurnId.make(`turn-${count}`),
+      checkpointTurnCount: count,
+      checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/fork-1/turn/${count}`),
+      status: "ready" as const,
+      files: [],
+      assistantMessageId: MessageId.make(`assistant-${count}`),
+      completedAt: t(count * 10 + 2),
+    });
+    const fork: OrchestrationThread = {
+      ...hydratedThread(),
+      id: ThreadId.make(forkId),
+      latestTurn: { ...latestTurn5, turnId: TurnId.make("turn-2"), completedAt: t(22) },
+      checkpoints: [checkpoint(1), checkpoint(2)],
+      // Live user prompts carry no turn id, inherited ones may not either: an inherited
+      // prompt must not take the fallback slot of the fork's own first prompt.
+      messages: [
+        message(inherited("user-0"), "user", null, 1),
+        message(inherited("assistant-0"), "assistant", "turn-source", 2),
+        message("user-1", "user", null, 10),
+        message("assistant-1", "assistant", "turn-1", 12),
+        message("user-2", "user", null, 20),
+        message("assistant-2", "assistant", "turn-2", 22),
+      ],
+      proposedPlans: [
+        {
+          ...hydratedThread().proposedPlans[0]!,
+          id: inherited("plan-0"),
+          turnId: TurnId.make("turn-source"),
+        },
+        { ...hydratedThread().proposedPlans[0]!, id: "plan-2", turnId: TurnId.make("turn-2") },
+      ],
+      activities: [
+        {
+          id: EventId.make(inherited("tool-0")),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "inherited",
+          payload: {},
+          turnId: TurnId.make("turn-source"),
+          createdAt: t(2),
+        },
+        {
+          id: EventId.make(`${forkId}:forked`),
+          tone: "info",
+          kind: "thread.forked",
+          summary: "Forked",
+          payload: {},
+          turnId: null,
+          createdAt: t(5),
+        },
+        {
+          id: EventId.make("tool-2"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "own",
+          payload: {},
+          turnId: TurnId.make("turn-2"),
+          createdAt: t(21),
+        },
+      ],
+    };
+    const model = { ...createEmptyReadModel(t(0)), threads: [fork] };
+    const inheritedIds = [inherited("user-0"), inherited("assistant-0")];
+
+    for (const payload of [
+      { turnCount: 0 },
+      { turnCount: 0, droppedTurnIds: ["turn-1", "turn-2"], latestTurn: null },
+    ]) {
+      const toZero = (await Effect.runPromise(projectEvent(model, reverted(payload, forkId))))
+        .threads[0];
+      expect(toZero?.messages.map((entry) => entry.id)).toEqual(inheritedIds);
+      expect(toZero?.proposedPlans.map((plan) => plan.id)).toEqual([inherited("plan-0")]);
+      expect(toZero?.activities.map((activity) => activity.id)).toEqual([
+        inherited("tool-0"),
+        `${forkId}:forked`,
+      ]);
+      expect(toZero?.latestTurn).toBeNull();
+    }
+
+    const toOne = (await Effect.runPromise(projectEvent(model, reverted({ turnCount: 1 }, forkId))))
+      .threads[0];
+    expect(toOne?.messages.map((entry) => entry.id)).toEqual([
+      ...inheritedIds,
+      "user-1",
+      "assistant-1",
+    ]);
+  });
+
   it("keeps the legacy projection for payloads without the authoritative fields", async () => {
     const model = { ...createEmptyReadModel(t(0)), threads: [hydratedThread()] };
     const next = await Effect.runPromise(projectEvent(model, reverted({ turnCount: 5 })));

@@ -45,9 +45,10 @@ import {
   threadBusyReason,
 } from "../checkpointRevertPolicy.ts";
 import { resolveCwdRelocation } from "../cwdRelocation.ts";
+import { isInheritedItemId, nativeForkBaseTurnId } from "../forkInheritance.ts";
 import { latestTurnFromCheckpoint } from "../projector.ts";
 import { threadShellSettlementInput } from "../threadSettlementInput.ts";
-import { selectTurnReplyMessage, type TurnReplyCandidate } from "../turnReplyMessage.ts";
+import { selectTurnReplyMessage, type TurnReplyCandidate } from "@ryco/shared/turnReply";
 import { userFacingFailureDetail } from "../userFacingErrors.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -738,7 +739,9 @@ const make = Effect.gen(function* () {
       if (
         event.payload.role !== "user" ||
         event.payload.streaming ||
-        event.payload.turnId !== null
+        event.payload.turnId !== null ||
+        // Published history, not a send: a fork's inherited messages start no turn.
+        isInheritedItemId(event.payload.threadId, event.payload.messageId)
       ) {
         return;
       }
@@ -916,7 +919,10 @@ const make = Effect.gen(function* () {
     return {
       currentTurnCount: ordered.at(-1)?.checkpointTurnCount ?? 0,
       dropped: ordered.filter((checkpoint) => checkpoint.checkpointTurnCount > turnCount),
-      targetTurnId: turnCount === 0 ? null : (target?.turnId ?? null),
+      // Checkpoint 0 of a native fork still holds the inherited conversation: rewind the
+      // provider to the end of it rather than starting it fresh.
+      targetTurnId:
+        turnCount === 0 ? nativeForkBaseTurnId(thread.activities) : (target?.turnId ?? null),
       latestTurn: turnCount === 0 || !target ? null : latestTurnFromCheckpoint(target),
     };
   };

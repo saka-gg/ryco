@@ -63,6 +63,7 @@ export * from "./computerBeta.ts";
 
 export * from "./codexResetCredits.ts";
 export * from "./sessionImport.ts";
+export * from "./threadFork.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";

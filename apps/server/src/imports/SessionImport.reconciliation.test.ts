@@ -490,14 +490,16 @@ it("recovers a Claude copy in an explicitly configured SDK store without a model
       const importer = yield* makeSessionImport({
         fork: async (input) => {
           f.state.forks++;
-          copiedId = await forkClaudeNative({
-            root: f.store,
-            sourceFile: f.sourceFile,
-            sourceId: id,
-            lastMessageId: input.lastMessageId,
-            cwd: f.state.target,
-            key: f.request.key,
-          });
+          copiedId = (
+            await forkClaudeNative({
+              root: f.store,
+              sourceFile: f.sourceFile,
+              sourceId: id,
+              lastMessageId: input.lastMessageId,
+              cwd: f.state.target,
+              title: `Ryco import ${f.request.key}`,
+            })
+          ).sessionId;
           throw new Error("synthetic crash after SDK fork");
         },
       });
@@ -801,14 +803,16 @@ it("routes a successful installed Claude SDK fork through the same durable copy 
   const options: SessionImportTestOptions = {
     fork: async (input) => {
       f.state.forks++;
-      return forkClaudeNative({
-        root: f.store,
-        sourceFile: f.sourceFile,
-        sourceId: input.sourceId,
-        lastMessageId: input.lastMessageId,
-        cwd: input.cwd,
-        key: f.request.key,
-      });
+      return (
+        await forkClaudeNative({
+          root: f.store,
+          sourceFile: f.sourceFile,
+          sourceId: input.sourceId,
+          lastMessageId: input.lastMessageId,
+          cwd: input.cwd,
+          title: `Ryco import ${f.request.key}`,
+        })
+      ).sessionId;
     },
   };
   let file = "",

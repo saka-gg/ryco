@@ -37,6 +37,16 @@ describe("conversation lifecycle actions", () => {
     expect(ids(thread({ latestUserMessageAt: null }))).toEqual(["trash"]);
   });
 
+  it("offers Archive on a fork that holds only its inherited conversation", () => {
+    // A fork's inherited prompts are not its own recency, so a fresh fork has no
+    // latestUserMessageAt; it still holds a conversation.
+    const fork = thread({ latestUserMessageAt: null, lineage: { relationship: "forked" } });
+    expect(ids(fork)).toEqual(["archive", "trash"]);
+    expect(
+      ids(thread({ latestUserMessageAt: null, lineage: { relationship: "delegated" } })),
+    ).toEqual(["trash"]);
+  });
+
   it("never offers deletion or a misleading close: Trash is the only removal", () => {
     const labels = listThreadLifecycleActions(thread({ session: { status: "ready" } })).map(
       (action) => action.label,

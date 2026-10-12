@@ -14,6 +14,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  THREAD_FORKED_ACTIVITY_KIND,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -33,6 +34,13 @@ import {
   toContextHandoffTimelineEntry,
   type ContextHandoffTimelineEntry,
 } from "./contextHandoff.ts";
+import {
+  forkBoundaryTurnId,
+  forkTimelineBand,
+  forkTimelineInheritedPrefix,
+  toForkOriginTimelineEntry,
+  type ForkOriginTimelineEntry,
+} from "./forkOrigin.ts";
 
 export type ProviderPickerKind = ProviderDriverKind;
 
@@ -173,6 +181,7 @@ export interface ThreadActivityViewModel {
   workLogEntries: WorkLogEntry[];
   contextCompactionEntries: ContextCompactionTimelineEntry[];
   contextHandoffEntries: ContextHandoffTimelineEntry[];
+  forkOriginEntries: ForkOriginTimelineEntry[];
   latestTurnHasToolActivity: boolean;
   pendingApprovals: PendingApproval[];
   pendingUserInputs: PendingUserInput[];
@@ -220,6 +229,13 @@ export type TimelineEntry =
       kind: "context-handoff";
       createdAt: string;
       marker: ContextHandoffTimelineEntry;
+    }
+  | {
+      id: string;
+      /** A forked thread's divider between its inherited history and its own. */
+      kind: "fork-origin";
+      createdAt: string;
+      marker: ForkOriginTimelineEntry;
     };
 
 export function formatDuration(durationMs: number): string {
@@ -938,6 +954,7 @@ function shouldIncludeActivityInWorkLog(
     activity.kind !== "agent.message" &&
     activity.kind !== "context-window.updated" &&
     activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND &&
+    activity.kind !== THREAD_FORKED_ACTIVITY_KIND &&
     !isContextCompactionActivity(activity) &&
     activity.summary !== "Checkpoint captured" &&
     !isPlanBoundaryToolActivity(activity)
@@ -2136,12 +2153,16 @@ export function deriveThreadActivityViewModel(
 ): ThreadActivityViewModel {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const startedAtByToolCallId = collectToolStartTimestamps(ordered);
-  const effectiveLatestTurnId = latestTurnId ?? undefined;
+  // A fork has no turn of its own until its first send. Its boundary turn stands in, so the
+  // inherited history renders as the source rendered it with that turn as its latest instead
+  // of listing every inherited tool call.
+  const effectiveLatestTurnId = latestTurnId ?? forkBoundaryTurnId(ordered) ?? undefined;
   const pendingApprovalState = new Map<ApprovalRequestId, PendingApproval>();
   const pendingUserInputState = new Map<ApprovalRequestId, PendingUserInput>();
   const workLogState: DerivedWorkLogEntry[] = [];
   const contextCompactionEntries: ContextCompactionTimelineEntry[] = [];
   const contextHandoffEntries: ContextHandoffTimelineEntry[] = [];
+  const forkOriginEntries: ForkOriginTimelineEntry[] = [];
   let latestTurnHasToolActivity = false;
   let latestPlanActivity: OrchestrationThreadActivity | null = null;
   let latestPlanActivityForTurn: OrchestrationThreadActivity | null = null;
@@ -2177,6 +2198,11 @@ export function deriveThreadActivityViewModel(
       contextHandoffEntries.push(contextHandoffEntry);
     }
 
+    const forkOriginEntry = toForkOriginTimelineEntry(activity);
+    if (forkOriginEntry) {
+      forkOriginEntries.push(forkOriginEntry);
+    }
+
     if (shouldIncludeActivityInWorkLog(activity, effectiveLatestTurnId)) {
       workLogState.push(toDerivedWorkLogEntry(activity, startedAtByToolCallId));
     }
@@ -2187,6 +2213,7 @@ export function deriveThreadActivityViewModel(
     workLogEntries: toWorkLogEntries(workLogState),
     contextCompactionEntries,
     contextHandoffEntries,
+    forkOriginEntries,
     latestTurnHasToolActivity,
     pendingApprovals: pendingApprovalsFromState(pendingApprovalState),
     pendingUserInputs: userInputs.filter((input) => !input.nonBlocking),
@@ -2201,6 +2228,7 @@ export function deriveTimelineEntries(
   workEntries: WorkLogEntry[],
   contextCompactionEntries: ContextCompactionTimelineEntry[] = [],
   contextHandoffEntries: ContextHandoffTimelineEntry[] = [],
+  forkOriginEntries: ForkOriginTimelineEntry[] = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -2223,6 +2251,12 @@ export function deriveTimelineEntries(
   const contextCompactionRows: TimelineEntry[] = contextCompactionEntries.map((marker) => ({
     id: marker.id,
     kind: "context-compaction",
+    createdAt: marker.createdAt,
+    marker,
+  }));
+  const forkOriginRows: TimelineEntry[] = forkOriginEntries.map((marker) => ({
+    id: marker.id,
+    kind: "fork-origin",
     createdAt: marker.createdAt,
     marker,
   }));
@@ -2251,13 +2285,20 @@ export function deriveTimelineEntries(
     }
   }
 
+  // A fork's inherited history, its divider, then its own items; by time within each band.
+  const inheritedPrefix = forkTimelineInheritedPrefix(forkOriginEntries);
   const chronologicalRows = [
     ...messageRows,
     ...proposedPlanRows,
     ...workRows,
     ...contextCompactionRows,
     ...fallbackHandoffRows,
-  ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
+    ...forkOriginRows,
+  ].toSorted(
+    (a, b) =>
+      forkTimelineBand(a, inheritedPrefix) - forkTimelineBand(b, inheritedPrefix) ||
+      a.createdAt.localeCompare(b.createdAt),
+  );
 
   return chronologicalRows.flatMap((row) => {
     if (row.kind !== "message") {

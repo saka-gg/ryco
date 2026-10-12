@@ -81,8 +81,14 @@ import {
   projectWorktreeSourceControlState,
 } from "../worktreePullRequestProjection.ts";
 import { projectionLineageColumns } from "../threadLineage.ts";
+import {
+  countsTowardUserRecency,
+  inheritedTurnOutcomes,
+  isForkBaseItemId,
+  isInheritedTurnRow,
+} from "../forkInheritance.ts";
 import { turnStartEndedMessageId } from "../providerEffectIntents.ts";
-import { isAttachmentOnlyMessage } from "../turnReplyMessage.ts";
+import { isAttachmentOnlyMessage } from "@ryco/shared/turnReply";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -323,7 +329,30 @@ function deriveHasActionableProposedPlan(input: {
   return latestPlan !== null && latestPlan.implementedAt === null;
 }
 
+/**
+ * A fork's inherited history predates all its checkpoints and always survives a revert. It is
+ * kept apart so it cannot fill the count-based fallback for the thread's own messages.
+ */
 function retainProjectionMessagesAfterRevert(
+  threadId: string,
+  messages: ReadonlyArray<ProjectionThreadMessage>,
+  turns: ReadonlyArray<ProjectionTurn>,
+  turnCount: number,
+): ReadonlyArray<ProjectionThreadMessage> {
+  const keptOwnMessageIds = new Set(
+    retainOwnProjectionMessagesAfterRevert(
+      messages.filter((message) => !isForkBaseItemId(threadId, message.messageId)),
+      turns,
+      turnCount,
+    ).map((message) => message.messageId),
+  );
+  return messages.filter(
+    (message) =>
+      isForkBaseItemId(threadId, message.messageId) || keptOwnMessageIds.has(message.messageId),
+  );
+}
+
+function retainOwnProjectionMessagesAfterRevert(
   messages: ReadonlyArray<ProjectionThreadMessage>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
@@ -408,6 +437,7 @@ function retainProjectionMessagesAfterRevert(
 }
 
 function retainProjectionActivitiesAfterRevert(
+  threadId: string,
   activities: ReadonlyArray<ProjectionThreadActivity>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
@@ -423,11 +453,15 @@ function retainProjectionActivitiesAfterRevert(
       .flatMap((turn) => (turn.turnId === null ? [] : [turn.turnId])),
   );
   return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
+    (activity) =>
+      activity.turnId === null ||
+      isForkBaseItemId(threadId, activity.activityId) ||
+      retainedTurnIds.has(activity.turnId),
   );
 }
 
 function retainProjectionProposedPlansAfterRevert(
+  threadId: string,
   proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
@@ -443,7 +477,10 @@ function retainProjectionProposedPlansAfterRevert(
       .flatMap((turn) => (turn.turnId === null ? [] : [turn.turnId])),
   );
   return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
+    (proposedPlan) =>
+      proposedPlan.turnId === null ||
+      isForkBaseItemId(threadId, proposedPlan.planId) ||
+      retainedTurnIds.has(proposedPlan.turnId),
   );
 }
 
@@ -732,7 +769,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
       const latestUserMessageAt =
         messages
-          .filter((message) => message.role === "user")
+          .filter((message) =>
+            countsTowardUserRecency(threadId, { role: message.role, id: message.messageId }),
+          )
           .map((message) => message.createdAt)
           .toSorted()
           .at(-1) ?? null;
@@ -1111,7 +1150,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           const summary = applyThreadShellSummaryTransition(
             existingRow.value,
-            event.payload.role === "user" ? { latestUserMessageAt: event.payload.createdAt } : {},
+            countsTowardUserRecency(event.payload.threadId, {
+              role: event.payload.role,
+              id: event.payload.messageId,
+            })
+              ? { latestUserMessageAt: event.payload.createdAt }
+              : {},
           );
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
@@ -1533,6 +1577,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
           });
           const keptRows = retainProjectionMessagesAfterRevert(
+            event.payload.threadId,
             existingRows,
             existingTurns,
             event.payload.turnCount,
@@ -1600,6 +1645,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
           });
           const keptRows = retainProjectionProposedPlansAfterRevert(
+            event.payload.threadId,
             existingRows,
             existingTurns,
             event.payload.turnCount,
@@ -1776,6 +1822,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
           });
           const keptRows = retainProjectionActivitiesAfterRevert(
+            event.payload.threadId,
             existingRows,
             existingTurns,
             event.payload.turnCount,
@@ -1888,6 +1935,28 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               threadId: event.payload.threadId,
               messageId,
             });
+          }
+          // A fork's provenance: inherited turns that were interrupted or failed in the source
+          // keep that outcome. Their rows came from inherited replies (so they read as
+          // completed) and only inherited rows are touched, never the fork's own turns.
+          for (const outcome of inheritedTurnOutcomes(
+            event.payload.threadId,
+            event.payload.activity,
+          )) {
+            const inherited = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: outcome.turnId,
+            });
+            if (
+              Option.isSome(inherited) &&
+              isInheritedTurnRow(event.payload.threadId, inherited.value) &&
+              inherited.value.state !== outcome.state
+            ) {
+              yield* projectionTurnRepository.upsertByTurnId({
+                ...inherited.value,
+                state: outcome.state,
+              });
+            }
           }
           return;
         }
@@ -2140,11 +2209,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const existingTurns = yield* projectionTurnRepository.listByThreadId({
             threadId: event.payload.threadId,
           });
+          // A fork's inherited turns have no checkpoints and predate all of them.
           const keptTurns = existingTurns.filter(
             (turn) =>
               turn.turnId !== null &&
-              turn.checkpointTurnCount !== null &&
-              turn.checkpointTurnCount <= event.payload.turnCount,
+              ((turn.checkpointTurnCount !== null &&
+                turn.checkpointTurnCount <= event.payload.turnCount) ||
+                isInheritedTurnRow(event.payload.threadId, turn)),
           );
           yield* projectionTurnRepository.deleteByThreadId({
             threadId: event.payload.threadId,

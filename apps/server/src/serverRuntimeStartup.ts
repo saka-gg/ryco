@@ -47,6 +47,7 @@ import { ServerConfig } from "./config.ts";
 import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
 import { ProjectionThreadRepository } from "./persistence/Services/ProjectionThreads.ts";
 import { ProjectRelocationRepository } from "./persistence/Services/ProjectRelocations.ts";
+import { ThreadForkRepository } from "./persistence/Services/ThreadForks.ts";
 import { ChatFolders } from "./project/chatFolders.ts";
 import { recoverProjectRelocations } from "./project/chatPromotion.ts";
 import { removeOrphanChatProjects } from "./project/orphanChatProjects.ts";
@@ -831,6 +832,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const projectionProjects = yield* Effect.serviceOption(ProjectionProjectRepository);
   const projectionThreads = yield* Effect.serviceOption(ProjectionThreadRepository);
   const chatFolders = yield* Effect.serviceOption(ChatFolders);
+  const threadForks = yield* Effect.serviceOption(ThreadForkRepository);
 
   const commandGate = yield* makeCommandGate();
   const httpListening = yield* Deferred.make<void>();
@@ -886,7 +888,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
     if (
       Option.isSome(projectionProjects) &&
       Option.isSome(projectionThreads) &&
-      Option.isSome(chatFolders)
+      Option.isSome(chatFolders) &&
+      // Without the fork ledger a chat an unfinished fork still needs looks unused: no sweep.
+      Option.isSome(threadForks)
     ) {
       // After recovery settled every move. Housekeeping: startup does not wait for it, and a
       // failure is logged and retried on the next start.
@@ -897,6 +901,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
           projects: projectionProjects.value,
           threads: projectionThreads.value,
           chatFolders: chatFolders.value,
+          threadForks: threadForks.value,
           dispatch: orchestrationEngine.dispatch,
         }),
       ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);

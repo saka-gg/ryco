@@ -32,6 +32,7 @@ import {
   OrchestrationProjectionPipelineLive,
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import { inheritedTurnRowSql } from "../forkInheritanceSql.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
@@ -3281,6 +3282,411 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
             '[{"id":"script-1","name":"Build","command":"bun run build","icon":"build","runOnWorktreeCreate":false}]',
           defaultModelSelection: null,
         },
+      ]);
+    }),
+  );
+
+  it.effect("keeps a fork's inherited history and its files through every revert", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { attachmentsDir } = yield* ServerConfig;
+      const at = (minute: number) => `2026-10-11T10:${String(minute).padStart(2, "0")}:00.000Z`;
+      const projectId = ProjectId.make("project-fork-revert");
+      const sourceId = ThreadId.make("thread-fork-revert-source");
+      const forkId = ThreadId.make("fork-revert");
+      const inherited = (id: string) => `${forkId}:inherited:${id}`;
+      const sourceTurn = TurnId.make("turn-source");
+      const attachmentId = "fork-revert-00000000-0000-4000-8000-000000000001";
+      const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+      const threadFields = {
+        projectId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+      };
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-fork-revert-project"),
+        projectId,
+        title: "Fork revert",
+        workspaceRoot: "/tmp/project-fork-revert",
+        createdAt: at(0),
+      });
+      yield* engine.dispatch({
+        ...threadFields,
+        type: "thread.create",
+        commandId: CommandId.make("cmd-fork-revert-source"),
+        threadId: sourceId,
+        title: "Source",
+        createdAt: at(0),
+      });
+      yield* engine.dispatch({
+        ...threadFields,
+        type: "thread.fork.create",
+        commandId: CommandId.make("cmd-fork-revert-fork"),
+        threadId: forkId,
+        title: "Source (fork)",
+        createdAt: at(5),
+        sourceThreadId: sourceId,
+        sourceMessageId: MessageId.make("message-source-answer"),
+        sourceTurnId: sourceTurn,
+        worktreeId: null,
+        newWorktree: null,
+        messages: [
+          {
+            // Inherited prompts may carry no turn: they must not take an own prompt's place.
+            id: MessageId.make(inherited("message-source-question")),
+            role: "user",
+            text: "Question",
+            attachments: [
+              {
+                type: "image",
+                id: attachmentId,
+                name: "screen.png",
+                mimeType: "image/png",
+                sizeBytes: 4,
+              },
+            ],
+            turnId: null,
+            streaming: false,
+            createdAt: at(1),
+            updatedAt: at(1),
+          },
+          {
+            id: MessageId.make(inherited("message-source-answer")),
+            role: "assistant",
+            text: "Answer",
+            turnId: sourceTurn,
+            streaming: false,
+            createdAt: at(2),
+            updatedAt: at(2),
+          },
+        ],
+        proposedPlans: [
+          {
+            id: inherited("plan-source"),
+            turnId: sourceTurn,
+            planMarkdown: "1. Plan",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: at(2),
+            updatedAt: at(2),
+          },
+        ],
+        activities: [
+          {
+            id: EventId.make(inherited("activity-source")),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Ran tests",
+            payload: {},
+            turnId: sourceTurn,
+            createdAt: at(2),
+          },
+        ],
+        forked: {
+          schemaVersion: 1,
+          sourceThreadId: sourceId,
+          sourceMessageId: MessageId.make("message-source-answer"),
+          sourceTurnId: sourceTurn,
+          sourceTitle: "Source",
+          inheritedMessageCount: 2,
+          providerContext: "native",
+          checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+          notices: [],
+        },
+      });
+      // Two turns of the fork's own, each with a checkpoint.
+      for (const count of [1, 2]) {
+        const turnId = TurnId.make(`turn-own-${count}`);
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-fork-revert-turn-${count}`),
+          threadId: forkId,
+          message: {
+            messageId: MessageId.make(`message-own-user-${count}`),
+            role: "user",
+            text: `Own ${count}`,
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: at(10 * count),
+        });
+        yield* engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`cmd-fork-revert-reply-${count}`),
+          threadId: forkId,
+          messageId: MessageId.make(`message-own-reply-${count}`),
+          text: `Reply ${count}`,
+          turnId,
+          createdAt: at(10 * count + 1),
+        });
+        yield* engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make(`cmd-fork-revert-diff-${count}`),
+          threadId: forkId,
+          turnId,
+          completedAt: at(10 * count + 2),
+          checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/fork-revert/turn/${count}`),
+          status: "ready",
+          files: [],
+          assistantMessageId: MessageId.make(`message-own-reply-${count}`),
+          checkpointTurnCount: count,
+          createdAt: at(10 * count + 2),
+        });
+      }
+      const attachmentPath = path.join(attachmentsDir, `${attachmentId}.png`);
+      yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+      yield* fileSystem.writeFileString(attachmentPath, "keep");
+
+      const rows = <T, E>(query: Effect.Effect<ReadonlyArray<T>, E>) => query.pipe(Effect.orDie);
+      const messageIds = () =>
+        rows(sql<{ readonly id: string }>`
+          SELECT message_id AS "id" FROM projection_thread_messages
+          WHERE thread_id = ${forkId} ORDER BY created_at, message_id
+        `).pipe(Effect.map((result) => result.map((row) => row.id)));
+      const revert = (turnCount: number, droppedTurnIds: ReadonlyArray<TurnId>) =>
+        engine.dispatch({
+          type: "thread.revert.complete",
+          commandId: CommandId.make(`cmd-fork-revert-to-${turnCount}`),
+          threadId: forkId,
+          turnCount,
+          droppedTurnIds: [...droppedTurnIds],
+          latestTurn: null,
+          createdAt: at(40 + turnCount),
+        });
+      const inheritedMessages = [
+        inherited("message-source-question"),
+        inherited("message-source-answer"),
+      ];
+      // Every SQL reader that leaves inherited work out (recency, statistics, daily recap)
+      // recognizes exactly the turn rows fork publication projected, and none of the fork's own.
+      const classifiedTurns = yield* rows(sql<{
+        readonly turnId: string;
+        readonly inherited: number;
+      }>`
+        SELECT turn_id AS "turnId", ${inheritedTurnRowSql(sql, "turns")} AS "inherited"
+        FROM projection_turns turns
+        WHERE thread_id = ${forkId} AND turn_id IS NOT NULL ORDER BY turn_id
+      `);
+      assert.deepEqual(classifiedTurns, [
+        { turnId: "turn-own-1", inherited: 0 },
+        { turnId: "turn-own-2", inherited: 0 },
+        { turnId: sourceTurn, inherited: 1 },
+      ]);
+
+      yield* revert(1, [TurnId.make("turn-own-2")]);
+      assert.deepEqual(yield* messageIds(), [
+        ...inheritedMessages,
+        "message-own-user-1",
+        "message-own-reply-1",
+      ]);
+
+      yield* revert(0, [TurnId.make("turn-own-1")]);
+      assert.deepEqual(yield* messageIds(), inheritedMessages);
+      const plans = yield* rows(sql<{ readonly id: string }>`
+        SELECT plan_id AS "id" FROM projection_thread_proposed_plans WHERE thread_id = ${forkId}
+      `);
+      assert.deepEqual(
+        plans.map((row) => row.id),
+        [inherited("plan-source")],
+      );
+      const activities = yield* rows(sql<{ readonly id: string }>`
+        SELECT activity_id AS "id" FROM projection_thread_activities
+        WHERE thread_id = ${forkId} ORDER BY activity_id
+      `);
+      assert.deepEqual(
+        activities.map((row) => row.id),
+        [`${forkId}:forked`, inherited("activity-source")],
+      );
+      const turns = yield* rows(sql<{ readonly turnId: string }>`
+        SELECT turn_id AS "turnId" FROM projection_turns WHERE thread_id = ${forkId}
+      `);
+      assert.deepEqual(
+        turns.map((row) => row.turnId),
+        [sourceTurn],
+      );
+      // The inherited prompt's attachment copy is still referenced, so it is never pruned.
+      assert.isTrue(yield* exists(attachmentPath));
+    }),
+  );
+
+  it.effect("keeps how a fork's inherited turns ended in its source, through a revert", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const at = (minute: number) => `2026-10-11T11:${String(minute).padStart(2, "0")}:00.000Z`;
+      const projectId = ProjectId.make("project-fork-outcomes");
+      const sourceId = ThreadId.make("thread-fork-outcomes-source");
+      const forkId = ThreadId.make("fork-outcomes");
+      const inherited = (id: string) => `${forkId}:inherited:${id}`;
+      const stoppedTurn = TurnId.make("turn-outcomes-stopped");
+      const boundaryTurn = TurnId.make("turn-outcomes-boundary");
+      const ownTurn = TurnId.make("turn-outcomes-own");
+      const threadFields = {
+        projectId,
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+      };
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-fork-outcomes-project"),
+        projectId,
+        title: "Fork outcomes",
+        workspaceRoot: "/tmp/project-fork-outcomes",
+        createdAt: at(0),
+      });
+      yield* engine.dispatch({
+        ...threadFields,
+        type: "thread.create",
+        commandId: CommandId.make("cmd-fork-outcomes-source"),
+        threadId: sourceId,
+        title: "Source",
+        createdAt: at(0),
+      });
+      const reply = (id: string, turnId: TurnId, minute: number) => ({
+        id: MessageId.make(inherited(id)),
+        role: "assistant" as const,
+        text: id,
+        turnId,
+        streaming: false,
+        createdAt: at(minute),
+        updatedAt: at(minute),
+      });
+      yield* engine.dispatch({
+        ...threadFields,
+        type: "thread.fork.create",
+        commandId: CommandId.make("cmd-fork-outcomes-fork"),
+        threadId: forkId,
+        title: "Source (fork)",
+        createdAt: at(5),
+        sourceThreadId: sourceId,
+        sourceMessageId: MessageId.make("message-boundary"),
+        sourceTurnId: boundaryTurn,
+        worktreeId: null,
+        newWorktree: null,
+        messages: [
+          reply("message-partial", stoppedTurn, 1),
+          reply("message-boundary", boundaryTurn, 2),
+        ],
+        proposedPlans: [],
+        activities: [],
+        forked: {
+          schemaVersion: 1,
+          sourceThreadId: sourceId,
+          sourceMessageId: MessageId.make("message-boundary"),
+          sourceTurnId: boundaryTurn,
+          sourceTitle: "Source",
+          inheritedMessageCount: 2,
+          // A listed turn without an inherited row gets none, and never affects a later turn
+          // of the fork's own under that id.
+          inheritedTurnOutcomes: [
+            { turnId: stoppedTurn, state: "interrupted" },
+            { turnId: ownTurn, state: "error" },
+          ],
+          providerContext: "handoff",
+          handoffReason: "provider-unsupported",
+          checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+          notices: [],
+        },
+      });
+      const turnStates = () =>
+        sql<{ readonly turnId: string; readonly state: string }>`
+          SELECT turn_id AS "turnId", state FROM projection_turns
+          WHERE thread_id = ${forkId} AND turn_id IS NOT NULL ORDER BY turn_id
+        `.pipe(Effect.orDie);
+      assert.deepEqual(yield* turnStates(), [
+        { turnId: boundaryTurn, state: "completed" },
+        { turnId: stoppedTurn, state: "interrupted" },
+      ]);
+
+      // The fork's own turn completes, then is reverted.
+      yield* engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-fork-outcomes-turn"),
+        threadId: forkId,
+        message: {
+          messageId: MessageId.make("message-outcomes-own"),
+          role: "user",
+          text: "Own",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: at(10),
+      });
+      yield* engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-fork-outcomes-reply"),
+        threadId: forkId,
+        messageId: MessageId.make("message-outcomes-own-reply"),
+        text: "Own reply",
+        turnId: ownTurn,
+        createdAt: at(11),
+      });
+      assert.deepEqual(yield* turnStates(), [
+        { turnId: boundaryTurn, state: "completed" },
+        { turnId: ownTurn, state: "completed" },
+        { turnId: stoppedTurn, state: "interrupted" },
+      ]);
+      // A provenance projected again (e.g. a replay) never changes the fork's own turns.
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-fork-outcomes-provenance-again"),
+        threadId: forkId,
+        activity: {
+          id: EventId.make(`${forkId}:forked`),
+          tone: "info",
+          kind: "thread.forked",
+          summary: "Forked from Source",
+          payload: {
+            schemaVersion: 1,
+            sourceThreadId: sourceId,
+            sourceMessageId: MessageId.make("message-boundary"),
+            sourceTurnId: boundaryTurn,
+            sourceTitle: "Source",
+            inheritedMessageCount: 2,
+            inheritedTurnOutcomes: [
+              { turnId: stoppedTurn, state: "interrupted" },
+              { turnId: ownTurn, state: "error" },
+            ],
+            providerContext: "handoff",
+            handoffReason: "provider-unsupported",
+            checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+            notices: [],
+          },
+          turnId: null,
+          createdAt: at(12),
+        },
+        createdAt: at(12),
+      });
+      assert.deepEqual(yield* turnStates(), [
+        { turnId: boundaryTurn, state: "completed" },
+        { turnId: ownTurn, state: "completed" },
+        { turnId: stoppedTurn, state: "interrupted" },
+      ]);
+      yield* engine.dispatch({
+        type: "thread.revert.complete",
+        commandId: CommandId.make("cmd-fork-outcomes-revert"),
+        threadId: forkId,
+        turnCount: 0,
+        droppedTurnIds: [ownTurn],
+        latestTurn: null,
+        createdAt: at(20),
+      });
+      assert.deepEqual(yield* turnStates(), [
+        { turnId: boundaryTurn, state: "completed" },
+        { turnId: stoppedTurn, state: "interrupted" },
       ]);
     }),
   );

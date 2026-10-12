@@ -7,6 +7,11 @@ export * from "./threadInbox.ts";
 export * from "./threadPriorityRefresh.ts";
 export * from "./threadSort.ts";
 export * from "./threadLineage.ts";
+export * from "./threadFork.ts";
+export * from "./threadForkAttempt.ts";
+export * from "./threadForkAttemptController.ts";
+export * from "./checkpointSummary.ts";
+export * from "./waitForThreadShell.ts";
 export * from "./types.ts";
 export * from "./threadActivityStatus.ts";
 

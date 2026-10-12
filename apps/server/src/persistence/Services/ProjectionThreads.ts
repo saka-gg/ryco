@@ -9,6 +9,7 @@
 import {
   IsoDateTime,
   AgentTokenMode,
+  MessageId,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
@@ -63,19 +64,28 @@ export const ProjectionThread = Schema.Struct({
    */
   trashedAt: Schema.NullOr(IsoDateTime),
   /**
-   * Delegation lineage columns. Required on purpose: every SELECT must read them,
-   * otherwise the next `...existingRow` upsert would silently wipe the lineage.
+   * Lineage columns. Required on purpose: every SELECT must read them, otherwise
+   * the next `...existingRow` upsert would silently wipe the lineage.
    */
   lineageParentThreadId: Schema.NullOr(ThreadId),
   lineageRootThreadId: Schema.NullOr(ThreadId),
   lineageRelationship: Schema.NullOr(Schema.String),
+  /** Forks only: the parent's message and completed turn the inherited history ends at. */
+  lineageSourceMessageId: Schema.NullOr(MessageId),
+  lineageSourceTurnId: Schema.NullOr(TurnId),
 });
 export type ProjectionThread = typeof ProjectionThread.Type;
 
-/** Never used: no turn and no user message. */
+/**
+ * Never used: no turn and no user message. A fork never is: it is created with the history it
+ * inherited, whose prompts its recency fields do not count.
+ */
 export const isNeverUsedThread = (
-  thread: Pick<ProjectionThread, "latestTurnId" | "latestUserMessageAt">,
-): boolean => thread.latestTurnId === null && thread.latestUserMessageAt === null;
+  thread: Pick<ProjectionThread, "latestTurnId" | "latestUserMessageAt" | "lineageSourceMessageId">,
+): boolean =>
+  thread.latestTurnId === null &&
+  thread.latestUserMessageAt === null &&
+  thread.lineageSourceMessageId == null;
 
 /**
  * A creation that was rolled back: deleted permanently without passing Trash, and never used. Only
@@ -85,7 +95,7 @@ export const isNeverUsedThread = (
 export const isRolledBackThreadCreation = (
   thread: Pick<
     ProjectionThread,
-    "deletedAt" | "trashedAt" | "latestTurnId" | "latestUserMessageAt"
+    "deletedAt" | "trashedAt" | "latestTurnId" | "latestUserMessageAt" | "lineageSourceMessageId"
   >,
 ): boolean => thread.deletedAt !== null && thread.trashedAt === null && isNeverUsedThread(thread);
 

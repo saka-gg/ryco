@@ -7,6 +7,7 @@ import {
 } from "@ryco/contracts";
 import { formatAssistantDeliveryText, parseAssistantDelivery } from "../assistantAttachments.ts";
 import type { ProviderThreadHistory } from "../provider/Services/ProviderAdapter.ts";
+import { inheritedItemIdPrefix, inheritedTurnIds } from "./forkInheritance.ts";
 
 interface RecoveredReply {
   readonly text: string;
@@ -42,7 +43,13 @@ function showsReply(
   );
 }
 
-/** Preserve local IDs/attachments and segmented messages when filling a provider gap. */
+/**
+ * Preserve local IDs/attachments and segmented messages when filling a provider gap.
+ *
+ * A native fork's provider history repeats the turns it inherited, which the fork already
+ * shows as copies under its own ids. Inherited history is immutable: neither those turns nor
+ * a message the fork holds an inherited copy of is ever restored.
+ */
 export function historyMessagesToRestore(
   thread: Pick<OrchestrationThread, "id" | "createdAt" | "messages">,
   history: ProviderThreadHistory,
@@ -51,8 +58,16 @@ export function historyMessagesToRestore(
 ): OrchestrationMessage[] {
   const restored: OrchestrationMessage[] = [];
   const byId = new Map(thread.messages.map((message) => [message.id, message]));
+  const inheritedTurns = inheritedTurnIds(thread.id, thread.messages);
+  const inheritedPrefix = inheritedItemIdPrefix(thread.id);
   let precedingCreatedAt = Number.NEGATIVE_INFINITY;
   for (const [index, message] of history.messages.entries()) {
+    if (
+      inheritedTurns.has(message.turnId) ||
+      byId.has(MessageId.make(`${inheritedPrefix}${message.id}`))
+    ) {
+      continue;
+    }
     const recoveredId = MessageId.make(`history:${thread.id}:${message.id}`);
     const existing = byId.get(message.id) ?? byId.get(recoveredId);
     const existingUser =
@@ -137,10 +152,13 @@ export function historyMessagesToRestore(
   return restored;
 }
 
+/** Recovered activities the thread lacks. Like messages, inherited turns are never restored. */
 export function missingHistoryActivities(
-  existing: readonly OrchestrationThreadActivity[],
+  thread: Pick<OrchestrationThread, "id" | "messages" | "activities">,
   recovered: readonly OrchestrationThreadActivity[],
 ): OrchestrationThreadActivity[] {
+  const existing = thread.activities;
+  const inheritedTurns = inheritedTurnIds(thread.id, [...thread.messages, ...existing]);
   const key = (activity: OrchestrationThreadActivity) => {
     const payload = activity.payload as { providerItemId?: unknown } | null;
     return payload && typeof payload.providerItemId === "string"
@@ -149,6 +167,7 @@ export function missingHistoryActivities(
   };
   const known = new Set(existing.map(key));
   return recovered.filter((activity) => {
+    if (activity.turnId !== null && inheritedTurns.has(activity.turnId)) return false;
     // Transcript items cannot restore process-local callbacks or settle a live
     // callback that happens to reuse the same provider request ID. Lifecycle
     // cleanup is generated separately from the authoritative pending projection.

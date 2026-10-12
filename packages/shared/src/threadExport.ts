@@ -2,8 +2,12 @@ import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThread,
+  type ThreadForkedActivityPayload,
 } from "@ryco/contracts";
 import { Schema } from "effect";
+
+import { modelSelectionRequiresContextHandoff } from "./model.ts";
+import { readThreadForkedActivity } from "./threadFork.ts";
 
 export type ThreadExportMessage = Pick<
   OrchestrationThread["messages"][number],
@@ -15,6 +19,8 @@ export interface ThreadExportActivity {
   readonly kind: string;
   readonly summary: string;
   readonly boundary?: string;
+  /** Where a forked thread's inherited history came from (`thread.forked`). */
+  readonly forkOrigin?: string;
 }
 export type ThreadExportSource = Pick<
   OrchestrationThread,
@@ -32,6 +38,49 @@ export type ThreadExportSource = Pick<
   readonly activities: readonly ThreadExportActivity[];
 };
 const decodeBoundary = Schema.decodeUnknownOption(ContextHandoffActivityPayload);
+
+/**
+ * A fork handoff sends the fork's inherited conversation to a fresh session, so it reads as that
+ * delivery; when the first message also switched provider instance it names the one it left.
+ */
+function describeHandoffBoundary(data: ContextHandoffActivityPayload): string {
+  const source = `${data.sourceSelection.instanceId}/${data.sourceSelection.model}`;
+  const target = `${data.targetSelection.instanceId}/${data.targetSelection.model}`;
+  if (data.reason === "fork") {
+    const switched = modelSelectionRequiresContextHandoff({
+      canonicalSelection: data.sourceSelection,
+      targetSelection: data.targetSelection,
+    })
+      ? ` (switched from ${source})`
+      : "";
+    return `${data.status}: inherited conversation → fresh ${target} session${switched}`;
+  }
+  return `${data.status}: ${source} → ${target}`;
+}
+
+function describeForkCheckout(checkout: ThreadForkedActivityPayload["checkout"]): string {
+  switch (checkout.kind) {
+    case "current-checkout":
+      return `shared with the source (${checkout.worktreePath ?? "project folder"}${checkout.branch ? `, ${checkout.branch}` : ""})`;
+    case "new-worktree":
+      return `new worktree ${checkout.worktreePath} on ${checkout.branch}, from ${checkout.start === "checkpoint" ? `the turn's checkpoint over ${checkout.baseRef}` : checkout.baseRef}`;
+    case "new-chat":
+      return `new chat folder ${checkout.folder} (files not copied)`;
+  }
+}
+
+function describeForkOrigin(data: ThreadForkedActivityPayload): string {
+  return [
+    `Forked from: ${data.sourceTitle}`,
+    `Source thread: ${data.sourceThreadId}`,
+    `Source message: ${data.sourceMessageId} (turn ${data.sourceTurnId}, inclusive)`,
+    `Inherited messages: ${data.inheritedMessageCount}`,
+    `Provider context: ${data.providerContext}${data.handoffReason ? ` (${data.handoffReason})` : ""}`,
+    `Checkout: ${describeForkCheckout(data.checkout)}`,
+    ...data.notices.map((notice) => `Notice: ${notice}`),
+  ].join("\n");
+}
+
 /** Retain only display fields; tool arguments, results and auth payloads never accumulate. */
 export function projectThreadExportActivity(
   activity: OrchestrationThread["activities"][number],
@@ -39,11 +88,10 @@ export function projectThreadExportActivity(
   let boundary: string | undefined;
   if (activity.kind === CONTEXT_HANDOFF_ACTIVITY_KIND) {
     const decoded = decodeBoundary(activity.payload);
-    if (decoded._tag === "Some") {
-      const data = decoded.value;
-      boundary = `${data.status}: ${data.sourceSelection.instanceId}/${data.sourceSelection.model} → ${data.targetSelection.instanceId}/${data.targetSelection.model}`;
-    }
+    if (decoded._tag === "Some") boundary = describeHandoffBoundary(decoded.value);
   }
+  const forked = readThreadForkedActivity(activity);
+  const forkOrigin = forked ? describeForkOrigin(forked) : undefined;
   const known = ["tool.started", "tool.completed", "tool.denied"].includes(activity.kind);
   return {
     id: activity.id,
@@ -51,6 +99,7 @@ export function projectThreadExportActivity(
     kind: known ? activity.kind : "boundary",
     summary: known ? activity.summary : "",
     ...(boundary ? { boundary } : {}),
+    ...(forkOrigin ? { forkOrigin } : {}),
   };
 }
 
@@ -102,8 +151,13 @@ export function serializeThreadMarkdown(thread: ThreadExportSource): string {
     fence(
       `Title: ${thread.title}\nThread: ${thread.id}\nProject: ${thread.projectId}\nCurrent provider instance: ${thread.modelSelection.instanceId}\nCurrent model: ${thread.modelSelection.model}\nCreated: ${utc(thread.createdAt)}\nUpdated: ${utc(thread.updatedAt)}\nBranch: ${thread.branch ?? "unavailable"}\nWorktree: ${thread.worktreePath ?? "unavailable"}\nWorktree ID: ${thread.worktreeId ?? "unavailable"}`,
     ),
-    "## Messages",
   ];
+  // A fork's messages start with the history it inherited; say where that came from first.
+  for (const activity of ordered(thread.activities)) {
+    if (activity.forkOrigin)
+      sections.push(`## Fork origin · ${utc(activity.createdAt)}`, fence(activity.forkOrigin));
+  }
+  sections.push("## Messages");
   for (const message of ordered(thread.messages)) {
     sections.push(
       `### ${message.role === "user" ? "User" : "Assistant"} · ${utc(message.createdAt)}${message.streaming ? " · in progress at snapshot" : ""}`,

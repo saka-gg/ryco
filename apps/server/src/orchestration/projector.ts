@@ -20,6 +20,7 @@ import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActi
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
+import { isForkBaseItemId } from "./forkInheritance.ts";
 import {
   projectCreatedWorktreePullRequests,
   projectWorktreeSourceControlState,
@@ -212,11 +213,17 @@ function retainThreadMessagesAfterRevert(
 }
 
 function retainTurnItemsAfterRevert<
-  T extends { readonly turnId: string | null; readonly createdAt: string },
->(items: ReadonlyArray<T>, keepTurnItem: RevertTurnItemFilter): ReadonlyArray<T> {
+  T extends { readonly id: string; readonly turnId: string | null; readonly createdAt: string },
+>(
+  threadId: ThreadId,
+  items: ReadonlyArray<T>,
+  keepTurnItem: RevertTurnItemFilter,
+): ReadonlyArray<T> {
   return items.filter(
     (item) =>
-      item.turnId === null || keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
+      item.turnId === null ||
+      isForkBaseItemId(threadId, item.id) ||
+      keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
   );
 }
 
@@ -1127,17 +1134,27 @@ export function projectEvent(
             boundaryAt = undefined;
           }
 
-          const messages = retainThreadMessagesAfterRevert(
-            thread.messages,
+          // A fork's inherited history predates all its checkpoints and always survives.
+          // It is kept apart so it cannot fill the count-based fallback for own messages.
+          const ownMessages = retainThreadMessagesAfterRevert(
+            thread.messages.filter((message) => !isForkBaseItemId(thread.id, message.id)),
             keepTurnItem,
             payload.turnCount,
             boundaryAt,
-          ).slice(-MAX_THREAD_MESSAGES);
+          );
+          const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
+          const messages = thread.messages
+            .filter(
+              (message) =>
+                isForkBaseItemId(thread.id, message.id) || keptOwnMessageIds.has(message.id),
+            )
+            .slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainTurnItemsAfterRevert(
+            thread.id,
             thread.proposedPlans,
             keepTurnItem,
           ).slice(-200);
-          const activities = retainTurnItemsAfterRevert(thread.activities, keepTurnItem);
+          const activities = retainTurnItemsAfterRevert(thread.id, thread.activities, keepTurnItem);
 
           return {
             ...nextBase,

@@ -20,8 +20,7 @@ import {
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 
 import type { ServerSettingsShape } from "../../serverSettings.ts";
-import type { OrchestrationDispatchError } from "../../orchestration/Errors.ts";
-import { resolveManagedWorktreesRoot, type ServerConfigShape } from "../../config.ts";
+import type { ServerConfigShape } from "../../config.ts";
 import type { GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
 import {
   canonicalizeFilesystemPath,
@@ -33,14 +32,8 @@ import {
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveProjectWorktreesDir } from "../../project/projectMetadataPaths.ts";
 import type { ProjectSetupScriptRunnerShape } from "../../project/Services/ProjectSetupScriptRunner.ts";
-import {
-  resolveConfiguredWorktreeRoot,
-  selectConfiguredWorktreeRoot,
-} from "../../project/worktreeRoot.ts";
-import {
-  resolveManagedProjectDirectory,
-  resolveWorktreeCheckoutPath,
-} from "../../project/worktreeCheckoutPaths.ts";
+import { selectConfiguredWorktreeRoot } from "../../project/worktreeRoot.ts";
+import { resolveManagedProjectDirectory } from "../../project/worktreeCheckoutPaths.ts";
 import type { ProjectionWorktreeRepositoryShape } from "../../persistence/Services/ProjectionWorktrees.ts";
 import { refreshWorktreeSourceControlState } from "../../sourceControl/refreshWorktreeSourceControlState.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
@@ -55,11 +48,16 @@ import {
   buildWorkItemBranchNameMessage,
   ensureWorkItemBranchNameIncludesKey,
 } from "./branchNaming.ts";
+import { failGitWorkflow, toGitManagerError } from "./gitErrors.ts";
 import {
-  failGitWorkflow,
-  ignoreAlreadyMissingGitResource,
-  toGitManagerError,
-} from "./gitErrors.ts";
+  type AppendSetupScriptActivity,
+  authorizeWorktreePath as authorizeManagedWorktreePath,
+  cleanupOwnedCheckout,
+  createManagedCheckout,
+  isProjectRootPath,
+  launchSetupScriptForWorktreeInBackground as launchSetupScriptInBackground,
+  type OwnedCheckout,
+} from "./managedCheckout.ts";
 
 const RECONCILIATION_THROTTLE_MS = 5 * 60 * 1000;
 /** Staging a large folder or a commit hook can be slow; a signing prompt must not hang forever. */
@@ -154,15 +152,6 @@ export const describeInitialCommitFailure = (detail: string): string => {
     : "The first commit failed. Commit from a terminal to see why.";
 };
 
-type AppendSetupScriptActivity = (input: {
-  readonly threadId: ThreadId;
-  readonly kind: "setup-script.requested" | "setup-script.started" | "setup-script.failed";
-  readonly summary: string;
-  readonly createdAt: string;
-  readonly payload: Record<string, unknown>;
-  readonly tone: "info" | "error";
-}) => Effect.Effect<unknown, OrchestrationDispatchError>;
-
 export const makeWorktreeOperations = (deps: {
   readonly projectionSnapshotQuery: ProjectionSnapshotQueryShape;
   readonly projectionWorktrees: ProjectionWorktreeRepositoryShape;
@@ -201,11 +190,9 @@ export const makeWorktreeOperations = (deps: {
     workspaceLifecycle,
   } = deps;
 
+  const managedCheckoutDeps = { gitWorkflow, workspaceAccessPolicy, config };
   const authorizeWorktreePath = (operation: string, candidate: string, existing: boolean) =>
-    (existing
-      ? workspaceAccessPolicy.assertExistingPath({ path: candidate, operation })
-      : workspaceAccessPolicy.assertPath({ path: candidate, operation })
-    ).pipe(Effect.mapError((cause) => toGitManagerError(operation, cause.message, cause)));
+    authorizeManagedWorktreePath(workspaceAccessPolicy, operation, candidate, existing);
 
   const loadProjectForGitWorkflow = (operation: string, projectId: ProjectId) =>
     projectionSnapshotQuery.getProjectShellById(projectId).pipe(
@@ -232,16 +219,6 @@ export const makeWorktreeOperations = (deps: {
         }),
       ),
     );
-
-  const isProjectRootPath = (candidate: string, projectRoot: string): boolean => {
-    const normalize = (value: string) => {
-      const resolved = path.resolve(value).replace(/[\\/]+$/g, "");
-      return process.platform === "win32" || process.platform === "darwin"
-        ? resolved.toLowerCase()
-        : resolved;
-    };
-    return normalize(candidate) === normalize(projectRoot);
-  };
 
   const dispatchWorktreeCommand = (
     command: OrchestrationCommand,
@@ -298,90 +275,10 @@ export const makeWorktreeOperations = (deps: {
       return worktreeId;
     });
 
-  const launchSetupScriptForWorktreeInBackground = (input: {
-    readonly threadId: ThreadId;
-    readonly projectId: ProjectId;
-    readonly projectCwd: string;
-    readonly worktreePath: string;
-  }) =>
-    Effect.gen(function* () {
-      const requestedAt = new Date().toISOString();
-      yield* projectSetupScriptRunner
-        .runForThread({
-          threadId: input.threadId,
-          projectId: input.projectId,
-          projectCwd: input.projectCwd,
-          worktreePath: input.worktreePath,
-        })
-        .pipe(
-          Effect.matchEffect({
-            onFailure: (error) => {
-              const detail = error instanceof Error ? error.message : "Unknown setup failure.";
-              return appendSetupScriptActivity({
-                threadId: input.threadId,
-                kind: "setup-script.failed",
-                summary: "Setup script failed to start",
-                createdAt: requestedAt,
-                payload: {
-                  detail,
-                  worktreePath: input.worktreePath,
-                },
-                tone: "error",
-              }).pipe(
-                Effect.ignoreCause({ log: false }),
-                Effect.flatMap(() =>
-                  Effect.logWarning("worktree setup script failed to start", {
-                    threadId: input.threadId,
-                    worktreePath: input.worktreePath,
-                    detail,
-                  }),
-                ),
-              );
-            },
-            onSuccess: (setupResult) => {
-              if (setupResult.status !== "started") {
-                return Effect.void;
-              }
-              const payload = {
-                scriptId: setupResult.scriptId,
-                scriptName: setupResult.scriptName,
-                terminalId: setupResult.terminalId,
-                worktreePath: input.worktreePath,
-              };
-              return Effect.all([
-                appendSetupScriptActivity({
-                  threadId: input.threadId,
-                  kind: "setup-script.requested",
-                  summary: "Starting setup script",
-                  createdAt: requestedAt,
-                  payload,
-                  tone: "info",
-                }),
-                appendSetupScriptActivity({
-                  threadId: input.threadId,
-                  kind: "setup-script.started",
-                  summary: "Setup script started",
-                  createdAt: new Date().toISOString(),
-                  payload,
-                  tone: "info",
-                }),
-              ]).pipe(
-                Effect.asVoid,
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    "worktree setup script started but setup activity recording failed",
-                    {
-                      threadId: input.threadId,
-                      worktreePath: input.worktreePath,
-                      detail: error.message,
-                    },
-                  ),
-                ),
-              );
-            },
-          }),
-        );
-    }).pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
+  const launchSetupScriptForWorktreeInBackground = (
+    input: Parameters<typeof launchSetupScriptInBackground>[1],
+  ) =>
+    launchSetupScriptInBackground({ projectSetupScriptRunner, appendSetupScriptActivity }, input);
 
   const createWorktreeForProject = (input: GitCreateWorktreeForProjectInput) =>
     Effect.gen(function* () {
@@ -475,15 +372,6 @@ export const makeWorktreeOperations = (deps: {
       const effective = resolveProjectPreferences({ settings, project });
       const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
       const modelSelection = effective.initialModelSelection.value;
-      // Resolve lazily: reusing an existing registered PR checkout must not depend on
-      // the availability of the root configured for future checkouts.
-      const resolveRoot = () =>
-        resolveConfiguredWorktreeRoot({
-          settings,
-          projectId: input.projectId,
-          config,
-          policy: workspaceAccessPolicy,
-        }).pipe(Effect.mapError((cause) => toGitManagerError(operation, cause.message, cause)));
       const now = new Date().toISOString();
       const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
       const threadId = ThreadId.make(`thread-${crypto.randomUUID()}`);
@@ -504,8 +392,8 @@ export const makeWorktreeOperations = (deps: {
       let workItemUrl: string | null = null;
       let submoduleInitialization: WorktreeSubmoduleInitialization | undefined;
       let preparedWorktreePath: string | null = null;
-      let ownedWorktreePath: string | null = null;
-      let ownedBranchName: string | null = null;
+      // Only what this call created; a pre-existing PR checkout or branch is never removed.
+      let owned: OwnedCheckout = { worktreePath: null, branch: null };
 
       if (input.fetchOrigin && input.intent.kind === "pr") {
         yield* gitWorkflow.listRefs({ cwd: project.workspaceRoot, fetchOrigin: true, limit: 1 });
@@ -576,12 +464,12 @@ export const makeWorktreeOperations = (deps: {
             true,
           );
           branch = prepared.branch;
-          if (!existingWorktreePaths.includes(prepared.worktreePath)) {
-            ownedWorktreePath = preparedWorktreePath;
-          }
-          if (!existingBranchNames.includes(prepared.branch)) {
-            ownedBranchName = prepared.branch;
-          }
+          owned = {
+            worktreePath: existingWorktreePaths.includes(prepared.worktreePath)
+              ? null
+              : preparedWorktreePath,
+            branch: existingBranchNames.includes(prepared.branch) ? null : prepared.branch,
+          };
           refName = branch;
           title = prepared.pullRequest.title;
           origin = "pr";
@@ -679,86 +567,29 @@ export const makeWorktreeOperations = (deps: {
         }
         worktreePath = preparedWorktreePath;
       } else {
-        const targetPath = yield* resolveWorktreeCheckoutPath({
-          location: input.worktreeLocation,
-          appWorktreesRoot:
-            input.worktreeLocation === "projectMetadata"
-              ? resolveManagedWorktreesRoot(config)
-              : yield* resolveRoot(),
-          projectId: input.projectId,
-          workspaceRoot: project.workspaceRoot,
-          projectMetadataDir: project.projectMetadataDir,
-          projectTitle: project.title,
+        // Resolved lazily inside: reusing an existing registered PR checkout must not depend
+        // on the availability of the root configured for future checkouts.
+        const created = yield* createManagedCheckout(managedCheckoutDeps, {
+          operation,
+          project,
+          settings,
+          worktreeLocation: input.worktreeLocation,
           initialName: title,
           branchName: branch,
-        });
-        if (isProjectRootPath(targetPath, project.workspaceRoot)) {
-          return yield* failGitWorkflow(operation, "Cannot create a worktree at the project root.");
-        }
-        const authorizedTargetPath = yield* authorizeWorktreePath(operation, targetPath, false);
-        const created = yield* gitWorkflow.createWorktree({
-          settingsSnapshot: settings,
-          projectId: input.projectId,
-          fetchOrigin: input.fetchOrigin,
-          cwd: project.workspaceRoot,
           refName,
-          ...(newRefName !== undefined ? { newRefName } : {}),
-          path: authorizedTargetPath,
+          newRefName,
+          fetchOrigin: input.fetchOrigin,
         });
-        worktreePath = created.worktree.path;
+        worktreePath = created.worktreePath;
         submoduleInitialization = created.submoduleInitialization;
-        worktreePath = yield* authorizeWorktreePath(operation, worktreePath, true);
-        if (isProjectRootPath(worktreePath, project.workspaceRoot)) {
-          return yield* failGitWorkflow(
-            operation,
-            "Refusing to register a worktree that resolved to the project root.",
-          );
-        }
-        ownedWorktreePath = worktreePath;
-        if (newRefName !== undefined) {
-          ownedBranchName = newRefName;
-        }
+        owned = created.owned;
       }
 
-      const cleanupOwnedCheckout = Effect.gen(function* () {
-        if (ownedWorktreePath !== null) {
-          yield* ignoreAlreadyMissingGitResource(
-            gitWorkflow.removeWorktree({
-              cwd: project.workspaceRoot,
-              path: ownedWorktreePath,
-              force: true,
-            }),
-            {
-              operation,
-              action: "remove-worktree",
-              target: ownedWorktreePath,
-            },
-          );
-        }
-        if (ownedBranchName !== null) {
-          yield* ignoreAlreadyMissingGitResource(
-            gitWorkflow.deleteBranch({
-              cwd: project.workspaceRoot,
-              refName: ownedBranchName,
-              force: true,
-            }),
-            {
-              operation,
-              action: "delete-branch",
-              target: ownedBranchName,
-            },
-          );
-        }
-      }).pipe(
-        Effect.catch((cleanupError) =>
-          Effect.logWarning("failed to clean up worktree creation after dispatch failure", {
-            operation,
-            worktreePath: ownedWorktreePath,
-            branch: ownedBranchName,
-            detail: cleanupError.message,
-          }).pipe(Effect.asVoid),
-        ),
-      );
+      const cleanupCreatedCheckout = cleanupOwnedCheckout(managedCheckoutDeps, {
+        operation,
+        repositoryRoot: project.workspaceRoot,
+        owned,
+      });
 
       yield* Effect.gen(function* () {
         yield* dispatchWorktreeCommand(
@@ -831,7 +662,7 @@ export const makeWorktreeOperations = (deps: {
           });
         yield* refreshGitStatus(worktreePath);
       }).pipe(
-        Effect.catch((error) => cleanupOwnedCheckout.pipe(Effect.andThen(Effect.fail(error)))),
+        Effect.catch((error) => cleanupCreatedCheckout.pipe(Effect.andThen(Effect.fail(error)))),
       );
       return { worktreeId, sessionId: threadId, submoduleInitialization };
     });

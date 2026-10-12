@@ -81,6 +81,8 @@ describe("CheckpointDiffQueryLive", () => {
           return "diff patch";
         }),
       deleteCheckpointRefs: () => Effect.void,
+      resolveCommit: () => Effect.succeed(null),
+      pinRef: () => Effect.void,
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
@@ -163,6 +165,8 @@ describe("CheckpointDiffQueryLive", () => {
           return "diff patch";
         }),
       deleteCheckpointRefs: () => Effect.void,
+      resolveCommit: () => Effect.succeed(null),
+      pinRef: () => Effect.void,
     };
 
     const layer = CheckpointDiffQueryLive.pipe(
@@ -213,6 +217,8 @@ describe("CheckpointDiffQueryLive", () => {
       restoreCheckpoint: () => Effect.succeed(true),
       diffCheckpoints: () => Effect.succeed(""),
       deleteCheckpointRefs: () => Effect.void,
+      resolveCommit: () => Effect.succeed(null),
+      pinRef: () => Effect.void,
     };
 
     const layer = CheckpointDiffQueryLive.pipe(

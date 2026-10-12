@@ -315,6 +315,14 @@
       "types": "./src/threadExport.ts",
       "import": "./src/threadExport.ts"
     },
+    "./threadFork": {
+      "types": "./src/threadFork.ts",
+      "import": "./src/threadFork.ts"
+    },
+    "./turnReply": {
+      "types": "./src/turnReply.ts",
+      "import": "./src/turnReply.ts"
+    },
     "./computerFrame": {
       "types": "./src/computerFrame.ts",
       "import": "./src/computerFrame.ts"

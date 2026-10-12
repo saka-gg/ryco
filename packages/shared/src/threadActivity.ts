@@ -2,6 +2,7 @@ import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThreadActivity,
+  THREAD_FORKED_ACTIVITY_KIND,
 } from "@ryco/contracts";
 import { Schema } from "effect";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
@@ -35,10 +36,25 @@ export function isTerminalContextHandoffActivity(
   }
 }
 
+/**
+ * A forked thread's single provenance activity (see `@ryco/shared/threadFork`). It is a
+ * milestone by kind alone: it anchors the fork-origin timeline entry, and the decider reads it
+ * to decide whether the fork still owes a provider its inherited conversation.
+ */
+export function isThreadForkedActivity(
+  activity: Pick<OrchestrationThreadActivity, "kind">,
+): boolean {
+  return activity.kind === THREAD_FORKED_ACTIVITY_KIND;
+}
+
 export function isThreadActivityMilestone(
   activity: Pick<OrchestrationThreadActivity, "kind" | "payload">,
 ): boolean {
-  return isContextCompactionActivity(activity) || isTerminalContextHandoffActivity(activity);
+  return (
+    isContextCompactionActivity(activity) ||
+    isTerminalContextHandoffActivity(activity) ||
+    isThreadForkedActivity(activity)
+  );
 }
 
 /**

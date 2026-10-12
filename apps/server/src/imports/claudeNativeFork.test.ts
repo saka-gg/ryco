@@ -46,13 +46,13 @@ it("uses the real SDK to fork into the target cwd's native store without changin
         .join("\n") + "\n";
     const sourceFile = path.join(sourceDir, `${id}.jsonl`);
     await writeFile(sourceFile, contents);
-    const fork = await forkClaudeNative({
+    const { sessionId: fork, file } = await forkClaudeNative({
       root,
       sourceFile,
       sourceId: id,
       lastMessageId: answer,
       cwd: target,
-      key: "a".repeat(64),
+      title: `Ryco import ${"a".repeat(64)}`,
     });
     expect(fork).not.toBe(id);
     expect(await readFile(sourceFile, "utf8")).toBe(contents);
@@ -63,6 +63,7 @@ it("uses the real SDK to fork into the target cwd's native store without changin
       target.replace(/[^a-zA-Z0-9]/g, "-"),
       `${fork}.jsonl`,
     );
+    expect(file).toBe(targetFile);
     const copied = await readFile(targetFile, "utf8");
     expect(copied).toContain("Synthetic fixture answer");
     const history = parseHistory("claudeAgent", copied);

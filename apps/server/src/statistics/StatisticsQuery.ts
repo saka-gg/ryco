@@ -11,6 +11,9 @@
  * turn and request counters retain their final snapshots. Context-window gauges
  * remain a best-effort fallback for older/provider-limited data.
  *
+ * A fork's inherited turns and activities are display copies of its source's history: the work
+ * is already counted once, on the source, so every reader here leaves them out.
+ *
  * @module StatisticsQuery
  */
 import {
@@ -31,6 +34,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
 import { collectProcessedTokenUsage } from "./processedTokenUsage.ts";
+
+import {
+  inheritedActivityRowSql,
+  inheritedItemIdSql,
+  inheritedTurnRowSql,
+} from "../orchestration/forkInheritanceSql.ts";
 
 import {
   toPersistenceDecodeError,
@@ -254,12 +263,18 @@ const makeStatisticsQuery = Effect.gen(function* () {
         FROM orchestration_events
         WHERE event_type = 'thread.activity-appended'
           AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
+          AND NOT ${inheritedItemIdSql(
+            sql,
+            sql.literal("json_extract(payload_json, '$.activity.id')"),
+            sql.literal("stream_id"),
+          )}
         UNION ALL
         SELECT
           thread_id AS "threadId", turn_id AS "turnId", sequence,
           created_at AS "createdAt", payload_json AS "payloadJson"
         FROM projection_thread_activities a
         WHERE kind = 'context-window.updated'
+          AND NOT ${inheritedActivityRowSql(sql, "a")}
           AND NOT EXISTS (
             SELECT 1 FROM orchestration_events e
             WHERE e.event_type = 'thread.activity-appended'
@@ -281,8 +296,9 @@ const makeStatisticsQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           substr(created_at, 1, 10) AS "date",
           COUNT(*) AS "count"
-        FROM projection_thread_activities
+        FROM projection_thread_activities activities
         WHERE kind = 'tool.completed'
+          AND NOT ${inheritedActivityRowSql(sql, "activities")}
         GROUP BY thread_id, substr(created_at, 1, 10)
       `,
   });
@@ -298,7 +314,8 @@ const makeStatisticsQuery = Effect.gen(function* () {
           completed_at AS "completedAt",
           checkpoint_turn_count AS "checkpointTurnCount",
           checkpoint_files_json AS "filesJson"
-        FROM projection_turns
+        FROM projection_turns turns
+        WHERE NOT ${inheritedTurnRowSql(sql, "turns")}
       `,
   });
 

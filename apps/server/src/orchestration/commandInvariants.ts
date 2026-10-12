@@ -11,6 +11,7 @@ import type {
   WorktreeId,
 } from "@ryco/contracts";
 import { ContextHandoffActivityPayload } from "@ryco/contracts";
+import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 import { Effect, Option, Schema } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
@@ -364,6 +365,14 @@ export function requireThreadNotArchived(input: {
   );
 }
 
+/**
+ * A fork holds a conversation before it sends anything, and its inherited history may hold no
+ * user prompt (an imported turn whose prompt had no text). Its lineage marks it as used, the
+ * rule `threadHasConversation` and `isNeverUsedThread` apply too.
+ */
+const isForkedThread = (thread: Pick<OrchestrationThread, "lineage">): boolean =>
+  thread.lineage?.relationship === FORKED_THREAD_RELATIONSHIP;
+
 export function requireThreadHasUserMessage(input: {
   readonly readModel: OrchestrationReadModel;
   readonly command: OrchestrationCommand;
@@ -371,7 +380,7 @@ export function requireThreadHasUserMessage(input: {
 }): Effect.Effect<OrchestrationThread, OrchestrationCommandInvariantError> {
   return requireThread(input).pipe(
     Effect.flatMap((thread) =>
-      thread.messages.some((message) => message.role === "user")
+      thread.messages.some((message) => message.role === "user") || isForkedThread(thread)
         ? Effect.succeed(thread)
         : Effect.fail(
             invariantError(
@@ -440,12 +449,15 @@ export const isThreadLive = (thread: Pick<OrchestrationThread, "deletedAt">): bo
   thread.deletedAt === null;
 
 /**
- * Never-used: no user message and no turn. Only these may be deleted without passing
- * through Trash (internal rollback of a creation that failed before any work).
+ * Never-used: no user message, no turn, and not a fork. Only these may be deleted without
+ * passing through Trash (internal rollback of a creation that failed before any work).
  */
 export const isThreadPristine = (
-  thread: Pick<OrchestrationThread, "messages" | "latestTurn">,
-): boolean => thread.latestTurn === null && !thread.messages.some((m) => m.role === "user");
+  thread: Pick<OrchestrationThread, "messages" | "latestTurn" | "lineage">,
+): boolean =>
+  thread.latestTurn === null &&
+  !thread.messages.some((m) => m.role === "user") &&
+  !isForkedThread(thread);
 
 /**
  * Why new work cannot start in this thread. A removed checkout is never replaced by

@@ -114,7 +114,10 @@ export async function loadThreadForExport(input: {
   const addActivity = (item: ThreadExportActivity) => {
     if (activities.has(item.id))
       throw new Error("History contains overlapping activities. No file was saved; retry.");
-    account([item.id, item.createdAt, item.kind, item.summary, item.boundary], true);
+    account(
+      [item.id, item.createdAt, item.kind, item.summary, item.boundary, item.forkOrigin],
+      true,
+    );
     activities.set(item.id, item);
   };
   const metadata = snapshot.thread;

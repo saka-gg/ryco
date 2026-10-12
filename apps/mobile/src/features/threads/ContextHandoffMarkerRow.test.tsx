@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import {
   CWD_RELOCATION_HANDOFF_COPY,
+  FORK_HANDOFF_COPY,
   type ContextHandoffTimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
@@ -79,6 +80,55 @@ describe("native context handoff divider", () => {
     ]);
     expect(tree.props.accessibilityLabel).toBe(
       "Fresh session in the new folder. Failed: Provider exited. Send your message again to retry",
+    );
+  });
+
+  it("reads a fork's first session as the inherited conversation reaching a fresh session", () => {
+    const tree = ContextHandoffMarkerRow({
+      marker: marker({ reason: "fork", target: { ...endpoint, modelDisplayName: "Opus 5" } }),
+    });
+    expect(texts(tree)).toEqual(["Sent the inherited conversation to a fresh Opus 5 session"]);
+    expect(tree.props.accessibilityLabel).toBe(
+      "Sent the inherited conversation to a fresh Opus 5 session",
+    );
+    expect(tree.props.accessibilityHint).toBe(FORK_HANDOFF_COPY.explanation);
+    // The fork keeps its model: no `<model> → <model>` endpoints.
+    expect(elements(tree).some((element) => typeof element.type === "function")).toBe(false);
+    expect(elements(tree).find((element) => element.type === "SymbolView")?.props.name).toBe(
+      "arrow.triangle.branch",
+    );
+  });
+
+  it("names the model a fork switched from when its first message changed provider", () => {
+    const codex = {
+      providerInstanceId: ProviderInstanceId.make("codex-work"),
+      driverKind: ProviderDriverKind.make("codex"),
+      modelSlug: "gpt-5.6",
+      modelDisplayName: "GPT-5.6",
+    };
+    const tree = ContextHandoffMarkerRow({
+      marker: marker({
+        reason: "fork",
+        sources: [codex],
+        target: { ...endpoint, modelDisplayName: "Opus 5" },
+        changedFrom: codex,
+      }),
+    });
+    expect(texts(tree)).toEqual([
+      "Sent the inherited conversation to a fresh Claude Opus 5 session, switching from Codex GPT-5.6",
+    ]);
+    expect(tree.props.accessibilityLabel).toBe(
+      "Sent the inherited conversation to a fresh Claude Opus 5 session, switching from Codex GPT-5.6",
+    );
+  });
+
+  it("says a failed fork delivery is retried by the next send, without a second status tag", () => {
+    const tree = ContextHandoffMarkerRow({
+      marker: marker({ reason: "fork", status: "failed", error: "Provider exited" }),
+    });
+    expect(texts(tree)).toEqual([FORK_HANDOFF_COPY.failed, FORK_HANDOFF_COPY.retryHint]);
+    expect(tree.props.accessibilityLabel).toBe(
+      "Couldn't send the inherited conversation to a fresh session. Failed: Provider exited. Send your message again to retry",
     );
   });
 

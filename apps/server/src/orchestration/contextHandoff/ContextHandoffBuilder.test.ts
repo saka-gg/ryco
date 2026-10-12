@@ -469,4 +469,247 @@ describe("buildContextHandoffDocument", () => {
     expect(artifact.canonicalJson).not.toContain("DO NOT COPY THIS BODY");
     expect(stableStringifyContextHandoff({ z: 1, a: 2 })).toBe('{"a":2,"z":1}');
   });
+
+  // Stored records keep their digest: a thread that was never forked has no inherited items,
+  // so its document must stay byte for byte what earlier builds produced.
+  it("keeps the bytes of a never-forked thread's document", () => {
+    const at = (seconds: string) => `2026-08-04T00:00:${seconds}.000Z`;
+    const message = (
+      id: string,
+      role: "user" | "assistant",
+      text: string,
+      createdAt: string,
+      turnId: string | null,
+    ): OrchestrationThread["messages"][number] => ({
+      id: MessageId.make(id),
+      role,
+      text,
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      streaming: false,
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const tool = (id: string, kind: string, createdAt: string, sequence?: number) =>
+      activity({
+        id,
+        kind,
+        tone: "tool",
+        summary: `Tool ${id}`,
+        turnId: "turn-1",
+        payload: {
+          itemType: "command_execution",
+          providerItemId: id.startsWith("tool-a") ? "item-a" : `item-${id}`,
+          data: { item: { type: "commandExecution", command: `run ${id}`, exitCode: 0 } },
+        },
+        createdAt,
+        ...(sequence !== undefined ? { sequence } : {}),
+      });
+    const thread = makeThread({
+      // Detail-read order with equal timestamps and the target before a later reply.
+      messages: [
+        message("message-b", "assistant", "Second answer", at("03"), "turn-1"),
+        message("message-a", "user", "First question", at("01"), "turn-1"),
+        message("message-c", "assistant", "Same time answer", at("03"), "turn-1"),
+        message("message-target", "user", "target", at("05"), null),
+        message("message-late", "assistant", "late", at("06"), "turn-2"),
+      ],
+      proposedPlans: [
+        {
+          id: "plan-open",
+          turnId: TurnId.make("turn-1"),
+          planMarkdown: "1. Open plan",
+          implementedAt: null,
+          implementationThreadId: null,
+          createdAt: at("02"),
+          updatedAt: at("02"),
+        },
+        {
+          id: "plan-late",
+          turnId: TurnId.make("turn-2"),
+          planMarkdown: "1. Late plan",
+          implementedAt: null,
+          implementationThreadId: null,
+          createdAt: at("06"),
+          updatedAt: at("06"),
+        },
+      ],
+      activities: [
+        tool("tool-a-completed", "tool.completed", at("04"), 9),
+        tool("tool-a-started", "tool.started", at("02"), 3),
+        tool("tool-b", "tool.completed", at("03"), 5),
+        tool("tool-c", "tool.completed", at("03")),
+        tool("tool-late", "tool.completed", at("06")),
+        activity({
+          id: "runtime-plan",
+          kind: "turn.plan.updated",
+          createdAt: at("04"),
+          payload: { plan: [{ step: "Ship", status: "inProgress" }] },
+        }),
+        activity({
+          id: "runtime-error",
+          kind: "runtime.error",
+          tone: "error",
+          summary: "Runtime error",
+          createdAt: at("03"),
+          payload: { message: "Temporarily unavailable" },
+        }),
+      ],
+      checkpoints: [
+        {
+          turnId: TurnId.make("turn-1"),
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("checkpoint-1"),
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: at("04"),
+        },
+      ],
+    });
+
+    const artifact = buildContextHandoffDocument({
+      thread,
+      targetMessageId: MessageId.make("message-target"),
+      source: endpoint("codex_a", "gpt-a"),
+      target: endpoint("claude_b", "claude-b"),
+    });
+
+    expect(artifact.document.messages.map((entry) => entry.id)).toEqual([
+      "message-a",
+      "message-b",
+      "message-c",
+    ]);
+    expect(artifact.digest).toBe(
+      "709738eda61fae94bf69ea632e191fb1415db8329e86a6f4d053d6ec9b915ba3",
+    );
+  });
+});
+
+describe("buildContextHandoffDocument for a fork", () => {
+  const FORK = ThreadId.make("fork-context");
+  const inherited = (id: string) => `${FORK}:inherited:${id}`;
+  const at = (seconds: string) => `2026-10-01T12:00:${seconds}.000Z`;
+  const message = (
+    id: string,
+    role: "user" | "assistant",
+    text: string,
+    createdAt: string,
+    turnId: string | null,
+  ): OrchestrationThread["messages"][number] => ({
+    id: MessageId.make(id),
+    role,
+    text,
+    turnId: turnId === null ? null : TurnId.make(turnId),
+    streaming: false,
+    createdAt,
+    updatedAt: createdAt,
+  });
+  const tool = (id: string, turnId: string, createdAt: string) =>
+    activity({
+      id,
+      kind: "tool.completed",
+      tone: "tool",
+      summary: `Tool ${id}`,
+      turnId,
+      payload: {
+        itemType: "command_execution",
+        providerItemId: `item-${id}`,
+        data: { item: { type: "commandExecution", command: `run ${id}`, exitCode: 0 } },
+      },
+      createdAt,
+    });
+  // The source's history, server-stamped when its turn ran: Prompt 1 at :10, Reply 1 at :13.
+  const inheritedHistory = {
+    messages: [
+      message(inherited("message-prompt-1"), "user", "Prompt 1", at("10"), "turn-source-1"),
+      message(inherited("message-reply-1"), "assistant", "Reply 1", at("13"), "turn-source-1"),
+    ],
+    proposedPlans: [
+      {
+        id: inherited("plan-1"),
+        turnId: TurnId.make("turn-source-1"),
+        planMarkdown: "1. Inherited plan",
+        implementedAt: null,
+        implementationThreadId: null,
+        createdAt: "2026-10-01T12:00:13.500Z",
+        updatedAt: "2026-10-01T12:00:13.500Z",
+      },
+    ],
+    activities: [
+      tool(inherited("activity-tool"), "turn-source-1", at("13")),
+      activity({
+        id: inherited("activity-plan"),
+        kind: "turn.plan.updated",
+        turnId: "turn-source-1",
+        createdAt: at("13"),
+        payload: { plan: [{ step: "Inherited step", status: "inProgress" }] },
+      }),
+    ],
+  };
+  const build = (thread: OrchestrationThread, targetMessageId: string) =>
+    buildContextHandoffDocument({
+      thread,
+      targetMessageId: MessageId.make(targetMessageId),
+      source: endpoint("codex_a", "gpt-a"),
+      target: endpoint("codex_a", "gpt-a"),
+    }).document;
+
+  it("hands over the whole inherited history when the device stamped its first send earlier", () => {
+    // The device clock runs behind the node: "Continue" is stamped between Prompt 1 and
+    // Reply 1, and the detail read (created_at, id) puts it there.
+    const thread = makeThread({
+      id: FORK,
+      messages: [
+        inheritedHistory.messages[0]!,
+        message("message-own-1", "user", "Continue", at("12"), null),
+        inheritedHistory.messages[1]!,
+      ],
+      proposedPlans: inheritedHistory.proposedPlans,
+      activities: [
+        ...inheritedHistory.activities,
+        // The fork's own turn ran after the send.
+        tool("activity-own-later", "turn-own-1", at("14")),
+      ],
+    });
+
+    const document = build(thread, "message-own-1");
+
+    expect(document.messages.map((entry) => entry.text)).toEqual(["Prompt 1", "Reply 1"]);
+    expect(document.tools.map((entry) => entry.id)).toEqual([inherited("activity-tool")]);
+    expect(document.plans.map((entry) => entry.id)).toEqual([
+      inherited("activity-plan"),
+      inherited("plan-1"),
+    ]);
+  });
+
+  it("orders inherited history before the fork's own, whatever the own items' clock", () => {
+    // A retry after a failed first handoff: the failed send was stamped by a lagging clock,
+    // the retry by a corrected one. Its own items still follow the inherited band.
+    const thread = makeThread({
+      id: FORK,
+      messages: [
+        inheritedHistory.messages[0]!,
+        message("message-own-failed", "user", "First try", at("11"), null),
+        inheritedHistory.messages[1]!,
+        message("message-own-retry", "user", "Try again", at("15"), null),
+      ],
+      proposedPlans: inheritedHistory.proposedPlans,
+      activities: [
+        ...inheritedHistory.activities,
+        tool("activity-own-failed", "turn-own-failed", at("11")),
+      ],
+    });
+
+    const document = build(thread, "message-own-retry");
+
+    expect(document.messages.map((entry) => entry.text)).toEqual([
+      "Prompt 1",
+      "Reply 1",
+      "First try",
+    ]);
+    expect(document.tools.map((entry) => entry.id)).toEqual([
+      inherited("activity-tool"),
+      "activity-own-failed",
+    ]);
+  });
 });

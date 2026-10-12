@@ -34,7 +34,10 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { OrchestrationCommandAdmissionError } from "../orchestration/Errors.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
-import { buildCodexInitializeParams } from "../provider/Layers/CodexProvider.ts";
+import {
+  CodexIsolatedAppServerError,
+  withIsolatedCodexAppServer,
+} from "../provider/codexIsolatedAppServer.ts";
 import { resolveProviderSourceLayout } from "../provider/ProviderSourceLayout.ts";
 import { makeForkScanner, nativeContext, type ForkCandidate } from "./forkReconciliation.ts";
 import {
@@ -216,42 +219,14 @@ export const makeSessionImport = (options: SessionImportTestOptions = {}) =>
       binaryPath: string,
       use: (client: CodexClient.CodexAppServerClient["Service"]) => Effect.Effect<A, E>,
     ) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const context = yield* Layer.build(
-            CodexClient.layerCommand({
-              command: binaryPath,
-              args: ["app-server"],
-              cwd,
-              env: {
-                ...environment,
-                CODEX_HOME: layout.effectiveHomePath ?? layout.sharedHomePath,
-              },
-            }),
-          ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-          const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-            Effect.provide(context),
-          );
-          const initialized = yield* client.request("initialize", buildCodexInitializeParams());
-          const actualHome = yield* io(
-            () => realpath(initialized.codexHome),
-            "Codex effective home is unavailable.",
-          );
-          const expectedHome = yield* io(
-            () => realpath(layout.effectiveHomePath ?? layout.sharedHomePath),
-            "Codex expected home is unavailable.",
-          );
-          if (actualHome !== expectedHome)
-            return yield* mismatch("Codex started in a different provider store.");
-          yield* client.notify("initialized", undefined);
-          return yield* use(client);
-        }),
-      ).pipe(
-        Effect.timeout("45 seconds"),
+      withIsolatedCodexAppServer({ layout, cwd, environment, binaryPath }, use).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.mapError((error) =>
           Schema.is(ForkMismatch)(error)
             ? error
-            : failure("Codex native history verification failed."),
+            : Schema.is(CodexIsolatedAppServerError)(error) && error.reason === "home-mismatch"
+              ? mismatch(error.detail)
+              : failure("Codex native history verification failed."),
         ),
       );
 
@@ -1061,8 +1036,8 @@ export const makeSessionImport = (options: SessionImportTestOptions = {}) =>
                       sourceId: history.id,
                       lastMessageId: history.lastMessageId,
                       cwd,
-                      key: input.key,
-                    }),
+                      title: `Ryco import ${input.key}`,
+                    }).then((copy) => copy.sessionId),
                   "Claude could not fork this conversation. Its outcome is uncertain; automatic reforking is disabled.",
                 );
               }

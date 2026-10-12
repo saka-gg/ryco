@@ -53,6 +53,7 @@ export {
   selectSidebarWorktreesAcrossEnvironments,
   selectSidebarWorktreesForProjectRef,
   selectSidebarWorktreesForProjectRefs,
+  selectThreadAvailabilityByRef,
   selectThreadByRef,
   selectThreadExistsByRef,
   selectThreadIdsByProjectRef,
@@ -72,4 +73,5 @@ export type {
   AppState,
   EnvironmentState,
   ShellEventCoalescer,
+  ThreadAvailability,
 } from "@ryco/client-runtime/state/threads";

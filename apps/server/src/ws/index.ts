@@ -4,6 +4,7 @@ import { makeDailyRecapHandlers } from "./dailyRecapRpc.ts";
 import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeLifecycleHandlers } from "./lifecycleRpc.ts";
 import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
+import { makeThreadForkHandlers } from "./threadForkRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option } from "effect";
@@ -43,6 +44,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeProjectHandlers(ctx),
       ...makeChatProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
+      ...makeThreadForkHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),
       ...makeDailyRecapHandlers(ctx),

@@ -10,8 +10,12 @@ import {
 } from "@ryco/shared/retiredFeatures";
 import { useStore as useZustandStore } from "zustand";
 import { useAtomValue } from "@effect/atom-react";
-import { LegendList, type LegendListRenderItemProps } from "@legendapp/list/react-native";
-import { useNavigation } from "@react-navigation/native";
+import {
+  LegendList,
+  type LegendListRef,
+  type LegendListRenderItemProps,
+} from "@legendapp/list/react-native";
+import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import {
   useCallback,
@@ -48,13 +52,24 @@ import {
   resolveQueuedMessageSteerEligibility,
   type QueuedMessageSteerAttempt,
 } from "@ryco/client-runtime/state/message-queue";
-import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
+import {
+  buildThreadInbox,
+  createThreadForkAttemptController,
+  defaultThreadForkBaseRef,
+  deriveForkableReplyMessageIds,
+  readThreadForkApi,
+  threadForkBoundaryQuote,
+  threadForkReplyExcerpt,
+  type ChatMessage,
+} from "@ryco/client-runtime/state/threads";
+import { isChatProject } from "@ryco/shared/projectKind";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   EnvironmentId,
   MessageId,
   ThreadId,
   type ModelSelection,
+  type ThreadForkResult,
 } from "@ryco/contracts";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
@@ -65,11 +80,16 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SymbolView } from "../../components/AppSymbol";
-import { ensureEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
+import {
+  ensureEnvironmentApi,
+  readEnvironmentApi,
+  readRpcClient,
+} from "../../connection/environmentApi";
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import {
   loadOlderThreadMessages,
+  loadThreadMessagesAround,
   retainThreadDetailSubscription,
 } from "../../connection/threadDetail";
 import { useThreadConnectionRetarget } from "../../connection/useThreadConnectionRetarget";
@@ -87,6 +107,7 @@ import {
   useAgentControlStore,
 } from "../../state/agentControlRuntime";
 import { useAgentControlSync } from "../../state/agentControlSync";
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
 import { usePreferences } from "../../state/preferencesStore";
@@ -120,6 +141,7 @@ import {
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
@@ -134,12 +156,7 @@ import {
   setThreadRuntimeMode,
 } from "./sessionActions";
 import { useThreadChecks } from "./useThreadChecks";
-import {
-  buildThreadTimelineRows,
-  toggleFold,
-  type ThreadTimelineRow,
-  type TurnHtmlRender,
-} from "./threadActivityFold";
+import { buildThreadTimelineRows, toggleFold, type TurnHtmlRender } from "./threadActivityFold";
 import { HtmlRenderFullScreenProvider } from "./HtmlRenderFullScreen";
 import { ThreadActivityFoldRow } from "./ThreadActivityFoldRow";
 import {
@@ -168,24 +185,54 @@ import {
 import { ThreadMessage } from "./ThreadMessage";
 import { proposedPlanPresentation } from "./threadPresentation";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
-import { derivePendingContextHandoff } from "./contextHandoffModel";
+import { derivePendingComposerHandoff } from "./contextHandoffModel";
+import { ForkDestinationSheet } from "./ForkDestinationSheet";
+import { mobileForkSheetPorts } from "./forkActions";
+import {
+  buildForkSheetSource,
+  initialForkSheetSelection,
+  isThreadForkOffered,
+} from "./forkDestinationModel";
+import { ForkOriginRow } from "./ForkOriginRow";
+import { useForkSheetState } from "./useForkSheetState";
+import {
+  createThreadListRowAnnotator,
+  nextThreadMessageAnchorStep,
+  resolveOpenThreadNavigation,
+  type ThreadListRow,
+} from "./threadTimelineList";
+
+const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
+/** How long the message a link opened the thread at stays highlighted. */
+const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
 
 function TimelineRow(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly entry: TimelineEntry;
   readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender> | undefined;
+  /** Present only on a reply that can be forked right now. */
+  readonly onForkFromMessage?: ((message: ChatMessage) => void) | undefined;
+  /** The blank reply a page row stands in for; its fork starts from that reply. */
+  readonly forkReply?: ChatMessage | undefined;
+  readonly onOpenThread: (threadId: ThreadId, messageId: MessageId | null) => void;
+  /** The message a link opened this thread at. */
+  readonly highlighted?: boolean | undefined;
 }) {
-  const { entry } = props;
+  const { entry, onForkFromMessage, forkReply } = props;
   if (entry.kind === "message") {
-    return (
+    const message = (
       <ThreadMessage
         environmentId={props.environmentId}
         threadId={props.threadId}
         message={entry.message}
         turnHtmlRenders={props.turnHtmlRenders}
+        onForkFromHere={
+          onForkFromMessage ? () => onForkFromMessage(forkReply ?? entry.message) : undefined
+        }
       />
     );
+    return props.highlighted ? <View className="bg-primary/10">{message}</View> : message;
   }
   if (entry.kind === "proposed-plan") {
     const presentation = proposedPlanPresentation();
@@ -215,6 +262,15 @@ function TimelineRow(props: {
   }
   if (entry.kind === "context-handoff") {
     return <ContextHandoffMarkerRow marker={entry.marker} />;
+  }
+  if (entry.kind === "fork-origin") {
+    return (
+      <ForkOriginRow
+        environmentId={props.environmentId}
+        marker={entry.marker}
+        onOpenSource={props.onOpenThread}
+      />
+    );
   }
   // Work entries never reach here — buildThreadTimelineRows folds them before
   // the list sees them. This is the remaining unknown-kind fallback.
@@ -322,8 +378,11 @@ function HeaderActions(props: {
 export function ThreadDetailScreen(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  /** Open scrolled to this message (and highlight it briefly), loading history around it. */
+  readonly targetMessageId?: MessageId | null;
 }) {
   const { environmentId, threadId } = props;
+  const targetMessageId = props.targetMessageId ?? null;
   const [sideChatStore] = useState(createSideChatStore);
   const sideChatKey = JSON.stringify([environmentId, threadId]);
   const sideChat = useZustandStore(sideChatStore, (state) => state.chatsByThreadKey[sideChatKey]);
@@ -704,17 +763,165 @@ export function ThreadDetailScreen(props: {
       thread,
     ],
   );
-  const pendingContextHandoff = useMemo(
+  const threadActivities = thread?.activities;
+  const pendingHandoff = useMemo(
     () =>
-      selectedModelSelection
-        ? derivePendingContextHandoff({
-            threadStarted,
-            canonicalSelection: canonicalModelSelection,
-            targetSelection: selectedModelSelection,
-            serverConfig,
+      derivePendingComposerHandoff({
+        activities: threadActivities ?? [],
+        threadStarted,
+        canonicalSelection: canonicalModelSelection,
+        targetSelection: selectedModelSelection,
+        serverConfig,
+      }),
+    [
+      canonicalModelSelection,
+      selectedModelSelection,
+      serverConfig,
+      threadActivities,
+      threadStarted,
+    ],
+  );
+
+  // "Fork from here": offered on the terminal reply of a completed turn while this node can fork
+  // right now. Capability and chats availability come from THIS environment's config, not the
+  // active-environment atom, which nulls on switch.
+  const environmentServerConfig = useEnvironmentServerConfigs().get(environmentId) ?? null;
+  const forkOffered = isThreadForkOffered({
+    mutationReady: environmentRow?.mutationReady,
+    actionsDisabled: cachedView.actionsDisabled,
+    serverCapability: environmentServerConfig?.environment.capabilities.threadFork,
+    forkApiAvailable: readThreadForkApi(readEnvironmentApi(environmentId)) !== null,
+  });
+  const threadMessages = thread?.messages;
+  const threadLatestTurn = thread?.latestTurn;
+  const threadSession = thread?.session;
+  const forkableMessageIds = useMemo(
+    () =>
+      forkOffered && threadMessages
+        ? deriveForkableReplyMessageIds({
+            messages: threadMessages,
+            latestTurn: threadLatestTurn,
+            session: threadSession,
           })
-        : null,
-    [canonicalModelSelection, selectedModelSelection, serverConfig, threadStarted],
+        : NO_FORKABLE_MESSAGES,
+    [forkOffered, threadLatestTurn, threadMessages, threadSession],
+  );
+  // A sheet opened on another thread (this screen retargeted by `navigate`) is dropped, not just
+  // hidden; its attempt stays in the shared registry for the next "Fork from here".
+  const [forkSheet, setForkSheet] = useForkSheetState({ environmentId, threadId });
+  const closeForkSheet = useCallback(
+    () => setForkSheet((current) => (current ? { ...current, visible: false } : current)),
+    [setForkSheet],
+  );
+  // A slow stream still opens the fork (`arrived` false): the thread screen loads it.
+  const onForked = useCallback(
+    (result: ThreadForkResult) => {
+      closeForkSheet();
+      navigation.dispatch(
+        StackActions.push("Thread", { environmentId, threadId: result.threadId }),
+      );
+    },
+    [closeForkSheet, environmentId, navigation],
+  );
+  // Each opening drives the shared attempt for this reply: an unsettled one a closed sheet left
+  // (same key, possibly still in flight) is continued, a fork created while no sheet showed it is
+  // opened, else a fresh one starts.
+  const openForkSheet = useCallback(
+    (message: ChatMessage) => {
+      if (!message.turnId) return;
+      const state = useStore.getState();
+      const source = selectThreadByRef(state, scopeThreadRef(environmentId, threadId));
+      const sourceProject = source
+        ? selectProjectByRef(state, scopeProjectRef(environmentId, source.projectId))
+        : undefined;
+      const sourceBranch = source?.branch ?? null;
+      setForkSheet({
+        visible: true,
+        request: {
+          environmentId,
+          sourceThreadId: threadId,
+          sourceTitle: source?.title ?? "",
+          messageId: message.id,
+          turnId: message.turnId,
+          // A page-only turn, or a blank reply under a page, quotes what the turn published.
+          excerpt: threadForkReplyExcerpt(
+            threadForkBoundaryQuote(source?.messages ?? [], message.id),
+          ),
+        },
+        controller: createThreadForkAttemptController({
+          boundary: { environmentId, sourceThreadId: threadId, sourceMessageId: message.id },
+          initialSelection: initialForkSheetSelection({
+            isChat: isChatProject(sourceProject),
+            sourceBranch,
+          }),
+          defaultBaseRef: defaultThreadForkBaseRef(sourceBranch),
+          ports: mobileForkSheetPorts(environmentId),
+          onForked,
+        }),
+      });
+    },
+    [environmentId, onForked, setForkSheet, threadId],
+  );
+  // Git is read for the project root, the checkout a new worktree is created from, and only
+  // while the sheet is open. Chats never offer a worktree.
+  const forkSheetVisible = forkSheet?.visible === true;
+  const forkRepository = useRepositoryStatus(
+    environmentId,
+    forkSheetVisible && project && !isChatProject(project) ? project.cwd : null,
+  );
+  const forkTurnId = forkSheet?.request.turnId ?? null;
+  const threadWorktreePath = thread?.worktreePath ?? null;
+  const threadBranch = thread?.branch ?? null;
+  const threadTurnDiffSummaries = thread?.turnDiffSummaries;
+  const forkSheetSource = useMemo(
+    () =>
+      buildForkSheetSource({
+        project,
+        repository: forkRepository,
+        serverConfig: environmentServerConfig,
+        thread: threadTurnDiffSummaries
+          ? {
+              worktreePath: threadWorktreePath,
+              branch: threadBranch,
+              turnDiffSummaries: threadTurnDiffSummaries,
+            }
+          : null,
+        turnId: forkTurnId,
+      }),
+    [
+      environmentServerConfig,
+      forkRepository,
+      forkTurnId,
+      project,
+      threadBranch,
+      threadTurnDiffSummaries,
+      threadWorktreePath,
+    ],
+  );
+  // A link to another thread of this environment (a fork's source link), optionally at one of
+  // its messages: back to it when it is the previous screen (pointing it at the message first),
+  // otherwise pushed so Back returns here.
+  const openThread = useCallback(
+    (target: ThreadId, messageId: MessageId | null = null) => {
+      const step = resolveOpenThreadNavigation({
+        state: navigation.getState(),
+        environmentId,
+        threadId: target,
+        messageId,
+      });
+      if (step.kind === "back") {
+        if (step.anchor) {
+          navigation.dispatch({
+            ...CommonActions.setParams(step.anchor.params),
+            source: step.anchor.routeKey,
+          });
+        }
+        navigation.goBack();
+        return;
+      }
+      navigation.dispatch(StackActions.push("Thread", step.params));
+    },
+    [environmentId, navigation],
   );
 
   const getSteerEligibility = useCallback(
@@ -1221,7 +1428,79 @@ export function ThreadDetailScreen(props: {
     [built?.timeline, expandedFoldIds, runningTurnId],
   );
 
-  const renderItem = ({ item }: LegendListRenderItemProps<ThreadTimelineRow>) =>
+  // Anchoring to the message a link opened this thread at (a fork's link back to its reply):
+  // load the history around it if needed, then scroll to it once and highlight it briefly.
+  const listRef = useRef<LegendListRef>(null);
+  const [messageAnchor, setMessageAnchor] = useState<{
+    readonly messageId: MessageId;
+    readonly index: number;
+  } | null>(null);
+  const anchorProgress = useRef<{
+    readonly key: string;
+    loadRequested: boolean;
+    scrolled: boolean;
+  } | null>(null);
+  const historyReady = messageHistory !== undefined;
+  useEffect(() => {
+    if (targetMessageId === null) return;
+    const key = `${environmentId}\u0000${threadId}\u0000${targetMessageId}`;
+    if (anchorProgress.current?.key !== key) {
+      anchorProgress.current = { key, loadRequested: false, scrolled: false };
+    }
+    const progress = anchorProgress.current;
+    if (progress.scrolled) return;
+    const step = nextThreadMessageAnchorStep({
+      rows: timelineRows,
+      messageId: targetMessageId,
+      loadRequested: progress.loadRequested,
+      historyReady,
+    });
+    if (step.kind === "load") {
+      progress.loadRequested = true;
+      try {
+        void loadThreadMessagesAround({
+          environmentId,
+          threadId,
+          messageId: targetMessageId,
+        }).catch(() => undefined);
+      } catch {
+        // No live client (a cached thread): the list stays where it is.
+      }
+    } else if (step.kind === "scroll") {
+      progress.scrolled = true;
+      setMessageAnchor({ messageId: targetMessageId, index: step.index });
+    }
+  }, [environmentId, historyReady, targetMessageId, threadId, timelineRows]);
+  useEffect(() => {
+    if (messageAnchor === null) return;
+    // One frame late: the list has to have laid the row out before its index is a position.
+    const frame = requestAnimationFrame(() => {
+      void listRef.current?.scrollToIndex({
+        index: messageAnchor.index,
+        viewPosition: 0.3,
+        animated: true,
+      });
+    });
+    const timer = setTimeout(
+      () => setMessageAnchor((current) => (current === messageAnchor ? null : current)),
+      MESSAGE_ANCHOR_HIGHLIGHT_MS,
+    );
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [messageAnchor]);
+
+  // Fork eligibility and the anchored message live outside the timeline; they go onto the rows
+  // so LegendList re-renders the rows they change (it never re-renders on a new renderItem).
+  const [annotateRows] = useState(createThreadListRowAnnotator);
+  const highlightedMessageId = messageAnchor?.messageId ?? null;
+  const listRows = useMemo(
+    () => annotateRows(timelineRows, { forkableMessageIds, highlightedMessageId }),
+    [annotateRows, forkableMessageIds, highlightedMessageId, timelineRows],
+  );
+
+  const renderItem = ({ item }: LegendListRenderItemProps<ThreadListRow>) =>
     item.kind === "activity-fold" ? (
       <ThreadActivityFoldRow
         fold={item}
@@ -1233,6 +1512,10 @@ export function ThreadDetailScreen(props: {
         threadId={threadId}
         entry={item.entry}
         turnHtmlRenders={item.turnHtmlRenders}
+        onForkFromMessage={item.forkable ? openForkSheet : undefined}
+        forkReply={item.forkReply}
+        highlighted={item.highlighted}
+        onOpenThread={openThread}
       />
     );
   const visibleError = sendError ?? thread?.error ?? null;
@@ -1276,7 +1559,8 @@ export function ThreadDetailScreen(props: {
       {/* One full-screen view for every page in the feed: it outlives the row that opened it. */}
       <HtmlRenderFullScreenProvider>
         <LegendList
-          data={timelineRows}
+          ref={listRef}
+          data={listRows}
           renderItem={renderItem}
           keyExtractor={(row) => row.id}
           alignItemsAtEnd
@@ -1461,7 +1745,7 @@ export function ThreadDetailScreen(props: {
               setThreadInteractionMode(ensureEnvironmentApi(environmentId), threadId, next),
             );
         }}
-        pendingContextHandoff={pendingContextHandoff}
+        pendingHandoff={pendingHandoff}
       />
 
       {headerModel ? (
@@ -1542,6 +1826,15 @@ export function ThreadDetailScreen(props: {
             setActionsVisible(false);
             openReview();
           }}
+        />
+      ) : null}
+
+      {forkSheet ? (
+        <ForkDestinationSheet
+          sheet={forkSheet}
+          source={forkSheetSource}
+          ready={forkOffered}
+          onClose={closeForkSheet}
         />
       ) : null}
     </KeyboardAvoidingView>

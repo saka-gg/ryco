@@ -6,9 +6,12 @@ import {
   type ContextHandoffInspectionSummaryMetadata,
   type ContextHandoffReason,
   type MessageId,
+  type ModelSelection,
   type OrchestrationThreadActivity,
   type TurnId,
 } from "@ryco/contracts";
+import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
+import { forkContextHandoffPending } from "@ryco/shared/threadFork";
 import { Schema } from "effect";
 
 export type ContextHandoffTimelineStatus = "consumed" | "failed" | "delivery-uncertain";
@@ -26,6 +29,12 @@ export interface ContextHandoffTimelineEntry {
   targetTurnId: TurnId | null;
   sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
   target: ContextHandoffEndpointSnapshot;
+  /**
+   * A fork handoff whose fresh session is on another provider instance than the fork was: the
+   * endpoint it moved from, shown as `<changedFrom> → <target>`. Absent for every other handoff
+   * (a model change lists all of its `sources`).
+   */
+  changedFrom?: ContextHandoffEndpointSnapshot;
   error?: string;
   inspection?: ContextHandoffInspectionSummaryMetadata;
 }
@@ -40,6 +49,67 @@ export function isCwdRelocationHandoff(handoff: {
   readonly reason?: ContextHandoffReason | undefined;
 }): boolean {
   return handoff.reason === "cwd-relocation";
+}
+
+/**
+ * Whether a handoff delivered a fork's inherited conversation to its first fresh session
+ * (no provider-native copy could stop at the fork's boundary). The node records it as a fork
+ * handoff whichever model the first message chose, so it may also move the fork to another
+ * provider instance; `isModelChangeHandoff` says whether it did.
+ */
+export function isForkHandoff(handoff: {
+  readonly reason?: ContextHandoffReason | undefined;
+}): boolean {
+  return handoff.reason === "fork";
+}
+
+/** What `isModelChangeHandoff` reads: an activity payload or a timeline entry. */
+export interface ContextHandoffTransitionSubject {
+  readonly reason?: ContextHandoffReason | undefined;
+  readonly sourceSelection?: ModelSelection | undefined;
+  readonly targetSelection?: ModelSelection | undefined;
+  readonly changedFrom?: ContextHandoffEndpointSnapshot | undefined;
+}
+
+function forkHandoffChangesProvider(handoff: ContextHandoffTransitionSubject): boolean {
+  if (handoff.changedFrom !== undefined) return true;
+  return (
+    handoff.sourceSelection !== undefined &&
+    handoff.targetSelection !== undefined &&
+    // The threshold the node applies to a model-change handoff.
+    modelSelectionRequiresContextHandoff({
+      canonicalSelection: handoff.sourceSelection,
+      targetSelection: handoff.targetSelection,
+    })
+  );
+}
+
+/**
+ * Whether a handoff moved the thread to another provider instance or model: every model change
+ * (a missing reason is one recorded before handoffs carried a reason), and a fork's first fresh
+ * session when the first message also switched provider instance. Relocations keep their model.
+ */
+export function isModelChangeHandoff(handoff: ContextHandoffTransitionSubject): boolean {
+  if (handoff.reason === undefined || handoff.reason === "model-change") return true;
+  return handoff.reason === "fork" && forkHandoffChangesProvider(handoff);
+}
+
+/**
+ * The endpoint a handoff moved from: the `sources` entry of its source selection (`sources` also
+ * lists earlier endpoints of the conversation). Null when the payload does not list it.
+ */
+export function contextHandoffSourceEndpoint(handoff: {
+  readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
+  readonly sourceSelection: ModelSelection;
+}): ContextHandoffEndpointSnapshot | null {
+  const { instanceId, model } = handoff.sourceSelection;
+  return (
+    handoff.sources.find(
+      (endpoint) => endpoint.providerInstanceId === instanceId && endpoint.modelSlug === model,
+    ) ??
+    handoff.sources.find((endpoint) => endpoint.providerInstanceId === instanceId) ??
+    null
+  );
 }
 
 /**
@@ -66,7 +136,106 @@ export function cwdRelocationHandoffHeadline(status: ContextHandoffTimelineStatu
     : CWD_RELOCATION_HANDOFF_COPY.attempted;
 }
 
-/** The divider subject both kinds of handoff are described from. */
+/**
+ * Platform-neutral copy for a fork's handoff: the fork's own (inherited) history goes to a fresh
+ * session, so it reads as that delivery. When the first message also switched provider instance
+ * the headline names the model it switched from as well (`changedFrom`).
+ */
+export const FORK_HANDOFF_COPY = {
+  /** Divider headline once the fresh session received the inherited conversation. */
+  continued: "Sent the inherited conversation to a fresh session",
+  /** Divider headline for a delivery that failed. */
+  failed: "Couldn't send the inherited conversation to a fresh session",
+  /** Divider headline for a delivery Ryco could not confirm. */
+  uncertain: "Couldn't confirm the inherited conversation reached a fresh session",
+  /** Why the fork did not continue a copy of the provider's own session. */
+  explanation:
+    "This fork has no copy of the provider's session, so a fresh session received the conversation it inherited as context. Tool results and reasoning from before the fork weren't carried over.",
+  /** The handoff stays owed: the next send delivers the inherited conversation again. */
+  retryHint: "Send your message again to retry.",
+} as const;
+
+/**
+ * The fork divider's headline. `targetLabel` names the fresh session's model where the platform
+ * has a label for it ("… to a fresh Claude Sonnet session"); `sourceLabel` names the model the
+ * fork switched from when the handoff also changed provider (`changedFrom`).
+ */
+export function forkHandoffHeadline(
+  status: ContextHandoffTimelineStatus,
+  targetLabel?: string | null,
+  sourceLabel?: string | null,
+): string {
+  const source = sourceLabel?.trim();
+  const switched = source ? `, switching from ${source}` : "";
+  if (status === "failed") return `${FORK_HANDOFF_COPY.failed}${switched}`;
+  if (status === "delivery-uncertain") return `${FORK_HANDOFF_COPY.uncertain}${switched}`;
+  const label = targetLabel?.trim();
+  return label
+    ? `Sent the inherited conversation to a fresh ${label} session${switched}`
+    : `${FORK_HANDOFF_COPY.continued}${switched}`;
+}
+
+/** How a platform names a handoff endpoint; each app supplies its own provider labels. */
+export interface ContextHandoffEndpointLabelers {
+  /** Provider and model ("Claude Sonnet"). */
+  readonly endpoint: (endpoint: ContextHandoffEndpointSnapshot) => string;
+  /** The model alone ("Sonnet"). */
+  readonly model: (endpoint: ContextHandoffEndpointSnapshot) => string;
+}
+
+/**
+ * The labels a fork handoff's divider names (`forkHandoffHeadline`, `forkHandoffAccessibleLabel`).
+ * Usually just the fresh session's model. When the first message also switched provider instance
+ * (`changedFrom`), both ends are named with their provider: the provider is what changed, and two
+ * instances can serve the same model.
+ */
+export function forkHandoffEndpointLabels(
+  handoff: {
+    readonly target: ContextHandoffEndpointSnapshot;
+    readonly changedFrom?: ContextHandoffEndpointSnapshot | undefined;
+  },
+  labelers: ContextHandoffEndpointLabelers,
+): { readonly target: string; readonly source: string | null } {
+  return handoff.changedFrom
+    ? {
+        target: labelers.endpoint(handoff.target),
+        source: labelers.endpoint(handoff.changedFrom),
+      }
+    : { target: labelers.model(handoff.target), source: null };
+}
+
+/**
+ * What a composer says about the next message's context handoff, in precedence order:
+ * - `fork`: a handoff fork still owes a provider its inherited conversation, so the node starts
+ *   the next turn with a "fork" handoff whichever model is selected. It takes the model-change
+ *   chip's place: the node records a fork handoff, not a model change, even when the model
+ *   changed too;
+ * - `model-change`: the selected model is on another provider instance (the app's own
+ *   presentation of both ends);
+ * - null: the next message continues the current session.
+ */
+export type PendingComposerHandoff<ModelChange extends object> =
+  | { readonly kind: "fork" }
+  | ({ readonly kind: "model-change" } & ModelChange);
+
+/** The one precedence rule every composer applies (`PendingComposerHandoff`). */
+export function resolvePendingComposerHandoff<ModelChange extends object>(input: {
+  /** The thread's activities; null where the composer shows no handoff chips. */
+  readonly activities:
+    | ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>
+    | null
+    | undefined;
+  /** The model change the selection makes, read only when no fork handoff is owed. */
+  readonly modelChange: () => ModelChange | null;
+}): PendingComposerHandoff<ModelChange> | null {
+  if (input.activities != null && forkContextHandoffPending(input.activities)) {
+    return { kind: "fork" };
+  }
+  const modelChange = input.modelChange();
+  return modelChange ? { kind: "model-change", ...modelChange } : null;
+}
+
+/** The divider subject every kind of handoff is described from. */
 export interface ContextHandoffMarkerSubject {
   readonly status: ContextHandoffTimelineStatus;
   readonly reason?: ContextHandoffReason | undefined;
@@ -96,19 +265,46 @@ export function cwdRelocationHandoffRetryHint(handoff: ContextHandoffMarkerSubje
 }
 
 /**
+ * What a fork handoff that did not complete tells the user: the fork still owes its inherited
+ * conversation (a failed or unconfirmed delivery leaves it pending), so the next send retries.
+ */
+export function forkHandoffRetryHint(handoff: ContextHandoffMarkerSubject): string | null {
+  return isForkHandoff(handoff) && handoff.status !== "consumed"
+    ? FORK_HANDOFF_COPY.retryHint
+    : null;
+}
+
+function joinAccessibleSentences(parts: ReadonlyArray<string | null>): string {
+  return parts
+    .filter((part): part is string => part !== null)
+    .map((part) => part.replace(/\.+$/, ""))
+    .join(". ");
+}
+
+/**
  * The screen-reader label of a relocation divider: its headline, how it ended
  * and what to do next, as sentences. Model changes name their endpoints, which
  * each platform labels itself.
  */
 export function cwdRelocationHandoffAccessibleLabel(handoff: ContextHandoffMarkerSubject): string {
-  return [
+  return joinAccessibleSentences([
     cwdRelocationHandoffHeadline(handoff.status),
     contextHandoffStatusSuffix(handoff),
     cwdRelocationHandoffRetryHint(handoff),
-  ]
-    .filter((part): part is string => part !== null)
-    .map((part) => part.replace(/\.+$/, ""))
-    .join(". ");
+  ]);
+}
+
+/** The screen-reader label of a fork handoff divider, like a relocation's. */
+export function forkHandoffAccessibleLabel(
+  handoff: ContextHandoffMarkerSubject,
+  targetLabel?: string | null,
+  sourceLabel?: string | null,
+): string {
+  return joinAccessibleSentences([
+    forkHandoffHeadline(handoff.status, targetLabel, sourceLabel),
+    contextHandoffStatusSuffix(handoff),
+    forkHandoffRetryHint(handoff),
+  ]);
 }
 
 const decodeContextHandoffActivityPayload = Schema.decodeUnknownSync(ContextHandoffActivityPayload);
@@ -140,6 +336,10 @@ export function toContextHandoffTimelineEntry(
     return null;
   }
 
+  const changedFrom =
+    payload.reason === "fork" && forkHandoffChangesProvider(payload)
+      ? contextHandoffSourceEndpoint(payload)
+      : null;
   return {
     id: `context-handoff:${activity.id}`,
     activityId: activity.id,
@@ -152,6 +352,7 @@ export function toContextHandoffTimelineEntry(
     targetTurnId: payload.targetTurnId ?? activity.turnId,
     sources: payload.sources,
     target: payload.target,
+    ...(changedFrom ? { changedFrom } : {}),
     ...(payload.inspection ? { inspection: payload.inspection } : {}),
     ...(payload.status === "failed" || payload.status === "delivery-uncertain"
       ? { error: payload.error }

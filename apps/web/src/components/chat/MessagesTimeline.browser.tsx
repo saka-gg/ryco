@@ -7,6 +7,7 @@ import {
   type OrchestrationThreadActivity,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   TurnId,
 } from "@ryco/contracts";
 import { createRef } from "react";
@@ -122,6 +123,7 @@ vi.mock("@legendapp/list/react", async () => {
 import { MessagesTimeline } from "./MessagesTimeline";
 import { __rememberHtmlRenderSourceForTests } from "./useHtmlRenderSource";
 import { useUiStateStore } from "~/uiStateStore";
+import { type EnvironmentState, useStore } from "../../store";
 
 const THINKING_ENTRIES = [
   {
@@ -1637,6 +1639,113 @@ describe("MessagesTimeline", () => {
       });
     });
 
+    it("offers Fork from here on the page a turn ended on, and on the reply otherwise", async () => {
+      seedPage();
+      const onForkFromMessage = vi.fn();
+      const forkButtons = () =>
+        document.querySelectorAll<HTMLButtonElement>('button[aria-label="Fork from here"]');
+      const pageOnly = entries.filter((entry) => entry.id !== "reply-entry");
+      await withTier("desktop", async () => {
+        const screen = await render(
+          <MessagesTimeline
+            {...buildProps()}
+            latestTurn={latestTurn}
+            timelineEntries={pageOnly}
+            onForkFromMessage={onForkFromMessage}
+          />,
+        );
+        try {
+          // The turn answered with its page alone: the page row ends it.
+          await vi.waitFor(() => expect(forkButtons()).toHaveLength(1));
+          const button = forkButtons()[0]!;
+          expect(
+            button.closest("[data-timeline-row-kind]")?.getAttribute("data-timeline-row-kind"),
+          ).toBe("html-render");
+          await userEvent.click(button);
+          expect(onForkFromMessage).toHaveBeenCalledWith(
+            { messageId: renderMessageId, turnId },
+            button,
+          );
+
+          // With a reply after the page, the reply ends the turn and offers it.
+          await screen.rerender(
+            <MessagesTimeline
+              {...buildProps()}
+              latestTurn={latestTurn}
+              timelineEntries={entries}
+              onForkFromMessage={onForkFromMessage}
+            />,
+          );
+          await vi.waitFor(() => expect(forkButtons()).toHaveLength(1));
+          expect(
+            forkButtons()[0]!.closest("[data-message-id]")?.getAttribute("data-message-id"),
+          ).toBe("reply");
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
+
+    it("scrolls to and highlights the page a link to its turn's blank reply lands on", async () => {
+      seedPage();
+      const blankId = MessageId.make("blank-reply");
+      const blank = {
+        id: "blank-entry",
+        kind: "message" as const,
+        createdAt: "2026-09-04T12:00:05.000Z",
+        message: {
+          id: blankId,
+          role: "assistant" as const,
+          text: "",
+          turnId,
+          createdAt: "2026-09-04T12:00:05.000Z",
+          completedAt: "2026-09-04T12:00:05.000Z",
+          streaming: false,
+        },
+      };
+      const pageThenBlank = [...entries.filter((entry) => entry.id !== "reply-entry"), blank];
+      // A provider that opened its (blank) reply before publishing the page.
+      const blankThenPage = [
+        entries[0]!,
+        { ...blank, createdAt: "2026-09-04T12:00:01.000Z" },
+        entries[1]!,
+      ];
+      await withTier("desktop", async () => {
+        for (const timelineEntries of [pageThenBlank, blankThenPage]) {
+          scrollToIndexSpy.mockReset();
+          // A fork's origin link opens the source at the fork's boundary: the blank reply.
+          const screen = await render(
+            <MessagesTimeline
+              {...buildProps()}
+              latestTurn={latestTurn}
+              timelineEntries={timelineEntries}
+              targetMessageId={blankId}
+              targetMessageRequestId={1}
+            />,
+          );
+          try {
+            const rows = () => [
+              ...document.querySelectorAll<HTMLElement>("[data-timeline-row-kind]"),
+            ];
+            // The blank reply has no row of its own: the page stands in for it.
+            expect(rows().map((row) => row.dataset.timelineRowKind)).toEqual([
+              "message",
+              "html-render",
+            ]);
+            await vi.waitFor(() =>
+              expect(scrollToIndexSpy).toHaveBeenCalledWith(expect.objectContaining({ index: 1 })),
+            );
+            await vi.waitFor(() =>
+              expect(rows()[1]!.getAttribute("data-message-highlighted")).toBe("true"),
+            );
+            expect(rows()[0]!.hasAttribute("data-message-highlighted")).toBe(false);
+          } finally {
+            await screen.unmount();
+          }
+        }
+      });
+    });
+
     it("opens the page in a dialog from its reply card on the phone tier", async () => {
       seedPage();
       await withTier("phone", async () => {
@@ -1654,6 +1763,198 @@ describe("MessagesTimeline", () => {
           expect(frame.srcdoc).toBe(pageHtml);
           await page.getByRole("button", { name: "Close", exact: true }).click();
           await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
+  });
+
+  describe("forking", () => {
+    const turn1 = TurnId.make("turn-fork-1");
+    const turn2 = TurnId.make("turn-fork-2");
+    const message = (
+      id: string,
+      role: "user" | "assistant",
+      second: number,
+      turnId: TurnId | null,
+    ) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: `2026-10-11T12:00:${String(second).padStart(2, "0")}.000Z`,
+      message: {
+        id: MessageId.make(id),
+        role,
+        text: `${id} text`,
+        turnId,
+        createdAt: `2026-10-11T12:00:${String(second).padStart(2, "0")}.000Z`,
+        completedAt: `2026-10-11T12:00:${String(second).padStart(2, "0")}.000Z`,
+        streaming: false,
+      },
+    });
+    const entries = [
+      message("user-1", "user", 0, null),
+      message("reply-1", "assistant", 5, turn1),
+      message("user-2", "user", 10, null),
+      message("reply-2", "assistant", 15, turn2),
+    ];
+    // The second turn is still running: only the first reply ends a completed turn.
+    const runningTurn = {
+      turnId: turn2,
+      state: "running" as const,
+      startedAt: "2026-10-11T12:00:10.000Z",
+      completedAt: null,
+    };
+    const forkButtons = () =>
+      document.querySelectorAll<HTMLButtonElement>('button[aria-label="Fork from here"]');
+
+    async function withTier<T>(tier: "desktop" | "phone", run: () => Promise<T>): Promise<T> {
+      if (tier === "phone") await page.viewport(390, 844);
+      useTierOverrideStore.setState({ override: tier });
+      const stopTier = syncDocumentPresentationTier();
+      try {
+        return await run();
+      } finally {
+        useTierOverrideStore.setState({ override: null });
+        stopTier();
+        if (tier === "phone") await page.viewport(1280, 900);
+      }
+    }
+
+    it("offers Fork from here only on the terminal reply of a completed turn", async () => {
+      const onForkFromMessage = vi.fn();
+      await withTier("desktop", async () => {
+        const screen = await render(
+          <MessagesTimeline
+            {...buildProps()}
+            latestTurn={runningTurn}
+            timelineEntries={entries}
+            onForkFromMessage={onForkFromMessage}
+          />,
+        );
+        try {
+          await vi.waitFor(() => expect(forkButtons()).toHaveLength(1));
+          const button = forkButtons()[0]!;
+          expect(button.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe(
+            "reply-1",
+          );
+          await userEvent.click(button);
+          expect(onForkFromMessage).toHaveBeenCalledWith(
+            { messageId: "reply-1", turnId: turn1 },
+            button,
+          );
+        } finally {
+          await screen.unmount();
+        }
+        // No callback, no action: drafts and machines without the capability.
+        const withoutFork = await render(
+          <MessagesTimeline {...buildProps()} latestTurn={runningTurn} timelineEntries={entries} />,
+        );
+        try {
+          await expect.element(page.getByText("reply-1 text")).toBeVisible();
+          expect(forkButtons()).toHaveLength(0);
+        } finally {
+          await withoutFork.unmount();
+        }
+      });
+    });
+
+    it("never offers Fork from here on the frozen phone tier", async () => {
+      await withTier("phone", async () => {
+        const screen = await render(
+          <MessagesTimeline
+            {...buildProps()}
+            latestTurn={{
+              ...runningTurn,
+              state: "completed",
+              completedAt: "2026-10-11T12:00:16.000Z",
+            }}
+            timelineEntries={entries}
+            onForkFromMessage={vi.fn()}
+          />,
+        );
+        try {
+          await expect.element(page.getByText("reply-2 text")).toBeVisible();
+          expect(forkButtons()).toHaveLength(0);
+        } finally {
+          await screen.unmount();
+        }
+      });
+    });
+
+    const forkOrigin = {
+      id: "fork-origin:fork:forked",
+      activityId: "fork:forked",
+      createdAt: "2026-10-11T12:00:20.000Z",
+      sourceThreadId: ThreadId.make("source-thread"),
+      sourceMessageId: MessageId.make("source-reply"),
+      sourceTurnId: turn1,
+      sourceTitle: "Refactor auth",
+      inheritedMessageCount: 2,
+      providerContext: "handoff" as const,
+      handoffReason: "provider-unsupported" as const,
+      checkout: { kind: "current-checkout" as const, worktreePath: null, branch: "main" },
+      notices: ["1 attachment wasn't copied."],
+    };
+    const withDivider = [
+      ...entries.slice(0, 2),
+      {
+        id: forkOrigin.id,
+        kind: "fork-origin" as const,
+        createdAt: forkOrigin.createdAt,
+        marker: forkOrigin,
+      },
+    ];
+
+    it("divides inherited history from the fork's own, saying where it came from", async () => {
+      // The machine's shell has arrived and has no such thread: the source is gone.
+      useStore.setState({
+        environmentStateById: {
+          [EnvironmentId.make("environment-local")]: {
+            bootstrapComplete: true,
+            threadShellById: {},
+          } as unknown as EnvironmentState,
+        },
+      });
+      await withTier("desktop", async () => {
+        const screen = await render(
+          <MessagesTimeline {...buildProps()} timelineEntries={withDivider} />,
+        );
+        try {
+          const divider = page.getByRole("group", { name: "Forked from “Refactor auth”" });
+          await expect.element(divider).toBeVisible();
+          const element = divider.element() as HTMLElement;
+          expect(element.dataset.forkOriginProviderContext).toBe("handoff");
+          // The source is not in the machine's threads: no link, and it says so.
+          expect(element.dataset.forkOriginSource).toBe("missing");
+          expect(element.querySelector("[data-fork-origin-source-link]")).toBeNull();
+          expect(element.textContent).toContain("The original thread is no longer available.");
+          expect(element.textContent).toContain("This provider can't copy its session.");
+          expect(element.textContent).toContain(
+            "Shares the original's checkout on main. Files weren't copied or rewound.",
+          );
+          expect(element.textContent).toContain("1 attachment wasn't copied.");
+          const rowKinds = [
+            ...document.querySelectorAll<HTMLElement>("[data-timeline-row-kind]"),
+          ].map((row) => row.dataset.timelineRowKind);
+          expect(rowKinds.at(-1)).toBe("fork-origin");
+          expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth);
+        } finally {
+          await screen.unmount();
+          useStore.setState({ environmentStateById: {} });
+        }
+      });
+    });
+
+    it("renders no fork divider on the frozen phone tier", async () => {
+      await withTier("phone", async () => {
+        const screen = await render(
+          <MessagesTimeline {...buildProps()} timelineEntries={withDivider} />,
+        );
+        try {
+          await expect.element(page.getByText("reply-1 text")).toBeVisible();
+          expect(document.querySelector("[data-fork-origin-id]")).toBeNull();
+          expect(document.querySelector('[data-timeline-row-kind="fork-origin"]')).toBeNull();
         } finally {
           await screen.unmount();
         }

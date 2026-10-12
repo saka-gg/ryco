@@ -18,8 +18,10 @@ import { VcsProcessExitError } from "@ryco/contracts";
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 import { CheckpointStore, type CheckpointStoreShape } from "../Services/CheckpointStore.ts";
 import { CheckpointRef } from "@ryco/contracts";
+import { RYCO_REFS_PREFIX } from "../Utils.ts";
 
 const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
+const FULL_COMMIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 const makeCheckpointStore = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -70,23 +72,29 @@ const makeCheckpointStore = Effect.gen(function* () {
       })
       .pipe(Effect.map((result) => result.exitCode === 0));
 
+  const resolveCommitOid = (operation: string, cwd: string, ref: string) =>
+    // A leading dash would be read as an option, and control characters are never a ref.
+    ref.startsWith("-") || /[\p{Cc}]/u.test(ref)
+      ? Effect.succeed(null)
+      : vcs
+          .execute({
+            operation,
+            cwd,
+            args: ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) => {
+              if (result.exitCode !== 0) {
+                return null;
+              }
+              const commit = result.stdout.trim();
+              return commit.length > 0 ? commit : null;
+            }),
+          );
+
   const resolveCheckpointCommit = (cwd: string, checkpointRef: CheckpointRef) =>
-    vcs
-      .execute({
-        operation: "CheckpointStore.resolveCheckpointCommit",
-        cwd,
-        args: ["rev-parse", "--verify", "--quiet", `${checkpointRef}^{commit}`],
-        allowNonZeroExit: true,
-      })
-      .pipe(
-        Effect.map((result) => {
-          if (result.exitCode !== 0) {
-            return null;
-          }
-          const commit = result.stdout.trim();
-          return commit.length > 0 ? commit : null;
-        }),
-      );
+    resolveCommitOid("CheckpointStore.resolveCheckpointCommit", cwd, checkpointRef);
 
   const isGitRepository: CheckpointStoreShape["isGitRepository"] = (cwd) =>
     vcs
@@ -298,6 +306,30 @@ const makeCheckpointStore = Effect.gen(function* () {
     );
   });
 
+  const resolveCommit: CheckpointStoreShape["resolveCommit"] = (input) =>
+    resolveCommitOid("CheckpointStore.resolveCommit", input.cwd, input.ref);
+
+  const pinRef: CheckpointStoreShape["pinRef"] = Effect.fn("pinRef")(function* (input) {
+    const operation = "CheckpointStore.pinRef";
+    if (!input.ref.startsWith(`${RYCO_REFS_PREFIX}/`)) {
+      return yield* new CheckpointInvariantError({
+        operation,
+        detail: `Refusing to pin a ref outside ${RYCO_REFS_PREFIX}/.`,
+      });
+    }
+    if (!FULL_COMMIT_OID.test(input.commit)) {
+      return yield* new CheckpointInvariantError({
+        operation,
+        detail: "A pinned ref must name a full commit id.",
+      });
+    }
+    yield* vcs.execute({
+      operation,
+      cwd: input.cwd,
+      args: ["update-ref", input.ref, input.commit],
+    });
+  });
+
   return {
     isGitRepository,
     captureCheckpoint,
@@ -306,6 +338,8 @@ const makeCheckpointStore = Effect.gen(function* () {
     restoreCheckpoint,
     diffCheckpoints,
     deleteCheckpointRefs,
+    resolveCommit,
+    pinRef,
   } satisfies CheckpointStoreShape;
 });
 

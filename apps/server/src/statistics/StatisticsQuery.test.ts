@@ -7,6 +7,7 @@ import { runMigrations } from "../persistence/Migrations.ts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlStatement from "effect/sql/Statement";
 import { StatisticsSnapshot } from "@ryco/contracts";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -832,6 +833,150 @@ statisticsLayer("recorded usage attribution", (it) => {
       );
       assert.ok(
         snapshot.models.some((model) => model.model === "model-a" && model.provider === "codex"),
+      );
+    }),
+  );
+});
+
+statisticsLayer("forked threads", (it) => {
+  it.effect("counts a fork's own work only, never the history it inherited", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "fork-project", "Forks");
+      yield* insertThread(
+        sql,
+        "source",
+        "fork-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertThread(
+        sql,
+        "fork",
+        "fork-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-12T00:00:00.000Z",
+      );
+      const inherited = (id: string) => `fork:inherited:${id}`;
+      const turnRow = (
+        threadId: string,
+        turnId: string,
+        assistantMessageId: string,
+        startedAt: string,
+        completedAt: string,
+        filesJson: string,
+      ) => sql`
+        INSERT INTO projection_turns (
+          thread_id, turn_id, assistant_message_id, state, requested_at, started_at,
+          completed_at, checkpoint_files_json
+        ) VALUES (
+          ${threadId}, ${turnId}, ${assistantMessageId}, 'completed', ${startedAt}, ${startedAt},
+          ${completedAt}, ${filesJson}
+        )
+      `;
+      // The source's turn, and the fork's inherited copy of it (same ids and times, as fork
+      // publication projects it).
+      yield* turnRow(
+        "source",
+        "turn-source",
+        "message-answer",
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:01:00.000Z",
+        '[{"path":"a.ts","kind":"modified","additions":10,"deletions":4}]',
+      );
+      yield* turnRow(
+        "fork",
+        "turn-source",
+        inherited("message-answer"),
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:01:00.000Z",
+        "[]",
+      );
+      yield* turnRow(
+        "fork",
+        "turn-own",
+        "message-own",
+        "2026-06-12T00:00:00.000Z",
+        "2026-06-12T00:00:30.000Z",
+        "[]",
+      );
+      for (const [id, threadId, turnId, createdAt] of [
+        ["tool-source", "source", "turn-source", "2026-06-10T00:00:10.000Z"],
+        [inherited("tool-source"), "fork", "turn-source", "2026-06-10T00:00:10.000Z"],
+        ["tool-own", "fork", "turn-own", "2026-06-12T00:00:10.000Z"],
+      ] as const) {
+        yield* insertActivity(sql, id, threadId, turnId, "tool.completed", "{}", createdAt, 1);
+      }
+      const usage = '{"usedTokens":600,"lastInputTokens":400,"lastOutputTokens":200}';
+      yield* insertActivity(
+        sql,
+        "ctx-source",
+        "source",
+        "turn-source",
+        "context-window.updated",
+        usage,
+        "2026-06-10T00:00:20.000Z",
+        2,
+      );
+      // Usage never belongs in a fork's inherited history; if a copy existed, neither its
+      // projection row nor its event may count.
+      yield* insertActivity(
+        sql,
+        inherited("ctx-source"),
+        "fork",
+        "turn-source",
+        "context-window.updated",
+        usage,
+        "2026-06-10T00:00:20.000Z",
+        2,
+      );
+      const inheritedEventActivity = {
+        id: inherited("ctx-earlier"),
+        turnId: "turn-earlier",
+        sequence: 1,
+        kind: "context-window.updated",
+        createdAt: "2026-06-09T00:00:20.000Z",
+        payload: JSON.parse(usage),
+      };
+      yield* sql`INSERT INTO orchestration_events (event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,actor_kind,payload_json,metadata_json)
+        VALUES ('fork-usage-event','thread','fork',1,'thread.activity-appended',${inheritedEventActivity.createdAt},'system',${JSON.stringify({ threadId: "fork", activity: inheritedEventActivity })},'{}')`;
+
+      const snapshot = yield* statistics.getStatistics();
+      encodeSnapshot(snapshot);
+      assert.equal(snapshot.totals.turns, 2);
+      assert.equal(snapshot.totals.activeMs, 90_000);
+      assert.equal(snapshot.totals.toolUses, 2);
+      assert.equal(snapshot.totals.filesChanged, 1);
+      assert.equal(snapshot.totals.totalTokens, 600);
+      assert.equal(snapshot.totals.inputTokens, 400);
+      // The source's day holds the source's work once; the fork's day holds the fork's.
+      const day = (date: string) => snapshot.dailyBuckets.find((bucket) => bucket.date === date);
+      assert.include(day("2026-06-10"), { turns: 1, toolUses: 1, activeMs: 60_000 });
+      assert.include(day("2026-06-12"), { turns: 1, toolUses: 1, activeMs: 30_000 });
+      assert.isUndefined(day("2026-06-09"));
+
+      // The inherited-item filters are residual: usage history still reads through its index.
+      const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+      const capture: SqlStatement.Transformer = (statement) =>
+        Effect.sync(() => {
+          const compiled = statement.compile();
+          if (compiled[0].includes("FROM orchestration_events")) statements.push(compiled);
+          return statement;
+        });
+      // Inside a transaction the snapshot cache is bypassed, so the queries run again.
+      yield* statistics
+        .getStatistics()
+        .pipe(sql.withTransaction, Effect.provideService(SqlStatement.CurrentTransformer, capture));
+      assert.lengthOf(statements, 1);
+      const [statement, params] = statements[0]!;
+      const plan = yield* sql.unsafe<{ detail: string }>(`EXPLAIN QUERY PLAN ${statement}`, params);
+      assert.ok(
+        plan.some((row) => row.detail.includes("idx_orch_events_statistics_usage")),
+        JSON.stringify(plan),
       );
     }),
   );

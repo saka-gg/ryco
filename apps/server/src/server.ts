@@ -6,6 +6,8 @@ import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
 import { ChatFoldersLive } from "./project/chatFolders.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
+import { ThreadForkLive } from "./threadFork/Layers/ThreadFork.ts";
+import { ThreadForkRepositoryLive } from "./persistence/Layers/ThreadForks.ts";
 import { CompletionReturnRepositoryLive } from "./persistence/Layers/AgentControlCompletionReturns.ts";
 import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/ProviderEffectIntents.ts";
 import { RestartContinuationRepositoryLive } from "./persistence/Layers/RestartContinuations.ts";
@@ -497,6 +499,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
+  // Chat forks: recovery of unfinished forks once commands are admitted. The ledger is provided
+  // beneath the services (below), so startup's orphan-chat sweep sees the chats forks still need.
+  ThreadForkLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
   AutomationCentreLive.pipe(
     Layer.provideMerge(AgentControlActionValidatorLive),
     Layer.provideMerge(AgentControlProjectPlansLive),
@@ -544,6 +549,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),
+  // The chat fork ledger: read by the fork service and by startup's orphan-chat sweep.
+  Layer.provideMerge(ThreadForkRepositoryLive),
   // One lifecycle authority for sidebar, Inbox, workspace management and Agent Control.
   Layer.provideMerge(WorkspaceLifecycleLive),
   Layer.provideMerge(RuntimeDependenciesLive),

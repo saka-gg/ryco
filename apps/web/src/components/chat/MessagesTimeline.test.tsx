@@ -367,6 +367,80 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Fable 5");
   });
 
+  it("renders a fork's handoff as its inherited conversation reaching a fresh session", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const sameModel = makeContextHandoffMarker().target;
+    const consumed = makeContextHandoffMarker({
+      id: "context-handoff:fork",
+      handoffId: ContextHandoffId.make("handoff-fork"),
+      reason: "fork",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const uncertain = makeContextHandoffMarker({
+      id: "context-handoff:fork-uncertain",
+      handoffId: ContextHandoffId.make("handoff-fork-uncertain"),
+      reason: "fork",
+      status: "delivery-uncertain",
+      error: "Acceptance could not be proven.",
+      sources: [sameModel],
+      target: sameModel,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[consumed, uncertain].map((marker) => ({
+          id: marker.id,
+          kind: "context-handoff" as const,
+          createdAt: marker.createdAt,
+          marker,
+        }))}
+      />,
+    );
+
+    expect(markup.match(/data-context-handoff-reason="fork"/g)).toHaveLength(2);
+    expect(markup).toContain("Sent the inherited conversation to a fresh Fable 5 session");
+    expect(markup).toContain(
+      "Couldn&#x27;t confirm the inherited conversation reached a fresh session. Delivery uncertain: Acceptance could not be proven. Send your message again to retry",
+    );
+    expect(markup).toContain("lucide-git-fork");
+    // A fork's first session is never a model transition.
+    expect(markup).not.toContain("lucide-arrow-right");
+    expect(markup).not.toContain("Context handoff from");
+  });
+
+  it("names what a fork's first fresh session switched from when it changed provider", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const base = makeContextHandoffMarker();
+    const switched = makeContextHandoffMarker({
+      id: "context-handoff:fork-switched",
+      handoffId: ContextHandoffId.make("handoff-fork-switched"),
+      reason: "fork",
+      changedFrom: base.sources[0]!,
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: switched.id,
+            kind: "context-handoff" as const,
+            createdAt: switched.createdAt,
+            marker: switched,
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain(
+      "Sent the inherited conversation to a fresh Claude Work Fable 5 session, switching from Codex Work GPT-5.6 Sol",
+    );
+    // The accessible label says it too.
+    expect(markup).toContain(
+      'aria-label="Sent the inherited conversation to a fresh Claude Work Fable 5 session, switching from Codex Work GPT-5.6 Sol"',
+    );
+  });
+
   it("formats changed file paths from the workspace root", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
@@ -848,5 +922,57 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('download="notes.pdf"');
     expect(markup).toContain("opaque-blob");
     expect(markup).not.toContain('download="opaque-blob"');
+  });
+
+  it("renders Fork from here only on terminal replies of completed turns, and only when offered", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const turn1 = TurnId.make("turn-1");
+    const turn2 = TurnId.make("turn-2");
+    const entry = (id: string, role: "user" | "assistant", second: number, turnId?: TurnId) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: `2026-10-11T12:00:0${second}.000Z`,
+      message: {
+        id: MessageId.make(id),
+        role,
+        text: `${id} text`,
+        ...(turnId ? { turnId } : {}),
+        createdAt: `2026-10-11T12:00:0${second}.000Z`,
+        completedAt: `2026-10-11T12:00:0${second}.000Z`,
+        streaming: false,
+      },
+    });
+    const timelineEntries = [
+      entry("user-1", "user", 0),
+      entry("reply-1", "assistant", 1, turn1),
+      entry("user-2", "user", 2),
+      entry("reply-2", "assistant", 3, turn2),
+    ];
+    // The second turn ended interrupted: its reply is no boundary.
+    const latestTurn = {
+      turnId: turn2,
+      state: "interrupted" as const,
+      startedAt: "2026-10-11T12:00:02.000Z",
+      completedAt: "2026-10-11T12:00:04.000Z",
+    };
+    const offered = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        latestTurn={latestTurn}
+        timelineEntries={timelineEntries}
+        onForkFromMessage={() => {}}
+      />,
+    );
+    expect(offered.match(/aria-label="Fork from here"/g)).toHaveLength(1);
+    expect(offered).toContain('data-fork-from-message="reply-1"');
+
+    const notOffered = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        latestTurn={latestTurn}
+        timelineEntries={timelineEntries}
+      />,
+    );
+    expect(notOffered).not.toContain("Fork from here");
   });
 });

@@ -5,6 +5,7 @@ import {
   CircleAlertIcon,
   CircleHelpIcon,
   FolderInputIcon,
+  GitForkIcon,
 } from "lucide-react";
 import {
   contextHandoffStatusSuffix,
@@ -12,11 +13,18 @@ import {
   cwdRelocationHandoffAccessibleLabel,
   cwdRelocationHandoffHeadline,
   cwdRelocationHandoffRetryHint,
+  FORK_HANDOFF_COPY,
+  forkHandoffAccessibleLabel,
+  forkHandoffEndpointLabels,
+  forkHandoffHeadline,
+  forkHandoffRetryHint,
   isCwdRelocationHandoff,
+  isForkHandoff,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
 
 import {
+  CONTEXT_HANDOFF_ENDPOINT_LABELERS,
   ContextHandoffEndpointLabel,
   contextHandoffEndpointAccessibleLabel,
 } from "./ContextHandoffEndpointLabel";
@@ -35,15 +43,40 @@ export interface ContextHandoffMarkerPresentation {
   readonly retryHint: string | null;
 }
 
+/** What a fork divider names: the shared rule with the web's endpoint labels. */
+function forkLabels(marker: ContextHandoffTimelineEntry) {
+  return forkHandoffEndpointLabels(marker, CONTEXT_HANDOFF_ENDPOINT_LABELERS);
+}
+
+function forkHeadline(marker: ContextHandoffTimelineEntry): string {
+  const labels = forkLabels(marker);
+  return forkHandoffHeadline(marker.status, labels.target, labels.source);
+}
+
 /**
  * A model change reads as `<source> → <target>`. A working-directory relocation
  * keeps its model, so it reads as a fresh session in the new folder instead;
- * a failed one says how to try again. Handoffs recorded before they carried a
- * reason are model changes.
+ * a failed one says how to try again. A fork's handoff reads as its inherited
+ * conversation reaching a fresh session. Handoffs recorded before they carried
+ * a reason are model changes.
  */
 export function describeContextHandoffMarker(
   marker: ContextHandoffTimelineEntry,
 ): ContextHandoffMarkerPresentation {
+  if (isForkHandoff(marker)) {
+    const labels = forkLabels(marker);
+    return {
+      accessibleLabel: forkHandoffAccessibleLabel(marker, labels.target, labels.source),
+      tooltipTitle:
+        marker.status === "consumed"
+          ? "Sent to a fresh session"
+          : marker.status === "failed"
+            ? "Couldn't send the inherited conversation"
+            : "Delivery uncertain",
+      tooltipDetail: FORK_HANDOFF_COPY.explanation,
+      retryHint: forkHandoffRetryHint(marker),
+    };
+  }
   if (isCwdRelocationHandoff(marker)) {
     return {
       accessibleLabel: cwdRelocationHandoffAccessibleLabel(marker),
@@ -115,6 +148,7 @@ function MarkerContents({
   readonly uncertain: boolean;
 }) {
   const relocation = isCwdRelocationHandoff(marker);
+  const fork = isForkHandoff(marker);
   return (
     <>
       <span
@@ -135,7 +169,14 @@ function MarkerContents({
         )}
         aria-hidden
       >
-        {relocation ? (
+        {fork ? (
+          <>
+            <GitForkIcon className="size-3.5 shrink-0" />
+            <span className="min-w-0 font-medium" data-context-handoff-headline>
+              {forkHeadline(marker)}
+            </span>
+          </>
+        ) : relocation ? (
           <>
             <FolderInputIcon className="size-3.5 shrink-0" />
             <span className="min-w-0 font-medium" data-context-handoff-headline>

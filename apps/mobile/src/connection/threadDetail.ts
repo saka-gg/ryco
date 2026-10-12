@@ -1,4 +1,9 @@
-import type { EnvironmentId, OrchestrationThreadHistoryPageInfo, ThreadId } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  MessageId,
+  OrchestrationThreadHistoryPageInfo,
+  ThreadId,
+} from "@ryco/contracts";
 
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { mobileHostedConnectionScopes } from "./hostedConnectionScopes";
@@ -43,4 +48,16 @@ export function loadOlderThreadMessages(input: {
     collection: "messages",
     limit: 100,
   });
+}
+
+/**
+ * Loads the thread's message history around one message (a link that opens the thread at it),
+ * through the same shared supervisor call web uses.
+ */
+export function loadThreadMessagesAround(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+}) {
+  return registry.driver.supervisor.loadThreadHistoryAroundMessage({ ...input, limit: 101 });
 }

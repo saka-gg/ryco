@@ -3,6 +3,7 @@ import {
   deriveTerminalAssistantMessageIds,
   formatDuration,
   isBlankSettledReply,
+  isHtmlRenderOnlyMessage,
   placeRepliesAfterHtmlRenders,
   type HtmlRenderAttachment,
   type TimelineEntry,
@@ -69,6 +70,11 @@ export interface TimelineEntryRow {
    * the reply lists at its foot.
    */
   readonly turnHtmlRenders?: ReadonlyArray<TurnHtmlRender>;
+  /**
+   * On a turn's last page: the turn's blank reply, which has no row of its own (the page stands
+   * in for it), so the page offers what that reply offers, such as "Fork from here".
+   */
+  readonly forkReply?: ChatMessage;
 }
 
 export type ThreadTimelineRow = TimelineEntryRow | ActivityFold;
@@ -146,6 +152,8 @@ export function buildThreadTimelineRows(input: {
   const rows: ThreadTimelineRow[] = [];
   const placement = placeHtmlRenders(input.entries, input.runningTurnId);
   let pending: WorkLogEntry[] = [];
+  const lastPageRowIndexByTurn = new Map<string, number>();
+  const blankReplyByTurn = new Map<string, ChatMessage>();
 
   const flush = () => {
     if (pending.length === 0) return;
@@ -197,8 +205,18 @@ export function buildThreadTimelineRows(input: {
     const reply = placement.replyUnderPages(entry);
     // The page answered: a blank reply under it would be an empty bubble, and
     // an unseen reply does not split the activity around it.
-    if (reply !== undefined && isBlankSettledReply(reply.message)) continue;
+    if (reply !== undefined && isBlankSettledReply(reply.message)) {
+      if (reply.message.turnId) blankReplyByTurn.set(reply.message.turnId, reply.message);
+      continue;
+    }
     flush();
+    if (
+      entry.kind === "message" &&
+      entry.message.turnId &&
+      isHtmlRenderOnlyMessage(entry.message)
+    ) {
+      lastPageRowIndexByTurn.set(entry.message.turnId, rows.length);
+    }
     // A settled reply lists the pages at its foot. Until then it waits: a
     // streaming reply would carry the list down the screen as its text
     // arrives, and while the turn runs, its latest finished message only
@@ -210,6 +228,13 @@ export function buildThreadTimelineRows(input: {
     );
   }
   flush();
+
+  // A turn that ended on a blank reply under its page: the page's row stands in for the reply.
+  for (const [turnId, forkReply] of blankReplyByTurn) {
+    const index = lastPageRowIndexByTurn.get(turnId);
+    const row = index === undefined ? undefined : rows[index];
+    if (index !== undefined && row?.kind === "entry") rows[index] = { ...row, forkReply };
+  }
 
   return rows;
 }

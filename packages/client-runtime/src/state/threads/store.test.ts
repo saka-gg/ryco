@@ -32,6 +32,7 @@ import {
   removeEnvironmentState,
   selectEnvironmentState,
   selectProjectsAcrossEnvironments,
+  selectThreadAvailabilityByRef,
   selectThreadByRef,
   selectThreadExistsByRef,
   setSidebarWorktreeTitle,
@@ -822,6 +823,22 @@ describe("thread selection memoization", () => {
       ),
     ).toBe(false);
     expect(selectThreadExistsByRef(state, null)).toBe(false);
+  });
+
+  it("calls a thread missing only once its environment's shell snapshot arrived", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const missingRef = scopeThreadRef(thread.environmentId, ThreadId.make("missing"));
+    expect(
+      selectThreadAvailabilityByRef(state, scopeThreadRef(thread.environmentId, thread.id)),
+    ).toBe("available");
+    expect(selectThreadAvailabilityByRef(state, missingRef)).toBe("missing");
+    // Before the snapshot (cold start, deep link, reconnect) nothing is claimed either way.
+    const loading = withActiveEnvironmentState(localEnvironmentStateOf(state), {
+      bootstrapComplete: false,
+    });
+    expect(selectThreadAvailabilityByRef(loading, missingRef)).toBe("unknown");
+    expect(selectThreadAvailabilityByRef(state, null)).toBe("unknown");
   });
 });
 
@@ -1989,6 +2006,134 @@ describe("incremental orchestration updates", () => {
     expect(threadsOf(next)[0]?.turnDiffSummaries.map((summary) => summary.turnId)).toEqual([
       TurnId.make("turn-1"),
     ]);
+  });
+
+  describe("reverting a fork", () => {
+    // A fork's inherited history carries its source's turn ids, which never have checkpoints in
+    // the fork, and its provenance activity has none. No revert of the fork reaches before them,
+    // as on the server (`isForkBaseItemId`).
+    const forkId = ThreadId.make("fork-1");
+    const inherited = (id: string) => `${forkId}:inherited:${id}`;
+    const sourceTurn = TurnId.make("source-turn-1");
+    const ownTurn1 = TurnId.make("own-turn-1");
+    const ownTurn2 = TurnId.make("own-turn-2");
+    const at = (second: number) => `2026-02-27T00:00:${String(second).padStart(2, "0")}.000Z`;
+    const message = (
+      id: string,
+      role: "user" | "assistant",
+      turnId: TurnId | null,
+      second: number,
+    ): Thread["messages"][number] => ({
+      id: MessageId.make(id),
+      role,
+      text: id,
+      turnId,
+      createdAt: at(second),
+      completedAt: at(second),
+      streaming: false,
+    });
+    const plan = (id: string, turnId: TurnId, second: number): Thread["proposedPlans"][number] => ({
+      id,
+      turnId,
+      planMarkdown: id,
+      implementedAt: null,
+      implementationThreadId: null,
+      createdAt: at(second),
+      updatedAt: at(second),
+    });
+    const activity = (
+      id: string,
+      kind: string,
+      turnId: TurnId | null,
+      second: number,
+    ): Thread["activities"][number] => ({
+      id: EventId.make(id),
+      tone: "tool",
+      kind,
+      summary: id,
+      payload: {},
+      turnId,
+      createdAt: at(second),
+    });
+
+    function forkState() {
+      return makeState(
+        makeThread({
+          id: forkId,
+          messages: [
+            // An inherited prompt whose turn the source never recorded.
+            message(inherited("p0"), "user", null, 0),
+            message(inherited("p1"), "user", sourceTurn, 1),
+            message(inherited("r1"), "assistant", sourceTurn, 2),
+            // An own prompt still without its turn id: only the count fallback keeps it, and
+            // inherited prompts must never fill that fallback in its place.
+            message("own-p1", "user", null, 20),
+            message("own-r1", "assistant", ownTurn1, 21),
+            message("own-p2", "user", ownTurn2, 30),
+            message("own-r2", "assistant", ownTurn2, 31),
+          ],
+          proposedPlans: [
+            plan(inherited("plan-1"), sourceTurn, 1),
+            plan("own-plan-1", ownTurn1, 21),
+            plan("own-plan-2", ownTurn2, 31),
+          ],
+          activities: [
+            activity(inherited("tool-1"), "tool.completed", sourceTurn, 1),
+            activity(`${forkId}:forked`, "thread.forked", null, 10),
+            activity("own-tool-1", "tool.completed", ownTurn1, 21),
+            activity("own-tool-2", "tool.completed", ownTurn2, 31),
+          ],
+          turnDiffSummaries: [
+            {
+              turnId: ownTurn1,
+              completedAt: at(22),
+              status: "ready",
+              checkpointTurnCount: 1,
+              checkpointRef: CheckpointRef.make("fork-ref-1"),
+              files: [],
+            },
+            {
+              turnId: ownTurn2,
+              completedAt: at(32),
+              status: "ready",
+              checkpointTurnCount: 2,
+              checkpointRef: CheckpointRef.make("fork-ref-2"),
+              files: [],
+            },
+          ],
+        }),
+      );
+    }
+
+    function revert(turnCount: number) {
+      const next = applyOrchestrationEvent(
+        forkState(),
+        makeEvent("thread.reverted", { threadId: forkId, turnCount }),
+        localEnvironmentId,
+      );
+      const thread = threadsOf(next)[0];
+      return {
+        messages: thread?.messages.map((entry) => entry.id),
+        plans: thread?.proposedPlans.map((entry) => entry.id),
+        activities: thread?.activities.map((entry) => entry.id),
+      };
+    }
+
+    it("keeps the inherited history and the provenance when reverting to the fork's start", () => {
+      expect(revert(0)).toEqual({
+        messages: [inherited("p0"), inherited("p1"), inherited("r1")],
+        plans: [inherited("plan-1")],
+        activities: [inherited("tool-1"), `${forkId}:forked`],
+      });
+    });
+
+    it("keeps the inherited history plus the fork's own turns up to the checkpoint", () => {
+      expect(revert(1)).toEqual({
+        messages: [inherited("p0"), inherited("p1"), inherited("r1"), "own-p1", "own-r1"],
+        plans: [inherited("plan-1"), "own-plan-1"],
+        activities: [inherited("tool-1"), `${forkId}:forked`, "own-tool-1"],
+      });
+    });
   });
 
   it("clears pending source proposed plans after revert before a new session-set event", () => {

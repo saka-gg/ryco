@@ -252,3 +252,29 @@ it("routes import source selection and reconciliation through the shared transpo
   expect(reconcile).toHaveBeenCalledWith({ ...input, cursor: "server-cursor" });
   expect(adopt).toHaveBeenCalledWith({ ...input, adoptionToken: "server-proof" });
 });
+
+it("routes thread forks to the threads.fork wire method", async () => {
+  const fork = vi.fn(() =>
+    Effect.succeed({
+      threadId: "fork-thread",
+      projectId: "project",
+      replayed: false,
+      providerContext: "native",
+      checkout: { kind: "current-checkout", worktreePath: null, branch: "main" },
+      notices: [],
+    }),
+  );
+  const transport = {
+    request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
+      Effect.runPromise(invoke({ [WS_METHODS.threadsFork]: fork })),
+  } as unknown as WsTransport;
+  const client = createWsRpcClient(transport);
+  const input = {
+    forkKey: "fork-0123456789abcdef",
+    sourceThreadId: "source",
+    sourceMessageId: "reply",
+    destination: { kind: "current-checkout" as const },
+  } as Parameters<typeof client.threads.fork>[0];
+  await expect(client.threads.fork(input)).resolves.toMatchObject({ threadId: "fork-thread" });
+  expect(fork).toHaveBeenCalledWith(input);
+});

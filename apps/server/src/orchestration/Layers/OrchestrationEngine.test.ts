@@ -3273,3 +3273,196 @@ describe("OrchestrationEngine provider effect intents", () => {
     }
   });
 });
+
+describe("OrchestrationEngine thread.fork.create", () => {
+  const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "fixture" };
+  const sourceId = ThreadId.make("fork-engine-source");
+  const forkId = ThreadId.make("fork-engine-fork");
+  const boundaryMessage = MessageId.make("fork-engine-answer");
+  const boundaryTurn = TurnId.make("fork-engine-turn");
+  const inherited = (id: string) => `${forkId}:inherited:${id}`;
+
+  const forkCommand = (projectId: ProjectId, createdAt: string): OrchestrationCommand => ({
+    type: "thread.fork.create",
+    commandId: CommandId.make("fork-engine-publish"),
+    threadId: forkId,
+    projectId,
+    title: "Source (fork)",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdAt,
+    sourceThreadId: sourceId,
+    sourceMessageId: boundaryMessage,
+    sourceTurnId: boundaryTurn,
+    worktreeId: null,
+    newWorktree: null,
+    messages: [
+      {
+        id: MessageId.make(inherited("fork-engine-question")),
+        role: "user",
+        text: "Question",
+        turnId: boundaryTurn,
+        streaming: false,
+        createdAt: "2026-10-11T10:00:00.000Z",
+        updatedAt: "2026-10-11T10:00:00.000Z",
+      },
+      {
+        id: MessageId.make(inherited(boundaryMessage)),
+        role: "assistant",
+        text: "Answer",
+        turnId: boundaryTurn,
+        streaming: false,
+        createdAt: "2026-10-11T10:00:01.000Z",
+        updatedAt: "2026-10-11T10:00:01.000Z",
+      },
+    ],
+    proposedPlans: [],
+    activities: [],
+    forked: {
+      schemaVersion: 1,
+      sourceThreadId: sourceId,
+      sourceMessageId: boundaryMessage,
+      sourceTurnId: boundaryTurn,
+      sourceTitle: "Source",
+      inheritedMessageCount: 2,
+      providerContext: "handoff",
+      handoffReason: "provider-unsupported",
+      checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+      notices: [],
+    },
+  });
+
+  const seed = async (
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+    projectId: ProjectId,
+    workspaceRoot: string,
+    kind: "project" | "chat" = "project",
+  ) => {
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make(`fork-engine-project-${projectId}`),
+        projectId,
+        kind,
+        title: "Fixture",
+        workspaceRoot,
+        defaultModelSelection: modelSelection,
+        createdAt: now(),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`fork-engine-source-${projectId}`),
+        threadId: sourceId,
+        projectId,
+        title: "Source",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      }),
+    );
+  };
+
+  it("persists fork provenance and keeps the inherited handoff pending across a restart", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ryco-fork-engine-"));
+    const database = path.join(directory, "state.sqlite");
+    const projectId = ProjectId.make("fork-engine-project");
+    const expectedLineage = {
+      parentThreadId: sourceId,
+      rootThreadId: sourceId,
+      relationship: "forked",
+      sourceMessageId: boundaryMessage,
+      sourceTurnId: boundaryTurn,
+    };
+    let system = await createOrchestrationSystem(database);
+    try {
+      await seed(system, projectId, directory);
+      await system.run(system.engine.dispatch(forkCommand(projectId, now())));
+      // Later projections rewrite the thread row from a read of it.
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("fork-engine-rename"),
+          threadId: forkId,
+          title: "Renamed fork",
+        }),
+      );
+      const shell = (await system.readShell()).threads.find((thread) => thread.id === forkId);
+      expect(shell?.lineage).toEqual(expectedLineage);
+      expect(shell?.latestTurn).toBeNull();
+      const detail = (await system.readModel()).threads.find((thread) => thread.id === forkId);
+      expect(detail?.messages.map((message) => message.id)).toEqual([
+        inherited("fork-engine-question"),
+        inherited(boundaryMessage),
+      ]);
+      await system.dispose();
+
+      // After a restart the engine bootstraps from SQL: the provenance activity is hydrated, so
+      // the first turn still delivers the inherited conversation.
+      system = await createOrchestrationSystem(database);
+      const hydrated = (await system.commandReadModel()).threads.find(
+        (thread) => thread.id === forkId,
+      );
+      expect(hydrated?.lineage).toEqual(expectedLineage);
+      expect(hydrated?.activities.map((activity) => activity.kind)).toEqual(["thread.forked"]);
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("fork-engine-first-turn"),
+          threadId: forkId,
+          message: {
+            messageId: MessageId.make("fork-engine-first"),
+            role: "user",
+            text: "Continue",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now(),
+        }),
+      );
+      const handoff = (await system.readModel()).threads
+        .find((thread) => thread.id === forkId)
+        ?.activities.find((activity) => activity.kind === "context-handoff");
+      expect(handoff?.payload).toMatchObject({ reason: "fork", status: "requested" });
+    } finally {
+      await system.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a fork into a moving chat retryably, without a rejected receipt", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ryco-fork-move-")));
+    const chat = path.join(root, "chats", "2026-10-11-fork-0a1b2c3d");
+    await fs.mkdir(chat, { recursive: true });
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("fork-engine-chat");
+    try {
+      await seed(system, projectId, chat, "chat");
+      await system.run(
+        system.sql`INSERT INTO project_relocations (relocation_id, project_id, source_path, destination_path, strategy, state, destination_created, error, created_at, updated_at)
+          VALUES ('fork-relocation', ${projectId}, ${chat}, ${path.join(root, "fork")}, 'rename', 'pending', 0, NULL, ${now()}, ${now()})`,
+      );
+      const command = forkCommand(projectId, now());
+      const refused = await system.run(Effect.flip(system.engine.dispatch(command)));
+      expect(refused).toBeInstanceOf(OrchestrationCommandAdmissionError);
+      expect((await system.readShell()).threads.some((thread) => thread.id === forkId)).toBe(false);
+
+      await system.run(
+        system.sql`UPDATE project_relocations SET state = 'failed' WHERE relocation_id = 'fork-relocation'`,
+      );
+      await system.run(system.engine.dispatch(command));
+      expect((await system.readShell()).threads.some((thread) => thread.id === forkId)).toBe(true);
+    } finally {
+      await system.dispose();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});

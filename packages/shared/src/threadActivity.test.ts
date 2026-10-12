@@ -45,6 +45,21 @@ function handoffPayload(status: "consumed" | "failed" | "delivery-uncertain") {
   };
 }
 
+function forkedPayload(providerContext: "native" | "handoff") {
+  return {
+    schemaVersion: 1,
+    sourceThreadId: "thread-source",
+    sourceMessageId: "message-source",
+    sourceTurnId: "turn-source",
+    sourceTitle: "Source",
+    inheritedMessageCount: 2,
+    providerContext,
+    ...(providerContext === "handoff" ? { handoffReason: "provider-unsupported" } : {}),
+    checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+    notices: [],
+  };
+}
+
 describe("threadActivity", () => {
   it("identifies context compaction activities", () => {
     expect(isContextCompactionActivity(activity("compaction", "context-compaction"))).toBe(true);
@@ -113,6 +128,22 @@ describe("threadActivity", () => {
       "recent-tool-1",
       "recent-tool-2",
     ]);
+  });
+
+  it("keeps the fork provenance activity under the cap", () => {
+    const result = capThreadActivitiesPreservingMilestones(
+      [
+        activity("inherited-tool"),
+        activity("forked", "thread.forked", forkedPayload("handoff")),
+        activity("recent-tool-1"),
+        activity("recent-tool-2"),
+      ],
+      2,
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual(["forked", "recent-tool-1", "recent-tool-2"]);
+    // Kind alone: an unreadable record still keeps its timeline position.
+    expect(isThreadActivityMilestone(activity("forked", "thread.forked", null))).toBe(true);
   });
 
   it("derives pending approval and user-input request state in activity order", () => {

@@ -1,7 +1,7 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
-import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 
 import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
@@ -15,6 +15,7 @@ import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
+import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import { WebSocketConnectionCoordinator } from "./WebSocketConnectionSurface";
@@ -85,6 +86,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         <WorkspaceReviewDialog />
         {chatAvailable ? <AutomationsDialogMount /> : null}
         {chatAvailable ? <PromoteChatDialogMount /> : null}
+        {chatAvailable ? <ForkThreadDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
@@ -108,16 +110,21 @@ const LazyAutomationsDialog = lazy(() =>
   })),
 );
 
+/** An app-wide dialog's code loads the first time it opens; it then stays mounted. */
+function LazyDialogMount(props: { readonly open: boolean; readonly children: ReactNode }) {
+  const [hasOpened, setHasOpened] = useState(props.open);
+  if (props.open && !hasOpened) setHasOpened(true);
+  if (!hasOpened) return null;
+  return <Suspense fallback={null}>{props.children}</Suspense>;
+}
+
 /** The Automations dialog loads the first time something opens it, then stays mounted. */
 function AutomationsDialogMount() {
   const open = useAutomationsDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  if (!hasOpened) return null;
   return (
-    <Suspense fallback={null}>
+    <LazyDialogMount open={open}>
       <LazyAutomationsDialog />
-    </Suspense>
+    </LazyDialogMount>
   );
 }
 
@@ -130,13 +137,26 @@ const LazyPromoteChatDialog = lazy(() =>
 /** "Turn into project…" loads the first time a chat asks for it, then stays mounted. */
 function PromoteChatDialogMount() {
   const open = usePromoteChatDialogStore((state) => state.open);
-  const [hasOpened, setHasOpened] = useState(open);
-  if (open && !hasOpened) setHasOpened(true);
-  if (!hasOpened) return null;
   return (
-    <Suspense fallback={null}>
+    <LazyDialogMount open={open}>
       <LazyPromoteChatDialog />
-    </Suspense>
+    </LazyDialogMount>
+  );
+}
+
+const LazyForkThreadDialog = lazy(() =>
+  import("./chat/ForkThreadDialog").then((module) => ({
+    default: module.ForkThreadDialog,
+  })),
+);
+
+/** "Fork from here" loads the first time a reply asks for it, then stays mounted. */
+function ForkThreadDialogMount() {
+  const open = useForkThreadDialogStore((state) => state.open);
+  return (
+    <LazyDialogMount open={open}>
+      <LazyForkThreadDialog />
+    </LazyDialogMount>
   );
 }
 

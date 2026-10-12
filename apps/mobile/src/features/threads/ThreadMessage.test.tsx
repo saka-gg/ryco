@@ -63,6 +63,7 @@ vi.mock("expo-video", () => ({
   VideoView: "VideoView",
 }));
 vi.mock("../../components/AppText", () => ({ AppText: "AppText" }));
+vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/CopyTextButton", () => ({ CopyTextButton: "CopyTextButton" }));
 vi.mock("../../lib/appearancePreferences", () => ({
   resolveNativeMarkdownTypography: () => ({
@@ -84,7 +85,11 @@ vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
 vi.mock("./HtmlRenderCards", () => ({ HtmlRenderCards: "HtmlRenderCards" }));
 
 import { ThreadMessage } from "./ThreadMessage";
-import type { ChatAttachment, ChatMessage } from "@ryco/client-runtime/state/threads";
+import {
+  THREAD_FORK_COPY,
+  type ChatAttachment,
+  type ChatMessage,
+} from "@ryco/client-runtime/state/threads";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
 import type { TurnHtmlRender } from "./threadActivityFold";
@@ -612,5 +617,53 @@ describe("ThreadMessage page cards", () => {
     expect(
       collectElements(renderReply("user"), (element) => element.type === "HtmlRenderCards"),
     ).toHaveLength(0);
+  });
+});
+
+describe("ThreadMessage fork affordance", () => {
+  const reply = {
+    id: "m-1",
+    role: "assistant",
+    text: "Done: the parser is split.",
+    streaming: false,
+    turnId: "turn-1",
+  } as unknown as ChatMessage;
+
+  function forkButtons(tree: ReactElement): ReactElement[] {
+    return findPressables(tree).filter(
+      (pressable) => pressableLabel(pressable) === THREAD_FORK_COPY.action,
+    );
+  }
+
+  it("shows an explicit Fork from here button under a forkable reply", () => {
+    const onForkFromHere = vi.fn();
+    const tree = ThreadMessage({ environmentId, threadId, message: reply, onForkFromHere });
+    const buttons = forkButtons(tree);
+    expect(buttons).toHaveLength(1);
+    expect((buttons[0]!.props as { accessibilityRole?: string }).accessibilityRole).toBe("button");
+    // A footer button, not a long press on the reply (which would fight text selection).
+    expect(
+      collectElements(
+        tree,
+        (element) => (element.props as { onLongPress?: unknown }).onLongPress !== undefined,
+      ),
+    ).toHaveLength(0);
+    (buttons[0]!.props as { onPress: () => void }).onPress();
+    expect(onForkFromHere).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing on a reply the screen did not mark forkable", () => {
+    expect(forkButtons(ThreadMessage({ environmentId, threadId, message: reply }))).toHaveLength(0);
+  });
+
+  it("never offers forking from a user message", () => {
+    const tree = ThreadMessage({
+      environmentId,
+      threadId,
+      message: { ...reply, role: "user" } as ChatMessage,
+      onForkFromHere: vi.fn(),
+    });
+    expect(forkButtons(tree)).toHaveLength(0);
+    expect(collectElements(tree, (element) => element.type === "CopyTextButton")).toHaveLength(1);
   });
 });

@@ -39,4 +39,29 @@ describe("environment API lookup", () => {
     expect(lookup.read(id)).not.toBe(first);
     expect(lookup.read(id)?.projects.readIcon).toBe(current.projects.readIcon);
   });
+
+  it("exposes thread forks only when the client has them", () => {
+    const id = EnvironmentId.make("node");
+    const fork = vi.fn();
+    const withFork = {
+      ...client(),
+      threads: { setManualBucket: vi.fn(), setManualPosition: vi.fn(), fork },
+    } as unknown as WsRpcClient;
+    const api = createEnvironmentApiLookup({
+      canReadConnections: () => true,
+      readClient: () => withFork,
+    }).read(id);
+    expect(api?.threads?.fork).toBe(fork);
+
+    const withoutFork = {
+      ...client(),
+      threads: { setManualBucket: vi.fn(), setManualPosition: vi.fn() },
+    } as unknown as WsRpcClient;
+    const legacy = createEnvironmentApiLookup({
+      canReadConnections: () => true,
+      readClient: () => withoutFork,
+    }).read(id);
+    expect(legacy?.threads).toBeDefined();
+    expect(legacy?.threads).not.toHaveProperty("fork");
+  });
 });

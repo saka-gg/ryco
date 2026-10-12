@@ -137,9 +137,9 @@ import { isTerminalFocused } from "../../lib/terminalFocus";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashPicker } from "./ComposerStashPicker";
-import { PendingContextHandoffChip } from "./PendingContextHandoffChip";
+import { PendingContextHandoffChip, PendingForkHandoffChip } from "./PendingContextHandoffChip";
 import { ComposerGoalHeader } from "./ComposerGoalHeader";
-import { derivePendingContextHandoff } from "./pendingContextHandoff";
+import { derivePendingComposerHandoff, derivePendingContextHandoff } from "./pendingContextHandoff";
 
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-slot="popover-popup"]',
@@ -832,6 +832,17 @@ export const ChatComposer = memo(
         providerInstanceEntries,
         selectedModelSelection,
       ],
+    );
+    // A fork owing its inherited conversation hands off with reason "fork" on
+    // its next send, even after a model change (shared precedence).
+    const pendingHandoff = useMemo(
+      () =>
+        derivePendingComposerHandoff({
+          isPhoneTier: isMobileViewport,
+          activities: activeThreadActivities,
+          modelChange: pendingContextHandoff,
+        }),
+      [activeThreadActivities, isMobileViewport, pendingContextHandoff],
     );
 
     // ------------------------------------------------------------------
@@ -2490,17 +2501,21 @@ export const ChatComposer = memo(
           aria-hidden
           onChange={handleReattachFileChange}
         />
-        {pendingContextHandoff ? (
+        {pendingHandoff ? (
           <div
             className={cn(
               "mb-2 flex min-w-0 items-center px-4",
               stashEntries.length > 0 && "pr-24",
             )}
           >
-            <PendingContextHandoffChip
-              source={pendingContextHandoff.source}
-              target={pendingContextHandoff.target}
-            />
+            {pendingHandoff.kind === "fork" ? (
+              <PendingForkHandoffChip />
+            ) : (
+              <PendingContextHandoffChip
+                source={pendingHandoff.source}
+                target={pendingHandoff.target}
+              />
+            )}
           </div>
         ) : null}
         {!isMobileViewport ? (

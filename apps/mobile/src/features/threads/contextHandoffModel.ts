@@ -1,10 +1,21 @@
 import {
   contextHandoffStatusSuffix,
   cwdRelocationHandoffAccessibleLabel,
+  forkHandoffAccessibleLabel,
+  forkHandoffEndpointLabels,
   isCwdRelocationHandoff,
+  isForkHandoff,
+  resolvePendingComposerHandoff,
+  type ContextHandoffEndpointLabelers,
   type ContextHandoffMarkerSubject,
+  type PendingComposerHandoff as SharedPendingComposerHandoff,
 } from "@ryco/client-runtime/state/session";
-import type { ContextHandoffEndpointSnapshot, ModelSelection, ServerConfig } from "@ryco/contracts";
+import type {
+  ContextHandoffEndpointSnapshot,
+  ModelSelection,
+  OrchestrationThreadActivity,
+  ServerConfig,
+} from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 
 import { providerDisplayLabel } from "../../lib/providerDisplay";
@@ -80,18 +91,60 @@ export function derivePendingContextHandoff(input: {
 }
 
 /**
+ * What the composer says about the next message's context handoff, by the shared precedence
+ * (`resolvePendingComposerHandoff`): a fork's owed handoff, else a model change, else nothing.
+ */
+export type PendingComposerHandoff =
+  SharedPendingComposerHandoff<PendingContextHandoffPresentation>;
+
+export function derivePendingComposerHandoff(input: {
+  readonly activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>;
+  readonly threadStarted: boolean;
+  readonly canonicalSelection: ModelSelection | null | undefined;
+  readonly targetSelection: ModelSelection | null | undefined;
+  readonly serverConfig: ServerConfig | null | undefined;
+}): PendingComposerHandoff | null {
+  const { targetSelection } = input;
+  return resolvePendingComposerHandoff({
+    activities: input.activities,
+    modelChange: () =>
+      targetSelection
+        ? derivePendingContextHandoff({
+            threadStarted: input.threadStarted,
+            canonicalSelection: input.canonicalSelection,
+            targetSelection,
+            serverConfig: input.serverConfig,
+          })
+        : null,
+  });
+}
+
+/** Mobile's endpoint labels for the shared fork divider rule (`forkHandoffEndpointLabels`). */
+export const CONTEXT_HANDOFF_ENDPOINT_LABELERS: ContextHandoffEndpointLabelers = {
+  endpoint: contextHandoffEndpointAccessibleLabel,
+  model: contextHandoffModelLabel,
+};
+
+/**
  * A model change reads as `<source> to <target>`. A working-folder relocation (a chat turned
  * into a project) keeps its model, so it reads as a fresh session in the new folder instead,
- * with the shared relocation wording. Handoffs recorded before they carried a reason are model
+ * with the shared relocation wording. A fork's handoff reads as the inherited conversation
+ * reaching a fresh session of that model, naming the model it switched from when the first
+ * message also changed provider. Handoffs recorded before they carried a reason are model
  * changes.
  */
 export function contextHandoffMarkerAccessibilityLabel(
   input: ContextHandoffMarkerSubject & {
     readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
     readonly target: ContextHandoffEndpointSnapshot;
+    readonly changedFrom?: ContextHandoffEndpointSnapshot | undefined;
   },
 ): string {
   if (isCwdRelocationHandoff(input)) return cwdRelocationHandoffAccessibleLabel(input);
+  if (isForkHandoff(input)) {
+    const labels = forkHandoffEndpointLabels(input, CONTEXT_HANDOFF_ENDPOINT_LABELERS);
+    return forkHandoffAccessibleLabel(input, labels.target, labels.source);
+  }
   const transition = `Context handoff from ${input.sources
     .map(contextHandoffEndpointAccessibleLabel)
     .join(", ")} to ${contextHandoffEndpointAccessibleLabel(input.target)}`;

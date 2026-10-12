@@ -1,5 +1,6 @@
+import { FORK_ORIGIN_COPY } from "@ryco/client-runtime/state/session";
 import type { ContextHandoffEndpointSnapshot } from "@ryco/contracts";
-import { ArrowLeftRightIcon, ArrowRightIcon } from "lucide-react";
+import { ArrowLeftRightIcon, ArrowRightIcon, GitForkIcon } from "lucide-react";
 import { memo } from "react";
 
 import {
@@ -34,6 +35,23 @@ export const PendingContextHandoffChip = memo(function PendingContextHandoffChip
         endpoint={props.target}
         className="max-w-32 font-medium text-foreground/85 sm:max-w-44"
       />
+    </div>
+  );
+});
+
+/** A handoff fork's first send delivers its inherited conversation to a fresh session. */
+export const PendingForkHandoffChip = memo(function PendingForkHandoffChip() {
+  const label = FORK_ORIGIN_COPY.handoffPending;
+  return (
+    <div
+      role="status"
+      aria-label={label}
+      title={label}
+      data-pending-fork-handoff="true"
+      className="selection-glass-surface inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] leading-4 text-muted-foreground shadow-sm"
+    >
+      <GitForkIcon className="size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 truncate font-medium">{label}</span>
     </div>
   );
 });

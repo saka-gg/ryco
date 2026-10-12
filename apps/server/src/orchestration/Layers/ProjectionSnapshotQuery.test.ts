@@ -175,6 +175,89 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
   );
 
   it.effect(
+    "walks the requested-at index backwards for completion recency, without sorting turns",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("completion-plan-fork");
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at
+        ) VALUES (
+          ${threadId}, 'completion-plan-project', 'Completion plan',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          '2026-09-12T00:00:00.000Z', '2026-09-12T00:00:00.000Z'
+        )`;
+        const insertTurn = (turnId: string, assistantMessageId: string, at: string) =>
+          sql`INSERT INTO projection_turns (
+            thread_id, turn_id, assistant_message_id, state, requested_at, started_at,
+            completed_at, checkpoint_files_json
+          ) VALUES (${threadId}, ${turnId}, ${assistantMessageId}, 'completed', ${at}, ${at}, ${at}, '[]')`;
+        const recency = Effect.gen(function* () {
+          const shell = Option.getOrThrow(yield* query.getThreadShellById(threadId));
+          const snapshot = yield* query.getShellSnapshot();
+          const listed = snapshot.threads.find((thread) => thread.id === threadId);
+          assert.equal(listed?.latestCompletedTurnAt, shell.latestCompletedTurnAt);
+          return shell.latestCompletedTurnAt;
+        });
+        // A fork's inherited turn is its source's history, not completion of the fork.
+        yield* insertTurn(
+          "turn-inherited",
+          `${threadId}:inherited:message-answer`,
+          "2026-09-12T00:01:00.000Z",
+        );
+        assert.isNull(yield* recency);
+        yield* insertTurn("turn-own", "message-own", "2026-09-12T00:02:00.000Z");
+        assert.equal(yield* recency, "2026-09-12T00:02:00.000Z");
+
+        const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+        const capture: SqlStatement.Transformer = (statement) =>
+          Effect.sync(() => {
+            const compiled = statement.compile();
+            if (compiled[0].includes('AS "latestCompletedTurnAt"')) statements.push(compiled);
+            return statement;
+          });
+        yield* query
+          .getThreadShellById(threadId)
+          .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+        yield* query
+          .getShellSnapshot()
+          .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+        yield* query
+          .getCommandReadModel()
+          .pipe(Effect.provideService(SqlStatement.CurrentTransformer, capture));
+        assert.isAtLeast(statements.length, 3);
+        for (const [statement, params] of statements) {
+          const plan = yield* sql.unsafe<{ id: number; parent: number; detail: string }>(
+            `EXPLAIN QUERY PLAN ${statement}`,
+            params,
+          );
+          // The shell is re-read for every thread event, per subscriber: the subquery must
+          // stop at the newest completed turn instead of sorting the thread's whole history.
+          const turnsAccess = plan.filter((row) => /^(SEARCH|SCAN) turns\b/.test(row.detail));
+          assert.lengthOf(turnsAccess, 1, JSON.stringify(plan));
+          assert.match(
+            turnsAccess[0]!.detail,
+            /^SEARCH turns USING INDEX idx_projection_turns_thread_requested \(thread_id=\?\)/,
+            JSON.stringify(plan),
+          );
+          // Only the turn id tie-break may sort ("LAST TERM OF ORDER BY"), never every turn.
+          assert.isFalse(
+            plan.some(
+              (row) =>
+                row.parent === turnsAccess[0]!.parent &&
+                row.detail === "USE TEMP B-TREE FOR ORDER BY",
+            ),
+            JSON.stringify(plan),
+          );
+        }
+        yield* sql`DELETE FROM projection_turns WHERE thread_id = ${threadId}`;
+        yield* sql`DELETE FROM projection_threads WHERE thread_id = ${threadId}`;
+      }),
+  );
+
+  it.effect(
     "keeps inbox completion recency stable during live turns in snapshots and shell updates",
     () =>
       Effect.gen(function* () {
@@ -2665,30 +2748,48 @@ it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", (
         interaction_mode, branch, worktree_path, latest_turn_id,
         latest_user_message_at, pending_approval_count, pending_user_input_count,
         has_actionable_proposed_plan, created_at, updated_at, archived_at, deleted_at,
-        lineage_parent_thread_id, lineage_root_thread_id, lineage_relationship
+        lineage_parent_thread_id, lineage_root_thread_id, lineage_relationship,
+        lineage_source_message_id, lineage_source_turn_id
       ) VALUES
         (
           'thread-lineage-root', 'project-lineage', 'Root',
           '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
           NULL, NULL, NULL, NULL, 0, 0, 0,
           '2026-10-01T00:00:01.000Z', '2026-10-01T00:00:01.000Z', NULL, NULL,
-          NULL, NULL, NULL
+          NULL, NULL, NULL, NULL, NULL
         ),
         (
           'thread-lineage-child', 'project-lineage', 'Child',
           '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
           NULL, NULL, NULL, NULL, 0, 0, 0,
           '2026-10-01T00:00:02.000Z', '2026-10-01T00:00:02.000Z', NULL, NULL,
-          'thread-lineage-root', 'thread-lineage-root', 'delegated'
+          'thread-lineage-root', 'thread-lineage-root', 'delegated', NULL, NULL
+        ),
+        (
+          'thread-lineage-fork', 'project-lineage', 'Fork',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-10-01T00:00:03.000Z', '2026-10-01T00:00:03.000Z', NULL, NULL,
+          'thread-lineage-child', 'thread-lineage-root', 'forked',
+          'message-lineage-boundary', 'turn-lineage-boundary'
         )
     `;
 
     const rootId = ThreadId.make("thread-lineage-root");
     const childId = ThreadId.make("thread-lineage-child");
+    const forkId = ThreadId.make("thread-lineage-fork");
     const expected = {
       parentThreadId: rootId,
       rootThreadId: rootId,
       relationship: "delegated",
+    };
+    // A fork's provenance must survive every read path (and so every re-upsert).
+    const expectedFork = {
+      parentThreadId: childId,
+      rootThreadId: rootId,
+      relationship: "forked",
+      sourceMessageId: MessageId.make("message-lineage-boundary"),
+      sourceTurnId: TurnId.make("turn-lineage-boundary"),
     };
     const assertExposed = (
       threads: ReadonlyArray<{ readonly id: ThreadId; readonly lineage?: unknown }>,
@@ -2696,7 +2797,9 @@ it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", (
     ) => {
       const child = threads.find((thread) => thread.id === childId);
       const root = threads.find((thread) => thread.id === rootId);
+      const fork = threads.find((thread) => thread.id === forkId);
       assert.deepEqual(child?.lineage, expected, `${surface} child lineage`);
+      assert.deepEqual(fork?.lineage, expectedFork, `${surface} fork lineage`);
       assert.isDefined(root, `${surface} root`);
       assert.notProperty(root, "lineage", `${surface} root has no lineage key`);
     };
@@ -2708,6 +2811,7 @@ it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", (
       [
         Option.getOrThrow(yield* snapshotQuery.getThreadShellById(childId)),
         Option.getOrThrow(yield* snapshotQuery.getThreadShellById(rootId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadShellById(forkId)),
       ],
       "getThreadShellById",
     );
@@ -2715,8 +2819,14 @@ it.effect("ProjectionSnapshotQuery exposes thread lineage on every read path", (
       [
         Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(childId)),
         Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(rootId)),
+        Option.getOrThrow(yield* snapshotQuery.getThreadDetailById(forkId)),
       ],
       "getThreadDetailById",
     );
+    const window = yield* snapshotQuery.getThreadWindow!({
+      threadId: forkId,
+      limits: { messages: 10, proposedPlans: 10, activities: 10, checkpoints: 10 },
+    });
+    assert.deepEqual(window.thread.lineage, expectedFork, "getThreadWindow fork lineage");
   }).pipe(Effect.provide(layer));
 });

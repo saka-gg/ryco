@@ -3,7 +3,8 @@ import {
   REMOVED_PROJECT_MEMORY_MESSAGE,
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
-import { projectKindOf } from "@ryco/shared/projectKind";
+import { isChatProject, projectKindOf } from "@ryco/shared/projectKind";
+import { forkContextHandoffPending } from "@ryco/shared/threadFork";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
@@ -11,7 +12,9 @@ import type {
   MessageId,
   OrchestrationCommand,
   OrchestrationEvent,
+  OrchestrationMessage,
   OrchestrationReadModel,
+  ThreadForkCreateCommand,
   ThreadLineage,
   ThreadUsageLimit,
   ThreadId,
@@ -25,6 +28,7 @@ import {
   DEFAULT_PROJECT_KIND,
   EventId,
   NonNegativeInt,
+  THREAD_FORKED_ACTIVITY_KIND,
 } from "@ryco/contracts";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { threadSettlementInput } from "./threadSettlementInput.ts";
@@ -42,8 +46,13 @@ import {
 } from "@ryco/shared/turnSteer";
 import { Effect } from "effect";
 
+import {
+  parseThreadSegmentFromAttachmentId,
+  toSafeThreadAttachmentSegment,
+} from "../attachmentStore.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
+  findProjectById,
   isThreadLive,
   isThreadPristine,
   isThreadTrashed,
@@ -73,7 +82,17 @@ import {
   SUPERSEDED_RUNTIME_SESSION_SET_DETAIL,
   runtimeSessionMismatch,
 } from "./runtimeSessionFence.ts";
-import { resolveDelegatedChildLineage } from "./threadLineage.ts";
+import {
+  isInheritedItemId,
+  isUninheritableActivityKind,
+  reservedForkItemIdBlocker,
+  threadForkedActivityId,
+} from "./forkInheritance.ts";
+import {
+  DELEGATED_THREAD_RELATIONSHIP,
+  FORKED_THREAD_RELATIONSHIP,
+  resolveChildThreadLineage,
+} from "./threadLineage.ts";
 import { TURN_FINALIZATION_REASON, resolveReleasedTurn } from "./turnFinalization.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
 
@@ -168,6 +187,75 @@ const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
   };
   return event;
 });
+
+/**
+ * A settled message published as history (imported or inherited by a fork), never a live
+ * send: no turn starts, and the original ids, turn and timestamps are kept.
+ */
+function historyMessageSentEvent(
+  base: Omit<OrchestrationEvent, "sequence" | "type" | "payload">,
+  threadId: ThreadId,
+  message: OrchestrationMessage,
+): PlannedOrchestrationEvent {
+  return {
+    ...base,
+    type: "thread.message-sent",
+    payload: {
+      threadId,
+      messageId: message.id,
+      role: message.role,
+      text: message.text,
+      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+      ...(message.dispatchMode !== undefined ? { dispatchMode: message.dispatchMode } : {}),
+      turnId: message.turnId,
+      streaming: false,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+    },
+  };
+}
+
+/**
+ * Why a fork's inherited history cannot be published, or null. Inherited items carry fresh
+ * ids under the fork (ids are global keys), messages are settled, attachments are the fork's
+ * own copies, and no activity that drives server state is inherited.
+ */
+function forkInheritedHistoryBlocker(command: ThreadForkCreateCommand): string | null {
+  const forkThreadId = command.threadId;
+  const attachmentSegment = toSafeThreadAttachmentSegment(forkThreadId);
+  for (const message of command.messages) {
+    if (!isInheritedItemId(forkThreadId, message.id)) {
+      return `Inherited message '${message.id}' does not carry an id of fork '${forkThreadId}'.`;
+    }
+    if (message.streaming) {
+      return `Inherited message '${message.id}' is still streaming.`;
+    }
+    for (const attachment of message.attachments ?? []) {
+      if (
+        (attachment.type === "image" || attachment.type === "file") &&
+        attachment.id !== undefined &&
+        (attachmentSegment === null ||
+          parseThreadSegmentFromAttachmentId(attachment.id) !== attachmentSegment)
+      ) {
+        return `Inherited attachment '${attachment.id}' is not a copy owned by fork '${forkThreadId}'.`;
+      }
+    }
+  }
+  for (const plan of command.proposedPlans) {
+    if (!isInheritedItemId(forkThreadId, plan.id)) {
+      return `Inherited plan '${plan.id}' does not carry an id of fork '${forkThreadId}'.`;
+    }
+  }
+  for (const activity of command.activities) {
+    if (!isInheritedItemId(forkThreadId, activity.id)) {
+      return `Inherited activity '${activity.id}' does not carry an id of fork '${forkThreadId}'.`;
+    }
+    if (isUninheritableActivityKind(activity.kind)) {
+      return `A fork cannot inherit '${activity.kind}' activity '${activity.id}'.`;
+    }
+  }
+  return null;
+}
 
 const STEER_TURN_ENDED_ERROR =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
@@ -364,6 +452,37 @@ type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
 
+const plannedEventList = (
+  decided: DecideOrchestrationCommandResult,
+): ReadonlyArray<PlannedOrchestrationEvent> => ("type" in decided ? [decided] : decided);
+
+/**
+ * A planned event as the projector sees it once committed. `Omit` over the event union loses
+ * the type/payload correlation, which the spread cannot restore for the compiler.
+ */
+const withPlannedSequence = (
+  event: PlannedOrchestrationEvent,
+  sequence: number,
+): OrchestrationEvent => ({ ...event, sequence }) as OrchestrationEvent;
+
+/**
+ * A message sent into a thread may not take an id the server mints for a fork's inherited
+ * history or provenance: revert retention, recency and provider history repair key on those ids
+ * alone, so a client-chosen one would act as server-written provenance in any thread.
+ */
+function requireUnreservedMessageId(command: {
+  readonly type: "thread.turn.start" | "thread.turn.steer";
+  readonly threadId: ThreadId;
+  readonly message: { readonly messageId: MessageId };
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const blocker = reservedForkItemIdBlocker(command.threadId, command.message.messageId);
+  return blocker === null
+    ? Effect.void
+    : Effect.fail(
+        new OrchestrationCommandInvariantError({ commandType: command.type, detail: blocker }),
+      );
+}
+
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -380,14 +499,13 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
       command: nextCommand,
       readModel: nextReadModel,
     });
-    const nextEvents = Array.isArray(decided) ? decided : [decided];
-    for (const nextEvent of nextEvents) {
+    for (const nextEvent of plannedEventList(decided)) {
       plannedEvents.push(nextEvent);
       nextSequence += 1;
-      nextReadModel = yield* projectEvent(nextReadModel, {
-        ...nextEvent,
-        sequence: nextSequence,
-      }).pipe(Effect.orDie);
+      nextReadModel = yield* projectEvent(
+        nextReadModel,
+        withPlannedSequence(nextEvent, nextSequence),
+      ).pipe(Effect.orDie);
     }
   }
 
@@ -647,20 +765,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandId: command.commandId,
         });
       for (const message of command.messages) {
-        events.push({
-          ...base(),
-          type: "thread.message-sent",
-          payload: {
-            threadId: command.threadId,
-            messageId: message.id,
-            role: message.role,
-            text: message.text,
-            turnId: message.turnId,
-            streaming: false,
-            createdAt: message.createdAt,
-            updatedAt: message.updatedAt,
-          },
-        });
+        events.push(historyMessageSentEvent(base(), command.threadId, message));
       }
       events.push({
         ...base(),
@@ -721,10 +826,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Parent thread '${parentThreadId}' belongs to a different project than '${fields.projectId}'.`,
         });
       }
-      const resolved = resolveDelegatedChildLineage({
+      const resolved = resolveChildThreadLineage({
         readModel,
         parent,
         childThreadId: fields.threadId,
+        link: { relationship: DELEGATED_THREAD_RELATIONSHIP },
       });
       if (!resolved.ok) {
         return yield* new OrchestrationCommandInvariantError({
@@ -738,6 +844,176 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         fields,
         lineage: resolved.lineage,
       });
+    }
+
+    case "thread.fork.create": {
+      const {
+        type: _type,
+        sourceThreadId,
+        sourceMessageId,
+        sourceTurnId,
+        worktreeId,
+        newWorktree,
+        messages,
+        proposedPlans,
+        activities,
+        forked,
+        ...fields
+      } = command;
+      const reject = (detail: string) =>
+        new OrchestrationCommandInvariantError({ commandType: command.type, detail });
+      const source = yield* requireThread({ readModel, command, threadId: sourceThreadId });
+      // The boundary was pinned when the fork was accepted: the source may have moved to
+      // Trash or been archived since, but its history must still exist.
+      if (!isThreadLive(source) && !isThreadTrashed(source)) {
+        return yield* reject(`Source thread '${sourceThreadId}' was deleted permanently.`);
+      }
+      // A fork stays in its source's project. Only a chat forks into a new chat.
+      if (
+        source.projectId !== fields.projectId &&
+        !(
+          isChatProject(findProjectById(readModel, source.projectId)) &&
+          isChatProject(findProjectById(readModel, fields.projectId))
+        )
+      ) {
+        return yield* reject(
+          `Source thread '${sourceThreadId}' belongs to a different project than '${fields.projectId}'.`,
+        );
+      }
+      if (
+        forked.sourceThreadId !== sourceThreadId ||
+        forked.sourceMessageId !== sourceMessageId ||
+        forked.sourceTurnId !== sourceTurnId
+      ) {
+        return yield* reject("Fork provenance does not match the fork's source.");
+      }
+      const historyBlocker = forkInheritedHistoryBlocker(command);
+      if (historyBlocker !== null) {
+        return yield* reject(historyBlocker);
+      }
+      if (newWorktree !== null) {
+        if (
+          worktreeId !== newWorktree.worktreeId ||
+          fields.worktreePath !== newWorktree.worktreePath ||
+          fields.branch !== newWorktree.branch
+        ) {
+          return yield* reject("A fork must attach to, and run in, the worktree it creates.");
+        }
+        if (findWorktreeById(readModel, newWorktree.worktreeId) !== undefined) {
+          return yield* reject(`Worktree '${newWorktree.worktreeId}' already exists.`);
+        }
+      } else if (worktreeId !== null) {
+        const worktree = yield* requireWorktree({ readModel, command, worktreeId });
+        if (worktree.projectId !== fields.projectId) {
+          return yield* reject(
+            `Worktree '${worktreeId}' belongs to a different project than '${fields.projectId}'.`,
+          );
+        }
+      }
+      const resolved = resolveChildThreadLineage({
+        readModel,
+        parent: source,
+        childThreadId: fields.threadId,
+        link: { relationship: FORKED_THREAD_RELATIONSHIP, sourceMessageId, sourceTurnId },
+      });
+      if (!resolved.ok) {
+        return yield* reject(resolved.detail);
+      }
+
+      const worktreeEvents =
+        newWorktree === null
+          ? []
+          : plannedEventList(
+              yield* decideOrchestrationCommand({
+                readModel,
+                command: {
+                  type: "worktree.create",
+                  commandId: command.commandId,
+                  worktreeId: newWorktree.worktreeId,
+                  projectId: fields.projectId,
+                  branch: newWorktree.branch,
+                  worktreePath: newWorktree.worktreePath,
+                  origin: "branch",
+                  prNumber: null,
+                  issueNumber: null,
+                  prTitle: null,
+                  issueTitle: null,
+                  createdAt: command.createdAt,
+                },
+              }),
+            );
+      const createdEvent = yield* decideThreadCreated({
+        readModel,
+        command,
+        fields,
+        lineage: resolved.lineage,
+      });
+      const base = () =>
+        withEventBase({
+          aggregateKind: "thread",
+          aggregateId: fields.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        });
+      // Plans, activities and the attachment only require the thread to exist, so they are
+      // decided against the model with the created thread, without projecting the history.
+      const withThread = yield* projectEvent(
+        readModel,
+        withPlannedSequence(createdEvent, readModel.snapshotSequence + 1),
+      ).pipe(Effect.orDie);
+      const followUps: ReadonlyArray<OrchestrationCommand> = [
+        ...proposedPlans.map((proposedPlan): OrchestrationCommand => ({
+          type: "thread.proposed-plan.upsert",
+          commandId: command.commandId,
+          threadId: fields.threadId,
+          proposedPlan,
+          createdAt: command.createdAt,
+        })),
+        ...[
+          // Source sequence numbers mean nothing here: the fork orders by its own events.
+          ...activities.map(({ sequence: _sequence, ...activity }) => activity),
+          {
+            id: EventId.make(threadForkedActivityId(fields.threadId)),
+            tone: "info" as const,
+            kind: THREAD_FORKED_ACTIVITY_KIND,
+            summary: `Forked from ${forked.sourceTitle}`,
+            payload: forked,
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        ].map((activity): OrchestrationCommand => ({
+          type: "thread.activity.append",
+          commandId: command.commandId,
+          threadId: fields.threadId,
+          activity,
+          createdAt: command.createdAt,
+        })),
+        ...(worktreeId === null
+          ? []
+          : [
+              {
+                type: "thread.attach-to-worktree" as const,
+                commandId: command.commandId,
+                threadId: fields.threadId,
+                worktreeId,
+                attachedAt: command.createdAt,
+              },
+            ]),
+      ];
+      const followUpEvents: PlannedOrchestrationEvent[] = [];
+      for (const followUp of followUps) {
+        followUpEvents.push(
+          ...plannedEventList(
+            yield* decideOrchestrationCommand({ readModel: withThread, command: followUp }),
+          ),
+        );
+      }
+      return [
+        ...worktreeEvents,
+        createdEvent,
+        ...messages.map((message) => historyMessageSentEvent(base(), fields.threadId, message)),
+        ...followUpEvents,
+      ];
     }
 
     case "thread.delete": {
@@ -1384,6 +1660,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      yield* requireUnreservedMessageId(command);
       const lifecycleBlocker = threadLifecycleTurnBlocker(readModel, targetThread);
       if (lifecycleBlocker !== null) {
         return yield* new OrchestrationCommandInvariantError({
@@ -1492,12 +1769,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       const requestedSelection = command.modelSelection ?? targetThread.modelSelection;
       const isStartedThread = targetThread.messages.some((message) => message.role === "user");
+      // A fork without a provider-native copy delivers its inherited conversation on its
+      // first turn, from its own copied history, which already ends at the fork boundary.
+      // Its provenance alone proves that history exists: it may hold no user prompt (an
+      // imported turn whose prompt had no text), so no user-message gate applies here.
+      const forkHandoffPending = forkContextHandoffPending(targetThread.activities);
       const isContextHandoff =
-        isStartedThread &&
-        modelSelectionRequiresContextHandoff({
-          canonicalSelection: targetThread.modelSelection,
-          targetSelection: requestedSelection,
-        });
+        forkHandoffPending ||
+        (isStartedThread &&
+          modelSelectionRequiresContextHandoff({
+            canonicalSelection: targetThread.modelSelection,
+            targetSelection: requestedSelection,
+          }));
       if (isContextHandoff) {
         yield* requireThreadIdleForContextHandoff({ thread: targetThread, command });
       }
@@ -1595,7 +1878,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                   schemaVersion: 1,
                   handoffId,
                   mode: "full-context-fresh-session",
-                  reason: "model-change",
+                  reason: forkHandoffPending ? "fork" : "model-change",
                   status: "requested",
                   targetMessageId: command.message.messageId,
                   sourceSelection: targetThread.modelSelection,
@@ -1736,6 +2019,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      yield* requireUnreservedMessageId(command);
       const activeTurnId = targetThread.session?.activeTurnId ?? null;
       // A steer arriving after its turn ended is not an error: the message stays queued and is
       // sent as the next turn.

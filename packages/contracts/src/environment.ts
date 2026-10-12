@@ -61,6 +61,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
   /** Server-owned worktree notes (`notes.list` / `notes.command`); absent on older servers. */
   worktreeNotes: Schema.optionalKey(Schema.Boolean),
+  /** `threads.fork` (chat forking); absent on older servers. */
+  threadFork: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

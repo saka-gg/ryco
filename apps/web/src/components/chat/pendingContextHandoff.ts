@@ -1,4 +1,12 @@
-import type { ContextHandoffEndpointSnapshot, ModelSelection } from "@ryco/contracts";
+import {
+  resolvePendingComposerHandoff,
+  type PendingComposerHandoff,
+} from "@ryco/client-runtime/state/session";
+import type {
+  ContextHandoffEndpointSnapshot,
+  ModelSelection,
+  OrchestrationThreadActivity,
+} from "@ryco/contracts";
 import { getModelDisplayLabel, modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 
 import type { AppModelOption } from "../../modelSelection";
@@ -73,4 +81,26 @@ export function derivePendingContextHandoff(input: {
   });
 
   return source && target ? { source, target } : null;
+}
+
+/**
+ * What the composer says about the next message's context handoff, by the
+ * shared precedence (`resolvePendingComposerHandoff`): a fork that still owes a
+ * fresh session its inherited conversation takes the model chip's place (the
+ * node starts that turn with a "fork" handoff whichever model is selected),
+ * else the model change. The frozen phone tier offers no handoff chips.
+ */
+export function derivePendingComposerHandoff(input: {
+  readonly isPhoneTier: boolean;
+  readonly activities:
+    | ReadonlyArray<Pick<OrchestrationThreadActivity, "kind" | "payload">>
+    | null
+    | undefined;
+  readonly modelChange: PendingContextHandoffPresentation | null;
+}): PendingComposerHandoff<PendingContextHandoffPresentation> | null {
+  if (input.isPhoneTier) return null;
+  return resolvePendingComposerHandoff({
+    activities: input.activities,
+    modelChange: () => input.modelChange,
+  });
 }

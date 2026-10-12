@@ -2,8 +2,11 @@
  * Client helpers for server-owned thread lineage (spec 12, delegation-lineage).
  *
  * Lineage is provenance only. `relationship` is an open string on the wire; any
- * value other than "delegated" is treated as "no known relationship" and the
- * thread renders flat.
+ * value other than "delegated" is treated as "no known relationship" for
+ * nesting and the thread renders flat. Forks ("forked") are known but also
+ * render flat: they are independent threads, not work the parent waits on,
+ * and they end a delegation chain (a child delegated from a fork never nests
+ * under the fork's source).
  */
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { ThreadLineage } from "@ryco/contracts";
@@ -11,6 +14,8 @@ import { Schema } from "effect";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
 import type { SidebarThreadSummary } from "./types.ts";
+
+export { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 
 export const DELEGATED_THREAD_RELATIONSHIP = "delegated";
 const MAX_LINEAGE_WALK = 64;
@@ -37,7 +42,9 @@ export function threadLineagesEqual(
   return (
     left.parentThreadId === right.parentThreadId &&
     left.rootThreadId === right.rootThreadId &&
-    left.relationship === right.relationship
+    left.relationship === right.relationship &&
+    left.sourceMessageId === right.sourceMessageId &&
+    left.sourceTurnId === right.sourceTurnId
   );
 }
 
@@ -124,6 +131,10 @@ function nearestVisibleAncestorKey(
     visited.add(parentKey);
     cursor = lineageByKey?.get(parentKey);
   }
+  // The walk reached a hidden ancestor that is not a delegated child (a fork, a root, an
+  // unknown relationship): delegation starts there, so the lineage's root, which may be the
+  // conversation a fork came from, is not this child's host.
+  if (cursor !== undefined && !isDelegatedThreadLineage(cursor)) return null;
   // Dead end (e.g. a deleted middle child without a shell): use a visible root.
   const rootKey = scopedThreadKey(scopeThreadRef(item.environmentId, lineage.rootThreadId));
   return rootKey !== item.key && itemByKey.has(rootKey) ? rootKey : null;

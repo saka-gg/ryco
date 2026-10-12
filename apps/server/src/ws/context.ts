@@ -6,6 +6,7 @@ import { StorageService } from "../storage/StorageService.ts";
 import { storagePathBlocker } from "../storage/lifecycle.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
+import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
 import { Cause, Duration, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -14,14 +15,12 @@ import {
   USAGE_CONTRACT_VERSION,
   CommandId,
   type DiagnosticsProviderProcess,
-  EventId,
   type GitRunStackedActionInput,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   ProjectId,
   type ServerChatsCapability,
   type ServerProvider,
-  type ThreadId,
   SourceControlProviderError,
   WsRpcGroup,
   WorktreeId,
@@ -117,6 +116,7 @@ import { ThreadPriorityCoordinator } from "../threadPriority/ThreadPriorityCoord
 import { SOURCE_CONTROL_LINKED_REFRESH_DEBOUNCE_MS } from "./context/constants.ts";
 import { toGitManagerError } from "./context/gitErrors.ts";
 import { makeOrchestrationStreamHelpers } from "./context/orchestrationStreams.ts";
+import { makeAppendSetupScriptActivity } from "./context/managedCheckout.ts";
 import { makeWorktreeOperations } from "./context/worktreeOperations.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
@@ -176,6 +176,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Optional for the same route-test reason; production always provides it
     // through the runtime's Agent Control layer.
     const sessionImport = yield* Effect.serviceOption(SessionImport);
+    // Optional for the same route-test reason; production provides it in the runtime services.
+    const threadFork = yield* Effect.serviceOption(ThreadFork);
     const automationCentre = yield* Effect.serviceOption(AutomationCentre);
     const agentControlProposals = yield* Effect.serviceOption(AgentControlProposalService);
     const agentControlExternalIntegrations = yield* Effect.serviceOption(
@@ -434,29 +436,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         clientSessions: serverAuth.listClientSessions(currentSessionId).pipe(Effect.orDie),
       });
 
-    const appendSetupScriptActivity = (input: {
-      readonly threadId: ThreadId;
-      readonly kind: "setup-script.requested" | "setup-script.started" | "setup-script.failed";
-      readonly summary: string;
-      readonly createdAt: string;
-      readonly payload: Record<string, unknown>;
-      readonly tone: "info" | "error";
-    }) =>
-      orchestrationEngine.dispatch({
-        type: "thread.activity.append",
-        commandId: serverCommandId("setup-script-activity"),
-        threadId: input.threadId,
-        activity: {
-          id: EventId.make(crypto.randomUUID()),
-          tone: input.tone,
-          kind: input.kind,
-          summary: input.summary,
-          payload: input.payload,
-          turnId: null,
-          createdAt: input.createdAt,
-        },
-        createdAt: input.createdAt,
-      });
+    const appendSetupScriptActivity = makeAppendSetupScriptActivity(orchestrationEngine.dispatch);
 
     const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
       Schema.is(OrchestrationDispatchCommandError)(cause)
@@ -864,6 +844,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         );
     };
 
+    /** Runs a mutation once startup admits commands, exactly as `dispatchNormalizedCommand`. */
+    const enqueueStartupCommand = startup.enqueueCommand;
+
     const loadDiagnosticsMetrics = localDiagnosticsMetrics.snapshot;
     const loadAdvertisedEndpoints = advertisedEndpointRegistry.list;
     const loadDiagnosticsSnapshot = Effect.gen(function* () {
@@ -1055,6 +1038,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       threadPriorityCoordinator,
       chatAttachmentUploads,
       sessionImport,
+      threadFork,
       automationCentre,
       agentControlProposals,
       agentControlExternalIntegrations,
@@ -1111,6 +1095,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       toGitManagerError,
       commandReceipts,
       dispatchNormalizedCommand,
+      enqueueStartupCommand,
       dispatchWorktreeCommand,
       enrichOrchestrationEvents,
       makeReplayableShellStream,

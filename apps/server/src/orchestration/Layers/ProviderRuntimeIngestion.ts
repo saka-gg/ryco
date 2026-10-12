@@ -3309,7 +3309,7 @@ const make = Effect.gen(function* () {
       }
       const messages = historyMessagesToRestore(thread, input.history, now, userMessageIdsByTurn);
       const activities = missingHistoryActivities(
-        thread.activities,
+        thread,
         input.history.items.flatMap((event) => [
           ...runtimeEventToActivities(event),
           ...historyReasoningActivities(thread.id, event),

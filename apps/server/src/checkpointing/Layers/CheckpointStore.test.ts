@@ -5,7 +5,7 @@ import { it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, PlatformError, Scope } from "effect";
 import { describe, expect } from "vite-plus/test";
 
-import { checkpointRefForThreadTurn } from "../Utils.ts";
+import { checkpointRefForThreadTurn, forkPinRefs } from "../Utils.ts";
 import { CheckpointStoreLive } from "./CheckpointStore.ts";
 import { CheckpointStore } from "../Services/CheckpointStore.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
@@ -210,6 +210,137 @@ it.layer(TestLayer)("CheckpointStoreLive", (it) => {
         expect(whitespaceIgnoredDiff).toContain("+        <div>");
         expect(whitespaceIgnoredDiff).not.toContain("-      <h1>Title</h1>");
         expect(whitespaceIgnoredDiff).not.toContain("+          <h1>Title</h1>");
+      }),
+    );
+  });
+
+  describe("resolveCommit and pinRef", () => {
+    it.effect("resolves refs to full commit ids and refuses option-like refs", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const head = yield* git(tmp, ["rev-parse", "HEAD"]);
+
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: "HEAD" })).toBe(head);
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: head.slice(0, 10) })).toBe(
+          head,
+        );
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: "no-such-branch" })).toBe(
+          null,
+        );
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: "--all" })).toBe(null);
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: "HEAD\n--all" })).toBe(null);
+        // A tree is not a commit.
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: "HEAD^{tree}" })).toBe(null);
+      }),
+    );
+
+    it.effect("pins a commit under a fork-owned ref until the ref is deleted", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const threadId = ThreadId.make("thread-pin-source");
+        const checkpointRef = checkpointRefForThreadTurn(threadId, 1);
+        yield* writeTextFile(path.join(tmp, "work.txt"), "turn one\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+        const commit = yield* checkpointStore.resolveCommit({ cwd: tmp, ref: checkpointRef });
+        expect(commit).toMatch(/^[0-9a-f]{40}$/);
+
+        const pins = forkPinRefs(ThreadId.make("fork-0123456789abcdef0123456789abcdef"));
+        expect(pins.checkpoint.startsWith("refs/ryco/forks/")).toBe(true);
+        yield* checkpointStore.pinRef({ cwd: tmp, ref: pins.checkpoint, commit: commit! });
+        yield* checkpointStore.pinRef({ cwd: tmp, ref: pins.checkpoint, commit: commit! });
+        // The source's ref going away (a revert) leaves the pin.
+        yield* checkpointStore.deleteCheckpointRefs({ cwd: tmp, checkpointRefs: [checkpointRef] });
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: pins.checkpoint })).toBe(
+          commit,
+        );
+
+        yield* checkpointStore.deleteCheckpointRefs({
+          cwd: tmp,
+          checkpointRefs: [pins.checkpoint],
+        });
+        expect(yield* checkpointStore.resolveCommit({ cwd: tmp, ref: pins.checkpoint })).toBe(null);
+      }),
+    );
+
+    it.effect("refuses refs outside Ryco's namespace and abbreviated commits", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore;
+        const head = yield* git(tmp, ["rev-parse", "HEAD"]);
+        const outside = yield* Effect.exit(
+          checkpointStore.pinRef({
+            cwd: tmp,
+            ref: checkpointRefForThreadTurn(ThreadId.make("t"), 0).replace(
+              "refs/ryco/",
+              "refs/heads/",
+            ) as never,
+            commit: head,
+          }),
+        );
+        expect(outside._tag).toBe("Failure");
+        const abbreviated = yield* Effect.exit(
+          checkpointStore.pinRef({
+            cwd: tmp,
+            ref: forkPinRefs(ThreadId.make("fork-x")).base,
+            commit: head.slice(0, 12),
+          }),
+        );
+        expect(abbreviated._tag).toBe("Failure");
+        expect(yield* git(tmp, ["for-each-ref", "refs/heads/ryco"])).toBe("");
+      }),
+    );
+
+    it.effect("materializes a pinned checkpoint over its base commit in a new worktree", () =>
+      Effect.gen(function* () {
+        const source = yield* makeTmpDir();
+        yield* initRepoWithCommit(source);
+        const checkpointStore = yield* CheckpointStore;
+        yield* writeTextFile(path.join(source, ".gitignore"), "ignored.txt\n");
+        yield* git(source, ["add", ".gitignore"]);
+        yield* git(source, ["commit", "-m", "ignore"]);
+        yield* writeTextFile(path.join(source, "README.md"), "# changed by the turn\n");
+        yield* writeTextFile(path.join(source, "untracked.txt"), "new file\n");
+        yield* writeTextFile(path.join(source, "ignored.txt"), "secret\n");
+        const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("thread-overlay"), 1);
+        yield* checkpointStore.captureCheckpoint({ cwd: source, checkpointRef });
+
+        const pins = forkPinRefs(ThreadId.make("fork-overlay"));
+        const base = (yield* checkpointStore.resolveCommit({ cwd: source, ref: "HEAD" }))!;
+        const snapshot = (yield* checkpointStore.resolveCommit({
+          cwd: source,
+          ref: checkpointRef,
+        }))!;
+        yield* checkpointStore.pinRef({ cwd: source, ref: pins.base, commit: base });
+        yield* checkpointStore.pinRef({ cwd: source, ref: pins.checkpoint, commit: snapshot });
+
+        const worktree = path.join(yield* makeTmpDir("checkpoint-store-fork-"), "fork");
+        yield* git(source, ["worktree", "add", "-b", "ryco/fork-test", worktree, base]);
+        expect(
+          yield* checkpointStore.restoreCheckpoint({
+            cwd: worktree,
+            checkpointRef: pins.checkpoint,
+          }),
+        ).toBe(true);
+
+        const fileSystem = yield* FileSystem.FileSystem;
+        expect(yield* fileSystem.readFileString(path.join(worktree, "README.md"))).toBe(
+          "# changed by the turn\n",
+        );
+        expect(yield* fileSystem.readFileString(path.join(worktree, "untracked.txt"))).toBe(
+          "new file\n",
+        );
+        expect(yield* fileSystem.exists(path.join(worktree, "ignored.txt"))).toBe(false);
+        // HEAD stays on the base commit; the turn's work shows as uncommitted changes.
+        expect(yield* git(worktree, ["rev-parse", "HEAD"])).toBe(base);
+        expect(yield* git(worktree, ["status", "--porcelain"])).toContain("README.md");
+        // The source checkout is untouched.
+        expect(yield* fileSystem.readFileString(path.join(source, "ignored.txt"))).toBe("secret\n");
+        yield* git(source, ["worktree", "remove", "--force", worktree]);
       }),
     );
   });

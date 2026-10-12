@@ -89,6 +89,17 @@ describe("canArchiveSidebarThread", () => {
   it("requires a sent user message timestamp", () => {
     expect(canArchiveSidebarThread({ latestUserMessageAt: null })).toBe(false);
     expect(canArchiveSidebarThread({ latestUserMessageAt: "2026-05-09T10:00:00.000Z" })).toBe(true);
+    // A fork holds its inherited conversation before it sends anything of its own.
+    const freshFork = {
+      latestUserMessageAt: null,
+      lineage: {
+        parentThreadId: ThreadId.make("source"),
+        rootThreadId: ThreadId.make("source"),
+        relationship: "forked",
+      },
+    };
+    expect(canArchiveSidebarThread(freshFork)).toBe(true);
+    expect(shouldConfirmCloseSidebarThread(freshFork)).toBe(true);
   });
 });
 

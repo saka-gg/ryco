@@ -38,7 +38,7 @@ import {
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
 } from "./orchestration.ts";
-import { TurnId } from "./baseSchemas.ts";
+import { ThreadId, TurnId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { THREAD_GOAL_OBJECTIVE_MAX_CHARS } from "./threadGoal.ts";
 
@@ -908,8 +908,8 @@ it.effect("decodes thread shells with and without lineage, including unknown rel
       },
     });
     assert.deepStrictEqual(child.lineage, {
-      parentThreadId: "thread-parent",
-      rootThreadId: "thread-root",
+      parentThreadId: ThreadId.make("thread-parent"),
+      rootThreadId: ThreadId.make("thread-root"),
       relationship: "delegated",
     });
 
