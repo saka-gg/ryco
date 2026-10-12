@@ -21,7 +21,7 @@ import {
   CompactComposerControlsMenu,
 } from "./CompactComposerControlsMenu";
 import { ContextPickerButton } from "./ContextPickerButton";
-import { ContextWindowMeter } from "./ContextWindowMeter";
+import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { PhoneSessionPolicyControl } from "./PhoneSessionPolicySheet";
@@ -405,6 +405,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
   contextWindowRateLimitsCheckedAt?: string | undefined;
+  contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
@@ -435,6 +436,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         checkedAt={props.contextWindowRateLimitsCheckedAt}
         available={!props.isEnvironmentUnavailable}
         claudeCache={props.claudeCacheObservation}
+        account={props.contextWindowAccount}
       />
       {props.isPreparingWorktree ? (
         <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
@@ -530,6 +532,8 @@ export interface ComposerFooterProps {
   contextWindowUsage: ContextWindowUsage;
   contextWindowRateLimits: ServerProvider["rateLimits"] | undefined;
   contextWindowRateLimitsCheckedAt?: string | undefined;
+  /** The selected instance and its login, for the context popup's account details. */
+  contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
   pendingAction: {
     questionIndex: number;
@@ -715,6 +719,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           contextWindowUsage={props.contextWindowUsage}
           contextWindowRateLimits={props.contextWindowRateLimits}
           contextWindowRateLimitsCheckedAt={props.contextWindowRateLimitsCheckedAt}
+          contextWindowAccount={props.contextWindowAccount}
           claudeCacheObservation={props.claudeCacheObservation}
           pendingAction={props.pendingAction}
           isRunning={props.isRunning}

@@ -51,6 +51,7 @@ import { ContextHandoffInspection } from "../orchestration/Services/ContextHando
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery } from "../statistics/StatisticsQuery.ts";
 import { UsageService, UsageServiceTest } from "../usage/UsageService.ts";
+import { CliProxyService, CliProxyServiceUnavailable } from "../cliProxy/CliProxyService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ModelManifest } from "../provider/ModelManifest.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
@@ -161,6 +162,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const statisticsQuery = yield* StatisticsQuery;
     const usageServiceOption = yield* Effect.serviceOption(UsageService);
     const usageService = Option.getOrElse(usageServiceOption, () => UsageServiceTest);
+    const cliProxyService = Option.getOrElse(
+      yield* Effect.serviceOption(CliProxyService),
+      () => CliProxyServiceUnavailable,
+    );
     const orchestrationEngine = yield* OrchestrationEngineService;
     const threadDeletionReactor = yield* ThreadDeletionReactor;
     // Most server route tests intentionally provide only the services used by
@@ -1094,6 +1099,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       projectionSnapshotQuery,
       statisticsQuery,
       usageService,
+      cliProxyService,
       orchestrationEngine,
       contextHandoffInspection,
       threadPriorityCoordinator,

@@ -25,6 +25,7 @@ import {
   ProviderInstanceId,
   ServerSettings,
   type ServerProvider,
+  type ServerProviderRateLimits,
   type ServerProviderSlashCommand,
   type ServerSettings as ContractServerSettings,
 } from "@ryco/contracts";
@@ -41,6 +42,7 @@ import {
   normalizeClaudeCliEffort,
   resolveClaudeApiModelId,
 } from "./ClaudeProvider.ts";
+import type { ClaudeCredentialStore } from "./ClaudeUsage.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./ProviderInstanceRegistryHydration.ts";
@@ -235,6 +237,28 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
 const noClaudeCapabilities = () =>
   Effect.sync(() => undefined as TestClaudeCapabilities | undefined);
 
+// A Claude instance routed through a local proxy such as CLIProxyAPI.
+const PROXIED_CLAUDE_ENVIRONMENT = {
+  ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
+  ANTHROPIC_AUTH_TOKEN: "proxy-token",
+  ANTHROPIC_API_KEY: "",
+};
+
+const CLAUDE_USAGE_FIXTURE: ServerProviderRateLimits = {
+  limitId: "claude-oauth",
+  primary: { usedPercent: 42, windowDurationMins: 300 },
+};
+
+function recordingClaudeUsageProbe() {
+  const stores: Array<ClaudeCredentialStore> = [];
+  const probe = (store: ClaudeCredentialStore) =>
+    Effect.sync(() => {
+      stores.push(store);
+      return CLAUDE_USAGE_FIXTURE;
+    });
+  return { probe, stores };
+}
+
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -293,6 +317,12 @@ function recordingMockSpawnerLayer(
   );
   return { layer, commands };
 }
+
+const claudeVersionSpawnerLayer = mockSpawnerLayer((args) => {
+  const joined = args.join(" ");
+  if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+  throw new Error(`Unexpected args: ${joined}`);
+});
 
 function mockCommandSpawnerLayer(
   handler: (
@@ -1921,8 +1951,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
-            claudeCapabilities(),
-            process.env,
+            claudeCapabilities({ subscriptionType: "max" }),
+            {},
             () =>
               Effect.succeed({
                 limitId: "claude-oauth",
@@ -1952,16 +1982,84 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               windowDurationMins: 10_080,
             },
           });
-        }).pipe(
-          Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
-          ),
-        ),
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer)),
       );
+
+      it.effect("reads Claude OAuth usage from the instance's own credential store", () => {
+        const usage = recordingClaudeUsageProbe();
+        return Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, homePath: "/tmp/ryco-claude-home" },
+            claudeCapabilities({ subscriptionType: "max" }),
+            {},
+            usage.probe,
+          );
+
+          assert.deepStrictEqual(usage.stores, [
+            {
+              credentialsPath: "/tmp/ryco-claude-home/.claude/.credentials.json",
+              keychain: undefined,
+            },
+          ]);
+          assert.deepStrictEqual(status.rateLimits, CLAUDE_USAGE_FIXTURE);
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer));
+      });
+
+      it.effect(
+        "never reads the local Claude login's usage for an instance routed through a proxy",
+        () => {
+          const usage = recordingClaudeUsageProbe();
+          return Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities({ tokenSource: "ANTHROPIC_AUTH_TOKEN" }),
+              PROXIED_CLAUDE_ENVIRONMENT,
+              usage.probe,
+            );
+
+            assert.strictEqual(status.auth.type, "apiKey");
+            assert.strictEqual(status.rateLimits, undefined);
+            assert.deepStrictEqual(usage.stores, []);
+          }).pipe(Effect.provide(claudeVersionSpawnerLayer));
+        },
+      );
+
+      it.effect("skips Claude OAuth usage when account metadata is unavailable", () => {
+        const usage = recordingClaudeUsageProbe();
+        return Effect.gen(function* () {
+          for (const environment of [{}, PROXIED_CLAUDE_ENVIRONMENT]) {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              noClaudeCapabilities,
+              environment,
+              usage.probe,
+            );
+            assert.strictEqual(status.rateLimits, undefined);
+          }
+          assert.deepStrictEqual(usage.stores, []);
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer));
+      });
+
+      it.effect("skips Claude OAuth usage unless the CLI reports using its claude.ai login", () => {
+        const usage = recordingClaudeUsageProbe();
+        return Effect.gen(function* () {
+          for (const account of [
+            {},
+            { tokenSource: "claude.ai" },
+            { tokenSource: "apiKeyHelper" },
+            { tokenSource: "CLAUDE_CODE_OAUTH_TOKEN" },
+          ]) {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(account),
+              {},
+              usage.probe,
+            );
+            assert.strictEqual(status.rateLimits, undefined);
+          }
+          assert.deepStrictEqual(usage.stores, []);
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer));
+      });
 
       it.effect(
         "includes Claude Opus 4.7 with fast mode and xhigh as the default effort on supported versions",

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
 
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { CliProxyHubId } from "./cliProxy.ts";
 import {
   AiFocusRefreshIntervalMs,
   ClientSettingsPatch,
@@ -499,5 +500,80 @@ describe("ServerSettings usage-limit recovery", () => {
     });
     expect(patch.autoResumeLimitedThreads).toBe(true);
     expect(patch.snoozeLimitedThreads).toBe(true);
+  });
+});
+
+describe("ServerSettingsPatch strict entries", () => {
+  const decodePatch = Schema.decodeUnknownExit(ServerSettingsPatch);
+
+  it("accepts optional Cloudflare credentials and their saved-secret marker", () => {
+    const hubId = CliProxyHubId.make("home");
+    const hub = {
+      url: "https://hub.example",
+      managementKey: "",
+      managementKeyRedacted: true,
+      enabled: true,
+      cloudflareAccessClientId: "token.access",
+      cloudflareAccessClientSecret: "",
+      cloudflareAccessClientSecretRedacted: true,
+    };
+    expect(
+      decodeServerSettingsPatch({ cliProxyHubs: { home: hub } }).cliProxyHubs?.[hubId],
+    ).toEqual(hub);
+    expect(decodeServerSettings({ cliProxyHubs: { home: hub } }).cliProxyHubs[hubId]).toEqual(hub);
+    expect(
+      decodeServerSettings({ cliProxyHubs: { home: { url: hub.url } } }).cliProxyHubs[hubId]
+        ?.cloudflareAccessClientId,
+    ).toBeUndefined();
+  });
+
+  it("rejects partial hub entries so a missing key never reads as removing the stored key", () => {
+    expect(decodePatch({ cliProxyHubs: { home: { url: "http://127.0.0.1:8317" } } })._tag).toBe(
+      "Failure",
+    );
+    expect(
+      decodePatch({
+        cliProxyHubs: {
+          home: {
+            url: "http://127.0.0.1:8317",
+            managementKey: "",
+            managementKeyRedacted: true,
+            enabled: true,
+          },
+          old: null,
+        },
+      })._tag,
+    ).toBe("Success");
+  });
+
+  it("rejects partial retention and lifecycle policies instead of resetting their other fields", () => {
+    expect(decodePatch({ storageRetention: { temporaryDataDays: 7 } })._tag).toBe("Failure");
+    expect(decodePatch({ lifecycleSuggestions: { archiveInactiveThreadsDays: 10 } })._tag).toBe(
+      "Failure",
+    );
+    expect(decodePatch({ projectStorageRetention: { project: { automatic: true } } })._tag).toBe(
+      "Failure",
+    );
+    expect(
+      decodePatch({
+        lifecycleSuggestions: { archiveInactiveThreadsDays: 10, removeArchivedCheckoutsDays: null },
+      })._tag,
+    ).toBe("Success");
+  });
+
+  it("still decodes sparse persisted policies with per-field defaults", () => {
+    const settings = decodeServerSettings({
+      lifecycleSuggestions: { archiveInactiveThreadsDays: 14 },
+      storageRetention: { automatic: true },
+    });
+    expect(settings.lifecycleSuggestions).toEqual({
+      archiveInactiveThreadsDays: 14,
+      removeArchivedCheckoutsDays: 7,
+    });
+    expect(settings.storageRetention).toEqual({
+      automatic: true,
+      completedWorktreeDays: null,
+      temporaryDataDays: null,
+    });
   });
 });

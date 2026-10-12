@@ -1,6 +1,6 @@
 import type { UsageProviderKind } from "@ryco/contracts";
 import { USAGE_PROVIDERS } from "@ryco/client-runtime/usage";
-export type StatisticsView = "usage" | "activity";
+export type StatisticsView = "usage" | "activity" | "limits";
 export type StatisticsRange = "7d" | "30d" | "90d" | "all";
 export type UsageMetric = "cost" | "tokens";
 export type UsageBreakdown = "model" | "day";
@@ -47,7 +47,7 @@ export function parseStatisticsSearch(raw: Record<string, unknown>): StatisticsS
   const model = optionalString(raw["model"]);
   const modelProvider = optionalString(raw["modelProvider"]);
   return {
-    view: oneOf(raw["view"], new Set(["usage", "activity"]), "usage"),
+    view: oneOf(raw["view"], new Set(["usage", "activity", "limits"]), "usage"),
     range: oneOf(raw["range"], new Set(["7d", "30d", "90d", "all"]), "30d"),
     ...(environmentIds === undefined ? {} : { environmentIds }),
     ...(providers === undefined || providers.length === 0 ? {} : { providers }),

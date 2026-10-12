@@ -20,13 +20,6 @@ import {
 import { useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
 import { cn } from "~/lib/utils";
 import {
   formatDayLabel,
@@ -39,6 +32,7 @@ import {
 
 import { Panel, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
 import { SeriesAreaChart } from "../charts";
+import { EnvironmentSelect } from "../EnvironmentSelect";
 import type { StatisticsSearch } from "../statisticsSearch";
 import { useUsageSummary } from "../useUsageSummary";
 import {
@@ -121,11 +115,6 @@ export function UsageView({
       ? totals.cachedInputTokens /
         (totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationInputTokens)
       : 0;
-  const allSelectedEnvironments = search.environmentIds === undefined;
-  const selectedEnvironmentValue =
-    allSelectedEnvironments || search.environmentIds?.length !== 1
-      ? "all"
-      : search.environmentIds[0]!;
   const pendingLabels = result.pendingEnvironmentIds.flatMap((environmentId) => {
     const label = result.availableEnvironments.find(
       (environment) => environment.environmentId === environmentId,
@@ -141,35 +130,12 @@ export function UsageView({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <RangeControl search={search} onSearchChange={onSearchChange} />
-          <Select
-            value={selectedEnvironmentValue}
-            onValueChange={(value: string | null) =>
-              onSearchChange({
-                ...search,
-                ...(value === null || value === "all"
-                  ? { environmentIds: undefined }
-                  : { environmentIds: [value] }),
-              })
-            }
-          >
-            <SelectTrigger size="sm" className="w-48" aria-label="Usage environment">
-              <SelectValue>
-                {selectedEnvironmentValue === "all"
-                  ? `All environments (${result.availableEnvironments.length})`
-                  : (result.availableEnvironments.find(
-                      (item) => item.environmentId === selectedEnvironmentValue,
-                    )?.label ?? "Environment")}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup alignItemWithTrigger={false}>
-              <SelectItem value="all">All environments</SelectItem>
-              {result.availableEnvironments.map((environment) => (
-                <SelectItem key={environment.environmentId} value={environment.environmentId}>
-                  {environment.label}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <EnvironmentSelect
+            search={search}
+            onSearchChange={onSearchChange}
+            environments={result.availableEnvironments}
+            ariaLabel="Usage environment"
+          />
           <ProviderControl search={search} onSearchChange={onSearchChange} />
         </div>
         <Button size="sm" variant="outline" onClick={result.refresh} disabled={result.refreshing}>

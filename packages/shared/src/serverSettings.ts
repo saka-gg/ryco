@@ -5,7 +5,7 @@ import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
 import { createModelSelection } from "./model.ts";
 
-const ServerSettingsJson = fromLenientJson(ServerSettings);
+const PersistedSettingsObjectJson = fromLenientJson(Schema.Record(Schema.String, Schema.Unknown));
 
 export interface PersistedServerObservabilitySettings {
   readonly otlpTracesUrl: string | undefined;
@@ -35,7 +35,11 @@ export function parsePersistedServerObservabilitySettings(
   raw: string,
 ): PersistedServerObservabilitySettings {
   try {
-    const decoded = Schema.decodeUnknownSync(ServerSettingsJson)(raw);
+    // Decode only this key so an unrelated invalid setting cannot hide the endpoints.
+    const persisted = Schema.decodeUnknownSync(PersistedSettingsObjectJson)(raw);
+    const decoded = Schema.decodeUnknownSync(ServerSettings)(
+      persisted.observability === undefined ? {} : { observability: persisted.observability },
+    );
     return extractPersistedServerObservabilitySettings(decoded);
   } catch {
     return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined };
@@ -95,6 +99,7 @@ export function applyServerSettingsPatch(
     expectedProjectPreferences: _expected,
     expectedNodePreferences: _expectedNode,
     projectPreferences: _projects,
+    cliProxyHubs: _cliProxyHubs,
     ...persistedPatch
   } = patch;
   let next = deepMerge(current, persistedPatch);
@@ -149,6 +154,14 @@ export function applyServerSettingsPatch(
       else policies.set(projectId, policy);
     }
     next = { ...next, projectLifecycleSuggestions: Object.fromEntries(policies) };
+  }
+  if (patch.cliProxyHubs !== undefined) {
+    const hubs = new Map(Object.entries(current.cliProxyHubs));
+    for (const [hubId, hub] of Object.entries(patch.cliProxyHubs)) {
+      if (hub === null) hubs.delete(hubId);
+      else hubs.set(hubId, hub);
+    }
+    next = { ...next, cliProxyHubs: Object.fromEntries(hubs) as ServerSettings["cliProxyHubs"] };
   }
   const nextWithReplacements =
     patch.providerInstances !== undefined

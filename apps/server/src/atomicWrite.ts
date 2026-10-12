@@ -1,8 +1,9 @@
 import { Effect, FileSystem, Path } from "effect";
 
-export const writeFileStringAtomically = (input: {
+/** Writes through a temp file in the target directory and renames it into place. */
+export const writeFileAtomically = (input: {
   readonly filePath: string;
-  readonly contents: string;
+  readonly contents: string | Uint8Array;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -18,7 +19,14 @@ export const writeFileStringAtomically = (input: {
       });
       const tempPath = path.join(tempDirectory, `${tempFileId}.tmp`);
 
-      yield* fs.writeFileString(tempPath, input.contents);
+      yield* typeof input.contents === "string"
+        ? fs.writeFileString(tempPath, input.contents)
+        : fs.writeFile(tempPath, input.contents);
       yield* fs.rename(tempPath, input.filePath);
     }),
   );
+
+export const writeFileStringAtomically = (input: {
+  readonly filePath: string;
+  readonly contents: string;
+}) => writeFileAtomically(input);

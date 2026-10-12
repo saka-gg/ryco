@@ -1,5 +1,5 @@
 import { WS_METHODS } from "@ryco/contracts";
-import { ActivityIcon, BarChart3Icon, ShieldAlertIcon } from "lucide-react";
+import { ActivityIcon, BarChart3Icon, GaugeIcon, ShieldAlertIcon } from "lucide-react";
 
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { cn } from "~/lib/utils";
@@ -13,6 +13,7 @@ import { SidebarInset } from "../ui/sidebar";
 import { ScrollArea } from "../ui/scroll-area";
 import { StatePanel } from "../settings/statistics/parts";
 import { ActivityView } from "./activity/ActivityView";
+import { LimitsView } from "./limits/LimitsView";
 import type { StatisticsSearch } from "./statisticsSearch";
 import { UsageView } from "./usage/UsageView";
 
@@ -25,7 +26,11 @@ export function StatisticsPage({
 }) {
   const appSidebarCollapsed = useAppSidebarCollapsed();
   const method =
-    search.view === "usage" ? WS_METHODS.serverGetUsageSummary : WS_METHODS.serverGetStatistics;
+    search.view === "usage"
+      ? WS_METHODS.serverGetUsageSummary
+      : search.view === "limits"
+        ? WS_METHODS.serverReadCliProxyHubs
+        : WS_METHODS.serverGetStatistics;
   const capability = useHostedRpcCapability(method);
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
@@ -43,8 +48,9 @@ export function StatisticsPage({
               <p className="text-[11px] text-muted-foreground">Usage and work signals</p>
             </div>
             <div className="inline-flex shrink-0 rounded-lg bg-muted/75 p-0.5">
-              {(["usage", "activity"] as const).map((view) => {
-                const Icon = view === "usage" ? BarChart3Icon : ActivityIcon;
+              {(["usage", "activity", "limits"] as const).map((view) => {
+                const Icon =
+                  view === "usage" ? BarChart3Icon : view === "activity" ? ActivityIcon : GaugeIcon;
                 return (
                   <button
                     key={view}
@@ -64,14 +70,23 @@ export function StatisticsPage({
             </div>
           </div>
           <div className="hidden text-right sm:block">
-            <p className="text-xs font-medium">
-              {search.range === "all"
-                ? "All available history"
-                : `Last ${search.range.slice(0, -1)} days`}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              {search.view === "usage" ? "Local calendar window" : "UTC activity window"}
-            </p>
+            {search.view === "limits" ? (
+              <>
+                <p className="text-xs font-medium">Live subscription quota</p>
+                <p className="text-[11px] text-muted-foreground">From CLIProxyAPI hubs</p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs font-medium">
+                  {search.range === "all"
+                    ? "All available history"
+                    : `Last ${search.range.slice(0, -1)} days`}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {search.view === "usage" ? "Local calendar window" : "UTC activity window"}
+                </p>
+              </>
+            )}
           </div>
         </header>
 
@@ -85,6 +100,8 @@ export function StatisticsPage({
               />
             ) : search.view === "usage" ? (
               <UsageView search={search} onSearchChange={onSearchChange} />
+            ) : search.view === "limits" ? (
+              <LimitsView search={search} onSearchChange={onSearchChange} />
             ) : (
               <ActivityView search={search} onSearchChange={onSearchChange} />
             )}

@@ -17,6 +17,7 @@ import {
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_UNIFIED_SETTINGS,
+  type ServerSettingsPatch,
   UnifiedSettings,
 } from "@ryco/contracts/settings";
 import { ensureLocalApi } from "~/localApi";
@@ -98,6 +99,40 @@ function persistClientSettings(settings: ClientSettings): void {
     .persistence.setClientSettings(settings)
     .catch((error) => {
       console.error(`${CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE} persist failed`, error);
+    });
+}
+
+/**
+ * Optimistically applies a primary-node settings patch, then persists it. The push stream
+ * reconciles a successful write; a rejected one is reported and replaced by the server's
+ * current settings, or by the pre-write settings when those cannot be read either.
+ */
+function writePrimaryServerSettings(serverPatch: ServerSettingsPatch): void {
+  const previousSettings = getServerConfig()?.settings ?? null;
+  const optimisticSettings = previousSettings
+    ? applyServerSettingsPatch(previousSettings, serverPatch)
+    : null;
+  if (optimisticSettings) {
+    applySettingsUpdated(optimisticSettings);
+  }
+  void ensureLocalApi()
+    .server.updateSettings(serverPatch)
+    .catch(async (error: unknown) => {
+      console.error("[SETTINGS] update failed", error);
+      toastManager.add({
+        type: "error",
+        title: "Could not save settings",
+        description: error instanceof Error ? error.message : "Your change was not saved.",
+      });
+      try {
+        applySettingsUpdated(await ensureLocalApi().server.getSettings());
+      } catch (refreshError) {
+        console.error("[SETTINGS] could not reload settings after a failed update", refreshError);
+        // Only undo our own optimistic write; a newer one has already replaced it.
+        if (previousSettings && getServerConfig()?.settings === optimisticSettings) {
+          applySettingsUpdated(previousSettings);
+        }
+      }
     });
 }
 
@@ -228,14 +263,7 @@ export function useUpdateSettings() {
             );
           }
         } else {
-          const currentServerConfig = getServerConfig();
-          if (currentServerConfig) {
-            applySettingsUpdated(
-              applyServerSettingsPatch(currentServerConfig.settings, serverPatch),
-            );
-          }
-          // Fire-and-forget RPC — push will reconcile on success
-          void ensureLocalApi().server.updateSettings(serverPatch);
+          writePrimaryServerSettings(serverPatch);
         }
       }
 

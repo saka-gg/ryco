@@ -18,6 +18,9 @@ missing or invalid inputs, clock inconsistencies, and windows that have reset. M
 unavailable, never zero. Small differences within two percentage points and the first 3% of a
 window have no pace label. Existing usage amounts, credits, reset times and accounting are unchanged.
 
+Accounts pooled in a CLIProxyAPI hub appear on Statistics → Limits instead; see
+[CLIProxyAPI hubs](./cliproxyapi.md).
+
 Claude instances with a separate home use that home's credential file for usage reads. They do not
 fall back to the default account's global macOS Keychain entry. Refreshes are persisted only to the
 credential store that supplied the account. Missing separate-home credentials mean usage is unavailable.

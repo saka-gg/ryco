@@ -1,6 +1,10 @@
 import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Pressable, ScrollView, View } from "react-native";
-import type { EnvironmentId, StorageRetentionPolicy } from "@ryco/contracts";
+import {
+  DEFAULT_STORAGE_RETENTION_POLICY,
+  type EnvironmentId,
+  type StorageRetentionPolicy,
+} from "@ryco/contracts";
 import { createStorageManagementController } from "@ryco/client-runtime/state/storage";
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { AppText as Text } from "../../components/AppText";
@@ -60,7 +64,7 @@ function NodeStoragePanel({
   const [error, setError] = useState<string | null>(null);
   const policy = settings
     ? resolveStorageRetentionPolicy(settings, projectId)
-    : { automatic: false, completedWorktreeDays: null, temporaryDataDays: null };
+    : DEFAULT_STORAGE_RETENTION_POLICY;
   const busy = !enabled || saving || state.busy;
   async function save(next: StorageRetentionPolicy | null) {
     if (busy || (!projectId && !next)) return;

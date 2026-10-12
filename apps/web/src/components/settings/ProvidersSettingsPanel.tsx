@@ -54,6 +54,7 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
 import { getDriverOption } from "./providerDriverMeta";
@@ -715,6 +716,8 @@ export function ProvidersSettingsPanel() {
         </div>
       </SettingsSection>
 
+      <CliProxyHubSettings />
+
       <AddProviderInstanceDialog
         open={isAddInstanceDialogOpen}
         onOpenChange={setIsAddInstanceDialogOpen}
@@ -735,7 +738,7 @@ export function ProvidersSettingsPanel() {
             <AlertDialogDescription>
               {pendingDestructiveAction?.kind === "delete"
                 ? "This removes the instance, its model preferences, and its favorites. Existing threads that reference it may no longer start; text generation returns to its default if needed."
-                : "This restores the built-in instance configuration, removes its model preferences and favorites, and resets text generation if it uses this instance."}
+                : "This restores the built-in instance configuration, deletes its environment variables and stored secret values, removes its model preferences and favorites, and resets text generation if it uses this instance."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {pendingDestructiveAction?.kind === "delete" ? (

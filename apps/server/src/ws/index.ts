@@ -23,6 +23,7 @@ import { makeChatProjectHandlers } from "./chatProjectRpc.ts";
 import { makeSourceControlHandlers } from "./sourceControlRpc.ts";
 import { makeProviderHandlers } from "./providerRpc.ts";
 import { makeStatisticsHandlers } from "./statisticsRpc.ts";
+import { makeCliProxyHandlers } from "./cliProxyRpc.ts";
 import { makeContextHandoffHandlers } from "./contextHandoffRpc.ts";
 import { makeDeviceHandlers } from "./deviceRpc.ts";
 import { DeviceService } from "../device/Services/DeviceService.ts";
@@ -40,6 +41,7 @@ const makeWsRpcHandlers = (principal: RpcPrincipal) =>
       ...makeProviderHandlers(ctx),
       ...makeSideQuestionHandlers(ctx),
       ...makeStatisticsHandlers(ctx),
+      ...makeCliProxyHandlers(ctx),
       ...makeSourceControlHandlers(ctx),
       ...makeProjectHandlers(ctx),
       ...makeChatProjectHandlers(ctx),

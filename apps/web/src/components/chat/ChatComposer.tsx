@@ -1,7 +1,7 @@
 import { isHostedHubMode } from "../../env";
 import type { ProviderOptionSelection } from "@ryco/contracts";
 import { usePaneEffect, usePaneFocusRef } from "./PaneFocus";
-import { isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
+import { formatCliProxyPlan, isRateLimitSnapshotAvailable } from "@ryco/client-runtime/usage";
 import type {
   ApprovalRequestId,
   ComposerSourceControlContext,
@@ -67,6 +67,7 @@ import {
   shouldBlurComposerOnSubmit,
 } from "./ComposerSendPipeline";
 import { ComposerFooter } from "./ComposerFooter";
+import type { ContextWindowAccount } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import {
   type ComposerImageAttachment,
@@ -329,6 +330,8 @@ export interface ChatComposerProps {
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
   activeThreadModelSelection: ModelSelection | null | undefined;
+  /** The node has an enabled CLIProxyAPI hub that Claude instances may be routed through. */
+  cliProxyHubsEnabled: boolean;
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
@@ -507,6 +510,7 @@ export const ChatComposer = memo(
       lockedProvider,
       providerStatuses,
       activeThreadModelSelection,
+      cliProxyHubsEnabled,
       activeThreadActivities,
       phoneThreadDock,
       resolvedTheme,
@@ -817,6 +821,23 @@ export const ChatComposer = memo(
       [activeThreadActivities, selectedContextWindow, selectedModelMaxContextTokens],
     );
     const contextWindowRateLimits = selectedProviderStatus?.rateLimits;
+    const contextWindowAccount = useMemo<ContextWindowAccount | undefined>(
+      () =>
+        selectedProviderEntry
+          ? {
+              environmentId,
+              instanceId: selectedProviderEntry.instanceId,
+              displayName: selectedProviderEntry.displayName,
+              label:
+                selectedProviderEntry.snapshot.auth.label ??
+                formatCliProxyPlan(selectedProviderEntry.snapshot.rateLimits?.planType),
+              email: selectedProviderEntry.snapshot.auth.email,
+              checkCliProxyRoute:
+                cliProxyHubsEnabled && selectedProviderEntry.driverKind === "claudeAgent",
+            }
+          : undefined,
+      [cliProxyHubsEnabled, environmentId, selectedProviderEntry],
+    );
     const claudeCacheObservation = useMemo(
       () =>
         selectedProvider === "claudeAgent"
@@ -2900,6 +2921,7 @@ export const ChatComposer = memo(
                     ? selectedProviderStatus?.checkedAt
                     : undefined
                 }
+                contextWindowAccount={contextWindowAccount}
                 claudeCacheObservation={claudeCacheObservation}
                 pendingAction={pendingPrimaryAction}
                 isRunning={phase === "running"}

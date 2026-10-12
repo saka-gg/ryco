@@ -7,39 +7,17 @@ import {
   type UsageSummaryTarget,
 } from "@ryco/client-runtime/usage";
 import type { EnvironmentId } from "@ryco/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePrimaryEnvironmentId } from "~/environments/primary";
-import {
-  listEnvironmentConnections,
-  subscribeEnvironmentConnections,
-} from "~/environments/runtime";
+import { listEnvironmentConnections } from "~/environments/runtime";
 
 import type { StatisticsRange } from "./statisticsSearch";
+import { selectConnections, useConnectedEnvironments } from "./useConnectedEnvironments";
 
 export { usageRequestForRange } from "@ryco/client-runtime/usage";
 
 type EnvironmentConnections = ReturnType<typeof listEnvironmentConnections>;
-
-/*
- * The registered connections, one array per distinct set so the store snapshot
- * keeps its identity until a connection comes or goes. Reading the registry
- * itself (not counting notifications) means a registration that happened
- * before this view subscribed — e.g. the primary connection on a direct load
- * of /statistics — is still observed.
- */
-let connectionsSnapshot: EnvironmentConnections = [];
-function readConnections(): EnvironmentConnections {
-  const next = listEnvironmentConnections();
-  if (
-    next.length !== connectionsSnapshot.length ||
-    next.some((connection, index) => connection !== connectionsSnapshot[index])
-  ) {
-    connectionsSnapshot = next;
-  }
-  return connectionsSnapshot;
-}
-const NO_CONNECTIONS: EnvironmentConnections = [];
 
 type EnvironmentConnection = EnvironmentConnections[number];
 
@@ -50,16 +28,6 @@ function usageTarget(connection: EnvironmentConnection): UsageSummaryTarget {
     getUsageSummary: (request, options) =>
       connection.client.server.getUsageSummary(request, options),
   };
-}
-
-/** The connections a view filtered to `environmentIds` asks; none selected means all. */
-function selectConnections<T extends { readonly environmentId: EnvironmentId }>(
-  connections: readonly T[],
-  environmentIds: readonly string[] | undefined,
-): readonly T[] {
-  if (environmentIds === undefined || environmentIds.length === 0) return connections;
-  const selected = new Set(environmentIds);
-  return connections.filter((connection) => selected.has(connection.environmentId));
 }
 
 function currentTimeZone(): string {
@@ -79,14 +47,6 @@ export function prefetchUsageSummary(
   for (const connection of selectConnections(listEnvironmentConnections(), environmentIds)) {
     usageSummaryCache.prefetch(usageTarget(connection), range, timeZone);
   }
-}
-
-function useConnectedEnvironments(): EnvironmentConnections {
-  return useSyncExternalStore(
-    subscribeEnvironmentConnections,
-    readConnections,
-    () => NO_CONNECTIONS,
-  );
 }
 
 export interface UseUsageSummaryResult {

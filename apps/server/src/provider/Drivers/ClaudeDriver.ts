@@ -26,7 +26,7 @@ import {
   makePendingClaudeProvider,
   probeClaudeCapabilities,
 } from "../Layers/ClaudeProvider.ts";
-import { probeClaudeUsageRateLimits } from "../Layers/ClaudeUsage.ts";
+import { makeCachedClaudeUsageProbe } from "../Layers/ClaudeUsage.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { ModelManifest } from "../ModelManifest.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -179,20 +179,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         effectiveConfig,
         processEnv,
       );
-      const usageProbeCache = yield* Cache.make({
-        capacity: 1,
-        timeToLive: USAGE_PROBE_TTL,
-        lookup: (version: string | null) =>
-          probeClaudeUsageRateLimits(effectiveConfig, version).pipe(
-            Effect.provideService(Path.Path, path),
-          ),
-      });
+      const probeUsage = yield* makeCachedClaudeUsageProbe(USAGE_PROBE_TTL);
 
       const checkProvider = checkClaudeProviderStatus(
         effectiveConfig,
         () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
         processEnv,
-        (_settings, version) => Cache.get(usageProbeCache, version),
+        probeUsage,
         Option.getOrUndefined(modelManifest),
       ).pipe(
         Effect.map(stampIdentity),

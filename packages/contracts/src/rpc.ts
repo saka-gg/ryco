@@ -105,6 +105,13 @@ import {
 } from "./diagnostics.ts";
 import { StatisticsSnapshot } from "./statistics.ts";
 import { UsageReadError, UsageSummary, UsageSummaryRequest } from "./usage.ts";
+import {
+  CliProxyHubError,
+  CliProxyReadHubsInput,
+  CliProxyReadHubsResult,
+  CliProxyTestHubInput,
+  CliProxyTestHubResult,
+} from "./cliProxy.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import {
   AtlassianConnectionError,
@@ -481,6 +488,8 @@ export const WS_METHODS = {
   serverAuthenticateAcpRegistry: "server.authenticateAcpRegistry",
   serverReadCodexResetCredits: "server.readCodexResetCredits",
   serverConsumeCodexResetCredit: "server.consumeCodexResetCredit",
+  serverReadCliProxyHubs: "server.readCliProxyHubs",
+  serverTestCliProxyHub: "server.testCliProxyHub",
   serverListLocalTasks: "server.listLocalTasks",
   serverGetLocalTask: "server.getLocalTask",
   serverCreateLocalTask: "server.createLocalTask",
@@ -854,6 +863,17 @@ export const WsServerConsumeCodexResetCreditRpc = Rpc.make(
     error: Schema.Union([CodexResetCreditError, AuthRpcError]),
   },
 );
+
+export const WsServerReadCliProxyHubsRpc = Rpc.make(WS_METHODS.serverReadCliProxyHubs, {
+  payload: CliProxyReadHubsInput,
+  success: CliProxyReadHubsResult,
+  error: Schema.Union([CliProxyHubError, AuthRpcError]),
+});
+export const WsServerTestCliProxyHubRpc = Rpc.make(WS_METHODS.serverTestCliProxyHub, {
+  payload: CliProxyTestHubInput,
+  success: CliProxyTestHubResult,
+  error: Schema.Union([CliProxyHubError, AuthRpcError]),
+});
 
 export const WsServerListLocalTasksRpc = Rpc.make(WS_METHODS.serverListLocalTasks, {
   payload: LocalTaskListInput,
@@ -2290,6 +2310,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerAuthenticateAcpRegistryRpc
   | typeof WsServerReadCodexResetCreditsRpc
   | typeof WsServerConsumeCodexResetCreditRpc
+  | typeof WsServerReadCliProxyHubsRpc
+  | typeof WsServerTestCliProxyHubRpc
   | typeof WsServerListLocalTasksRpc
   | typeof WsServerGetLocalTaskRpc
   | typeof WsServerCreateLocalTaskRpc
@@ -2492,6 +2514,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerAuthenticateAcpRegistryRpc,
   WsServerReadCodexResetCreditsRpc,
   WsServerConsumeCodexResetCreditRpc,
+  WsServerReadCliProxyHubsRpc,
+  WsServerTestCliProxyHubRpc,
   WsServerListLocalTasksRpc,
   WsServerGetLocalTaskRpc,
   WsServerCreateLocalTaskRpc,

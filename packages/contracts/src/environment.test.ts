@@ -105,6 +105,24 @@ it("requires explicit required-worktree bootstrap support from the node", () => 
   ).toBe(true);
 });
 
+describe("ExecutionEnvironmentCapabilities.cliProxyHubs", () => {
+  it("keeps Cloudflare Access support optional for older nodes", () => {
+    expect(
+      decodeDescriptor(descriptor({ cliProxyHubs: true })).capabilities.cliProxyCloudflareAccess,
+    ).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ cliProxyCloudflareAccess: true })).capabilities
+        .cliProxyCloudflareAccess,
+    ).toBe(true);
+  });
+  it("stays absent for older servers and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.cliProxyHubs).toBeUndefined();
+    expect(decodeDescriptor(descriptor({ cliProxyHubs: true })).capabilities.cliProxyHubs).toBe(
+      true,
+    );
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.usageLimitRecovery", () => {
   it("stays absent for older servers and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.usageLimitRecovery).toBeUndefined();

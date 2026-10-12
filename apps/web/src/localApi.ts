@@ -163,6 +163,10 @@ function createBrowserLocalApi(
         withRpcClient(readRpcClient, (rpcClient) =>
           rpcClient.server.consumeCodexResetCredit(input),
         ),
+      readCliProxyHubs: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.readCliProxyHubs(input)),
+      testCliProxyHub: (input) =>
+        withRpcClient(readRpcClient, (rpcClient) => rpcClient.server.testCliProxyHub(input)),
       refreshProviders: (input) =>
         withRpcClient(readRpcClient, (rpcClient) =>
           input === undefined

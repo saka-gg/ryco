@@ -1,15 +1,28 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const RetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
-export const StorageRetentionPolicy = Schema.Struct({
+/** A complete policy as sent in settings patches; a partial one is rejected, not reset. */
+export const StorageRetentionPolicyInput = Schema.Struct({
   automatic: Schema.Boolean,
   completedWorktreeDays: RetentionDays,
   temporaryDataDays: RetentionDays,
 });
+
+// Per-field defaults: settings files written sparsely by older builds omit default fields.
+export const StorageRetentionPolicy = Schema.Struct({
+  automatic: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  completedWorktreeDays: RetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  temporaryDataDays: RetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+});
 export type StorageRetentionPolicy = typeof StorageRetentionPolicy.Type;
+
+export const DEFAULT_STORAGE_RETENTION_POLICY: StorageRetentionPolicy = Schema.decodeSync(
+  StorageRetentionPolicy,
+)({});
 
 export const StorageEntry = Schema.Struct({
   id: TrimmedNonEmptyString,

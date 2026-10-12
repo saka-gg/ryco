@@ -143,6 +143,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.serverAuthenticateAcpRegistry]: "owner",
   [WS_METHODS.serverReadCodexResetCredits]: "owner",
   [WS_METHODS.serverConsumeCodexResetCredit]: "owner",
+  // Hub snapshots expose account emails and the test reaches an arbitrary URL with a key.
+  [WS_METHODS.serverReadCliProxyHubs]: "owner",
+  [WS_METHODS.serverTestCliProxyHub]: "owner",
   [WS_METHODS.serverListLocalTasks]: "owner",
   [WS_METHODS.serverGetLocalTask]: "owner",
   [WS_METHODS.serverCreateLocalTask]: "owner",
@@ -385,6 +388,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverAuthenticateAcpRegistry]: "mutation",
   [WS_METHODS.serverReadCodexResetCredits]: "read",
   [WS_METHODS.serverConsumeCodexResetCredit]: "mutation",
+  [WS_METHODS.serverReadCliProxyHubs]: "read",
+  [WS_METHODS.serverTestCliProxyHub]: "read",
   [WS_METHODS.serverListLocalTasks]: "read",
   [WS_METHODS.serverGetLocalTask]: "read",
   [WS_METHODS.serverCreateLocalTask]: "mutation",
