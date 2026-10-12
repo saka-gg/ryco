@@ -26,10 +26,8 @@ import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { isContextMenuPointerDown } from "../Sidebar.logic";
 import { openExternalLink } from "../../lib/openExternalLink";
 import { SidebarWorktreeList, type SidebarThreadGitStatusTarget } from "./SidebarWorktreeList";
-import {
-  createSidebarProjectDraftThreadsSelector,
-  mergeSidebarThreadsWithDrafts,
-} from "./sidebarTreeAdapters";
+import { useSidebarProjectTreeCache } from "./sidebarProjectTreeCache";
+import { mergeSidebarThreadsWithDrafts } from "./sidebarTreeAdapters";
 import { type SidebarTreeThread } from "./hooks/useSidebarTree";
 import { type SortableProjectHandleProps } from "./SidebarProjectList";
 import { SidebarThreadRow } from "./SidebarThreadRow";
@@ -138,9 +136,8 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
       ),
     ),
   );
-  const projectDraftThreads = useComposerDraftStore(
-    useMemo(() => createSidebarProjectDraftThreadsSelector(project), [project]),
-  );
+  const projectTreeCache = useSidebarProjectTreeCache();
+  const projectDraftThreads = useComposerDraftStore(projectTreeCache.draftThreadsSelector(project));
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
@@ -270,6 +267,8 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   } = useSidebarProjectThreadPresentation({
     project,
     projectThreads,
+    sidebarThreads,
+    projectDraftThreads,
     sidebarWorktrees,
     lastVisitedAtByThreadKey,
     threadSortOrder,

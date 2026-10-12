@@ -18,6 +18,8 @@ import {
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationGetFullThreadDiffInput,
+  OrchestrationShellStreamItem,
+  OrchestrationSubscribeShellInput,
   OrchestrationGetThreadHistoryPageInput,
   OrchestrationGetThreadWindowInput,
   OrchestrationGetTurnDiffInput,
@@ -2022,3 +2024,44 @@ it.effect("lets clients configure a usage limit but never record one", () =>
     assert.strictEqual(internal.type, "thread.usage-limit.record");
   }),
 );
+
+const decodeShellStreamItem = Schema.decodeUnknownSync(OrchestrationShellStreamItem);
+const decodeSubscribeShellInput = Schema.decodeUnknownSync(OrchestrationSubscribeShellInput);
+
+it("decodes the paged shell snapshot items", () => {
+  const begin = decodeShellStreamItem({
+    kind: "snapshot-begin",
+    snapshotSequence: 4,
+    updatedAt: "2026-10-12T00:00:00.000Z",
+    projects: [],
+    threadCount: 1,
+    archivedThreadCount: 0,
+  });
+  assert.equal(begin.kind, "snapshot-begin");
+  assert.equal(
+    decodeShellStreamItem({ kind: "snapshot-threads", threads: [] }).kind,
+    "snapshot-threads",
+  );
+  assert.equal(decodeShellStreamItem({ kind: "snapshot-end" }).kind, "snapshot-end");
+});
+
+it("keeps decoding the single snapshot item older servers send", () => {
+  const item = decodeShellStreamItem({
+    kind: "snapshot",
+    snapshot: {
+      snapshotSequence: 1,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-10-12T00:00:00.000Z",
+    },
+  });
+  assert.equal(item.kind, "snapshot");
+});
+
+it("accepts shell subscribe input with and without paged delivery", () => {
+  assert.deepEqual(decodeSubscribeShellInput({}), {});
+  assert.deepEqual(decodeSubscribeShellInput({ snapshotDelivery: "paged" }), {
+    snapshotDelivery: "paged",
+  });
+  assert.throws(() => decodeSubscribeShellInput({ snapshotDelivery: "streamed" }));
+});

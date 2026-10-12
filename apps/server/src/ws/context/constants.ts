@@ -44,3 +44,11 @@ export const ORCHESTRATION_STREAM_CHUNK_MAX_BYTES = 256 * 1024;
  * chunks are bounded by count instead.
  */
 export const ORCHESTRATION_SHELL_STREAM_CHUNK_MAX_ITEMS = 128;
+/**
+ * Ceiling on one message of a paged shell snapshot. A shell of thousands of
+ * threads is megabytes; one message that size exceeds the 4 MiB relay message
+ * cap and the relayed client never gets its snapshot. Each page is one
+ * acknowledged RPC chunk (a round trip on a relayed connection), so pages are
+ * large: a few per thousand threads, still far below the cap.
+ */
+export const ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES = 1024 * 1024;

@@ -278,6 +278,7 @@ import {
 } from "./terminal.ts";
 import {
   ServerConfigStreamEvent,
+  ServerSubscribeConfigInput,
   ServerConfig,
   ServerLocalDiagnosticsMetrics,
   ServerProviderUpdateError,
@@ -2124,7 +2125,7 @@ export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTermina
 });
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
-  payload: Schema.Struct({}),
+  payload: ServerSubscribeConfigInput,
   success: ServerConfigStreamEvent,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
   stream: true,

@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   ProviderDriverKind,
+  TurnId,
   WorktreeId,
   defaultInstanceIdForDriver,
   type EnvironmentId,
@@ -10,6 +11,7 @@ import { projectKindOf } from "@ryco/shared/projectKind";
 import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
+  type WorkspaceThreadLatestTurn,
 } from "@ryco/client-runtime/state/workspace";
 import {
   isThreadLineage,
@@ -17,6 +19,7 @@ import {
 } from "@ryco/client-runtime/state/threads";
 
 import { useStore, type AppState } from "./store";
+import type { SidebarThreadSummary } from "./types";
 
 export function readWorkspaceMetadataSnapshot(
   environmentId: EnvironmentId,
@@ -93,6 +96,9 @@ export function readWorkspaceMetadataSnapshot(
               deliveryUnknown,
               // Cached so delegated folding does not flicker on a cold start.
               ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
+              // Cached so rows settle and sort as the live ones do.
+              latestUserMessageAt: thread.latestUserMessageAt,
+              latestTurn: endedLatestTurn(thread.latestTurn),
             },
           ]
         : [];
@@ -213,11 +219,11 @@ export function workspaceMetadataToCachedShellSnapshot(
           snoozedUntil: thread.snoozedUntil ?? null,
           snoozedAt: thread.snoozedAt ?? null,
           updatedAt: thread.updatedAt ?? undefined,
-          latestTurn: null,
+          latestTurn: readCachedLatestTurn(thread.latestTurn),
           branch: thread.branch,
           worktreePath: null,
           worktreeId: thread.worktreeId,
-          latestUserMessageAt: null,
+          latestUserMessageAt: readCachedTimestamp(thread.latestUserMessageAt),
           hasPendingApprovals: thread.hasPendingApprovals,
           hasPendingUserInput: thread.hasPendingUserInput,
           hasActionableProposedPlan: thread.hasActionableProposedPlan,
@@ -225,5 +231,49 @@ export function workspaceMetadataToCachedShellSnapshot(
         },
       };
     }),
+  };
+}
+
+/** The latest turn worth caching: one that ended. A running turn is live state, never cached. */
+function endedLatestTurn(
+  turn: SidebarThreadSummary["latestTurn"],
+): WorkspaceThreadLatestTurn | null {
+  if (turn === null || turn.state === "running") return null;
+  return {
+    turnId: turn.turnId,
+    state: turn.state,
+    requestedAt: turn.requestedAt,
+    startedAt: turn.startedAt,
+    completedAt: turn.completedAt,
+  };
+}
+
+const ENDED_TURN_STATES = new Set(["interrupted", "completed", "error"]);
+
+function readCachedTimestamp(value: unknown): string | null {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/** Cached turns are untrusted storage: only a well-formed ended turn is used. */
+function readCachedLatestTurn(value: unknown): SidebarThreadSummary["latestTurn"] {
+  if (typeof value !== "object" || value === null) return null;
+  const turn = value as Partial<Record<keyof WorkspaceThreadLatestTurn, unknown>>;
+  const requestedAt = readCachedTimestamp(turn.requestedAt);
+  if (
+    typeof turn.turnId !== "string" ||
+    turn.turnId.length === 0 ||
+    typeof turn.state !== "string" ||
+    !ENDED_TURN_STATES.has(turn.state) ||
+    requestedAt === null
+  ) {
+    return null;
+  }
+  return {
+    turnId: TurnId.make(turn.turnId),
+    state: turn.state as WorkspaceThreadLatestTurn["state"],
+    requestedAt,
+    startedAt: readCachedTimestamp(turn.startedAt),
+    completedAt: readCachedTimestamp(turn.completedAt),
+    assistantMessageId: null,
   };
 }

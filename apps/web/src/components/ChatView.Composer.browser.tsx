@@ -2010,6 +2010,49 @@ describe("ChatView Composer (full app)", () => {
       await mounted.cleanup();
     }
   });
+  it("queues a send into a thread shown from last-known state instead of dispatching it", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-last-known-existing" as MessageId,
+      targetText: "Existing conversation",
+    });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    const commands: Array<{ readonly type: string }> = [];
+    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+    __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+      ...api,
+      orchestration: {
+        ...api.orchestration,
+        dispatchCommand: async (command) => {
+          commands.push(command);
+          return { sequence: snapshot.snapshotSequence + 1 };
+        },
+      },
+    });
+    try {
+      await waitForComposerEditor();
+      // The rows stay, but they are no longer live (a cached boot, a demotion).
+      useStore.getState().demoteEnvironmentStateToCachedSnapshot(LOCAL_ENVIRONMENT_ID, Date.now());
+      await waitForLayout();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Sent before the shell is live");
+      await waitForComposerText("Sent before the shell is live");
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+
+      await vi.waitFor(
+        () => expect(useMessageQueueStore.getState().queuesByThreadKey[THREAD_KEY]).toHaveLength(1),
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(commands.filter((command) => command.type === "thread.turn.start")).toEqual([]);
+    } finally {
+      useMessageQueueStore.getState().clear(THREAD_KEY);
+      __resetEnvironmentApiOverridesForTests();
+      await mounted.cleanup();
+    }
+  });
+
   describe("follow-up while a turn runs", () => {
     type RecordedCommand = { readonly type: string; readonly commandId?: string } & Record<
       string,

@@ -8,6 +8,10 @@ export type StartupPhase =
   | "primary-ws-open"
   /** The first raw shell-subscription frame arrived, before JSON/Schema decoding. */
   | "primary-shell-frame-received"
+  /** The primary environment's last-known shell was painted from the local cache. */
+  | "primary-shell-cache-hydrated"
+  /** React committed the sidebar with that cached (not yet live) primary shell. */
+  | "primary-cached-sidebar-committed"
   | "primary-shell-snapshot-received"
   | "primary-shell-snapshot-applied"
   | "primary-shell-usable"
@@ -28,6 +32,7 @@ export const STARTUP_MEASURES: ReadonlyArray<
   ["primary-sidebar-commit", "primary-shell-usable", "primary-sidebar-committed"],
   ["primary-shell-paint", "primary-sidebar-committed", "primary-shell-painted"],
   ["primary-shell-painted", null, "primary-shell-painted"],
+  ["primary-cached-sidebar-committed", null, "primary-cached-sidebar-committed"],
 ];
 
 const reachedPhases = new Set<StartupPhase>();

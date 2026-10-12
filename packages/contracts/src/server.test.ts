@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ServerProvider } from "./server.ts";
+import { ServerConfigStreamEvent, ServerProvider, ServerSubscribeConfigInput } from "./server.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 
@@ -166,6 +166,61 @@ describe("ServerProvider", () => {
           compatibilityAdvisory: { status: "weird", message: null },
         }),
       ).toThrow();
+    });
+  });
+});
+
+describe("provider status deltas", () => {
+  const decodeEvent = Schema.decodeUnknownSync(ServerConfigStreamEvent);
+  const decodeInput = Schema.decodeUnknownSync(ServerSubscribeConfigInput);
+
+  it("decodes a delta whose provider leaves out its unchanged catalogs", () => {
+    const event = decodeEvent({
+      version: 1,
+      type: "providerStatusesDelta",
+      payload: {
+        instanceIds: ["codex", "claude"],
+        providers: [
+          {
+            instanceId: "codex",
+            driver: "codex",
+            enabled: true,
+            installed: true,
+            version: "1.0.0",
+            status: "error",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-10-12T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(event.type).toBe("providerStatusesDelta");
+    if (event.type !== "providerStatusesDelta") return;
+    const [update] = event.payload.providers;
+    expect(update && "models" in update).toBe(false);
+    expect(update && "skills" in update).toBe(false);
+  });
+
+  it("keeps decoding the full provider list older servers send", () => {
+    const event = decodeEvent({
+      version: 1,
+      type: "providerStatuses",
+      payload: { providers: [] },
+    });
+    expect(event.type).toBe("providerStatuses");
+  });
+
+  it("accepts the empty subscribe input older clients send, and the delta request", () => {
+    expect(decodeInput({})).toEqual({});
+    expect(decodeInput({ providerStatuses: "delta" })).toEqual({ providerStatuses: "delta" });
+  });
+
+  it("bounds the catalog digests a client may name", () => {
+    expect(() =>
+      decodeInput({ knownProviderCatalogs: Array.from({ length: 65 }, (_, index) => `d${index}`) }),
+    ).toThrow();
+    expect(decodeInput({ knownProviderCatalogs: ["digest-a"] })).toEqual({
+      knownProviderCatalogs: ["digest-a"],
     });
   });
 });

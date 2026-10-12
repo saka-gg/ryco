@@ -408,15 +408,55 @@ export const ServerConfigProviderStatusesPayload = Schema.Struct({
 });
 export type ServerConfigProviderStatusesPayload = typeof ServerConfigProviderStatusesPayload.Type;
 
+/**
+ * A provider's status in a `providerStatusesDelta`. A catalog (`models`,
+ * `skills`, `slashCommands`) is present only when it changed since the stream
+ * last sent this instance; absent, the client keeps the one it has.
+ */
+export const ServerProviderStatusUpdate = Schema.Struct({
+  ...ServerProvider.fields,
+  models: Schema.optionalKey(Schema.Array(ServerProviderModel)),
+  slashCommands: Schema.optionalKey(Schema.Array(ServerProviderSlashCommand)),
+  skills: Schema.optionalKey(Schema.Array(ServerProviderSkill)),
+});
+export type ServerProviderStatusUpdate = typeof ServerProviderStatusUpdate.Type;
+
+export const ServerConfigProviderStatusesDeltaPayload = Schema.Struct({
+  /** Every provider instance, in order; an instance no longer listed was removed. */
+  instanceIds: Schema.Array(ProviderInstanceId),
+  /** The instances that changed since this stream last sent them. */
+  providers: Schema.Array(ServerProviderStatusUpdate),
+});
+export type ServerConfigProviderStatusesDeltaPayload =
+  typeof ServerConfigProviderStatusesDeltaPayload.Type;
+
 export const ServerConfigSettingsUpdatedPayload = Schema.Struct({
   settings: ServerSettings,
 });
 export type ServerConfigSettingsUpdatedPayload = typeof ServerConfigSettingsUpdatedPayload.Type;
 
+/** Identifies one provider's catalogs (models, skills, slash commands) by content. */
+export const ServerProviderCatalogDigest = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
+export type ServerProviderCatalogDigest = typeof ServerProviderCatalogDigest.Type;
+
+/**
+ * Catalog bookkeeping of a snapshot sent to a client that named the catalogs
+ * it holds (`knownProviderCatalogs`). Each provider's catalog digest, and the
+ * instances whose catalogs were left out (sent empty) because the client
+ * already holds them under that digest.
+ */
+export const ServerConfigProviderCatalogs = Schema.Struct({
+  digests: Schema.Record(ProviderInstanceId, ServerProviderCatalogDigest),
+  omitted: Schema.Array(ProviderInstanceId),
+});
+export type ServerConfigProviderCatalogs = typeof ServerConfigProviderCatalogs.Type;
+
 export const ServerConfigStreamSnapshotEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("snapshot"),
   config: ServerConfig,
+  /** Only for a client that sent `knownProviderCatalogs`; older servers never send it. */
+  providerCatalogs: Schema.optionalKey(ServerConfigProviderCatalogs),
 });
 export type ServerConfigStreamSnapshotEvent = typeof ServerConfigStreamSnapshotEvent.Type;
 
@@ -436,6 +476,20 @@ export const ServerConfigStreamProviderStatusesEvent = Schema.Struct({
 export type ServerConfigStreamProviderStatusesEvent =
   typeof ServerConfigStreamProviderStatusesEvent.Type;
 
+/**
+ * The provider list changed: what changed since this stream's previous provider
+ * list (its snapshot or its last update). Only sent to a client that asked for
+ * it (`providerStatuses: "delta"`); others receive the whole list as
+ * `providerStatuses`.
+ */
+export const ServerConfigStreamProviderStatusesDeltaEvent = Schema.Struct({
+  version: Schema.Literal(1),
+  type: Schema.Literal("providerStatusesDelta"),
+  payload: ServerConfigProviderStatusesDeltaPayload,
+});
+export type ServerConfigStreamProviderStatusesDeltaEvent =
+  typeof ServerConfigStreamProviderStatusesDeltaEvent.Type;
+
 export const ServerConfigStreamSettingsUpdatedEvent = Schema.Struct({
   version: Schema.Literal(1),
   type: Schema.Literal("settingsUpdated"),
@@ -449,8 +503,27 @@ export const ServerConfigStreamEvent = Schema.Union([
   ServerConfigStreamKeybindingsUpdatedEvent,
   ServerConfigStreamProviderStatusesEvent,
   ServerConfigStreamSettingsUpdatedEvent,
+  ServerConfigStreamProviderStatusesDeltaEvent,
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
+
+export const ServerSubscribeConfigInput = Schema.Struct({
+  /**
+   * `"delta"` asks for provider changes as `providerStatusesDelta` (changed
+   * instances only, unchanged catalogs left out) instead of the whole list on
+   * every change. Older servers ignore the field and keep sending the list.
+   */
+  providerStatuses: Schema.optional(Schema.Literal("delta")),
+  /**
+   * Catalog digests the client already holds. The snapshot then leaves out
+   * (sends empty) every provider catalog with one of these digests and says
+   * which in `providerCatalogs`. Older servers ignore the field.
+   */
+  knownProviderCatalogs: Schema.optional(
+    Schema.Array(ServerProviderCatalogDigest).check(Schema.isMaxLength(64)),
+  ),
+});
+export type ServerSubscribeConfigInput = typeof ServerSubscribeConfigInput.Type;
 
 export const ServerLifecycleReadyPayload = Schema.Struct({
   at: IsoDateTime,

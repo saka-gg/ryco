@@ -2,6 +2,7 @@ import { Array as Arr, Deferred, Effect, Fiber, Option, PubSub, Queue, Ref, Stre
 import {
   type OrchestrationEvent,
   type OrchestrationShellSnapshot,
+  type OrchestrationShellSnapshotDelivery,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadPriorityEntry,
@@ -43,6 +44,7 @@ import {
   rechunkByBudget,
   tapArray,
 } from "./orchestrationStreamBatching.ts";
+import { pageShellSnapshot } from "./shellSnapshotPages.ts";
 
 /**
  * One shared load for the subscribers a thread-priority ranking woke together.
@@ -740,6 +742,15 @@ export const makeOrchestrationStreamHelpers = (deps: {
           ),
         );
 
+  /** A shell snapshot as the subscriber asked to receive it: one item, or pages. */
+  const shellSnapshotItems = (
+    snapshot: OrchestrationShellSnapshot,
+    snapshotDelivery: OrchestrationShellSnapshotDelivery | undefined,
+  ): Stream.Stream<OrchestrationShellStreamItem> =>
+    snapshotDelivery === "paged"
+      ? Stream.fromArrays(...pageShellSnapshot(snapshot))
+      : Stream.make({ kind: "snapshot" as const, snapshot });
+
   /**
    * The shell items a thread-priority ranking sends a subscriber. A client
    * that takes deltas gets the rankings alone (dozens of rows); any other
@@ -749,6 +760,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
   const priorityStream = (
     snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
     threadPriorities: "delta" | undefined,
+    snapshotDelivery: OrchestrationShellSnapshotDelivery | undefined,
   ): Stream.Stream<OrchestrationShellStreamItem, OrchestrationGetSnapshotError> => {
     const loadPriorities = loadThreadPriorityEntries;
     if (threadPriorities === "delta" && loadPriorities !== undefined) {
@@ -763,7 +775,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
       Stream.mapEffect(() =>
         joinPriorityLoad(prioritySnapshotFlights, projectionSnapshotQuery, snapshot),
       ),
-      Stream.map((nextSnapshot) => ({ kind: "snapshot" as const, snapshot: nextSnapshot })),
+      Stream.flatMap((nextSnapshot) => shellSnapshotItems(nextSnapshot, snapshotDelivery)),
     );
   };
 
@@ -792,6 +804,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
     options: {
       readonly resumeFromSequence?: number | undefined;
       readonly threadPriorities?: "delta" | undefined;
+      readonly snapshotDelivery?: OrchestrationShellSnapshotDelivery | undefined;
     } = {},
   ) =>
     Stream.unwrap(
@@ -843,16 +856,23 @@ export const makeOrchestrationStreamHelpers = (deps: {
           dedupeBySequence((event) => event.sequence, snapshotSequence),
           rechunkByBudget({ maxItems: ORCHESTRATION_SHELL_STREAM_CHUNK_MAX_ITEMS }),
         );
-        const priorityItems = priorityStream(snapshot, options.threadPriorities);
+        const priorityItems = priorityStream(
+          snapshot,
+          options.threadPriorities,
+          options.snapshotDelivery,
+        );
 
-        const head: OrchestrationShellStreamItem =
-          loadedSnapshot === undefined
-            ? { kind: "resumed", fromSequence: snapshotSequence }
-            : { kind: "snapshot", snapshot: loadedSnapshot };
+        const resumedItem: OrchestrationShellStreamItem = {
+          kind: "resumed",
+          fromSequence: snapshotSequence,
+        };
         const headItems =
           loadedSnapshot === undefined
-            ? Stream.concat(Stream.make(head), resumedPriorityItems(options.threadPriorities))
-            : Stream.make(head);
+            ? Stream.concat(
+                Stream.make(resumedItem),
+                resumedPriorityItems(options.threadPriorities),
+              )
+            : shellSnapshotItems(loadedSnapshot, options.snapshotDelivery);
         return Stream.concat(headItems, Stream.merge(eventStream, priorityItems)).pipe(
           Stream.ensuring(replayMetrics.reset),
         );

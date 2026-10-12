@@ -1249,12 +1249,64 @@ export const OrchestrationShellThreadPrioritiesItem = Schema.Struct({
 export type OrchestrationShellThreadPrioritiesItem =
   typeof OrchestrationShellThreadPrioritiesItem.Type;
 
+/**
+ * How a client takes the shell snapshot. `"paged"` asks for it in bounded
+ * pieces instead of one message: a `snapshot-begin` header, `snapshot-threads`
+ * pages (every unarchived thread before any archived one), and `snapshot-end`.
+ * The client applies the assembled snapshot at `snapshot-end`, so no message
+ * outgrows a relayed connection however large the shell is, and a client can
+ * show the unarchived threads before the archived ones have arrived.
+ */
+export const OrchestrationShellSnapshotDelivery = Schema.Literal("paged");
+export type OrchestrationShellSnapshotDelivery = typeof OrchestrationShellSnapshotDelivery.Type;
+
+/**
+ * Opens a paged shell snapshot. Everything but the threads, plus how many
+ * `snapshot-threads` will carry: `threadCount` in all, the last
+ * `archivedThreadCount` of them archived.
+ */
+export const OrchestrationShellSnapshotBeginItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-begin"),
+  snapshotSequence: NonNegativeInt,
+  updatedAt: IsoDateTime,
+  projects: Schema.Array(OrchestrationProjectShell),
+  worktrees: Schema.optional(Schema.Array(OrchestrationWorktreeShell)),
+  threadCount: NonNegativeInt,
+  archivedThreadCount: NonNegativeInt,
+});
+export type OrchestrationShellSnapshotBeginItem = typeof OrchestrationShellSnapshotBeginItem.Type;
+
+/** One page of a paged shell snapshot's threads, in snapshot order. */
+export const OrchestrationShellSnapshotThreadsItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-threads"),
+  threads: Schema.Array(OrchestrationThreadShell),
+});
+export type OrchestrationShellSnapshotThreadsItem =
+  typeof OrchestrationShellSnapshotThreadsItem.Type;
+
+/** Closes a paged shell snapshot; the events after its sequence follow. */
+export const OrchestrationShellSnapshotEndItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-end"),
+});
+export type OrchestrationShellSnapshotEndItem = typeof OrchestrationShellSnapshotEndItem.Type;
+
+export const OrchestrationShellSnapshotPageItem = Schema.Union([
+  OrchestrationShellSnapshotBeginItem,
+  OrchestrationShellSnapshotThreadsItem,
+  OrchestrationShellSnapshotEndItem,
+]);
+export type OrchestrationShellSnapshotPageItem = typeof OrchestrationShellSnapshotPageItem.Type;
+
 export const OrchestrationShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
   OrchestrationShellThreadPrioritiesItem,
+  /** Only ever sent to a client that asked for `snapshotDelivery: "paged"`. */
+  OrchestrationShellSnapshotBeginItem,
+  OrchestrationShellSnapshotThreadsItem,
+  OrchestrationShellSnapshotEndItem,
   /**
    * The server accepted `resumeFromSequence`: instead of a snapshot, the events
    * after `fromSequence` follow, and the client keeps the shell it already has.
@@ -1267,6 +1319,15 @@ export const OrchestrationShellStreamItem = Schema.Union([
   OrchestrationShellStreamEvent,
 ]);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
+
+/**
+ * A shell stream item as subscribers see it: a client that takes paged
+ * snapshots reassembles the pages into one `snapshot` item before delivery.
+ */
+export type OrchestrationShellSubscriptionItem = Exclude<
+  OrchestrationShellStreamItem,
+  OrchestrationShellSnapshotPageItem
+>;
 
 export const OrchestrationSubscribeShellInput = Schema.Struct({
   /**
@@ -1283,6 +1344,13 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * ignore the field and keep sending snapshots.
    */
   threadPriorities: Schema.optional(Schema.Literal("delta")),
+  /**
+   * `"paged"` asks for every shell snapshot in bounded pages (see
+   * `OrchestrationShellSnapshotDelivery`). Absent, a snapshot is one `snapshot`
+   * item, which every client understands; older servers ignore the field and
+   * keep sending that.
+   */
+  snapshotDelivery: Schema.optional(OrchestrationShellSnapshotDelivery),
 });
 export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 

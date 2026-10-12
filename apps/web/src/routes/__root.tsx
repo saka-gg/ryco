@@ -22,6 +22,7 @@ import {
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
 import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
+import { isPrimaryShellCacheEligible } from "../persistence/primaryShellCacheEligibility";
 import { hostedPwaLifecycle } from "../pwa/lifecycle";
 import { useHostedPwaSnapshot } from "../pwa/useHostedPwaSnapshot";
 import {
@@ -80,6 +81,9 @@ export const Route = createRootRouteWithContext<Record<string, never>>()({
   pendingMinMs: 0,
   pendingMs: 0,
 });
+
+/** How long a boot waits for the cached primary shell before rendering without it. */
+const PRIMARY_SHELL_CACHE_BOOT_WAIT_MS = 150;
 
 function isNativeAuthorizationPath(pathname: string): boolean {
   return pathname.startsWith("/native/authorize/");
@@ -251,20 +255,101 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     };
   }
 
+  // The primary environment's last-known shell is read while the auth and
+  // descriptor requests are on the wire, so the sidebar can paint it before
+  // the live snapshot arrives (see persistence/primaryShellCache).
+  const keepsLocalCaches = isPrimaryShellCacheEligible({
+    hostname: currentUrl.hostname,
+    desktop: isElectron,
+  });
+  const primaryShellCache =
+    keepsLocalCaches && pathname !== "/pair" && !isNativeAuthorizationPath(pathname)
+      ? loadPrimaryShellCache()
+      : null;
+  // Provider catalogs this page already holds, so the config snapshot can
+  // leave them out (loaded here, ahead of the first config subscription).
+  const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
   const { ensurePrimaryEnvironmentReady, resolveInitialServerAuthGateState } =
     await import("../environments/primary");
   const [, authGateState] = await Promise.all([
     ensurePrimaryEnvironmentReady(),
     resolveInitialServerAuthGateState(),
   ]);
-  markStartupPhase("root-before-load-ready");
-  measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
   if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
     startPrimaryConnectionEarly();
+    if (primaryShellCache !== null) await restorePrimaryShellCache(primaryShellCache);
+  } else if (authGateState.status !== "authenticated") {
+    // The server no longer accepts this browser's session: what it cached goes.
+    void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
+    void providerCatalogs?.then((clear) => clear?.());
   }
+  markStartupPhase("root-before-load-ready");
+  measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
   return {
     authGateState,
   };
+}
+
+/** Resolves to a function that drops the persisted catalogs, or `null` when unavailable. */
+function attachProviderCatalogPersistence(): Promise<(() => Promise<void>) | null> {
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  return Promise.all([
+    import("@ryco/client-runtime/rpc"),
+    import("../persistence/providerCatalogStore"),
+  ])
+    .then(async ([{ providerCatalogCache }, { createIndexedDbProviderCatalogStore }]) => {
+      const store = createIndexedDbProviderCatalogStore({
+        factory: indexedDB,
+        origin: window.location.origin,
+      });
+      await providerCatalogCache.attachStore(store);
+      return async () => {
+        providerCatalogCache.clear();
+        await store.clear().catch(() => undefined);
+      };
+    })
+    .catch(() => null);
+}
+
+type PrimaryShellCacheModule = typeof import("../persistence/primaryShellCache");
+interface LoadedPrimaryShellCache {
+  readonly cache: PrimaryShellCacheModule;
+  readonly value: unknown;
+}
+
+function loadPrimaryShellCache(): Promise<LoadedPrimaryShellCache | null> {
+  return import("../persistence/primaryShellCache")
+    .then(async (cache) => ({ cache, value: await cache.readPrimaryShellCache() }))
+    .catch(() => null);
+}
+
+/**
+ * Paints the cached primary shell (when the store has nothing live for it)
+ * and starts keeping the cache current. Waits a bounded time for a slow read
+ * rather than holding the boot on storage; a read that loses the race still
+ * hydrates when it lands, unless live data has arrived by then.
+ */
+async function restorePrimaryShellCache(
+  pending: Promise<LoadedPrimaryShellCache | null>,
+): Promise<void> {
+  const restore = pending.then(async (loaded) => {
+    if (loaded === null) return;
+    const { readPrimaryEnvironmentDescriptor } = await import("../environments/primary");
+    const environmentId = readPrimaryEnvironmentDescriptor()?.environmentId;
+    if (!environmentId) return;
+    if (loaded.cache.hydratePrimaryShellFromCache({ value: loaded.value, environmentId })) {
+      markStartupPhase("primary-shell-cache-hydrated");
+    }
+    loaded.cache.startPrimaryShellCachePersistence({ environmentId });
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    restore.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, PRIMARY_SHELL_CACHE_BOOT_WAIT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /**

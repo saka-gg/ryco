@@ -531,6 +531,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               {
                 resumeFromSequence: input.resumeFromSequence,
                 threadPriorities: input.threadPriorities,
+                snapshotDelivery: input.snapshotDelivery,
               },
             ).pipe(
               observeArrays(isServerPerfProfileEnabled(), (items) =>

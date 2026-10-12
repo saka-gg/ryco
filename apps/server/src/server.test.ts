@@ -25,6 +25,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationProjectShell,
   type ServerChatsCapability,
+  type ServerSubscribeConfigInput,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderDriverKind,
@@ -3470,6 +3471,135 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect(
+    "routes websocket rpc subscribeServerConfig sends only changed providers to a delta client",
+    () =>
+      Effect.gen(function* () {
+        const model = {
+          slug: "gpt-5",
+          name: "GPT-5",
+          isCustom: false,
+          capabilities: null,
+        } as const;
+        const provider = (instanceId: string, status: "ready" | "error") => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status,
+          auth: { status: "authenticated" as const },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [model],
+          slashCommands: [],
+          skills: [],
+        });
+        const initial = [provider("codex", "ready"), provider("codex-work", "ready")];
+        // The second list changes one instance's status only; its catalogs are equal.
+        const changed = [provider("codex", "ready"), provider("codex-work", "error")];
+
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed(initial),
+              streamChanges: Stream.succeed(changed),
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const events = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.subscribeServerConfig]({ providerStatuses: "delta" }).pipe(
+              Stream.take(2),
+              Stream.runCollect,
+            ),
+          ),
+        );
+
+        const [first, second] = Array.from(events);
+        assert.equal(first?.type, "snapshot");
+        assert.equal(second?.type, "providerStatusesDelta");
+        if (second?.type !== "providerStatusesDelta") return;
+        assert.deepEqual(second.payload.instanceIds.map(String), ["codex", "codex-work"]);
+        assert.equal(second.payload.providers.length, 1);
+        const update = second.payload.providers[0]!;
+        assert.equal(update.instanceId, "codex-work");
+        assert.equal(update.status, "error");
+        assert.isFalse("models" in update);
+        assert.isFalse("skills" in update);
+        assert.isFalse("slashCommands" in update);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes websocket rpc subscribeServerConfig leaves out catalogs the client already holds",
+    () =>
+      Effect.gen(function* () {
+        const provider = (instanceId: string, slug: string) => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          driver: ProviderDriverKind.make("codex"),
+          enabled: true,
+          installed: true,
+          version: "1.0.0",
+          status: "ready" as const,
+          auth: { status: "authenticated" as const },
+          checkedAt: "2026-04-11T00:00:00.000Z",
+          models: [{ slug, name: slug, isCustom: false, capabilities: null }],
+          slashCommands: [],
+          skills: [],
+        });
+        const codex = provider("codex", "gpt-5");
+        const claude = provider("claude", "opus");
+        yield* buildAppUnderTest({
+          layers: {
+            keybindings: {
+              loadConfigState: Effect.succeed({ keybindings: [], issues: [] }),
+              streamChanges: Stream.empty,
+            },
+            providerRegistry: {
+              getProviders: Effect.succeed([codex, claude]),
+              streamChanges: Stream.empty,
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const subscribe = (input: ServerSubscribeConfigInput) =>
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.subscribeServerConfig](input).pipe(
+                Stream.take(1),
+                Stream.runCollect,
+                Effect.map((events) => Array.from(events)[0]),
+              ),
+            ),
+          );
+        const first = yield* subscribe({ knownProviderCatalogs: [] });
+        assert.equal(first?.type, "snapshot");
+        if (first?.type !== "snapshot") return;
+        const codexDigest = first.providerCatalogs?.digests[codex.instanceId];
+        assert.isString(codexDigest);
+        assert.deepEqual(first.providerCatalogs?.omitted, []);
+
+        const second = yield* subscribe({ knownProviderCatalogs: [codexDigest!] });
+        if (second?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.deepEqual(second.providerCatalogs?.omitted.map(String), ["codex"]);
+        assert.deepEqual(second.config.providers[0]?.models, []);
+        assert.deepEqual(second.config.providers[1]?.models, claude.models);
+
+        // A client that names nothing gets the snapshot older clients get.
+        const legacy = yield* subscribe({});
+        if (legacy?.type !== "snapshot") return assert.fail("expected a snapshot");
+        assert.isFalse("providerCatalogs" in legacy);
+        assert.deepEqual(legacy.config.providers[0]?.models, codex.models);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc subscribeServerConfig re-snapshots chats changes", () =>
     Effect.gen(function* () {
       const available = { available: true, root: "/chats" } as const;
@@ -5923,12 +6053,110 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(
-        result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
-            ? item.kind
-            : item.sequence,
-        ),
+        result.map((item) => ("sequence" in item ? item.sequence : item.kind)),
         ["snapshot", 11, 12],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const pagedShellThread = (id: string, archivedAt: string | null) => ({
+    id: ThreadId.make(id),
+    projectId: ProjectId.make("project-paged"),
+    title: `Thread ${id}`,
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "fixture" },
+    runtimeMode: "approval-required" as const,
+    interactionMode: "default" as const,
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    goal: null,
+    createdAt: "2026-04-05T00:00:00.000Z",
+    updatedAt: "2026-04-05T00:00:00.000Z",
+    archivedAt,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  });
+
+  const buildPagedShellApp = Effect.gen(function* () {
+    const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+    yield* buildAppUnderTest({
+      layers: {
+        orchestrationEngine: {
+          readEventsPage: (fromSequenceExclusive) =>
+            Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
+          subscribeDomainEvents: PubSub.subscribe(livePubSub),
+        },
+        projectionSnapshotQuery: {
+          getShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 7,
+              projects: [],
+              threads: [
+                pagedShellThread("archived-1", "2026-04-04T00:00:00.000Z"),
+                pagedShellThread("live-1", null),
+                pagedShellThread("live-2", null),
+              ],
+              updatedAt: "2026-04-05T00:00:00.000Z",
+            }),
+        },
+      },
+    });
+  });
+
+  it.effect("pages the shell snapshot for a client that asks for it", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const items = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({ snapshotDelivery: "paged" }).pipe(
+            Stream.takeUntil((item) => item.kind === "snapshot-end"),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)),
+          ),
+        ),
+      );
+
+      assert.equal(items[0]?.kind, "snapshot-begin");
+      const begin = items[0];
+      assertTrue(begin?.kind === "snapshot-begin");
+      assert.equal(begin.snapshotSequence, 7);
+      assert.equal(begin.threadCount, 3);
+      assert.equal(begin.archivedThreadCount, 1);
+      assert.deepEqual(
+        items.flatMap((item) =>
+          item.kind === "snapshot-threads" ? item.threads.map((thread) => thread.id) : [],
+        ),
+        ["live-1", "live-2", "archived-1"],
+      );
+      assert.equal(items.at(-1)?.kind, "snapshot-end");
+      assertTrue(items.every((item) => item.kind !== "snapshot"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("sends one snapshot item to a client that does not ask for pages", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)[0]),
+          ),
+        ),
+      );
+
+      assertTrue(first?.kind === "snapshot");
+      assert.deepEqual(
+        first.snapshot.threads.map((thread) => thread.id),
+        ["archived-1", "live-1", "live-2"],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -6182,11 +6410,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(replayPageCursors, [10, 11]);
       assert.deepEqual(
-        result.map((item) =>
-          item.kind === "snapshot" || item.kind === "resumed" || item.kind === "thread-priorities"
-            ? item.kind
-            : item.sequence,
-        ),
+        result.map((item) => ("sequence" in item ? item.sequence : item.kind)),
         ["snapshot", 11, 12],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),

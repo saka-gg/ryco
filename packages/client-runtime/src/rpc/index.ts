@@ -3,6 +3,7 @@ export * from "./attachmentRead.ts";
 export * from "./invalidation.ts";
 export * from "./keyedQuery.ts";
 export * from "./protocol.ts";
+export * from "./providerCatalogCache.ts";
 export * from "./deviceRpcClient.ts";
 export * from "./requestLatencyState.ts";
 export * from "./serverState.ts";

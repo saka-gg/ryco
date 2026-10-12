@@ -332,4 +332,50 @@ describe("serverState", () => {
     unsubscribeConfig();
     stop();
   });
+  it("applies a provider delta onto the list the stream sent and reports it as a provider update", async () => {
+    const configListener = vi.fn();
+    const providersListener = vi.fn();
+    const stop = startServerStateSync(serverApi);
+    const unsubscribeConfig = onServerConfigUpdated(configListener);
+    const unsubscribeProviders = onProvidersUpdated(providersListener);
+    const model = { slug: "gpt-5", name: "GPT-5", isCustom: false, capabilities: null };
+    const codex = { ...defaultProviders[0]!, models: [model] };
+    const work: ServerProvider = {
+      ...codex,
+      instanceId: ProviderInstanceId.make("codex-work"),
+    };
+
+    emitServerConfigEvent({
+      version: 1,
+      type: "snapshot",
+      config: { ...baseServerConfig, providers: [codex, work] },
+    });
+    await waitFor(() => expect(getServerConfig()?.providers).toHaveLength(2));
+
+    const { models: _models, skills: _skills, slashCommands: _slashCommands, ...status } = work;
+    emitServerConfigEvent({
+      version: 1,
+      type: "providerStatusesDelta",
+      payload: {
+        instanceIds: [work.instanceId, codex.instanceId],
+        providers: [{ ...status, status: "error" }],
+      },
+    });
+
+    await waitFor(() => {
+      const providers = getServerConfig()?.providers ?? [];
+      expect(providers.map((provider) => provider.instanceId)).toEqual(["codex-work", "codex"]);
+      // The untouched instance keeps its object; the changed one keeps its catalogs.
+      expect(providers[1]).toBe(getServerConfig()?.providers[1]);
+      expect(providers[0]).toEqual({ ...work, status: "error" });
+    });
+    expect(providersListener).toHaveBeenLastCalledWith({
+      providers: getServerConfig()?.providers,
+    });
+    expect(configListener).toHaveBeenLastCalledWith(expect.anything(), "providerStatuses");
+
+    unsubscribeProviders();
+    unsubscribeConfig();
+    stop();
+  });
 });
