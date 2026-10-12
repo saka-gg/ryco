@@ -5,6 +5,7 @@ import { clean, concatBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { encode, rfc8949EncodeOptions } from "cborg";
 
 import {
+  E2EE_AEAD_TAG_BYTES,
   E2EE_CLOSE_COMMITMENT_BYTES,
   E2EE_CLOSE_RECORDS_RESERVED,
   E2EE_COUNTER_FIELD_BYTES,
@@ -21,6 +22,7 @@ import {
   E2EE_SECRET_BYTES,
   E2EE_SESSION_BINDING_HASH_BYTES,
 } from "./relayE2eeConstants.ts";
+import { e2eeNativePrimitives } from "./relayE2eeKeys.ts";
 import type { E2eeNoiseHandshake, E2eeNoiseSessionKeys } from "./relayE2eeNoise.ts";
 import {
   E2EE_DIRECTION_CLIENT_TO_NODE,
@@ -405,8 +407,39 @@ const suiteRecordAead: E2eeRecordAeadFactory = ({ version, suite, key }) => {
   }
   requireSecret(key, "AEAD key");
   return {
-    seal: (nonce, plaintext, aad) => chacha20poly1305(key, nonce, aad).encrypt(plaintext),
-    open: (nonce, ciphertext, aad) => chacha20poly1305(key, nonce, aad).decrypt(ciphertext),
+    seal: (nonce, plaintext, aad) => {
+      // §14.7: RFC 8439 sealing is a deterministic function of (key, nonce,
+      // AAD, plaintext), so a native seal is the pinned seal byte for byte.
+      // Small records stay on the pinned primitive, which is faster there.
+      const native = e2eeNativePrimitives()?.chacha20Poly1305;
+      if (native !== undefined && plaintext.byteLength >= native.minBytes) {
+        try {
+          return native.seal(key, nonce, plaintext, aad);
+        } catch {
+          // Answered by the pinned primitive below.
+        }
+      }
+      return chacha20poly1305(key, nonce, aad).encrypt(plaintext);
+    },
+    open: (nonce, ciphertext, aad) => {
+      // §14.7: a native open that returns has authenticated the tag, so the
+      // pinned primitive accepts the same input and yields the same plaintext.
+      // Every native failure — including every authentication failure — is
+      // decided again by the pinned primitive, whose throw is the one §9.2
+      // classifies, so the rejected set is exactly the pinned primitive's.
+      const native = e2eeNativePrimitives()?.chacha20Poly1305;
+      if (
+        native !== undefined &&
+        ciphertext.byteLength - E2EE_AEAD_TAG_BYTES >= Math.max(native.minBytes, 0)
+      ) {
+        try {
+          return native.open(key, nonce, ciphertext, aad);
+        } catch {
+          // Answered by the pinned primitive below.
+        }
+      }
+      return chacha20poly1305(key, nonce, aad).decrypt(ciphertext);
+    },
   };
 };
 

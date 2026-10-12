@@ -6,7 +6,17 @@
  * only reachable once a Hub origin is configured and something asks for it.
  * `main.ts` imports this module dynamically; never import it statically there
  * (`desktopMainBundleSplitting.test.ts` guards that).
+ *
+ * Loading it installs the `node:crypto` relay E2EE primitives for the main
+ * process (§14.7 of docs/relay-e2ee-protocol.md): every E2EE operation the
+ * desktop performs is reached through this stack, Electron's BoringSSL passes
+ * the self-tests for X25519, Ed25519 and P-256, and the record AEAD stays on
+ * the pinned primitive because BoringSSL exposes no ChaCha20-Poly1305 there.
  */
+import { installE2eeNodeNativePrimitives } from "@ryco/shared/relayE2eeNodeCrypto";
+
+installE2eeNodeNativePrimitives();
+
 export {
   createNativeSecurityHelperRunner,
   desktopNativeInstallationNamespace,
