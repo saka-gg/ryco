@@ -76,7 +76,7 @@ const hostedHubApi = {
   signOut: vi.fn(),
   bootstrapOwner: vi.fn(),
   redeemInvitation: vi.fn(),
-  listNodes: vi.fn(),
+  listNodes: vi.fn(async () => []),
   listPasskeys: vi.fn(),
   listE2eeDevices: vi.fn(),
   getAccountSecurity: vi.fn(),
@@ -623,7 +623,9 @@ describe("hosted account state", () => {
         accountStatus: "signed-out",
         account: null,
       });
-      expect(listNodes).not.toHaveBeenCalled();
+      // Only the read held beside the replaced check went out, and it was dropped.
+      expect(listNodes).toHaveBeenCalledOnce();
+      expect(listNodes.mock.calls[0]?.[0]?.aborted).toBe(true);
 
       finishCommit(true);
       await expect(adopted).resolves.toBe(true);
@@ -1789,6 +1791,8 @@ describe("hosted registration and directory state", () => {
       .mockResolvedValue(sessionResponse);
     const listNodes = vi
       .spyOn(hostedHubApi, "listNodes")
+      // The read held beside the restore, then the ordinary read after it.
+      .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
       .mockRejectedValueOnce(new HostedHubApiError("unavailable", 0))
       .mockResolvedValue([selected]);
 
@@ -1804,7 +1808,7 @@ describe("hosted registration and directory state", () => {
     await vi.waitFor(() => expect(restoreSession).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
 
-    expect(listNodes).toHaveBeenCalledTimes(3);
+    expect(listNodes).toHaveBeenCalledTimes(4);
     expect(hostedHubStore.getState()).toMatchObject({
       browserStatus: "synchronizing",
       directoryStatus: "ready",
@@ -2030,7 +2034,9 @@ describe("hosted registration and directory state", () => {
 
     finishCheck(sessionResponse);
     await vi.waitFor(() => expect(hostedHubStore.getState().browserStatus).toBe("current"));
-    expect(listNodes).toHaveBeenCalledOnce();
+    // One read held beside each check; the aborted check's is dropped.
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(listNodes.mock.calls[0]?.[0]?.aborted).toBe(true);
     expect(activateHostedNode).not.toHaveBeenCalled();
   });
 
@@ -4047,24 +4053,56 @@ describe("cookie-mode access checks", () => {
     });
   });
 
-  it("keeps bearer-mode access checks serial and on the full deadline", async () => {
+  it("reads the directory beside a bearer-mode access check on the full deadline", async () => {
     Object.defineProperty(hostedHubApi, "credentialMode", {
       configurable: true,
       get: () => "bearer",
     });
     const order: string[] = [];
-    vi.spyOn(hostedHubApi, "restoreSession").mockImplementation(async (...args) => {
+    const session = deferred<HostedHubSessionResponse>();
+    vi.spyOn(hostedHubApi, "restoreSession").mockImplementation((...args) => {
       order.push(`session:${args.length > 1 ? JSON.stringify(args[1]) : "default"}`);
-      return sessionResponse;
+      return session.promise;
     });
-    vi.spyOn(hostedHubApi, "listNodes").mockImplementation(async () => {
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockImplementation(async () => {
       order.push("directory");
       return [node()];
     });
 
+    const bootstrapping = hostedHubController.bootstrap();
+    expect(order).toEqual(["session:undefined", "directory"]);
+    await Promise.resolve();
+    expect(hostedHubStore.getState()).toMatchObject({ accountStatus: "signed-out", nodes: [] });
+    session.resolve(sessionResponse);
+    await bootstrapping;
+
+    expect(listNodes).toHaveBeenCalledOnce();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [node()],
+    });
+  });
+
+  it("keeps a bearer token when only the read beside its restore was refused", async () => {
+    Object.defineProperty(hostedHubApi, "credentialMode", {
+      configurable: true,
+      get: () => "bearer",
+    });
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const listNodes = vi
+      .spyOn(hostedHubApi, "listNodes")
+      .mockRejectedValueOnce(new HostedHubApiError("session_invalid", 401))
+      .mockResolvedValueOnce([node()]);
+
     await hostedHubController.bootstrap();
 
-    expect(order).toEqual(["session:undefined", "directory"]);
+    expect(listNodes).toHaveBeenCalledTimes(2);
+    expect(hostedHubApi.clearSessionMaterial).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+    });
   });
 
   it("decides a stalled bearer access check at the short bound without abandoning its answer", async () => {

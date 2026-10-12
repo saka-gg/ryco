@@ -447,11 +447,15 @@ function reconcileDirectoryNodes(
 }
 
 /**
- * A directory read sent beside a session restore, in cookie mode only.
+ * A directory read sent beside a session restore.
  *
- * Both requests carry the same ambient cookie and the read needs nothing from
+ * Both requests carry the same credential — the ambient cookie, or the stored
+ * DPoP-bound token with a proof of its own — and the read needs nothing from
  * the restore's answer, so overlapping them takes a Hub round trip off every
- * cold start and resume. Its answer is held, never published by itself: only
+ * cold start and resume. In bearer mode this relies on the Hub never rotating
+ * the token on `GET /api/auth/session` (it answers the account and session
+ * only); a read failing on a token the restore did rotate would still be
+ * non-authoritative below, and a bearer `401` on this read clears nothing. Its answer is held, never published by itself: only
  * after the restore has validated the session does `#refreshDirectory` commit
  * it, under the same session fence an ordinary read has. `null` — the read
  * failed, was abandoned, or answered for a check that was replaced — is never
@@ -850,9 +854,8 @@ class HostedHubController {
     return { deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS };
   }
 
-  /** In cookie mode, the directory read sent beside an access check; see {@link HostedDirectoryPrefetch}. */
-  #prefetchDirectory(signal: AbortSignal): HostedDirectoryPrefetch | null {
-    if (getHostedHubApi().credentialMode !== "cookie") return null;
+  /** The directory read sent beside an access check; see {@link HostedDirectoryPrefetch}. */
+  #prefetchDirectory(signal: AbortSignal): HostedDirectoryPrefetch {
     return prefetchHostedDirectory(signal);
   }
 
