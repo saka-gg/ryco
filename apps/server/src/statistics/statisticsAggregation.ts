@@ -67,7 +67,10 @@ export const StatisticsTurnRow = Schema.Struct({
   startedAt: Schema.NullOr(Schema.String),
   completedAt: Schema.NullOr(Schema.String),
   checkpointTurnCount: Schema.NullOr(Schema.Number),
-  filesJson: Schema.String,
+  /** Checkpoint file totals, summed by SQLite (see selectStatisticsTurns). */
+  filesChanged: Schema.Number,
+  additions: Schema.Number,
+  deletions: Schema.Number,
 });
 export type StatisticsTurnRow = typeof StatisticsTurnRow.Type;
 
@@ -249,15 +252,6 @@ function addCumulativeUsage(bucket: BucketCounters, payload: Payload): void {
   bucket.totalTokens += bestCumulativeTotalTokenCount(payload);
 }
 
-function safeParseArray(json: string): ReadonlyArray<unknown> {
-  try {
-    const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
 /** Rows of one thread, in the token query's (createdAt, sequence) order. */
 export interface StatisticsThreadRows {
   readonly tokens: Array<StatisticsTokenActivityRow>;
@@ -414,14 +408,9 @@ export function computeStatisticsThreadPartial(
           }
         }
       }
-      const files = safeParseArray(row.filesJson);
-      if (files.length > 0) {
-        bucket.filesChanged += files.length;
-        for (const file of files) {
-          bucket.additions += num((file as Record<string, unknown> | null)?.additions);
-          bucket.deletions += num((file as Record<string, unknown> | null)?.deletions);
-        }
-      }
+      bucket.filesChanged += row.filesChanged;
+      bucket.additions += row.additions;
+      bucket.deletions += row.deletions;
     }
 
     // ── Tool uses (completed tool calls) ────────────────────────────────

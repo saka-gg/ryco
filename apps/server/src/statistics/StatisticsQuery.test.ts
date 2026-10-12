@@ -4,16 +4,23 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
-import { assert, it } from "@effect/vitest";
-import { Effect, Layer, Schema } from "effect";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, describe, it } from "@effect/vitest";
+import { Deferred, Effect, Fiber, Layer, Schema, Scope } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
 import { StatisticsSnapshot } from "@ryco/contracts";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../persistence/Layers/Sqlite.ts";
+import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import {
   selectStatisticsTokenActivities,
   selectStatisticsToolUses,
+  makeStatisticsQuery,
+  STATISTICS_PARTIAL_FORMAT_VERSION,
   StatisticsQuery,
   StatisticsQueryLive,
 } from "./StatisticsQuery.ts";
@@ -1358,6 +1365,257 @@ statisticsLayer("forked threads", (it) => {
         plan.some((row) => row.detail.includes("idx_orch_events_statistics_usage")),
         JSON.stringify(plan),
       );
+    }),
+  );
+});
+
+/** A file database with the production persistence layer (read worker included). */
+const withFileDatabase = <A, E>(
+  body: (filename: string) => Effect.Effect<A, E, Scope.Scope>,
+): Effect.Effect<A, E> =>
+  Effect.gen(function* () {
+    const directory = yield* Effect.acquireRelease(
+      Effect.sync(() => mkdtempSync(join(tmpdir(), "ryco-statistics-persisted-"))),
+      (directory) => Effect.sync(() => rmSync(directory, { recursive: true, force: true })),
+    );
+    return yield* body(join(directory, "state.sqlite"));
+  }).pipe(Effect.scoped);
+
+const fileStatistics = (filename: string) =>
+  StatisticsQueryLive.pipe(
+    Layer.provideMerge(makeSqlitePersistenceLive(filename)),
+    Layer.provide(NodeServices.layer),
+  );
+
+const seedTwoThreads = (sql: SqlClient.SqlClient) =>
+  Effect.gen(function* () {
+    yield* insertProject(sql, "persist-project", "Persisted");
+    for (const threadId of ["persist-a", "persist-b"]) {
+      yield* insertThread(
+        sql,
+        threadId,
+        "persist-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      yield* insertContextEvent(
+        sql,
+        `${threadId}-1`,
+        threadId,
+        "turn-1",
+        "2026-06-10T00:00:01.000Z",
+        {
+          lastInputTokens: 50,
+          lastOutputTokens: 5,
+          lastUsedTokens: 55,
+        },
+      );
+      yield* insertTurn(
+        sql,
+        threadId,
+        "turn-1",
+        1,
+        "2026-06-10T00:00:00.000Z",
+        "2026-06-10T00:00:30.000Z",
+        '[{"path":"a.ts","kind":"modified","additions":3,"deletions":1}]',
+      );
+    }
+    yield* markProjected(sql);
+  });
+
+describe("persisted statistics partials", () => {
+  it.effect("restarts incrementally from the partials the previous process persisted", () =>
+    withFileDatabase((filename) =>
+      Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* seedTwoThreads(sql);
+          const first = yield* (yield* StatisticsQuery).getStatistics();
+          assert.equal(first.totals.totalTokens, 110);
+          assert.equal(first.totals.additions, 6);
+          const [persisted] = yield* sql<{ readonly count: number }>`
+            SELECT COUNT(*) AS count FROM statistics_thread_partials
+          `;
+          assert.equal(persisted?.count, 2);
+        }).pipe(Effect.provide(fileStatistics(filename)));
+
+        // A new process (fresh layer). Production writes thread rows only together with an
+        // event; this bypassing write shows thread B's partial was restored, not re-read.
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE projection_turns SET checkpoint_files_json = '[]' WHERE thread_id = 'persist-b'`;
+          yield* insertContextEvent(
+            sql,
+            "persist-a-2",
+            "persist-a",
+            "turn-2",
+            "2026-06-10T00:00:02.000Z",
+            {
+              lastInputTokens: 10,
+              lastOutputTokens: 1,
+              lastUsedTokens: 11,
+            },
+          );
+          yield* markProjected(sql);
+          const restarted = yield* (yield* StatisticsQuery).getStatistics();
+          assert.equal(restarted.totals.totalTokens, 121);
+          assert.equal(restarted.totals.additions, 6);
+          assert.equal((yield* recompute(sql, yield* StatisticsQuery)).totals.additions, 3);
+        }).pipe(Effect.provide(fileStatistics(filename)));
+      }),
+    ),
+  );
+
+  it.effect("drops persisted partials written under another format or schema", () =>
+    withFileDatabase((filename) =>
+      Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* seedTwoThreads(sql);
+          yield* (yield* StatisticsQuery).getStatistics();
+          yield* sql`UPDATE projection_turns SET checkpoint_files_json = '[]' WHERE thread_id = 'persist-b'`;
+          yield* sql`UPDATE statistics_partials_state SET format_version = format_version + 1`;
+        }).pipe(Effect.provide(fileStatistics(filename)));
+
+        yield* Effect.gen(function* () {
+          const snapshot = yield* (yield* StatisticsQuery).getStatistics();
+          // Everything recomputed: thread B's emptied files are visible.
+          assert.equal(snapshot.totals.additions, 3);
+          const sql = yield* SqlClient.SqlClient;
+          const [state] = yield* sql<{ readonly formatVersion: number }>`
+            SELECT format_version AS "formatVersion" FROM statistics_partials_state
+          `;
+          assert.equal(state?.formatVersion, STATISTICS_PARTIAL_FORMAT_VERSION);
+        }).pipe(Effect.provide(fileStatistics(filename)));
+      }),
+    ),
+  );
+
+  it.effect("reads statistics rows on the worker connection with identical results", () =>
+    withFileDatabase((filename) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const reader = yield* SqliteReadClient;
+        assert.notStrictEqual(reader, sql);
+        yield* seedTwoThreads(sql);
+        const before = (
+          reader as unknown as { readWorkerStats: () => { workerStatements: number } }
+        ).readWorkerStats().workerStatements;
+        const snapshot = yield* (yield* StatisticsQuery).getStatistics();
+        const after = (
+          reader as unknown as { readWorkerStats: () => { workerStatements: number } }
+        ).readWorkerStats().workerStatements;
+        assert.isAbove(after, before);
+        assert.deepEqual(
+          withoutGeneratedAt(snapshot),
+          withoutGeneratedAt(yield* recompute(sql, yield* StatisticsQuery)),
+        );
+      }).pipe(Effect.provide(fileStatistics(filename))),
+    ),
+  );
+});
+
+it.live("answers with the previous snapshot while a slow refresh runs, then refreshes", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const statistics = yield* StatisticsQuery;
+    yield* clean(sql);
+    yield* insertProject(sql, "swr-project", "Before");
+    yield* insertThread(
+      sql,
+      "swr-thread",
+      "swr-project",
+      "codex",
+      "gpt-5.4",
+      "2026-06-10T00:00:00.000Z",
+    );
+    const previous = yield* statistics.getStatistics();
+    yield* sql`UPDATE projection_projects SET title = 'After' WHERE project_id = 'swr-project'`;
+
+    // Hold the only connection, so the refresh cannot read its revision.
+    const release = yield* Deferred.make<void>();
+    const holding = yield* Deferred.make<void>();
+    const holder = yield* Effect.forkChild(
+      sql.withTransaction(
+        Deferred.succeed(holding, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ),
+    );
+    yield* Deferred.await(holding);
+    const stale = yield* statistics.getStatistics({ maxWaitMs: 20 });
+    assert.strictEqual(stale, previous);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+
+    // The background refresh completes; the next answer is current.
+    const fresh = yield* statistics.getStatistics({ maxWaitMs: 5_000 });
+    assert.equal(fresh.projects[0]?.title, "After");
+  }).pipe(Effect.provide(StatisticsQueryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)))),
+);
+
+statisticsLayer("statistics stale-while-revalidate", (it) => {
+  it.effect("waits for the first snapshot when there is none to serve", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* clean(sql);
+      yield* insertProject(sql, "swr-first", "First");
+      yield* insertThread(
+        sql,
+        "swr-first-thread",
+        "swr-first",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      // A fresh service instance has no snapshot yet.
+      const snapshot = yield* Effect.scoped(
+        Effect.flatMap(makeStatisticsQuery, (statistics) =>
+          statistics.getStatistics({ maxWaitMs: 0 }),
+        ),
+      );
+      assert.equal(snapshot.projects[0]?.title, "First");
+    }),
+  );
+});
+
+statisticsLayer("statistics checkpoint file totals", (it) => {
+  it.effect("sums files in SQL like the former JS parse, tolerating malformed rows", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const statistics = yield* StatisticsQuery;
+      yield* clean(sql);
+      yield* insertProject(sql, "files-project", "Files");
+      yield* insertThread(
+        sql,
+        "files-thread",
+        "files-project",
+        "codex",
+        "gpt-5.4",
+        "2026-06-10T00:00:00.000Z",
+      );
+      const files: ReadonlyArray<string> = [
+        '[{"path":"a.ts","kind":"modified","additions":3,"deletions":1},{"path":"b.ts","kind":"added","additions":"7","deletions":2.5}]',
+        "not json",
+        '{"path":"x.ts"}',
+        '[null, 4, {"additions":1}]',
+        "[]",
+      ];
+      for (const [index, json] of files.entries()) {
+        yield* insertTurn(
+          sql,
+          "files-thread",
+          `turn-${index}`,
+          index + 1,
+          "2026-06-10T00:00:00.000Z",
+          "2026-06-10T00:00:30.000Z",
+          json,
+        );
+      }
+      const snapshot = yield* statistics.getStatistics();
+      // 2 + 0 + 0 + 3 + 0 files; numeric additions/deletions only.
+      assert.equal(snapshot.totals.filesChanged, 5);
+      assert.equal(snapshot.totals.additions, 4);
+      assert.equal(snapshot.totals.deletions, 3.5);
     }),
   );
 });
