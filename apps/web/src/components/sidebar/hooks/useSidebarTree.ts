@@ -136,7 +136,8 @@ export type ComposeSidebarTreeStructureInput = Pick<
 export interface DecorateSidebarTreeInput {
   diffStatsByWorktreeId?: ReadonlyMap<string, SidebarWorktreeDiffStats | null> | undefined;
   diffStatsByWorktreeIdRecord?: Record<string, SidebarWorktreeDiffStats | null> | undefined;
-  nowMs: number;
+  /** For archive suggestions; the current time when absent. */
+  nowMs?: number | undefined;
   /**
    * Replaces a session before it is bucketed (e.g. with a status pill that
    * reflects when the user last visited it). Called once per session; must
@@ -229,6 +230,7 @@ export function decorateSidebarTreeProject(
   project: SidebarTreeStructureProject,
   input: DecorateSidebarTreeInput,
 ): SidebarTreeProject {
+  const nowMs = input.nowMs ?? Date.now();
   const restatus = input.restatusThread;
   const restatused = new Map<SidebarTreeThread, SidebarTreeThread>();
   const restatusOne = (thread: SidebarTreeThread) => {
@@ -245,7 +247,7 @@ export function decorateSidebarTreeProject(
   const composeNode = (node: SidebarTreeStructureNode) =>
     composeWorktreeNode({
       diffStats: getDiffStats(input, node.worktree.worktreeId),
-      nowMs: input.nowMs,
+      nowMs,
       threads: restatusAll(node.threads),
       worktree: node.worktree,
     });

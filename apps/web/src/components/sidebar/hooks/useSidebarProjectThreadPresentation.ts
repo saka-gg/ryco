@@ -163,7 +163,6 @@ export function useSidebarProjectThreadPresentation(params: {
       structure === null
         ? null
         : decorateSidebarTreeProject(structure, {
-            nowMs: Date.now(),
             restatusThread: (thread) =>
               restatusSidebarTreeThread(
                 thread,

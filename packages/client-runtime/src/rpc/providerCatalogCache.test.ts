@@ -14,7 +14,9 @@ import { Stream } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("./wsTransport.ts", () => ({
-  WsTransport: class WsTransport {},
+  WsTransport: class WsTransport {
+    readonly mocked = true;
+  },
 }));
 
 import {

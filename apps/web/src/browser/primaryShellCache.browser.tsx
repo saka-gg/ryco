@@ -66,7 +66,9 @@ afterEach(async () => {
   for (const name of databases.splice(0)) {
     await new Promise<void>((resolve) => {
       const operation = indexedDB.deleteDatabase(name);
-      operation.onsuccess = operation.onerror = operation.onblocked = () => resolve();
+      for (const event of ["success", "error", "blocked"]) {
+        operation.addEventListener(event, () => resolve(), { once: true });
+      }
     });
   }
 });
