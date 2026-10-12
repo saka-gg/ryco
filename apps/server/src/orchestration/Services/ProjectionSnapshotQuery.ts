@@ -114,6 +114,29 @@ export interface ProjectionThreadCheckpointContext {
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
+export interface ThreadHistoryRepairContextInput {
+  readonly threadId: ThreadId;
+  readonly turnIds: ReadonlyArray<string>;
+  readonly messageIds: ReadonlyArray<string>;
+  readonly activityIds: ReadonlyArray<string>;
+  /** Also key activities without a turn (a recovered activity has none). */
+  readonly includeTurnlessActivities: boolean;
+}
+
+/** An activity's identity for history dedupe: `providerItemId` is its payload's, when a string. */
+export interface ThreadHistoryActivityKey {
+  readonly id: string;
+  readonly turnId: TurnId | null;
+  readonly kind: string;
+  readonly providerItemId: string | null;
+}
+
+export interface ThreadHistoryRepairContext {
+  readonly messages: ReadonlyArray<OrchestrationMessage>;
+  readonly activityKeys: ReadonlyArray<ThreadHistoryActivityKey>;
+  readonly requestActivities: ReadonlyArray<OrchestrationThreadActivity>;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -314,6 +337,17 @@ export interface ProjectionSnapshotQueryShape {
     readonly turnId: TurnId;
     readonly limit: number;
   }) => Effect.Effect<ReadonlyArray<OrchestrationMessage>, ProjectionRepositoryError>;
+
+  /**
+   * What provider history recovery compares a recovered transcript against, without hydrating
+   * the thread: the messages of the given turns or ids, the identity keys (no payloads) of the
+   * activities of the given turns or ids (and of turnless ones when asked), and every
+   * pending-request lifecycle activity of the thread. Optional so existing test doubles stay
+   * valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly getThreadHistoryRepairContext?: (
+    input: ThreadHistoryRepairContextInput,
+  ) => Effect.Effect<ThreadHistoryRepairContext, ProjectionRepositoryError>;
 
   /**
    * Count projected user messages for one thread (aggregate only). Turn start

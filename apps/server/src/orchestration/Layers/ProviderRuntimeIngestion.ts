@@ -37,7 +37,12 @@ import {
 import { Cache, Cause, Deferred, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import type { ProviderRuntimeBinding } from "../../provider/Services/ProviderSessionDirectory.ts";
 import type { ProviderThreadHistory } from "../../provider/Services/ProviderAdapter.ts";
-import { historyMessagesToRestore, missingHistoryActivities } from "../providerHistoryRecovery.ts";
+import {
+  type HistoryActivityIdentity,
+  historyMessagesToRestore,
+  historyRepairLookups,
+  missingHistoryActivities,
+} from "../providerHistoryRecovery.ts";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { readEnv } from "@ryco/shared/runtimeEnv";
@@ -3286,6 +3291,43 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(true as const),
   });
 
+  /**
+   * The slice of a thread provider history recovery compares against. The bounded query when the
+   * snapshot query has it; otherwise the full thread, re-checked against the preconditions.
+   */
+  const loadHistoryRepairContext = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly history: ProviderThreadHistory;
+    readonly recovered: ReadonlyArray<OrchestrationThreadActivity>;
+    readonly userMessageIdsByTurn: ReadonlyMap<TurnId, MessageId>;
+    readonly matchesHistory: (thread: OrchestrationThread) => boolean;
+  }) {
+    const bounded = projectionSnapshotQuery.getThreadHistoryRepairContext;
+    if (bounded === undefined) {
+      const thread = yield* resolveThreadDetail(input.threadId);
+      if (!thread || !input.matchesHistory(thread)) return undefined;
+      return {
+        messages: thread.messages,
+        activities: thread.activities as ReadonlyArray<HistoryActivityIdentity>,
+        requestActivities: thread.activities,
+      };
+    }
+    const context = yield* bounded({
+      threadId: input.threadId,
+      ...historyRepairLookups(input),
+    });
+    return {
+      messages: context.messages,
+      activities: context.activityKeys.map((key): HistoryActivityIdentity => ({
+        id: EventId.make(key.id),
+        turnId: key.turnId,
+        kind: key.kind,
+        payload: key.providerItemId === null ? null : { providerItemId: key.providerItemId },
+      })),
+      requestActivities: context.requestActivities,
+    };
+  });
+
   const processHistory = (input: Extract<RuntimeIngestionInput, { source: "history" }>) =>
     Effect.gen(function* () {
       // Nothing to restore, or a thread that moved on: decided without loading
@@ -3309,38 +3351,54 @@ const make = Effect.gen(function* () {
         thread.session?.runtimeSessionId === input.binding.runtimeSessionId &&
         thread.session.providerInstanceId === input.binding.providerInstanceId;
       const shell = yield* resolveThreadShell(input.threadId);
-      if (!shell || !matchesHistory(shell)) return;
-      const thread = yield* resolveThreadDetail(input.threadId);
+      const { providerInstanceId, runtimeSessionId } = input.binding;
       if (
-        !thread ||
-        thread.updatedAt !== input.expectedUpdatedAt ||
-        !input.binding.runtimeSessionId ||
-        !input.binding.providerInstanceId ||
-        thread.session?.runtimeSessionId !== input.binding.runtimeSessionId ||
-        thread.session.providerInstanceId !== input.binding.providerInstanceId
+        !shell ||
+        !shell.session ||
+        !providerInstanceId ||
+        !runtimeSessionId ||
+        !matchesHistory(shell)
       )
         return;
-      const now = new Date(Math.max(Date.now(), Date.parse(thread.updatedAt) + 1)).toISOString();
+      const session = shell.session;
+      const recovered = input.history.items.flatMap((event) => [
+        ...runtimeEventToActivities(event),
+        ...historyReasoningActivities(shell.id, event),
+      ]);
       // User messages are persisted before the provider assigns a turn ID.
       // The turn projection owns that association; message.turnId stays null.
       const userMessageIdsByTurn = new Map<TurnId, MessageId>();
       if (input.history.messages.some((message) => message.role === "user")) {
-        const turns = yield* projectionTurnRepository.listByThreadId({ threadId: thread.id });
+        const turns = yield* projectionTurnRepository.listByThreadId({ threadId: shell.id });
         for (const turn of turns) {
           if (turn.turnId !== null && turn.pendingMessageId !== null) {
             userMessageIdsByTurn.set(turn.turnId, turn.pendingMessageId);
           }
         }
       }
+      // Only what the transcript can match is read: the messages and activity keys of its
+      // turns and ids, and the pending-request lifecycle. The decider re-checks the
+      // preconditions against the thread when the restore is dispatched.
+      const repair = yield* loadHistoryRepairContext({
+        threadId: shell.id,
+        history: input.history,
+        recovered,
+        userMessageIdsByTurn,
+        matchesHistory,
+      });
+      if (!repair) return;
+      const thread = {
+        id: shell.id,
+        createdAt: shell.createdAt,
+        updatedAt: shell.updatedAt,
+        session,
+        messages: repair.messages,
+        activities: repair.activities,
+      };
+      const now = new Date(Math.max(Date.now(), Date.parse(thread.updatedAt) + 1)).toISOString();
       const messages = historyMessagesToRestore(thread, input.history, now, userMessageIdsByTurn);
-      const activities = missingHistoryActivities(
-        thread,
-        input.history.items.flatMap((event) => [
-          ...runtimeEventToActivities(event),
-          ...historyReasoningActivities(thread.id, event),
-        ]),
-      );
-      for (const request of derivePendingThreadRequests(thread.activities)) {
+      const activities = missingHistoryActivities(thread, recovered);
+      for (const request of derivePendingThreadRequests(repair.requestActivities)) {
         if (
           request.turnId === null ||
           !input.history.completedTurnIds.includes(TurnId.make(request.turnId))
@@ -3370,8 +3428,8 @@ const make = Effect.gen(function* () {
           type: "thread.history.restore",
           commandId: CommandId.make(`history:${crypto.randomUUID()}`),
           threadId: thread.id,
-          providerInstanceId: input.binding.providerInstanceId,
-          runtimeSessionId: input.binding.runtimeSessionId,
+          providerInstanceId,
+          runtimeSessionId,
           expectedUpdatedAt: thread.updatedAt,
           messages,
           activities,

@@ -26,6 +26,7 @@ import {
   MessageId,
   ProjectId,
   ProviderItemId,
+  RuntimeItemId,
   type ServerSettings,
   ThreadId,
   TurnId,
@@ -52,7 +53,10 @@ import {
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -254,6 +258,8 @@ describe("ProviderRuntimeIngestion", () => {
     getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     serverSettings?: Partial<ServerSettings>;
     readThreadHistory?: NonNullable<ProviderServiceShape["readThreadHistory"]>;
+    /** Wraps the snapshot query ingestion reads through. */
+    wrapSnapshotQuery?: (query: ProjectionSnapshotQueryShape) => ProjectionSnapshotQueryShape;
     /** Wraps every engine dispatch, so a test can interleave a competing command. */
     interceptDispatch?: (
       command: OrchestrationCommand,
@@ -289,10 +295,17 @@ describe("ProviderRuntimeIngestion", () => {
           })),
         ).pipe(Layer.provide(engineLayer))
       : engineLayer;
-    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    const baseSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const wrapSnapshotQuery = options?.wrapSnapshotQuery;
+    const projectionSnapshotLayer = wrapSnapshotQuery
+      ? Layer.effect(
+          ProjectionSnapshotQuery,
+          Effect.map(Effect.service(ProjectionSnapshotQuery), wrapSnapshotQuery),
+        ).pipe(Layer.provide(baseSnapshotLayer))
+      : baseSnapshotLayer;
     const completionLayer = options?.onCompletionObservation
       ? Layer.effect(
           CompletionReturnRepository,
@@ -845,6 +858,184 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
     ).rejects.toThrow("Thread changed");
+  });
+
+  it.each([
+    { name: "bounded repair reads", bounded: true },
+    { name: "the full-thread fallback", bounded: false },
+  ])("restores history the same way through $name", async ({ bounded }) => {
+    const threadId = asThreadId("thread-1");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeSessionId = RuntimeSessionId.make("bounded-runtime");
+    const turnId = TurnId.make("bounded-turn");
+    const otherTurnId = TurnId.make("unrelated-turn");
+    const at = "2026-09-05T10:00:00.000Z";
+    const reads = { detail: 0, repair: 0 };
+    const harness = await createHarness({
+      wrapSnapshotQuery: (query) => {
+        const { getThreadHistoryRepairContext, ...rest } = query;
+        return {
+          ...rest,
+          getThreadDetailById: (id) => {
+            reads.detail += 1;
+            return query.getThreadDetailById(id);
+          },
+          ...(bounded && getThreadHistoryRepairContext
+            ? {
+                getThreadHistoryRepairContext: (input) => {
+                  reads.repair += 1;
+                  return getThreadHistoryRepairContext(input);
+                },
+              }
+            : {}),
+        };
+      },
+      readThreadHistory: () =>
+        Effect.succeed(
+          Option.some({
+            binding: {
+              threadId,
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: instanceId,
+              runtimeSessionId,
+              resumeCursor: { threadId: "remote-thread" },
+            },
+            history: {
+              messages: [
+                {
+                  id: MessageId.make("assistant:partial"),
+                  turnId,
+                  role: "assistant",
+                  text: "complete response",
+                  createdAt: at,
+                },
+                {
+                  id: MessageId.make("assistant:missing"),
+                  turnId,
+                  role: "assistant",
+                  text: "previously missing",
+                  createdAt: at,
+                },
+              ],
+              items: [
+                {
+                  type: "item.completed",
+                  eventId: asEventId("history-tool-known"),
+                  provider: ProviderDriverKind.make("codex"),
+                  threadId,
+                  turnId,
+                  itemId: RuntimeItemId.make("tool-known"),
+                  createdAt: at,
+                  payload: { itemType: "command_execution", status: "completed", title: "ls" },
+                },
+                {
+                  type: "item.completed",
+                  eventId: asEventId("history-tool-missing"),
+                  provider: ProviderDriverKind.make("codex"),
+                  threadId,
+                  turnId,
+                  itemId: RuntimeItemId.make("tool-missing"),
+                  createdAt: at,
+                  payload: { itemType: "command_execution", status: "completed", title: "pwd" },
+                },
+              ],
+              completedTurnIds: [turnId],
+              failedTurnIds: [],
+            },
+          }),
+        ),
+    });
+    const before = (await harness.readModel()).threads[0]!;
+    const dispatch = (command: OrchestrationCommand) =>
+      Effect.runPromise(harness.engine.dispatch(command));
+    await dispatch({
+      type: "thread.session.set",
+      threadId,
+      commandId: CommandId.make("bounded-session"),
+      createdAt: at,
+      session: {
+        ...before.session!,
+        providerInstanceId: instanceId,
+        runtimeSessionId,
+        activeTurnId: turnId,
+        status: "running",
+        updatedAt: at,
+      },
+    });
+    await dispatch({
+      type: "thread.message.assistant.delta",
+      threadId,
+      commandId: CommandId.make("bounded-partial"),
+      messageId: MessageId.make("assistant:partial"),
+      turnId,
+      delta: "complete",
+      createdAt: at,
+    });
+    // The tool the transcript already shows, and a large unrelated activity it cannot match.
+    await dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("bounded-known-tool"),
+      threadId,
+      activity: {
+        id: asEventId("local-known-tool"),
+        kind: "tool.completed",
+        turnId,
+        payload: { providerItemId: "tool-known", itemType: "command_execution" },
+        tone: "tool",
+        summary: "ls",
+        createdAt: at,
+      },
+      createdAt: at,
+    });
+    await dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("bounded-unrelated"),
+      threadId,
+      activity: {
+        id: asEventId("unrelated-output"),
+        kind: "tool.completed",
+        turnId: otherTurnId,
+        payload: { providerItemId: "tool-known", output: "x".repeat(64 * 1024) },
+        tone: "tool",
+        summary: "old",
+        createdAt: at,
+      },
+      createdAt: at,
+    });
+    await dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("bounded-pending-input"),
+      threadId,
+      activity: {
+        id: asEventId("bounded-pending-input"),
+        kind: "user-input.requested",
+        turnId,
+        payload: { requestId: "bounded-question", runtimeSessionId },
+        tone: "info",
+        summary: "Question",
+        createdAt: at,
+      },
+      createdAt: at,
+    });
+
+    reads.detail = 0;
+    await harness.reconcileThread(threadId);
+    expect(reads).toEqual(bounded ? { detail: 0, repair: 1 } : { detail: 1, repair: 0 });
+    const recovered = (await harness.readModel()).threads[0]!;
+    expect(recovered.messages.map((message) => [message.text, message.streaming])).toEqual([
+      ["complete response", false],
+      ["previously missing", false],
+    ]);
+    expect(
+      recovered.activities
+        .filter((activity) => activity.kind.startsWith("tool."))
+        .map((activity) => activity.id)
+        .toSorted(),
+    ).toEqual(
+      ["local-known-tool", "unrelated-output", expect.stringContaining("tool-missing")].toSorted(),
+    );
+    expect(derivePendingThreadRequestState(recovered.activities).pendingUserInputCount).toBe(0);
+    expect(recovered.session?.activeTurnId).toBeNull();
   });
 
   it("spaces a thread's history reads instead of reading on every signal", async () => {
