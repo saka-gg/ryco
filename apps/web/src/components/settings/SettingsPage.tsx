@@ -404,6 +404,19 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+const ESCAPE_OWNER_SELECTOR =
+  '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
+
+/**
+ * An open popup takes Escape before the page. Some popups stay mounted while
+ * closed, inert (the sidebar Omnifield's menu), and must not hold the key.
+ */
+function hasOpenEscapeOwner(): boolean {
+  return Array.from(document.querySelectorAll(ESCAPE_OWNER_SELECTOR)).some(
+    (element) => element.closest("[inert]") === null,
+  );
+}
+
 interface NavGroup {
   readonly destination: SettingsDestination;
   readonly items: ReadonlyArray<NavItem>;
@@ -823,12 +836,7 @@ export function SettingsPage() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (
-        document.querySelector(
-          '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]',
-        )
-      )
-        return;
+      if (hasOpenEscapeOwner()) return;
       if (isEditableTarget(event.target)) {
         if (event.target === searchInputRef.current && searchQuery) {
           setSearchQuery("");
