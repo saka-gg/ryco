@@ -4891,7 +4891,8 @@ describe("ClaudeAdapterLive", () => {
 
         const query = harness.queries[0]!;
         assert.equal(query.initCalls, 1);
-        assert.deepEqual(query.setPermissionModeCalls, ["bypassPermissions", "bypassPermissions"]);
+        // The process started in the session's mode, so default turns need no switch.
+        assert.deepEqual(query.setPermissionModeCalls, []);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -5257,6 +5258,148 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+
+  it.effect.each<{
+    runtimeMode: RuntimeMode;
+    modes: ReadonlyArray<"default" | "plan" | "ask">;
+    expected: ReadonlyArray<PermissionMode>;
+  }>([
+    { runtimeMode: "full-access", modes: ["default", "default"], expected: [] },
+    {
+      runtimeMode: "full-access",
+      modes: ["plan", "ask", "plan", "default", "default"],
+      expected: ["plan", "bypassPermissions"],
+    },
+    // No start option: the first default turn sets the mode, later ones skip it.
+    {
+      runtimeMode: "approval-required",
+      modes: ["default", "default", "plan", "default"],
+      expected: ["default", "plan", "default"],
+    },
+  ])(
+    "skips setPermissionMode when the mode is unchanged ($runtimeMode: $modes)",
+    ({ runtimeMode, modes, expected }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-permission-skip"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode,
+        });
+        for (const [index, interactionMode] of modes.entries()) {
+          const completed = yield* Stream.filter(
+            adapter.streamEvents,
+            (event) => event.type === "turn.completed",
+          ).pipe(Stream.runHead, Effect.forkChild);
+          yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: `turn ${index}`,
+            interactionMode,
+            attachments: [],
+          });
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            errors: [],
+            session_id: "sdk-session-permission-skip",
+            uuid: `result-permission-skip-${index}`,
+          } as unknown as SDKMessage);
+          yield* Fiber.join(completed);
+        }
+        assert.deepEqual(harness.query.setPermissionModeCalls, [...expected]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("sets the mode again after the CLI reports a different one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-permission-reported"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const configured = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "session.state.changed",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "system",
+        subtype: "status",
+        status: null,
+        permissionMode: "acceptEdits",
+        session_id: "sdk-session-permission-reported",
+        uuid: "status-permission-reported",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(configured);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        interactionMode: "default",
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setPermissionModeCalls, ["bypassPermissions"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("sets the mode again after an always-allow approval applied a mode", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-permission-approval"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "auto-accept-edits",
+      });
+      const opened = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "request.opened",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      const permission = canUseTool!(
+        "Bash",
+        { command: "pwd" },
+        {
+          signal: new AbortController().signal,
+          requestId: "permission-request-mode",
+          suggestions: [{ type: "setMode", mode: "default", destination: "session" }],
+          toolUseID: "tool-use-mode",
+        },
+      );
+      const request = yield* Fiber.join(opened);
+      assert.equal(request._tag, "Some");
+      if (request._tag !== "Some" || request.value.type !== "request.opened") return;
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(request.value.requestId!),
+        "acceptForSession",
+      );
+      yield* Effect.promise(() => permission);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        interactionMode: "default",
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setPermissionModeCalls, ["acceptEdits"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("does not call setPermissionMode when interactionMode is absent", () => {
     const harness = makeHarness();
@@ -7535,8 +7678,9 @@ describe("ClaudeAdapterLive turn ownership", () => {
         releaseGate = resolve;
       });
       const entered = harness.query.permissionModeEntered();
+      // A plan turn switches the mode, so the send parks on that control request.
       const sendFiber = yield* adapter
-        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "default" })
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "plan" })
         .pipe(Effect.forkChild);
       yield* Effect.promise(() => entered);
 
@@ -7876,8 +8020,9 @@ describe("ClaudeAdapterLive provider wake turns", () => {
         releaseGate = resolve;
       });
       const entered = harness.query.permissionModeEntered();
+      // A plan turn switches the mode, so the send parks on that control request.
       const sendFiber = yield* adapter
-        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "default" })
+        .sendTurn({ threadId: THREAD_ID, input: "user prompt", interactionMode: "plan" })
         .pipe(Effect.forkChild);
       yield* Effect.promise(() => entered);
       harness.query.emit(systemStatusFrame("requesting"));

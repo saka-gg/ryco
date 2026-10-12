@@ -421,6 +421,12 @@ interface ClaudeSessionContext {
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
+  /**
+   * The permission mode this process is known to be in: the start option, then each mode a
+   * turn set. Undefined when unknown (no start option, or the CLI may have changed it), so the
+   * next turn with an interaction mode sets it explicitly.
+   */
+  currentPermissionMode: PermissionMode | undefined;
   currentApiModelId: string | undefined;
   /** Effective effort for the session's turns; subagents without an explicit
    * effort override inherit this. */
@@ -1679,6 +1685,20 @@ function extractTextContent(value: unknown): string {
   }
 
   return extractTextContent(record.content);
+}
+
+/**
+ * The SDK permission mode a turn's interaction mode asks for, or undefined to leave the
+ * current mode alone. "plan" and "ask" both map to the SDK's read-only "plan" mode;
+ * "default" restores the session's own mode.
+ */
+export function claudePermissionModeForInteraction(
+  interactionMode: ProviderSendTurnInput["interactionMode"],
+  basePermissionMode: PermissionMode | undefined,
+): PermissionMode | undefined {
+  if (interactionMode === "plan" || interactionMode === "ask") return "plan";
+  if (interactionMode === "default") return basePermissionMode ?? "default";
+  return undefined;
 }
 
 function extractExitPlanModePlan(value: unknown): string | undefined {
@@ -3929,6 +3949,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (message.subtype === "status" && message.status === "requesting") {
       context.requestingStatusObserved = true;
     }
+    // A reported mode is never adopted (it may predate a switch this adapter made); a
+    // disagreement only makes the tracked mode unknown, so the next turn sets it.
+    const reportedPermissionMode =
+      message.subtype === "init" || message.subtype === "status"
+        ? message.permissionMode
+        : undefined;
+    if (
+      reportedPermissionMode !== undefined &&
+      reportedPermissionMode !== context.currentPermissionMode
+    ) {
+      context.currentPermissionMode = undefined;
+    }
     const wakeSignal = claudeWakeSignal(message);
     if (
       wakeSignal !== undefined &&
@@ -5529,6 +5561,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
 
       if (decision === "accept" || decision === "acceptForSession") {
+        if (
+          decision === "acceptForSession" &&
+          pendingApproval.suggestions?.some((suggestion) => suggestion.type === "setMode")
+        ) {
+          // The CLI applies the suggested mode itself; the next turn sets its own.
+          context.currentPermissionMode = undefined;
+        }
         return {
           behavior: "allow",
           updatedInput: toolInput,
@@ -5785,6 +5824,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       streamFiber: undefined,
       startedAt,
       basePermissionMode: permissionMode,
+      currentPermissionMode: permissionMode,
       currentApiModelId: apiModelId,
       currentEffort: effectiveEffort ?? undefined,
       resumeSessionId: sessionId,
@@ -6014,16 +6054,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // mode — so the turn cannot perform file edits or run commands;
     // "default" restores the session's original permission mode.
     // When interactionMode is absent we leave the current mode unchanged.
-    if (input.interactionMode === "plan" || input.interactionMode === "ask") {
+    // A mode the process is known to be in already costs no control round trip.
+    const targetPermissionMode = claudePermissionModeForInteraction(
+      input.interactionMode,
+      context.basePermissionMode,
+    );
+    if (
+      targetPermissionMode !== undefined &&
+      targetPermissionMode !== context.currentPermissionMode
+    ) {
+      // Unknown until the CLI acknowledged the switch.
+      context.currentPermissionMode = undefined;
       yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode("plan"),
+        try: () => context.query.setPermissionMode(targetPermissionMode),
         catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
       });
-    } else if (input.interactionMode === "default") {
-      yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode(context.basePermissionMode ?? "default"),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
-      });
+      context.currentPermissionMode = targetPermissionMode;
     }
 
     const promptUuid = yield* Effect.sync(() => crypto.randomUUID());
