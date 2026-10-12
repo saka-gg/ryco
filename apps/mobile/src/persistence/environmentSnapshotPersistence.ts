@@ -54,12 +54,23 @@ const ROSTER_WRITE_DEBOUNCE_MS = 1_000;
 const MAX_CACHED_ENVIRONMENT_SNAPSHOTS = MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS;
 const MAX_CACHED_ENVIRONMENT_SNAPSHOT_TOTAL_BYTES = MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES;
 
+/**
+ * Cold-start hydration commits decoded environments in batches of about this
+ * many payload bytes, then yields. Small environments share one store commit
+ * (one render) instead of one each; a large one still lands, and yields, on
+ * its own, so no task decodes much more than one slice.
+ */
+const HYDRATION_SLICE_BYTES = 64 * 1024;
+
 interface ThreadsStoreLike {
   readonly getState: () => {
     readonly environmentStateById: Record<string, EnvironmentState>;
-    readonly hydrateEnvironmentStateFromCache: (
-      cached: ReturnType<typeof toCachedEnvironmentShellSnapshot>,
-      environmentId: EnvironmentId,
+    readonly hydrateEnvironmentStatesFromCache: (
+      entries: ReadonlyArray<{
+        readonly environmentId: EnvironmentId;
+        readonly cached: ReturnType<typeof toCachedEnvironmentShellSnapshot>;
+      }>,
+      onEntryError?: (environmentId: EnvironmentId, error: unknown) => void,
     ) => void;
     readonly removeEnvironmentState: (environmentId: EnvironmentId) => void;
   };
@@ -375,8 +386,9 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     );
 
     // One read for every row (most recently written first) instead of a stats
-    // query plus one SELECT per environment, and a yield between environments
-    // so decoding a large cache never holds the JS thread in one long task.
+    // query plus one SELECT per environment. Decoded environments are
+    // committed in byte-bounded batches with a yield between them, so decoding
+    // a large cache never holds the JS thread in one long task.
     let rows: Awaited<ReturnType<SnapshotDb["loadEnvironmentSnapshots"]>>;
     try {
       rows = await deps.db.loadEnvironmentSnapshots();
@@ -384,9 +396,39 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
       warn("could not load environment snapshots")(error);
       return;
     }
-    let decodedAny = false;
+    // The direct supervisor may already be connected (it starts once the
+    // catalog is hydrated). A row a live capture has replaced since the read
+    // above is not this hydration's to discard.
+    const discardRow = (environmentId: EnvironmentId): Promise<void> =>
+      serialize(environmentId, async () => {
+        if (written.has(environmentId)) return;
+        await removeStoredSnapshot(environmentId);
+      });
+    const hasState = (environmentId: EnvironmentId) =>
+      deps.store.getState().environmentStateById[environmentId] !== undefined;
+    let batch: Array<{
+      readonly environmentId: EnvironmentId;
+      readonly cached: ReturnType<typeof toCachedEnvironmentShellSnapshot>;
+    }> = [];
+    let batchBytes = 0;
+    const commit = () => {
+      if (batch.length === 0) return;
+      // The store re-applies its live-wins guard per entry at commit time.
+      deps.store
+        .getState()
+        .hydrateEnvironmentStatesFromCache(batch, (_environmentId, error) =>
+          warn("could not hydrate environment snapshot")(error),
+        );
+      batch = [];
+      batchBytes = 0;
+    };
     for (const row of rows) {
       const environmentId = row.environmentId as EnvironmentId;
+      // A full slice is committed before anything else waits on the database.
+      if (batchBytes >= HYDRATION_SLICE_BYTES) {
+        commit();
+        await yieldToEventLoop();
+      }
       try {
         // A revoked node's cached content must disappear; an environment no
         // roster entry or catalog record can name has nothing to render it.
@@ -394,27 +436,25 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
           revokedEnvironmentIds.has(environmentId) ||
           (!rosterEnvironmentIds.has(environmentId) && !deps.hasDirectEnvironment(environmentId))
         ) {
-          await removeStoredSnapshot(environmentId);
+          await discardRow(environmentId);
           continue;
         }
-        if (decodedAny) await yieldToEventLoop();
-        decodedAny = true;
+        // Live data wins: a cached projection would be ignored at commit, so
+        // decoding it is wasted work on the launch path.
+        if (hasState(environmentId)) continue;
         const record = decodeStoredEnvironmentSnapshot(row.payload, environmentId);
         if (!record) {
           // Version bump or corrupt payload: discard rather than mis-decode.
-          await removeStoredSnapshot(environmentId);
+          await discardRow(environmentId);
           continue;
         }
-        deps.store
-          .getState()
-          .hydrateEnvironmentStateFromCache(
-            toCachedEnvironmentShellSnapshot(record),
-            environmentId,
-          );
+        batch.push({ environmentId, cached: toCachedEnvironmentShellSnapshot(record) });
+        batchBytes += row.payload.length;
       } catch (error) {
         warn("could not hydrate environment snapshot")(error);
       }
     }
+    commit();
   };
 
   const dispose = (): void => {
@@ -452,9 +492,18 @@ function getSharedSnapshotDb(): SnapshotDb {
   return (sharedDb ??= createSnapshotDb());
 }
 
-/** The sink's projection-changed seam; a no-op until the runtime is initialized. */
+/**
+ * Projection writes that landed before the runtime existed. The direct plane
+ * can deliver its first live snapshot while the persistence module is still
+ * being initialized; those marks are replayed instead of dropped, so the
+ * snapshot is captured without waiting for the environment's next change.
+ */
+const dirtyBeforeInitialization = new Set<EnvironmentId>();
+
+/** The sink's projection-changed seam; buffered until the runtime is initialized. */
 export function markEnvironmentSnapshotDirty(environmentId: EnvironmentId): void {
-  activeRuntime?.markDirty(environmentId);
+  if (activeRuntime) activeRuntime.markDirty(environmentId);
+  else dirtyBeforeInitialization.add(environmentId);
 }
 
 /** Forget an environment's cached snapshot (environment removal path). */
@@ -497,6 +546,8 @@ export async function initializeMobileSnapshotPersistence(deps: {
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
   activeRuntime = runtime;
+  for (const environmentId of dirtyBeforeInitialization) runtime.markDirty(environmentId);
+  dirtyBeforeInitialization.clear();
   await runtime.hydrate();
   runtime.installHostedRosterMirror(hostedHubStore);
 }
@@ -504,6 +555,7 @@ export async function initializeMobileSnapshotPersistence(deps: {
 export function resetMobileSnapshotPersistenceForTests(): void {
   activeRuntime?.dispose();
   activeRuntime = null;
+  dirtyBeforeInitialization.clear();
   sharedDb = null;
   uninstallSelectionPersistence?.();
   uninstallSelectionPersistence = null;
