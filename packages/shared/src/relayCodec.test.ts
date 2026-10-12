@@ -4,13 +4,14 @@ import {
   RELAY_MAX_DATA_CHUNK_BYTES,
   RELAY_PROTOCOL_ERROR_CODES,
 } from "@ryco/contracts/relay";
-import { encode, rfc8949EncodeOptions } from "cborg";
+import { decode, encode, rfc8949EncodeOptions } from "cborg";
 import * as fc from "fast-check";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   decodeRelayFrame,
   encodeRelayFrame,
+  isCanonicalEncoding,
   makeProtocolUnsupportedErrorFrame,
   negotiateRelayVersion,
 } from "./relayCodec.ts";
@@ -361,5 +362,120 @@ describe("relay codec deterministic properties", () => {
       }),
       { seed: PROPERTY_SEED, numRuns: 200 },
     );
+  });
+});
+
+describe("relay codec canonical check for large data frames", () => {
+  function strictDecode(bytes: Uint8Array): Map<unknown, unknown> | null {
+    try {
+      const raw: unknown = decode(bytes, {
+        allowIndefinite: false,
+        allowUndefined: false,
+        allowInfinity: false,
+        allowNaN: false,
+        allowBigInt: false,
+        strict: true,
+        useMaps: true,
+        rejectDuplicateMapKeys: true,
+        tags: {},
+      });
+      return raw instanceof Map ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+  /** The full re-encode-and-compare check the spliced one must equal. */
+  function referenceCanonical(bytes: Uint8Array): boolean {
+    let raw: unknown;
+    try {
+      raw = decode(bytes, {
+        allowIndefinite: false,
+        allowUndefined: false,
+        allowInfinity: false,
+        allowNaN: false,
+        allowBigInt: false,
+        strict: true,
+        useMaps: true,
+        rejectDuplicateMapKeys: true,
+        tags: {},
+      });
+    } catch {
+      return false;
+    }
+    if (!(raw instanceof Map)) return false;
+    return Buffer.from(encode(raw, rfc8949EncodeOptions)).equals(bytes);
+  }
+  const decodesCanonically = (bytes: Uint8Array) => {
+    const result = decodeRelayFrame(bytes);
+    return result.ok || result.error.code !== "invalid_encoding";
+  };
+  const frame = (length: number) => {
+    const payload = new Uint8Array(length);
+    for (let index = 0; index < length; index += 1) payload[index] = (index * 13) & 0xff;
+    return unwrap(encodeRelayFrame({ type: "data", ...version, channelId, sequence: 9, payload }));
+  };
+  const rawMap = (entries: ReadonlyArray<readonly [string, unknown]>) =>
+    Uint8Array.from(encode(new Map(entries), { ...rfc8949EncodeOptions, mapSorter: () => 0 }));
+
+  it("accepts canonical frames around every byte-string head size", () => {
+    for (const length of [1_023, 1_024, 65_535, 65_536, RELAY_MAX_DATA_CHUNK_BYTES]) {
+      const decoded = decodeRelayFrame(frame(length));
+      expect(decoded.ok && decoded.value.type === "data" && decoded.value.payload.byteLength).toBe(
+        length,
+      );
+    }
+  });
+
+  it("rejects reordered keys, non-minimal heads and trailing bytes exactly as the full check does", () => {
+    const payload = new Uint8Array(4_096).fill(7);
+    const entries: Array<readonly [string, unknown]> = [
+      ["type", "data"],
+      ["protocolMajor", 1],
+      ["protocolMinor", 2],
+      ["channelId", channelId],
+      ["sequence", 9],
+      ["payload", payload],
+    ];
+    const unsorted = rawMap(entries);
+    expect(referenceCanonical(unsorted)).toBe(false);
+    expect(decodesCanonically(unsorted)).toBe(false);
+
+    const canonical = frame(4_096);
+    const at = canonical.indexOf(0x59);
+    // A four-byte length head for a payload that fits a two-byte one.
+    const widened = new Uint8Array(canonical.byteLength + 2);
+    widened.set(canonical.subarray(0, at));
+    widened.set([0x5a, 0, 0, canonical[at + 1]!, canonical[at + 2]!], at);
+    widened.set(canonical.subarray(at + 3), at + 5);
+    expect(referenceCanonical(widened)).toBe(false);
+    expect(decodesCanonically(widened)).toBe(false);
+
+    const trailing = Uint8Array.of(...canonical, 0);
+    expect(decodesCanonically(trailing)).toBe(referenceCanonical(trailing));
+  });
+
+  it("agrees with the full check on seeded mutations of a large frame", () => {
+    const encoded = frame(2_048);
+    let decodable = 0;
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: encoded.byteLength - 1 }),
+        fc.integer({ min: 0, max: 255 }),
+        fc.boolean(),
+        (index, byte, insert) => {
+          const mutated = insert
+            ? Uint8Array.of(...encoded.subarray(0, index), byte, ...encoded.subarray(index))
+            : Uint8Array.from(encoded).fill(byte, index, index + 1);
+          const raw = strictDecode(mutated);
+          // Never accept what the full check rejects.
+          if (!referenceCanonical(mutated) && decodesCanonically(mutated)) return false;
+          if (raw === null) return true;
+          decodable += 1;
+          return isCanonicalEncoding(mutated, raw) === referenceCanonical(mutated);
+        },
+      ),
+      { seed: PROPERTY_SEED, numRuns: 2_000 },
+    );
+    expect(decodable).toBeGreaterThan(100);
   });
 });

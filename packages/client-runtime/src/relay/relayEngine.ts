@@ -588,7 +588,9 @@ export class HostedRelayEngine {
       );
     }
     for (const chunk of prepared.payloads) {
-      this.#enqueueOutbound(Uint8Array.from(chunk));
+      // The queue zeroes what it sends. A prelude or chunk layout is a buffer
+      // of its own; only the caller's unchanged payload must be copied first.
+      this.#enqueueOutbound(chunk === payload ? Uint8Array.from(chunk) : chunk);
     }
   }
 
@@ -1115,7 +1117,8 @@ export class HostedRelayEngine {
     const prepared = prepareRelayMessage(message, this.#messageLimits(limits));
     if (prepared.kind === "error") return false;
     for (const chunk of prepared.payloads) {
-      const bytes = Uint8Array.from(chunk);
+      // As in `#sendPlaintext`: only the record itself belongs to the caller.
+      const bytes = chunk === message ? Uint8Array.from(chunk) : chunk;
       const reservedBytes = bytes.byteLength + QUEUE_ENTRY_OVERHEAD_BYTES;
       this.#outboundQueue.push({ bytes, reservedBytes });
       this.#outboundQueuedBytes += reservedBytes;

@@ -7,6 +7,7 @@ import {
   HUB_SESSION_MAX_QUEUED_FRAMES,
   type HubSessionFrame,
 } from "@ryco/contracts/hub-session";
+import { bytesEqual } from "@ryco/shared/bytesEqual";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import type { RelaySocket, RelayTimers } from "./relayEngine.ts";
 
@@ -316,7 +317,7 @@ export class HostedHubSession {
         this.#sendControl({ type: "pong", nonce: frame.nonce });
         return;
       case "pong":
-        if (!this.#probe || !frame.nonce.every((byte, index) => byte === this.#probe![index])) {
+        if (!this.#probe || !bytesEqual(frame.nonce, this.#probe)) {
           this.#lost("protocol", false);
           return;
         }
