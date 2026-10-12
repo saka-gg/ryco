@@ -22,7 +22,12 @@ import {
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
 } from "../authorization/runtime.ts";
-import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
+import {
+  hostedHubController,
+  hostedHubStore,
+  markHostedSessionReady,
+  markHostedSessionReplaying,
+} from "../authorization/state.ts";
 import type { HostedHubNode, HostedRelayFailure } from "../authorization/types.ts";
 import { RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
@@ -523,32 +528,116 @@ describe("HostedRelayAttemptFactory", () => {
     expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
   });
 
-  it("re-enters the selected-node lifecycle only after the relay channel recovers", async () => {
-    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+  it("adopts the replacement channel: one ticket and no client rebuild per drop", async () => {
+    const issue = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: encodeBase64Url(new Uint8Array(32).fill(10)),
       expiresAt: Date.now() + 60_000,
       protocolMajor: 1,
       protocolMinor: 2,
     });
-    const retrySelectedNode = vi
-      .spyOn(hostedHubController, "retrySelectedNode")
-      .mockResolvedValue(undefined);
+    const retrySelectedNode = vi.spyOn(hostedHubController, "retrySelectedNode");
     hostedHubStore.setState({
       nodes: [selectedNode],
       browserStatus: "current",
       sessionStatus: "ready",
+      sessionEstablished: true,
+      transportStatus: "online",
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    const dispatch = { tag: ORCHESTRATION_WS_METHODS.dispatchCommand, stream: false } as const;
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    expect(issue).toHaveBeenCalledOnce();
+
+    lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
+    // The transport's own reconnect is the only re-establishment.
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    await flush();
+
+    expect(issue).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(2);
+    expect(retrySelectedNode).not.toHaveBeenCalled();
+    expect(nodeLifecycle.disconnectPrimaryEnvironment).not.toHaveBeenCalled();
+    expect(nodeLifecycle.connectPrimaryEnvironment).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      generation: 4,
+      transportStatus: "online",
+      sessionStatus: "stale",
+      sessionEstablished: false,
+    });
+    // Mutation authority waits for the replacement session's own snapshot.
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    markHostedSessionReplaying(selectedNode.environmentId, 4);
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe("allowed");
+  });
+
+  it("never makes a session ready from a snapshot that lands before its replacement channel", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(13)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({
+      nodes: [selectedNode],
+      browserStatus: "current",
+      sessionStatus: "ready",
+      sessionEstablished: true,
       transportStatus: "online",
     });
     const factory = new HostedRelayAttemptFactory();
     const lifecycle = factory.lifecycleHandlers();
     factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
 
     lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
-    expect(retrySelectedNode).not.toHaveBeenCalled();
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState().sessionStatus).toBe("stale");
 
     factory.createSocket(await factory.nextUrl());
     sockets.at(-1)?.callbacks.onTransportStatus("online");
-    await vi.waitFor(() => expect(retrySelectedNode).toHaveBeenCalledOnce());
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState().sessionStatus).toBe("ready");
+  });
+
+  it("leaves a mutation lost with its channel uncertain on the adopted replacement", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(14)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({
+      nodes: [selectedNode],
+      browserStatus: "current",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      transportStatus: "online",
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    factory.createSocket(await factory.nextUrl());
+    lifecycle.onRequestStart?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
+
+    lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
+    // The protocol fails the lost request after the close.
+    lifecycle.onRequestExit?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    markHostedSessionReady(selectedNode.environmentId, 4);
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
   });
 
   it("does not rebuild the rpc client for the initial relay connection", async () => {

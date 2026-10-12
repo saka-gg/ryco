@@ -115,6 +115,7 @@ const standardHostedHubController: {
   markDeliveryUnknown: ignore,
   markEnvironmentDeliveryUnknown: ignore,
   connectionClosed: ignore,
+  connectionRecovered: ignore,
   markSessionReady: ignore,
   markSessionReplaying: ignore,
   reportShellSnapshotFailure: ignore,

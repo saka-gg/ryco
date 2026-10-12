@@ -251,31 +251,19 @@ function defaultBinding(): HostedRelayAttemptBinding {
   };
 }
 
-/** Re-enter the authoritative lifecycle after a replacement channel authenticates. */
+/**
+ * Hand a replacement channel that authenticated after an unintentional close
+ * back to the authoritative lifecycle owner.
+ *
+ * The transport has already paid for the replacement — a fresh ticket, stream,
+ * E2EE handshake — and the client's shell and thread subscriptions resubscribe
+ * on it, so the controller adopts that channel instead of rebuilding the client
+ * (which bought a second ticket, stream, handshake and shell snapshot per
+ * drop). Mutation authority still waits for the replacement session's own
+ * accepted shell snapshot; see `HostedHubController.connectionRecovered`.
+ */
 export function recoverHostedRelayConnection(generation: number): void {
-  const state = hostedHubStore.getState();
-  if (
-    state.generation !== generation ||
-    state.accountStatus !== "authenticated" ||
-    state.directoryStatus !== "ready" ||
-    state.browserStatus !== "current" ||
-    state.selectedNode === null ||
-    state.transportStatus === "terminal-failure"
-  ) {
-    return;
-  }
-  // A replacement relay socket is not enough: the RPC subscriptions that
-  // ended with the old channel belong to that client session. Wait until
-  // the transport has authenticated a replacement channel before
-  // rebuilding that client. Rebuilding immediately on close races the
-  // node's own relay-ticket renewal and can turn that brief handoff into a
-  // terminal channel rejection.
-  getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
-    const current = hostedHubStore.getState();
-    if (current.generation === generation && current.selectedNode?.id === state.selectedNode?.id) {
-      void hostedHubController.retrySelectedNode();
-    }
-  });
+  hostedHubController.connectionRecovered(generation);
 }
 
 /**
@@ -303,7 +291,8 @@ export class HostedRelayAttemptFactory {
   #nextAttemptId = 0;
   #activeAttemptId: number | null = null;
   #activeSocket: unknown = null;
-  #requiresClientRecreation = false;
+  /** An unintentional close was seen; the next channel online is its replacement. */
+  #recoveringAfterClose = false;
   #revision = 0;
   #preparation = 0;
   #disposed = false;
@@ -414,8 +403,8 @@ export class HostedRelayAttemptFactory {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
         this.#binding.transportStatus(generation, status);
-        if (status === "online" && this.#requiresClientRecreation) {
-          this.#requiresClientRecreation = false;
+        if (status === "online" && this.#recoveringAfterClose) {
+          this.#recoveringAfterClose = false;
           this.#binding.connectionRecovered?.(generation);
         }
       },
@@ -510,7 +499,14 @@ export class HostedRelayAttemptFactory {
         const generation = this.#activeGeneration;
         if (generation === null) return;
         this.#reconnect.closed();
-        this.#requiresClientRecreation = true;
+        this.#recoveringAfterClose = true;
+        // A mutation sent on the lost channel and never answered stays
+        // uncertain: the replacement channel this connection adopts cannot
+        // answer for it.
+        if (this.#pendingRequests.size > 0) {
+          this.#pendingRequests.clear();
+          this.#binding.markDeliveryUnknown(generation);
+        }
         this.#binding.connectionClosed(generation);
       },
       onRequestStart: (info) => {
@@ -592,7 +588,7 @@ export class HostedRelayAttemptFactory {
     this.#activeGeneration = null;
     this.#activeAttemptId = null;
     this.#activeSocket = null;
-    this.#requiresClientRecreation = false;
+    this.#recoveringAfterClose = false;
   }
 
   reset(): void {
@@ -605,7 +601,7 @@ export class HostedRelayAttemptFactory {
     this.#activeGeneration = null;
     this.#activeAttemptId = null;
     this.#activeSocket = null;
-    this.#requiresClientRecreation = false;
+    this.#recoveringAfterClose = false;
     this.#reconnect.reset();
   }
 

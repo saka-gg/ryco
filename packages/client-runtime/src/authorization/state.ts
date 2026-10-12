@@ -563,6 +563,12 @@ class HostedHubController {
   #accessCheckTimedOut = false;
   #sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
   #retrySelectedNodeOperation: AbortController | null = null;
+  /**
+   * The generation whose relay channel closed unintentionally and has not yet
+   * been replaced. While it is current, no shell snapshot may make the session
+   * ready: a snapshot can only belong to the lost channel.
+   */
+  #relayGapGeneration: number | null = null;
   #retrySelectedNodePromise: Promise<void> | null = null;
   #browserResumeOperation: AbortController | null = null;
   #browserResumePromise: Promise<void> | null = null;
@@ -1922,6 +1928,7 @@ class HostedHubController {
     this.#bootstrapAccessPromise = null;
     this.#accessCheckTimedOut = false;
     this.#clearSessionSyncTimer();
+    this.#relayGapGeneration = null;
     this.#retrySelectedNodeOperation?.abort();
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
@@ -2569,6 +2576,7 @@ class HostedHubController {
   connectionClosed(generation: number): void {
     const state = hostedHubStore.getState();
     if (state.generation !== generation || state.transportStatus === "terminal-failure") return;
+    this.#relayGapGeneration = generation;
     patchState({
       // Keep the directory-validated role while this retryable transport gap is
       // stale. Freshness still denies every mutation, but the shell and other
@@ -2582,9 +2590,38 @@ class HostedHubController {
     });
   }
 
+  /**
+   * The transport authenticated a replacement for a channel that closed
+   * unintentionally in this generation, and the client's subscriptions are
+   * resubscribing on it. The controller adopts that channel as the new session
+   * instead of rebuilding the client: one drop costs one ticket, one stream, one
+   * handshake and one shell snapshot. The session is not established again
+   * until the replacement's own shell snapshot is accepted
+   * ({@link markSessionReady}), under the same synchronization deadline as a
+   * fresh selection; until then `sessionStatus` stays stale or replaying, which
+   * admits no mutation.
+   */
+  connectionRecovered(generation: number): void {
+    const state = hostedHubStore.getState();
+    if (
+      state.generation !== generation ||
+      this.#relayGapGeneration !== generation ||
+      state.selectedNode === null ||
+      state.transportStatus === "terminal-failure"
+    ) {
+      return;
+    }
+    this.#relayGapGeneration = null;
+    patchState({ sessionEstablished: false, sessionRecoveredAfterUnknown: false });
+    this.#startSessionSyncTimer(generation);
+  }
+
   markSessionReady(environmentId: EnvironmentId): void {
     const state = hostedHubStore.getState();
     if (state.selectedNode?.environmentId !== environmentId) return;
+    // A snapshot that lands between an unintentional close and its replacement
+    // channel can only have come from the lost channel.
+    if (this.#relayGapGeneration === state.generation) return;
     this.#clearSessionSyncTimer();
     if (state.sessionStatus === "delivery-unknown") {
       patchState({
