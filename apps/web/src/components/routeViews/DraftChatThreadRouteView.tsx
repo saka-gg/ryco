@@ -1,5 +1,6 @@
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
 import { DraftId } from "../../composerDraftStore";
@@ -90,6 +91,8 @@ export function DraftChatThreadRouteView({
   const canonicalThreadKey = canonicalThreadRef
     ? `${canonicalThreadRef.environmentId}:${canonicalThreadRef.threadId}`
     : null;
+  // The agent can ask this thread to open the simulator pane at any time.
+  useDeviceRuntime(canonicalThreadRef?.environmentId);
   const pendingDeviceOpenRequest = useDeviceStateStore((state) =>
     canonicalThreadKey ? state.pendingOpenByThreadKey[canonicalThreadKey] : undefined,
   );

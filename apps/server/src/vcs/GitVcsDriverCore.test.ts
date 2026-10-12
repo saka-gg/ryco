@@ -1027,6 +1027,49 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         );
       }).pipe(Effect.provide(ServerConfigLayer)),
     );
+    it.effect("starts a new worktree from a prefetched base without fetching again", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["clone", remote, "."]);
+        yield* git(remote, ["commit", "--allow-empty", "-m", "new remote commit"]);
+        const remoteHead = yield* git(remote, ["rev-parse", "HEAD"]);
+        const base = yield* GitVcsDriver.GitVcsDriver;
+        const fetchArgs: Array<ReadonlyArray<string>> = [];
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) => {
+            if (input.args[0] === "fetch") fetchArgs.push(input.args);
+            return base.execute(input);
+          },
+        });
+        const pathService = yield* Path.Path;
+        const root = yield* makeTmpDir();
+
+        // Entering worktree mode prefetches the base; the send reuses it.
+        yield* driver.prefetchWorktreeBase({ cwd, refName: `origin/${initialBranch}` });
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "prefetched"),
+          refName: `origin/${initialBranch}`,
+          newRefName: "feature/prefetched",
+          fetchOrigin: true,
+        });
+
+        assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), remoteHead);
+        assert.lengthOf(fetchArgs, 1);
+        // Another base is fetched as usual.
+        yield* git(remote, ["branch", "other"]);
+        yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "other"),
+          refName: "origin/other",
+          newRefName: "feature/other",
+          fetchOrigin: true,
+        });
+        assert.lengthOf(fetchArgs, 2);
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
     it.effect("asks origin when the recorded origin/HEAD names a branch origin renamed", () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();

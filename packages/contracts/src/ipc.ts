@@ -99,6 +99,7 @@ import type {
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
+  VcsPrefetchWorktreeBaseInput,
   VcsPullInput,
   VcsPullResult,
   VcsRemoveWorktreeInput,
@@ -1220,6 +1221,8 @@ export interface EnvironmentApi {
     applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
     readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
+    /** Absent on clients built without it; older servers answer "Unknown request tag". */
+    prefetchWorktreeBase?: (input: VcsPrefetchWorktreeBaseInput) => Promise<void>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;
     createRef: (input: VcsCreateRefInput) => Promise<VcsCreateRefResult>;

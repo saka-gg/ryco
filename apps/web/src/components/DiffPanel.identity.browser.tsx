@@ -34,11 +34,61 @@ import DiffPanel, { DiffWorkerPoolProvider } from "./DiffPanel";
 
 const fixture = vi.hoisted(() => ({
   patch: "",
+  wholePatchHashes: 0,
+  workerParses: 0,
+  heldParses: [] as Array<() => void>,
+  releaseParses() {
+    for (const release of this.heldParses.splice(0)) release();
+  },
+  largeInlineParses: 0,
   legacy: false,
   selectedFile: null as string | null,
   renders: {} as Record<string, number>,
   mounts: {} as Record<string, number>,
 }));
+// The real worker cannot load this suite's mocked modules: parse in a stand-in
+// that answers asynchronously like the worker does, and count its requests.
+vi.mock("../lib/diffParseOffThread", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/diffParseOffThread")>();
+  const { getRenderablePatch } = await import("../lib/diffParsing");
+  const parser = actual.createOffThreadDiffParser({
+    createWorker: () => {
+      let onMessage: ((event: unknown) => void) | null = null;
+      return {
+        postMessage: (message) => {
+          fixture.workerParses += 1;
+          fixture.heldParses.push(() =>
+            onMessage?.({
+              data: {
+                id: message.id,
+                ok: true,
+                patch: getRenderablePatch(message.patch, message.scope),
+              },
+            }),
+          );
+        },
+        terminate: () => undefined,
+        addEventListener: (type, listener) => {
+          if (type === "message") onMessage = listener as (event: unknown) => void;
+        },
+      };
+    },
+  });
+  return { ...actual, getOffThreadDiffParser: () => parser };
+});
+// Counts content hashes of the whole patch (per-file segment keys are not counted).
+vi.mock("../lib/diffRendering", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/diffRendering")>();
+  return {
+    ...actual,
+    buildPatchCacheKey: (patch: string, scope?: string) => {
+      if (patch.length > 1_000_000 && patch.length >= fixture.patch.length - 2) {
+        fixture.wholePatchHashes += 1;
+      }
+      return actual.buildPatchCacheKey(patch, scope);
+    },
+  };
+});
 // Baseline uses the former whole-patch React identity with the same real renderer.
 vi.mock("../lib/diffParsing", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/diffParsing")>();
@@ -46,6 +96,9 @@ vi.mock("../lib/diffParsing", async (importOriginal) => {
     ...actual,
     ActiveDiffParser: class extends actual.ActiveDiffParser {
       override parse(...args: Parameters<InstanceType<typeof actual.ActiveDiffParser>["parse"]>) {
+        if (args[2] === undefined && (args[0]?.length ?? 0) >= 1_000_000) {
+          fixture.largeInlineParses += 1;
+        }
         const result = super.parse(...args);
         if (!fixture.legacy || result?.kind !== "files") return result;
         return {
@@ -325,5 +378,37 @@ describe("real Pierre file identity and panel navigation", () => {
     });
     await screen.unmount();
     fixture.legacy = false;
+  });
+
+  it("parses a patch over 1 MB off the main thread and never re-hashes unchanged text", async () => {
+    await page.viewport(1100, 800);
+    fixture.selectedFile = null;
+    fixture.mounts = {};
+    fixture.renders = {};
+    fixture.wholePatchHashes = 0;
+    const paths = Array.from({ length: 700 }, (_, i) => `big-${String(i).padStart(3, "0")}.ts`);
+    fixture.patch = paths.map((path) => patchFor(path)).join("");
+    expect(fixture.patch.length).toBeGreaterThan(1_000_000);
+
+    fixture.largeInlineParses = 0;
+    const screen = await render(<App />);
+    // The panel shows its loading state while the worker parses.
+    await expect.element(page.getByText("Loading checkpoint diff...")).toBeInTheDocument();
+    fixture.releaseParses();
+    await vi.waitFor(
+      () => expect(document.querySelectorAll("[data-diff-file-path]").length).toBeGreaterThan(0),
+      { timeout: 15_000 },
+    );
+    // The worker parsed it: the page's own parser never ran on this patch.
+    expect(fixture.workerParses).toBe(1);
+    expect(fixture.largeInlineParses).toBe(0);
+    expect(fixture.wholePatchHashes).toBe(1);
+
+    // The same text delivered again (a refetch builds a new string) is not re-hashed.
+    fixture.patch = paths.map((path) => patchFor(path)).join("");
+    await screen.rerender(<App />);
+    await screen.rerender(<App />);
+    expect(fixture.wholePatchHashes).toBe(1);
+    await screen.unmount();
   });
 });

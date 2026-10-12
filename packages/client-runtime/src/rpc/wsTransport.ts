@@ -16,11 +16,9 @@ import {
   isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
-  makeWsRpcProtocolClient,
   type DeviceRpcProtocolClient,
   type HostedRpcProtocolClient,
   type WsProtocolLifecycleHandlers,
-  type WsRpcProtocolClient,
   type WsRpcProtocolSocketUrlProvider,
 } from "./protocol.ts";
 import { isTransportConnectionErrorMessage } from "../errors/transportError.ts";
@@ -604,14 +602,19 @@ class RpcTransport<Client> {
   }
 }
 
-/** The main application RPC transport. */
-export class WsTransport extends RpcTransport<WsRpcProtocolClient> {
+/**
+ * The main application RPC transport. Its client also names the simulator
+ * control RPCs: current servers serve them on this socket, and an older one
+ * answers them with "Unknown request tag" without running anything, which
+ * `createDirectDeviceRpcTransport` takes as its cue to use `/ws/device`.
+ */
+export class WsTransport extends RpcTransport<HostedRpcProtocolClient> {
   constructor(
     url: WsRpcProtocolSocketUrlProvider,
     platform: { readonly observability: ObservabilityService; readonly socket: SocketService },
     lifecycleHandlers?: WsProtocolLifecycleHandlers,
   ) {
-    super(url, platform, () => makeWsRpcProtocolClient, lifecycleHandlers);
+    super(url, platform, () => makeHostedRpcProtocolClient, lifecycleHandlers);
   }
 }
 

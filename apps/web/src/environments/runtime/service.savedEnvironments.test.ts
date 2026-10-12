@@ -288,7 +288,7 @@ describe("saved environment startup", () => {
     await resetEnvironmentServiceForTests();
   });
 
-  it("waits for a slow config snapshot instead of racing it with a getConfig read", async () => {
+  it("registers before a slow config snapshot and waits for it instead of racing a getConfig read", async () => {
     // A link where ws-token, upgrade and the first config item take a second.
     mockCreateEnvironmentConnection.mockImplementation((input) => {
       if (input.kind === "saved") {
@@ -309,11 +309,13 @@ describe("saved environment startup", () => {
 
     const stop = startEnvironmentConnectionService();
     await vi.advanceTimersByTimeAsync(2_500 + 500);
+    // The connection registers once its bearer passed the session check, while
+    // the config is still on its way, so thread subscriptions attach at once.
     expect(
       listEnvironmentConnections().some(
         (connection) => connection.environmentId === savedRecord.environmentId,
       ),
-    ).toBe(false);
+    ).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
 
     const savedClient = mockCreateEnvironmentConnection.mock.calls.find(

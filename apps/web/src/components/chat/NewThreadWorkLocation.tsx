@@ -1,11 +1,12 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { FolderGit2Icon, FolderIcon, GitBranchPlusIcon } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../store";
+import { prefetchWorktreeSend } from "../../hooks/worktreeSendPrefetch";
 import { cn } from "~/lib/utils";
 import { BranchToolbarBranchSelector } from "../BranchToolbarBranchSelector";
 import { ProjectSwitcher } from "../ProjectSwitcher";
@@ -144,6 +145,17 @@ export function NewThreadWorkLocation({
     : draftThread?.branch?.trim()
       ? ("branch" as const)
       : null;
+
+  // A first send into a new worktree waits for origin's base branch and the
+  // project's preferences; both start now, while the message is written.
+  const prefetchRefName =
+    location.kind === "newWorktree" && fetchOrigin && !worktreeSource
+      ? newWorktreeBaseBranch(selectedBranch, true)
+      : null;
+  useEffect(() => {
+    if (!prefetchRefName || !canEdit || !cwd || !projectId) return;
+    prefetchWorktreeSend({ environmentId, projectId, cwd, refName: prefetchRefName });
+  }, [canEdit, cwd, environmentId, prefetchRefName, projectId]);
 
   // Every source is recorded, never materialized: picking one is a statement
   // of intent, and the worktree is created from it on first send. Branch and

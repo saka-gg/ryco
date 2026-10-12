@@ -58,6 +58,7 @@ const mockToPersistedSavedEnvironmentRecord = vi.fn((record) => record);
 const mockCreateEnvironmentConnection = vi.fn();
 const mockWsTransport = vi.fn();
 const mockDeviceWsTransport = vi.fn();
+const mockCreateDirectDeviceRpcTransport = vi.fn();
 const mockClientGetConfig = vi.fn(async () => ({
   environment: {
     environmentId: EnvironmentId.make("environment-1"),
@@ -141,6 +142,19 @@ vi.mock("../../rpc/wsRpcClient", () => ({
     },
   })),
 }));
+
+vi.mock("@ryco/client-runtime/rpc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/rpc")>();
+  return {
+    ...actual,
+    createDirectDeviceRpcTransport: (
+      input: Parameters<typeof actual.createDirectDeviceRpcTransport>[0],
+    ) => {
+      mockCreateDirectDeviceRpcTransport(input);
+      return actual.createDirectDeviceRpcTransport(input);
+    },
+  };
+});
 
 vi.mock("../../rpc/wsTransport", () => ({
   DeviceWsTransport: mockDeviceWsTransport,
@@ -654,6 +668,12 @@ describe("addSavedEnvironment", () => {
     expect(listEnvironmentConnections()).toHaveLength(1);
 
     const socketOptions = mockWsTransport.mock.calls.at(-1)?.[1] as WsProtocolLifecycleHandlers;
+    // Device control rides the main socket: no device socket until one is needed.
+    expect(mockDeviceWsTransport).not.toHaveBeenCalled();
+    const deviceTransportInput = mockCreateDirectDeviceRpcTransport.mock.calls.at(-1)?.[0] as {
+      readonly openDedicated: () => unknown;
+    };
+    deviceTransportInput.openDedicated();
     const deviceOptions = mockDeviceWsTransport.mock.calls.at(-1)?.[1] as {
       readonly isTerminalUrlError?: (error: unknown) => boolean;
     };
@@ -991,6 +1011,62 @@ describe("addSavedEnvironment", () => {
       expect.objectContaining({ connectionState: "error" }),
     );
     expect(listEnvironmentConnections()).toHaveLength(0);
+
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("registers a connect before its config arrives and removes it when the socket's bearer is rejected", async () => {
+    const environmentId = EnvironmentId.make("environment-1");
+    mockSavedRecords = [
+      {
+        environmentId,
+        label: "Remote environment",
+        httpBaseUrl: "https://remote.example.com/",
+        wsBaseUrl: "wss://remote.example.com/",
+        createdAt: "2026-04-14T00:00:00.000Z",
+        lastConnectedAt: null,
+      },
+    ];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("bearer-token");
+    mockClientGetConfig.mockReturnValue(new Promise(() => undefined));
+    const dispose = vi.fn(async () => undefined);
+    mockCreateEnvironmentConnection.mockImplementation(
+      (input: { knownEnvironment: { environmentId: EnvironmentId }; client: unknown }) => ({
+        kind: "saved" as const,
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: async () => undefined,
+        reconnect: async () => undefined,
+        dispose,
+      }),
+    );
+
+    const {
+      reconnectSavedEnvironment,
+      listEnvironmentConnections,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+    const { RemoteEnvironmentAuthHttpError } = await import("@ryco/client-runtime/connection");
+
+    const reconnecting = reconnectSavedEnvironment(environmentId);
+    reconnecting.catch(() => undefined);
+    // The session check passed: the connection is registered while the socket's
+    // ws-token, upgrade and config are still pending.
+    await vi.waitFor(() => expect(listEnvironmentConnections()).toHaveLength(1));
+
+    const socketOptions = mockWsTransport.mock.calls.at(-1)?.[1] as WsProtocolLifecycleHandlers;
+    socketOptions.onTerminalUrlError?.(
+      new RemoteEnvironmentAuthHttpError("Unauthorized request.", 401),
+    );
+
+    await expect(reconnecting).rejects.toThrow();
+    await vi.waitFor(() => expect(listEnvironmentConnections()).toHaveLength(0));
+    expect(dispose).toHaveBeenCalled();
+    expect(mockPatchRuntime).toHaveBeenCalledWith(
+      environmentId,
+      expect.objectContaining({ authState: "requires-auth" }),
+    );
 
     await resetEnvironmentServiceForTests();
   });

@@ -39,6 +39,7 @@ import {
   writePrimaryEnvironmentDescriptor,
 } from "../environments/primary/context";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { resetNewDraftDefaultsCacheForTests } from "../hooks/newDraftDefaults";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../rpc/serverState";
 import { useStore } from "../store";
 
@@ -121,6 +122,7 @@ afterEach(async () => {
   resetPrimaryEnvironmentDescriptorForTests();
   resetServerStateForTests();
   __resetEnvironmentApiOverridesForTests();
+  resetNewDraftDefaultsCacheForTests();
 });
 
 describe("draft settings for canonical environment identities", () => {
@@ -215,5 +217,95 @@ describe("draft settings for canonical environment identities", () => {
     expect(useComposerDraftStore.getState().draftThreadsByThreadKey).toEqual({});
     resolveConfig(targetConfig);
     await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+  });
+
+  it("opens a repeat draft at once with the remembered defaults and applies the node's newer answer", async () => {
+    const primaryConfig = config(canonicalId);
+    writePrimaryEnvironmentDescriptor(primaryConfig.environment);
+    setServerConfigSnapshot(primaryConfig);
+    let answer: Promise<EffectiveProjectPreferences> = Promise.resolve(effective);
+    const readPreferences = vi.fn(() => answer);
+    __setEnvironmentApiOverrideForTests(canonicalId, {
+      server: { getProjectPreferences: readPreferences },
+    } as unknown as EnvironmentApi);
+    mounted = await render(<NewDraft environmentId={canonicalId} />);
+    const readDraft = () =>
+      useComposerDraftStore
+        .getState()
+        .getDraftSessionByLogicalProjectKey(
+          scopedProjectKey({ environmentId: canonicalId, projectId }),
+        );
+
+    // First draft: the node's answer is read before the draft opens.
+    await page.getByRole("button", { name: "New draft" }).click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+    useComposerDraftStore.setState({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {},
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    });
+
+    // Second draft: it opens without waiting for the node, with the last answer.
+    let resolveAnswer!: (value: EffectiveProjectPreferences) => void;
+    answer = new Promise((resolve) => {
+      resolveAnswer = resolve;
+    });
+    await page.getByRole("button", { name: "New draft" }).click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(2));
+    expect(readPreferences).toHaveBeenCalledTimes(2);
+    expect(readDraft()).toMatchObject({ envMode: "worktree" });
+
+    // The node's newer defaults replace the remembered ones on the untouched draft.
+    resolveAnswer({
+      ...effective,
+      defaultThreadEnvMode: { value: "local", source: "project" },
+      initialModelSelection: {
+        value: { instanceId: ProviderInstanceId.make("codex"), model: "newer-model" },
+        source: "project",
+      },
+    });
+    await vi.waitFor(() => expect(readDraft()).toMatchObject({ envMode: "local" }));
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(readDraft()!.draftId)
+        ?.modelSelectionByProvider[ProviderInstanceId.make("codex")],
+    ).toMatchObject({ model: "newer-model" });
+  });
+
+  it("never overwrites a choice made on the draft before the node answered", async () => {
+    const primaryConfig = config(canonicalId);
+    writePrimaryEnvironmentDescriptor(primaryConfig.environment);
+    setServerConfigSnapshot(primaryConfig);
+    let answer: Promise<EffectiveProjectPreferences> = Promise.resolve(effective);
+    __setEnvironmentApiOverrideForTests(canonicalId, {
+      server: { getProjectPreferences: vi.fn(() => answer) },
+    } as unknown as EnvironmentApi);
+    mounted = await render(<NewDraft environmentId={canonicalId} />);
+    const readDraft = () =>
+      useComposerDraftStore
+        .getState()
+        .getDraftSessionByLogicalProjectKey(
+          scopedProjectKey({ environmentId: canonicalId, projectId }),
+        );
+    await page.getByRole("button", { name: "New draft" }).click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+    useComposerDraftStore.setState({
+      draftsByThreadKey: {},
+      draftThreadsByThreadKey: {},
+      logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    });
+
+    let resolveAnswer!: (value: EffectiveProjectPreferences) => void;
+    answer = new Promise((resolve) => {
+      resolveAnswer = resolve;
+    });
+    await page.getByRole("button", { name: "New draft" }).click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(2));
+    // The user picks "local" themselves, then the node answers differently.
+    useComposerDraftStore.getState().setDraftThreadContext(readDraft()!.draftId, {
+      envMode: "local",
+    });
+    resolveAnswer({ ...effective, defaultThreadEnvMode: { value: "worktree", source: "node" } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(readDraft()).toMatchObject({ envMode: "local" });
   });
 });

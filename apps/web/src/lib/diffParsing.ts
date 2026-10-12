@@ -98,6 +98,20 @@ export function getRenderablePatch(
  */
 export class ActiveDiffParser {
   #previous: { source: string; patch: RenderablePatch | null } | undefined;
+  #identified: { source: string; key: string } | undefined;
+
+  /**
+   * The content key of `source` (`buildPatchCacheKey`). Hashing walks every
+   * character twice, so the key of the source this panel identified last is
+   * reused when the same text arrives again: a refetch, a remount, or any
+   * re-render that re-delivers an unchanged patch costs one string comparison.
+   */
+  identify(source: string): string {
+    if (this.#identified?.source === source) return this.#identified.key;
+    const key = buildPatchCacheKey(source);
+    this.#identified = { source, key };
+    return key;
+  }
 
   parse(source: string, scope: string, cached?: RenderablePatch | null): RenderablePatch | null {
     const patch = cached === undefined ? getRenderablePatch(source, scope, this.#previous) : cached;

@@ -17,7 +17,7 @@ import {
   getWsConnectionStatusForEnvironment,
   clearWsConnectionStatusForEnvironment,
 } from "../rpc/wsConnectionState.ts";
-import { bindDeviceConnection } from "../state/device/runtime.ts";
+import { registerDeviceConnection } from "../state/device/runtime.ts";
 
 export interface PushSequenceMonitor {
   readonly recordEvent: (environmentId: EnvironmentId, sequence: number) => void;
@@ -320,8 +320,9 @@ export function createEnvironmentConnection(
   const unsubTerminalEvent = input.client.terminal.onEvent((event) =>
     input.applyTerminalEvent(event, environmentId),
   );
+  // The device event stream starts only while a device surface retains it.
   const deviceBinding = input.client.device
-    ? bindDeviceConnection(environmentId, input.client.device)
+    ? registerDeviceConnection(environmentId, input.client.device)
     : null;
   const cleanup = () => {
     disposed = true;

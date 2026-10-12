@@ -249,16 +249,27 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     };
   }
 
-  const { ensurePrimaryEnvironmentReady, resolveInitialServerAuthGateState } =
-    await import("../environments/primary");
+  const {
+    discardPrefetchedPrimaryWebSocketToken,
+    ensurePrimaryEnvironmentReady,
+    prefetchPrimaryWebSocketToken,
+    resolveInitialServerAuthGateState,
+  } = await import("../environments/primary");
+  const connectsEarly = !isNativeAuthorizationPath(pathname);
+  // The first socket's ws-token round trip overlaps the session check. With a
+  // valid session cookie it saves one round trip; without one it is a 401
+  // that is dropped, and the socket asks again once a session exists.
+  if (connectsEarly) prefetchPrimaryWebSocketToken();
   const [, authGateState] = await Promise.all([
     ensurePrimaryEnvironmentReady(),
     resolveInitialServerAuthGateState(),
   ]);
   markStartupPhase("root-before-load-ready");
   measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
-  if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
+  if (authGateState.status === "authenticated" && connectsEarly) {
     startPrimaryConnectionEarly();
+  } else {
+    discardPrefetchedPrimaryWebSocketToken();
   }
   return {
     authGateState,

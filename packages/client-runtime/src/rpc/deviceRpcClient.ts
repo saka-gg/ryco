@@ -36,6 +36,11 @@ import {
 import type { DeviceRpcProtocolClient } from "./protocol.ts";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import {
+  isUnsupportedRpcError,
+  RpcTransportDisposedError,
+  type SubscriptionFailureKind,
+} from "./wsTransport.ts";
 import type {
   DeviceFrameSource,
   DeviceFrameSourceHandlers,
@@ -91,11 +96,180 @@ export interface DeviceRpcTransport {
   readonly request: <TSuccess>(
     execute: (client: DeviceRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
   ) => Promise<TSuccess>;
+  /**
+   * Large, repeated reads (screenshots). A transport that keeps them off the
+   * application socket provides this; otherwise they use `request`.
+   */
+  readonly requestBulk?: <TSuccess>(
+    execute: (client: DeviceRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+  ) => Promise<TSuccess>;
   readonly subscribe: <TValue>(
     connect: (client: DeviceRpcProtocolClient) => Stream.Stream<TValue, Error, never>,
     listener: (value: TValue) => void,
     options?: DeviceStreamSubscriptionOptions & { readonly tag?: string },
   ) => () => void;
+}
+
+/** The application socket, whose client also names the device RPCs. */
+export interface DeviceCapableMainTransport {
+  readonly isHeartbeatFresh: () => boolean;
+  readonly request: <TSuccess>(
+    execute: (client: DeviceRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+  ) => Promise<TSuccess>;
+  readonly subscribe: <TValue>(
+    connect: (client: DeviceRpcProtocolClient) => Stream.Stream<TValue, Error, never>,
+    listener: (value: TValue) => void,
+    options?: {
+      readonly onResubscribe?: () => void;
+      readonly onError?: (kind?: SubscriptionFailureKind) => void;
+      readonly classifyFailure?: (error: unknown) => SubscriptionFailureKind;
+      readonly tag?: string;
+    },
+  ) => () => void;
+}
+
+/** How long an unused dedicated device socket stays open before it closes. */
+export const DEDICATED_DEVICE_SOCKET_IDLE_MS = 60_000;
+
+const NOOP = () => undefined;
+
+const classifyDeviceStreamFailure = (error: unknown): SubscriptionFailureKind =>
+  isUnsupportedRpcError(error) ? "unsupported" : "failed";
+
+/**
+ * Device control for a direct connection without a socket of its own.
+ *
+ * Control RPCs and the event stream ride the application socket, which current
+ * servers serve them on. The dedicated `/ws/device` socket (and its ws-token
+ * request) opens only on demand: for screenshots, which are large and repeat
+ * while a screenshot-streamed pane is open, and for everything once an older
+ * server answered a device RPC with "Unknown request tag" — an answer given
+ * before anything ran, so the request is safely sent again there. An unused
+ * dedicated socket closes after `idleCloseMs`.
+ */
+export function createDirectDeviceRpcTransport(input: {
+  readonly main: DeviceCapableMainTransport;
+  readonly openDedicated: () => DeviceRpcTransport;
+  readonly idleCloseMs?: number;
+  readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  readonly clearTimeout?: (handle: unknown) => void;
+}): DeviceRpcTransport {
+  const idleCloseMs = input.idleCloseMs ?? DEDICATED_DEVICE_SOCKET_IDLE_MS;
+  const setTimer =
+    input.setTimeout ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+  const clearTimer =
+    input.clearTimeout ??
+    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  let disposed = false;
+  /** Set once the server showed it serves device RPCs only on `/ws/device`. */
+  let mainUnsupported = false;
+  let dedicated: DeviceRpcTransport | null = null;
+  let dedicatedUsers = 0;
+  let idleTimer: unknown = null;
+
+  const cancelIdleClose = () => {
+    if (idleTimer === null) return;
+    clearTimer(idleTimer);
+    idleTimer = null;
+  };
+  const acquireDedicated = (): DeviceRpcTransport => {
+    if (disposed) throw new RpcTransportDisposedError();
+    cancelIdleClose();
+    dedicated ??= input.openDedicated();
+    dedicatedUsers += 1;
+    return dedicated;
+  };
+  const releaseDedicated = (transport: DeviceRpcTransport) => {
+    if (transport !== dedicated) return;
+    dedicatedUsers = Math.max(0, dedicatedUsers - 1);
+    if (dedicatedUsers > 0 || disposed) return;
+    cancelIdleClose();
+    idleTimer = setTimer(() => {
+      idleTimer = null;
+      if (dedicatedUsers > 0 || dedicated !== transport) return;
+      dedicated = null;
+      void transport.dispose().catch(NOOP);
+    }, idleCloseMs);
+  };
+  const requestDedicated = async <TSuccess>(
+    execute: (client: DeviceRpcProtocolClient) => Effect.Effect<TSuccess, Error, never>,
+  ): Promise<TSuccess> => {
+    const transport = acquireDedicated();
+    try {
+      return await transport.request(execute);
+    } finally {
+      releaseDedicated(transport);
+    }
+  };
+  const subscribeDedicated = <TValue>(
+    connect: (client: DeviceRpcProtocolClient) => Stream.Stream<TValue, Error, never>,
+    listener: (value: TValue) => void,
+    options?: DeviceStreamSubscriptionOptions & { readonly tag?: string },
+  ): (() => void) => {
+    const transport = acquireDedicated();
+    const unsubscribe = transport.subscribe(connect, listener, options);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      unsubscribe();
+      releaseDedicated(transport);
+    };
+  };
+
+  return {
+    dispose: async () => {
+      if (disposed) return;
+      disposed = true;
+      cancelIdleClose();
+      const transport = dedicated;
+      dedicated = null;
+      await transport?.dispose();
+    },
+    reconnect: async () => {
+      if (disposed) throw new RpcTransportDisposedError();
+      // The application socket is reconnected by its own owner.
+      await dedicated?.reconnect();
+    },
+    isHeartbeatFresh: () =>
+      mainUnsupported ? (dedicated?.isHeartbeatFresh() ?? false) : input.main.isHeartbeatFresh(),
+    request: async (execute) => {
+      if (disposed) throw new RpcTransportDisposedError();
+      if (!mainUnsupported) {
+        try {
+          return await input.main.request(execute);
+        } catch (error) {
+          if (!isUnsupportedRpcError(error)) throw error;
+          mainUnsupported = true;
+        }
+      }
+      return requestDedicated(execute);
+    },
+    requestBulk: (execute) => requestDedicated(execute),
+    subscribe: (connect, listener, options) => {
+      if (disposed) return NOOP;
+      if (mainUnsupported) return subscribeDedicated(connect, listener, options);
+      let active = true;
+      let stop: () => void = NOOP;
+      stop = input.main.subscribe(connect, listener, {
+        ...(options?.tag === undefined ? {} : { tag: options.tag }),
+        ...(options?.onResubscribe === undefined ? {} : { onResubscribe: options.onResubscribe }),
+        classifyFailure: classifyDeviceStreamFailure,
+        onError: (kind) => {
+          if (kind === "unsupported" && active && !disposed) {
+            mainUnsupported = true;
+            stop = subscribeDedicated(connect, listener, options);
+            return;
+          }
+          options?.onError?.();
+        },
+      });
+      return () => {
+        active = false;
+        stop();
+      };
+    },
+  };
 }
 
 function unexpectedResponse(expected: string, actual: string): never {
@@ -131,9 +305,11 @@ export function createDeviceRpcClient(
         : unexpectedResponse("get-thread-state", response.type);
     },
     screenshot: async (input) => {
-      const response = await transport.request((client) =>
-        client[DEVICE_WS_METHODS.read]({ type: "screenshot", input }),
-      );
+      const read = (client: DeviceRpcProtocolClient) =>
+        client[DEVICE_WS_METHODS.read]({ type: "screenshot", input });
+      const response = await (transport.requestBulk
+        ? transport.requestBulk(read)
+        : transport.request(read));
       return response.type === "screenshot"
         ? response.result
         : unexpectedResponse("screenshot", response.type);

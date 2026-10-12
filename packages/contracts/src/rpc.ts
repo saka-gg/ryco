@@ -162,6 +162,7 @@ import {
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
+  VcsPrefetchWorktreeBaseInput,
   GitManagerServiceError,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
@@ -428,6 +429,7 @@ export const WS_METHODS = {
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
+  vcsPrefetchWorktreeBase: "vcs.prefetchWorktreeBase",
   vcsReadLineBlame: "vcs.readLineBlame",
   vcsReadImageBlob: "vcs.readImageBlob",
   vcsReadLocalChanges: "vcs.readLocalChanges",
@@ -1895,6 +1897,11 @@ export const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   error: Schema.Union([GitCommandError, AuthRpcError]),
 });
 
+export const WsVcsPrefetchWorktreeBaseRpc = Rpc.make(WS_METHODS.vcsPrefetchWorktreeBase, {
+  payload: VcsPrefetchWorktreeBaseInput,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
 export const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   payload: VcsCreateWorktreeInput,
   success: VcsCreateWorktreeResult,
@@ -2446,6 +2453,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsVcsApplyIndexPatchRpc
   | typeof WsVcsReadComparisonRpc
   | typeof WsVcsListRefsRpc
+  | typeof WsVcsPrefetchWorktreeBaseRpc
   | typeof WsVcsCreateWorktreeRpc
   | typeof WsVcsRemoveWorktreeRpc
   | typeof WsVcsCreateRefRpc
@@ -2650,6 +2658,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsVcsApplyIndexPatchRpc,
   WsVcsReadComparisonRpc,
   WsVcsListRefsRpc,
+  WsVcsPrefetchWorktreeBaseRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,
   WsVcsCreateRefRpc,
@@ -2704,10 +2713,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
 );
 
 /**
- * Hosted relay channels carry both groups through one lifecycle-owned encrypted
- * channel. Direct clients keep the device group on its own low-priority socket
- * so video-adjacent work cannot contend with chat RPC. The explicit annotation
- * keeps the merged RPC union within the compiler's serializable type limit.
+ * Hosted relay channels and the direct main socket carry both groups on one
+ * connection; device video frames keep their own binary socket. Older servers
+ * serve the device group only on `/ws/device`. The explicit annotation keeps
+ * the merged RPC union within the compiler's serializable type limit.
  */
 export const WsHostedRpcGroup: RpcGroup.RpcGroup<
   RpcGroup.Rpcs<typeof WsRpcGroup> | RpcGroup.Rpcs<typeof WsDeviceRpcGroup>
