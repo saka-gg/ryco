@@ -99,6 +99,13 @@ export interface PerfSample {
   readonly processTree: ProcessTreeSummary;
   readonly sourceControl: SourceControlScenarioMetrics;
   readonly cpuProfile: CpuProfileSummary | null;
+  /**
+   * One full-document style recalc and layout on the app's stylesheet: the
+   * `dark` root class toggled over ~4,400 elements cloned from the shell's own
+   * class lists. Tracks how stylesheet growth prices root-level changes (theme
+   * and appearance switches). Absent from results recorded before it existed.
+   */
+  readonly themeRecalcMs?: number | null;
   readonly errors: readonly string[];
 }
 
@@ -142,7 +149,8 @@ export type PerfMetricKey =
   | "sourceControlHiddenRequests"
   | "sourceControlSettledRequests"
   | "statusMotionP95FrameMs"
-  | "statusMotionDroppedFrames";
+  | "statusMotionDroppedFrames"
+  | "themeRecalcMs";
 
 export type ComparisonMetricKey =
   | PerfMetricKey
@@ -396,6 +404,7 @@ export const DEFAULT_COMPARISON_POLICY: ComparisonPolicy = {
     sourceControlActiveCadenceMs: { relativePercent: 15, absolute: 3_000 },
     statusMotionP95FrameMs: { relativePercent: 20, absolute: 4 },
     statusMotionDroppedFrames: { relativePercent: 50, absolute: 3 },
+    themeRecalcMs: { relativePercent: 20, absolute: 10 },
   },
   idleRequestAllowance: 1,
   failOnSampleErrors: true,
@@ -434,6 +443,7 @@ export const PERF_METRIC_KEYS: readonly PerfMetricKey[] = [
   "sourceControlSettledRequests",
   "statusMotionP95FrameMs",
   "statusMotionDroppedFrames",
+  "themeRecalcMs",
 ];
 
 export function sampleMetric(sample: PerfSample, metric: PerfMetricKey): number | null {
@@ -493,5 +503,7 @@ export function sampleMetric(sample: PerfSample, metric: PerfMetricKey): number 
       return sample.sourceControl.statusMotionP95FrameMs;
     case "statusMotionDroppedFrames":
       return sample.sourceControl.supported ? sample.sourceControl.statusMotionDroppedFrames : null;
+    case "themeRecalcMs":
+      return sample.themeRecalcMs ?? null;
   }
 }

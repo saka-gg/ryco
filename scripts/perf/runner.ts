@@ -183,6 +183,7 @@ export async function runCheckoutBenchmark(input: {
           processTree,
           sourceControl: browserResult.sourceControl ?? UNSUPPORTED_SOURCE_CONTROL_METRICS,
           cpuProfile: browserResult.cpuProfile,
+          themeRecalcMs: browserResult.themeRecalcMs,
           errors: iterationErrors,
         });
       } catch (error) {

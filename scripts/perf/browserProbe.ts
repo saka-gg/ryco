@@ -46,7 +46,87 @@ interface BrowserProbeResult {
   readonly reconnectNetwork: PhaseNetworkMetrics;
   readonly sourceControl: SourceControlScenarioMetrics;
   readonly cpuProfile: CpuProfileSummary | null;
+  readonly themeRecalcMs: number | null;
   readonly errors: readonly string[];
+}
+
+/** Elements the theme recalc probe styles, the size of a large real page. */
+export const THEME_RECALC_PROBE_ELEMENTS = 4_400;
+
+/**
+ * Median time of one full-document style recalc plus layout after toggling the
+ * `dark` root class (what a theme switch costs), over elements cloned from the
+ * shell's own class lists so the selectors the app really uses are matched.
+ */
+export async function measureThemeRecalc(page: Page): Promise<number | null> {
+  return page.evaluate((elementCount) => {
+    interface BrowserElement {
+      className: string;
+      textContent: string | null;
+      readonly offsetHeight: number;
+      readonly classList: {
+        add: (name: string) => void;
+        remove: (name: string) => void;
+        toggle: (name: string) => boolean;
+      };
+      style: { cssText: string };
+      append: (...children: BrowserElement[]) => void;
+      getAttribute: (name: string) => string | null;
+      querySelectorAll: (selector: string) => Iterable<BrowserElement>;
+      remove: () => void;
+      setAttribute: (name: string, value: string) => void;
+    }
+    const browser = globalThis as unknown as {
+      document: {
+        body: BrowserElement;
+        documentElement: BrowserElement;
+        createElement: (tag: string) => BrowserElement;
+      };
+      getComputedStyle: (element: BrowserElement) => { readonly color: string };
+    };
+    const { document } = browser;
+    const classLists = [
+      ...new Set(
+        Array.from(document.body.querySelectorAll("[class]"), (element) =>
+          element.getAttribute("class"),
+        ).filter((value): value is string => !!value && value.trim().length > 0),
+      ),
+    ];
+    if (classLists.length === 0) return null;
+    const host = document.createElement("div");
+    host.setAttribute("aria-hidden", "true");
+    host.style.cssText = "position:absolute;left:-100000px;top:0;width:1024px;";
+    for (let index = 0; index < elementCount; index += 1) {
+      const element = document.createElement(index % 4 === 0 ? "button" : "div");
+      element.className = classLists[index % classLists.length]!;
+      element.textContent = "Probe";
+      host.append(element);
+    }
+    document.body.append(host);
+    const root = document.documentElement;
+    const settle = () => {
+      void browser.getComputedStyle(document.body).color;
+      void document.body.offsetHeight;
+    };
+    settle();
+    const samples: number[] = [];
+    for (let run = 0; run < 7; run += 1) {
+      const startedAt = performance.now();
+      // What a theme switch does: guard transitions and flip the root class.
+      root.classList.add("no-transitions");
+      root.classList.toggle("dark");
+      settle();
+      samples.push(performance.now() - startedAt);
+      root.classList.remove("no-transitions");
+      settle();
+    }
+    // Seven toggles leave the opposite theme: restore the original.
+    root.classList.toggle("dark");
+    settle();
+    host.remove();
+    samples.sort((left, right) => left - right);
+    return samples[Math.floor(samples.length / 2)] ?? null;
+  }, THEME_RECALC_PROBE_ELEMENTS);
 }
 
 /** Where the boot CPU profile goes and which dist resolves its frames to sources. */
@@ -1055,6 +1135,7 @@ export async function runBrowserProbe(input: {
     startupMeasures: {},
   };
   let cpuProfile: CpuProfileSummary | null = null;
+  let themeRecalcMs: number | null = null;
 
   try {
     if (input.cpuProfile) {
@@ -1216,6 +1297,8 @@ export async function runBrowserProbe(input: {
     if (reconnected) reconnectMs = performance.now() - onlineAt;
     else errors.push("browser: no WebSocket reconnect handshake before the recovery deadline.");
     heapAfterIdleBytes ??= (await readCdpRuntimeMetrics(session)).heapBytes;
+    // Last, so its synthetic DOM never touches the idle and network phases.
+    themeRecalcMs = await measureThemeRecalc(page);
   } catch (error) {
     errors.push(
       `browser: ${sanitizeDiagnostic(error instanceof Error ? error.message : String(error))}`,
@@ -1251,6 +1334,7 @@ export async function runBrowserProbe(input: {
     reconnectNetwork: snapshotNetworkMetrics(phases.reconnect),
     sourceControl,
     cpuProfile,
+    themeRecalcMs,
     errors,
   };
 }
