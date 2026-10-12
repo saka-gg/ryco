@@ -76,19 +76,22 @@ describe("makeDeferredHubConnectorLive", () => {
     }),
   );
 
-  it.live("fails waiting routes, without failing the server, when the connector cannot be built", () =>
-    Effect.gen(function* () {
-      const { scope, ready, start } = yield* buildDeferred(
-        makeDeferredHubConnectorLive(async () =>
-          Layer.effect(HubConnectorService, Effect.die(new Error("custody exploded"))),
-        ),
-      );
-      yield* start;
-      const exit = yield* Effect.exit(ready.await);
-      expect(Exit.isFailure(exit)).toBe(true);
-      if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("Hub connector failed to start");
-      yield* Scope.close(scope, Exit.void);
-    }),
+  it.live(
+    "fails waiting routes, without failing the server, when the connector cannot be built",
+    () =>
+      Effect.gen(function* () {
+        const { scope, ready, start } = yield* buildDeferred(
+          makeDeferredHubConnectorLive(async () =>
+            Layer.effect(HubConnectorService, Effect.die(new Error("custody exploded"))),
+          ),
+        );
+        yield* start;
+        const exit = yield* Effect.exit(ready.await);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit))
+          expect(String(exit.cause)).toContain("Hub connector failed to start");
+        yield* Scope.close(scope, Exit.void);
+      }),
   );
 
   it.live("interrupts waiting routes when the server shuts down mid-build", () =>

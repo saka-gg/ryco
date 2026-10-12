@@ -19,8 +19,14 @@ import {
   NodeLocalIntroductionLedgerError,
 } from "./NodeLocalIntroductionLedger.ts";
 
-export { type NodeLocalIntroductionErrorCode, NodeLocalIntroductionError } from "./NodeLocalIntroductionError.ts";
-import { type NodeLocalIntroductionErrorCode, NodeLocalIntroductionError } from "./NodeLocalIntroductionError.ts";
+export {
+  type NodeLocalIntroductionErrorCode,
+  NodeLocalIntroductionError,
+} from "./NodeLocalIntroductionError.ts";
+import {
+  type NodeLocalIntroductionErrorCode,
+  NodeLocalIntroductionError,
+} from "./NodeLocalIntroductionError.ts";
 
 function introductionError(code: NodeLocalIntroductionErrorCode): never {
   throw new NodeLocalIntroductionError(code);

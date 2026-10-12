@@ -781,15 +781,18 @@ export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(fu
     Effect.gen(function* () {
       const module = yield* loadModule("gitlab", () => import("./GitLabSourceControlProvider.ts"));
       const client = yield* loadModule("gitlab", () => import("./GitLabCli.ts"));
-      return yield* module.make().pipe(Effect.provideService(client.GitLabCli, yield* clients.gitlab));
+      return yield* module
+        .make()
+        .pipe(Effect.provideService(client.GitLabCli, yield* clients.gitlab));
     }),
   );
 
   const bitbucket = yield* makeLazyProvider(
     "bitbucket",
     Effect.gen(function* () {
-      const module = yield* loadModule("bitbucket", () =>
-        import("./BitbucketSourceControlProvider.ts"),
+      const module = yield* loadModule(
+        "bitbucket",
+        () => import("./BitbucketSourceControlProvider.ts"),
       );
       const client = yield* loadModule("bitbucket", () => import("./BitbucketApi.ts"));
       return yield* module
@@ -813,8 +816,9 @@ export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(fu
   const azureDevOps = yield* makeLazyProvider(
     "azure-devops",
     Effect.gen(function* () {
-      const module = yield* loadModule("azure-devops", () =>
-        import("./AzureDevOpsSourceControlProvider.ts"),
+      const module = yield* loadModule(
+        "azure-devops",
+        () => import("./AzureDevOpsSourceControlProvider.ts"),
       );
       const client = yield* loadModule("azure-devops", () => import("./AzureDevOpsCli.ts"));
       return yield* module

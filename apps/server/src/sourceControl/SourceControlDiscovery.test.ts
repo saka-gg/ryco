@@ -14,7 +14,6 @@ import * as ForgejoApi from "./ForgejoApi.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlDiscovery from "./SourceControlDiscovery.ts";
-import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import { layerFromClientServices } from "./sourceControlProviderRegistryTestLayer.ts";
 
 const sourceControlProviderRegistryTestLayer = (input: {

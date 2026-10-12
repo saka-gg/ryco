@@ -112,12 +112,12 @@ describe("createDesktopBackendChildEnv", () => {
     expect(createDesktopBackendChildEnv({}, packaged).UV_THREADPOOL_SIZE).toBe(
       DESKTOP_BACKEND_UV_THREADPOOL_SIZE,
     );
-    expect(createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: " " }, packaged).UV_THREADPOOL_SIZE).toBe(
-      DESKTOP_BACKEND_UV_THREADPOOL_SIZE,
-    );
-    expect(createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: "8" }, packaged).UV_THREADPOOL_SIZE).toBe(
-      "8",
-    );
+    expect(
+      createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: " " }, packaged).UV_THREADPOOL_SIZE,
+    ).toBe(DESKTOP_BACKEND_UV_THREADPOOL_SIZE);
+    expect(
+      createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: "8" }, packaged).UV_THREADPOOL_SIZE,
+    ).toBe("8");
   });
 });
 

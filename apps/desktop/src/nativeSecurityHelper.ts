@@ -195,7 +195,9 @@ export function createNativeSecurityHelperRunner(
       idleTimer: null,
       closed: false,
     };
-    child.once("error", () => discard(current, new DesktopNativeSecurityError("hardware_unavailable")));
+    child.once("error", () =>
+      discard(current, new DesktopNativeSecurityError("hardware_unavailable")),
+    );
     child.once("exit", () => discard(current, new DesktopNativeSecurityError("operation_failed")));
     child.stdin?.on("error", () =>
       discard(current, new DesktopNativeSecurityError("operation_failed")),
