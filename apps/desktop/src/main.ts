@@ -3,15 +3,13 @@ import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
 import { Duplex } from "node:stream";
 import { attachDesktopResourceTelemetry } from "./desktopResourceTelemetry.ts";
-import { registerProjectBrowserIpc } from "./browser/ipc.ts";
 import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DesktopComputerUseRuntime } from "./computerUse/runtime.ts";
-import { registerComputerUseIpc } from "./computerUse/ipc.ts";
+import type { DesktopComputerUseRuntime } from "./computerUse/runtime.ts";
 
 import {
   app,
@@ -423,6 +421,8 @@ type LinuxDesktopNamedApp = Electron.App & {
 
 let mainWindow: BrowserWindow | null = null;
 let computerUseRuntime: DesktopComputerUseRuntime | null = null;
+/** Registers the Computer-use and project browser IPC once its stack has loaded. */
+let registerComputerUseStackIpc: ((runtime: DesktopComputerUseRuntime) => void) | null = null;
 const desktopAuthorizationBroker = new DesktopAuthorizationCallbackBroker();
 let desktopHostedIdentityCoordinator: DesktopHostedIdentityCoordinator | null = null;
 let desktopHostedIdentityStatus: DesktopHostedIdentityStatus = {
@@ -4647,7 +4647,12 @@ async function selectDesktopBackendPort(
 
 async function startDesktopComputerUse(): Promise<void> {
   try {
-    computerUseRuntime = new DesktopComputerUseRuntime({
+    const stack = await import("./computerUse/desktopStack.ts");
+    registerComputerUseStackIpc = (runtime) => {
+      stack.registerComputerUseIpc(runtime, () => mainWindow);
+      stack.registerProjectBrowserIpc(runtime.embedded, () => mainWindow);
+    };
+    computerUseRuntime = new stack.DesktopComputerUseRuntime({
       stateDir: STATE_DIR,
       auditLogPath: Path.join(
         BACKEND_BASE_DIR,
@@ -4789,10 +4794,7 @@ async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap backend start requested");
 
   registerIpcHandlers();
-  if (computerUseRuntime) {
-    registerComputerUseIpc(computerUseRuntime, () => mainWindow);
-    registerProjectBrowserIpc(computerUseRuntime.embedded, () => mainWindow);
-  }
+  if (computerUseRuntime) registerComputerUseStackIpc?.(computerUseRuntime);
   forwardSystemResumeToRenderers();
   startDesktopKeepAwake();
   writeDesktopLogHeader("bootstrap ipc handlers registered");

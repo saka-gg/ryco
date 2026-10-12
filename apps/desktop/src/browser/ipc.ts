@@ -1,5 +1,5 @@
 import { ipcMain, type BrowserWindow } from "electron";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { ProjectBrowserCommand, ProjectBrowserSurface } from "@ryco/contracts";
 import type { EmbeddedComputerBrowser } from "../computerUse/embeddedBrowser.ts";
 import { record, textArg } from "../computerUse/native.ts";

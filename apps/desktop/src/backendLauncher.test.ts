@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createDesktopBackendChildEnv,
+  DESKTOP_BACKEND_UV_THREADPOOL_SIZE,
   DESKTOP_BACKEND_EXIT_WAIT_MS,
   DESKTOP_BACKEND_SIGTERM_GRACE_MS,
   desktopBackendSpawnArgs,
@@ -93,6 +94,7 @@ describe("createDesktopBackendChildEnv", () => {
     expect(env).toEqual({
       PATH: "/usr/bin",
       ELECTRON_RUN_AS_NODE: "1",
+      UV_THREADPOOL_SIZE: "16",
       RYCO_DEVICE_HELPER_SOURCE_DIR: "/Applications/Ryco.app/Contents/Resources/device-helper",
     });
   });
@@ -104,6 +106,18 @@ describe("createDesktopBackendChildEnv", () => {
     );
     expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
     expect(env.RYCO_DEVICE_HELPER_SOURCE_DIR).toBeUndefined();
+  });
+
+  it("widens the backend's libuv threadpool unless the user sized it", () => {
+    expect(createDesktopBackendChildEnv({}, packaged).UV_THREADPOOL_SIZE).toBe(
+      DESKTOP_BACKEND_UV_THREADPOOL_SIZE,
+    );
+    expect(createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: " " }, packaged).UV_THREADPOOL_SIZE).toBe(
+      DESKTOP_BACKEND_UV_THREADPOOL_SIZE,
+    );
+    expect(createDesktopBackendChildEnv({ UV_THREADPOOL_SIZE: "8" }, packaged).UV_THREADPOOL_SIZE).toBe(
+      "8",
+    );
   });
 });
 

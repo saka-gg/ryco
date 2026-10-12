@@ -64,8 +64,22 @@ const LAZY_FROM_MAIN = [
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",
+  // Computer use: started during bootstrap, after Electron is ready.
+  "./computerUse/desktopStack.ts",
+  "./computerUse/runtime.ts",
+  "./computerUse/ipc.ts",
+  "./browser/ipc.ts",
+  "./cuaDriverHost.ts",
+  "./appSnapManager.ts",
 ];
-const LAZY_EXTERNALS_FROM_MAIN = ["electron-updater", "@ryco/ssh/tunnel", "@ryco/ssh/command"];
+const LAZY_EXTERNALS_FROM_MAIN = [
+  "electron-updater",
+  "@ryco/ssh/tunnel",
+  "@ryco/ssh/command",
+  "ws",
+  // The barrel evaluates every effect module; eager code imports subpaths.
+  "effect",
+];
 
 describe("desktop main bundle splitting", () => {
   it("keeps Hub, E2EE, workspace, SSH and updater code out of the eager main graph", async () => {
@@ -85,6 +99,7 @@ describe("desktop main bundle splitting", () => {
     const main = await readSource("./main.ts");
     expect(main).toContain('import("./desktopHubStack.ts")');
     expect(main).toContain('import("./sshEnvironment.ts")');
+    expect(main).toContain('import("./computerUse/desktopStack.ts")');
     // A lazy CommonJS require: the ESM namespace of electron-updater has no
     // `autoUpdater` export, so `(await import("electron-updater")).autoUpdater`
     // would be undefined.

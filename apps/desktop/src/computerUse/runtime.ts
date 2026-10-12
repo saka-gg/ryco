@@ -15,7 +15,7 @@ import {
   type ComputerUsePairing,
   type ComputerUseState,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { ComputerPolicyController, DEFAULT_COMPUTER_POLICY } from "./policy.ts";
 import { ComputerNativeHelper } from "./helper.ts";
 import { ComputerPermissionMonitor } from "./permissions.ts";
