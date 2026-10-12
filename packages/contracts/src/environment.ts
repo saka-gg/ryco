@@ -77,6 +77,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   cliProxyHubs: Schema.optionalKey(Schema.Boolean),
   /** Stores Cloudflare Access service tokens and sends them with CLIProxyAPI management calls. */
   cliProxyCloudflareAccess: Schema.optionalKey(Schema.Boolean),
+  /** `provider.prewarmSession` (start a thread's session ahead of its send); absent on older servers. */
+  providerSessionPrewarm: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

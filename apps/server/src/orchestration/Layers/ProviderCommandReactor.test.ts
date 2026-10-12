@@ -1,4 +1,9 @@
 import { execFileSync } from "node:child_process";
+import {
+  makeProviderSessionPrewarmLayer,
+  type ProviderSessionPrewarmOptions,
+} from "./ProviderSessionPrewarm.ts";
+import { ProviderSessionPrewarm } from "../Services/ProviderSessionPrewarm.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { canonicalStoragePath } from "../../storage/lifecycle.ts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -263,6 +268,8 @@ describe("ProviderCommandReactor", () => {
     readonly decorateIntents?: (
       live: ProviderEffectIntentRepositoryShape,
     ) => ProviderEffectIntentRepositoryShape;
+    /** Runs the real session prewarm service with these options. */
+    readonly prewarm?: ProviderSessionPrewarmOptions;
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ryco-reactor-"));
@@ -484,6 +491,17 @@ describe("ProviderCommandReactor", () => {
     >(() => Effect.succeed("unrecognized" as const));
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
+    // Stops exactly the runtime named, as ProviderService does.
+    const stopSessionBinding = vi.fn((binding: { readonly runtimeSessionId?: string }) =>
+      Effect.sync(() => {
+        const index = runtimeSessions.findIndex(
+          (session) => session.runtimeSessionId === binding.runtimeSessionId,
+        );
+        if (index < 0) return "not-found" as const;
+        runtimeSessions.splice(index, 1);
+        return "stopped" as const;
+      }),
+    );
     const service: ProviderServiceShape = {
       ...(input?.setThreadGoal ? { setThreadGoal: input.setThreadGoal } : {}),
       ...(input?.getThreadGoal ? { getThreadGoal: input.getThreadGoal } : {}),
@@ -495,7 +513,7 @@ describe("ProviderCommandReactor", () => {
       getSession: input?.getSession ?? (() => Effect.succeed(Option.none())),
       restoreSessionBinding: () => Effect.succeed(false),
       retireSessionBinding: () => Effect.succeed(false),
-      stopSessionBinding: () => Effect.succeed("not-found"),
+      stopSessionBinding: stopSessionBinding as ProviderServiceShape["stopSessionBinding"],
       listStaleSessionBindings: () => Effect.succeed([]),
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       steerTurn: input?.steerTurn ?? (() => unsupported()),
@@ -627,7 +645,11 @@ describe("ProviderCommandReactor", () => {
           drain: Effect.void,
         })
       : Layer.empty;
+    const prewarmLayer = input?.prewarm
+      ? makeProviderSessionPrewarmLayer(input.prewarm)
+      : Layer.empty;
     const layer = reactorLayer.pipe(
+      Layer.provideMerge(prewarmLayer),
       Layer.provideMerge(checkpointLayer),
       Layer.provideMerge(contextHandoffLayer),
       Layer.provideMerge(
@@ -787,6 +809,10 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       reactor,
+      stopSessionBinding,
+      prewarm: Option.getOrUndefined(
+        await runtime.runPromise(Effect.serviceOption(ProviderSessionPrewarm)),
+      ),
     };
   }
 
@@ -7369,6 +7395,205 @@ describe("ProviderCommandReactor", () => {
       expect(summary.settledWithoutOutcome).toBe(1);
       expect(await openIntents(second)).toEqual([]);
       expect(await activitiesOf(second, "provider.turn.start.failed")).toHaveLength(0);
+    });
+  });
+
+  describe("session prewarm", () => {
+    const threadId = ThreadId.make("thread-1");
+    const turnStart = (id: string, overrides: Record<string, unknown> = {}) => ({
+      type: "thread.turn.start" as const,
+      commandId: CommandId.make(`prewarm-${id}`),
+      threadId,
+      message: {
+        messageId: MessageId.make(`prewarm-message-${id}`),
+        role: "user" as const,
+        text: "hello",
+        attachments: [],
+      },
+      runtimeMode: "approval-required" as const,
+      interactionMode: "default" as const,
+      createdAt: new Date().toISOString(),
+      ...overrides,
+    });
+    const prewarmHarness = (options: Parameters<typeof createHarness>[0] = {}) => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-prewarm-"));
+      return createHarness({ baseDir, workspaceRoot: baseDir, prewarm: {}, ...options });
+    };
+
+    it("starts the session ahead of the send without touching the thread, and the send adopts it", async () => {
+      const harness = await prewarmHarness();
+      const before = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(await harness.run(harness.prewarm!.prewarm({ threadId }))).toEqual({
+        status: "started",
+      });
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      // Unbound: no session-set, no turn, no title.
+      const warmed = (await harness.readModel()).threads.find((thread) => thread.id === threadId);
+      expect(warmed?.session).toEqual(before?.session ?? null);
+      expect(warmed?.updatedAt).toBe(before?.updatedAt);
+      expect(harness.generateThreadTitle).not.toHaveBeenCalled();
+      // A repeat finds the session it already started.
+      expect(await harness.run(harness.prewarm!.prewarm({ threadId }))).toEqual({
+        status: "pending",
+      });
+
+      await Effect.runPromise(harness.engine.dispatch(turnStart("adopt")));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSessionBinding).not.toHaveBeenCalled();
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session?.runtimeSessionId).toBe("runtime-1");
+    });
+
+    it("shortens the first turn by the provider start (fake provider, 300 ms start)", async () => {
+      const startMs = 300;
+      const measure = async (prewarm: boolean) => {
+        const harness = await prewarmHarness({
+          startSessionEffect: () => Effect.sleep(`${startMs} millis`),
+        });
+        if (prewarm) {
+          await harness.run(harness.prewarm!.prewarm({ threadId }));
+          await waitFor(() => harness.runtimeSessions.length === 1);
+        }
+        const sentAt = Date.now();
+        await Effect.runPromise(harness.engine.dispatch(turnStart(prewarm ? "warm" : "cold")));
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        const elapsed = Date.now() - sentAt;
+        await Effect.runPromise(Scope.close(scope!, Exit.void));
+        scope = null;
+        await runtime!.dispose();
+        runtime = null;
+        return elapsed;
+      };
+      const cold = await measure(false);
+      const warm = await measure(true);
+      expect(cold).toBeGreaterThanOrEqual(startMs);
+      expect(warm).toBeLessThan(startMs / 2);
+    });
+
+    it("lets a send arriving mid-start wait for the prewarm instead of starting twice", async () => {
+      const gate = Effect.runSync(Deferred.make<void>());
+      const harness = await prewarmHarness({
+        startSessionEffect: ({ call }) => (call === 1 ? Deferred.await(gate) : undefined),
+      });
+      await harness.run(harness.prewarm!.prewarm({ threadId }));
+      await Effect.runPromise(harness.engine.dispatch(turnStart("mid-start")));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops a prewarmed session the send would start differently, then starts its own", async () => {
+      const harness = await prewarmHarness();
+      await harness.run(
+        harness.prewarm!.prewarm({
+          threadId,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-mini" },
+        }),
+      );
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      await Effect.runPromise(harness.engine.dispatch(turnStart("mismatch")));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.stopSessionBinding).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimeSessionId: "runtime-1" }),
+      );
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(thread?.session?.runtimeSessionId).toBe("runtime-2");
+    });
+
+    it("stops an unclaimed prewarmed session after the idle timeout", async () => {
+      const harness = await prewarmHarness({ prewarm: { idleTimeout: "60 millis" } });
+      await harness.run(harness.prewarm!.prewarm({ threadId }));
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      await waitFor(() => harness.stopSessionBinding.mock.calls.length === 1);
+      expect(harness.runtimeSessions).toHaveLength(0);
+      // Nothing left to claim: the next send starts normally.
+      await Effect.runPromise(harness.engine.dispatch(turnStart("after-idle")));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+    });
+
+    it("does nothing for a thread whose session runs, and bounds the pool per instance", async () => {
+      const harness = await prewarmHarness({
+        prewarm: { perInstanceLimit: 1 },
+        extraThreadIds: ["thread-2"],
+      });
+      await Effect.runPromise(harness.engine.dispatch(turnStart("running")));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(await harness.run(harness.prewarm!.prewarm({ threadId }))).toEqual({
+        status: "already-running",
+      });
+      const second = await harness.run(
+        harness.prewarm!.prewarm({ threadId: ThreadId.make("thread-2") }),
+      );
+      expect(second).toEqual({ status: "started" });
+      await waitFor(() => harness.runtimeSessions.length === 2);
+      const third = await harness.run(
+        harness.prewarm!.prewarm({
+          threadId: ThreadId.make("thread-3"),
+          projectId: asProjectId("project-1"),
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+        }),
+      );
+      expect(third).toEqual({ status: "started" });
+      // thread-2's warm session made room for the draft's.
+      await waitFor(() => harness.stopSessionBinding.mock.calls.length === 1);
+      expect(harness.stopSessionBinding).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "thread-2" }),
+      );
+      expect(harness.startSession).toHaveBeenCalledTimes(3);
+    });
+
+    it("prewarms a draft before its thread exists, and its first send adopts the session", async () => {
+      const harness = await prewarmHarness();
+      const draftId = ThreadId.make("draft-thread");
+      const draftSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+      expect(
+        await harness.run(
+          harness.prewarm!.prewarm({
+            threadId: draftId,
+            projectId: asProjectId("project-1"),
+            modelSelection: draftSelection,
+            runtimeMode: "approval-required",
+          }),
+        ),
+      ).toEqual({ status: "started" });
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      expect((await harness.readModel()).threads.some((thread) => thread.id === draftId)).toBe(
+        false,
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("draft-create"),
+          threadId: draftId,
+          projectId: asProjectId("project-1"),
+          title: "Draft",
+          modelSelection: draftSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await Effect.runPromise(harness.engine.dispatch(turnStart("draft", { threadId: draftId })));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("skips a thread whose working directory does not exist", async () => {
+      const harness = await createHarness({ prewarm: {} });
+      expect(
+        await harness.run(
+          harness.prewarm!.prewarm({ threadId, projectId: asProjectId("project-1") }),
+        ),
+      ).toEqual({ status: "skipped", reason: "working directory unavailable" });
+      expect(harness.startSession).not.toHaveBeenCalled();
     });
   });
 });

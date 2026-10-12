@@ -2,6 +2,7 @@ import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
+import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { storagePathBlocker } from "../storage/lifecycle.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
@@ -220,6 +221,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
+    // Optional: route tests without the orchestration runtime answer "skipped".
+    const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
     const codexMcp = yield* makeCodexMcpService;
     const claudeMcp = yield* makeClaudeMcpAdapter();
     const copilotMcp = yield* makeCopilotMcpAdapter();
@@ -1123,6 +1126,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       providerRuntimeIngestion,
       providerMaintenanceRunner,
       dailyRecapQuery,
+      sessionPrewarm,
       localTaskService,
       worktreeNotesService,
       config,

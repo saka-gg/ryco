@@ -57,6 +57,7 @@ import {
   AutomationCentreSnapshot,
 } from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
+import { ProviderSessionPrewarmInput, ProviderSessionPrewarmResult } from "./provider.ts";
 import {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
@@ -503,6 +504,7 @@ export const WS_METHODS = {
   notesCommand: "notes.command",
 
   serverRefreshProviders: "server.refreshProviders",
+  providerPrewarmSession: "provider.prewarmSession",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
@@ -927,6 +929,12 @@ export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap,
   payload: DailyRecapRequest,
   success: DailyRecapSnapshot,
   error: Schema.Union([DailyRecapReadError, AuthRpcError]),
+});
+
+export const WsProviderPrewarmSessionRpc = Rpc.make(WS_METHODS.providerPrewarmSession, {
+  payload: ProviderSessionPrewarmInput,
+  success: ProviderSessionPrewarmResult,
+  error: AuthRpcError,
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -2322,6 +2330,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
+  | typeof WsProviderPrewarmSessionRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
@@ -2526,6 +2535,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
+  WsProviderPrewarmSessionRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,

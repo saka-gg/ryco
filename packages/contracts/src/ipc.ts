@@ -1114,6 +1114,10 @@ export interface EnvironmentApi {
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
+    /** Absent on transports without it; call only when the server advertises the capability. */
+    prewarmProviderSession?: (
+      input: import("./provider.ts").ProviderSessionPrewarmInput,
+    ) => Promise<import("./provider.ts").ProviderSessionPrewarmResult>;
     getSettings: () => Promise<ServerSettings>;
     getProjectPreferences?: (input: {
       readonly projectId?: ProjectId;
