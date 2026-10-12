@@ -37,6 +37,8 @@ import {
   __resetClientTracingForTests,
   ClientTracingLive,
   configureClientTracing,
+  disableClientTracing,
+  shouldExportClientTraces,
 } from "./clientTracing";
 
 function runTracedSpan(name: string): Promise<void> {
@@ -80,5 +82,48 @@ describe("client tracing", () => {
 
     expect(exporter.starts.map((start) => start.exportIntervalMs)).toEqual([10_000, 50]);
     expect(exporter.disposals).toBe(1);
+  });
+});
+
+describe("client trace export gating", () => {
+  afterEach(async () => {
+    await __resetClientTracingForTests();
+  });
+
+  it("exports only to a server that advertises a use for browser spans", () => {
+    const observability = {
+      logsDirectoryPath: "/logs",
+      localTracingEnabled: true,
+      otlpTracesEnabled: false,
+      otlpMetricsEnabled: false,
+    };
+    // An older server advertises nothing: no spans are sent.
+    expect(shouldExportClientTraces({ observability, perfProfile: false })).toBe(false);
+    expect(shouldExportClientTraces({ observability: null, perfProfile: false })).toBe(false);
+    expect(
+      shouldExportClientTraces({
+        observability: { ...observability, browserTracesEnabled: false },
+        perfProfile: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldExportClientTraces({
+        observability: { ...observability, browserTracesEnabled: true },
+        perfProfile: false,
+      }),
+    ).toBe(true);
+    // A perf-profile build always exports.
+    expect(shouldExportClientTraces({ observability: null, perfProfile: true })).toBe(true);
+  });
+
+  it("stops the exporter when tracing is disabled again", async () => {
+    const disposalsBefore = exporter.disposals;
+    await configureClientTracing();
+    await disableClientTracing();
+    expect(exporter.disposals).toBe(disposalsBefore + 1);
+    // Configuring again starts a fresh exporter.
+    const startsBefore = exporter.starts.length;
+    await configureClientTracing();
+    expect(exporter.starts.length).toBe(startsBefore + 1);
   });
 });

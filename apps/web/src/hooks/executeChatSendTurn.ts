@@ -1,5 +1,10 @@
-import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
 import { readEnvironmentConnection } from "../environments/runtime";
+import { isHostedHubMode } from "../env";
+import {
+  readAndRememberProjectPreferences,
+  readRememberedProjectPreferences,
+} from "./newDraftDefaults";
+import { readEnvironmentServerConfig } from "./useChatsAvailability";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
@@ -544,26 +549,45 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     if (needsBranchPrefix && !api.server) {
       throw new Error("Server settings are unavailable for worktree creation.");
     }
-    // The settings fallback is read alongside the config, not after both
-    // preference reads: one round trip less before the worktree send. Its
-    // outcome, a failure included, only counts when the project names no prefix.
-    const configRead = worktree.baseBranchForWorktree ? api.server?.getConfig?.() : null;
-    const settingsFallback =
-      needsBranchPrefix && api.server
-        ? api.server.getSettings().then(
-            (settings) => ({ ok: true as const, settings }),
-            (error: unknown) => ({ ok: false as const, error }),
-          )
-        : undefined;
-    const config = await configRead;
-    const effective = worktree.baseBranchForWorktree
-      ? await readEffectiveProjectPreferences({ api, config, projectId: project.projectId })
+    // Nothing here waits on a server round trip in the common case. Support for
+    // project preferences comes from the environment's live config (hosted
+    // targets read it fresh: a cached one may still be another node's), the
+    // branch prefix from the preferences remembered when the draft opened or
+    // worktree mode was entered, and the setup-script choice is left to the
+    // server, which resolves the same preferences while it bootstraps.
+    const remembered = needsBranchPrefix
+      ? readRememberedProjectPreferences(draft.environmentId, project.projectId)
       : null;
+    const readSettingsFallback = () =>
+      api.server!.getSettings().then(
+        (settings) => ({ ok: true as const, settings }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    // Without a remembered prefix, the node-wide fallback is read alongside the
+    // config; its outcome, a failure included, only counts when the project
+    // names no prefix.
+    const settingsFallback =
+      needsBranchPrefix && api.server && !remembered ? readSettingsFallback() : undefined;
+    const config = worktree.baseBranchForWorktree
+      ? isHostedHubMode()
+        ? await api.server?.getConfig?.()
+        : (readEnvironmentServerConfig(draft.environmentId) ?? (await api.server?.getConfig?.()))
+      : null;
+    const supportsPreferences = config?.environment.capabilities.projectPreferences === true;
     let worktreeBranchPrefix: string | undefined;
-    if (settingsFallback) {
+    if (needsBranchPrefix && api.server) {
+      const effective = supportsPreferences
+        ? (remembered ??
+          (await readAndRememberProjectPreferences({
+            api,
+            environmentId: draft.environmentId,
+            config: config ?? null,
+            projectId: project.projectId,
+          })))
+        : null;
       worktreeBranchPrefix = effective?.worktreeBranchPrefix.value;
       if (worktreeBranchPrefix === undefined) {
-        const fallback = await settingsFallback;
+        const fallback = await (settingsFallback ?? readSettingsFallback());
         if (!fallback.ok) throw fallback.error;
         worktreeBranchPrefix = fallback.settings.worktreeBranchPrefix;
       }
@@ -574,7 +598,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       fetchOrigin: worktree.fetchOrigin,
       worktreeBranchName: worktree.worktreeBranchName,
       worktreeBranchPrefix,
-      runSetupScript: effective?.runSetupScript.value ?? true,
+      // A node with project preferences resolves the project's choice itself;
+      // an older one runs the setup script as it always did.
+      runSetupScript: supportsPreferences ? undefined : true,
       shouldMaterializeLegacyBranchWorktree: worktree.shouldMaterializeLegacyBranchWorktree,
       projectId: project.projectId,
       projectCwd: project.projectCwd,

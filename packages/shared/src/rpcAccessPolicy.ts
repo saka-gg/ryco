@@ -220,6 +220,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.vcsCreateWorktree]: "operator",
   [WS_METHODS.vcsInit]: "operator",
   [WS_METHODS.vcsListRefs]: "operator",
+  [WS_METHODS.vcsPrefetchWorktreeBase]: "operator",
   [WS_METHODS.vcsReadLineBlame]: "operator",
   [WS_METHODS.vcsReadImageBlob]: "operator",
   [WS_METHODS.vcsReadLocalChanges]: "operator",
@@ -467,6 +468,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.vcsCreateWorktree]: "mutation",
   [WS_METHODS.vcsInit]: "mutation",
   [WS_METHODS.vcsListRefs]: "read",
+  // Updates only a remote-tracking ref, like listRefs' origin fetch.
+  [WS_METHODS.vcsPrefetchWorktreeBase]: "read",
   [WS_METHODS.vcsReadLineBlame]: "read",
   [WS_METHODS.vcsReadImageBlob]: "read",
   [WS_METHODS.vcsReadLocalChanges]: "read",

@@ -269,19 +269,31 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   // Provider catalogs this page already holds, so the config snapshot can
   // leave them out (loaded here, ahead of the first config subscription).
   const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
-  const { ensurePrimaryEnvironmentReady, resolveInitialServerAuthGateState } =
-    await import("../environments/primary");
+  const {
+    discardPrefetchedPrimaryWebSocketToken,
+    ensurePrimaryEnvironmentReady,
+    prefetchPrimaryWebSocketToken,
+    resolveInitialServerAuthGateState,
+  } = await import("../environments/primary");
+  const connectsEarly = !isNativeAuthorizationPath(pathname);
+  // The first socket's ws-token round trip overlaps the session check. With a
+  // valid session cookie it saves one round trip; without one it is a 401
+  // that is dropped, and the socket asks again once a session exists.
+  if (connectsEarly) prefetchPrimaryWebSocketToken();
   const [, authGateState] = await Promise.all([
     ensurePrimaryEnvironmentReady(),
     resolveInitialServerAuthGateState(),
   ]);
-  if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
+  if (authGateState.status === "authenticated" && connectsEarly) {
     startPrimaryConnectionEarly();
     if (primaryShellCache !== null) await restorePrimaryShellCache(primaryShellCache);
-  } else if (authGateState.status !== "authenticated") {
-    // The server no longer accepts this browser's session: what it cached goes.
-    void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
-    void providerCatalogs?.then((clear) => clear?.());
+  } else {
+    discardPrefetchedPrimaryWebSocketToken();
+    if (authGateState.status !== "authenticated") {
+      // The server no longer accepts this browser's session: what it cached goes.
+      void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
+      void providerCatalogs?.then((clear) => clear?.());
+    }
   }
   markStartupPhase("root-before-load-ready");
   measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");

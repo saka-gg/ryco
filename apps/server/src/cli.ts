@@ -320,6 +320,7 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   otlpExportIntervalMs: Config.Int("RYCO_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
+  browserTracesEnabled: Config.Boolean("RYCO_BROWSER_TRACES").pipe(Config.withDefault(false)),
   otlpServiceName: Config.String("RYCO_OTLP_SERVICE_NAME").pipe(Config.withDefault("ryco-server")),
   mode: Config.schema(RuntimeMode, "RYCO_MODE").pipe(
     Config.option,
@@ -791,6 +792,7 @@ export const resolveServerConfig = (
         bootstrap?.otlpMetricsUrl ??
         persistedObservabilitySettings.otlpMetricsUrl,
       otlpExportIntervalMs: env.otlpExportIntervalMs,
+      ...(env.browserTracesEnabled ? { browserTracesEnabled: true } : {}),
       otlpServiceName: env.otlpServiceName,
       mode,
       port,

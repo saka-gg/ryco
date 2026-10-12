@@ -3,6 +3,7 @@ import { paneContains } from "../../chatPanes.logic";
 import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, type ReactElement } from "react";
 
@@ -123,6 +124,8 @@ export function ChatThreadRouteView({
   const activeRenderKey =
     threadSearch.workspaceTab === "render" ? (threadSearch.workspaceRender ?? null) : null;
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  // The agent can ask this thread to open the simulator pane at any time.
+  useDeviceRuntime(routeEnvironmentId);
   const pendingDeviceOpenRequest = useDeviceStateStore((state) =>
     currentThreadKey ? state.pendingOpenByThreadKey[currentThreadKey] : undefined,
   );

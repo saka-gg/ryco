@@ -1,12 +1,23 @@
 import type {
   EffectiveProjectPreferences,
   EnvironmentApi,
+  EnvironmentId,
   ProjectId,
   ServerConfig,
 } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { readNewDraftDefaults } from "./newDraftDefaults";
+import {
+  readNewDraftDefaults,
+  readRememberedProjectPreferences,
+  resetNewDraftDefaultsCacheForTests,
+} from "./newDraftDefaults";
+
+const ENVIRONMENT_ID = "environment-1" as EnvironmentId;
+
+afterEach(() => {
+  resetNewDraftDefaultsCacheForTests();
+});
 
 function config(projectPreferences: boolean, label = "node"): ServerConfig {
   return {
@@ -39,6 +50,7 @@ describe("readNewDraftDefaults", () => {
 
     const defaults = await readNewDraftDefaults({
       api: target.api,
+      environmentId: ENVIRONMENT_ID,
       cachedConfig: cached,
       requireFreshConfig: false,
       projectId: PROJECT_ID,
@@ -54,7 +66,12 @@ describe("readNewDraftDefaults", () => {
     const target = api({});
 
     await expect(
-      readNewDraftDefaults({ api: target.api, cachedConfig: cached, requireFreshConfig: false }),
+      readNewDraftDefaults({
+        api: target.api,
+        environmentId: ENVIRONMENT_ID,
+        cachedConfig: cached,
+        requireFreshConfig: false,
+      }),
     ).resolves.toEqual({ config: cached, effective: null });
     expect(target.getConfig).not.toHaveBeenCalled();
     expect(target.getProjectPreferences).not.toHaveBeenCalled();
@@ -65,6 +82,7 @@ describe("readNewDraftDefaults", () => {
 
     const defaults = await readNewDraftDefaults({
       api: target.api,
+      environmentId: ENVIRONMENT_ID,
       cachedConfig: null,
       requireFreshConfig: false,
     });
@@ -86,6 +104,7 @@ describe("readNewDraftDefaults", () => {
 
     const pending = readNewDraftDefaults({
       api: target.api,
+      environmentId: ENVIRONMENT_ID,
       cachedConfig: config(true, "previous node"),
       requireFreshConfig: true,
     });
@@ -109,6 +128,7 @@ describe("readNewDraftDefaults", () => {
     await expect(
       readNewDraftDefaults({
         api: target.api,
+        environmentId: ENVIRONMENT_ID,
         cachedConfig: config(true, "previous node"),
         requireFreshConfig: true,
       }),
@@ -122,6 +142,7 @@ describe("readNewDraftDefaults", () => {
     await expect(
       readNewDraftDefaults({
         api: target.api,
+        environmentId: ENVIRONMENT_ID,
         cachedConfig: config(true),
         requireFreshConfig: true,
       }),
@@ -141,8 +162,67 @@ describe("readNewDraftDefaults", () => {
       },
     });
 
-    await readNewDraftDefaults({ api: target.api, cachedConfig: null, requireFreshConfig: true });
+    await readNewDraftDefaults({
+      api: target.api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: null,
+      requireFreshConfig: true,
+    });
 
     expect(order).toEqual(["config", "preferences"]);
+  });
+
+  it("opens with the remembered preferences and reads the current ones in the background", async () => {
+    const cached = config(true, "cached");
+    const first = api({});
+    await readNewDraftDefaults({
+      api: first.api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: cached,
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID)).toBe(EFFECTIVE);
+
+    const NEWER = { marker: "newer" } as unknown as EffectiveProjectPreferences;
+    let answer!: (value: EffectiveProjectPreferences) => void;
+    const second = api({
+      getProjectPreferences: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    // Resolves without waiting for the node.
+    const defaults = await readNewDraftDefaults({
+      api: second.api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: cached,
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+    expect(defaults.effective).toBe(EFFECTIVE);
+    answer(NEWER);
+    await expect(defaults.fresh).resolves.toBe(NEWER);
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID)).toBe(NEWER);
+  });
+
+  it("never lets a remembered answer decide support", async () => {
+    const target = api({});
+    await readNewDraftDefaults({
+      api: target.api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: config(true),
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+    await expect(
+      readNewDraftDefaults({
+        api: target.api,
+        environmentId: ENVIRONMENT_ID,
+        cachedConfig: config(false),
+        requireFreshConfig: false,
+        projectId: PROJECT_ID,
+      }),
+    ).resolves.toEqual({ config: config(false), effective: null });
   });
 });

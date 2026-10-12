@@ -81,7 +81,11 @@ import { useStore, selectSidebarThreadSummaryByRef, selectThreadByRef } from "~/
 import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import type { WsProtocolCloseContext } from "@ryco/client-runtime/rpc";
-import { createDeviceRpcClient, WS_URL_PROVIDER_TIMEOUT_MS } from "@ryco/client-runtime/rpc";
+import {
+  createDeviceRpcClient,
+  createDirectDeviceRpcTransport,
+  WS_URL_PROVIDER_TIMEOUT_MS,
+} from "@ryco/client-runtime/rpc";
 import {
   environmentQueryRefresh,
   isHostedEnvironmentQueryRefreshReady,
@@ -966,23 +970,28 @@ function createPrimaryEnvironmentClient(
   const shellFrameProbe = createPrimaryShellFrameProbe(
     (url, protocols) => webSocket.webSocketConstructor(url, protocols) as WebSocket,
   );
+  const transport = new WsTransport((signal) => authenticatedSocketUrl("/ws", signal), {
+    getConnectionLabel: () => connectionLabel,
+    getEnvironmentId: () => knownEnvironment?.environmentId ?? null,
+    getVersionMismatchHint: () =>
+      resolveServerConfigVersionMismatch(getServerConfig())?.hint ?? null,
+    onOpen: () => {
+      markStartupPhase("primary-ws-open");
+    },
+    urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+    onRequestStart: shellFrameProbe.onRequestStart,
+    webSocketConstructor: shellFrameProbe.webSocketConstructor,
+  });
   return createWsRpcClient(
-    new WsTransport((signal) => authenticatedSocketUrl("/ws", signal), {
-      getConnectionLabel: () => connectionLabel,
-      getEnvironmentId: () => knownEnvironment?.environmentId ?? null,
-      getVersionMismatchHint: () =>
-        resolveServerConfigVersionMismatch(getServerConfig())?.hint ?? null,
-      onOpen: () => {
-        markStartupPhase("primary-ws-open");
-      },
-      urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
-      onRequestStart: shellFrameProbe.onRequestStart,
-      webSocketConstructor: shellFrameProbe.webSocketConstructor,
-    }),
+    transport,
     createDeviceRpcClient(
-      new DeviceWsTransport((signal) => authenticatedSocketUrl("/ws/device", signal), {
-        getConnectionLabel: () => connectionLabel,
-        urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+      createDirectDeviceRpcTransport({
+        main: transport,
+        openDedicated: () =>
+          new DeviceWsTransport((signal) => authenticatedSocketUrl("/ws/device", signal), {
+            getConnectionLabel: () => connectionLabel,
+            urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+          }),
       }),
       {
         openFrameSource: (udid, handlers) =>
@@ -1093,63 +1102,68 @@ function createSavedEnvironmentClient(
     ? {}
     : { urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS };
 
-  return createWsRpcClient(
-    new WsTransport((signal) => socketUrl("/ws", signal), {
-      ...urlProviderDeadline,
-      getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
-      getEnvironmentId: () => environmentId,
-      // A remote machine can be asleep or offline for hours; keep trying on a
-      // capped backoff, and keep its status out of the primary's.
-      persistentReconnect: true,
-      // An expired or revoked bearer is not one of those outages: no retry can
-      // bring it back, so the socket stops and its pending requests fail.
-      isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-      onTerminalUrlError: owner.onCredentialRejected,
-      recordGlobalConnectionState: false,
-      getVersionMismatchHint: () =>
-        resolveServerConfigVersionMismatch(
-          useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
-        )?.hint ?? null,
-      onAttempt: () => {
-        if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
-      },
-      onOpen: () => {
-        if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
-      },
-      onError: (message: string) => {
-        if (!owner.speaksForEnvironment()) return;
-        const mismatch = resolveServerConfigVersionMismatch(
-          useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
-        );
-        useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
-          connectionState: "error",
-          lastError: appendVersionMismatchHint(message, mismatch),
-          lastErrorAt: isoNow(),
-        });
-      },
-      onClose: (
-        details: { readonly code: number; readonly reason: string },
-        context: WsProtocolCloseContext,
-      ) => {
-        if (context.intentional || !owner.speaksForEnvironment()) {
-          return;
-        }
-        setRuntimeDisconnected(
-          environmentId,
-          appendVersionMismatchHint(
-            details.reason,
-            resolveServerConfigVersionMismatch(
-              useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
-            ),
+  const transport = new WsTransport((signal) => socketUrl("/ws", signal), {
+    ...urlProviderDeadline,
+    getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
+    getEnvironmentId: () => environmentId,
+    // A remote machine can be asleep or offline for hours; keep trying on a
+    // capped backoff, and keep its status out of the primary's.
+    persistentReconnect: true,
+    // An expired or revoked bearer is not one of those outages: no retry can
+    // bring it back, so the socket stops and its pending requests fail.
+    isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+    onTerminalUrlError: owner.onCredentialRejected,
+    recordGlobalConnectionState: false,
+    getVersionMismatchHint: () =>
+      resolveServerConfigVersionMismatch(
+        useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
+      )?.hint ?? null,
+    onAttempt: () => {
+      if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
+    },
+    onOpen: () => {
+      if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
+    },
+    onError: (message: string) => {
+      if (!owner.speaksForEnvironment()) return;
+      const mismatch = resolveServerConfigVersionMismatch(
+        useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
+      );
+      useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+        connectionState: "error",
+        lastError: appendVersionMismatchHint(message, mismatch),
+        lastErrorAt: isoNow(),
+      });
+    },
+    onClose: (
+      details: { readonly code: number; readonly reason: string },
+      context: WsProtocolCloseContext,
+    ) => {
+      if (context.intentional || !owner.speaksForEnvironment()) {
+        return;
+      }
+      setRuntimeDisconnected(
+        environmentId,
+        appendVersionMismatchHint(
+          details.reason,
+          resolveServerConfigVersionMismatch(
+            useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig,
           ),
-        );
-      },
-    }),
+        ),
+      );
+    },
+  });
+  return createWsRpcClient(
+    transport,
     createDeviceRpcClient(
-      new DeviceWsTransport((signal) => socketUrl("/ws/device", signal), {
-        ...urlProviderDeadline,
-        getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
-        isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+      createDirectDeviceRpcTransport({
+        main: transport,
+        openDedicated: () =>
+          new DeviceWsTransport((signal) => socketUrl("/ws/device", signal), {
+            ...urlProviderDeadline,
+            getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
+            isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+          }),
       }),
       {
         openFrameSource: (udid, handlers) =>
@@ -1577,7 +1591,37 @@ async function connectSavedEnvironment(
       onDispose: () => stopRenewal(),
     });
 
+    // Removal goes by identity: the environment may already hold another
+    // attempt's healthy connection, which this attempt must not take down.
+    let discarded = false;
+    const discardConnection = async () => {
+      if (discarded) return;
+      discarded = true;
+      stopRenewal();
+      stopRenewal = NOOP;
+      if (
+        registered &&
+        getEnvironmentSupervisor().read(activeRecord.environmentId) === connection
+      ) {
+        await removeConnection(activeRecord.environmentId).catch(() => false);
+      } else {
+        await connection.dispose().catch(() => undefined);
+      }
+      registered = false;
+    };
     try {
+      if (isCancelled()) {
+        await connection.dispose().catch(() => undefined);
+        throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
+      }
+      // The bearer passed its session check (and any renewal), so the
+      // connection registers now, while its ws-token, upgrade and config are
+      // still in flight: thread subscriptions waiting for this environment
+      // attach at once and go out as soon as the socket opens. A rejection
+      // that arrives later removes it again, by identity.
+      registerConnection(connection);
+      registered = true;
+      stopRenewal = keepSavedEnvironmentSessionRenewed(activeRecord, connection, renewal.session);
       try {
         await refreshSavedEnvironmentMetadata(
           activeRecord.environmentId,
@@ -1607,17 +1651,14 @@ async function connectSavedEnvironment(
           if (speaksForEnvironment()) setRuntimeRequiresAuth(activeRecord.environmentId);
           throw toSavedEnvironmentCredentialError(error);
         }
+        await discardConnection();
         await reissueDesktopSshBearerOnce(error);
-        await connection.dispose().catch(() => undefined);
         continue;
       }
       if (isCancelled()) {
-        await connection.dispose().catch(() => undefined);
+        await discardConnection();
         throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
       }
-      registerConnection(connection);
-      registered = true;
-      stopRenewal = keepSavedEnvironmentSessionRenewed(activeRecord, connection, renewal.session);
       return connection;
     } catch (error) {
       if (error instanceof SavedEnvironmentConnectionCancelledError) {
@@ -1626,13 +1667,7 @@ async function connectSavedEnvironment(
       if (speaksForEnvironment() && !(error instanceof SavedEnvironmentCredentialError)) {
         setRuntimeError(activeRecord.environmentId, error);
       }
-      // Removal goes by identity: the environment may already hold another
-      // attempt's healthy connection, which this failure must not take down.
-      if (getEnvironmentSupervisor().read(activeRecord.environmentId) === connection) {
-        await removeConnection(activeRecord.environmentId).catch(() => false);
-      } else {
-        await connection.dispose().catch(() => undefined);
-      }
+      await discardConnection();
       throw error;
     }
   }

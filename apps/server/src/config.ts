@@ -262,6 +262,8 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   readonly traceMaxBytes: number;
   readonly traceMaxFiles: number;
   readonly otlpTracesUrl: string | undefined;
+  /** Ask browsers for their spans even without an OTLP collector (`RYCO_BROWSER_TRACES`). */
+  readonly browserTracesEnabled?: boolean;
   readonly otlpMetricsUrl: string | undefined;
   readonly otlpExportIntervalMs: number;
   readonly otlpServiceName: string;

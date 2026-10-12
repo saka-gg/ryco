@@ -700,35 +700,41 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           const { settings, project: bootstrapProject, choices } = resolved;
           shouldRunSetupScript = resolved.runSetupScript;
           if (bootstrap?.prepareWorktree && bootstrapProject) targetProjectId = bootstrapProject.id;
-          const createBootstrapThread = Effect.gen(function* () {
-            if (!bootstrap?.createThread) return;
-            const created = yield* orchestrationEngine.dispatch({
-              type: "thread.create",
-              commandId: serverCommandId("bootstrap-thread-create"),
-              threadId: command.threadId,
-              projectId: bootstrap.createThread.projectId,
-              title: bootstrap.createThread.title,
-              modelSelection: choices.modelSelection,
-              runtimeMode: bootstrap.createThread.runtimeMode,
-              interactionMode: bootstrap.createThread.interactionMode,
-              ...(bootstrap.createThread.tokenMode === undefined
-                ? {}
-                : { tokenMode: bootstrap.createThread.tokenMode }),
-              branch: bootstrap.createThread.branch,
-              worktreePath: bootstrap.createThread.worktreePath,
-              createdAt: bootstrap.createThread.createdAt,
+          // A thread created after its worktree starts on that worktree's branch
+          // and path, with no follow-up metadata update.
+          const createBootstrapThread = (checkout?: {
+            readonly branch: string;
+            readonly worktreePath: string;
+          }) =>
+            Effect.gen(function* () {
+              if (!bootstrap?.createThread) return;
+              const created = yield* orchestrationEngine.dispatch({
+                type: "thread.create",
+                commandId: serverCommandId("bootstrap-thread-create"),
+                threadId: command.threadId,
+                projectId: bootstrap.createThread.projectId,
+                title: bootstrap.createThread.title,
+                modelSelection: choices.modelSelection,
+                runtimeMode: bootstrap.createThread.runtimeMode,
+                interactionMode: bootstrap.createThread.interactionMode,
+                ...(bootstrap.createThread.tokenMode === undefined
+                  ? {}
+                  : { tokenMode: bootstrap.createThread.tokenMode }),
+                branch: checkout?.branch ?? bootstrap.createThread.branch,
+                worktreePath: checkout?.worktreePath ?? bootstrap.createThread.worktreePath,
+                createdAt: bootstrap.createThread.createdAt,
+              });
+              // The create event is an exact fence in the serialized command
+              // stream. Drain every earlier deletion before setup or turn start
+              // can acquire resources under the reused id.
+              yield* threadDeletionReactor.drainThrough(created.sequence);
+              createdThread = true;
             });
-            // The create event is an exact fence in the serialized command
-            // stream. Drain every earlier deletion before setup or turn start
-            // can acquire resources under the reused id.
-            yield* threadDeletionReactor.drainThrough(created.sequence);
-            createdThread = true;
-          });
 
           // Publishing a draft's thread promotes it on every connected client.
           // Finish checkout preparation first: a Git failure must leave the draft
           // intact instead of creating/deleting it and clearing the user's prompt.
-          if (!bootstrap?.prepareWorktree) yield* createBootstrapThread;
+          if (!bootstrap?.prepareWorktree) yield* createBootstrapThread();
 
           if (bootstrap?.prepareWorktree) {
             const worktree = yield* gitWorkflow.createWorktree({
@@ -773,14 +779,20 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               );
             }
             targetWorktreePath = worktree.worktree.path;
-            yield* createBootstrapThread;
-            yield* orchestrationEngine.dispatch({
-              type: "thread.meta.update",
-              commandId: serverCommandId("bootstrap-thread-meta-update"),
-              threadId: command.threadId,
-              branch: worktree.worktree.refName,
-              worktreePath: targetWorktreePath,
-            });
+            if (bootstrap.createThread) {
+              yield* createBootstrapThread({
+                branch: worktree.worktree.refName,
+                worktreePath: targetWorktreePath,
+              });
+            } else {
+              yield* orchestrationEngine.dispatch({
+                type: "thread.meta.update",
+                commandId: serverCommandId("bootstrap-thread-meta-update"),
+                threadId: command.threadId,
+                branch: worktree.worktree.refName,
+                worktreePath: targetWorktreePath,
+              });
+            }
             const worktreeProjectId = targetProjectId ?? bootstrapProject?.id;
             if (worktreeProjectId !== undefined) {
               const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
@@ -951,6 +963,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           localTracingEnabled: true,
           ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
           otlpTracesEnabled: config.otlpTracesUrl !== undefined,
+          // Browsers export spans only to a server that has a use for them.
+          browserTracesEnabled:
+            config.otlpTracesUrl !== undefined || config.browserTracesEnabled === true,
           ...(config.otlpMetricsUrl !== undefined ? { otlpMetricsUrl: config.otlpMetricsUrl } : {}),
           otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           localMetrics,

@@ -285,6 +285,7 @@ export interface WsRpcClient {
       options?: StreamSubscriptionOptions,
     ) => () => void;
     readonly listRefs: RpcUnaryMethod<typeof WS_METHODS.vcsListRefs>;
+    readonly prefetchWorktreeBase: RpcUnaryMethod<typeof WS_METHODS.vcsPrefetchWorktreeBase>;
     readonly createWorktree: RpcUnaryMethod<typeof WS_METHODS.vcsCreateWorktree>;
     readonly removeWorktree: RpcUnaryMethod<typeof WS_METHODS.vcsRemoveWorktree>;
     readonly createRef: RpcUnaryMethod<typeof WS_METHODS.vcsCreateRef>;
@@ -778,6 +779,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       readComparison: (input) =>
         transport.request((client) => client[WS_METHODS.vcsReadComparison](input)),
       listRefs: (input) => transport.request((client) => client[WS_METHODS.vcsListRefs](input)),
+      prefetchWorktreeBase: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsPrefetchWorktreeBase](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.vcsCreateWorktree](input)),
       removeWorktree: (input) =>

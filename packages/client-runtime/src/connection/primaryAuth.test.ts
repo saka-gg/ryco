@@ -201,3 +201,78 @@ describe("primary auth platform fakes", () => {
     });
   });
 });
+
+describe("prefetched primary ws-token", () => {
+  function setup(fetch: (url: string) => Promise<ReturnType<typeof response>>) {
+    let nowMs = 1_000;
+    const auth = createPrimaryAuth({
+      endpoint: {
+        origin: () => "https://app.test",
+        readPrimaryTarget: () => null,
+        resolveHttpUrl: (path) => `https://app.test${path}`,
+        resolveWsUrl: (url) => url,
+      },
+      httpClient: { fetch: vi.fn(fetch) },
+      pairingCredentialSource: { take: async () => null },
+      readBootstrapCredential: () => null,
+      sessionCredentials: {
+        mode: "cookie",
+        readCsrfToken: () => null,
+        writeCsrfToken: () => undefined,
+      },
+      now: () => nowMs,
+      sleep: async () => undefined,
+    });
+    return { auth, advance: (ms: number) => (nowMs += ms) };
+  }
+
+  it("hands the token requested alongside the session check to the first socket attempt only", async () => {
+    let issued = 0;
+    const fetch = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/auth/ws-token")) {
+        issued += 1;
+        return response({ token: `token-${issued}`, expiresAt: "2026-10-12T00:05:00.000Z" });
+      }
+      return response({ ...session, authenticated: true });
+    });
+    const { auth } = setup(fetch);
+
+    auth.prefetchPrimaryWebSocketToken();
+    expect(issued).toBe(1);
+    expect((await auth.issuePrimaryWebSocketToken()).token).toBe("token-1");
+    // The prefetched token is single use; the next attempt asks again.
+    expect((await auth.issuePrimaryWebSocketToken()).token).toBe("token-2");
+  });
+
+  it("drops a prefetch that failed and asks again", async () => {
+    let wsTokenRequests = 0;
+    const { auth } = setup(async (url) => {
+      if (!url.endsWith("/api/auth/ws-token")) return response(session);
+      wsTokenRequests += 1;
+      return wsTokenRequests === 1
+        ? response("Unauthorized", 401)
+        : response({ token: "fresh", expiresAt: "2026-10-12T00:05:00.000Z" });
+    });
+
+    auth.prefetchPrimaryWebSocketToken();
+    expect((await auth.issuePrimaryWebSocketToken()).token).toBe("fresh");
+    expect(wsTokenRequests).toBe(2);
+  });
+
+  it("never uses a stale or discarded prefetch", async () => {
+    let issued = 0;
+    const { auth, advance } = setup(async (url) => {
+      if (!url.endsWith("/api/auth/ws-token")) return response(session);
+      issued += 1;
+      return response({ token: `token-${issued}`, expiresAt: "2026-10-12T00:05:00.000Z" });
+    });
+
+    auth.prefetchPrimaryWebSocketToken();
+    advance(61_000);
+    expect((await auth.issuePrimaryWebSocketToken()).token).toBe("token-2");
+
+    auth.prefetchPrimaryWebSocketToken();
+    auth.discardPrefetchedPrimaryWebSocketToken();
+    expect((await auth.issuePrimaryWebSocketToken()).token).toBe("token-4");
+  });
+});

@@ -38,8 +38,12 @@ import { readLocalApi } from "../localApi";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
-import { DiffParseCache } from "../lib/diffParseCache";
-import { buildPatchCacheKey } from "../lib/diffRendering";
+import {
+  buildDiffParseCacheKey,
+  DiffParseCache,
+  type DiffParseCacheKey,
+} from "../lib/diffParseCache";
+import { getOffThreadDiffParser, OFF_THREAD_DIFF_PARSE_MIN_CHARS } from "../lib/diffParseOffThread";
 import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
 import { useDiffFileNavigation } from "../hooks/useDiffFileNavigation";
 import { DIFF_SURFACE_BASE_UNSAFE_CSS, resolveDiffThemeName } from "../lib/diffRendering";
@@ -132,6 +136,7 @@ interface ParsedDiffContent {
 // that scroll out / unmount are cancelled by @pierre/diffs on unmount, so the
 // queue does not stack as the selection changes.
 const renderablePatchCache = new DiffParseCache<ParsedDiffContent>();
+const EMPTY_PARSED_DIFF_CONTENT: ParsedDiffContent = { patch: null, files: [] };
 const DIFF_PANEL_PARSE_SCOPE = "diff-panel";
 
 function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
@@ -582,14 +587,26 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
   const imagePreviewCwd = reviewingLocal ? localChanges.data?.worktreePath : activeCwd;
   const hasResolvedPatch = typeof selectedPatch === "string";
   const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
-  const renderableContent = useMemo<ParsedDiffContent>(() => {
+  // The latest off-thread parse result, shown while it matches the pending parse.
+  const [offThreadParsed, setOffThreadParsed] = useState<{
+    readonly source: string;
+    readonly key: string;
+    readonly content: ParsedDiffContent;
+  } | null>(null);
+  const { content: parsedContent, pendingParse } = useMemo<{
+    readonly content: ParsedDiffContent;
+    readonly pendingParse: {
+      readonly cacheKey: DiffParseCacheKey;
+      readonly source: string;
+    } | null;
+  }>(() => {
     // Parsing does not depend on the theme: the worker pool drops its highlight
     // caches itself when the theme changes, so a theme toggle never re-parses.
     const parseScope = DIFF_PANEL_PARSE_SCOPE;
     const normalizedPatch = typeof selectedPatch === "string" ? selectedPatch : "";
     if (normalizedPatch.length === 0) {
       activeDiffParser.parse("", parseScope);
-      return { patch: null, files: [] };
+      return { content: EMPTY_PARSED_DIFF_CONTENT, pendingParse: null };
     }
     const turnScope =
       comparing || reviewingLocal
@@ -602,22 +619,29 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
       filePath: parseScope,
       // The local-changes revision is a server-side hash of both patches, so it
       // already identifies the content without hashing megabytes again here.
+      // Checkpoint patches are hashed once per distinct text this panel sees.
       blobSha:
         reviewingLocal && localChanges.data && localScope
           ? `revision:${localScope}`
-          : buildPatchCacheKey(normalizedPatch),
+          : activeDiffParser.identify(normalizedPatch),
     };
     const cached = renderablePatchCache.get(cacheKey);
     if (cached) {
       activeDiffParser.parse(normalizedPatch, parseScope, cached.patch);
-      return cached;
+      return { content: cached, pendingParse: null };
+    }
+    if (normalizedPatch.length >= OFF_THREAD_DIFF_PARSE_MIN_CHARS) {
+      return {
+        content: EMPTY_PARSED_DIFF_CONTENT,
+        pendingParse: { cacheKey, source: normalizedPatch },
+      };
     }
     const patch = activeDiffParser.parse(normalizedPatch, parseScope);
     const content: ParsedDiffContent = { patch, files: sortRenderableFiles(patch) };
     if (patch) {
       renderablePatchCache.set(cacheKey, content);
     }
-    return content;
+    return { content, pendingParse: null };
   }, [
     activeDiffParser,
     comparing,
@@ -629,6 +653,37 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     selectedPatch,
     selectedTurn,
   ]);
+  // Large patches parse in a worker; the panel shows its loading state meanwhile.
+  useEffect(() => {
+    if (!pendingParse) return;
+    let current = true;
+    void getOffThreadDiffParser()
+      .parse(pendingParse.source, DIFF_PANEL_PARSE_SCOPE)
+      .then((patch) => {
+        const content: ParsedDiffContent = { patch, files: sortRenderableFiles(patch) };
+        // Cached even when the selection moved on: going back is then instant.
+        if (patch) renderablePatchCache.set(pendingParse.cacheKey, content);
+        if (!current) return;
+        activeDiffParser.parse(pendingParse.source, DIFF_PANEL_PARSE_SCOPE, patch);
+        setOffThreadParsed({
+          source: pendingParse.source,
+          key: buildDiffParseCacheKey(pendingParse.cacheKey),
+          content,
+        });
+      });
+    return () => {
+      current = false;
+    };
+  }, [activeDiffParser, pendingParse]);
+  const offThreadContent =
+    pendingParse &&
+    offThreadParsed &&
+    offThreadParsed.source === pendingParse.source &&
+    offThreadParsed.key === buildDiffParseCacheKey(pendingParse.cacheKey)
+      ? offThreadParsed.content
+      : null;
+  const renderableContent = offThreadContent ?? parsedContent;
+  const parsingOffThread = pendingParse !== null && offThreadContent === null;
   const renderablePatch = renderableContent.patch;
   const renderableFiles = renderableContent.files;
 
@@ -1307,7 +1362,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
               </div>
             )}
             {!renderablePatch ? (
-              isLoadingCheckpointDiff ? (
+              isLoadingCheckpointDiff || parsingOffThread ? (
                 <DiffPanelLoadingState
                   label={
                     reviewingLocal

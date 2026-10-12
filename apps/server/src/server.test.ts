@@ -33,7 +33,9 @@ import {
   ResolvedKeybindingRule,
   ThreadId,
   WorktreeId,
+  DEVICE_WS_METHODS,
   WS_METHODS,
+  WsHostedRpcGroup,
   WsRpcGroup,
   EditorId,
 } from "@ryco/contracts";
@@ -1105,6 +1107,17 @@ const withWsRpcClient = <A, E, R>(
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
 
+const makeWsMainRpcClient = RpcClient.make(WsHostedRpcGroup);
+
+const withWsMainRpcClient = <A, E, R>(
+  wsUrl: string,
+  f: (
+    client: typeof makeWsMainRpcClient extends Effect.Effect<infer Client, any, any>
+      ? Client
+      : never,
+  ) => Effect.Effect<A, E, R>,
+) => makeWsMainRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
+
 const appendSessionCookieToWsUrl = (url: string, sessionCookieHeader: string) => {
   const isAbsoluteUrl = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(url);
   const next = new URL(url, "http://localhost");
@@ -1324,6 +1337,35 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+  it.effect("asks browsers for no spans when nothing consumes them", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const config = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+      assert.equal(config.observability.otlpTracesEnabled, false);
+      assert.equal(config.observability.browserTracesEnabled, false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+  it.effect("serves device control RPCs on the main socket", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const failure = yield* Effect.scoped(
+        withWsMainRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            // Application and device RPCs share one connection.
+            yield* client[WS_METHODS.serverGetProjectPreferences]({});
+            return yield* Effect.flip(client[DEVICE_WS_METHODS.read]({ type: "list", input: {} }));
+          }),
+        ),
+      );
+      // The test host is an unsupported platform: the device handler answered
+      // with its own typed error rather than "Unknown request tag".
+      assert.equal(failure._tag, "DeviceRpcError");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
   it.effect("classifies static cache-control headers", () =>
@@ -3352,6 +3394,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(first.config.observability.localTracingEnabled, true);
         assert.equal(first.config.observability.otlpTracesUrl, "http://localhost:4318/v1/traces");
         assert.equal(first.config.observability.otlpTracesEnabled, true);
+        // An OTLP collector consumes browser spans, so browsers are asked for them.
+        assert.equal(first.config.observability.browserTracesEnabled, true);
         assert.equal(first.config.observability.otlpMetricsUrl, "http://localhost:4318/v1/metrics");
         assert.equal(first.config.observability.otlpMetricsEnabled, true);
         assert.deepEqual(first.config.settings, DEFAULT_SERVER_SETTINGS);
@@ -7630,12 +7674,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
 
-        assert.equal(response.sequence, 7);
+        assert.equal(response.sequence, 6);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
           [
             "thread.create",
-            "thread.meta.update",
             "worktree.create",
             "thread.attach-to-worktree",
             "thread.activity.append",
@@ -7643,10 +7686,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             "thread.turn.start",
           ],
         );
+        // The thread is created on its worktree: no separate metadata update.
         assert.deepInclude(dispatchedCommands[0], {
           type: "thread.create",
           tokenMode: "aggressive",
+          branch: "ryco/bootstrap-refName",
         });
+        assert.equal(
+          (dispatchedCommands[0] as Extract<OrchestrationCommand, { type: "thread.create" }>)
+            .worktreePath,
+          fixture.worktreePath,
+        );
         const createdWorktreeInput = createWorktree.mock.calls[0]?.[0];
         assert.equal(createdWorktreeInput?.cwd, fixture.projectCwd);
         assert.equal(createdWorktreeInput?.refName, "main");
@@ -7673,15 +7723,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           setupActivities.map((command) => command.activity.kind),
           ["setup-script.requested", "setup-script.started"],
         );
-        const worktreeCommand = dispatchedCommands[2];
+        const worktreeCommand = dispatchedCommands[1];
         assertTrue(worktreeCommand?.type === "worktree.create");
         if (worktreeCommand?.type === "worktree.create") {
           assert.equal(worktreeCommand.branch, "ryco/bootstrap-refName");
           assert.equal(worktreeCommand.worktreePath, fixture.worktreePath);
           assert.equal(worktreeCommand.projectId, defaultProjectId);
-          assert.equal(dispatchedCommands[3]?.type, "thread.attach-to-worktree");
+          assert.equal(dispatchedCommands[2]?.type, "thread.attach-to-worktree");
         }
-        const finalCommand = dispatchedCommands[6];
+        const finalCommand = dispatchedCommands[5];
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);
@@ -7768,12 +7818,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(response.sequence, 6);
+      assert.equal(response.sequence, 5);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
         [
           "thread.create",
-          "thread.meta.update",
           "worktree.create",
           "thread.attach-to-worktree",
           "thread.activity.append",
@@ -7895,12 +7944,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(response.sequence, 6);
+      assert.equal(response.sequence, 5);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
         [
           "thread.create",
-          "thread.meta.update",
           "worktree.create",
           "thread.attach-to-worktree",
           "thread.activity.append",
@@ -8195,13 +8243,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(createWorktree.mock.calls.length, 2);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
-          [
-            "thread.create",
-            "thread.meta.update",
-            "worktree.create",
-            "thread.attach-to-worktree",
-            "thread.turn.start",
-          ],
+          ["thread.create", "worktree.create", "thread.attach-to-worktree", "thread.turn.start"],
         );
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
     );

@@ -1,3 +1,4 @@
+import type { ServerConfig } from "@ryco/contracts";
 import { Layer, Tracer } from "effect";
 
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
@@ -34,6 +35,32 @@ export const ClientTracingLive = Layer.succeed(
     },
   }),
 );
+
+/**
+ * Browser spans are exported only to a server that has a use for them: one
+ * that advertises it wants them (it forwards to an OTLP collector or was
+ * started with browser tracing on), or any server in a perf-profile build.
+ * Older servers advertise nothing and receive nothing.
+ */
+export function shouldExportClientTraces(input: {
+  readonly observability: ServerConfig["observability"] | null | undefined;
+  readonly perfProfile: boolean;
+}): boolean {
+  return input.perfProfile || input.observability?.browserTracesEnabled === true;
+}
+
+/** Stops exporting spans; they are recorded as plain native spans again. */
+export function disableClientTracing(): Promise<void> {
+  pendingConfiguration = pendingConfiguration.finally(async () => {
+    configurationGeneration++;
+    activeConfigKey = null;
+    activeDelegate = null;
+    const exporter = activeExporter;
+    activeExporter = null;
+    await exporter?.dispose();
+  });
+  return pendingConfiguration;
+}
 
 export function configureClientTracing(config: ClientTracingConfig = {}): Promise<void> {
   if (config.exportIntervalMs === undefined && activeConfigKey !== null) {

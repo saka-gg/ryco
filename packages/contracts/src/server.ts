@@ -323,6 +323,12 @@ export const ServerObservability = Schema.Struct({
   localTracingEnabled: Schema.Boolean,
   otlpTracesUrl: Schema.optional(TrimmedNonEmptyString),
   otlpTracesEnabled: Schema.Boolean,
+  /**
+   * Whether this server wants browser spans: it forwards them to an OTLP
+   * collector or was started with browser tracing on. Absent from older
+   * servers, whose clients then send none.
+   */
+  browserTracesEnabled: Schema.optional(Schema.Boolean),
   otlpMetricsUrl: Schema.optional(TrimmedNonEmptyString),
   otlpMetricsEnabled: Schema.Boolean,
   localMetrics: Schema.optional(ServerLocalDiagnosticsMetrics),

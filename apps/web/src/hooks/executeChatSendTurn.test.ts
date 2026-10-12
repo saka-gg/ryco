@@ -12,6 +12,10 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { DraftId } from "../composerDraftStore";
+import {
+  readAndRememberProjectPreferences,
+  resetNewDraftDefaultsCacheForTests,
+} from "./newDraftDefaults";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import { toastManager } from "../components/ui/toast";
 import type { ChatMessage } from "../types";
@@ -985,7 +989,46 @@ describe("worktree branch defaults", () => {
       },
     } as never;
     expect(await executeChatSendTurn(input)).toBe(true);
-    expect(started).toEqual(["config", "settings"]);
+    // The settings read starts first and releases the held config read: had
+    // they run one after the other, the send would never finish.
+    expect(started).toEqual(["settings", "config"]);
+  });
+
+  it("sends with remembered preferences and leaves the setup choice to the node", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    const getProjectPreferences = vi.fn(async () => ({
+      worktreeBranchPrefix: { value: "remembered", source: "project" },
+      runSetupScript: { value: false, source: "project" },
+    }));
+    const capableConfig = {
+      environment: { capabilities: { projectPreferences: true } },
+    } as ServerConfig;
+    // Entering worktree mode (or opening the draft) remembered the project's answer.
+    await readAndRememberProjectPreferences({
+      api: { server: { getProjectPreferences } } as never,
+      environmentId: EnvironmentId.make("env-1"),
+      config: capableConfig,
+      projectId: ProjectId.make("project-1"),
+    });
+    getProjectPreferences.mockClear();
+    const getSettings = vi.fn(async () => ({ worktreeBranchPrefix: "team" }));
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: { getConfig: async () => capableConfig, getProjectPreferences, getSettings },
+    } as never;
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(getProjectPreferences).not.toHaveBeenCalled();
+    expect(getSettings).not.toHaveBeenCalled();
+    const command = dispatchCommand.mock.calls[0]?.[0] as { bootstrap?: object } | undefined;
+    const bootstrap = command?.bootstrap;
+    expect(bootstrap).toMatchObject({
+      prepareWorktree: { branch: expect.stringMatching(/^remembered\/[0-9a-f]{8}$/) },
+    });
+    expect(bootstrap).not.toHaveProperty("runSetupScript");
+    resetNewDraftDefaultsCacheForTests();
   });
 
   it("uses the project's prefix even when the settings fallback read fails", async () => {
