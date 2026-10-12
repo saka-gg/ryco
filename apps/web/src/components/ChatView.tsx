@@ -206,7 +206,6 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
-import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import type { NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -232,7 +231,6 @@ import { ChatHeader } from "./chat/ChatHeader";
 import type { ChatProjectTarget } from "./chat/ChatProjectActions";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
-import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
 import { useChatSessionTabsPrefetch } from "./chat/useChatSessionTabsPrefetch";
 import {
   createSessionTabsSelector,
@@ -250,7 +248,6 @@ import {
   resolveProviderStatusNotice,
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
-import { AgentControlApprovals } from "./agent-control/AgentControlApprovals";
 import { DelegatedThreadsSection } from "./threads/DelegatedThreadsSection";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
@@ -263,9 +260,12 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
+  LazyAgentControlApprovals,
   LazyChatOverviewPanel,
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
+  LazyExpandedImageDialog,
+  LazyPhoneOverviewSheet,
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
   notifyChatSurfaceLoadFailure,
@@ -5036,6 +5036,41 @@ export default function ChatView(props: ChatViewProps) {
       },
     },
   );
+  const expandedImageDialogReady = useLazyComponentReady(
+    LazyExpandedImageDialog,
+    expandedImage !== null,
+    {
+      onLoadError: (error) => {
+        const preview = expandedImage;
+        closeExpandedImage();
+        notifyChatSurfaceLoadFailure(
+          "image preview",
+          error,
+          () => {
+            if (preview) setExpandedImage(preview);
+          },
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
+  // the native surface).
+  const agentControlApprovalsReady = useLazyComponentReady(
+    LazyAgentControlApprovals,
+    presentationTier !== "phone",
+    {
+      onLoadError: (error, retry) =>
+        notifyChatSurfaceLoadFailure("Agent Control approvals", error, retry),
+    },
+  );
+  const phoneOverviewSheetReady = useLazyComponentReady(
+    LazyPhoneOverviewSheet,
+    isPhoneTier && showPhoneOverviewSheet,
+    {
+      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("overview", error, retry),
+    },
+  );
   const sideChatThreadKey = !isPhoneTier ? activeThreadKey : null;
   const hasSideChat = useSideChatStore((state) =>
     sideChatThreadKey ? state.chatsByThreadKey[sideChatThreadKey] !== undefined : false,
@@ -5631,10 +5666,12 @@ export default function ChatView(props: ChatViewProps) {
                     environmentId={environmentId}
                     parentThreadId={activeThreadId}
                   />
-                  <AgentControlApprovals
-                    environmentId={environmentId}
-                    activeThreadId={activeThreadId}
-                  />
+                  {agentControlApprovalsReady ? (
+                    <LazyAgentControlApprovals
+                      environmentId={environmentId}
+                      activeThreadId={activeThreadId}
+                    />
+                  ) : null}
                 </>
               ) : null}
               {showNewThreadComposerSpacer ? (
@@ -5852,8 +5889,12 @@ export default function ChatView(props: ChatViewProps) {
               onOpenChange={setProjectExplorerOpen}
             />
           ) : null}
-          {!isPhoneTier && expandedImage ? (
-            <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} contained />
+          {!isPhoneTier && expandedImage && expandedImageDialogReady ? (
+            <LazyExpandedImageDialog
+              preview={expandedImage}
+              onClose={closeExpandedImage}
+              contained
+            />
           ) : null}
         </div>
         {/* end chat column */}
@@ -5975,53 +6016,49 @@ export default function ChatView(props: ChatViewProps) {
           ) : null}
         </RightPanelSheet>
       ) : null}
-      {isPhoneTier ? (
+      {isPhoneTier && phoneOverviewSheetReady ? (
         // Phone tier: the overview promotes to a full-screen surface with an
         // explicit back affordance, consistent with the other work surfaces
         // (the audited right overlay had no close affordance at all).
-        <PhoneWorkSurfaceSheet
+        // The sheet stays mounted once it first opened, like the other work
+        // surfaces.
+        <LazyPhoneOverviewSheet
           label={planSidebarLabel}
           open={paneFocused && showPhoneOverviewSheet}
           onClose={closePlanSidebar}
         >
-          <PhoneSurfaceScaffold
-            title={planSidebarLabel}
-            backLabel="Back to thread"
-            onBack={closePlanSidebar}
-          >
-            {overviewPanelReady ? (
-              <LazyChatOverviewPanel
-                environmentId={environmentId}
-                gitCwd={sourceControlCwd}
-                activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-                activeThreadBranch={activeThread?.branch ?? null}
-                activeWorktreePullRequests={activeWorktreePullRequests}
-                activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-                activeWorktreeTitle={activeWorktreeSummary?.title}
-                postPushWorkflowWatch={postPushWorkflowWatch}
-                activeThreadKey={activeThreadKey}
-                activePlan={activePlan}
-                sidebarProposedPlan={sidebarProposedPlan}
-                threadSubagents={threadSubagents}
-                changedFileSummaries={activeThread?.turnDiffSummaries}
-                controls={overviewPanelControls}
-                markdownCwd={gitCwd ?? undefined}
-                workspaceRoot={activeWorkspaceRoot}
-                presentation="sheet"
-                onOpenFiles={onOpenFilesPanel}
-                onOpenReview={onOpenReviewPanel}
-                onOpenSubagent={onOpenSubagentPanel}
-                onOpenPullRequestInApp={openPullRequestInApp}
-                onPostPushDiscoveryComplete={clearPostPushWatch}
-              />
-            ) : null}
-          </PhoneSurfaceScaffold>
-        </PhoneWorkSurfaceSheet>
+          {overviewPanelReady ? (
+            <LazyChatOverviewPanel
+              environmentId={environmentId}
+              gitCwd={sourceControlCwd}
+              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+              activeThreadBranch={activeThread?.branch ?? null}
+              activeWorktreePullRequests={activeWorktreePullRequests}
+              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
+              activeWorktreeTitle={activeWorktreeSummary?.title}
+              postPushWorkflowWatch={postPushWorkflowWatch}
+              activeThreadKey={activeThreadKey}
+              activePlan={activePlan}
+              sidebarProposedPlan={sidebarProposedPlan}
+              threadSubagents={threadSubagents}
+              changedFileSummaries={activeThread?.turnDiffSummaries}
+              controls={overviewPanelControls}
+              markdownCwd={gitCwd ?? undefined}
+              workspaceRoot={activeWorkspaceRoot}
+              presentation="sheet"
+              onOpenFiles={onOpenFilesPanel}
+              onOpenReview={onOpenReviewPanel}
+              onOpenSubagent={onOpenSubagentPanel}
+              onOpenPullRequestInApp={openPullRequestInApp}
+              onPostPushDiscoveryComplete={clearPostPushWatch}
+            />
+          ) : null}
+        </LazyPhoneOverviewSheet>
       ) : null}
 
-      {isPhoneTier && expandedImage && (
-        <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
-      )}
+      {isPhoneTier && expandedImage && expandedImageDialogReady ? (
+        <LazyExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
+      ) : null}
     </div>
   );
 }

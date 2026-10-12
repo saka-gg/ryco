@@ -1,3 +1,5 @@
+// The page styles load with the page chunk, not the boot stylesheet.
+import "./projects.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 

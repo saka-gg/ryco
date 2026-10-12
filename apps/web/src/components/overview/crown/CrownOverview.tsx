@@ -1,3 +1,5 @@
+// The Crown and notes styles load with the overview chunk, not the boot stylesheet.
+import "../overview.css";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 
 import { usePaneFocus } from "../../chat/PaneFocus";

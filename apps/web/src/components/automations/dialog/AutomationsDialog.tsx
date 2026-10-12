@@ -1,3 +1,5 @@
+// The dialog styles load with the dialog chunk, not the boot stylesheet.
+import "../styles/automations.css";
 /**
  * The Automations dialog (the lab's direction C): no page of its own, one
  * dialog that grows out of whatever opened it, scoped to one project with a

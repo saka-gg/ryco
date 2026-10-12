@@ -1,4 +1,3 @@
-import { PreviewFileNavigationGuard } from "../components/PreviewFileNavigationGuard";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -19,6 +18,7 @@ import {
   isPhoneAppInterstitialEnabled,
   readMobileAppUrl,
 } from "../env";
+import { runHostedBootGate } from "../hostedHub/bootGate";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
 import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
@@ -37,6 +37,14 @@ const RootAppShell = preloadableLazy(() =>
 );
 const HostedHubRoot = preloadableLazy(() =>
   import("../components/hostedHub/HostedHubRoot").then((module) => module.HostedHubRoot),
+);
+// File Preview drafts only exist once its (lazy) panel has opened, so the
+// guard that protects them loads after the first render instead of with boot.
+// It renders nothing, so its boundary never shows a fallback.
+const PreviewFileNavigationGuard = lazy(() =>
+  import("../components/PreviewFileNavigationGuard").then((module) => ({
+    default: module.PreviewFileNavigationGuard,
+  })),
 );
 const PhoneGetAppInterstitial = lazy(() =>
   import("../components/shell/phone/PhoneGetAppInterstitial").then((module) => ({
@@ -66,7 +74,9 @@ export const Route = createRootRouteWithContext<Record<string, never>>()({
   beforeLoad: ({ location, preload }) => resolveRootBeforeLoadContext(location.pathname, preload),
   component: () => (
     <>
-      <PreviewFileNavigationGuard />
+      <Suspense fallback={null}>
+        <PreviewFileNavigationGuard />
+      </Suspense>
       <RootRouteView />
     </>
   ),
@@ -177,53 +187,10 @@ function resolveRootBeforeLoadContext(
 async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<RootBeforeLoadContext> {
   const currentUrl = new URL(window.location.href);
   if (isHostedHubMode()) {
-    // Code-only prefetches: fetching a chunk starts no session, ticket, relay
-    // or store work, so the hosted root's graph and the workspace-owner module
-    // download while the access check is on the wire instead of after it.
-    // Each failure is settled here, so a chunk that fails to load while the
-    // gate is still waiting is left for the route's own lazy load to report.
     // The same preloadable module `RootRouteView` renders, so the root match
     // commits the hosted root directly instead of suspending on it once.
     // `preload()` never rejects; a failed chunk surfaces from the render.
-    const hostedRoot = HostedHubRoot.preload();
-    const hostedRootAppShell = import("../components/hostedHub/hostedRootAppShell").catch(
-      () => undefined,
-    );
-    const workspaceOwners = import("../hostedHub/hostedWorkspaceOwners").catch(() => undefined);
-    const [
-      { installHostedConsoleBoundary },
-      { ensureWebHostedRuntimeConfigured, hostedHubController, hostedHubStore },
-      { bootstrapWithHostedReadCache, canShowHostedReadPreview },
-    ] = await Promise.all([
-      import("../hostedHub/logging"),
-      import("../hostedHub/state"),
-      import("../hostedHub/readCache"),
-    ]);
-    installHostedConsoleBoundary();
-    ensureWebHostedRuntimeConfigured();
-    // Start the routed-node orchestrator, workspace coordinator and browser
-    // lifecycle now, so route-derived demand reaches `selectNode` as soon as
-    // the directory is ready rather than once the hosted root has mounted.
-    // They only call into the hosted controller, which stays the one owner;
-    // the root retains them as well, so a failed load here changes nothing.
-    void workspaceOwners.then((owners) => {
-      owners?.retainHostedWorkspaceOwners();
-      owners?.prefetchHostedRouteCode(pathname);
-    });
-    // The gate waits for the account answer only. The directory has its own
-    // loading and stale surfaces, and waiting for it held a stalled network on
-    // the boot surface for a second request deadline.
-    await bootstrapWithHostedReadCache(() => hostedHubController.bootstrapAccess());
-    const needsWorkspaceShell =
-      hostedHubStore.getState().accountStatus === "authenticated" || canShowHostedReadPreview();
-    await Promise.all([
-      hostedRoot,
-      needsWorkspaceShell
-        ? hostedRootAppShell.then((shell) =>
-            shell?.preloadHostedRootAppShell().catch(() => undefined),
-          )
-        : undefined,
-    ]);
+    await runHostedBootGate({ pathname, hostedRoot: HostedHubRoot.preload() });
     markStartupPhase("root-before-load-ready");
     return { authGateState: { status: "hosted-hub" } };
   }
