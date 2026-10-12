@@ -353,6 +353,26 @@ export interface SourceControlProviderShape {
     },
     SourceControlProviderError
   >;
+  /**
+   * `getPullRequestState` for several pull requests of one repository at once (GitHub: one
+   * GraphQL request per 50). Numbers the forge does not resolve are absent from the result.
+   * Optional: callers read one at a time without it.
+   */
+  readonly getPullRequestStates?: (input: {
+    readonly numbers: ReadonlyArray<number>;
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+  }) => Effect.Effect<
+    ReadonlyMap<
+      number,
+      {
+        readonly state: PullRequestState;
+        readonly isDraft: boolean;
+        readonly terminalAt: DateTime.Utc | null;
+      }
+    >,
+    SourceControlProviderError
+  >;
   readonly getIssueState: (input: {
     readonly number: number;
     readonly cwd: string;

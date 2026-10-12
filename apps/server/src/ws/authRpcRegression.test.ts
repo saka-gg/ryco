@@ -295,6 +295,10 @@ const makeSourceControlContext = (role: AuthenticatedSession["role"]) => {
       Effect.sync(() => {
         refreshCalls += 1;
       }),
+    gitWorkflow: {
+      cachedRepositoryList: <A, E, R>(input: { readonly load: Effect.Effect<A, E, R> }) =>
+        input.load,
+    },
   } as unknown as WsRpcContext;
 
   return {
