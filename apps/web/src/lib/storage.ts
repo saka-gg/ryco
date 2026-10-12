@@ -6,15 +6,6 @@ export interface StateStorage<R = unknown> {
   removeItem: (name: string) => R;
 }
 
-export interface DebouncedStorage<R = unknown> extends StateStorage<R> {
-  /**
-   * Like `setItem`, but the value is serialized only when the debounced write
-   * actually runs: a burst of writes (one per keystroke) serializes once.
-   */
-  setItemDeferred: (name: string, serialize: () => string) => void;
-  flush: () => void;
-}
-
 export function createMemoryStorage(): StateStorage {
   const store = new Map<string, string>();
   return {
@@ -44,32 +35,17 @@ export function resolveStorage(storage: Partial<StateStorage> | null | undefined
   return isStateStorage(storage) ? storage : createMemoryStorage();
 }
 
-export function createDebouncedStorage(
-  baseStorage: Partial<StateStorage> | null | undefined,
-  debounceMs: number = 300,
-): DebouncedStorage {
-  const resolvedStorage = resolveStorage(baseStorage);
-  const debouncedSetItem = new Debouncer(
-    (name: string, value: string | (() => string)) => {
-      resolvedStorage.setItem(name, typeof value === "function" ? value() : value);
-    },
-    { wait: debounceMs },
-  );
+export interface WriteScheduler {
+  /** Runs `write` once the burst of calls settles; a later call replaces an earlier `write`. */
+  readonly schedule: (write: () => void) => void;
+  /** Runs the scheduled write now. */
+  readonly flush: () => void;
+}
 
+export function createWriteScheduler(debounceMs: number = 300): WriteScheduler {
+  const debounced = new Debouncer((write: () => void) => write(), { wait: debounceMs });
   return {
-    getItem: (name) => resolvedStorage.getItem(name),
-    setItem: (name, value) => {
-      debouncedSetItem.maybeExecute(name, value);
-    },
-    setItemDeferred: (name, serialize) => {
-      debouncedSetItem.maybeExecute(name, serialize);
-    },
-    removeItem: (name) => {
-      debouncedSetItem.cancel();
-      resolvedStorage.removeItem(name);
-    },
-    flush: () => {
-      debouncedSetItem.flush();
-    },
+    schedule: (write) => debounced.maybeExecute(write),
+    flush: () => debounced.flush(),
   };
 }

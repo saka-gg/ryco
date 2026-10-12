@@ -121,6 +121,12 @@ vi.mock("@legendapp/list/react", async () => {
 });
 
 import { MessagesTimeline } from "./MessagesTimeline";
+import { resetActivityPayloadAtomsForTests } from "../../rpc/activityPayloadAtoms";
+import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
 import { __rememberHtmlRenderSourceForTests } from "./useHtmlRenderSource";
 import { useUiStateStore } from "~/uiStateStore";
 import { type EnvironmentState, useStore } from "../../store";
@@ -1167,6 +1173,87 @@ describe("MessagesTimeline", () => {
       await row!.click();
       await expect.element(page.getByText("error: Script not found")).toBeVisible();
     } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("loads the full output of a previewed tool payload when its row expands", async () => {
+    resetActivityPayloadAtomsForTests();
+    let attempts = 0;
+    const requests: Array<{ threadId: string; activityId: string }> = [];
+    let fail = true;
+    const read = async (input: { threadId: string; activityId: string }) => {
+      attempts += 1;
+      requests.push(input);
+      if (fail) throw new Error("relay dropped");
+      return {
+        activityId: input.activityId,
+        payload: {
+          itemType: "command_execution",
+          data: {
+            item: {
+              type: "commandExecution",
+              aggregatedOutput: "line one\nline two\nthe complete tail",
+              exitCode: 3,
+            },
+          },
+        },
+        fullBytes: 900_000,
+        truncated: false,
+      };
+    };
+    __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
+      orchestration: { getActivityPayload: read },
+    } as never);
+    const screen = await render(
+      <AppAtomRegistryProvider>
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              id: "previewed-command-entry",
+              kind: "work",
+              createdAt: "2026-04-13T12:00:00.000Z",
+              entry: {
+                id: "previewed-command",
+                createdAt: "2026-04-13T12:00:00.000Z",
+                label: "Command",
+                command: "cat big.log",
+                output: "line one…",
+                outputPreviewActivityId: "activity-big",
+                completed: true,
+                tone: "tool",
+              },
+            },
+          ]}
+        />
+      </AppAtomRegistryProvider>,
+    );
+
+    try {
+      // Collapsed rows never fetch: the preview is all the row needs.
+      expect(attempts).toBe(0);
+      const row = document.querySelector<HTMLElement>("[data-tool-entry-kind='expandable']");
+      await row!.click();
+      await expect.element(page.getByText("Showing a preview.", { exact: false })).toBeVisible();
+      await expect.element(page.getByText("line one…", { exact: false })).toBeVisible();
+      expect(requests[0]).toEqual({ threadId: "thread-1", activityId: "activity-big" });
+
+      fail = false;
+      await page.getByRole("button", { name: "Retry" }).click();
+      await expect.element(page.getByText("the complete tail", { exact: false })).toBeVisible();
+      await expect.element(page.getByText("Exit code 3", { exact: false })).toBeVisible();
+      expect(document.querySelector("[data-work-entry-output-status]")).toBeNull();
+
+      // Collapsing and reopening reuses the fetched payload.
+      const fetched = attempts;
+      await row!.click();
+      await row!.click();
+      await expect.element(page.getByText("the complete tail", { exact: false })).toBeVisible();
+      expect(attempts).toBe(fetched);
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+      resetActivityPayloadAtomsForTests();
       await screen.unmount();
     }
   });

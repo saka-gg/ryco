@@ -4,12 +4,14 @@ import {
   AuthRpcError,
   EnvironmentId,
   ProviderInstanceId,
+  type ClaudeCacheObservation,
   type CliProxyAccount,
   type CliProxyHubSnapshot,
   type CliProxyReadHubsResult,
   type EnvironmentApi,
   type ServerProviderRateLimits,
 } from "@ryco/contracts";
+import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
@@ -170,6 +172,45 @@ describe("ContextWindowMeter account details", () => {
     defaultQueryClient.clear();
     navigate.mockReset();
     document.body.innerHTML = "";
+  });
+
+  it("re-renders an open popup when a relative label changes, not every second", async () => {
+    // A cache read that turns from "3m ago" into "4m ago" about 2.5 s after the popup opens,
+    // and a reset whose label holds for another 30 s.
+    const observedAt = new Date(Date.now() - 240_000 + 2_500).toISOString();
+    let commits = 0;
+    mounted = await render(
+      <Profiler id="meter" onRender={() => (commits += 1)}>
+        <ContextWindowMeter
+          usage={deriveContextWindowUsage([], "200k")}
+          rateLimits={{ primary: { usedPercent: 3, resetsAt: Date.now() / 1000 + 7_230 } }}
+          claudeCache={
+            {
+              source: "assistant-usage",
+              observedAt,
+              messageId: "message-1",
+              cacheReadInputTokens: 1_000,
+              cacheWriteInputTokens: 100,
+              directInputTokens: 10,
+            } as unknown as ClaudeCacheObservation
+          }
+          available
+          account={account({ checkCliProxyRoute: false })}
+        />
+      </Profiler>,
+    );
+    await open();
+    await expect.element(page.getByText("Last request 3m ago", { exact: false })).toBeVisible();
+
+    // A second-by-second tick would commit here; the labels have not changed yet.
+    const settled = commits;
+
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(commits).toBe(settled);
+
+    // It re-renders once the label does.
+    await expect.element(page.getByText("Last request 4m ago", { exact: false })).toBeVisible();
+    expect(commits - settled).toBeLessThanOrEqual(2);
   });
 
   it("names the instance and its login with the email blurred", async () => {

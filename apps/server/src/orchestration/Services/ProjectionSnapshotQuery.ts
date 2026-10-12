@@ -8,6 +8,7 @@
  */
 import type {
   CheckpointRevertActivityPayload,
+  EventId,
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -318,6 +319,24 @@ export interface ProjectionSnapshotQueryShape {
   ) => Effect.Effect<
     OrchestrationThreadHistoryPage,
     ProjectionRepositoryError | OrchestrationThreadHistoryError
+  >;
+
+  /**
+   * Read one stored activity payload of an active thread, with its encoded
+   * size, for a client expanding a row the window sent as a preview.
+   * Optional so existing test doubles stay valid; the RPC reports it
+   * unavailable.
+   */
+  readonly getActivityPayload?: (input: {
+    readonly threadId: ThreadId;
+    readonly activityId: EventId;
+  }) => Effect.Effect<
+    Option.Option<{
+      readonly kind: string;
+      readonly payload: unknown;
+      readonly payloadBytes: number;
+    }>,
+    ProjectionRepositoryError
   >;
 
   /**

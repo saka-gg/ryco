@@ -35,7 +35,7 @@ import {
   normalizeTerminalContextText,
 } from "./terminalContext.ts";
 import { create } from "zustand";
-import { createJSONStorage, persist, type PersistStorage } from "zustand/middleware";
+import { persist } from "zustand/middleware";
 import { getDefaultServerModel } from "./providerModels.ts";
 import type { UnifiedSettings } from "@ryco/contracts/settings";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection.ts";
@@ -50,16 +50,20 @@ import {
   normalizeCurrentPersistedComposerDraftStoreState,
   normalizeModelSelection,
   normalizeProviderDriverKind,
-  partializeComposerDraftStoreState,
   projectDraftKey,
   toHydratedDraftThreadState,
   toHydratedThreadDraft,
   type DraftThreadEnvMode,
   type HydrateComposerImages,
-  type PersistedComposerDraftStoreState,
   type PersistedComposerImageAttachment,
   type ProviderOptionSelectionsByProvider,
 } from "./draftPersistence.ts";
+import {
+  type ComposerDraftPersistSnapshot,
+  type ComposerDraftStorage,
+  createSplitComposerDraftPersistStorage,
+  snapshotComposerDraftPersistState,
+} from "./draftSplitStorage.ts";
 
 export const DraftId = Schema.String.pipe(Schema.brand("DraftId"));
 export type DraftId = typeof DraftId.Type;
@@ -365,6 +369,20 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
     threadRef: ComposerThreadTarget,
     imageId: string,
     update: (image: TImage) => TImage,
+  ) => void;
+  /**
+   * Swaps in images the platform restored after hydration, once their bytes
+   * were loaded from its local blob store. `image: null` drops one whose bytes
+   * are gone; `persisted` replaces its persisted record (bytes moved out of a
+   * data URL).
+   */
+  restoreDraftImages: (
+    threadKey: string,
+    restored: ReadonlyArray<{
+      readonly id: string;
+      readonly image: TImage | null;
+      readonly persisted?: PersistedComposerImageAttachment | undefined;
+    }>,
   ) => void;
   insertTerminalContext: (
     threadRef: ComposerThreadTarget,
@@ -848,44 +866,13 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
   );
 }
 
-/** Plain key-value storage injected by the platform (web binds localStorage). */
-export interface ComposerDraftStorage {
-  readonly getItem: (name: string) => string | null | Promise<string | null>;
-  readonly setItem: (name: string, value: string) => unknown;
-  readonly removeItem: (name: string) => unknown;
-  /**
-   * Optional deferred write: `serialize` runs only when the (debounced) write
-   * actually happens. Without it every store update serializes the whole
-   * persisted state (image data URLs included) synchronously, per keystroke.
-   */
-  readonly setItemDeferred?: ((name: string, serialize: () => string) => unknown) | undefined;
-}
-
-function createComposerDraftPersistStorage(
-  storage: ComposerDraftStorage,
-): PersistStorage<PersistedComposerDraftStoreState> {
-  const jsonStorage = createJSONStorage(
-    () => storage,
-  ) as PersistStorage<PersistedComposerDraftStoreState>;
-  const setItemDeferred = storage.setItemDeferred;
-  if (setItemDeferred === undefined) {
-    return jsonStorage;
-  }
-  return {
-    ...jsonStorage,
-    // The persisted value is built from immutable store state, so serializing
-    // the latest one at flush time writes exactly what an eager write would.
-    setItem: (name, value) => setItemDeferred(name, () => JSON.stringify(value)),
-  };
-}
-
 /**
  * Platform seams for the composer draft store. Persistence, the blob-preview
  * lifecycle, and dataURL decoding stay app-side; the store logic and Schema
  * migrations live here.
  */
 export interface CreateComposerDraftStoreDeps<TImage extends ComposerDraftImage> {
-  /** Persist-middleware storage (web binds a debounced localStorage wrapper). */
+  /** Key-value storage for the split draft entries (web binds localStorage). */
   readonly storage: ComposerDraftStorage;
   /** Flush buffered writes to durable storage before a verify read. */
   readonly flushStorage: () => void;
@@ -991,8 +978,12 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
     });
   }
 
+  const persistStorage = createSplitComposerDraftPersistStorage<TImage>(
+    deps.storage,
+    COMPOSER_DRAFT_STORAGE_KEY,
+  );
   const composerDraftStore = create<ComposerDraftStoreState<TImage>>()(
-    persist<ComposerDraftStoreState<TImage>, [], [], PersistedComposerDraftStoreState>(
+    persist<ComposerDraftStoreState<TImage>, [], [], ComposerDraftPersistSnapshot<TImage>>(
       (setBase, get) => {
         const set = setBase;
 
@@ -1970,6 +1961,47 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               };
             });
           },
+          restoreDraftImages: (threadKey, restored) => {
+            if (restored.length === 0) return;
+            set((state) => {
+              const current = state.draftsByThreadKey[threadKey];
+              if (!current) return state;
+              const restoredById = new Map(restored.map((entry) => [entry.id, entry]));
+              let changed = false;
+              const images: TImage[] = [];
+              for (const image of current.images) {
+                const entry = restoredById.get(image.id);
+                if (!entry) images.push(image);
+                else {
+                  changed = true;
+                  if (entry.image !== null) images.push(entry.image);
+                }
+              }
+              const dropped = new Set(
+                restored.filter((entry) => entry.image === null).map((entry) => entry.id),
+              );
+              const persistedAttachments = current.persistedAttachments.flatMap((attachment) => {
+                if (dropped.has(attachment.id)) return [];
+                const replacement = restoredById.get(attachment.id)?.persisted;
+                if (replacement === undefined || replacement === attachment) return [attachment];
+                changed = true;
+                return [replacement];
+              });
+              if (!changed && persistedAttachments.length === current.persistedAttachments.length) {
+                return state;
+              }
+              const nextDraft: ComposerThreadDraftState<TImage> = {
+                ...current,
+                images,
+                persistedAttachments,
+                nonPersistedImageIds: current.nonPersistedImageIds.filter((id) => !dropped.has(id)),
+              };
+              const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+              if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+              else nextDraftsByThreadKey[threadKey] = nextDraft;
+              return { draftsByThreadKey: nextDraftsByThreadKey };
+            });
+          },
           insertTerminalContext: (threadRef, prompt, context, index) => {
             const threadKey = resolveComposerDraftKey(get(), threadRef);
             const threadId = resolveComposerThreadId(get(), threadRef);
@@ -2313,9 +2345,14 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
       {
         name: COMPOSER_DRAFT_STORAGE_KEY,
         version: COMPOSER_DRAFT_STORAGE_VERSION,
-        storage: createComposerDraftPersistStorage(deps.storage),
-        migrate: (persistedState) => migratePersistedComposerDraftStoreState(persistedState),
-        partialize: (state) => partializeComposerDraftStoreState(state),
+        storage: persistStorage,
+        // The storage reads the persisted shape; migrate and merge only ever see that.
+        migrate: (persistedState) =>
+          migratePersistedComposerDraftStoreState(
+            persistedState,
+          ) as unknown as ComposerDraftPersistSnapshot<TImage>,
+        // References only: the storage serializes the drafts that changed when it flushes.
+        partialize: (state) => snapshotComposerDraftPersistState(state),
         merge: (persistedState, currentState) => {
           const normalizedPersisted =
             normalizeCurrentPersistedComposerDraftStoreState(persistedState);

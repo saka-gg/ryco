@@ -126,6 +126,9 @@ import Migration0086, {
 import Migration0087, {
   ensureProjectionThreadAnchorsAndStatisticsPartials,
 } from "./Migrations/087_ProjectionThreadAnchorsAndStatisticsPartials.ts";
+import Migration0088, {
+  reprojectLegacyActivityPayloads,
+} from "./Migrations/088_LegacyActivityPayloads.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -224,6 +227,7 @@ export const migrationEntries = [
   [85, "ProjectionThreadActivityKindIndex", Migration0085],
   [86, "ProjectionProjectRepositoryIdentity", Migration0086],
   [87, "ProjectionThreadAnchorsAndStatisticsPartials", Migration0087],
+  [88, "LegacyActivityPayloads", Migration0088],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -527,6 +531,16 @@ export const repairProjectionThreadAnchorsAndStatisticsPartials = Effect.fn(
   }
 });
 
+// Legacy tool activity payloads: run 088 again as a repair when a later id was recorded
+// first (parallel branches claim the same next id). Its completion marker keeps this to
+// one lookup per boot once it has run.
+export const repairLegacyActivityPayloads = Effect.fn("repairLegacyActivityPayloads")(function* () {
+  const rewritten = yield* reprojectLegacyActivityPayloads;
+  if (rewritten > 0) {
+    yield* Effect.log(`Re-projected ${rewritten} legacy tool activity payloads`);
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -712,6 +726,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 87) {
         yield* repairProjectionThreadAnchorsAndStatisticsPartials();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 88) {
+        yield* repairLegacyActivityPayloads();
       }
     }),
   );

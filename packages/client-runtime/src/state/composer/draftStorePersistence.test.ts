@@ -2,51 +2,93 @@ import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
-import { createComposerDraftStore, DraftId, type ComposerDraftStorage } from "./draftStore.ts";
-import { COMPOSER_DRAFT_STORAGE_KEY } from "./draftPersistence.ts";
+import { createComposerDraftStore, DraftId, type ComposerDraftImage } from "./draftStore.ts";
+import {
+  COMPOSER_DRAFT_INDEX_STORAGE_KEY,
+  COMPOSER_DRAFT_STORAGE_KEY,
+  COMPOSER_DRAFT_STORAGE_VERSION,
+  composerDraftEntryStorageKey,
+  type PersistedComposerImageAttachment,
+} from "./draftPersistence.ts";
+import type { ComposerDraftStorage } from "./draftSplitStorage.ts";
 
-function makeStorage(options: { deferred: boolean }) {
-  const values = new Map<string, string>();
-  const pending: Array<{ name: string; serialize: () => string }> = [];
+function makeStorage(
+  options: {
+    readonly scheduled?: boolean;
+    readonly async?: boolean;
+    readonly initial?: Record<string, string>;
+  } = {},
+) {
+  const values = new Map<string, string>(Object.entries(options.initial ?? {}));
+  let pendingFlush: (() => void) | null = null;
   const setItem = vi.fn((name: string, value: string) => {
     values.set(name, value);
   });
+  const removeItem = vi.fn((name: string) => {
+    values.delete(name);
+  });
+  const releaseAttachments = vi.fn((_ids: ReadonlyArray<string>) => undefined);
   const storage: ComposerDraftStorage = {
-    getItem: (name) => values.get(name) ?? null,
+    getItem: (name) =>
+      options.async ? Promise.resolve(values.get(name) ?? null) : (values.get(name) ?? null),
     setItem,
-    removeItem: (name) => {
-      values.delete(name);
-    },
-    ...(options.deferred
+    removeItem,
+    keys: () => values.keys(),
+    releaseAttachments,
+    ...(options.scheduled
       ? {
-          setItemDeferred: (name: string, serialize: () => string) => {
-            pending.splice(0, pending.length, { name, serialize });
+          scheduleWrite: (flush: () => void) => {
+            pendingFlush = flush;
           },
         }
       : {}),
   };
   const flush = () => {
-    for (const write of pending.splice(0)) values.set(write.name, write.serialize());
+    const run = pendingFlush;
+    pendingFlush = null;
+    run?.();
   };
-  return { storage, values, setItem, flush, pending };
+  return { storage, values, setItem, removeItem, releaseAttachments, flush };
 }
 
-function makeStore(storage: ComposerDraftStorage, flushStorage: () => void = () => undefined) {
+function makeStore(
+  storage: ComposerDraftStorage,
+  hydrateImages: (
+    attachments: ReadonlyArray<PersistedComposerImageAttachment>,
+  ) => ComposerDraftImage[] = () => [],
+) {
   return createComposerDraftStore({
     storage,
-    flushStorage,
+    flushStorage: () => undefined,
     revokePreviewUrl: () => undefined,
-    hydrateImages: () => [],
+    hydrateImages,
     readPersistedAttachmentIds: () => [],
   });
 }
 
-const threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
+const environmentId = EnvironmentId.make("environment");
+const threadRef = scopeThreadRef(environmentId, ThreadId.make("thread"));
+const otherThreadRef = scopeThreadRef(environmentId, ThreadId.make("other"));
+const entryOf = (values: Map<string, string>, ref: typeof threadRef) =>
+  JSON.parse(values.get(composerDraftEntryStorageKey(scopedThreadKey(ref))) ?? "null");
+
+const localImage = (id: string): PersistedComposerImageAttachment => ({
+  type: "image",
+  id,
+  name: `${id}.png`,
+  mimeType: "image/png",
+  sizeBytes: 4,
+  bytes: "local",
+});
 
 describe("composer draft persistence", () => {
-  it("defers serialization to the storage flush when the storage supports it", () => {
-    const { storage, values, setItem, flush, pending } = makeStorage({ deferred: true });
+  it("serializes nothing while typing and only the changed draft when it flushes", () => {
+    const { storage, values, setItem, flush } = makeStorage({ scheduled: true });
     const { useComposerDraftStore } = makeStore(storage);
+    useComposerDraftStore.getState().setPrompt(otherThreadRef, "left alone");
+    flush();
+    setItem.mockClear();
+
     const stringify = vi.spyOn(JSON, "stringify");
     try {
       for (const prompt of ["h", "he", "hel", "hell", "hello"]) {
@@ -55,30 +97,192 @@ describe("composer draft persistence", () => {
       // Typing serializes nothing: the latest state waits for the flush.
       expect(stringify).not.toHaveBeenCalled();
       expect(setItem).not.toHaveBeenCalled();
-      expect(pending).toHaveLength(1);
       flush();
-      expect(stringify).toHaveBeenCalledTimes(1);
+      // The new draft and the index that lists it; the other draft is untouched.
+      expect(stringify).toHaveBeenCalledTimes(2);
     } finally {
       stringify.mockRestore();
     }
-    const persisted = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY) ?? "null");
-    expect(persisted.state.draftsByThreadKey[scopedThreadKey(threadRef)].prompt).toBe("hello");
+    expect(setItem.mock.calls.map(([name]) => name).toSorted()).toEqual(
+      [
+        COMPOSER_DRAFT_INDEX_STORAGE_KEY,
+        composerDraftEntryStorageKey(scopedThreadKey(threadRef)),
+      ].toSorted(),
+    );
+    expect(entryOf(values, threadRef).prompt).toBe("hello");
+    expect(entryOf(values, otherThreadRef).prompt).toBe("left alone");
+
+    // Another keystroke rewrites that one entry, not the index.
+    setItem.mockClear();
+    useComposerDraftStore.getState().setPrompt(threadRef, "hello!");
+    flush();
+    expect(setItem.mock.calls.map(([name]) => name)).toEqual([
+      composerDraftEntryStorageKey(scopedThreadKey(threadRef)),
+    ]);
   });
 
-  it("keeps eager serialization for plain storage", () => {
-    const { storage, values, setItem } = makeStorage({ deferred: false });
+  it("writes the changed draft right away when the platform schedules no writes", () => {
+    const { storage, values, setItem } = makeStorage();
     const { useComposerDraftStore } = makeStore(storage);
-    useComposerDraftStore.getState().setPrompt(threadRef, "eager");
-    expect(setItem).toHaveBeenCalled();
-    const persisted = JSON.parse(values.get(COMPOSER_DRAFT_STORAGE_KEY) ?? "null");
-    expect(persisted.state.draftsByThreadKey[scopedThreadKey(threadRef)].prompt).toBe("eager");
+    useComposerDraftStore.getState().setPrompt(threadRef, "a");
+    expect(entryOf(values, threadRef).prompt).toBe("a");
+    setItem.mockClear();
+    useComposerDraftStore.getState().setPrompt(threadRef, "ab");
+    expect(entryOf(values, threadRef).prompt).toBe("ab");
+    expect(setItem).toHaveBeenCalledTimes(1);
+  });
+
+  it("round-trips through the split entries, also from async storage", async () => {
+    const first = makeStorage({ scheduled: true });
+    const writer = makeStore(first.storage);
+    writer.useComposerDraftStore.getState().setPrompt(threadRef, "kept");
+    writer.useComposerDraftStore.getState().setRuntimeMode(otherThreadRef, "approval-required");
+    first.flush();
+
+    const sync = makeStore(makeStorage({ initial: Object.fromEntries(first.values) }).storage);
+    expect(sync.useComposerDraftStore.getState().getComposerDraft(threadRef)?.prompt).toBe("kept");
+
+    const asyncStore = makeStore(
+      makeStorage({ async: true, initial: Object.fromEntries(first.values) }).storage,
+    );
+    await vi.waitFor(() =>
+      expect(asyncStore.useComposerDraftStore.persist.hasHydrated()).toBe(true),
+    );
+    const state = asyncStore.useComposerDraftStore.getState();
+    expect(state.getComposerDraft(threadRef)?.prompt).toBe("kept");
+    expect(state.getComposerDraft(otherThreadRef)?.runtimeMode).toBe("approval-required");
+  });
+
+  it("migrates the single legacy entry without losing a draft, then removes it", () => {
+    const legacy = {
+      version: COMPOSER_DRAFT_STORAGE_VERSION,
+      state: {
+        draftsByThreadKey: {
+          [scopedThreadKey(threadRef)]: { prompt: "first", attachments: [] },
+          [scopedThreadKey(otherThreadRef)]: { prompt: "second", attachments: [] },
+        },
+        draftThreadsByThreadKey: {},
+        logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+      },
+    };
+    const { storage, values, flush } = makeStorage({
+      scheduled: true,
+      initial: { [COMPOSER_DRAFT_STORAGE_KEY]: JSON.stringify(legacy) },
+    });
+    const { useComposerDraftStore } = makeStore(storage);
+    expect(useComposerDraftStore.getState().getComposerDraft(otherThreadRef)?.prompt).toBe(
+      "second",
+    );
+    // Nothing is rewritten until something changes; the legacy entry is still there.
+    expect(values.has(COMPOSER_DRAFT_STORAGE_KEY)).toBe(true);
+
+    useComposerDraftStore.getState().setPrompt(threadRef, "first, edited");
+    flush();
+    expect(values.has(COMPOSER_DRAFT_STORAGE_KEY)).toBe(false);
+    expect(entryOf(values, threadRef).prompt).toBe("first, edited");
+    expect(entryOf(values, otherThreadRef).prompt).toBe("second");
+    expect(JSON.parse(values.get(COMPOSER_DRAFT_INDEX_STORAGE_KEY)!).state.draftKeys).toHaveLength(
+      2,
+    );
+  });
+
+  it("keeps the legacy entry when the new index cannot be written", () => {
+    const legacy = {
+      version: COMPOSER_DRAFT_STORAGE_VERSION,
+      state: {
+        draftsByThreadKey: { [scopedThreadKey(threadRef)]: { prompt: "safe", attachments: [] } },
+        draftThreadsByThreadKey: {},
+        logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+      },
+    };
+    const { storage, values, setItem, flush } = makeStorage({
+      scheduled: true,
+      initial: { [COMPOSER_DRAFT_STORAGE_KEY]: JSON.stringify(legacy) },
+    });
+    const onWriteError = vi.fn();
+    const { useComposerDraftStore } = makeStore({ ...storage, onWriteError });
+    setItem.mockImplementation((name: string, value: string) => {
+      if (name === COMPOSER_DRAFT_INDEX_STORAGE_KEY) throw new Error("QuotaExceededError");
+      values.set(name, value);
+    });
+    useComposerDraftStore.getState().setPrompt(threadRef, "safe, edited");
+    flush();
+    expect(onWriteError).toHaveBeenCalledWith(COMPOSER_DRAFT_INDEX_STORAGE_KEY, expect.any(Error));
+    expect(values.has(COMPOSER_DRAFT_STORAGE_KEY)).toBe(true);
+  });
+
+  it("removes a cleared draft's entry and releases bytes no draft references", () => {
+    const { storage, values, releaseAttachments, flush } = makeStorage({ scheduled: true });
+    const { useComposerDraftStore } = makeStore(storage);
+    const state = () => useComposerDraftStore.getState();
+    state().setPrompt(threadRef, "with images");
+    state().syncPersistedAttachments(threadRef, [localImage("shared"), localImage("only-here")]);
+    state().setPrompt(otherThreadRef, "also shared");
+    state().syncPersistedAttachments(otherThreadRef, [localImage("shared")]);
+    flush();
+    expect(releaseAttachments).not.toHaveBeenCalled();
+
+    state().clearComposerContent(threadRef);
+    flush();
+    expect(values.has(composerDraftEntryStorageKey(scopedThreadKey(threadRef)))).toBe(false);
+    expect(releaseAttachments).toHaveBeenCalledExactlyOnceWith(["only-here"]);
+  });
+
+  it("removes draft entries no index lists", () => {
+    const first = makeStorage({ scheduled: true });
+    const writer = makeStore(first.storage);
+    writer.useComposerDraftStore.getState().setPrompt(threadRef, "listed");
+    first.flush();
+    const orphan = composerDraftEntryStorageKey("orphaned-thread");
+    const reopened = makeStorage({
+      scheduled: true,
+      initial: { ...Object.fromEntries(first.values), [orphan]: '{"prompt":"x","attachments":[]}' },
+    });
+    const { useComposerDraftStore } = makeStore(reopened.storage);
+    useComposerDraftStore.getState().setPrompt(threadRef, "listed, edited");
+    reopened.flush();
+    expect(reopened.values.has(orphan)).toBe(false);
+    expect(entryOf(reopened.values, threadRef).prompt).toBe("listed, edited");
+  });
+
+  it("restores hydrated images in place and drops ones whose bytes are gone", () => {
+    const first = makeStorage({ scheduled: true });
+    const writer = makeStore(first.storage);
+    writer.useComposerDraftStore.getState().setPrompt(threadRef, "pictures");
+    writer.useComposerDraftStore
+      .getState()
+      .syncPersistedAttachments(threadRef, [localImage("present"), localImage("missing")]);
+    first.flush();
+
+    const pendingImage = (attachment: PersistedComposerImageAttachment): ComposerDraftImage => ({
+      type: "image",
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      previewUrl: "",
+    });
+    const { useComposerDraftStore } = makeStore(
+      makeStorage({ initial: Object.fromEntries(first.values) }).storage,
+      (attachments) => attachments.map(pendingImage),
+    );
+    const key = scopedThreadKey(threadRef);
+    expect(useComposerDraftStore.getState().draftsByThreadKey[key]?.images).toHaveLength(2);
+    useComposerDraftStore.getState().restoreDraftImages(key, [
+      { id: "present", image: { ...pendingImage(localImage("present")), previewUrl: "blob:x" } },
+      { id: "missing", image: null },
+    ]);
+    const draft = useComposerDraftStore.getState().draftsByThreadKey[key]!;
+    expect(draft.images.map((image) => [image.id, image.previewUrl])).toEqual([
+      ["present", "blob:x"],
+    ]);
+    expect(draft.persistedAttachments.map((attachment) => attachment.id)).toEqual(["present"]);
   });
 
   it("promotes every draft of materialized threads in one pass", () => {
-    const { storage } = makeStorage({ deferred: true });
+    const { storage } = makeStorage({ scheduled: true });
     const store = makeStore(storage);
     const projectId = ProjectId.make("project");
-    const environmentId = threadRef.environmentId;
     const state = store.useComposerDraftStore.getState();
     for (const id of ["one", "two", "three"]) {
       state.setLogicalProjectDraftThreadId(

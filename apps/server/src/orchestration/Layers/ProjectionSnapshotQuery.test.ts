@@ -2528,6 +2528,149 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("serves bounded activity previews and the stored payload on request", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-preview', 'Preview', '/tmp/preview', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-preview', 'project-preview', 'Preview', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      // Eight heavy tool outputs, the newest alone 5 MiB: past the relay's 4 MiB message cap.
+      const heavyPayload = (bytes: number) => ({
+        itemType: "command_execution",
+        status: "completed",
+        data: {
+          item: {
+            command: "cat big.log",
+            exitCode: 0,
+            aggregatedOutput: "y".repeat(bytes),
+            changes: [{ path: "src/a.ts", additions: 3, deletions: 1 }],
+          },
+        },
+      });
+      for (let index = 1; index <= 8; index++) {
+        const payload = heavyPayload(index === 8 ? 5 * 1024 * 1024 : 400 * 1024);
+        yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`preview-activity-${index}`}, 'thread-preview', NULL, 'tool', 'tool.completed', 'Ran',
+            ${JSON.stringify(payload)}, ${index}, ${`2026-05-01T00:00:0${index}.000Z`})`;
+      }
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('preview-activity-small', 'thread-preview', NULL, 'info', 'task.progress', 'Small',
+          ${JSON.stringify({ summary: "still small" })}, 9, '2026-05-01T00:00:09.000Z')`;
+
+      const limits = { messages: 150, activities: 150, proposedPlans: 30, checkpoints: 30 };
+      const window = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-preview"),
+        limits,
+        activityPayloads: "preview",
+      });
+      // Every activity fits once previewed, the 5 MiB one included.
+      assert.deepEqual(
+        window.thread.activities.map((activity) => activity.id),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+          .map((index) => `preview-activity-${index}`)
+          .concat(["preview-activity-small"]),
+      );
+      assert.equal(window.history.activities.hasMoreBefore, false);
+      const windowBytes = window.thread.activities.reduce(
+        (total, activity) => total + JSON.stringify(activity.payload).length,
+        0,
+      );
+      assert.isAtMost(windowBytes, 9 * 8 * 1024);
+      const newest = window.thread.activities.find(
+        (activity) => activity.id === "preview-activity-8",
+      )!;
+      assert.isDefined(newest.payloadPreview);
+      assert.isAbove(newest.payloadPreview!.fullBytes, 5 * 1024 * 1024);
+      // The preview keeps what collapsed rows read: command, exit code, file stats.
+      const item = (newest.payload as { data: { item: Record<string, unknown> } }).data.item;
+      assert.equal(item.command, "cat big.log");
+      assert.equal(item.exitCode, 0);
+      assert.deepEqual(item.changes, [{ path: "src/a.ts", additions: 3, deletions: 1 }]);
+      assert.isTrue(String(item.aggregatedOutput).startsWith("yyyy"));
+      assert.isTrue(String(item.aggregatedOutput).endsWith("…"));
+      const small = window.thread.activities.find(
+        (activity) => activity.id === "preview-activity-small",
+      )!;
+      assert.isUndefined(small.payloadPreview);
+      assert.deepEqual(small.payload, { summary: "still small" });
+
+      // A client that does not ask for previews keeps today's full, byte-bounded window:
+      // the 5 MiB activity does not fit behind the newest one.
+      const full = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-preview"),
+        limits,
+      });
+      assert.deepEqual(
+        full.thread.activities.map((activity) => activity.id),
+        ["preview-activity-small"],
+      );
+      assert.isTrue(full.thread.activities.every((activity) => !activity.payloadPreview));
+
+      // History pages preview the same way.
+      const page = yield* snapshotQuery.getThreadHistoryPage!({
+        threadId: ThreadId.make("thread-preview"),
+        collection: "activities",
+        mode: { kind: "before", cursor: full.history.activities.oldestCursor! },
+        limit: 150,
+        activityPayloads: "preview",
+      });
+      assert.equal(page.collection, "activities");
+      if (page.collection === "activities") {
+        assert.equal(page.items.length, 8);
+        assert.isTrue(page.items.every((activity) => activity.payloadPreview !== undefined));
+      }
+
+      const stored = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-preview"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isSome(stored));
+      if (Option.isSome(stored)) {
+        assert.equal(stored.value.kind, "tool.completed");
+        assert.deepEqual(stored.value.payload, heavyPayload(400 * 1024));
+        assert.equal(stored.value.payloadBytes, JSON.stringify(heavyPayload(400 * 1024)).length);
+      }
+      const otherThread = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-other"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isNone(otherThread));
+
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-05-02T00:00:00.000Z'`;
+      const deleted = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-preview"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isNone(deleted));
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
   it.effect("carries a thread's projected priority on its shell upsert", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

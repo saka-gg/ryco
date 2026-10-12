@@ -64,7 +64,7 @@ export function ProviderLimitWindow(props: {
       : props.compact || highUsage
         ? `${used}% used`
         : `${remaining}% available`;
-  const reset = formatRateLimitResetText(props.window.resetsAt);
+  const reset = formatRateLimitResetText(props.window.resetsAt, props.now);
   const pace = rateLimitPace(props.window, props.checkedAt, props.now, props.available);
   const paceDescription = describeRateLimitPace(pace);
   const paceReference =

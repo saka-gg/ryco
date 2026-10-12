@@ -53,8 +53,11 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
  * Returns `{ value: "20s", suffix: "ago" }` or `{ value: "just now", suffix: null }`
  * so callers can style the numeric portion independently.
  */
-export function formatRelativeTime(isoDate: string): { value: string; suffix: string | null } {
-  const diffMs = Date.now() - new Date(isoDate).getTime();
+export function formatRelativeTime(
+  isoDate: string,
+  nowMs: number = Date.now(),
+): { value: string; suffix: string | null } {
+  const diffMs = nowMs - new Date(isoDate).getTime();
   if (diffMs < 0) return { value: "just now", suffix: null };
   const seconds = Math.floor(diffMs / 1000);
   if (seconds < 60) return { value: "just now", suffix: null };
@@ -66,8 +69,9 @@ export function formatRelativeTime(isoDate: string): { value: string; suffix: st
   return { value: `${days}d`, suffix: "ago" };
 }
 
-export function formatRelativeTimeLabel(isoDate: string) {
-  const relative = formatRelativeTime(isoDate);
+/** Pass `nowMs` when a parent tick drives re-renders: memoized renders cannot see `Date.now()`. */
+export function formatRelativeTimeLabel(isoDate: string, nowMs: number = Date.now()) {
+  const relative = formatRelativeTime(isoDate, nowMs);
   return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
 }
 
@@ -111,8 +115,11 @@ export function formatElapsedClockLabel(isoDate: string, nowMs: number = Date.no
 /**
  * Relative time until an ISO instant (e.g. expiry). Mirrors {@link formatRelativeTime} but for future times.
  */
-export function formatRelativeTimeUntil(isoDate: string): { value: string; suffix: string | null } {
-  const diffMs = new Date(isoDate).getTime() - Date.now();
+export function formatRelativeTimeUntil(
+  isoDate: string,
+  nowMs: number = Date.now(),
+): { value: string; suffix: string | null } {
+  const diffMs = new Date(isoDate).getTime() - nowMs;
   if (diffMs <= 0) return { value: "Expired", suffix: null };
   const seconds = Math.floor(diffMs / 1000);
   if (seconds < 5) return { value: "Soon", suffix: null };
@@ -125,8 +132,8 @@ export function formatRelativeTimeUntil(isoDate: string): { value: string; suffi
   return { value: `${days}d`, suffix: "left" };
 }
 
-export function formatRelativeTimeUntilLabel(isoDate: string): string {
-  const relative = formatRelativeTimeUntil(isoDate);
+export function formatRelativeTimeUntilLabel(isoDate: string, nowMs: number = Date.now()): string {
+  const relative = formatRelativeTimeUntil(isoDate, nowMs);
   return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
 }
 
@@ -171,4 +178,30 @@ export function formatExpiresInLabel(isoDate: string, nowMs: number = Date.now()
   if (minutes > 0) tail.push(`${minutes}m`);
   if (seconds > 0) tail.push(`${seconds}s`);
   return tail.length > 0 ? `Expires in ${days}d ${tail.join(" ")}` : `Expires in ${days}d`;
+}
+
+/** The slowest a label-granular tick runs; values derived from the time itself (pace) stay current. */
+const RELATIVE_LABEL_MAX_REFRESH_MS = 60_000;
+
+/**
+ * How long until any minute-granular relative label for these instants
+ * ("3m ago", "resets in 4h", "45s left") can read differently. A future
+ * instant under a minute away counts down in seconds; anything else changes at
+ * most once a minute, when its distance from now crosses a whole minute.
+ */
+export function relativeLabelRefreshDelayMs(
+  instantsMs: Iterable<number | undefined>,
+  nowMs: number,
+): number {
+  let delay = RELATIVE_LABEL_MAX_REFRESH_MS;
+  for (const instant of instantsMs) {
+    if (instant === undefined || !Number.isFinite(instant)) continue;
+    const distance = Math.abs(instant - nowMs);
+    if (instant > nowMs && distance < 60_000) return 1_000;
+    const intoMinute = distance % 60_000;
+    const untilChange = instant > nowMs ? intoMinute : 60_000 - intoMinute;
+    // A few ms past the boundary, so the re-render lands on the new label.
+    delay = Math.min(delay, Math.max(1_000, untilChange + 25));
+  }
+  return delay;
 }
