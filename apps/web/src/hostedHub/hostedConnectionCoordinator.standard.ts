@@ -14,6 +14,7 @@ type Hosted = typeof import("./hostedConnectionCoordinator");
 
 export const MAX_HOSTED_WEB_CONNECTIONS: Hosted["MAX_HOSTED_WEB_CONNECTIONS"] = 1;
 export const HOSTED_WEB_WAKE_STAGGER_MS: Hosted["HOSTED_WEB_WAKE_STAGGER_MS"] = 750;
+export const HOME_DISCOVERY_CACHE_WAIT_MS: Hosted["HOME_DISCOVERY_CACHE_WAIT_MS"] = 1_500;
 
 const SIGNED_OUT_WORKSPACE: ReturnType<Hosted["readHostedWorkspaceState"]> = {
   status: "signed-out",

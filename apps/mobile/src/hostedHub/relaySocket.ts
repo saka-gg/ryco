@@ -1,6 +1,6 @@
 import type { HostedEarlyRelaySocket } from "@ryco/client-runtime/authorization";
 import type { DpopSignerService } from "@ryco/client-runtime/platform";
-import { RELAY_AUTHENTICATION_DEADLINE_MS } from "@ryco/contracts";
+import { RELAY_AUTHENTICATION_DEADLINE_MS } from "@ryco/contracts/relay";
 import {
   HostedRelayEngine,
   type HostedRelaySocketCallbacks,
