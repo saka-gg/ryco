@@ -1,14 +1,13 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  type EditorId,
-  type ServerConfig,
-  type ServerConfigStreamEvent,
-  type ServerConfigUpdatedPayload,
-  type ServerLifecycleWelcomePayload,
-  type ServerProvider,
-  type ServerProviderUpdatedPayload,
-  type ServerSettings,
+import type {
+  EditorId,
+  ServerConfig,
+  ServerConfigStreamEvent,
+  ServerConfigUpdatedPayload,
+  ServerLifecycleWelcomePayload,
+  ServerProvider,
+  ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
+import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import { Atom } from "effect/reactivity";
 

@@ -1,4 +1,4 @@
-import { WsDeviceRpcGroup, WsHostedRpcGroup, WsRpcGroup } from "@ryco/contracts";
+import { WsDeviceRpcGroup, WsHostedRpcGroup, WsRpcGroup } from "@ryco/contracts/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";

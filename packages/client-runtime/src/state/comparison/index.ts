@@ -3,7 +3,7 @@ import {
   GitComparisonSelection,
   type GitComparisonSource,
   type GitReadComparisonResult,
-} from "@ryco/contracts";
+} from "@ryco/contracts/git";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { KVService } from "../../platform/index.ts";

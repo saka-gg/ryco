@@ -1,23 +1,27 @@
+import type {
+  ScopedProjectRef,
+  ScopedThreadRef,
+  ServerProvider,
+  ComposerSourceControlContext,
+  WorkItemState,
+} from "@ryco/contracts";
+import { type EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts/base-schemas";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
-  defaultInstanceIdForDriver,
-  type EnvironmentId,
-  ModelSelection,
-  ProjectId,
-  ProviderInstanceId,
-  ProviderInteractionMode,
-  ProviderDriverKind,
   ProviderOptionSelection,
+} from "@ryco/contracts/model";
+import {
+  ModelSelection,
+  ProviderInteractionMode,
   RuntimeMode,
   AgentTokenMode,
-  type ServerProvider,
-  type ScopedProjectRef,
-  type ScopedThreadRef,
-  ThreadId,
-  type ComposerSourceControlContext,
-  type WorkItemState,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import {
+  defaultInstanceIdForDriver,
+  ProviderInstanceId,
+  ProviderDriverKind,
+} from "@ryco/contracts/provider-instance";
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
 import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";

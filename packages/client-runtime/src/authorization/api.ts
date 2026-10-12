@@ -1,4 +1,5 @@
-import { EnvironmentId, RelayNodeId } from "@ryco/contracts";
+import { EnvironmentId } from "@ryco/contracts/base-schemas";
+import { RelayNodeId } from "@ryco/contracts/relay";
 import {
   NATIVE_HANDOFF_CODE_LIFETIME_MS,
   NATIVE_HANDOFF_APPROVE_PATH_SUFFIX,

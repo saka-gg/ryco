@@ -1,6 +1,6 @@
 import type { StaticScreenProps } from "@react-navigation/native";
 
-import { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 
 import { ProjectDetailScreen } from "./ProjectDetailScreen";
 

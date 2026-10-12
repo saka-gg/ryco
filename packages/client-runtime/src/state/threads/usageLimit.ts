@@ -1,4 +1,5 @@
-import { PROVIDER_DISPLAY_NAMES, type ThreadUsageLimit } from "@ryco/contracts";
+import type { ThreadUsageLimit } from "@ryco/contracts";
+import { PROVIDER_DISPLAY_NAMES } from "@ryco/contracts/model";
 import {
   applicableUsageLimit,
   effectiveUsageLimitAutoResume,

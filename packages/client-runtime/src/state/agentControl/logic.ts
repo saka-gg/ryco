@@ -17,15 +17,14 @@
  *     all harmless — a stale document simply loses the upsert.
  *   - Terminal proposals stay as bounded history; the oldest are pruned.
  */
+import type { ThreadId, ThreadLineage } from "@ryco/contracts";
 import {
   AGENT_CONTROL_QUEUE_RECENT_LIMIT_DEFAULT,
   AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
   type AgentControlProposal,
   type AgentControlProposalStatus,
   type AgentControlProposalStreamEvent,
-  type ThreadId,
-  type ThreadLineage,
-} from "@ryco/contracts";
+} from "@ryco/contracts/agent-control";
 
 import { isDelegatedThreadLineage } from "../threads/threadLineage.ts";
 

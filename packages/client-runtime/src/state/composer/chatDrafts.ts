@@ -1,12 +1,14 @@
+import type {
+  EnvironmentId,
+  ProjectId,
+  ScopedProjectRef,
+  ServerChatsCapability,
+  ServerChatsUnavailableReason,
+} from "@ryco/contracts";
 import {
   CHAT_PROJECT_TITLE_MAX_CHARS,
-  type EnvironmentId,
   type OrchestrationDispatchCommandErrorReason,
-  type ProjectId,
-  type ScopedProjectRef,
-  type ServerChatsCapability,
-  type ServerChatsUnavailableReason,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
 
 /**

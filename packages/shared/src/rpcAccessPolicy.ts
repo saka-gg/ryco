@@ -1,11 +1,11 @@
+import type { RelayEffectiveRole } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
+import { DEVICE_WS_METHODS } from "@ryco/contracts/device";
 import {
-  AGENT_CONTROL_WS_METHODS,
   CONTEXT_HANDOFF_WS_METHODS,
-  DEVICE_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
-  WS_METHODS,
-  type RelayEffectiveRole,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 
 export type RpcMethod =
   | (typeof WS_METHODS)[keyof typeof WS_METHODS]

@@ -31,7 +31,7 @@ import {
   type DeviceThreadInput,
   type DeviceTypeTextInput,
   type ThreadDeviceState,
-} from "@ryco/contracts";
+} from "@ryco/contracts/device";
 
 import type { DeviceRpcProtocolClient } from "./protocol.ts";
 import type * as Effect from "effect/Effect";

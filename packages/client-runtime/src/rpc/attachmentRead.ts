@@ -3,7 +3,7 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ChatAttachmentReadChunkInput,
   type ChatAttachmentReadChunkResult,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 
 /** Sequential, bounded reads over the existing authorized transport; no URLs or platform imports. */
 export async function readAttachmentBytes(input: {

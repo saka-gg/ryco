@@ -64,14 +64,9 @@ import {
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
 import { isChatProject } from "@ryco/shared/projectKind";
-import {
-  DEFAULT_AGENT_TOKEN_MODE,
-  EnvironmentId,
-  MessageId,
-  ThreadId,
-  type ModelSelection,
-  type ThreadForkResult,
-} from "@ryco/contracts";
+import type { ThreadForkResult } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
+import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   deriveChatFileUploadSendBlock,

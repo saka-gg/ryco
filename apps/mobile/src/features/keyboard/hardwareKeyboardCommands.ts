@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 import { useEffect } from "react";
 
 export type HardwareKeyboardCommand =

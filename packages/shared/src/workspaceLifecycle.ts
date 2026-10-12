@@ -4,7 +4,7 @@ import type {
   WorkspaceLifecycleAction,
   WorkspaceLifecycleEffects,
 } from "@ryco/contracts";
-import { DEFAULT_LIFECYCLE_SUGGESTION_POLICY } from "@ryco/contracts";
+import { DEFAULT_LIFECYCLE_SUGGESTION_POLICY } from "@ryco/contracts/workspace-lifecycle";
 
 import { threadHasConversation } from "./threadFork.ts";
 

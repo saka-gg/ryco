@@ -1,9 +1,5 @@
-import {
-  CommandId,
-  MessageId,
-  type ClaudeResumeGuard,
-  type OrchestrationThread,
-} from "@ryco/contracts";
+import type { ClaudeResumeGuard, OrchestrationThread } from "@ryco/contracts";
+import { CommandId, MessageId } from "@ryco/contracts/base-schemas";
 import {
   assessClaudeCacheResume,
   claudeCompactUnavailableReason,

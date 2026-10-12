@@ -8,13 +8,15 @@
  *
  * Pure module.
  */
+import type { ThreadId } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
+} from "@ryco/contracts/orchestration";
+import {
   THREAD_FORKED_ACTIVITY_KIND,
   ThreadForkedActivityPayload,
-  type ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/thread-fork";
 import * as Schema from "effect/Schema";
 
 // ── Inherited item identity ───────────────────────────────────────────

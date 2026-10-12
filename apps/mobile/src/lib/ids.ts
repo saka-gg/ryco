@@ -1,4 +1,5 @@
-import { CommandId, MessageId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
+import { CommandId, MessageId, ProjectId, ThreadId } from "@ryco/contracts/base-schemas";
+import { WorktreeId } from "@ryco/contracts/worktree";
 
 import { uuidv4 } from "./uuid";
 

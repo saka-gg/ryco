@@ -16,6 +16,12 @@
  * recurring end not before the start) plus the client-only draft checks
  * (title, prompt, model, the per-project active limit), worded for inline use.
  */
+import type {
+  ModelSelection,
+  ProviderDriverKind,
+  ServerProviderAvailability,
+  ServerProviderState,
+} from "@ryco/contracts";
 import {
   AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
@@ -24,16 +30,14 @@ import {
   AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
   AGENT_CONTROL_TITLE_MAX_CHARS,
-  PROVIDER_DISPLAY_NAMES,
   type AgentControlAutomationSchedule,
+} from "@ryco/contracts/agent-control";
+import {
+  PROVIDER_DISPLAY_NAMES,
   type ModelCapabilities,
-  type ModelSelection,
-  type ProviderDriverKind,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
-  type ServerProviderAvailability,
-  type ServerProviderState,
-} from "@ryco/contracts";
+} from "@ryco/contracts/model";
 
 import { getModelDisplayName } from "./model.ts";
 

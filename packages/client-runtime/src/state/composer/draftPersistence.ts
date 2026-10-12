@@ -1,20 +1,21 @@
+import type { ScopedProjectRef, ScopedThreadRef } from "@ryco/contracts";
+import { type EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts/base-schemas";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
-  defaultInstanceIdForDriver,
-  type EnvironmentId,
-  ModelSelection,
-  ProjectId,
-  ProviderInstanceId,
-  ProviderInteractionMode,
-  ProviderDriverKind,
   ProviderOptionSelection,
+} from "@ryco/contracts/model";
+import {
+  ModelSelection,
+  ProviderInteractionMode,
   RuntimeMode,
   AgentTokenMode,
-  type ScopedProjectRef,
-  type ScopedThreadRef,
-  ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import {
+  defaultInstanceIdForDriver,
+  ProviderInstanceId,
+  ProviderDriverKind,
+} from "@ryco/contracts/provider-instance";
 import {
   parseScopedProjectKey,
   parseScopedThreadKey,

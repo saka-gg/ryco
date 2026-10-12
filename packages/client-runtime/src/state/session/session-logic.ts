@@ -1,4 +1,7 @@
-import { ApprovalResponseIdentity, ApprovalResponseState } from "@ryco/contracts";
+import {
+  ApprovalResponseIdentity,
+  ApprovalResponseState,
+} from "@ryco/contracts/approval-responses";
 import * as Schema from "effect/Schema";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
 import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
@@ -7,19 +10,23 @@ import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 import { isBackgroundTaskActivity } from "./subagentRuntime.ts";
 import {
   ApprovalRequestId,
-  CONTEXT_HANDOFF_ACTIVITY_KIND,
-  isToolLifecycleItemType,
   type MessageId,
+  type ThreadId,
+  type TurnId,
+} from "@ryco/contracts/base-schemas";
+import {
+  CONTEXT_HANDOFF_ACTIVITY_KIND,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
-  ProviderDriverKind,
-  THREAD_FORKED_ACTIVITY_KIND,
+} from "@ryco/contracts/orchestration";
+import { ProviderDriverKind } from "@ryco/contracts/provider-instance";
+import {
+  isToolLifecycleItemType,
   type ToolLifecycleItemType,
   type UserInputQuestion,
-  type ThreadId,
-  type TurnId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/provider-runtime";
+import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
 
 import type {
   ChatMessage,

@@ -8,12 +8,12 @@
  * @module claudeCacheReview
  */
 import * as Schema from "effect/Schema";
-import {
-  ClaudeCacheObservation,
-  type ModelSelection,
-  type OrchestrationThread,
-  type OrchestrationThreadActivity,
+import type {
+  ModelSelection,
+  OrchestrationThread,
+  OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { ClaudeCacheObservation } from "@ryco/contracts/claude-cache";
 
 export interface ClaudeCacheReview {
   readonly observation: ClaudeCacheObservation;
