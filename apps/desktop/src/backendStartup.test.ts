@@ -8,6 +8,8 @@ import {
 import {
   BackendFatalStartupError,
   BackendPortMismatchError,
+  BACKEND_POST_READY_TAIL_CHARS,
+  BackendOutputCapture,
   BackendOutputTail,
   BackendReadinessTracker,
   createBackendFailurePolicy,
@@ -135,5 +137,41 @@ describe("BackendOutputTail", () => {
     tail.push("line 1\n");
     tail.push(Buffer.from("\u001b[31mError: schema 77 is newer\u001b[0m\r\nline 3\n"));
     expect(tail.lines(2)).toEqual(["Error: schema 77 is newer", "line 3"]);
+  });
+});
+
+describe("BackendOutputCapture", () => {
+  it("copies output until the backend serves, then keeps only a crash tail", () => {
+    const written: string[] = [];
+    const capture = new BackendOutputCapture((chunk) => written.push(chunk.toString()));
+    capture.push(Buffer.from("migrating\n"), false);
+    capture.push(Buffer.from("request log 1\n"), true);
+    capture.push(Buffer.from("request log 2\n"), true);
+    expect(written).toEqual([
+      "migrating\n",
+      "---- backend serving; its output continues in server.log ----\n",
+    ]);
+
+    capture.recordUnexpectedExit("code=134 signal=null");
+    expect(written.slice(2)).toEqual([
+      "---- last backend output before exit code=134 signal=null ----\n",
+      "request log 1\nrequest log 2\n",
+    ]);
+  });
+
+  it("bounds the crash tail and writes nothing for a backend that printed nothing", () => {
+    const written: string[] = [];
+    const quiet = new BackendOutputCapture((chunk) => written.push(chunk.toString()));
+    quiet.recordUnexpectedExit("code=1");
+    expect(written).toEqual([]);
+
+    const noisy = new BackendOutputCapture((chunk) => written.push(chunk.toString()));
+    for (let index = 0; index < 1_000; index += 1) {
+      noisy.push(Buffer.from(`${"x".repeat(60)} ${index}\n`), true);
+    }
+    noisy.recordUnexpectedExit("code=1");
+    const tail = written.at(-1)!;
+    expect(tail.length).toBeLessThanOrEqual(BACKEND_POST_READY_TAIL_CHARS + 1);
+    expect(tail.endsWith(" 999\n")).toBe(true);
   });
 });

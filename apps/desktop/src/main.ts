@@ -93,6 +93,7 @@ import {
   terminateDesktopBackendChild,
 } from "./backendLauncher.ts";
 import {
+  BackendOutputCapture,
   BackendOutputTail,
   BackendPortMismatchError,
   BackendReadinessTracker,
@@ -1849,14 +1850,15 @@ function captureBackendOutput(
   child: ChildProcess.ChildProcess,
   readiness: BackendReadinessTracker,
   outputTail: BackendOutputTail,
-): void {
+): BackendOutputCapture {
+  const capture = new BackendOutputCapture((chunk) => void backendLogSink?.write(chunk));
   const attachStream = (
     stream: NodeJS.ReadableStream | null | undefined,
     streamName: "stdout" | "stderr",
   ): void => {
     stream?.on("data", (chunk: unknown) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-      void backendLogSink?.write(buffer);
+      capture.push(buffer, readiness.ready);
       // Until the backend serves, its output may explain a failed start.
       if (!readiness.ready) {
         readiness.pushOutput(buffer);
@@ -1870,6 +1872,7 @@ function captureBackendOutput(
 
   attachStream(child.stdout, "stdout");
   attachStream(child.stderr, "stderr");
+  return capture;
 }
 
 initializePackagedLogging();
@@ -3222,7 +3225,7 @@ function startBackend(): void {
     "START",
     `pid=${child.pid ?? "unknown"} port=${backendPort} cwd=${resolveBackendCwd()}`,
   );
-  captureBackendOutput(child, readiness, outputTail);
+  const outputCapture = captureBackendOutput(child, readiness, outputTail);
 
   if (early !== null) {
     markDesktopStartupPhase("desktop.backend.spawned", `pid=${child.pid ?? "unknown"} early=1`);
@@ -3243,6 +3246,7 @@ function startBackend(): void {
       backendProcess = null;
     }
     if (backendControlToken === childControlToken) backendControlToken = "";
+    if (!isQuitting && !wasExpected) outputCapture.recordUnexpectedExit(details);
     closeBackendSession(`pid=${child.pid ?? "unknown"} ${details}`);
     if (isQuitting || wasExpected) return;
     const reachedReady = backendReadyChild === child;
