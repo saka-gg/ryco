@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { CodexResetCreditInput as ResetInputSchema } from "@ryco/contracts";
+import { CodexResetCreditInput as ResetInputSchema } from "@ryco/contracts/codex-reset-credits";
 import type { KVService } from "../platform/index.ts";
 import type {
   CodexResetCreditAccount,

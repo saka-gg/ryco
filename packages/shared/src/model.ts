@@ -1,14 +1,13 @@
+import type { ModelSelection } from "@ryco/contracts";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   type ModelCapabilities,
-  type ModelSelection,
-  ProviderDriverKind,
-  ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
-} from "@ryco/contracts";
+} from "@ryco/contracts/model";
+import { ProviderDriverKind, ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 

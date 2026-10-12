@@ -52,6 +52,9 @@ function getAppDriver(): MobileEnvironmentDriver {
     catalog: getAppCatalog(),
     remoteApi: getAppRemoteApi(),
     sessionHints: createSavedSessionHints(mobileKV),
+    // The driver starts at the direct stage; the hosted primary waits for the
+    // cached roster and projections, as it did before the stages were split.
+    admitPrimaryConnection: () => mobileRuntimeStartupBarrier.isHydrated(),
   }));
 }
 
@@ -102,16 +105,24 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
     initialized = true;
     initializeWsConnectionState();
     // Wave 2: hydrate the snapshot cache (cached node roster + per-environment
-    // projections) before either the direct supervisor or hosted lifecycle can
-    // attempt a connection. Catalog hydration must land first or the orphan
-    // check would misread direct environments.
+    // projections) before the hosted lifecycle can attempt a connection.
+    // Catalog hydration must land first or the orphan check would misread
+    // direct environments; it is also all the direct supervisor needs, so its
+    // network pre-flight overlaps the SQLite open and decode (live data wins
+    // the race in the threads store; see `startupBarrier`).
     void mobileRuntimeStartupBarrier.beginHydration(
-      async () => {
-        const { mobileKV } = await import("../platform/kv");
-        const { mobileAppLifecycle } = await import("../platform/appLifecycle");
-        const { initializeMobileSnapshotPersistence } =
-          await import("../persistence/environmentSnapshotPersistence");
+      async ({ markDirectReady }) => {
+        const modules = Promise.all([
+          import("../platform/kv"),
+          import("../platform/appLifecycle"),
+          import("../persistence/environmentSnapshotPersistence"),
+        ]);
+        // Awaited below; a catalog failure first must not leave it unhandled.
+        modules.catch(() => undefined);
         await registry.catalog.waitForHydration();
+        markDirectReady();
+        const [{ mobileKV }, { mobileAppLifecycle }, { initializeMobileSnapshotPersistence }] =
+          await modules;
         await initializeMobileSnapshotPersistence({
           kv: mobileKV,
           hasDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
@@ -173,12 +184,18 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       }
       previousHostedState = currentHostedState;
     });
-    mobileRuntimeStartupBarrier.runAfterHydration(
+    mobileRuntimeStartupBarrier.runAfterDirectReady(
       () => {
         stopEnvironmentDriver = registry.driver.start();
       },
       (error: unknown) => {
         console.warn("[connection] mobile runtime startup failed", error);
+      },
+    );
+    mobileRuntimeStartupBarrier.runAfterHydration(
+      () => registry.driver.releaseDeferredPrimaryConnection(),
+      (error: unknown) => {
+        console.warn("[connection] hosted primary startup failed", error);
       },
     );
   }

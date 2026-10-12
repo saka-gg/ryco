@@ -1,4 +1,4 @@
-import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
 import type { ExternalIdentityConfigResponse } from "@ryco/contracts/hosted-identity";
 import {
   deriveHostedConnectionStatusIndicator,

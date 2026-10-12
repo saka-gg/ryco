@@ -1,4 +1,4 @@
-import { MessageId, TurnId } from "@ryco/contracts";
+import { MessageId, TurnId } from "@ryco/contracts/base-schemas";
 import {
   THREAD_READ_CACHE_MESSAGE_LIMIT,
   THREAD_READ_CACHE_TEXT_LIMIT,

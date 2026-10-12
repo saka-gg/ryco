@@ -89,10 +89,15 @@ installHostedPrimaryConnectionFactory(createHostedPrimaryConnection);
  * Hosted runtime wiring.
  *
  * Fails closed at every step: with no hosted config, or with no hardware device
- * key, the runtime is simply never configured and hosted surfaces report
- * unavailable. Configuring without a DPoP signer would throw inside
- * `HostedHubApi`'s constructor at bootstrap, so the signer is resolved before
- * `configureHostedRuntime` is called, never after.
+ * key, hosted surfaces report unavailable and no proof is ever minted.
+ * Configuring without a DPoP signer would throw inside `HostedHubApi`'s
+ * constructor at bootstrap, so a signer is always supplied to
+ * `configureHostedRuntime`. When a stored session must be restored, it is the
+ * resolved hardware signer, loaded before configuration. With no stored session
+ * nothing signs at launch, so the hardware key load (a Secure Enclave/keystore
+ * round trip plus two native modules) is deferred to first hosted use: the
+ * runtime is configured with {@link deferredDpopSigner}, and the first hosted
+ * surface or proof decides availability through {@link ensureMobileHostedDeviceKey}.
  */
 
 let configured = false;
@@ -139,12 +144,64 @@ function subscribeForeground(listener: () => void): () => void {
 }
 
 /**
+ * Resolve the hardware signer and publish what it proves about availability.
+ *
+ * Only a configured runtime publishes: a profile change that invalidated the
+ * runtime while the key was loading owns availability from then on. A failed
+ * load is not memoized (`createMobileDpopSigner`), so the next hosted surface
+ * or proof retries it, for example after the user unlocks the device.
+ */
+async function resolveHostedDpopSigner(): Promise<DpopSignerService> {
+  try {
+    const signer = await createMobileDpopSigner();
+    if (configured) setMobileHostedModeAvailable(true);
+    return signer;
+  } catch (cause) {
+    if (configured) setMobileHostedModeAvailable(false, "device-security");
+    throw cause;
+  }
+}
+
+/**
+ * The signer a runtime configured without a stored session holds.
+ *
+ * It loads the hardware key on its first proof, which is a sign-in ceremony or
+ * another explicit hosted action, and never falls back to a software key: a
+ * missing key rejects the proof and the request fails closed.
+ */
+const deferredDpopSigner: DpopSignerService = {
+  sign: async (input) => (await resolveHostedDpopSigner()).sign(input),
+};
+
+/**
+ * First hosted use: settle the session setup, then make sure the hardware key
+ * is loaded and availability reflects it. Hosted surfaces call this on mount, so
+ * a device without a usable key stops offering hosted affordances before the
+ * user starts a ceremony. Resolves false when hosted mode is unavailable; never
+ * rejects.
+ */
+export async function ensureMobileHostedDeviceKey(): Promise<boolean> {
+  await ensureMobileHostedSession();
+  if (!configured) return false;
+  try {
+    await resolveHostedDpopSigner();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Idempotent. Returns false when hosted mode cannot be configured, which is the
  * normal state for a direct-only build.
  */
 export async function configureMobileHostedRuntime(
-  /** A signer creation the caller already started; joined rather than repeated. */
-  signerAttempt?: Promise<DpopSignerService>,
+  /**
+   * A signer creation the caller already started; joined rather than repeated.
+   * `"deferred"` configures with {@link deferredDpopSigner} instead, leaving the
+   * hardware key unloaded until first hosted use.
+   */
+  signerAttempt?: Promise<DpopSignerService> | "deferred",
 ): Promise<boolean> {
   if (configured) return isMobileHostedModeAvailable();
   if (!isMobileHostedModeConfigured()) return false;
@@ -152,16 +209,20 @@ export async function configureMobileHostedRuntime(
   const httpClient = getMobileHostedHttpClient();
   if (!endpoint || !httpClient) return false;
 
-  let dpopSigner;
-  try {
-    // Hardware-backed key or no hosted session at all. There is deliberately no
-    // software fallback: it would reduce DPoP to bare bearer assurance.
-    dpopSigner = await (signerAttempt ?? createMobileDpopSigner());
-  } catch {
-    setMobileHostedModeAvailable(false, "device-security");
-    return false;
+  let dpopSigner: DpopSignerService;
+  if (signerAttempt === "deferred") {
+    dpopSigner = deferredDpopSigner;
+  } else {
+    try {
+      // Hardware-backed key or no hosted session at all. There is deliberately no
+      // software fallback: it would reduce DPoP to bare bearer assurance.
+      dpopSigner = await (signerAttempt ?? createMobileDpopSigner());
+    } catch {
+      setMobileHostedModeAvailable(false, "device-security");
+      return false;
+    }
+    if (configured) return isMobileHostedModeAvailable();
   }
-  if (configured) return isMobileHostedModeAvailable();
 
   configureHostedRuntime({
     endpoint,
@@ -360,31 +421,39 @@ export function ensureMobileHostedSession(): Promise<void> {
     // becomes authoritative before any secret is read or request is sent.
     invalidateMobileHostedRuntimeConfig();
     if (!isMobileHostedModeConfigured()) return false;
-    // The three local steps are independent: the token is only needed before
-    // bootstrap and the trust store before configuration, and the hardware key
-    // load behind the signer needs neither. Overlapping them costs the slowest
-    // keychain/Secure Enclave round trip instead of their sum. The signer
-    // attempt is joined by `configureMobileHostedRuntime`, which still maps
-    // its failure to `device-security`.
-    const signerAttempt = configured ? undefined : createMobileDpopSigner();
-    signerAttempt?.catch(() => undefined);
-    const [token, trust] = await Promise.allSettled([
-      hydrateMobileHostedSessionToken(),
-      mobileE2eeTrustStore.hydrate(),
-    ]);
+    // The token and trust reads are independent keychain round trips, so they
+    // overlap. The hardware key is needed only to restore a stored session:
+    // its load starts the moment the token read finds one, still overlapping
+    // the trust read, and is joined by `configureMobileHostedRuntime`, which
+    // maps its failure to `device-security`. With no stored session nothing
+    // signs at launch, so the key is left to first hosted use.
+    const hasStoredSession = () => (mobileSessionCredentials.readBearerToken?.() ?? null) !== null;
+    const tokenRead = hydrateMobileHostedSessionToken();
+    // Boxed so the attempt's own rejection reaches the configuration step
+    // instead of rejecting this read.
+    const signerLoad = tokenRead.then(
+      () => {
+        if (configured || !hasStoredSession()) return undefined;
+        const attempt = createMobileDpopSigner();
+        attempt.catch(() => undefined);
+        return { attempt };
+      },
+      () => undefined,
+    );
+    const [token, trust] = await Promise.allSettled([tokenRead, mobileE2eeTrustStore.hydrate()]);
     if (token.status === "rejected") {
       setMobileHostedModeAvailable(false, "credential-storage");
       return false;
     }
     if (trust.status === "rejected") throw trust.reason;
-    if (!(await configureMobileHostedRuntime(signerAttempt))) return false;
     // No stored session means there is nothing to restore: the access check
     // would only fail locally on the missing token, clear material that does
     // not exist, and spend a proof plus a Hub round trip (up to the request
     // deadline) on the bootstrap-availability probe, whose answer no mobile
     // surface reads. The store already reads `signed-out`; a sign-in ceremony
     // adopts its credential and checks access itself.
-    if ((mobileSessionCredentials.readBearerToken?.() ?? null) === null) return true;
+    if (!hasStoredSession()) return await configureMobileHostedRuntime("deferred");
+    if (!(await configureMobileHostedRuntime((await signerLoad)?.attempt))) return false;
     await hostedHubController.bootstrap();
     return true;
   })().then(

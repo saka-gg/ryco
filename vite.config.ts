@@ -11,6 +11,18 @@ const EFFECT_ROOT_IMPORT = {
     "Import the Effect module you use (e.g. effect/Schema); the root barrel pulls every module into the startup graph.",
 };
 
+/**
+ * The same holds for the `@ryco/contracts` root: it re-exports every schema
+ * module. Values come from the module's subpath (e.g. @ryco/contracts/orchestration);
+ * types may stay on the root, since they are erased.
+ */
+const CONTRACTS_ROOT_IMPORT = {
+  name: "@ryco/contracts",
+  message:
+    "Import values from the contracts module's subpath (e.g. @ryco/contracts/orchestration); the root barrel pulls every schema module into the mobile startup graph.",
+  allowTypeImports: true,
+};
+
 const CLIENT_RUNTIME_RESTRICTED_PATTERNS = [
   {
     group: ["react", "react/*", "react-dom", "react-dom/*"],
@@ -109,7 +121,10 @@ const rootConfig = {
         rules: {
           "no-restricted-imports": [
             "error",
-            { paths: [EFFECT_ROOT_IMPORT], patterns: CLIENT_RUNTIME_RESTRICTED_PATTERNS },
+            {
+              paths: [EFFECT_ROOT_IMPORT, CONTRACTS_ROOT_IMPORT],
+              patterns: CLIENT_RUNTIME_RESTRICTED_PATTERNS,
+            },
           ],
         },
       },
@@ -117,7 +132,10 @@ const rootConfig = {
         // Shared by every client, so their modules sit in the mobile startup graph.
         files: ["packages/{contracts,shared}/src/**/*.{ts,tsx}"],
         rules: {
-          "no-restricted-imports": ["error", { paths: [EFFECT_ROOT_IMPORT] }],
+          "no-restricted-imports": [
+            "error",
+            { paths: [EFFECT_ROOT_IMPORT, CONTRACTS_ROOT_IMPORT] },
+          ],
         },
       },
       {
@@ -135,6 +153,27 @@ const rootConfig = {
       },
       {
         files: ["apps/mobile/**/*.{ts,tsx}"],
+        rules: {
+          "no-restricted-imports": [
+            "error",
+            {
+              paths: [
+                {
+                  name: "@tabler/icons-react-native",
+                  message:
+                    "The package root evaluates every Tabler icon at startup. Import from apps/mobile/src/components/icons (one deep module per icon).",
+                  allowTypeImports: true,
+                },
+                EFFECT_ROOT_IMPORT,
+                CONTRACTS_ROOT_IMPORT,
+              ],
+            },
+          ],
+        },
+      },
+      {
+        // Tests never reach the app's startup graph.
+        files: ["apps/mobile/**/*.test.{ts,tsx}"],
         rules: {
           "no-restricted-imports": [
             "error",

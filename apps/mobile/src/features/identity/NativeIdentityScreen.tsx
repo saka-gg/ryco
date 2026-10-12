@@ -35,6 +35,7 @@ import {
 import { invalidateMobileHostedRuntime } from "../../hostedHub/runtime";
 import { getMobileHostedHttpClient } from "../../hostedHub/runtimeConfig";
 import {
+  ensureMobileHostedDeviceKey,
   ensureMobileHostedSession,
   hostedHubController,
   hostedHubStore,
@@ -170,7 +171,9 @@ async function waitForSessionSetup(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      ensureMobileHostedSession(),
+      // Also loads the hardware key the setup defers without a stored session,
+      // so a device without one reports `device-security` before any ceremony.
+      ensureMobileHostedDeviceKey(),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, SESSION_SETUP_WAIT_MS);
       }),

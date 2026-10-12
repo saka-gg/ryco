@@ -4,7 +4,8 @@ import {
   type SidebarUndoNotice,
 } from "@ryco/client-runtime/state/threads";
 import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization";
-import { ORCHESTRATION_WS_METHODS, type ScopedThreadRef } from "@ryco/contracts";
+import type { ScopedThreadRef } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
 import { Alert } from "react-native";
 import { readEnvironmentApi } from "../connection/environmentApi";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";

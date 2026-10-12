@@ -12,15 +12,13 @@
  *
  * @module providerInstances
  */
+import type { ServerProvider, ServerProviderModel, ServerProviderState } from "@ryco/contracts";
+import { PROVIDER_DISPLAY_NAMES } from "@ryco/contracts/model";
 import {
   defaultInstanceIdForDriver,
-  PROVIDER_DISPLAY_NAMES,
   type ProviderDriverKind,
   type ProviderInstanceId,
-  type ServerProvider,
-  type ServerProviderModel,
-  type ServerProviderState,
-} from "@ryco/contracts";
+} from "@ryco/contracts/provider-instance";
 
 import { formatProviderDriverKindLabel } from "./providerModels.ts";
 

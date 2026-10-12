@@ -12,7 +12,7 @@ import {
   type VisibleWorkspaceFileTreeRow,
   type WorkspaceFileSearchRow,
 } from "@ryco/client-runtime/state/files";
-import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";

@@ -45,6 +45,14 @@ config.resolver = {
         return context.resolveRequest(context, sourcePath, platform);
       }
     }
+    // Workspace packages publish source through `import`-only export
+    // conditions. With inline requires (below), Metro records every static
+    // import as a `require` dependency and would match the `require`
+    // condition, which those packages do not declare. Resolve them as the ESM
+    // imports they are written as; the bundle's module set is unchanged.
+    if (moduleName.startsWith("@ryco/") && context.isESMImport !== true) {
+      return context.resolveRequest({ ...context, isESMImport: true }, moduleName, platform);
+    }
     return context.resolveRequest(context, moduleName, platform);
   },
   blockList: [
@@ -67,6 +75,31 @@ config.resolver = {
     "@shikijs/types": resolveShikiDependencyRoot("@shikijs/types"),
     "@shikijs/vscode-textmate": resolveShikiDependencyRoot("@shikijs/vscode-textmate"),
   },
+};
+
+// Inline requires: a module's imports are evaluated where they are first used
+// instead of before its body, so launch evaluates only what the first surface
+// touches (about 1,250 of 2,330 modules by the time the splash hides, measured
+// on a release build). Modules whose import registers something are imported
+// bare from index.ts, which is never inlined, so registration order is
+// unchanged. React and React Native stay eager: they are needed immediately.
+const NON_INLINED_REQUIRES = [
+  "React",
+  "react",
+  "react/jsx-runtime",
+  "react/jsx-dev-runtime",
+  "react-compiler-runtime",
+  "react-native",
+];
+config.transformer = {
+  ...config.transformer,
+  getTransformOptions: async () => ({
+    transform: {
+      experimentalImportSupport: true,
+      inlineRequires: true,
+      nonInlinedRequires: NON_INLINED_REQUIRES,
+    },
+  }),
 };
 
 module.exports = withUniwindConfig(config, {

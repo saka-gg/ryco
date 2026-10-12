@@ -1,15 +1,13 @@
+import type { ContextHandoffId, MessageId, TurnId } from "@ryco/contracts";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type ContextHandoffEndpointSnapshot,
-  type ContextHandoffId,
   type ContextHandoffInspectionSummaryMetadata,
   type ContextHandoffReason,
-  type MessageId,
   type ModelSelection,
   type OrchestrationThreadActivity,
-  type TurnId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 import { modelSelectionRequiresContextHandoff } from "@ryco/shared/model";
 import { forkContextHandoffPending } from "@ryco/shared/threadFork";
 import * as Schema from "effect/Schema";

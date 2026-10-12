@@ -1,14 +1,12 @@
 import type { Project, SidebarWorktreeSummary } from "@ryco/client-runtime/state/threads";
+import type { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
+import { DEFAULT_MODEL } from "@ryco/contracts/model";
 import {
-  DEFAULT_MODEL,
   DEFAULT_AGENT_TOKEN_MODE,
-  ProviderInstanceId,
   type AgentTokenMode,
-  type EnvironmentId,
   type ModelSelection,
-  type ProjectId,
-  type WorktreeId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
 import type { ProjectEnvironment } from "../projects/projectsModel";
 

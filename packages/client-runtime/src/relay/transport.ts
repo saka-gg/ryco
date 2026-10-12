@@ -1,4 +1,6 @@
-import { ORCHESTRATION_WS_METHODS, type RelayEffectiveRole, WS_METHODS } from "@ryco/contracts";
+import type { RelayEffectiveRole } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
 import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";

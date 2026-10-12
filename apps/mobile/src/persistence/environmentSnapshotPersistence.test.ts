@@ -309,9 +309,9 @@ describe("environment snapshot persistence", () => {
     const loadOne = vi.spyOn(db, "loadEnvironmentSnapshot");
     await runtime.hydrate();
 
-    // One read for every row, and a yield between the two decodes.
+    // One read for every row; two small environments need no yield.
     expect(loadOne).not.toHaveBeenCalled();
-    expect(yields).toHaveBeenCalledTimes(1);
+    expect(yields).not.toHaveBeenCalled();
     const state = useStore.getState();
     expect(state.environmentStateById[goodId]?.projectIds).toHaveLength(1);
     expect(state.environmentStateById[goodId]?.hydratedFromCacheAt).toBe(1_000);
@@ -319,6 +319,123 @@ describe("environment snapshot persistence", () => {
     // The bumped record is discarded rather than mis-decoded, and its row dropped.
     expect(state.environmentStateById[bumpedId]).toBeUndefined();
     expect(snapshots.has(bumpedId)).toBe(false);
+    runtime.dispose();
+  });
+
+  it("commits small cached environments together and yields between large ones", async () => {
+    const { db } = createFakeSnapshotDb();
+    const small = [env("persist-small-1"), env("persist-small-2"), env("persist-small-3")];
+    const large = [env("persist-large-1"), env("persist-large-2")];
+    for (const [index, environmentId] of small.entries()) {
+      await db.saveEnvironmentSnapshot({
+        environmentId,
+        schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+        payload: boundStoredEnvironmentSnapshot(storedRecord(environmentId)).payload,
+        updatedAt: 10 - index,
+      });
+    }
+    const bulky = (environmentId: EnvironmentId): StoredEnvironmentSnapshot => ({
+      ...storedRecord(environmentId),
+      projects: [{ ...storedRecord(environmentId).projects[0]!, cwd: `/${"x".repeat(80_000)}` }],
+    });
+    for (const [index, environmentId] of large.entries()) {
+      await db.saveEnvironmentSnapshot({
+        environmentId,
+        schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+        payload: JSON.stringify(bulky(environmentId)),
+        updatedAt: 100 - index,
+      });
+    }
+    const commits = vi.spyOn(useStore.getState(), "hydrateEnvironmentStatesFromCache");
+    const yields = vi.fn(async () => undefined);
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 200,
+      hasDirectEnvironment: () => true,
+      yieldToEventLoop: yields,
+    });
+
+    await runtime.hydrate();
+
+    // Most recent first: each large environment fills a slice on its own and
+    // is committed before the next decode; the small ones share one commit.
+    expect(
+      commits.mock.calls.map(([entries]) => entries.map((entry) => entry.environmentId)),
+    ).toEqual([[large[0]], [large[1]], small]);
+    expect(yields).toHaveBeenCalledTimes(2);
+    for (const environmentId of [...small, ...large]) {
+      expect(useStore.getState().environmentStateById[environmentId]?.hydratedFromCacheAt).toBe(
+        1_000,
+      );
+    }
+    commits.mockRestore();
+    runtime.dispose();
+  });
+
+  it("leaves an environment the live connection already populated to it", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    const environmentId = env("persist-live-first");
+    await db.saveEnvironmentSnapshot({
+      environmentId,
+      schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
+      payload: boundStoredEnvironmentSnapshot(storedRecord(environmentId)).payload,
+      updatedAt: 1,
+    });
+    // The direct plane connects as soon as the catalog is hydrated, so its
+    // first snapshot can land before the cache is read.
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("live"), environmentId);
+    const commits = vi.spyOn(useStore.getState(), "hydrateEnvironmentStatesFromCache");
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 10,
+      hasDirectEnvironment: () => true,
+    });
+
+    await runtime.hydrate();
+
+    const state = useStore.getState().environmentStateById[environmentId];
+    expect(state?.bootstrapComplete).toBe(true);
+    expect(state?.hydratedFromCacheAt).toBeUndefined();
+    expect(commits).not.toHaveBeenCalled();
+    expect(snapshots.has(environmentId)).toBe(true);
+    commits.mockRestore();
+    runtime.dispose();
+  });
+
+  it("does not discard a row a live capture replaced while hydration was reading", async () => {
+    const { db, snapshots } = createFakeSnapshotDb();
+    const environmentId = env("persist-replaced-during-hydration");
+    await db.saveEnvironmentSnapshot({
+      environmentId,
+      schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION + 1,
+      payload: "{}",
+      updatedAt: 1,
+    });
+    let runtime: ReturnType<typeof createSnapshotPersistenceRuntime> | undefined;
+    const loadAll = db.loadEnvironmentSnapshots;
+    runtime = createSnapshotPersistenceRuntime({
+      db: {
+        ...db,
+        loadEnvironmentSnapshots: async () => {
+          const rows = await loadAll();
+          // The live snapshot arrives and is captured after the rows were read.
+          useStore.getState().syncServerShellSnapshot(wireSnapshot("live"), environmentId);
+          await runtime!.capture(environmentId);
+          useStore.getState().removeEnvironmentState(environmentId);
+          return rows;
+        },
+      },
+      store: useStore,
+      now: () => 10,
+      hasDirectEnvironment: () => true,
+    });
+
+    await runtime.hydrate();
+
+    // The stale row was unreadable, but the stored one is now the live capture.
+    expect(snapshots.get(environmentId)?.schemaVersion).toBe(ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION);
     runtime.dispose();
   });
 

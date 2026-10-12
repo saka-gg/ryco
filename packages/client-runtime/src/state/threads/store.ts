@@ -27,7 +27,7 @@ import type {
   ScopedThreadRef,
   WorktreeId,
 } from "@ryco/contracts";
-import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts";
+import { isProviderDriverKind, ProviderDriverKind } from "@ryco/contracts/provider-instance";
 import type { ThreadId, TurnId } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";

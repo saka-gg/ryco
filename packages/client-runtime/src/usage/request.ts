@@ -3,7 +3,7 @@ import {
   USAGE_CONTRACT_VERSION,
   type UsageCalendarDate,
   type UsageSummaryRequest,
-} from "@ryco/contracts";
+} from "@ryco/contracts/usage";
 export type UsageSummaryRange = "7d" | "30d" | "90d" | "all";
 const RANGE_DAYS: Readonly<Record<UsageSummaryRange, number | null>> = {
   "7d": 7,

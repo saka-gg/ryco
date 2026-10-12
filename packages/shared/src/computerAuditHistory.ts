@@ -7,7 +7,7 @@ import {
   type ComputerAuditHistoryEntry,
   type ComputerGetAuditHistoryInput,
   type ComputerGetAuditHistoryResult,
-} from "@ryco/contracts";
+} from "@ryco/contracts/computer-audit";
 import * as Schema from "effect/Schema";
 import { computerAuditTailLines, readComputerAuditFileTail } from "./computerAuditFile.ts";
 

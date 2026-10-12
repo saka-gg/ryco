@@ -2,8 +2,8 @@ import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
   type OrchestrationThreadActivity,
-  THREAD_FORKED_ACTIVITY_KIND,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 

@@ -1,10 +1,10 @@
 // @effect-diagnostics globalDate:off
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   USAGE_CONTRACT_VERSION,
-  type EnvironmentId,
   type UsageSummary,
   type UsageSummaryRequest,
-} from "@ryco/contracts";
+} from "@ryco/contracts/usage";
 
 import { isUsageContractMismatch } from "./compatibility.ts";
 import type { UsageEnvironmentResult } from "./merge.ts";

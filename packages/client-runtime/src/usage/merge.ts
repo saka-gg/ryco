@@ -1,6 +1,6 @@
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   USAGE_CONTRACT_VERSION,
-  type EnvironmentId,
   type UsageCalendarDate,
   type UsageCostSource,
   type UsageDailyBucket,
@@ -8,7 +8,7 @@ import {
   type UsageSourceCoverage,
   type UsageSummary,
   type UsageTokenTotals,
-} from "@ryco/contracts";
+} from "@ryco/contracts/usage";
 
 export type UsageEnvironmentTerminalStatus =
   | "complete"

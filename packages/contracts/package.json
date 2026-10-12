@@ -56,6 +56,116 @@
       "import": "./src/desktopNativeNodeClaim.ts",
       "require": "./src/desktopNativeNodeClaim.ts"
     },
+    "./agent-control": {
+      "types": "./src/agentControl.ts",
+      "import": "./src/agentControl.ts",
+      "require": "./src/agentControl.ts"
+    },
+    "./approval-responses": {
+      "types": "./src/approvalResponses.ts",
+      "import": "./src/approvalResponses.ts",
+      "require": "./src/approvalResponses.ts"
+    },
+    "./base-schemas": {
+      "types": "./src/baseSchemas.ts",
+      "import": "./src/baseSchemas.ts",
+      "require": "./src/baseSchemas.ts"
+    },
+    "./claude-cache": {
+      "types": "./src/claudeCache.ts",
+      "import": "./src/claudeCache.ts",
+      "require": "./src/claudeCache.ts"
+    },
+    "./codex-reset-credits": {
+      "types": "./src/codexResetCredits.ts",
+      "import": "./src/codexResetCredits.ts",
+      "require": "./src/codexResetCredits.ts"
+    },
+    "./computer": {
+      "types": "./src/computer.ts",
+      "import": "./src/computer.ts",
+      "require": "./src/computer.ts"
+    },
+    "./computer-audit": {
+      "types": "./src/computerAudit.ts",
+      "import": "./src/computerAudit.ts",
+      "require": "./src/computerAudit.ts"
+    },
+    "./device": {
+      "types": "./src/device.ts",
+      "import": "./src/device.ts",
+      "require": "./src/device.ts"
+    },
+    "./environment": {
+      "types": "./src/environment.ts",
+      "import": "./src/environment.ts",
+      "require": "./src/environment.ts"
+    },
+    "./git": {
+      "types": "./src/git.ts",
+      "import": "./src/git.ts",
+      "require": "./src/git.ts"
+    },
+    "./keybindings": {
+      "types": "./src/keybindings.ts",
+      "import": "./src/keybindings.ts",
+      "require": "./src/keybindings.ts"
+    },
+    "./model": {
+      "types": "./src/model.ts",
+      "import": "./src/model.ts",
+      "require": "./src/model.ts"
+    },
+    "./orchestration": {
+      "types": "./src/orchestration.ts",
+      "import": "./src/orchestration.ts",
+      "require": "./src/orchestration.ts"
+    },
+    "./provider-instance": {
+      "types": "./src/providerInstance.ts",
+      "import": "./src/providerInstance.ts",
+      "require": "./src/providerInstance.ts"
+    },
+    "./provider-runtime": {
+      "types": "./src/providerRuntime.ts",
+      "import": "./src/providerRuntime.ts",
+      "require": "./src/providerRuntime.ts"
+    },
+    "./rpc": {
+      "types": "./src/rpc.ts",
+      "import": "./src/rpc.ts",
+      "require": "./src/rpc.ts"
+    },
+    "./storage": {
+      "types": "./src/storage.ts",
+      "import": "./src/storage.ts",
+      "require": "./src/storage.ts"
+    },
+    "./terminal": {
+      "types": "./src/terminal.ts",
+      "import": "./src/terminal.ts",
+      "require": "./src/terminal.ts"
+    },
+    "./thread-fork": {
+      "types": "./src/threadFork.ts",
+      "import": "./src/threadFork.ts",
+      "require": "./src/threadFork.ts"
+    },
+    "./usage": {
+      "types": "./src/usage.ts",
+      "import": "./src/usage.ts",
+      "require": "./src/usage.ts"
+    },
+    "./workspace-lifecycle": {
+      "types": "./src/workspaceLifecycle.ts",
+      "import": "./src/workspaceLifecycle.ts",
+      "require": "./src/workspaceLifecycle.ts"
+    },
+    "./worktree": {
+      "types": "./src/worktree.ts",
+      "import": "./src/worktree.ts",
+      "require": "./src/worktree.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts",

@@ -5,13 +5,8 @@
  *
  * @module usageLimit
  */
-import {
-  CommandId,
-  MessageId,
-  type ThreadId,
-  type ThreadUsageLimit,
-  type TurnId,
-} from "@ryco/contracts";
+import type { ThreadUsageLimit } from "@ryco/contracts";
+import { CommandId, MessageId, type ThreadId, type TurnId } from "@ryco/contracts/base-schemas";
 
 /** The text a usage-limit resume sends, from the banner or the server worker. */
 export const USAGE_LIMIT_RESUME_MESSAGE = "Continue where you left off.";

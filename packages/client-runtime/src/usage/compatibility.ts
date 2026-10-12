@@ -1,4 +1,5 @@
-import { USAGE_CONTRACT_VERSION, WS_METHODS } from "@ryco/contracts";
+import { WS_METHODS } from "@ryco/contracts/rpc";
+import { USAGE_CONTRACT_VERSION } from "@ryco/contracts/usage";
 export const USAGE_UPDATE_MESSAGE =
   "Update Ryco on this device and the connected node to use the current usage format.";
 export class UsageContractMismatchError extends Error {

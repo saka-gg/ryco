@@ -1,4 +1,10 @@
 import "./polyfills";
+// Import-time registrations. Metro inlines requires (metro.config.js), so a
+// module is evaluated at its first use; bare imports are never inlined, which
+// keeps these lazy configurators registered at startup, before any runtime
+// code can ask for its configuration.
+import "./src/state/threadsRuntime";
+import "./src/hostedHub/state";
 
 import { registerRootComponent } from "expo";
 import "react-native-gesture-handler";

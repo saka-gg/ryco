@@ -9,7 +9,7 @@
  * under the fork's source).
  */
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
-import { ThreadLineage } from "@ryco/contracts";
+import { ThreadLineage } from "@ryco/contracts/orchestration";
 import * as Schema from "effect/Schema";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";

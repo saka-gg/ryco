@@ -149,6 +149,7 @@ import { createNativeE2eeEnrollmentCoordinator } from "@ryco/client-runtime/auth
 
 import {
   configureMobileHostedRuntime,
+  ensureMobileHostedDeviceKey,
   ensureMobileHostedSession,
   invalidateMobileHostedRuntime,
   isMobileHostedModeAvailable,
@@ -476,22 +477,44 @@ describe("session bootstrap ordering", () => {
     expect(hoisted.calls.indexOf("trust-hydrate")).toBeLessThan(hoisted.calls.indexOf("bootstrap"));
   });
 
-  it("loads the hardware key alongside the keychain reads instead of after them", async () => {
-    let releaseToken: () => void = () => undefined;
-    hoisted.hydrate.mockImplementationOnce(
-      () => new Promise<void>((resolve) => (releaseToken = resolve)),
-    );
+  it("loads the hardware key for a stored session before configuration completes", async () => {
+    let releaseSigner: () => void = () => undefined;
+    hoisted.createMobileDpopSigner.mockImplementationOnce(async () => {
+      hoisted.calls.push("signer");
+      await new Promise<void>((resolve) => (releaseSigner = resolve));
+      return signer;
+    });
     const session = ensureMobileHostedSession();
-    await vi.waitFor(() => expect(hoisted.calls).toContain("hydrate"));
+    await vi.waitFor(() => expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1));
 
-    // The token read is still pending, yet the signer is already being built.
-    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1);
+    // The stored token was found, so the key load started; configuration and
+    // the access check wait for it, because restoring the session signs.
     expect(hoisted.calls).not.toContain("configure");
 
-    releaseToken();
+    releaseSigner();
     await session;
     expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure", "bootstrap"]);
+    expect(getHostedRuntimeConfiguration().dpopSigner).toBe(signer);
     expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1);
+  });
+
+  it("overlaps the stored session's key load with the trust read", async () => {
+    let trustHydrated = false;
+    let signerStartedBeforeTrust = false;
+    const { mobileE2eeTrustStore } = await import("../platform/e2eeTrustStore");
+    const hydrateTrust = vi
+      .spyOn(mobileE2eeTrustStore, "hydrate")
+      .mockImplementationOnce(async () => {
+        await vi.waitFor(() => expect(hoisted.createMobileDpopSigner).toHaveBeenCalled());
+        signerStartedBeforeTrust = !trustHydrated;
+        trustHydrated = true;
+      });
+
+    await ensureMobileHostedSession();
+
+    expect(hydrateTrust).toHaveBeenCalledTimes(1);
+    expect(signerStartedBeforeTrust).toBe(true);
+    expect(isMobileHostedModeAvailable()).toBe(true);
   });
 
   it("does not run the Hub access check when no session is stored", async () => {
@@ -507,11 +530,92 @@ describe("session bootstrap ordering", () => {
     expect(orderedCalls()).toEqual(["hydrate", "trust-hydrate", "configure"]);
     expect(hostedHubStore.getState().accountStatus).toBe("signed-out");
   });
-
   it("runs the session bootstrap once across repeated calls", async () => {
     await Promise.all([ensureMobileHostedSession(), ensureMobileHostedSession()]);
     await ensureMobileHostedSession();
 
     expect(hoisted.calls.filter((entry) => entry === "bootstrap")).toHaveLength(1);
+  });
+});
+
+describe("deferred hardware key", () => {
+  beforeEach(() => {
+    hoisted.bearerToken = null;
+  });
+
+  it("does not load the hardware key at launch when no session is stored", async () => {
+    await ensureMobileHostedSession();
+
+    // Nothing signs without a stored session, so the Secure Enclave round trip
+    // is left to first hosted use.
+    expect(hoisted.createMobileDpopSigner).not.toHaveBeenCalled();
+    expect(hoisted.calls).toContain("configure");
+    expect(isMobileHostedModeAvailable()).toBe(true);
+  });
+
+  it("loads the key on the first proof and signs with the hardware signer", async () => {
+    await ensureMobileHostedSession();
+    const dpopSigner = getHostedRuntimeConfiguration().dpopSigner!;
+
+    await expect(
+      dpopSigner.sign({ method: "GET", url: "https://hub.example.test/x" } as never),
+    ).resolves.toBe("proof");
+    await dpopSigner.sign({ method: "GET", url: "https://hub.example.test/y" } as never);
+
+    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(2);
+    expect(isMobileHostedModeAvailable()).toBe(true);
+  });
+
+  it("fails the proof closed and reports device security when no hardware key exists", async () => {
+    await ensureMobileHostedSession();
+    hoisted.createMobileDpopSigner.mockRejectedValueOnce(new Error("no enclave"));
+
+    await expect(
+      getHostedRuntimeConfiguration().dpopSigner!.sign({
+        method: "POST",
+        url: "https://hub.example.test/x",
+      } as never),
+    ).rejects.toThrow("no enclave");
+
+    expect(isMobileHostedModeAvailable()).toBe(false);
+    expect(getMobileHostedUnavailableReason()).toBe("device-security");
+  });
+
+  it("settles availability when a hosted surface asks for the key", async () => {
+    hoisted.createMobileDpopSigner.mockRejectedValueOnce(new Error("locked"));
+
+    await expect(ensureMobileHostedDeviceKey()).resolves.toBe(false);
+    expect(getMobileHostedUnavailableReason()).toBe("device-security");
+    expect(hoisted.calls).not.toContain("bootstrap");
+
+    // A failed load is not memoized: the next surface retries it.
+    await expect(ensureMobileHostedDeviceKey()).resolves.toBe(true);
+    expect(isMobileHostedModeAvailable()).toBe(true);
+    expect(getMobileHostedUnavailableReason()).toBeNull();
+    expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports unavailable without loading a key when hosted mode is unconfigured", async () => {
+    hoisted.readMobileHostedConfig.mockReturnValue(null);
+
+    await expect(ensureMobileHostedDeviceKey()).resolves.toBe(false);
+    expect(hoisted.createMobileDpopSigner).not.toHaveBeenCalled();
+  });
+
+  it("does not publish availability for a runtime invalidated while the key loads", async () => {
+    await ensureMobileHostedSession();
+    let releaseSigner: () => void = () => undefined;
+    hoisted.createMobileDpopSigner.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (releaseSigner = resolve));
+      return signer;
+    });
+    const probe = ensureMobileHostedDeviceKey();
+    await vi.waitFor(() => expect(hoisted.createMobileDpopSigner).toHaveBeenCalledTimes(1));
+
+    invalidateMobileHostedRuntime();
+    releaseSigner();
+    await probe;
+
+    expect(isMobileHostedModeAvailable()).toBe(false);
   });
 });

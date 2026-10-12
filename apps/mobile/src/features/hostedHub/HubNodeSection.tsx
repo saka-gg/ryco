@@ -3,7 +3,8 @@ import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import { WS_METHODS, type RelayEffectiveRole } from "@ryco/contracts";
+import type { RelayEffectiveRole } from "@ryco/contracts";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   getHostedHubApi,
