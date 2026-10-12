@@ -148,6 +148,10 @@ import {
   createSidebarProjectThreadKeysCache,
   groupByLogicalProjectKey,
 } from "./sidebar/sidebarVisibleThreadKeys";
+import {
+  createSidebarProjectTreeCache,
+  SidebarProjectTreeCacheContext,
+} from "./sidebar/sidebarProjectTreeCache";
 import type { SidebarProjectSnapshot } from "../sidebarProjectGrouping";
 import type { SortableProjectHandleProps } from "./sidebar/SidebarProjectList";
 
@@ -752,6 +756,8 @@ export default function Sidebar() {
   // are displayed together. Groups a commit did not touch keep their previous
   // array, so per-project derivations below hit their cache.
   const [projectThreadKeysCache] = useState(createSidebarProjectThreadKeysCache);
+  // Shared with every SidebarProjectItem, which renders the same project trees.
+  const [projectTreeCache] = useState(createSidebarProjectTreeCache);
   const logicalProjectKeyOf = useCallback(
     (item: { readonly environmentId: EnvironmentId; readonly projectId: ProjectId }) => {
       const scopedKey = scopedProjectKey(scopeProjectRef(item.environmentId, item.projectId));
@@ -1012,22 +1018,31 @@ export default function Sidebar() {
           row.kind === "project" ? [row.project] : row.folder.expanded ? row.projects : [];
         return projectsForRow.flatMap((project) => {
           const projectExpanded = projectExpandedById[project.projectKey] ?? true;
+          const activeThreadKey = projectExpanded ? null : routeThreadKey;
+          // A collapsed project without a routed thread shows nothing to traverse.
+          if (!projectExpanded && activeThreadKey === null) return [];
           return projectThreadKeysCache.projectThreadKeys({
-            project,
-            threads: threadsByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_THREADS,
-            worktrees: worktreesByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_WORKTREES,
-            sortOrder: sidebarThreadSortOrder,
-            pinnedThreadKeys,
+            projectKey: project.projectKey,
+            structure: projectTreeCache.structure({
+              project,
+              threads: threadsByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_THREADS,
+              drafts: projectTreeCache.draftThreadsSelector(project)({ draftThreadsByThreadKey }),
+              worktrees: worktreesByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_WORKTREES,
+              sortOrder: sidebarThreadSortOrder,
+              pinnedThreadKeys,
+            }),
             projectExpanded,
-            activeThreadKey: projectExpanded ? null : routeThreadKey,
+            activeThreadKey,
           });
         });
       }),
     [
+      draftThreadsByThreadKey,
       sidebarThreadSortOrder,
       pinnedThreadKeys,
       projectExpandedById,
       projectThreadKeysCache,
+      projectTreeCache,
       projectTreeRows,
       routeThreadKey,
       threadsByProjectKey,
@@ -1480,78 +1495,80 @@ export default function Sidebar() {
         searchShortcutLabel={commandPaletteShortcutLabel}
       />
 
-      <SidebarProjectDialogProvider
-        projectGroupingSettings={projectGroupingSettings}
-        updateSettings={updateSettings}
-        navigateToThread={navigateToThread}
-      >
-        {mountedSidebarModes.has("projects") ? (
-          <Activity mode={projectsPaneVisible ? "visible" : "hidden"} name="sidebar-projects">
-            <FrozenWhileHidden visible={projectsPaneVisible}>
-              <SidebarProjectsContent
-                showArm64IntelBuildWarning={showArm64IntelBuildWarning}
-                arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-                desktopUpdateButtonAction={desktopUpdateButtonAction}
-                desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
-                handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
-                projectSortOrder={sidebarProjectSortOrder}
-                threadSortOrder={sidebarThreadSortOrder}
-                projectGroupingMode={sidebarProjectGroupingMode}
-                updateSettings={updateSettings}
-                openAddProject={openAddProjectCommandPalette}
-                isManualProjectSorting={isManualProjectSorting}
-                projectDnDSensors={projectDnDSensors}
-                projectCollisionDetection={projectCollisionDetection}
-                handleProjectDragStart={handleProjectDragStart}
-                handleProjectDragEnd={handleProjectDragEnd}
-                handleProjectDragCancel={handleProjectDragCancel}
-                projectTreeRows={projectTreeRows}
-                attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
-                projectsLength={orderedProjects.length}
-                chatsSection={
-                  <SidebarChatList
-                    chats={sidebarChatRows}
-                    activeRouteThreadKey={activeRouteThreadKey}
-                    handleNewThread={handleNewThread}
-                    archiveThread={archiveThread}
-                    trashThread={trashThread}
-                    stopThreadSession={stopThreadSession}
-                    interruptThreadTurn={interruptThreadTurn}
-                    attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
-                    onNewChat={startNewChatFromSidebar}
-                  />
-                }
-                renderProjectRow={renderProjectRow}
-              />
-            </FrozenWhileHidden>
-          </Activity>
-        ) : null}
-        {mountedSidebarModes.has("inbox") ? (
-          <Activity mode={inboxPaneVisible ? "visible" : "hidden"} name="sidebar-inbox">
-            <FrozenWhileHidden visible={inboxPaneVisible}>
-              <ConnectedInboxSidebar
-                archiveThread={archiveThread}
-                trashThread={trashThread}
-                stopThreadSession={stopThreadSession}
-                interruptThreadTurn={interruptThreadTurn}
-                activeThreadKey={activeRouteThreadKey}
-                aiFocusEnabled={aiFocusEnabled}
-                autoSettleAfterDays={sidebarAutoSettleAfterDays}
-                deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
-                environments={inboxEnvironments}
-                localQueuedThreadKeys={localQueuedThreadKeys}
-                motionReady={listMotionReady}
-                pinnedThreadKeys={pinnedThreadKeys}
-                primaryEnvironmentId={primaryEnvironmentId}
-                onOpenThread={navigateToThread}
-                projects={projects}
-                threads={sidebarThreads}
-                worktrees={sidebarWorktrees}
-              />
-            </FrozenWhileHidden>
-          </Activity>
-        ) : null}
-      </SidebarProjectDialogProvider>
+      <SidebarProjectTreeCacheContext.Provider value={projectTreeCache}>
+        <SidebarProjectDialogProvider
+          projectGroupingSettings={projectGroupingSettings}
+          updateSettings={updateSettings}
+          navigateToThread={navigateToThread}
+        >
+          {mountedSidebarModes.has("projects") ? (
+            <Activity mode={projectsPaneVisible ? "visible" : "hidden"} name="sidebar-projects">
+              <FrozenWhileHidden visible={projectsPaneVisible}>
+                <SidebarProjectsContent
+                  showArm64IntelBuildWarning={showArm64IntelBuildWarning}
+                  arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
+                  desktopUpdateButtonAction={desktopUpdateButtonAction}
+                  desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
+                  handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
+                  projectSortOrder={sidebarProjectSortOrder}
+                  threadSortOrder={sidebarThreadSortOrder}
+                  projectGroupingMode={sidebarProjectGroupingMode}
+                  updateSettings={updateSettings}
+                  openAddProject={openAddProjectCommandPalette}
+                  isManualProjectSorting={isManualProjectSorting}
+                  projectDnDSensors={projectDnDSensors}
+                  projectCollisionDetection={projectCollisionDetection}
+                  handleProjectDragStart={handleProjectDragStart}
+                  handleProjectDragEnd={handleProjectDragEnd}
+                  handleProjectDragCancel={handleProjectDragCancel}
+                  projectTreeRows={projectTreeRows}
+                  attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
+                  projectsLength={orderedProjects.length}
+                  chatsSection={
+                    <SidebarChatList
+                      chats={sidebarChatRows}
+                      activeRouteThreadKey={activeRouteThreadKey}
+                      handleNewThread={handleNewThread}
+                      archiveThread={archiveThread}
+                      trashThread={trashThread}
+                      stopThreadSession={stopThreadSession}
+                      interruptThreadTurn={interruptThreadTurn}
+                      attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
+                      onNewChat={startNewChatFromSidebar}
+                    />
+                  }
+                  renderProjectRow={renderProjectRow}
+                />
+              </FrozenWhileHidden>
+            </Activity>
+          ) : null}
+          {mountedSidebarModes.has("inbox") ? (
+            <Activity mode={inboxPaneVisible ? "visible" : "hidden"} name="sidebar-inbox">
+              <FrozenWhileHidden visible={inboxPaneVisible}>
+                <ConnectedInboxSidebar
+                  archiveThread={archiveThread}
+                  trashThread={trashThread}
+                  stopThreadSession={stopThreadSession}
+                  interruptThreadTurn={interruptThreadTurn}
+                  activeThreadKey={activeRouteThreadKey}
+                  aiFocusEnabled={aiFocusEnabled}
+                  autoSettleAfterDays={sidebarAutoSettleAfterDays}
+                  deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
+                  environments={inboxEnvironments}
+                  localQueuedThreadKeys={localQueuedThreadKeys}
+                  motionReady={listMotionReady}
+                  pinnedThreadKeys={pinnedThreadKeys}
+                  primaryEnvironmentId={primaryEnvironmentId}
+                  onOpenThread={navigateToThread}
+                  projects={projects}
+                  threads={sidebarThreads}
+                  worktrees={sidebarWorktrees}
+                />
+              </FrozenWhileHidden>
+            </Activity>
+          ) : null}
+        </SidebarProjectDialogProvider>
+      </SidebarProjectTreeCacheContext.Provider>
       <SidebarThreadJumpHintController
         keybindings={keybindings}
         platform={platform}

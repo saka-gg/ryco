@@ -1,11 +1,6 @@
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 
-import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../types";
-import { sortThreadsWithPinned } from "../Sidebar.logic";
-import { composeSidebarTree } from "./hooks/useSidebarTree";
-import { adaptProjectForSidebarTree } from "./sidebarTreeAdapters";
+import type { SidebarTreeStructureProject } from "./hooks/useSidebarTree";
 
 const EMPTY_KEYS: readonly string[] = [];
 
@@ -28,11 +23,8 @@ export function groupByLogicalProjectKey<T>(
 }
 
 interface ProjectThreadKeysInput {
-  readonly project: SidebarProjectSnapshot;
-  readonly threads: readonly SidebarThreadSummary[];
-  readonly worktrees: readonly SidebarWorktreeSummary[];
-  readonly sortOrder: SidebarThreadSortOrder;
-  readonly pinnedThreadKeys: ReadonlySet<string>;
+  /** The project's tree structure, from the shared `SidebarProjectTreeCache`. */
+  readonly structure: SidebarTreeStructureProject | null;
   readonly projectExpanded: boolean;
   /** The routed thread; only consulted while the project is collapsed. */
   readonly activeThreadKey: string | null;
@@ -40,51 +32,20 @@ interface ProjectThreadKeysInput {
 
 /**
  * Keyboard-traversal order of one project's visible threads: the order of the
- * project tree the Sidebar renders (worktree nodes, then their sessions).
+ * project tree the Sidebar renders (worktree nodes, then their sessions). A
+ * collapsed project shows only the routed thread, when it is one of them.
  */
 export function computeSidebarProjectThreadKeys(input: ProjectThreadKeysInput): readonly string[] {
-  const projectThreads = sortThreadsWithPinned({
-    threads: input.threads,
-    sortOrder: input.sortOrder,
-    pinnedThreadKeys: input.pinnedThreadKeys,
-    getThreadKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-  });
-  const activeThreadKey = input.activeThreadKey ?? undefined;
-  const pinnedCollapsedThreadKey =
-    !input.projectExpanded && activeThreadKey
-      ? projectThreads.some(
-          (thread) =>
-            thread.archivedAt === null &&
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === activeThreadKey,
-        )
-        ? activeThreadKey
-        : null
-      : null;
-  if (!input.projectExpanded && !pinnedCollapsedThreadKey) {
-    return EMPTY_KEYS;
-  }
-
-  const treeInput = adaptProjectForSidebarTree({
-    project: input.project,
-    threads: projectThreads,
-    worktrees: input.worktrees,
-  });
-  const treeProject = composeSidebarTree({
-    nowMs: 0,
-    projects: [treeInput.project],
-    threads: treeInput.threads,
-    worktrees: treeInput.worktrees,
-  }).projects[0];
-  if (!treeProject) {
-    return EMPTY_KEYS;
-  }
-
-  return treeProject.worktrees.flatMap((worktree) =>
-    worktree.sessions
+  if (input.structure === null) return EMPTY_KEYS;
+  if (!input.projectExpanded && !input.activeThreadKey) return EMPTY_KEYS;
+  const keys = input.structure.worktrees.flatMap((worktree) =>
+    worktree.threads
       .filter((thread) => thread.archivedAt === null)
-      .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
-      .filter((threadKey) => input.projectExpanded || threadKey === pinnedCollapsedThreadKey),
+      .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
+  if (input.projectExpanded) return keys;
+  const active = keys.filter((threadKey) => threadKey === input.activeThreadKey);
+  return active.length === 0 ? EMPTY_KEYS : active;
 }
 
 export interface SidebarProjectThreadKeysCache {
@@ -95,19 +56,24 @@ export interface SidebarProjectThreadKeysCache {
    */
   readonly shareGroups: <T>(slot: string, next: Map<string, T[]>) => Map<string, T[]>;
   /** Memoized `computeSidebarProjectThreadKeys`, keyed by project. */
-  readonly projectThreadKeys: (input: ProjectThreadKeysInput) => readonly string[];
+  readonly projectThreadKeys: (
+    input: ProjectThreadKeysInput & { readonly projectKey: string },
+  ) => readonly string[];
 }
 
 /**
  * Per-project memoization for the Sidebar's traversal order. A streaming
- * thread changes one project's thread array; every other project reuses its
- * previous tree instead of re-running sort + adapt + compose for all of them.
+ * thread changes one project's thread array; every other project keeps its
+ * tree structure (see `SidebarProjectTreeCache`) and so its keys.
  */
 export function createSidebarProjectThreadKeysCache(): SidebarProjectThreadKeysCache {
   const groupsBySlot = new Map<string, Map<string, unknown[]>>();
   const keysByProject = new Map<
     string,
-    { readonly input: ProjectThreadKeysInput; readonly keys: readonly string[] }
+    {
+      readonly input: ProjectThreadKeysInput & { readonly projectKey: string };
+      readonly keys: readonly string[];
+    }
   >();
   return {
     shareGroups: <T>(slot: string, next: Map<string, T[]>) => {
@@ -124,15 +90,11 @@ export function createSidebarProjectThreadKeysCache(): SidebarProjectThreadKeysC
       return next;
     },
     projectThreadKeys: (input) => {
-      const projectKey = input.project.projectKey;
+      const projectKey = input.projectKey;
       const cached = keysByProject.get(projectKey);
       if (
         cached !== undefined &&
-        cached.input.project === input.project &&
-        cached.input.threads === input.threads &&
-        cached.input.worktrees === input.worktrees &&
-        cached.input.sortOrder === input.sortOrder &&
-        cached.input.pinnedThreadKeys === input.pinnedThreadKeys &&
+        cached.input.structure === input.structure &&
         cached.input.projectExpanded === input.projectExpanded &&
         cached.input.activeThreadKey === input.activeThreadKey
       ) {
