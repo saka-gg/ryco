@@ -7,6 +7,7 @@ import { hostedSessionAdmits } from "../authorization/capabilities.ts";
 import { getHostedHubApi, getHostedRuntimeConfiguration } from "../authorization/runtime.ts";
 import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
 import type {
+  HostedEarlyRelaySocket,
   HostedRelayFailure,
   HostedRelayTransportStatus,
   HostedRycoSessionStatus,
@@ -18,6 +19,7 @@ interface PendingTicket {
   readonly expiresAt: number;
   readonly generation: number;
   readonly preparedSocketContext: unknown;
+  readonly earlySocket: HostedEarlyRelaySocket | undefined;
   used: boolean;
 }
 
@@ -170,11 +172,14 @@ export interface HostedRelayAttemptBinding {
   }>;
   /** Erase/release a prepared context the factory could not hand to a socket. */
   readonly disposeSocketContext?: (context: unknown) => void;
+  /** Start the relay upgrade beside the ticket request; see {@link HostedEarlyRelaySocket}. */
+  readonly openEarlyRelaySocket?: () => HostedEarlyRelaySocket | undefined;
   readonly relayUrl?: () => string;
   readonly createRelaySocket?: (input: {
     readonly url: string;
     readonly ticket: string;
     readonly ticketExpiresAt: number;
+    readonly earlySocket?: HostedEarlyRelaySocket;
     readonly callbacks: {
       readonly onTransportStatus: (status: HostedRelayTransportStatus) => void;
       readonly onSessionStatus: (status: HostedRycoSessionStatus) => void;
@@ -227,6 +232,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     },
     disposeSocketContext: (context) =>
       getHostedRuntimeConfiguration().disposeRelaySocketContext?.(context),
+    openEarlyRelaySocket: () => getHostedRuntimeConfiguration().openEarlyRelaySocket?.(),
     authorizeRequest: admitHostedRequest,
     subscribeAdmissionChanges: hostedHubStore.subscribe,
     shouldReconnect: (generation) => {
@@ -297,6 +303,12 @@ export class HostedRelayAttemptFactory {
   #preparation = 0;
   #disposed = false;
   #retryable = true;
+  /**
+   * The last attempt failed before it had a ticket. The next one opens its
+   * socket only once it has one, so a node that is offline (or a Hub refusing
+   * tickets) is not also sent an upgrade per retry.
+   */
+  #ticketStageFailed = false;
 
   constructor(binding: HostedRelayAttemptBinding = defaultBinding()) {
     this.#binding = binding;
@@ -326,6 +338,7 @@ export class HostedRelayAttemptFactory {
     this.#binding.transportStatus(generation, "requesting-ticket");
     this.#discardPendingTicket();
     let preparedSocketContext: unknown;
+    let earlySocket = this.#ticketStageFailed ? undefined : this.#openEarlySocket();
     try {
       preparedSocketContext = await this.#binding.prepareSocketContext?.();
       if (!isCurrent()) {
@@ -346,17 +359,22 @@ export class HostedRelayAttemptFactory {
         this.#disposeSocketContext(issued.preparedSocketContext);
         throw new Error("Hosted node selection changed.");
       }
+      this.#ticketStageFailed = false;
       this.#pendingTicket = {
         ticket: issued.ticket,
         expiresAt: issued.expiresAt,
         generation,
         preparedSocketContext: issued.preparedSocketContext,
+        earlySocket,
         used: false,
       };
+      earlySocket = undefined;
       return this.#binding.relayUrl?.() ?? getHostedRuntimeConfiguration().relayUrl();
     } catch (error) {
       this.#disposeSocketContext(preparedSocketContext);
+      discardEarlySocket(earlySocket);
       if (!isCurrent()) throw error;
+      this.#ticketStageFailed = true;
       if (error instanceof HostedHubApiError && error.status === 401) {
         void hostedHubController.expireSession();
       } else if (error instanceof HostedRelayPreparationError) {
@@ -384,6 +402,7 @@ export class HostedRelayAttemptFactory {
       pending.expiresAt <= getHostedRuntimeConfiguration().timers.now()
     ) {
       this.#disposeSocketContext(pending?.preparedSocketContext);
+      discardEarlySocket(pending?.earlySocket);
       throw new Error("A fresh relay ticket is required for every connection attempt.");
     }
     pending.used = true;
@@ -399,6 +418,7 @@ export class HostedRelayAttemptFactory {
       revision === this.#revision &&
       this.#activeAttemptId === attemptId &&
       this.#binding.isCurrent(generation);
+    const earlySocket = pending.earlySocket;
     const callbacks = {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
@@ -428,25 +448,22 @@ export class HostedRelayAttemptFactory {
     };
     this.#activeGeneration = generation;
     try {
+      const input = {
+        url,
+        ticket,
+        ticketExpiresAt,
+        callbacks,
+        preparedSocketContext: pending.preparedSocketContext,
+        ...(earlySocket === undefined ? {} : { earlySocket }),
+      };
       const socket = this.#binding.createRelaySocket
-        ? this.#binding.createRelaySocket({
-            url,
-            ticket,
-            ticketExpiresAt,
-            callbacks,
-            preparedSocketContext: pending.preparedSocketContext,
-          })
-        : getHostedRuntimeConfiguration().createRelaySocket({
-            url,
-            ticket,
-            ticketExpiresAt,
-            callbacks,
-            preparedSocketContext: pending.preparedSocketContext,
-          });
+        ? this.#binding.createRelaySocket(input)
+        : getHostedRuntimeConfiguration().createRelaySocket(input);
       if (isCurrentAttempt()) this.#activeSocket = socket;
       return socket;
     } catch (error) {
       this.#disposeSocketContext(pending.preparedSocketContext);
+      discardEarlySocket(earlySocket);
       if (isCurrentAttempt()) {
         this.#activeAttemptId = null;
         this.#activeSocket = null;
@@ -602,6 +619,7 @@ export class HostedRelayAttemptFactory {
     this.#activeAttemptId = null;
     this.#activeSocket = null;
     this.#recoveringAfterClose = false;
+    this.#ticketStageFailed = false;
     this.#reconnect.reset();
   }
 
@@ -617,7 +635,28 @@ export class HostedRelayAttemptFactory {
   #discardPendingTicket(): void {
     const pending = this.#pendingTicket;
     this.#pendingTicket = null;
-    if (pending !== null) this.#disposeSocketContext(pending.preparedSocketContext);
+    if (pending !== null) {
+      this.#disposeSocketContext(pending.preparedSocketContext);
+      discardEarlySocket(pending.earlySocket);
+    }
+  }
+
+  #openEarlySocket(): HostedEarlyRelaySocket | undefined {
+    try {
+      return this.#binding.openEarlyRelaySocket?.();
+    } catch {
+      // Best effort: the attempt then opens its socket once it has a ticket.
+      return undefined;
+    }
+  }
+}
+
+function discardEarlySocket(socket: HostedEarlyRelaySocket | undefined): void {
+  if (socket === undefined) return;
+  try {
+    socket.discard();
+  } catch {
+    // Best effort: an early socket carries no authority before its ticket.
   }
 }
 

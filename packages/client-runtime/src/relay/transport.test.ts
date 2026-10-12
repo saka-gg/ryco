@@ -298,6 +298,96 @@ describe("HostedRelayAttemptFactory", () => {
     expect(changed).toHaveBeenCalledOnce();
   });
 
+  it("opens the relay socket beside the ticket and hands it only to that ticket's socket", async () => {
+    const early = { discard: vi.fn() };
+    const openEarly = vi.fn(() => early);
+    let finishTicket: (value: { ticket: string; expiresAt: number }) => void = () => {};
+    const createRelaySocket = vi.fn((input: { readonly earlySocket?: unknown }) => input);
+    const binding: HostedRelayAttemptBinding = {
+      nodeId: () => selectedNode.id,
+      generation: () => 4,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      openEarlyRelaySocket: openEarly,
+      issueRelayAttempt: (input) =>
+        new Promise((resolve) => {
+          finishTicket = (value) =>
+            resolve({ ...value, preparedSocketContext: input.preparedSocketContext });
+        }),
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+    const factory = new HostedRelayAttemptFactory(binding);
+    const url = factory.nextUrl();
+    // The upgrade is under way before the ticket has been issued.
+    await flush();
+    expect(openEarly).toHaveBeenCalledOnce();
+    finishTicket({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(1)),
+      expiresAt: Date.now() + 60_000,
+    });
+    factory.createSocket(await url);
+    expect(createRelaySocket.mock.calls[0]?.[0].earlySocket).toBe(early);
+    expect(early.discard).not.toHaveBeenCalled();
+  });
+
+  it("discards an early socket whose ticket failed and opens none on the retry", async () => {
+    const sockets: Array<{ discard: ReturnType<typeof vi.fn> }> = [];
+    const openEarly = vi.fn(() => {
+      const early = { discard: vi.fn() };
+      sockets.push(early);
+      return early;
+    });
+    const issue = vi
+      .fn()
+      .mockRejectedValueOnce(new HostedHubApiError("node_offline", 409))
+      .mockResolvedValue({
+        ticket: encodeBase64Url(new Uint8Array(32).fill(2)),
+        expiresAt: Date.now() + 60_000,
+        preparedSocketContext: undefined,
+      });
+    const createRelaySocket = vi.fn((input: { readonly earlySocket?: unknown }) => input);
+    const binding: HostedRelayAttemptBinding = {
+      nodeId: () => selectedNode.id,
+      generation: () => 4,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      openEarlyRelaySocket: openEarly,
+      issueRelayAttempt: issue,
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+    const factory = new HostedRelayAttemptFactory(binding);
+    await expect(factory.nextUrl()).rejects.toBeInstanceOf(HostedHubApiError);
+    expect(sockets[0]?.discard).toHaveBeenCalledOnce();
+    // Serial after a ticket-stage failure: a node offline is not also sent an upgrade.
+    factory.createSocket(await factory.nextUrl());
+    expect(openEarly).toHaveBeenCalledOnce();
+    expect(createRelaySocket.mock.calls[0]?.[0]).not.toHaveProperty("earlySocket");
+    // Back to overlapping once a ticket was issued.
+    await factory.nextUrl();
+    expect(openEarly).toHaveBeenCalledTimes(2);
+    // A ticket that is never consumed takes its early socket with it.
+    factory.reset();
+    expect(sockets[1]?.discard).toHaveBeenCalledOnce();
+  });
+
   it("publishes a bounded native grant failure before reconnect policy runs", async () => {
     const failure = vi.fn();
     const binding: HostedRelayAttemptBinding = {

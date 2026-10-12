@@ -46,7 +46,11 @@ import { mobileHostedNodeLifecycle } from "./nodeLifecycle";
 import { createHostedPrimaryConnection } from "./primaryConnection";
 import { installHostedPrimaryConnectionFactory } from "./primaryConnectionFactory";
 import { configureAuthoritativeNodeTrustSource } from "../features/home/authoritativeNodeTrustSource";
-import { MobileHostedRelaySocket, mobileHostedRelayUrl } from "./relaySocket";
+import {
+  MobileHostedRelaySocket,
+  mobileHostedRelayUrl,
+  openMobileEarlyRelaySocket,
+} from "./relaySocket";
 import {
   getMobileHostedEndpoint,
   getMobileHostedHttpClient,
@@ -176,6 +180,7 @@ export async function configureMobileHostedRuntime(
     prepareRelaySocketContext: prepareMobileRelaySocketContext,
     issueRelayAttempt: (input) => issueMobileRelayAttempt(input),
     disposeRelaySocketContext: disposeMobileRelaySocketContext,
+    openEarlyRelaySocket: () => openMobileEarlyRelaySocket(),
     // docs/relay-e2ee-protocol.md §4: THIS IS WHERE NATIVE E2EE IS ON.
     //
     // Every relay channel this app opens is built with the §4.4 mode machine,

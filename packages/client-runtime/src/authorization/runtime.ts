@@ -7,7 +7,7 @@ import type {
   SessionCredentialsService,
 } from "../platform/index.ts";
 import { HostedHubApi } from "./api.ts";
-import type { HostedHubNode } from "./types.ts";
+import type { HostedEarlyRelaySocket, HostedHubNode } from "./types.ts";
 import type {
   HostedRelayFailure,
   HostedRelayTransportStatus,
@@ -89,10 +89,16 @@ export interface HostedRuntimeConfiguration {
     readonly preparedSocketContext: unknown;
   }>;
   readonly disposeRelaySocketContext?: (context: unknown) => void;
+  /**
+   * Native only: start the relay upgrade beside the ticket request. See
+   * {@link HostedEarlyRelaySocket}.
+   */
+  readonly openEarlyRelaySocket?: () => HostedEarlyRelaySocket | undefined;
   readonly createRelaySocket: (input: {
     readonly url: string;
     readonly ticket: string;
     readonly ticketExpiresAt: number;
+    readonly earlySocket?: HostedEarlyRelaySocket;
     readonly preparedSocketContext?: unknown;
     readonly callbacks: {
       readonly onTransportStatus: (status: HostedRelayTransportStatus) => void;
