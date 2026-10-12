@@ -7,10 +7,11 @@ export interface HostedBrowserLifecyclePorts {
   readonly recover: () => Promise<void>;
   readonly setBackgrounded: (backgrounded: boolean) => Promise<void>;
   /**
-   * Check that the account connection is still alive. A foreground, `online`
-   * or network-change signal does not mean the old socket died — and a healthy
-   * one is deliberately not replaced — but a path change can leave it open and
-   * dead, which the heartbeat alone takes up to its liveness bound to notice.
+   * Check that the account connection is still alive, or reconnect it now if
+   * it is waiting out a backoff. A foreground, `online` or network-change
+   * signal does not mean the old socket died — and a healthy one is
+   * deliberately not replaced — but a path change can leave it open and dead,
+   * which the heartbeat alone takes up to its liveness bound to notice.
    */
   readonly probe?: () => void;
   /** NetworkInformation `change`, where the browser has it. */
