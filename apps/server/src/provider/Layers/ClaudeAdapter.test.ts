@@ -6666,6 +6666,80 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+  it.effect("stamps a delayed task_started with the turn that launched its Agent tool", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const turnCompletedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const taskStartedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-delayed-task-turn"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const launchTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "fan out in the background",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-delayed-task-turn",
+        uuid: "stream-delayed-task-turn",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "toolu_background_agent",
+            name: "Agent",
+            input: {
+              description: "Audit the relay",
+              prompt: "Audit the relay",
+              subagent_type: "general-purpose",
+              run_in_background: true,
+            },
+          },
+        },
+      } as unknown as SDKMessage);
+      emitClaudeSuccessfulResult(harness.query, { id: "delayed-task-turn", usedTokens: 10 });
+      yield* Fiber.join(turnCompletedFiber);
+
+      // The SDK reports the background agent only after its launching turn settled.
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-delayed-turn",
+        description: "Audit the relay",
+        task_type: "local_agent",
+        tool_use_id: "toolu_background_agent",
+        uuid: "task-delayed-turn-started",
+        session_id: "sdk-session-delayed-task-turn",
+      } as unknown as SDKMessage);
+
+      const started = Array.from(yield* Fiber.join(taskStartedFiber))[0];
+      assert.equal(started?.type, "task.started");
+      assert.equal(started?.turnId, launchTurn.turnId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
   it.effect(
     "normalizes detached task evidence and uses individual stop without stopping its peers",
     () => {

@@ -816,6 +816,45 @@ describe("deriveMessagesTimelineRows", () => {
     );
   });
 
+  it("merges direct-spawn rows in one work block into a single row", () => {
+    const spawnEntry = (
+      id: string,
+      createdAt: string,
+      agentSpawn: NonNullable<WorkLogEntry["agentSpawn"]>,
+    ) => ({
+      id: `entry-${id}`,
+      kind: "work" as const,
+      createdAt,
+      entry: makeWorkEntry({ id, createdAt, tone: "info", label: "Agent", agentSpawn }),
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        spawnEntry("spawn-a", "2026-01-01T00:00:01Z", { workflowId: null, agentTaskIds: ["a"] }),
+        spawnEntry("spawn-b", "2026-01-01T00:00:02Z", { workflowId: null, agentTaskIds: ["b"] }),
+        spawnEntry("workflow", "2026-01-01T00:00:03Z", {
+          workflowId: "wf",
+          agentTaskIds: ["wf", "wf:wf:1"],
+        }),
+        spawnEntry("spawn-c", "2026-01-01T00:00:04Z", {
+          workflowId: null,
+          agentTaskIds: ["b", "c"],
+        }),
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    const spawns = rows.flatMap((row) =>
+      row.kind === "work" ? row.groupedEntries.map((entry) => [entry.id, entry.agentSpawn]) : [],
+    );
+    expect(spawns).toEqual([
+      ["spawn-a", { workflowId: null, agentTaskIds: ["a", "b", "c"] }],
+      ["workflow", { workflowId: "wf", agentTaskIds: ["wf", "wf:wf:1"] }],
+    ]);
+  });
+
   it("shows one summary and reveals all tool calls only when expanded", () => {
     const timelineEntries = [
       {

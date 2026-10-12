@@ -444,6 +444,12 @@ interface ClaudeSessionContext {
   /** Agent-tool input retained beyond parent-turn completion for delayed task_started. */
   readonly subagentLaunchInputByToolUseId: Map<string, Record<string, unknown>>;
   /**
+   * Turn that issued each Agent tool call. Background task_started often
+   * arrives after that turn settled (or inside a later wake turn); stamping
+   * the launching turn keeps one turn's spawns in one batch.
+   */
+  readonly subagentLaunchTurnByToolUseId: Map<string, TurnId>;
+  /**
    * Authoritative API model observed in a subagent-owned assistant snapshot,
    * keyed by the launching tool use id. The SDK can deliver the snapshot and
    * task_started on independent paths, so retain the observation until both
@@ -594,6 +600,24 @@ function rememberClaudeSubagentAttribution<A>(
     if (oldestToolUseId !== undefined) cache.delete(oldestToolUseId);
   }
   cache.set(toolUseId, value);
+}
+
+function rememberClaudeSubagentLaunch(
+  context: Pick<
+    ClaudeSessionContext,
+    "subagentLaunchInputByToolUseId" | "subagentLaunchTurnByToolUseId" | "turnState"
+  >,
+  toolUseId: string,
+  input: Record<string, unknown>,
+): void {
+  rememberClaudeSubagentAttribution(context.subagentLaunchInputByToolUseId, toolUseId, input);
+  if (context.turnState && !context.subagentLaunchTurnByToolUseId.has(toolUseId)) {
+    rememberClaudeSubagentAttribution(
+      context.subagentLaunchTurnByToolUseId,
+      toolUseId,
+      context.turnState.turnId,
+    );
+  }
 }
 
 function claudeSubagentLaunchModel(input: Record<string, unknown> | undefined): string | undefined {
@@ -3058,11 +3082,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : undefined;
         context.inFlightTools.set(event.index, nextTool);
         if (nextTool.itemType === "collab_agent_tool_call" && parsedInput) {
-          rememberClaudeSubagentAttribution(
-            context.subagentLaunchInputByToolUseId,
-            nextTool.itemId,
-            parsedInput,
-          );
+          rememberClaudeSubagentLaunch(context, nextTool.itemId, parsedInput);
         }
 
         if (
@@ -3215,11 +3235,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       context.inFlightTools.set(index, tool);
       if (itemType === "collab_agent_tool_call") {
-        rememberClaudeSubagentAttribution(
-          context.subagentLaunchInputByToolUseId,
-          itemId,
-          toolInput,
-        );
+        rememberClaudeSubagentLaunch(context, itemId, toolInput);
       }
 
       const stamp = yield* makeEventStamp();
@@ -3571,11 +3587,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           typeof block.input === "object" &&
           !Array.isArray(block.input)
         ) {
-          rememberClaudeSubagentAttribution(
-            context.subagentLaunchInputByToolUseId,
-            block.id,
-            block.input as Record<string, unknown>,
-          );
+          rememberClaudeSubagentLaunch(context, block.id, block.input as Record<string, unknown>);
         }
       }
       context.lastAssistantUuid = message.uuid;
@@ -4254,8 +4266,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         } else if (backgroundFlag === false) {
           context.backgroundedTaskIds.delete(message.task_id);
         }
+        const launchTurnId = message.tool_use_id
+          ? context.subagentLaunchTurnByToolUseId.get(message.tool_use_id)
+          : undefined;
         if (message.tool_use_id) {
           context.subagentLaunchInputByToolUseId.delete(message.tool_use_id);
+          context.subagentLaunchTurnByToolUseId.delete(message.tool_use_id);
         }
         const model =
           (message.tool_use_id
@@ -4301,6 +4317,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.liveTaskIds.add(message.task_id);
         yield* offerRuntimeEventForContext(context, {
           ...base,
+          ...(launchTurnId ? { turnId: asCanonicalTurnId(launchTurnId) } : {}),
           type: "task.started",
           payload: {
             taskId: RuntimeTaskId.make(message.task_id),
@@ -5778,6 +5795,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       suppressedSubagentBlocks: new Map(),
       taskAgents: new Map(),
       subagentLaunchInputByToolUseId: new Map(),
+      subagentLaunchTurnByToolUseId: new Map(),
       subagentModelByToolUseId: new Map(),
       subagentParentByToolUseId: new Map(),
       workflowMemberFingerprints: new Map(),
