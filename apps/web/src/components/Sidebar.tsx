@@ -380,7 +380,8 @@ export default function Sidebar() {
   );
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewChat } = useNewThreadHandler();
-  const { archiveThread, trashThread, stopThreadSession, interruptThreadTurn } = useThreadActions();
+  const { archiveThread, deleteThread, stopThreadSession, interruptThreadTurn } =
+    useThreadActions();
   const { isMobile, open, openMobile, setOpen, setOpenMobile } = useSidebar();
   const pinnedThreadKeys = useMemo(
     () =>
@@ -1426,7 +1427,7 @@ export default function Sidebar() {
         }
         handleNewThread={handleNewThread}
         archiveThread={archiveThread}
-        trashThread={trashThread}
+        deleteThread={deleteThread}
         stopThreadSession={stopThreadSession}
         interruptThreadTurn={interruptThreadTurn}
         threadJumpLabelByKey={visibleThreadJumpLabelByKey}
@@ -1453,7 +1454,7 @@ export default function Sidebar() {
       interruptThreadTurn,
       isManualProjectSorting,
       stopThreadSession,
-      trashThread,
+      deleteThread,
       visibleThreadJumpLabelByKey,
     ],
   );
@@ -1530,7 +1531,7 @@ export default function Sidebar() {
                       activeRouteThreadKey={activeRouteThreadKey}
                       handleNewThread={handleNewThread}
                       archiveThread={archiveThread}
-                      trashThread={trashThread}
+                      deleteThread={deleteThread}
                       stopThreadSession={stopThreadSession}
                       interruptThreadTurn={interruptThreadTurn}
                       attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
@@ -1547,7 +1548,7 @@ export default function Sidebar() {
               <FrozenWhileHidden visible={inboxPaneVisible}>
                 <ConnectedInboxSidebar
                   archiveThread={archiveThread}
-                  trashThread={trashThread}
+                  deleteThread={deleteThread}
                   stopThreadSession={stopThreadSession}
                   interruptThreadTurn={interruptThreadTurn}
                   activeThreadKey={activeRouteThreadKey}

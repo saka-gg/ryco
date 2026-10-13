@@ -44,19 +44,23 @@ describe("parseProjectsSearch", () => {
       project: "p",
       section: "workspaces",
       workspace: "wt-1",
-      review: "remove-checkout",
+      // Older links named the checkout removal; they open the delete review.
+      review: "delete-workspace",
     });
-    expect(parseProjectsSearch({ project: "p", review: "remove-checkout" })).toEqual({
+    expect(parseProjectsSearch({ project: "p", review: "delete-workspace" })).toEqual({
       project: "p",
     });
   });
 
-  it("only reviews actions that change a checkout", () => {
+  it("only reviews Delete", () => {
     expect(parseProjectsSearch({ project: "p", workspace: "wt-1", review: "archive" })).toEqual({
       project: "p",
       workspace: "wt-1",
     });
-    expect(parseProjectsSearch({ workspace: "wt-1", review: "remove-checkout" })).toEqual({});
+    expect(
+      parseProjectsSearch({ project: "p", workspace: "wt-1", review: "recreate-checkout" }),
+    ).toEqual({ project: "p", workspace: "wt-1" });
+    expect(parseProjectsSearch({ workspace: "wt-1", review: "delete-workspace" })).toEqual({});
   });
 
   it("keeps a known view and opens on the map unless a section names settings", () => {

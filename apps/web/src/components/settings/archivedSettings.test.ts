@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { describeTrashedThreadPlace, selectArchivedSettingsGroups } from "./archivedSettings";
+import { selectArchivedSettingsGroups } from "./archivedSettings";
 
 describe("node settings archive", () => {
   const projects = ["local", "remote"].map((environmentId) => ({
@@ -100,39 +100,5 @@ describe("archived chats", () => {
     expect(
       selectArchivedSettingsGroups(projects, [thread("active-chat", "trip", null)], "local"),
     ).toEqual([]);
-  });
-});
-
-describe("trashed conversation place", () => {
-  const folder = "/home/me/.ryco/chats/plan-a-trip";
-  const chatProject = { kind: "chat" as const, cwd: folder };
-  const regularProject = { kind: "project" as const, cwd: "/repo/ryco" };
-
-  it("trusts the node's project kind, even once the store no longer lists the project", () => {
-    expect(
-      describeTrashedThreadPlace({ projectKind: "chat", projectTitle: "Plan a trip" }, null),
-    ).toEqual({ label: "No project", chatFolder: null });
-    expect(
-      describeTrashedThreadPlace({ projectKind: "chat", projectTitle: "Plan a trip" }, chatProject),
-    ).toEqual({ label: "No project", chatFolder: folder });
-    // The node's answer wins over a stale store.
-    expect(
-      describeTrashedThreadPlace({ projectKind: "project", projectTitle: "Ryco" }, chatProject),
-    ).toEqual({ label: "Ryco", chatFolder: null });
-  });
-
-  it("falls back to the store for nodes that send no project kind", () => {
-    expect(describeTrashedThreadPlace({ projectTitle: "Plan a trip" }, chatProject)).toEqual({
-      label: "No project",
-      chatFolder: folder,
-    });
-    expect(describeTrashedThreadPlace({ projectTitle: "Ryco" }, regularProject)).toEqual({
-      label: "Ryco",
-      chatFolder: null,
-    });
-    expect(describeTrashedThreadPlace({ projectTitle: null }, undefined)).toEqual({
-      label: "Removed project",
-      chatFolder: null,
-    });
   });
 });

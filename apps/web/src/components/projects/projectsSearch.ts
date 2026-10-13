@@ -6,7 +6,7 @@
  */
 import {
   isWorkspaceReviewAction,
-  WORKSPACE_REVIEW_ACTIONS,
+  parseWorkspaceReviewAction,
   type WorkspaceReviewAction,
 } from "@ryco/client-runtime/state/lifecycle";
 
@@ -42,8 +42,6 @@ export interface ProjectsSearch {
   readonly review?: WorkspaceReviewAction | undefined;
 }
 
-const REVIEW_ACTIONS: ReadonlySet<string> = new Set(WORKSPACE_REVIEW_ACTIONS);
-
 const SECTION_SET: ReadonlySet<string> = new Set(PROJECT_SECTIONS);
 
 /** The page opens on the map unless a settings section (or the view) says otherwise. */
@@ -68,10 +66,9 @@ export function parseProjectsSearch(raw: Record<string, unknown>): ProjectsSearc
       : undefined;
   // A workspace belongs to the named checkout; a review needs its workspace.
   const workspace = project === undefined ? undefined : optionalString(raw.workspace);
+  // Older builds linked to checkout-removal reviews; those open the delete review.
   const review =
-    workspace !== undefined && typeof raw.review === "string" && REVIEW_ACTIONS.has(raw.review)
-      ? (raw.review as WorkspaceReviewAction)
-      : undefined;
+    workspace !== undefined ? (parseWorkspaceReviewAction(raw.review) ?? undefined) : undefined;
   const view = raw.view === "map" || raw.view === "settings" ? raw.view : undefined;
   return {
     ...(env !== undefined ? { env } : {}),

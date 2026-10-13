@@ -358,8 +358,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         let cleanupCompleted = true;
-        // A created thread that never ran is rolled back. One that holds any work is moved
-        // to Trash instead (recoverable), and its checkout is then never force-removed.
+        // A created thread that never ran is rolled back. One that holds any work is archived
+        // instead (its conversation is kept: Trash now means deletion after a short grace
+        // period), and its checkout is then never force-removed.
         let preservedConversations = false;
         const state = current.state;
         for (const threadId of state.resources.ownedThreadIds.toReversed()) {
@@ -377,10 +378,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           if (cleaned._tag === "Success") continue;
           preservedConversations = true;
           cleanupCompleted = false;
+          if (existing.value.archivedAt !== null) continue;
           yield* Effect.exit(
             commandApplication.apply({
-              type: "thread.trash",
-              commandId: commandIdFor(current.operationId, `compensate-trash-${threadId}`),
+              type: "thread.archive",
+              commandId: commandIdFor(current.operationId, `compensate-archive-${threadId}`),
               threadId,
             }),
           );

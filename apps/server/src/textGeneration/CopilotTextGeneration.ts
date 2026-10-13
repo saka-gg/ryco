@@ -286,5 +286,7 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
       codexFallback.generateIssueContent(withGitFallbackSelection(input)),
     rankInboxThreads,
     answerSideQuestion,
+    summarizeWorkspaceChanges: (input) =>
+      codexFallback.summarizeWorkspaceChanges(withGitFallbackSelection(input)),
   } satisfies TextGenerationShape;
 });

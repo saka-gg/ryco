@@ -37,7 +37,7 @@ describe("thread menu inventory", () => {
       },
     });
     expect(inbox).toEqual(sidebar);
-    expect(sidebar.slice(-3)).toEqual(["stop-session", "archive", "trash"]);
+    expect(sidebar.slice(-3)).toEqual(["stop-session", "archive", "delete"]);
   });
 
   it("keeps workspace actions in their own submenu, separate from conversation actions", () => {
@@ -51,7 +51,6 @@ describe("thread menu inventory", () => {
     const workspace = items.find((item) => item.id === "workspace");
     expect(workspace?.children?.map((item) => item.id)).toEqual([
       "workspace:archive",
-      "workspace:remove-checkout",
       "workspace:delete-workspace",
       "workspace:manage",
     ]);
@@ -60,7 +59,22 @@ describe("thread menu inventory", () => {
         .filter((item) => item.id !== "workspace")
         .some((item) => item.id.startsWith("workspace:")),
     ).toBe(false);
-    expect(threadMenuActionIds(items)).toContain("workspace:remove-checkout");
+    expect(threadMenuActionIds(items)).toContain("workspace:delete-workspace");
+  });
+
+  it("drops the Workspace submenu once the workspace was deleted", () => {
+    const items = buildThreadMenuInventory({
+      ...base,
+      workspace: {
+        record: {
+          archivedAt: "2026-10-01T00:00:00.000Z",
+          checkoutRemovedAt: "2026-10-01T00:00:00.000Z",
+          checkoutRemovalReason: "deleted",
+        },
+        protectedWorkspace: false,
+      },
+    });
+    expect(items.some((item) => item.id === "workspace")).toBe(false);
   });
 
   it("offers only management for the main checkout and conversations without a record", () => {
@@ -78,8 +92,8 @@ describe("thread menu inventory", () => {
   it("has no misleading close action; drafts are discarded locally", () => {
     const labels = buildThreadMenuInventory(base).map((item) => item.label);
     expect(labels).not.toContain("Close session");
-    expect(labels).not.toContain("Delete thread");
-    expect(labels).toContain("Move to Trash");
+    expect(labels).not.toContain("Move to Trash");
+    expect(labels).toContain("Delete…");
     expect(buildThreadMenuInventory({ ...base, isDraft: true })).toEqual([
       { id: "discard-draft", label: "Discard draft", destructive: true },
     ]);
@@ -107,7 +121,7 @@ describe("thread menu inventory", () => {
       "copy-thread-id",
       "stop-session",
       "archive",
-      "trash",
+      "delete",
     ]);
     expect(items.find((item) => item.id === "rename")?.label).toBe("Rename chat");
     expect(items.find((item) => item.id === "chat-reveal-folder")?.label).toBe(

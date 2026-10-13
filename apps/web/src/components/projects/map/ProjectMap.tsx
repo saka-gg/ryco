@@ -2,6 +2,7 @@ import type { AgentControlProposalId } from "@ryco/contracts";
 import {
   ArchiveIcon,
   ClockIcon,
+  GitBranchIcon,
   LayersIcon,
   MaximizeIcon,
   MessageSquareIcon,
@@ -184,6 +185,7 @@ export function ProjectMap() {
   const [view, setView] = useState<Omit<MapOptions, "offsets">>(() => ({
     hiddenCheckouts: new Set(),
     expanded: new Set(),
+    showActive: true,
     showArchived: true,
     showAutomations: true,
   }));
@@ -364,9 +366,11 @@ export function ProjectMap() {
         review: requestedReview,
       });
       setView((current) =>
-        current.showArchived && !current.hiddenCheckouts.has(target.checkoutKey)
+        current.showActive &&
+        current.showArchived &&
+        !current.hiddenCheckouts.has(target.checkoutKey)
           ? current
-          : { ...current, showArchived: true, hiddenCheckouts: new Set() },
+          : { ...current, showActive: true, showArchived: true, hiddenCheckouts: new Set() },
       );
     }
   }
@@ -800,11 +804,30 @@ export function ProjectMap() {
           >
             Automations
           </ToolChip>
+          {/* Active and Archived split the workspaces; hiding both would empty
+              the map, so turning one off with the other already off swaps them. */}
+          <ToolChip
+            pressed={view.showActive}
+            icon={<GitBranchIcon className="size-3.5" />}
+            onClick={() =>
+              setView((current) => ({
+                ...current,
+                showActive: !current.showActive,
+                showArchived: current.showArchived || current.showActive,
+              }))
+            }
+          >
+            Active
+          </ToolChip>
           <ToolChip
             pressed={view.showArchived}
             icon={<ArchiveIcon className="size-3.5" />}
             onClick={() =>
-              setView((current) => ({ ...current, showArchived: !current.showArchived }))
+              setView((current) => ({
+                ...current,
+                showArchived: !current.showArchived,
+                showActive: current.showActive || current.showArchived,
+              }))
             }
           >
             Archived

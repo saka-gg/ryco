@@ -58,7 +58,7 @@ export interface SidebarProjectThreadListProps {
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
   ) => Promise<void>;
-  requestTrashThread: (
+  requestDeleteThread: (
     thread: SidebarThreadSummary & { draftId?: DraftId | undefined },
     opts?: { deletedThreadKeys?: ReadonlySet<string> },
   ) => Promise<void>;
@@ -128,7 +128,7 @@ export const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     navigateToDraft,
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
-    requestTrashThread,
+    requestDeleteThread,
     clearSelection,
     commitRename,
     cancelRename,
@@ -173,7 +173,7 @@ export const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         navigateToDraft={navigateToDraft}
         handleMultiSelectContextMenu={handleMultiSelectContextMenu}
         handleThreadContextMenu={handleThreadContextMenu}
-        requestTrashThread={requestTrashThread}
+        requestDeleteThread={requestDeleteThread}
         clearSelection={clearSelection}
         commitRename={commitRename}
         cancelRename={cancelRename}

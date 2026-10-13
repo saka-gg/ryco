@@ -428,7 +428,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     section: "archived",
     title: "Archive",
     owner: "node",
-    description: "Archived threads and Trash; restore, or delete from Trash permanently.",
-    keywords: "trash restore retention cleanup suggestions",
+    description: "Archived threads; unarchive or delete them.",
+    keywords: "unarchive delete restore retention cleanup suggestions",
   },
 ];

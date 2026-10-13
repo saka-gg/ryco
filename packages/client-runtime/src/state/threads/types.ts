@@ -22,6 +22,7 @@ import type {
   AgentTokenMode,
   StatusBucket,
   ThreadSettlementOverride,
+  WorktreeCheckoutRemovalReason,
   WorktreeId,
   WorktreeOrigin,
   WorktreePullRequestLink,
@@ -308,7 +309,8 @@ export interface SidebarWorktreeSummary {
   archivedAt: string | null;
   /** Set once the physical checkout is gone; the record keeps path and branch as provenance. */
   checkoutRemovedAt?: string | null | undefined;
-  checkoutRemovalReason?: "removed" | "missing" | null | undefined;
+  /** `deleted`: a hidden tombstone kept only as provenance for its conversations. */
+  checkoutRemovalReason?: WorktreeCheckoutRemovalReason | null | undefined;
   manualPosition: number;
   /**
    * Every pull request the workspace has carried, current one included (the

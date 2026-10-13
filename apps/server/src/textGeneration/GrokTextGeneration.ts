@@ -22,12 +22,14 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   extractJsonObject,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitleResult,
+  sanitizeWorkspaceChangesSummary,
 } from "./TextGenerationUtils.ts";
 import {
   applyGrokAcpModelSelection,
@@ -37,6 +39,8 @@ import {
 } from "../provider/acp/GrokAcpSupport.ts";
 
 const GROK_TIMEOUT_MS = 180_000;
+/** A workspace change summary is short and optional; no summary is the fallback. */
+const GROK_SUMMARY_TIMEOUT_MS = 30_000;
 
 function mapGrokAcpError(
   operation:
@@ -45,7 +49,8 @@ function mapGrokAcpError(
     | "generateBranchName"
     | "generateThreadTitle"
     | "generateIssueContent"
-    | "rankInboxThreads",
+    | "rankInboxThreads"
+    | "summarizeWorkspaceChanges",
   detail: string,
   cause: unknown,
 ): TextGenerationError {
@@ -77,6 +82,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     prompt,
     outputSchemaJson,
     modelSelection,
+    timeoutMs = GROK_TIMEOUT_MS,
   }: {
     operation:
       | "generateCommitMessage"
@@ -84,11 +90,13 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads";
+      | "rankInboxThreads"
+      | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
     modelSelection: ModelSelection;
+    timeoutMs?: number;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
       const resolvedModel = resolveGrokAcpBaseModelId(modelSelection.model);
@@ -131,7 +139,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
           prompt: [{ type: "text", text: prompt }],
         });
       }).pipe(
-        Effect.timeoutOption(GROK_TIMEOUT_MS),
+        Effect.timeoutOption(timeoutMs),
         Effect.flatMap(
           Option.match({
             onNone: () =>
@@ -323,6 +331,21 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     return yield* validateRankInboxThreadsResult(input, generated.rankings);
   });
 
+  const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
+    "GrokTextGeneration.summarizeWorkspaceChanges",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildWorkspaceChangesSummaryPrompt(input);
+    const generated = yield* runGrokJson({
+      operation: "summarizeWorkspaceChanges",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+      timeoutMs: GROK_SUMMARY_TIMEOUT_MS,
+    });
+    return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
@@ -330,6 +353,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    summarizeWorkspaceChanges,
     answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
       Effect.fail(
         new TextGenerationError({

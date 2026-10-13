@@ -1,4 +1,8 @@
-import type { WorkspaceLifecycleAction } from "@ryco/contracts";
+import type {
+  WorkspaceCheckoutState,
+  WorkspaceLifecycleRequest,
+  WorktreeCheckoutRemovalReason,
+} from "@ryco/contracts";
 import { threadHasConversation } from "@ryco/shared/threadFork";
 
 /**
@@ -11,7 +15,7 @@ export type ThreadLifecycleActionId =
   | "stop-session"
   | "archive"
   | "unarchive"
-  | "trash";
+  | "delete";
 
 export interface ThreadLifecycleActionItem {
   readonly id: ThreadLifecycleActionId;
@@ -50,36 +54,39 @@ export function listThreadLifecycleActions(
   else if (isThreadSessionLive(thread)) items.push({ id: "stop-session", label: "Stop session" });
   if (thread.archivedAt !== null) items.push({ id: "unarchive", label: "Unarchive thread" });
   else if (threadHasConversation(thread)) items.push({ id: "archive", label: "Archive thread" });
-  items.push({ id: "trash", label: "Move to Trash", destructive: true });
+  items.push({ id: "delete", label: "Delete…", destructive: true });
   return items;
 }
 
 /**
- * Every workspace action a surface offers: the contract's actions, plus
- * "Delete workspace" — a checkout removal that discards whatever only exists
- * there and moves the workspace's conversations to Trash.
+ * Every workspace action a surface offers. A workspace gets exactly three:
+ * Archive (hide it; nothing on disk changes), Restore (show it again; the node
+ * recreates a removed checkout whose branch still exists) and "Delete
+ * workspace" (one reviewed removal of the checkout, its branch and,
+ * optionally, its conversations). The contract's other actions
+ * (`remove-checkout`, `remove-stale-record`, `recreate-checkout`) stay for
+ * Agent Control and older clients; no surface offers them.
  */
-export type WorkspaceActionId = WorkspaceLifecycleAction | "delete-workspace";
+export type WorkspaceActionId = "archive" | "restore" | "delete-workspace";
+
+export const WORKSPACE_LIFECYCLE_ACTION_LABELS: Readonly<Record<WorkspaceActionId, string>> = {
+  archive: "Archive workspace",
+  restore: "Restore workspace",
+  "delete-workspace": "Delete workspace",
+};
 
 /**
  * Whether an action changes a checkout on disk, so it runs only after the
- * exact-effects review. Exhaustive: a new contract action must be classified.
+ * exact-effects review. Exhaustive: a new action must be classified.
  */
 const WORKSPACE_ACTION_NEEDS_REVIEW: Readonly<Record<WorkspaceActionId, boolean>> = {
   archive: false,
   restore: false,
-  "remove-checkout": true,
-  "remove-stale-record": true,
-  "recreate-checkout": true,
   "delete-workspace": true,
 };
 
 /** A workspace action that is reviewed before it runs. */
-export type WorkspaceReviewAction =
-  | "remove-checkout"
-  | "remove-stale-record"
-  | "recreate-checkout"
-  | "delete-workspace";
+export type WorkspaceReviewAction = "delete-workspace";
 
 export function isWorkspaceReviewAction(
   action: WorkspaceActionId,
@@ -91,19 +98,55 @@ export const WORKSPACE_REVIEW_ACTIONS: readonly WorkspaceReviewAction[] = (
   Object.keys(WORKSPACE_ACTION_NEEDS_REVIEW) as WorkspaceActionId[]
 ).filter(isWorkspaceReviewAction);
 
-/** The lifecycle request an action makes: "Delete workspace" is a discarding removal. */
-export function workspaceActionRequest(action: WorkspaceActionId): {
-  readonly action: WorkspaceLifecycleAction;
-  readonly discard: boolean;
-} {
+/**
+ * The review a `review` link names. Links from older builds named the checkout
+ * removals; those open the delete review (which shows its exact effects before
+ * anything changes). A recreate link names nothing any more: Restore recreates.
+ */
+export function parseWorkspaceReviewAction(raw: unknown): WorkspaceReviewAction | null {
+  switch (raw) {
+    case "delete-workspace":
+    case "remove-checkout":
+    case "remove-stale-record":
+      return "delete-workspace";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The lifecycle request an action makes. "Delete workspace" is a discarding
+ * checkout removal that always deletes the branch; its conversations are kept
+ * (archived) unless the reader also deletes them.
+ */
+export function workspaceActionRequest(
+  action: WorkspaceActionId,
+  options: { readonly deleteConversations?: boolean } = {},
+): Omit<WorkspaceLifecycleRequest, "worktreeId"> {
   return action === "delete-workspace"
-    ? { action: "remove-checkout", discard: true }
+    ? {
+        action: "remove-checkout",
+        discard: true,
+        deleteBranch: true,
+        deleteConversations: options.deleteConversations === true,
+      }
     : { action, discard: false };
 }
+
+/**
+ * A workspace the user deleted while keeping its conversations: the record
+ * stays only as their provenance. Every surface hides it.
+ */
+export const isWorkspaceDeleted = (worktree: {
+  readonly checkoutRemovalReason?: WorktreeCheckoutRemovalReason | null | undefined;
+}): boolean => worktree.checkoutRemovalReason === "deleted";
 
 export interface WorkspaceLifecycleSubject {
   readonly archivedAt: string | null;
   readonly checkoutRemovedAt?: string | null | undefined;
+  readonly checkoutRemovalReason?: WorktreeCheckoutRemovalReason | null | undefined;
+  /** What an inspection found on disk, when there is one: a missing checkout restores. */
+  readonly checkout?: WorkspaceCheckoutState | null | undefined;
 }
 
 export interface WorkspaceLifecycleActionItem {
@@ -115,68 +158,41 @@ export interface WorkspaceLifecycleActionItem {
 }
 
 /**
- * Menu inventory without filesystem inspection. "Remove checkout" also covers a
- * checkout that turns out to be missing: its review shows the stale-record effect.
- * "Delete workspace" is always offered; its review says what it would discard or
- * why it cannot run. The project root/main checkout and derived groups never get
- * lifecycle actions.
+ * Menu inventory without filesystem inspection: Archive while the workspace is
+ * live, Restore once it is archived or its checkout is gone, and always
+ * "Delete workspace…" (its review says what it would discard or why it cannot
+ * run). The project root/main checkout, derived groups and deleted workspaces
+ * never get lifecycle actions.
  */
 export function listWorkspaceLifecycleActions(
   workspace: WorkspaceLifecycleSubject,
   options: { readonly protectedWorkspace: boolean },
 ): WorkspaceLifecycleActionItem[] {
-  if (options.protectedWorkspace) return [];
-  const removed = workspace.checkoutRemovedAt != null;
-  const items: WorkspaceLifecycleActionItem[] = [];
-  if (workspace.archivedAt === null)
-    items.push({
-      action: "archive",
-      label: "Archive workspace",
-      review: isWorkspaceReviewAction("archive"),
-    });
-  else
-    items.push({
-      action: "restore",
-      label: "Restore workspace",
-      review: isWorkspaceReviewAction("restore"),
-    });
-  if (removed)
-    items.push({
-      action: "recreate-checkout",
-      label: "Recreate checkout…",
-      review: isWorkspaceReviewAction("recreate-checkout"),
-    });
-  else
-    items.push({
-      action: "remove-checkout",
-      label: "Remove checkout…",
-      review: isWorkspaceReviewAction("remove-checkout"),
+  if (options.protectedWorkspace || isWorkspaceDeleted(workspace)) return [];
+  const restorable =
+    workspace.archivedAt !== null ||
+    workspace.checkoutRemovedAt != null ||
+    workspace.checkout === "removed" ||
+    workspace.checkout === "missing";
+  const primary: WorkspaceActionId = restorable ? "restore" : "archive";
+  return [
+    {
+      action: primary,
+      label: WORKSPACE_LIFECYCLE_ACTION_LABELS[primary],
+      review: isWorkspaceReviewAction(primary),
+    },
+    {
+      action: "delete-workspace",
+      label: `${WORKSPACE_LIFECYCLE_ACTION_LABELS["delete-workspace"]}…`,
+      review: isWorkspaceReviewAction("delete-workspace"),
       destructive: true,
-    });
-  items.push({
-    action: "delete-workspace",
-    label: "Delete workspace…",
-    review: isWorkspaceReviewAction("delete-workspace"),
-    destructive: true,
-  });
-  return items;
+    },
+  ];
 }
 
-/** Labels for every action, including those only offered after inspection. */
-export const WORKSPACE_LIFECYCLE_ACTION_LABELS: Readonly<Record<WorkspaceActionId, string>> = {
-  archive: "Archive workspace",
-  restore: "Restore workspace",
-  "remove-checkout": "Remove checkout",
-  "remove-stale-record": "Remove stale workspace record",
-  "recreate-checkout": "Recreate checkout",
-  "delete-workspace": "Delete workspace",
-};
-
-/** Retention copy shown wherever archived or trashed conversations are listed. */
+/** Retention copy shown wherever archived conversations are listed or deleted. */
 export const LIFECYCLE_RETENTION_COPY = {
   archive: "Archived conversations are kept indefinitely. Unarchive them at any time.",
-  trash:
-    "Conversations in Trash keep their history, attachments and terminal history. Ryco never empties Trash automatically; items stay until you delete them permanently.",
   permanentDelete:
-    "Deleting permanently removes this conversation, its attachments and its terminal history. This cannot be undone.",
+    "Deleting removes a conversation, its attachments and its terminal history. You can undo for a few seconds; after that it's gone for good.",
 } as const;

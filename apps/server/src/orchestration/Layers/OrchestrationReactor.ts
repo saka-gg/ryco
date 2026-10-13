@@ -9,6 +9,7 @@ import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { ThreadPurgeReactor } from "../Services/ThreadPurgeReactor.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -16,6 +17,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerCommandReactor = yield* ProviderCommandReactor;
   const checkpointReactor = yield* CheckpointReactor;
   const threadDeletionReactor = yield* ThreadDeletionReactor;
+  const threadPurgeReactor = yield* ThreadPurgeReactor;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* contextHandoffCoordinator.recover();
@@ -26,6 +28,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
         providerCommandReactor.start(),
         checkpointReactor.start(),
         threadDeletionReactor.start(),
+        threadPurgeReactor.start(),
       ],
       { concurrency: "unbounded", discard: true },
     );

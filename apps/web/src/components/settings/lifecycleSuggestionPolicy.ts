@@ -24,10 +24,10 @@ export const LIFECYCLE_SUGGESTION_COPY: Record<
     ariaLabel: "Inactive conversation suggestion",
   },
   removeArchivedCheckoutsDays: {
-    title: "Suggest removing finished checkouts",
+    title: "Suggest deleting finished workspaces",
     description:
-      "Once every conversation of a workspace has been archived this long. History and the branch are always kept.",
-    ariaLabel: "Finished checkout suggestion",
+      "Once every conversation of a workspace has been archived this long. Nothing is deleted until you review it.",
+    ariaLabel: "Finished workspace suggestion",
   },
 };
 

@@ -1,4 +1,9 @@
-import { DEFAULT_LIFECYCLE_SUGGESTION_POLICY, DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
+import {
+  DEFAULT_LIFECYCLE_SUGGESTION_POLICY,
+  DEFAULT_SERVER_SETTINGS,
+  type ThreadId,
+  type WorkspaceLifecycleEffects,
+} from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -6,6 +11,7 @@ import {
   parseWorktreeStatus,
   planLifecycleSuggestions,
   resolveLifecycleSuggestionPolicy,
+  summarizeWorkspaceLifecycleEffects,
   threadPendingWork,
   type LifecycleThreadLike,
 } from "./workspaceLifecycle.ts";
@@ -220,5 +226,78 @@ describe("lifecycle suggestions", () => {
         NOW,
       ),
     ).toEqual(["background work is still running", "an approval is pending"]);
+  });
+});
+
+describe("workspace lifecycle summaries", () => {
+  const id = (value: string) => value as ThreadId;
+  const effects = (overrides: Partial<WorkspaceLifecycleEffects>): WorkspaceLifecycleEffects => ({
+    archiveWorkspace: false,
+    restoreWorkspace: false,
+    removeCheckout: false,
+    recreateCheckout: false,
+    recordCheckoutRemoval: false,
+    stopSessionThreadIds: [],
+    archiveConversationIds: [],
+    unchangedConversations: 0,
+    discardedRegenerableIgnored: 0,
+    deleteBranch: false,
+    branch: "topic",
+    ...overrides,
+  });
+
+  it("describes a delete that keeps the conversations in the archive", () => {
+    expect(
+      summarizeWorkspaceLifecycleEffects(
+        "remove-checkout",
+        effects({
+          discard: true,
+          removeCheckout: true,
+          recordCheckoutRemoval: true,
+          deleteBranch: true,
+          archiveConversationIds: [id("a"), id("b"), id("c")],
+          trashConversationIds: [id("unused")],
+        }),
+      ),
+    ).toBe(
+      "Delete 1 workspace: remove its checkout, delete branch topic, archive 3 conversations, delete 1 unused conversation. Kept conversations stay in the archive; the workspace is hidden.",
+    );
+  });
+
+  it("describes a delete that deletes the conversations too", () => {
+    expect(
+      summarizeWorkspaceLifecycleEffects(
+        "remove-checkout",
+        effects({
+          discard: true,
+          removeCheckout: true,
+          recordCheckoutRemoval: true,
+          deleteBranch: true,
+          trashConversationIds: [id("a"), id("b"), id("c")],
+          discardsWork: true,
+        }),
+        { deleteConversations: true },
+      ),
+    ).toBe(
+      "Delete 1 workspace: remove its checkout, delete branch topic, delete 3 conversations. Work that exists only here is lost.",
+    );
+  });
+
+  it("describes deleting an already-removed workspace without conversations", () => {
+    expect(
+      summarizeWorkspaceLifecycleEffects(
+        "remove-checkout",
+        effects({ discard: true, recordCheckoutRemoval: true, deleteRecord: true }),
+      ),
+    ).toBe("Delete 1 workspace.");
+  });
+
+  it("mentions a recreated checkout when restoring", () => {
+    expect(summarizeWorkspaceLifecycleEffects("restore", effects({ recreateCheckout: true }))).toBe(
+      "Restore 1 workspace: recreate its checkout on branch topic. Conversations stay as they are.",
+    );
+    expect(summarizeWorkspaceLifecycleEffects("restore", effects({ restoreWorkspace: true }))).toBe(
+      "Restore 1 workspace. Its checkout, branch and conversations stay as they are.",
+    );
   });
 });

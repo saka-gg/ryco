@@ -4865,7 +4865,7 @@ export default function ChatView(props: ChatViewProps) {
       })
       .catch(async (err: unknown) => {
         // Roll back a creation that never ran; one that already holds the request
-        // goes to Trash instead (recoverable), never deleted outright.
+        // is archived instead (recoverable), never deleted. Trash would purge it.
         await api.orchestration
           .dispatchCommand({
             type: "thread.delete",
@@ -4874,7 +4874,7 @@ export default function ChatView(props: ChatViewProps) {
           })
           .catch(() =>
             api.orchestration.dispatchCommand({
-              type: "thread.trash",
+              type: "thread.archive",
               commandId: newCommandId(),
               threadId: nextThreadId,
             }),

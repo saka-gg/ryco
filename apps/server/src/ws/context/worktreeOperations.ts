@@ -994,22 +994,9 @@ export const makeWorktreeOperations = (deps: {
         )
       : runLifecycle("git.archiveWorktree", { worktreeId: input.worktreeId, action: "archive" });
 
+  // Restore also recreates a checkout that is gone when its branch still exists.
   const restoreWorktree = (worktreeId: WorktreeId) =>
-    Option.match(workspaceLifecycle, {
-      onNone: () =>
-        failGitWorkflow("git.restoreWorktree", "Workspace lifecycle management is unavailable."),
-      onSome: (lifecycle) =>
-        lifecycle.preview({ worktreeId, action: "recreate-checkout" }).pipe(
-          Effect.mapError((cause) => toGitManagerError("git.restoreWorktree", cause.detail, cause)),
-          // Records archived by older builds lost their checkout: recreate it when possible.
-          Effect.flatMap((preview) =>
-            runLifecycle("git.restoreWorktree", {
-              worktreeId,
-              action: preview.blockers.length === 0 ? "recreate-checkout" : "restore",
-            }),
-          ),
-        ),
-    });
+    runLifecycle("git.restoreWorktree", { worktreeId, action: "restore" });
 
   const deleteWorktree = (input: {
     readonly worktreeId: WorktreeId;

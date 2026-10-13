@@ -20,7 +20,7 @@ export function ConnectedInboxSidebar(
   props: InboxSidebarProps &
     Pick<
       ReturnType<typeof useThreadActions>,
-      "archiveThread" | "trashThread" | "stopThreadSession" | "interruptThreadTurn"
+      "archiveThread" | "deleteThread" | "stopThreadSession" | "interruptThreadTurn"
     >,
 ) {
   const router = useRouter();
@@ -38,7 +38,7 @@ export function ConnectedInboxSidebar(
     },
     [router],
   );
-  const { trashThread, archiveThread, stopThreadSession, interruptThreadTurn } = props;
+  const { deleteThread, archiveThread, stopThreadSession, interruptThreadTurn } = props;
   const clipboard = useThreadClipboardActions();
   const appSettingsConfirmThreadDelete = useSettings((s) => s.confirmThreadDelete);
   const appSettingsConfirmThreadArchive = useSettings((s) => s.confirmThreadArchive);
@@ -73,7 +73,7 @@ export function ConnectedInboxSidebar(
   const chat = useChatRowMenuContext();
   const actions = useThreadMenuActions({
     router,
-    trashThread,
+    deleteThread,
     archiveThread,
     stopThreadSession,
     interruptThreadTurn,

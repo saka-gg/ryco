@@ -129,6 +129,7 @@ import Migration0087, {
 import Migration0088, {
   reprojectLegacyActivityPayloads,
 } from "./Migrations/088_LegacyActivityPayloads.ts";
+import Migration0089, { ensureLifecycleMarkersTable } from "./Migrations/089_RetireThreadTrash.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -228,6 +229,7 @@ export const migrationEntries = [
   [86, "ProjectionProjectRepositoryIdentity", Migration0086],
   [87, "ProjectionThreadAnchorsAndStatisticsPartials", Migration0087],
   [88, "LegacyActivityPayloads", Migration0088],
+  [89, "RetireThreadTrash", Migration0089],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -541,6 +543,14 @@ export const repairLegacyActivityPayloads = Effect.fn("repairLegacyActivityPaylo
   }
 });
 
+// Lifecycle markers: run 089 again as a repair when a later id was recorded first (parallel
+// branches claim the same next id).
+export const repairLifecycleMarkersTable = Effect.fn("repairLifecycleMarkersTable")(function* () {
+  if (yield* ensureLifecycleMarkersTable) {
+    yield* Effect.log("Repaired lifecycle markers table");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -729,6 +739,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 88) {
         yield* repairLegacyActivityPayloads();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 89) {
+        yield* repairLifecycleMarkersTable();
       }
     }),
   );

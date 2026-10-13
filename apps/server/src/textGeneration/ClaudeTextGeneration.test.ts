@@ -348,6 +348,35 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
     ),
   );
 
+  it.effect("summarizes workspace changes in a lightweight, tool-free call", () =>
+    withFakeClaudeEnv(
+      {
+        output: JSON.stringify({
+          structured_output: { summary: "  Adds a **farewell** greeting.  " },
+        }),
+        argsMustContain: "--no-session-persistence",
+        stdinMustContain: "+goodbye",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.summarizeWorkspaceChanges({
+            cwd: process.cwd(),
+            branch: "topic",
+            statusSummary: " M app.ts",
+            diffPatch: "diff --git a/app.ts b/app.ts\n+goodbye",
+            untrackedFiles: "",
+            unmergedLog: "",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-sonnet-4-6",
+            },
+          });
+
+          expect(generated.summary).toBe("Adds a farewell greeting.");
+        }),
+    ),
+  );
+
   it.effect("runs Claude text generation with the configured Claude HOME", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

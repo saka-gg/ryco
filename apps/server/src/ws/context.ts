@@ -6,6 +6,7 @@ import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessio
 import { StorageService } from "../storage/StorageService.ts";
 import { storagePathBlocker } from "../storage/lifecycle.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
+import { WorkspaceChangeSummary } from "../workspace/WorkspaceChangeSummary.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
@@ -231,6 +232,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const storageService = yield* Effect.serviceOption(StorageService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const workspaceLifecycle = yield* Effect.serviceOption(WorkspaceLifecycle);
+    const workspaceChangeSummary = yield* Effect.serviceOption(WorkspaceChangeSummary);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
@@ -1187,6 +1189,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     return {
       storageService,
       workspaceLifecycle,
+      workspaceChangeSummary,
       storagePrincipalKey: `${principal.transport}:${principal.scopeId}:${crypto.randomUUID()}`,
       currentSessionId,
       projectionSnapshotQuery,

@@ -10,6 +10,8 @@ import {
   type SidebarStatusBucket,
   type ThreadStatusPill,
 } from "../../Sidebar.logic";
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
+import type { WorktreeCheckoutRemovalReason } from "@ryco/contracts";
 import type { WorktreePullRequestLink } from "@ryco/shared/worktreePullRequests";
 
 export type SidebarWorktreeOrigin = "main" | "branch" | "pr" | "issue" | "manual";
@@ -41,6 +43,8 @@ export interface SidebarWorktree {
   archivedAt?: string | null | undefined;
   /** The physical checkout is gone; the record keeps its branch and path as provenance. */
   checkoutRemovedAt?: string | null | undefined;
+  /** `deleted`: the user deleted the workspace; the record only remains as provenance. */
+  checkoutRemovalReason?: WorktreeCheckoutRemovalReason | null | undefined;
   manualPosition?: number | null | undefined;
   updatedAt?: string | undefined;
 }
@@ -181,18 +185,33 @@ export function composeSidebarTreeStructure(
         };
       }
 
+      // A deleted workspace is never listed. Its archived conversations stay
+      // with the project's archive instead of growing a derived row of its own.
+      const explicitWorktrees = explicitWorktreesByProjectId.get(project.id) ?? [];
+      const deletedWorktreeIds = new Set(
+        explicitWorktrees.filter(isWorkspaceDeleted).map((worktree) => worktree.worktreeId),
+      );
+      const worktreeThreads =
+        deletedWorktreeIds.size === 0
+          ? materializedThreads
+          : materializedThreads.filter(
+              (thread) =>
+                thread.archivedAt === null ||
+                thread.worktreeId == null ||
+                !deletedWorktreeIds.has(thread.worktreeId),
+            );
       const projectWorktrees = ensureProjectWorktrees({
         project,
         // Drafts describe where a future session should run. They do not own a
         // checkout yet, so allowing them into synthesis would make that intent
         // look like a real worktree (and can overwrite the main row's branch).
-        threads: materializedThreads,
-        worktrees: explicitWorktreesByProjectId.get(project.id) ?? [],
+        threads: worktreeThreads,
+        worktrees: explicitWorktrees.filter((worktree) => !isWorkspaceDeleted(worktree)),
       });
       const mergedNodes = mergeEquivalentWorktrees(project, projectWorktrees);
       const sortedWorktrees = sortWorktrees(mergedNodes.worktrees);
       const threadsByNode = assignThreadsToWorktreeNodes(
-        materializedThreads,
+        worktreeThreads,
         sortedWorktrees,
         project,
         mergedNodes,

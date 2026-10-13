@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
+import { isWorkspaceDeleted, type WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
 import {
   EnvironmentId,
   ProjectId,
@@ -112,10 +112,10 @@ export function useSidebarWorktreeActions(params: {
       }
       toastManager.add({
         type: "info",
-        title:
-          worktreeNode.worktree.checkoutRemovedAt != null
-            ? "Recreate the checkout to start a thread here"
-            : "Restore the workspace to start a thread here",
+        // Restore also recreates a removed checkout; a deleted workspace is gone.
+        title: isWorkspaceDeleted(worktreeNode.worktree)
+          ? "This workspace was deleted."
+          : "Restore the workspace to start a thread here",
       });
     },
     [createThreadInWorktree, navigateToThread],
@@ -181,9 +181,9 @@ export function useSidebarWorktreeActions(params: {
   );
 
   /**
-   * Workspace actions never touch conversations directly: the server lifecycle
-   * service archives (never deletes) them as part of checkout removal, after a
-   * review that shows the exact effects.
+   * Workspace actions never touch conversations directly: Archive and Restore
+   * run on the server as they are, and Delete opens its review, which shows the
+   * exact effects (conversations are kept unless the reader deletes them too).
    */
   const runWorkspaceAction = useCallback(
     (worktreeNode: SidebarTreeWorktree, action: WorkspaceActionId) => {

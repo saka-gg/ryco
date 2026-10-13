@@ -116,6 +116,26 @@ export interface IssueContentGenerationResult {
   body?: string;
 }
 
+/** Read-only Git context of work that exists only in one checkout. */
+export interface WorkspaceChangesSummaryGenerationInput {
+  cwd: string;
+  branch: string | null;
+  /** Porcelain status plus the diff stat of uncommitted changes. */
+  statusSummary: string;
+  /** Patch of tracked changes against HEAD. */
+  diffPatch: string;
+  /** Untracked file paths, one per line. */
+  untrackedFiles: string;
+  /** Commits the project's main checkout does not contain, with their diff stat. */
+  unmergedLog: string;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface WorkspaceChangesSummaryGenerationResult {
+  summary: string;
+}
+
 export interface RankInboxThreadsInput {
   cwd: string;
   chunk: ThreadPriorityPromptChunk;
@@ -204,6 +224,14 @@ export interface TextGenerationShape {
   readonly rankInboxThreads: (
     input: RankInboxThreadsInput,
   ) => Effect.Effect<RankInboxThreadsResult, TextGenerationError>;
+
+  /**
+   * Describe, in at most two sentences, the work a checkout holds that deleting
+   * it would lose. Tool-free; the change data is quoted, never followed.
+   */
+  readonly summarizeWorkspaceChanges: (
+    input: WorkspaceChangesSummaryGenerationInput,
+  ) => Effect.Effect<WorkspaceChangesSummaryGenerationResult, TextGenerationError>;
 }
 
 /**
@@ -220,7 +248,8 @@ type TextGenerationOp =
   | "generateThreadTitle"
   | "generateIssueContent"
   | "rankInboxThreads"
-  | "answerSideQuestion";
+  | "answerSideQuestion"
+  | "summarizeWorkspaceChanges";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistryShape,
@@ -270,6 +299,10 @@ export const makeTextGenerationFromRegistry = (
   rankInboxThreads: (input) =>
     resolveInstance(registry, "rankInboxThreads", input.modelSelection.instanceId).pipe(
       Effect.flatMap((textGeneration) => textGeneration.rankInboxThreads(input)),
+    ),
+  summarizeWorkspaceChanges: (input) =>
+    resolveInstance(registry, "summarizeWorkspaceChanges", input.modelSelection.instanceId).pipe(
+      Effect.flatMap((textGeneration) => textGeneration.summarizeWorkspaceChanges(input)),
     ),
 });
 

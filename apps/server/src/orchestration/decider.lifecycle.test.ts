@@ -341,6 +341,57 @@ describe("resuming without a checkout", () => {
     expect(elsewhere.events.some((e) => e.type === "thread.turn-start-requested")).toBe(true);
   });
 
+  it("records a deleted workspace once, also over a removed checkout, and never restores it", async () => {
+    const model = await seed();
+    const removed = await decide(model, {
+      type: "worktree.checkout.remove",
+      commandId: cmd("remove"),
+      worktreeId,
+      reason: "removed",
+      removedAt: NOW,
+    });
+    const deleted = await decide(removed.model, {
+      type: "worktree.checkout.remove",
+      commandId: cmd("delete"),
+      worktreeId,
+      reason: "deleted",
+      removedAt: NOW,
+    });
+    expect(deleted.events.map((e) => e.type)).toEqual(["worktree.checkoutRemoved"]);
+    expect(
+      deleted.model.worktrees?.find((w) => w.worktreeId === worktreeId)?.checkoutRemovalReason,
+    ).toBe("deleted");
+    await expect(reject(deleted.model, turnStart)).rejects.toThrow(
+      "was deleted; this conversation is read-only",
+    );
+    await expect(
+      reject(deleted.model, {
+        type: "worktree.checkout.remove",
+        commandId: cmd("delete-again"),
+        worktreeId,
+        reason: "deleted",
+        removedAt: NOW,
+      }),
+    ).rejects.toThrow("was deleted");
+    await expect(
+      reject(deleted.model, {
+        type: "worktree.checkout.restore",
+        commandId: cmd("restore"),
+        worktreeId,
+        worktreePath: "/tmp/lifecycle-worktree",
+        restoredAt: NOW,
+      }),
+    ).rejects.toThrow("was deleted");
+    await expect(
+      reject(deleted.model, {
+        type: "worktree.restore",
+        commandId: cmd("unarchive"),
+        worktreeId,
+        restoredAt: NOW,
+      }),
+    ).rejects.toThrow("was deleted");
+  });
+
   it("never treats the main checkout as removable or archivable", async () => {
     const model = await seed();
     const mainId = WorktreeId.make("worktree-main");

@@ -68,7 +68,7 @@ import {
   SettingsSection,
   SettingsCard,
 } from "./settingsLayout";
-import { LifecycleSuggestionSettings, TrashSection } from "./LifecycleSettings";
+import { LifecycleSuggestionSettings } from "./LifecycleSettings";
 import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
@@ -912,14 +912,14 @@ export function GeneralSettingsPanel({
         />
 
         <SettingsRow
-          title="Move to Trash confirmation"
-          description="Ask before moving a thread to Trash. Deleting from Trash always asks."
+          title="Delete confirmation"
+          description="Ask before deleting a thread. Undo stays available for a few seconds either way."
           owner="client"
           scope={localScopeLabel}
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
               <SettingResetButton
-                label="Move to Trash confirmation"
+                label="Delete confirmation"
                 onClick={() =>
                   updateSettings({
                     confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -934,7 +934,7 @@ export function GeneralSettingsPanel({
               onCheckedChange={(checked) =>
                 updateSettings({ confirmThreadDelete: Boolean(checked) })
               }
-              aria-label="Confirm moving threads to Trash"
+              aria-label="Confirm thread deletion"
             />
           }
         />
@@ -1066,7 +1066,7 @@ export function ArchivedThreadsPanel() {
     mutationCapability.allowed && (!target || (target.connected && target.canMutate !== false));
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
-  const { unarchiveThread, confirmAndTrashThread } = useThreadActions();
+  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const config = useServerConfig();
   const lifecycleEnvironmentId = target?.environmentId ?? config?.environment.environmentId ?? null;
   const archivedGroups = useMemo(
@@ -1091,7 +1091,7 @@ export function ArchivedThreadsPanel() {
       const clicked = await api.contextMenu.show(
         [
           { id: "unarchive", label: "Unarchive" },
-          { id: "trash", label: "Move to Trash", destructive: true },
+          { id: "delete", label: "Delete…", destructive: true },
         ],
         position,
       );
@@ -1111,17 +1111,17 @@ export function ArchivedThreadsPanel() {
         return;
       }
 
-      if (clicked === "trash") {
-        await confirmAndTrashThread(threadRef);
+      if (clicked === "delete") {
+        await confirmAndDeleteThread(threadRef);
       }
     },
-    [confirmAndTrashThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
+    [confirmAndDeleteThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
   );
 
   return (
     <SettingsPageContainer>
       <SettingsNotice tone="info" title="Retention">
-        {LIFECYCLE_RETENTION_COPY.archive} {LIFECYCLE_RETENTION_COPY.trash}
+        {LIFECYCLE_RETENTION_COPY.archive} {LIFECYCLE_RETENTION_COPY.permanentDelete}
       </SettingsNotice>
       {archivedGroups.length === 0 ? (
         <SettingsSection title="Archived threads">
@@ -1166,11 +1166,6 @@ export function ArchivedThreadsPanel() {
           </SettingsSection>
         ))
       )}
-      <TrashSection
-        environmentId={lifecycleEnvironmentId}
-        mutationAllowed={mutationAllowed}
-        mutationReason={mutationCapability.reason ?? null}
-      />
       <LifecycleSuggestionSettings
         environmentId={lifecycleEnvironmentId}
         disabled={!mutationAllowed}

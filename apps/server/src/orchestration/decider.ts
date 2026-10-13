@@ -69,6 +69,7 @@ import {
   requireThreadIdleForContextHandoff,
   findWorktreeById,
   requireWorktree,
+  requireWorktreeNotDeleted,
   threadLifecycleTurnBlocker,
 } from "./commandInvariants.ts";
 import {
@@ -718,8 +719,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Project '${command.projectId}' is not empty and cannot be deleted without force=true.`,
         });
       }
-      // Removing a project never deletes its conversations: they move to Trash, where
-      // they stay recoverable (as history) and permanent deletion remains explicit.
+      // A forced project removal deletes its conversations: they move to Trash, the
+      // delete grace period, and ThreadPurgeReactor deletes them permanently afterwards.
       if (activeThreads.length > 0) {
         return yield* decideCommandSequence({
           readModel,
@@ -2441,6 +2442,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "worktree.restore": {
+      yield* requireWorktreeNotDeleted({ readModel, command, worktreeId: command.worktreeId });
       return {
         ...withEventBase({
           aggregateKind: "worktree",
@@ -2521,10 +2523,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "The project root/main checkout is never a removable workspace.",
         });
       }
-      if (worktree.checkoutRemovedAt != null) {
+      // Deleting a workspace whose checkout is already removed only re-records the
+      // removal as deleted; a deleted workspace is final.
+      if (
+        worktree.checkoutRemovedAt != null &&
+        (command.reason !== "deleted" || worktree.checkoutRemovalReason === "deleted")
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Workspace '${command.worktreeId}' already records its checkout as removed.`,
+          detail:
+            worktree.checkoutRemovalReason === "deleted"
+              ? `Workspace '${command.worktreeId}' was deleted.`
+              : `Workspace '${command.worktreeId}' already records its checkout as removed.`,
         });
       }
       const removed: PlannedOrchestrationEvent = {
@@ -2598,6 +2608,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "worktree.checkout.restore": {
+      yield* requireWorktreeNotDeleted({ readModel, command, worktreeId: command.worktreeId });
       const worktree = yield* requireWorktree({
         readModel,
         command,

@@ -1,4 +1,5 @@
 import {
+  isWorkspaceDeleted,
   listThreadLifecycleActions,
   listWorkspaceLifecycleActions,
   type ThreadLifecycleSubject,
@@ -21,7 +22,7 @@ export type ThreadMenuActionId =
   | "stop-session"
   | "archive"
   | "unarchive"
-  | "trash"
+  | "delete"
   | "discard-draft"
   | "workspace"
   | `workspace:${WorkspaceActionId}`
@@ -105,8 +106,12 @@ export function buildThreadMenuInventory(input: ThreadMenuInventoryInput): Threa
     items.push({ id: "copy-path", label: "Copy Path" });
   }
   items.push({ id: "copy-thread-id", label: "Copy Thread ID" });
-  // A chat folder is not a Git workspace.
-  if (input.workspace && !chat) {
+  // A chat folder is not a Git workspace, and a deleted workspace is gone.
+  if (
+    input.workspace &&
+    !chat &&
+    !(input.workspace.record && isWorkspaceDeleted(input.workspace.record))
+  ) {
     const workspaceItems: ThreadMenuActionItem[] = input.workspace.record
       ? listWorkspaceLifecycleActions(input.workspace.record, {
           protectedWorkspace: input.workspace.protectedWorkspace,

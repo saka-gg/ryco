@@ -104,6 +104,8 @@ export interface MapOptions {
   readonly hiddenCheckouts: ReadonlySet<string>;
   /** Workspace keys whose threads are fanned out. */
   readonly expanded: ReadonlySet<string>;
+  /** Workspaces that are not archived; off leaves only the archived ones. */
+  readonly showActive: boolean;
   readonly showArchived: boolean;
   readonly showAutomations: boolean;
   /** Manual moves (drag), by node key. */
@@ -281,7 +283,7 @@ export function buildProjectMap(
     let deviceWorking = false;
     const threadWorkspace = new Map<string, string>();
     for (const workspace of checkout.workspaces) {
-      if (workspace.archived && !options.showArchived) continue;
+      if (workspace.archived ? !options.showArchived : !options.showActive) continue;
       const workspaceKey = mapKey.workspace(checkout.key, workspace.id);
       nodes.push(
         place({

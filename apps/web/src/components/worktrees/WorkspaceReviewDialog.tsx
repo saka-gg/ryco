@@ -10,14 +10,7 @@ import {
 } from "../../workspaceLifecycle";
 import { useProjectEditAccess } from "../projects/sections/useProjectEditAccess";
 import { WorkspaceReview } from "../projects/sections/WorkspaceReview";
-import {
-  Dialog,
-  DialogDescription,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
+import { Dialog, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "../ui/dialog";
 
 function WorkspaceReviewDialogBody(props: {
   readonly target: WorkspaceReviewTarget;
@@ -33,7 +26,6 @@ function WorkspaceReviewDialogBody(props: {
     <DialogPopup className="max-w-md" data-testid="workspace-review-dialog">
       <DialogHeader>
         <DialogTitle>{WORKSPACE_LIFECYCLE_ACTION_LABELS[target.action]}</DialogTitle>
-        <DialogDescription className="truncate font-mono text-xs">{target.title}</DialogDescription>
       </DialogHeader>
       <DialogPanel>
         <WorkspaceReview
@@ -52,7 +44,6 @@ function WorkspaceReviewDialogBody(props: {
           canApply={access.canEdit && applyCapability.allowed}
           onClose={props.onClose}
           onReopen={() => openWorkspaceReviewDialog(target)}
-          onChangeAction={(action) => openWorkspaceReviewDialog({ ...target, action })}
         />
         {access.reason ? (
           <p className="mt-1 text-[11.5px] text-muted-foreground">{access.reason}</p>

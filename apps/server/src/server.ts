@@ -3,6 +3,7 @@ import { WorktreeNotesServiceLive } from "./notes/WorktreeNotesService.ts";
 import { DailyRecapQueryLive } from "./statistics/DailyRecapQuery.ts";
 import { StorageServiceLive } from "./storage/StorageService.ts";
 import { WorkspaceLifecycleLive } from "./workspace/WorkspaceLifecycle.ts";
+import { WorkspaceChangeSummaryLive } from "./workspace/WorkspaceChangeSummary.ts";
 import { ChatFoldersLive } from "./project/chatFolders.ts";
 import { ProviderProtectedPathsLive } from "./storage/providerProtection.ts";
 import { SessionImportLive } from "./imports/SessionImport.ts";
@@ -94,6 +95,7 @@ import { ContextHandoffCoordinatorLive } from "./orchestration/Layers/ContextHan
 import { ContextHandoffServiceLive } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { ThreadPurgeReactorLive } from "./orchestration/Layers/ThreadPurgeReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
@@ -327,6 +329,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ContextHandoffRepositoryLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(ThreadPurgeReactorLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -650,6 +653,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   Layer.provideMerge(ThreadForkRepositoryLive),
   // One lifecycle authority for sidebar, Inbox, workspace management and Agent Control.
   Layer.provideMerge(WorkspaceLifecycleLive),
+  // Delete dialog: what the work a checkout alone holds is about.
+  Layer.provideMerge(WorkspaceChangeSummaryLive),
   Layer.provideMerge(RuntimeDependenciesLive),
   // One process-scoped manager is shared by control RPC, frame streaming,
   // provider tools, idle cleanup, and crash-recovery ownership.

@@ -32,12 +32,14 @@ import {
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
+  buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitleResult,
+  sanitizeWorkspaceChangesSummary,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
 import {
@@ -54,7 +56,10 @@ import {
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
-/** Titles and branch names are short; the user's own message is the fallback title. */
+/**
+ * Titles, branch names and workspace change summaries are short; each has a
+ * fallback (the user's own message, or no summary).
+ */
 const CLAUDE_NAMING_TIMEOUT_MS = 30_000;
 const CLAUDE_TIMEOUT_DETAIL = "Claude CLI request timed out.";
 
@@ -110,7 +115,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateThreadTitle"
       | "generateIssueContent"
       | "rankInboxThreads"
-      | "answerSideQuestion";
+      | "answerSideQuestion"
+      | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -273,14 +279,14 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   // ---------------------------------------------------------------------------
 
   /**
-   * Titles and branch names: lightweight first, in an empty directory, then
+   * Titles, branch names and change summaries: lightweight first, in an empty directory, then
    * once with the user's setting sources (env, apiKeyHelper) when that may be
    * what was missing. Never with tools, never persisted as a session.
    */
   const runClaudeNamingJson = <S extends Schema.Top>(input: {
     readonly operation: Extract<
       LightweightTextGenerationOperation,
-      "generateThreadTitle" | "generateBranchName"
+      "generateThreadTitle" | "generateBranchName" | "summarizeWorkspaceChanges"
     >;
     readonly cwd: string;
     readonly prompt: string;
@@ -466,6 +472,20 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     return yield* validateRankInboxThreadsResult(input, generated.rankings);
   });
 
+  const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
+    "ClaudeTextGeneration.summarizeWorkspaceChanges",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildWorkspaceChangesSummaryPrompt(input);
+    const generated = yield* runClaudeNamingJson({
+      operation: "summarizeWorkspaceChanges",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+    });
+    return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
@@ -474,5 +494,6 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     generateIssueContent,
     rankInboxThreads,
     answerSideQuestion,
+    summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;
 });

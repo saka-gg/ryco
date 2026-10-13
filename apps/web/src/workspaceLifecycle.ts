@@ -7,14 +7,17 @@ import {
 import type {
   EnvironmentId,
   ProjectId,
+  ThreadId,
   WorkspaceLifecycleResult,
   WorktreeId,
 } from "@ryco/contracts";
+import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { create } from "zustand";
 
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
 import { readEnvironmentApi } from "./environmentApi";
 import { buildProjectsPageLocation } from "./projectsRoute";
+import { undoThreadDeletes } from "./threadDeleteUndo";
 
 export interface WorkspaceLifecycleTarget {
   readonly environmentId: EnvironmentId;
@@ -99,14 +102,55 @@ export function buildWorkspaceLocation(input: {
   });
 }
 
+/** Whether a run recreated the workspace's checkout (Restore does when it was removed). */
+export const recreatedCheckout = (result: WorkspaceLifecycleResult): boolean =>
+  result.steps.some((step) => step.id === "recreate-checkout" && step.status === "done");
+
 export function announceWorkspaceLifecycleResult(
   target: WorkspaceLifecycleTarget,
   result: WorkspaceLifecycleResult,
   retry: () => void,
+  options: {
+    /** Conversations the run deleted; the toast offers Undo for them. */
+    readonly deletedConversationIds?: readonly ThreadId[] | undefined;
+  } = {},
 ): void {
   useWorkspaceLifecycleChanges.getState().markChanged();
   if (result.outcome === "completed") {
-    toastManager.add({ type: "success", title: result.message });
+    const deleted = options.deletedConversationIds ?? [];
+    if (deleted.length > 0) {
+      toastManager.add({
+        type: "success",
+        title: result.message,
+        timeout: THREAD_DELETE_UNDO_MS,
+        actionProps: {
+          children: "Undo",
+          onClick: () =>
+            void undoThreadDeletes(target.environmentId, deleted).then(
+              () => useWorkspaceLifecycleChanges.getState().markChanged(),
+              (error: unknown) =>
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title:
+                      deleted.length === 1
+                        ? "Failed to restore conversation"
+                        : "Failed to restore conversations",
+                    description: error instanceof Error ? error.message : "An error occurred.",
+                  }),
+                ),
+            ),
+        },
+      });
+      return;
+    }
+    toastManager.add({
+      type: "success",
+      title: result.message,
+      ...(target.action === "restore" && recreatedCheckout(result)
+        ? { description: "The checkout was recreated." }
+        : {}),
+    });
     return;
   }
   const failedStep = result.steps.find((step) => step.status === "failed");
@@ -145,6 +189,7 @@ export async function runWorkspaceLifecycleBatch(
   const action = targets[0]!.action;
   const failed: Array<{ readonly target: (typeof targets)[number]; readonly reason: string }> = [];
   let done = 0;
+  let recreated = 0;
   for (const target of targets) {
     const lifecycle = readLifecycleApi(target.environmentId);
     if (!lifecycle) {
@@ -164,8 +209,10 @@ export async function runWorkspaceLifecycleBatch(
         ...preview.request,
         expectedFingerprint: preview.fingerprint,
       });
-      if (result.outcome === "completed") done += 1;
-      else failed.push({ target, reason: result.message });
+      if (result.outcome === "completed") {
+        done += 1;
+        if (recreatedCheckout(result)) recreated += 1;
+      } else failed.push({ target, reason: result.message });
     } catch (error) {
       failed.push({
         target,
@@ -175,8 +222,16 @@ export async function runWorkspaceLifecycleBatch(
   }
   useWorkspaceLifecycleChanges.getState().markChanged();
   const verb = DIRECT_ACTION_DONE[action];
+  const recreatedNote =
+    recreated > 0
+      ? `${recreated === 1 ? "1 checkout was" : `${recreated} checkouts were`} recreated.`
+      : null;
   if (failed.length === 0) {
-    toastManager.add({ type: "success", title: `${verb} ${workspaces(done)}` });
+    toastManager.add({
+      type: "success",
+      title: `${verb} ${workspaces(done)}`,
+      ...(recreatedNote ? { description: recreatedNote } : {}),
+    });
     return;
   }
   toastManager.add(
@@ -197,8 +252,8 @@ export async function runWorkspaceLifecycleBatch(
 
 /**
  * Entry point for every surface (sidebar worktree menu, Inbox Workspace submenu,
- * the project page). Hiding/restoring a record runs directly; anything that
- * touches a checkout goes to its review with the server's exact effects.
+ * the project page). Archive and Restore run directly (Restore also recreates a
+ * removed checkout); Delete goes to its review with the server's exact effects.
  */
 export async function runWorkspaceLifecycleAction(
   target: WorkspaceLifecycleTarget,

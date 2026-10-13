@@ -3,12 +3,22 @@ import type {
   ServerSettings,
   WorkspaceLifecycleAction,
   WorkspaceLifecycleEffects,
+  WorkspaceLifecycleRequest,
 } from "@ryco/contracts";
 import { DEFAULT_LIFECYCLE_SUGGESTION_POLICY } from "@ryco/contracts/workspace-lifecycle";
 
 import { threadHasConversation } from "./threadFork.ts";
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Deleting a conversation is final after this grace period. Until then it is
+ * hidden everywhere (the server's Trash state) and Undo restores it; the server
+ * purges it afterwards, also across restarts.
+ */
+export const THREAD_DELETE_GRACE_MS = 10_000;
+/** How long the client offers Undo: ends before the server purges. */
+export const THREAD_DELETE_UNDO_MS = 8_000;
 
 export function resolveLifecycleSuggestionPolicy(
   settings: Partial<Pick<ServerSettings, "lifecycleSuggestions" | "projectLifecycleSuggestions">>,
@@ -306,6 +316,7 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
 export function summarizeWorkspaceLifecycleEffects(
   action: WorkspaceLifecycleAction,
   effects: WorkspaceLifecycleEffects,
+  request?: Pick<WorkspaceLifecycleRequest, "deleteConversations">,
 ): string {
   const archived = effects.archiveConversationIds.length;
   const conversations =
@@ -317,24 +328,28 @@ export function summarizeWorkspaceLifecycleEffects(
     : "keep history and branch";
   if (action === "remove-checkout" && effects.discard) {
     const trashed = effects.trashConversationIds?.length ?? 0;
+    const deleteAll = request?.deleteConversations === true;
     const parts = [
-      effects.removeCheckout
-        ? "remove its checkout"
-        : effects.recordCheckoutRemoval
-          ? "record its missing checkout as removed"
-          : null,
-      trashed > 0 ? `move ${plural(trashed, "conversation")} to Trash` : null,
-      effects.deleteBranch ? `delete branch ${effects.branch}` : `keep branch ${effects.branch}`,
+      effects.removeCheckout ? "remove its checkout" : null,
+      effects.deleteBranch ? `delete branch ${effects.branch}` : null,
+      archived > 0 ? `archive ${plural(archived, "conversation")}` : null,
+      trashed > 0
+        ? `delete ${plural(trashed, deleteAll ? "conversation" : "unused conversation")}`
+        : null,
     ].filter((part) => part !== null);
-    return `Delete 1 workspace: ${parts.join(", ")}.${
-      effects.discardsWork ? " Work that exists only here is lost." : ""
-    }`;
+    const kept =
+      !effects.deleteRecord && !deleteAll && archived + effects.unchangedConversations > 0;
+    return `Delete 1 workspace${parts.length > 0 ? `: ${parts.join(", ")}` : ""}.${
+      kept ? " Kept conversations stay in the archive; the workspace is hidden." : ""
+    }${effects.discardsWork ? " Work that exists only here is lost." : ""}`;
   }
   switch (action) {
     case "archive":
       return "Archive 1 workspace. Its checkout, branch and conversations stay as they are.";
     case "restore":
-      return "Restore 1 workspace. Its checkout, branch and conversations stay as they are.";
+      return effects.recreateCheckout
+        ? `Restore 1 workspace: recreate its checkout on branch ${effects.branch}. Conversations stay as they are.`
+        : "Restore 1 workspace. Its checkout, branch and conversations stay as they are.";
     case "remove-checkout":
       return effects.removeCheckout
         ? `Remove 1 checkout, ${conversations}, ${branch}.`

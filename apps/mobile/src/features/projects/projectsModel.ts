@@ -1,3 +1,4 @@
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 import type {
   Project,
   SidebarThreadSummary,
@@ -101,8 +102,11 @@ export function buildProjectDetail(input: {
 
   const worktrees = input.worktrees
     .filter(
+      // A deleted workspace only remains as hidden provenance for its conversations.
       (worktree) =>
-        worktree.environmentId === input.environmentId && worktree.projectId === input.projectId,
+        worktree.environmentId === input.environmentId &&
+        worktree.projectId === input.projectId &&
+        !isWorkspaceDeleted(worktree),
     )
     .toSorted(newestFirst);
   const threads = input.threads

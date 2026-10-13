@@ -685,7 +685,6 @@ function WorkspacePanel(props: {
                 title,
               })
             }
-            onChangeAction={props.onReview}
           />
         </div>
       </>
@@ -828,15 +827,11 @@ function WorkspacePanel(props: {
         ) : null}
         {lifecycle.map((action) => {
           const Icon = ACTION_ICONS[action];
-          const removal =
-            action === "remove-checkout" ||
-            action === "remove-stale-record" ||
-            action === "delete-workspace";
           return (
             <Button
               key={action}
               size="sm"
-              variant={removal ? "destructive-outline" : "outline"}
+              variant={isWorkspaceReviewAction(action) ? "destructive-outline" : "outline"}
               disabled={!canMutate || !registeredId}
               onClick={() =>
                 registeredId &&
@@ -1113,11 +1108,11 @@ function ThreadPanel(props: {
         return run(label, () => threadActions.archiveThread(ref));
       case "unarchive":
         return run(label, () => threadActions.unarchiveThread(ref));
-      case "trash":
-        // A thread in Trash leaves the map; so does its card.
+      case "delete":
+        // A deleted thread leaves the map; so does its card.
         return run(
-          label,
-          () => threadActions.confirmAndTrashThread(ref),
+          "Delete",
+          () => threadActions.confirmAndDeleteThread(ref),
           () => {
             if (!detail.threads.has(props.id)) props.onSelect(null);
           },

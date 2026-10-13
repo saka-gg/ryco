@@ -1,4 +1,5 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 import type { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { FolderGit2Icon, FolderIcon, GitBranchPlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -97,7 +98,10 @@ export function NewThreadWorkLocation({
   const worktrees = useMemo<ReadonlyArray<WorktreeChoice>>(
     () =>
       worktreeSummaries.flatMap((worktree) =>
-        worktree.worktreePath && worktree.archivedAt === null && worktree.checkoutRemovedAt == null
+        worktree.worktreePath &&
+        worktree.archivedAt === null &&
+        worktree.checkoutRemovedAt == null &&
+        !isWorkspaceDeleted(worktree)
           ? [
               {
                 worktreeId: worktree.id,
