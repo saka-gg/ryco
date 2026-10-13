@@ -81,7 +81,7 @@ export const OpenInPicker = memo(function OpenInPicker({
         disabled={!preferredEditor || !openInCwd}
         onClick={() => openInEditor(preferredEditor)}
       >
-        {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-3.5" />}
+        {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-4" />}
         <span className="sr-only @3xl/header-actions:not-sr-only @3xl/header-actions:ml-0.5">
           Open
         </span>
@@ -99,11 +99,15 @@ export const OpenInPicker = memo(function OpenInPicker({
         >
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
-        <MenuPopup align="end">
+        <MenuPopup align="end" className="min-w-52">
           {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
           {options.map(({ label, Icon, value }) => (
-            <MenuItem key={value} onClick={() => openInEditor(value)}>
-              <Icon aria-hidden="true" className="text-muted-foreground" />
+            <MenuItem
+              key={value}
+              className="gap-2.5 sm:min-h-8"
+              onClick={() => openInEditor(value)}
+            >
+              <Icon aria-hidden="true" className="size-5 opacity-100" />
               {label}
               {value === preferredEditor && openFavoriteEditorShortcutLabel && (
                 <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>

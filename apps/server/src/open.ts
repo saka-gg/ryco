@@ -110,6 +110,12 @@ function resolveAvailableCommand(
 const DARWIN_APP_BUNDLE_RELATIVE_CLI_PATHS: Partial<Record<EditorId, readonly string[]>> = {
   cursor: ["Cursor.app/Contents/Resources/app/bin/cursor"],
   windsurf: ["Windsurf.app/Contents/Resources/app/bin/windsurf"],
+  trae: ["Trae.app/Contents/Resources/app/bin/trae"],
+  kiro: ["Kiro.app/Contents/Resources/app/bin/kiro"],
+  vscode: ["Visual Studio Code.app/Contents/Resources/app/bin/code"],
+  "vscode-insiders": ["Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders"],
+  vscodium: ["VSCodium.app/Contents/Resources/app/bin/codium"],
+  zed: ["Zed.app/Contents/MacOS/cli", "Zed Preview.app/Contents/MacOS/cli"],
   positron: ["Positron.app/Contents/Resources/app/bin/positron"],
   "sublime-text": ["Sublime Text.app/Contents/SharedSupport/bin/subl"],
   xcode: ["Xcode.app/Contents/Developer/usr/bin/xed"],

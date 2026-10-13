@@ -73,7 +73,7 @@ import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
-import { EDITOR_ICONS, getEditorLabel } from "./SettingsPanels.editor";
+import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
@@ -84,7 +84,7 @@ const TIMESTAMP_FORMAT_LABELS = {
 } as const;
 
 function EditorOptionIcon({ editor }: { editor: EditorId }) {
-  const IconComponent = EDITOR_ICONS[editor];
+  const IconComponent = getEditorIcon(editor, navigator.platform);
   if (!IconComponent) return null;
   return <IconComponent aria-hidden="true" className="size-4 text-muted-foreground" />;
 }
