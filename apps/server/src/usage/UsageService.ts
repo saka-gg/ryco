@@ -41,6 +41,12 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import {
+  buildUsageFileAggregate,
+  EMPTY_USAGE_FILE_AGGREGATE,
+  type UsageFileAggregate,
+  UsageSlotAggregator,
+} from "./usageFileAggregate.ts";
+import {
   lookupUsageModelRate,
   encodeUsageRateTable,
   parseUsageRateTable,
@@ -123,7 +129,7 @@ interface ResolvedTranscriptSource {
 }
 
 interface CachedReadResult {
-  readonly records: readonly UsageRecord[];
+  readonly aggregate: UsageFileAggregate;
   readonly reused: boolean;
   readonly skippedLineCount: number;
   readonly malformedLineCount: number;
@@ -603,7 +609,7 @@ const makeUsageService = Effect.gen(function* () {
     const cached = scanCache.get(fileKey);
     if (matchesUsageFileCache(cached, file, provider)) {
       return {
-        records: cached.records,
+        aggregate: cached.aggregate,
         reused: true,
         skippedLineCount: 0,
         malformedLineCount: 0,
@@ -614,15 +620,15 @@ const makeUsageService = Effect.gen(function* () {
     const read = yield* Effect.promise((signal) => readTranscript(file.path, provider, signal));
     if (read === null) {
       return {
-        records: [],
+        aggregate: EMPTY_USAGE_FILE_AGGREGATE,
         reused: false,
         skippedLineCount: 0,
         malformedLineCount: 0,
         failed: true,
       };
     }
-    const records = deduplicateUsageRecordsWithinFile(read.records).map(
-      anonymizeScanCachedUsageRecord,
+    const aggregate = buildUsageFileAggregate(
+      deduplicateUsageRecordsWithinFile(read.records).map(anonymizeScanCachedUsageRecord),
     );
     if (!read.limited && read.malformedLineCount === 0)
       scanCache.set(fileKey, {
@@ -631,11 +637,11 @@ const makeUsageService = Effect.gen(function* () {
         mtimeMs: file.mtimeMs,
         ...(file.fingerprint === undefined ? {} : { fingerprint: file.fingerprint }),
         provider,
-        records,
+        aggregate,
       });
     else scanCache.delete(fileKey);
     return {
-      records,
+      aggregate,
       reused: false,
       skippedLineCount: read.skippedLineCount,
       malformedLineCount: read.malformedLineCount,
@@ -651,13 +657,24 @@ const makeUsageService = Effect.gen(function* () {
     const { source } = plan;
     const { input, pricing } = context;
     const sourceStartedAtMs = yield* Clock.currentTimeMillis;
-    const aggregator = new UsageAggregator({
-      sourceId: plan.sourceId,
-      retainExportIdentity: source.cursorExport !== undefined,
+    const window = {
       timeZone: input.timeZone,
       ...(input.startDate === undefined ? {} : { startDate: input.startDate }),
       endDate: input.endDate,
+    };
+    // Cursor exports keep one bucket per export record, so they aggregate per record; every
+    // other source aggregates per-file slots.
+    const recordAggregator = new UsageAggregator({
+      sourceId: plan.sourceId,
+      retainExportIdentity: true,
+      ...window,
       price: (record) => priceUsageRecord(pricing.rates, record),
+    });
+    const slotAggregator = new UsageSlotAggregator({
+      sourceId: plan.sourceId,
+      provider: source.provider,
+      ...window,
+      rates: pricing.rates,
     });
     const recognizedModels = new Set<string>();
     const unrecognizedModels = new Set<string>();
@@ -679,7 +696,7 @@ const makeUsageService = Effect.gen(function* () {
     let nativeStatus: UsageSourceCoverage["status"] | undefined;
     let nativeDiagnostic: string | undefined;
     const addRecord = (record: UsageRecord) => {
-      if (aggregator.add(record)) {
+      if (recordAggregator.add(record)) {
         const recognized =
           record.reportedCostUsd !== null ||
           lookupUsageModelRate(pricing.rates, record.model) !== null;
@@ -741,7 +758,7 @@ const makeUsageService = Effect.gen(function* () {
       liveFileKeys.push(...read.liveFileKeys);
       // An incomplete walk cannot prove that an unseen history file was deleted.
       if (read.status === "complete") walkedRootKeys.push(usageCacheRootKey(source.provider, root));
-      for (const record of read.records) addRecord(record);
+      slotAggregator.addFile(read.aggregate);
     } else {
       const listings: Array<{
         readonly rootKey: string;
@@ -803,11 +820,11 @@ const makeUsageService = Effect.gen(function* () {
       for (const { file, rootKey, fileKey } of files) {
         const cached = scanCache.get(fileKey);
         if (matchesUsageFileCache(cached, file, source.provider)) {
-          if (cachedRecords + cached.records.length > SOURCE_CACHED_RECORDS) {
+          if (cachedRecords + cached.aggregate.recordCount > SOURCE_CACHED_RECORDS) {
             tally.budgetLimitedFileCount++;
             continue;
           }
-          cachedRecords += cached.records.length;
+          cachedRecords += cached.aggregate.recordCount;
         } else {
           // Only fresh parses spend the scan budget. Later files may already be
           // cached or small enough to fit.
@@ -825,17 +842,26 @@ const makeUsageService = Effect.gen(function* () {
         const read = yield* readFileRecords(file, fileKey, source.provider, rootKey);
         if (read.reused) tally.reusedCacheFileCount += 1;
         else {
-          parsedRecords += read.records.length;
+          parsedRecords += read.aggregate.recordCount;
           if (!read.failed) tally.parsedFileCount += 1;
         }
         if (read.failed) tally.failedFileCount += 1;
         tally.skippedLineCount += read.skippedLineCount;
         tally.malformedLineCount += read.malformedLineCount;
-        for (const record of read.records) addRecord(record);
+        slotAggregator.addFile(read.aggregate);
       }
     }
 
-    const aggregated = aggregator.finish();
+    const slotResult = slotAggregator.finish();
+    for (const model of slotResult.recognizedModels) recognizedModels.add(model);
+    for (const model of slotResult.unrecognizedModels) unrecognizedModels.add(model);
+    for (const sessionId of slotResult.sessionIds) sessionIds.add(sessionId);
+    const recordResult = recordAggregator.finish();
+    const aggregated = {
+      // One kind of source feeds one of the aggregators; the other stays empty.
+      buckets: recordResult.buckets.length > 0 ? recordResult.buckets : slotResult.buckets,
+      acceptedRecords: recordResult.acceptedRecords + slotResult.acceptedRecords,
+    };
     const sourceFinishedAtMs = yield* Clock.currentTimeMillis;
     const incomplete = tally.failedFileCount + tally.budgetLimitedFileCount;
     const status: UsageSourceCoverage["status"] =

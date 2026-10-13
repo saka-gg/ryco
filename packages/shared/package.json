@@ -66,6 +66,10 @@
       "types": "./src/advertisedEndpoint.ts",
       "import": "./src/advertisedEndpoint.ts"
     },
+    "./bytesEqual": {
+      "types": "./src/bytesEqual.ts",
+      "import": "./src/bytesEqual.ts"
+    },
     "./relayMessageChunks": {
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"
@@ -93,6 +97,10 @@
     "./relayE2eeClose": {
       "types": "./src/relayE2eeClose.ts",
       "import": "./src/relayE2eeClose.ts"
+    },
+    "./relayE2eeNodeCrypto": {
+      "types": "./src/relayE2eeNodeCrypto.ts",
+      "import": "./src/relayE2eeNodeCrypto.ts"
     },
     "./relayE2eeSession": {
       "types": "./src/relayE2eeSession.ts",

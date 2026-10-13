@@ -87,6 +87,9 @@ export interface GitWorkflowServiceShape {
   /** See {@link GitManagerShape.refSummary}; a non-repository folder summarizes as such. */
   readonly refSummary: (cwd: string) => Effect.Effect<VcsRefSummary, GitManagerServiceError>;
   readonly indexedPullRequestStates: GitManagerShape["indexedPullRequestStates"];
+  readonly indexedChangeRequests: GitManagerShape["indexedChangeRequests"];
+  readonly cachedRepositoryList: GitManagerShape["cachedRepositoryList"];
+  readonly invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"];
   readonly refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"];
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -110,6 +113,7 @@ export interface GitWorkflowServiceShape {
   readonly createWorktree: (
     input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
+  readonly prefetchWorktreeBase: GitVcsDriverShape["prefetchWorktreeBase"];
   readonly removeWorktree: GitVcsDriverShape["removeWorktree"];
   readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly listWorktreePaths: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
@@ -361,6 +365,9 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
         ),
       ),
     indexedPullRequestStates: gitManager.indexedPullRequestStates,
+    indexedChangeRequests: gitManager.indexedChangeRequests,
+    cachedRepositoryList: gitManager.cachedRepositoryList,
+    invalidateRepositoryLists: gitManager.invalidateRepositoryLists,
     refreshRemoteTrackingRefs: gitManager.refreshRemoteTrackingRefs,
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
@@ -422,6 +429,10 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     createWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(git.createWorktree(input)),
+      ),
+    prefetchWorktreeBase: (input) =>
+      ensureGitCommand("GitWorkflowService.prefetchWorktreeBase", input.cwd).pipe(
+        Effect.andThen(git.prefetchWorktreeBase(input)),
       ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(

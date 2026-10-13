@@ -31,6 +31,7 @@ import {
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
+  deriveActivityPayloadOutput,
   type WorkLogEntry,
 } from "./session-logic.ts";
 
@@ -1565,6 +1566,53 @@ describe("deriveWorkLogEntries", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ id: "z-update-earlier", completed: true });
+  });
+
+  it("marks output that came from a payload preview, and clears it for a full later output", () => {
+    const commandPayload = (aggregatedOutput: string) => ({
+      itemType: "command_execution",
+      data: { item: { type: "commandExecution", command: "cat log", aggregatedOutput } },
+    });
+    const updated = {
+      ...makeActivity({
+        id: "preview-updated",
+        kind: "tool.updated",
+        payload: commandPayload("head of the log…"),
+        sequence: 1,
+      }),
+      payloadPreview: { fullBytes: 900_000 },
+    };
+    const [previewed] = deriveWorkLogEntries([updated], undefined);
+    expect(previewed?.output).toBe("head of the log…");
+    expect(previewed?.outputPreviewActivityId).toBe("preview-updated");
+
+    // The completion arrives live with its whole payload: its output is complete.
+    const completed = makeActivity({
+      id: "full-completed",
+      kind: "tool.completed",
+      payload: commandPayload("the whole log"),
+      sequence: 2,
+    });
+    const [merged] = deriveWorkLogEntries([updated, completed], undefined);
+    expect(merged?.id).toBe("preview-updated");
+    expect(merged?.output).toBe("the whole log");
+    expect(merged?.outputPreviewActivityId).toBeUndefined();
+
+    // A completion without output keeps the previewed output and its marker.
+    const bare = makeActivity({
+      id: "bare-completed",
+      kind: "tool.completed",
+      payload: { itemType: "command_execution", data: { item: { type: "commandExecution" } } },
+      sequence: 2,
+    });
+    const [kept] = deriveWorkLogEntries([updated, bare], undefined);
+    expect(kept?.output).toBe("head of the log…");
+    expect(kept?.outputPreviewActivityId).toBe("preview-updated");
+
+    expect(deriveActivityPayloadOutput(commandPayload("full text\n"))).toEqual({
+      output: "full text",
+      exitCode: null,
+    });
   });
 
   it("populates output from Codex aggregatedOutput for commandExecution items", () => {

@@ -2,13 +2,24 @@ import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
+import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
 import { storagePathBlocker } from "../storage/lifecycle.ts";
 import { WorkspaceLifecycle } from "../workspace/WorkspaceLifecycle.ts";
 import { SessionImport } from "../imports/SessionImport.ts";
 import { ThreadFork } from "../threadFork/Services/ThreadFork.ts";
 import { AutomationCentre } from "../agentControl/Services/AutomationCentre.ts";
-import { Cause, Duration, Effect, FileSystem, Metric, Option, Schema, Stream } from "effect";
+import {
+  Cause,
+  DateTime,
+  Duration,
+  Effect,
+  FileSystem,
+  Metric,
+  Option,
+  Schema,
+  Stream,
+} from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   AuthSessionId,
@@ -35,7 +46,7 @@ import { CheckpointDiffQuery } from "../checkpointing/Services/CheckpointDiffQue
 import { ServerConfig } from "../config.ts";
 import { Diagnostics } from "../diagnostics/Services/Diagnostics.ts";
 import { Keybindings } from "../keybindings.ts";
-import { ignoreCauseLogOnceEvery } from "../logOnceEvery.ts";
+import { ignoreCauseLogOnceEvery, logOnceEvery } from "../logOnceEvery.ts";
 import { makeCodexMcpService } from "../mcp/CodexMcpService.ts";
 import { makeCodexMcpAdapter } from "../mcp/adapters/CodexMcpAdapter.ts";
 import { makeClaudeMcpAdapter } from "../mcp/adapters/ClaudeMcpAdapter.ts";
@@ -99,7 +110,10 @@ import {
   WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
 } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
-import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
+import {
+  readWorktreePullRequestLinks,
+  selectCurrentPullRequestLink,
+} from "@ryco/shared/worktreePullRequests";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import {
@@ -220,6 +234,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
+    // Optional: route tests without the orchestration runtime answer "skipped".
+    const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
     const codexMcp = yield* makeCodexMcpService;
     const claudeMcp = yield* makeClaudeMcpAdapter();
     const copilotMcp = yield* makeCopilotMcpAdapter();
@@ -350,6 +366,53 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           }),
         );
 
+    /**
+     * One forge request for the states of every pull request a sweep would re-read one by
+     * one (`gh pr view` each), where the host can batch them. Empty when it cannot or fails:
+     * the refreshes then read as before.
+     */
+    const batchedPullRequestStates = (
+      cwd: string,
+      worktrees: ReadonlyArray<Parameters<typeof readWorktreePullRequestLinks>[0]>,
+    ) =>
+      Effect.gen(function* () {
+        const numbers = new Set<number>();
+        for (const worktree of worktrees) {
+          const links = readWorktreePullRequestLinks(worktree);
+          const current = selectCurrentPullRequestLink(links);
+          for (const link of links) {
+            if (link.dismissedAt) continue;
+            const finished = link.state === "merged" || link.state === "closed";
+            if (finished && link.number !== current?.number) continue;
+            numbers.add(link.number);
+          }
+        }
+        if (numbers.size < 2) return new Map<number, KnownPullRequestState>();
+        const provider = yield* sourceControlRegistry.resolve({ cwd });
+        if (!provider.getPullRequestStates) return new Map<number, KnownPullRequestState>();
+        const states = yield* provider.getPullRequestStates({ cwd, numbers: [...numbers] });
+        return new Map<number, KnownPullRequestState>(
+          [...states].map(([number, state]) => [
+            number,
+            {
+              state: state.state,
+              isDraft: state.isDraft,
+              reported: {
+                terminalAt: state.terminalAt ? DateTime.formatIso(state.terminalAt) : null,
+              },
+            },
+          ]),
+        );
+      }).pipe(
+        Effect.catchCause((cause) =>
+          logOnceEvery({
+            key: `sourceControl.pullRequestStates:${cwd}`,
+            message: "Batched pull request state read failed",
+            cause,
+          }).pipe(Effect.as(new Map<number, KnownPullRequestState>())),
+        ),
+      );
+
     const refreshLinkedWorktreeSourceControlStates = (input: {
       readonly cwd: string;
       readonly reason: string;
@@ -362,8 +425,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       readonly lifecycle?: { readonly pullRequestNumber: number | null } | undefined;
       /** Change requests the triggering read just returned for this repository. */
       readonly knownPullRequests?: ReadonlyArray<KnownPullRequestRow> | undefined;
-    }) =>
-      Effect.gen(function* () {
+    }) => {
+      const sweep = Effect.gen(function* () {
         const scope = yield* resolveSourceControlRefreshScope(input.cwd);
         if (scope === null) return;
 
@@ -380,7 +443,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           : yield* projectionWorktrees
               .listByProjectId({ projectId: scope.projectId })
               .pipe(Effect.catch(() => Effect.succeed([])));
-        const refreshIds: WorktreeId[] = [];
+        const refreshed: Array<(typeof worktrees)[number]> = [];
         for (const worktree of worktrees) {
           if (worktree.archivedAt !== null || worktree.worktreePath === null) continue;
           // Recorded as removed (by Ryco or found missing on disk): nothing to refresh.
@@ -394,8 +457,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           ) {
             continue;
           }
-          refreshIds.push(worktree.worktreeId);
+          refreshed.push(worktree);
         }
+        const refreshIds = refreshed.map((worktree) => worktree.worktreeId);
         // The checkout on screen refreshes promptly; a project-wide sweep over
         // every other workspace less often; a lifecycle action now.
         const intervalMs = input.lifecycle
@@ -403,6 +467,15 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           : scope.checkout
             ? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS
             : WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS;
+        // A project-wide sweep reads the states its links need in one request.
+        const batched =
+          input.lifecycle || scope.checkout || refreshIds.length === 0
+            ? new Map<number, KnownPullRequestState>()
+            : yield* batchedPullRequestStates(input.cwd, refreshed);
+        const knownStates = (cwd: string) =>
+          knownPullRequestStatesFor(input.knownPullRequests)(cwd).pipe(
+            Effect.map((known) => (batched.size === 0 ? known : new Map([...known, ...batched]))),
+          );
         const refresh = (worktreeId: WorktreeId) =>
           refreshWorktreeSourceControlState({
             worktreeId,
@@ -410,21 +483,26 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             discoveryIntervalMs: intervalMs,
             linkRefreshIntervalMs: intervalMs,
             // A lifecycle action reads live; otherwise states in hand spare forge calls.
-            ...(input.lifecycle
-              ? {}
-              : { knownPullRequestStates: knownPullRequestStatesFor(input.knownPullRequests) }),
+            ...(input.lifecycle ? {} : { knownPullRequestStates: knownStates }),
             actedOnPullRequestNumber: input.lifecycle?.pullRequestNumber ?? undefined,
           }).pipe(ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)));
         if (input.lifecycle && scope.checkout) {
           yield* Effect.forEach(refreshIds, refresh, { concurrency: "unbounded", discard: true });
         } else if (refreshIds.length > 0) {
-          // One bounded background sweep, never a fiber (and forge call) per workspace at once.
+          // One bounded sweep, never a fiber (and forge call) per workspace at once.
           yield* Effect.forEach(refreshIds, refresh, {
             concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY,
             discard: true,
-          }).pipe(inBackgroundProcessLane, Effect.forkDetach);
+          });
         }
       }).pipe(Effect.ignoreCause({ log: true }), Effect.asVoid);
+      // A lifecycle action waits for its checkout's refresh. Anything else (a list or search
+      // read) answers at once: scope resolution, the sweep and its forge calls run detached in
+      // the background process lane, never on the read's response path.
+      return input.lifecycle
+        ? sweep
+        : sweep.pipe(inBackgroundProcessLane, Effect.forkDetach, Effect.asVoid);
+    };
 
     const refreshStateForLinkedReference = (input: {
       readonly cwd: string;
@@ -700,35 +778,41 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           const { settings, project: bootstrapProject, choices } = resolved;
           shouldRunSetupScript = resolved.runSetupScript;
           if (bootstrap?.prepareWorktree && bootstrapProject) targetProjectId = bootstrapProject.id;
-          const createBootstrapThread = Effect.gen(function* () {
-            if (!bootstrap?.createThread) return;
-            const created = yield* orchestrationEngine.dispatch({
-              type: "thread.create",
-              commandId: serverCommandId("bootstrap-thread-create"),
-              threadId: command.threadId,
-              projectId: bootstrap.createThread.projectId,
-              title: bootstrap.createThread.title,
-              modelSelection: choices.modelSelection,
-              runtimeMode: bootstrap.createThread.runtimeMode,
-              interactionMode: bootstrap.createThread.interactionMode,
-              ...(bootstrap.createThread.tokenMode === undefined
-                ? {}
-                : { tokenMode: bootstrap.createThread.tokenMode }),
-              branch: bootstrap.createThread.branch,
-              worktreePath: bootstrap.createThread.worktreePath,
-              createdAt: bootstrap.createThread.createdAt,
+          // A thread created after its worktree starts on that worktree's branch
+          // and path, with no follow-up metadata update.
+          const createBootstrapThread = (checkout?: {
+            readonly branch: string;
+            readonly worktreePath: string;
+          }) =>
+            Effect.gen(function* () {
+              if (!bootstrap?.createThread) return;
+              const created = yield* orchestrationEngine.dispatch({
+                type: "thread.create",
+                commandId: serverCommandId("bootstrap-thread-create"),
+                threadId: command.threadId,
+                projectId: bootstrap.createThread.projectId,
+                title: bootstrap.createThread.title,
+                modelSelection: choices.modelSelection,
+                runtimeMode: bootstrap.createThread.runtimeMode,
+                interactionMode: bootstrap.createThread.interactionMode,
+                ...(bootstrap.createThread.tokenMode === undefined
+                  ? {}
+                  : { tokenMode: bootstrap.createThread.tokenMode }),
+                branch: checkout?.branch ?? bootstrap.createThread.branch,
+                worktreePath: checkout?.worktreePath ?? bootstrap.createThread.worktreePath,
+                createdAt: bootstrap.createThread.createdAt,
+              });
+              // The create event is an exact fence in the serialized command
+              // stream. Drain every earlier deletion before setup or turn start
+              // can acquire resources under the reused id.
+              yield* threadDeletionReactor.drainThrough(created.sequence);
+              createdThread = true;
             });
-            // The create event is an exact fence in the serialized command
-            // stream. Drain every earlier deletion before setup or turn start
-            // can acquire resources under the reused id.
-            yield* threadDeletionReactor.drainThrough(created.sequence);
-            createdThread = true;
-          });
 
           // Publishing a draft's thread promotes it on every connected client.
           // Finish checkout preparation first: a Git failure must leave the draft
           // intact instead of creating/deleting it and clearing the user's prompt.
-          if (!bootstrap?.prepareWorktree) yield* createBootstrapThread;
+          if (!bootstrap?.prepareWorktree) yield* createBootstrapThread();
 
           if (bootstrap?.prepareWorktree) {
             const worktree = yield* gitWorkflow.createWorktree({
@@ -773,14 +857,20 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               );
             }
             targetWorktreePath = worktree.worktree.path;
-            yield* createBootstrapThread;
-            yield* orchestrationEngine.dispatch({
-              type: "thread.meta.update",
-              commandId: serverCommandId("bootstrap-thread-meta-update"),
-              threadId: command.threadId,
-              branch: worktree.worktree.refName,
-              worktreePath: targetWorktreePath,
-            });
+            if (bootstrap.createThread) {
+              yield* createBootstrapThread({
+                branch: worktree.worktree.refName,
+                worktreePath: targetWorktreePath,
+              });
+            } else {
+              yield* orchestrationEngine.dispatch({
+                type: "thread.meta.update",
+                commandId: serverCommandId("bootstrap-thread-meta-update"),
+                threadId: command.threadId,
+                branch: worktree.worktree.refName,
+                worktreePath: targetWorktreePath,
+              });
+            }
             const worktreeProjectId = targetProjectId ?? bootstrapProject?.id;
             if (worktreeProjectId !== undefined) {
               const worktreeId = WorktreeId.make(`worktree-${crypto.randomUUID()}`);
@@ -951,6 +1041,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           localTracingEnabled: true,
           ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
           otlpTracesEnabled: config.otlpTracesUrl !== undefined,
+          // Browsers export spans only to a server that has a use for them.
+          browserTracesEnabled:
+            config.otlpTracesUrl !== undefined || config.browserTracesEnabled === true,
           ...(config.otlpMetricsUrl !== undefined ? { otlpMetricsUrl: config.otlpMetricsUrl } : {}),
           otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           localMetrics,
@@ -1123,6 +1216,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       providerRuntimeIngestion,
       providerMaintenanceRunner,
       dailyRecapQuery,
+      sessionPrewarm,
       localTaskService,
       worktreeNotesService,
       config,

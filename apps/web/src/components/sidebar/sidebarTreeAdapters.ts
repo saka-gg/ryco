@@ -113,6 +113,35 @@ export function adaptProjectForSidebarTree(
   };
 }
 
+/**
+ * A tree session's status pill as `adaptProjectForSidebarTree` would compute it
+ * with `lastVisitedAt` (it only decides whether a completion is unseen). The
+ * tree structure is adapted without visits so one structure can be shared; this
+ * applies them afterwards. Returns `thread` itself when the pill is unchanged.
+ * Drafts carry no status and stay as they are.
+ */
+export function restatusSidebarTreeThread(
+  thread: SidebarTreeThread,
+  lastVisitedAt: string | null | undefined,
+): SidebarTreeThread {
+  if (thread.draftId !== undefined || !lastVisitedAt) return thread;
+  const statusPill = resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } });
+  return sameStatusPill(statusPill, thread.statusPill) ? thread : { ...thread, statusPill };
+}
+
+function sameStatusPill(
+  left: ThreadStatusPill | null | undefined,
+  right: ThreadStatusPill | null | undefined,
+): boolean {
+  if (left == null || right == null) return left == right;
+  return (
+    left.label === right.label &&
+    left.colorClass === right.colorClass &&
+    left.dotClass === right.dotClass &&
+    left.pulse === right.pulse
+  );
+}
+
 export function adaptDraftThreadsForSidebarProject(input: {
   draftThreadsByThreadKey: Readonly<Record<string, DraftThreadState>>;
   project: SidebarProjectSnapshot;

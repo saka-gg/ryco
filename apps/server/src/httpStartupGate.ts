@@ -275,3 +275,17 @@ export function isEarlyStaticRequest(request: Http.IncomingMessage): boolean {
   const pathname = queryIndex === -1 ? rawUrl : rawUrl.slice(0, queryIndex);
   return isEarlyStaticPath(pathname);
 }
+
+/**
+ * The early static requests any server mode may answer: hashed build assets and root-level
+ * files, but not the document (`/`, `/index.html`). Readiness probes such as the SSH
+ * launcher's `wait_ready` poll the document and must not see a server ready before its router
+ * serves; assets only matter to a client that already loaded a document.
+ */
+export function isEarlyStaticAssetRequest(request: Http.IncomingMessage): boolean {
+  if (!isEarlyStaticRequest(request)) return false;
+  const rawUrl = request.url ?? "/";
+  const queryIndex = rawUrl.search(/[?#]/u);
+  const pathname = queryIndex === -1 ? rawUrl : rawUrl.slice(0, queryIndex);
+  return pathname !== "/" && pathname !== "/index.html";
+}

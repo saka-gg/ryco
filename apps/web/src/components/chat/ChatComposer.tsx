@@ -13,6 +13,7 @@ import type {
   RuntimeMode,
   AgentTokenMode,
   ScopedThreadRef,
+  ServerConfig,
   ServerProvider,
   ThreadId,
   TurnId,
@@ -35,6 +36,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   clampCollapsedComposerCursor,
@@ -49,11 +51,18 @@ import { serializeComposerMentionPath } from "../../composerMentionSyntax";
 import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
+  ensureProjectProviderCommands,
   latestClaudeCacheObservation,
+  mergeProjectProviderCommands,
+  projectProviderCommandsKey,
   PROMPT_STASH_MAX_ENTRIES,
+  readProjectProviderCommands,
   stripInlineTerminalContextPlaceholders,
+  subscribeProjectProviderCommands,
   type PromptStashEntry,
 } from "@ryco/client-runtime/state/composer";
+import { readEnvironmentApi } from "../../environmentApi";
+import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { webAttachmentCodec } from "../../platform/attachmentCodec";
 import {
   deriveComposerFileUploadSendBlock,
@@ -72,6 +81,7 @@ import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import {
   type ComposerImageAttachment,
   type DraftId,
+  ensureComposerDraftAttachmentsRestored,
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
 } from "../../composerDraftStore";
@@ -129,7 +139,10 @@ import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import { deriveContextWindowUsage } from "../../lib/contextWindow";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { hydrateImagesFromPersistedWithFailures } from "../../composerDraftPersistence";
+import {
+  hydrateImagesFromPersistedWithFailures,
+  persistComposerImageBytes,
+} from "../../composerDraftPersistence";
 import { usePromptStashStore } from "../../promptStashStore";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveShortcutCommand, shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
@@ -271,6 +284,8 @@ export interface ChatComposerHandle {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps {
+  /** The user is about to write (focus, first keystroke): a cue to warm what the send needs. */
+  onComposerIntent?: () => void;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -471,9 +486,13 @@ function useSetPromptFromTraits(input: {
 // Component
 // --------------------------------------------------------------------------
 
+const selectProjectProviderCommandsSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.providerProjectCommands === true;
+
 export const ChatComposer = memo(
   forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(props, ref) {
     const {
+      onComposerIntent,
       composerDraftTarget,
       environmentId,
       routeKind,
@@ -717,10 +736,28 @@ export const ChatComposer = memo(
       () => providerInstanceEntries.find((entry) => entry.instanceId === selectedInstanceId),
       [providerInstanceEntries, selectedInstanceId],
     );
-    const selectedProviderStatus = useMemo(
-      () => selectedProviderEntry?.snapshot ?? null,
-      [selectedProviderEntry],
+    const snapshotProviderStatus = selectedProviderEntry?.snapshot ?? null;
+    // Project and local skills and slash commands of this directory, read on the first `/`
+    // or `$` here (the snapshot was probed outside any project) and merged into its lists.
+    const projectCommandsSupported = useEnvironmentServerConfigSelector(
+      environmentId,
+      selectProjectProviderCommandsSupported,
     );
+    const projectCommandsKey =
+      gitCwd && selectedInstanceId
+        ? projectProviderCommandsKey({ environmentId, instanceId: selectedInstanceId, cwd: gitCwd })
+        : null;
+    const projectCommands = useSyncExternalStore(subscribeProjectProviderCommands, () =>
+      projectCommandsKey ? readProjectProviderCommands(projectCommandsKey) : undefined,
+    );
+    const selectedProviderStatus = useMemo(() => {
+      if (!snapshotProviderStatus || !projectCommands) return snapshotProviderStatus;
+      const merged = mergeProjectProviderCommands(snapshotProviderStatus, projectCommands);
+      return merged.skills === snapshotProviderStatus.skills &&
+        merged.slashCommands === snapshotProviderStatus.slashCommands
+        ? snapshotProviderStatus
+        : { ...snapshotProviderStatus, ...merged };
+    }, [snapshotProviderStatus, projectCommands]);
     const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
       () => selectedProviderEntry?.models ?? [],
       [selectedProviderEntry],
@@ -855,6 +892,18 @@ export const ChatComposer = memo(
     const [composerTrigger, setComposerTrigger] = useState<ComposerTrigger | null>(() =>
       detectComposerTrigger(prompt, prompt.length),
     );
+    const wantsProjectCommands =
+      composerTrigger?.kind === "slash-command" || composerTrigger?.kind === "skill";
+    useEffect(() => {
+      if (!wantsProjectCommands || !gitCwd || !selectedInstanceId) return;
+      ensureProjectProviderCommands({
+        api: readEnvironmentApi(environmentId),
+        supported: projectCommandsSupported,
+        environmentId,
+        instanceId: selectedInstanceId,
+        cwd: gitCwd,
+      });
+    }, [wantsProjectCommands, gitCwd, selectedInstanceId, environmentId, projectCommandsSupported]);
     const [composerHighlightedItemId, setComposerHighlightedItemId] = useState<string | null>(null);
     const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
       null,
@@ -1376,6 +1425,13 @@ export const ChatComposer = memo(
       shouldAutoScrollRef,
     ]);
 
+    // Attachments restored from a saved draft load their bytes off the boot
+    // path; showing them is the moment they are needed.
+    const hasPendingComposerImageBytes = composerImages.some((image) => image.bytesPending);
+    useEffect(() => {
+      if (hasPendingComposerImageBytes) void ensureComposerDraftAttachmentsRestored();
+    }, [hasPendingComposerImageBytes]);
+
     // ------------------------------------------------------------------
     // Image persist effect
     // ------------------------------------------------------------------
@@ -1423,6 +1479,18 @@ export const ChatComposer = memo(
                   });
                   return;
                 }
+              }
+              // Still loading after a reload: its persisted record already stands.
+              if (image.file === null) {
+                const existingPersisted = existingPersistedById.get(image.id);
+                if (existingPersisted) stagedAttachmentById.set(image.id, existingPersisted);
+                return;
+              }
+              // Bytes go to IndexedDB, keeping the draft entry small.
+              const local = await persistComposerImageBytes({ ...image, file: image.file });
+              if (local) {
+                stagedAttachmentById.set(image.id, local);
+                return;
               }
               try {
                 // Encode from the neutral union via the AttachmentCodec so the
@@ -1502,6 +1570,7 @@ export const ChatComposer = memo(
           );
           return;
         }
+        if (promptRef.current.length === 0 && nextPrompt.length > 0) onComposerIntent?.();
         promptRef.current = nextPrompt;
         setPrompt(nextPrompt);
         if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
@@ -1524,6 +1593,7 @@ export const ChatComposer = memo(
         composerDraftTarget,
         composerTerminalContexts,
         setComposerDraftTerminalContexts,
+        onComposerIntent,
       ],
     );
 
@@ -2114,6 +2184,20 @@ export const ChatComposer = memo(
         return;
       }
 
+      if (images.some((image) => image.bytesPending)) {
+        // A saved draft's attachments are still loading; the stash needs their bytes.
+        void ensureComposerDraftAttachmentsRestored();
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Attachments aren't ready",
+            description: "They are still loading. Try again in a moment.",
+            data: { hideCopyButton: true },
+          }),
+        );
+        return;
+      }
+
       const snapshotKey = stashSnapshotKey(composerDraftTarget, promptForEntry, images);
       if (inFlightStashKeysRef.current.has(snapshotKey)) {
         return;
@@ -2663,6 +2747,7 @@ export const ChatComposer = memo(
               }
               setIsComposerFocused(true);
               setIsReadingChat(false);
+              onComposerIntent?.();
             }}
             onBlurCapture={() => {
               scheduleComposerCollapseCheck();

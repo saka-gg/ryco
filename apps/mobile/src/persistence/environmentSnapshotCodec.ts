@@ -1,4 +1,5 @@
-import { WorktreeId, type EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId } from "@ryco/contracts";
+import { WorktreeId } from "@ryco/contracts/worktree";
 import { projectKindOf } from "@ryco/shared/projectKind";
 import { isThreadLineage } from "@ryco/client-runtime/state/threads";
 import {

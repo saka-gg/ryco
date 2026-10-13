@@ -8,7 +8,7 @@ import {
   type ResolvedKeybindingRule,
   type ResolvedKeybindingsConfig,
   THREAD_JUMP_KEYBINDING_COMMANDS,
-} from "@ryco/contracts";
+} from "@ryco/contracts/keybindings";
 
 type WhenToken =
   | { type: "identifier"; value: string }

@@ -33,6 +33,16 @@ export function probeWebHubSession(): void {
   session?.probe();
 }
 
+/**
+ * A foreground, `online` or network-change signal: an account socket waiting
+ * out its reconnect backoff connects at once, and a live-looking one is probed
+ * (or replaced at once when it has been silent past the liveness bound). See
+ * `HostedHubSession.resume`.
+ */
+export function resumeWebHubSession(): void {
+  session?.resume();
+}
+
 function disposeSession(): void {
   const previous = session;
   session = null;

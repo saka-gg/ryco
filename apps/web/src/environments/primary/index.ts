@@ -42,6 +42,8 @@ export {
   setNodeE2eePairingWindow,
   startHubEnrollment,
   issuePrimaryWebSocketToken,
+  prefetchPrimaryWebSocketToken,
+  discardPrefetchedPrimaryWebSocketToken,
   listServerClientSessions,
   listServerPairingLinks,
   peekPairingTokenFromUrl,

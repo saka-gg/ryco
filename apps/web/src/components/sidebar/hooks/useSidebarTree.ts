@@ -101,7 +101,58 @@ export type UseSidebarTreeInput = Omit<ComposeSidebarTreeInput, "nowMs"> & {
   nowMs?: number | undefined;
 };
 
+/** A worktree node and the sessions assigned to it, before status decoration. */
+export interface SidebarTreeStructureNode {
+  readonly threads: ReadonlyArray<SidebarTreeThread>;
+  readonly worktree: SidebarWorktree;
+}
+
+/**
+ * A project's tree without anything derived from session status: which node
+ * each session belongs to and in what order. This is the expensive part of a
+ * tree (path normalization, node merging, assignment); `decorateSidebarTree`
+ * adds buckets and aggregate status on top, cheaply, so one structure can
+ * serve every consumer of a project's tree.
+ */
+export interface SidebarTreeStructureProject {
+  readonly archivedSessions: ReadonlyArray<SidebarTreeThread>;
+  readonly archivedWorktrees: ReadonlyArray<SidebarTreeStructureNode>;
+  readonly draftSessions: ReadonlyArray<SidebarTreeThread>;
+  readonly flatSessions: ReadonlyArray<SidebarTreeThread>;
+  readonly isGitRepo: boolean;
+  readonly project: Project;
+  readonly worktrees: ReadonlyArray<SidebarTreeStructureNode>;
+}
+
+export interface SidebarTreeStructure {
+  readonly projects: ReadonlyArray<SidebarTreeStructureProject>;
+}
+
+export type ComposeSidebarTreeStructureInput = Pick<
+  ComposeSidebarTreeInput,
+  "isGitRepoByProjectId" | "projects" | "threads" | "worktrees"
+>;
+
+export interface DecorateSidebarTreeInput {
+  diffStatsByWorktreeId?: ReadonlyMap<string, SidebarWorktreeDiffStats | null> | undefined;
+  diffStatsByWorktreeIdRecord?: Record<string, SidebarWorktreeDiffStats | null> | undefined;
+  /** For archive suggestions; the current time when absent. */
+  nowMs?: number | undefined;
+  /**
+   * Replaces a session before it is bucketed (e.g. with a status pill that
+   * reflects when the user last visited it). Called once per session; must
+   * return the same object when nothing changes.
+   */
+  restatusThread?: ((thread: SidebarTreeThread) => SidebarTreeThread) | undefined;
+}
+
 export function composeSidebarTree(input: ComposeSidebarTreeInput): SidebarTree {
+  return decorateSidebarTree(composeSidebarTreeStructure(input), input);
+}
+
+export function composeSidebarTreeStructure(
+  input: ComposeSidebarTreeStructureInput,
+): SidebarTreeStructure {
   const uniqueThreads = dedupeSidebarThreads(input.threads);
   const threadsByProjectId = groupBy(uniqueThreads, (thread) => thread.projectId);
   const explicitWorktreesByProjectId = groupBy(input.worktrees ?? [], (worktree) =>
@@ -109,7 +160,7 @@ export function composeSidebarTree(input: ComposeSidebarTreeInput): SidebarTree 
   );
 
   return {
-    projects: input.projects.map((project) => {
+    projects: input.projects.map((project): SidebarTreeStructureProject => {
       const projectThreads = threadsByProjectId.get(project.id) ?? [];
       const draftSessions = projectThreads.filter(
         (thread) => thread.draftId !== undefined && thread.archivedAt === null,
@@ -146,28 +197,68 @@ export function composeSidebarTree(input: ComposeSidebarTreeInput): SidebarTree 
         project,
         mergedNodes,
       );
-      const composeNode = (worktree: SidebarWorktree) =>
-        composeWorktreeNode({
-          diffStats: getDiffStats(input, worktree.worktreeId),
-          nowMs: input.nowMs,
-          threads: threadsByNode.get(worktree) ?? [],
-          worktree,
-        });
+      const toNode = (worktree: SidebarWorktree): SidebarTreeStructureNode => ({
+        threads: threadsByNode.get(worktree) ?? [],
+        worktree,
+      });
 
       return {
         archivedSessions,
         archivedWorktrees: sortedWorktrees
           .filter((worktree) => worktree.archivedAt != null)
-          .map(composeNode),
+          .map(toNode),
         flatSessions: [],
         draftSessions,
         isGitRepo,
         project,
-        worktrees: sortedWorktrees
-          .filter((worktree) => worktree.archivedAt == null)
-          .map(composeNode),
+        worktrees: sortedWorktrees.filter((worktree) => worktree.archivedAt == null).map(toNode),
       };
     }),
+  };
+}
+
+export function decorateSidebarTree(
+  structure: SidebarTreeStructure,
+  input: DecorateSidebarTreeInput,
+): SidebarTree {
+  return {
+    projects: structure.projects.map((project) => decorateSidebarTreeProject(project, input)),
+  };
+}
+
+export function decorateSidebarTreeProject(
+  project: SidebarTreeStructureProject,
+  input: DecorateSidebarTreeInput,
+): SidebarTreeProject {
+  const nowMs = input.nowMs ?? Date.now();
+  const restatus = input.restatusThread;
+  const restatused = new Map<SidebarTreeThread, SidebarTreeThread>();
+  const restatusOne = (thread: SidebarTreeThread) => {
+    if (restatus === undefined) return thread;
+    let next = restatused.get(thread);
+    if (next === undefined) {
+      next = restatus(thread);
+      restatused.set(thread, next);
+    }
+    return next;
+  };
+  const restatusAll = (threads: ReadonlyArray<SidebarTreeThread>) =>
+    restatus === undefined ? threads : threads.map(restatusOne);
+  const composeNode = (node: SidebarTreeStructureNode) =>
+    composeWorktreeNode({
+      diffStats: getDiffStats(input, node.worktree.worktreeId),
+      nowMs,
+      threads: restatusAll(node.threads),
+      worktree: node.worktree,
+    });
+  return {
+    archivedSessions: restatusAll(project.archivedSessions),
+    archivedWorktrees: project.archivedWorktrees.map(composeNode),
+    draftSessions: restatusAll(project.draftSessions),
+    flatSessions: restatusAll(project.flatSessions),
+    isGitRepo: project.isGitRepo,
+    project: project.project,
+    worktrees: project.worktrees.map(composeNode),
   };
 }
 
@@ -658,7 +749,7 @@ function getLatestUpdatedAt(threads: ReadonlyArray<SidebarTreeThread>): string |
 }
 
 function getDiffStats(
-  input: ComposeSidebarTreeInput,
+  input: Pick<DecorateSidebarTreeInput, "diffStatsByWorktreeId" | "diffStatsByWorktreeIdRecord">,
   worktreeId: string,
 ): SidebarWorktreeDiffStats | null {
   if (input.diffStatsByWorktreeId) {

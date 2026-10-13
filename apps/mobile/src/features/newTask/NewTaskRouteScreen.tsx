@@ -11,15 +11,14 @@ import { Pressable, ScrollView, TextInput, View } from "react-native";
 
 import { normalizeInteractionModeForProviderTarget } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import {
-  EnvironmentId,
   DEFAULT_AGENT_TOKEN_MODE,
-  ProjectId,
-  WorktreeId,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { WorktreeId } from "@ryco/contracts/worktree";
 
 import { OverlayPortalScope } from "../../components/OverlayPortal";
 import { AppText as Text } from "../../components/AppText";

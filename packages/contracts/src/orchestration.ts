@@ -58,6 +58,7 @@ export const ORCHESTRATION_WS_METHODS = {
   searchThreadMessages: "orchestration.searchThreadMessages",
   getThreadWindow: "orchestration.getThreadWindow",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
+  getActivityPayload: "orchestration.getActivityPayload",
   setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
   replayEvents: "orchestration.replayEvents",
   replayEventsPage: "orchestration.replayEventsPage",
@@ -927,6 +928,18 @@ export const OrchestrationThreadActivity = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   sequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
+  /**
+   * Present when `payload` is a bounded preview of a larger stored payload: a
+   * window or history page served with `activityPayloads: "preview"`. The
+   * preview keeps the payload's structure with long strings and arrays cut, and
+   * `orchestration.getActivityPayload` returns the stored payload.
+   */
+  payloadPreview: Schema.optional(
+    Schema.Struct({
+      /** Encoded size of the stored payload. */
+      fullBytes: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
@@ -1249,12 +1262,64 @@ export const OrchestrationShellThreadPrioritiesItem = Schema.Struct({
 export type OrchestrationShellThreadPrioritiesItem =
   typeof OrchestrationShellThreadPrioritiesItem.Type;
 
+/**
+ * How a client takes the shell snapshot. `"paged"` asks for it in bounded
+ * pieces instead of one message: a `snapshot-begin` header, `snapshot-threads`
+ * pages (every unarchived thread before any archived one), and `snapshot-end`.
+ * The client applies the assembled snapshot at `snapshot-end`, so no message
+ * outgrows a relayed connection however large the shell is, and a client can
+ * show the unarchived threads before the archived ones have arrived.
+ */
+export const OrchestrationShellSnapshotDelivery = Schema.Literal("paged");
+export type OrchestrationShellSnapshotDelivery = typeof OrchestrationShellSnapshotDelivery.Type;
+
+/**
+ * Opens a paged shell snapshot. Everything but the threads, plus how many
+ * `snapshot-threads` will carry: `threadCount` in all, the last
+ * `archivedThreadCount` of them archived.
+ */
+export const OrchestrationShellSnapshotBeginItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-begin"),
+  snapshotSequence: NonNegativeInt,
+  updatedAt: IsoDateTime,
+  projects: Schema.Array(OrchestrationProjectShell),
+  worktrees: Schema.optional(Schema.Array(OrchestrationWorktreeShell)),
+  threadCount: NonNegativeInt,
+  archivedThreadCount: NonNegativeInt,
+});
+export type OrchestrationShellSnapshotBeginItem = typeof OrchestrationShellSnapshotBeginItem.Type;
+
+/** One page of a paged shell snapshot's threads, in snapshot order. */
+export const OrchestrationShellSnapshotThreadsItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-threads"),
+  threads: Schema.Array(OrchestrationThreadShell),
+});
+export type OrchestrationShellSnapshotThreadsItem =
+  typeof OrchestrationShellSnapshotThreadsItem.Type;
+
+/** Closes a paged shell snapshot; the events after its sequence follow. */
+export const OrchestrationShellSnapshotEndItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-end"),
+});
+export type OrchestrationShellSnapshotEndItem = typeof OrchestrationShellSnapshotEndItem.Type;
+
+export const OrchestrationShellSnapshotPageItem = Schema.Union([
+  OrchestrationShellSnapshotBeginItem,
+  OrchestrationShellSnapshotThreadsItem,
+  OrchestrationShellSnapshotEndItem,
+]);
+export type OrchestrationShellSnapshotPageItem = typeof OrchestrationShellSnapshotPageItem.Type;
+
 export const OrchestrationShellStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
   }),
   OrchestrationShellThreadPrioritiesItem,
+  /** Only ever sent to a client that asked for `snapshotDelivery: "paged"`. */
+  OrchestrationShellSnapshotBeginItem,
+  OrchestrationShellSnapshotThreadsItem,
+  OrchestrationShellSnapshotEndItem,
   /**
    * The server accepted `resumeFromSequence`: instead of a snapshot, the events
    * after `fromSequence` follow, and the client keeps the shell it already has.
@@ -1267,6 +1332,15 @@ export const OrchestrationShellStreamItem = Schema.Union([
   OrchestrationShellStreamEvent,
 ]);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
+
+/**
+ * A shell stream item as subscribers see it: a client that takes paged
+ * snapshots reassembles the pages into one `snapshot` item before delivery.
+ */
+export type OrchestrationShellSubscriptionItem = Exclude<
+  OrchestrationShellStreamItem,
+  OrchestrationShellSnapshotPageItem
+>;
 
 export const OrchestrationSubscribeShellInput = Schema.Struct({
   /**
@@ -1283,6 +1357,13 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * ignore the field and keep sending snapshots.
    */
   threadPriorities: Schema.optional(Schema.Literal("delta")),
+  /**
+   * `"paged"` asks for every shell snapshot in bounded pages (see
+   * `OrchestrationShellSnapshotDelivery`). Absent, a snapshot is one `snapshot`
+   * item, which every client understands; older servers ignore the field and
+   * keep sending that.
+   */
+  snapshotDelivery: Schema.optional(OrchestrationShellSnapshotDelivery),
 });
 export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 
@@ -1354,9 +1435,20 @@ export const OrchestrationThreadHistoryState = Schema.Struct({
 });
 export type OrchestrationThreadHistoryState = typeof OrchestrationThreadHistoryState.Type;
 
+/**
+ * How a window or history page sends activity payloads. `"preview"` bounds each
+ * large payload (see `OrchestrationThreadActivity.payloadPreview`); absent means
+ * full payloads, which is all an older client understands. Older servers ignore
+ * the field and send full payloads, which a client that asked for previews
+ * handles unchanged.
+ */
+export const OrchestrationActivityPayloadMode = Schema.Literals(["full", "preview"]);
+export type OrchestrationActivityPayloadMode = typeof OrchestrationActivityPayloadMode.Type;
+
 export const OrchestrationGetThreadWindowInput = Schema.Struct({
   threadId: ThreadId,
   limits: OrchestrationThreadHistoryLimits,
+  activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
 
@@ -1377,6 +1469,7 @@ export const OrchestrationSubscribeThreadWindowInput = Schema.Struct({
   limits: OrchestrationThreadHistoryLimits,
   resumeFromSequence: ThreadResumeFromSequence,
   historyRecovery: Schema.optional(OrchestrationThreadHistoryRecoveryMode),
+  activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationSubscribeThreadWindowInput =
   typeof OrchestrationSubscribeThreadWindowInput.Type;
@@ -1406,6 +1499,7 @@ export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
     collection: OrchestrationThreadHistoryCollection,
     mode: OrchestrationThreadHistoryPageMode,
     limit: PositiveInt,
+    activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -1452,6 +1546,33 @@ export const OrchestrationThreadHistoryPage = Schema.Union([
   OrchestrationThreadCheckpointHistoryPage,
 ]);
 export type OrchestrationThreadHistoryPage = typeof OrchestrationThreadHistoryPage.Type;
+
+export const OrchestrationGetActivityPayloadInput = Schema.Struct({
+  threadId: ThreadId,
+  activityId: EventId,
+});
+export type OrchestrationGetActivityPayloadInput = typeof OrchestrationGetActivityPayloadInput.Type;
+
+export const OrchestrationGetActivityPayloadResult = Schema.Struct({
+  activityId: EventId,
+  /** The stored payload, or a preview of it when it exceeds what one response carries. */
+  payload: Schema.Unknown,
+  /** Encoded size of the stored payload. */
+  fullBytes: NonNegativeInt,
+  /** Whether `payload` is still a preview: the stored payload is larger than a response carries. */
+  truncated: Schema.Boolean,
+});
+export type OrchestrationGetActivityPayloadResult =
+  typeof OrchestrationGetActivityPayloadResult.Type;
+
+export class OrchestrationGetActivityPayloadError extends Schema.TaggedError<OrchestrationGetActivityPayloadError>()(
+  "OrchestrationGetActivityPayloadError",
+  {
+    reason: Schema.Literals(["not-found", "unavailable"]),
+    threadId: ThreadId,
+    activityId: EventId,
+  },
+) {}
 
 export class OrchestrationThreadHistoryError extends Schema.TaggedError<OrchestrationThreadHistoryError>()(
   "OrchestrationThreadHistoryError",
@@ -3539,6 +3660,10 @@ export const OrchestrationRpcSchemas = {
   getThreadHistoryPage: {
     input: OrchestrationGetThreadHistoryPageInput,
     output: OrchestrationThreadHistoryPage,
+  },
+  getActivityPayload: {
+    input: OrchestrationGetActivityPayloadInput,
+    output: OrchestrationGetActivityPayloadResult,
   },
   setThreadHistoryRecovery: {
     input: OrchestrationSetThreadHistoryRecoveryInput,

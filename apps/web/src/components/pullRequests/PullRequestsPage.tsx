@@ -1,3 +1,5 @@
+// The page styles load with the page chunk, not the boot stylesheet.
+import "./pullRequests.css";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {

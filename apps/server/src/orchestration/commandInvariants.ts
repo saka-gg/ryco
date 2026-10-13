@@ -15,6 +15,7 @@ import { FORKED_THREAD_RELATIONSHIP } from "@ryco/shared/threadFork";
 import { Effect, Option, Schema } from "effect";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
+import { findThreadInArray } from "./threadIndex.ts";
 
 function invariantError(commandType: string, detail: string): OrchestrationCommandInvariantError {
   return new OrchestrationCommandInvariantError({
@@ -173,7 +174,7 @@ export function findThreadById(
   readModel: OrchestrationReadModel,
   threadId: ThreadId,
 ): OrchestrationThread | undefined {
-  return readModel.threads.find((thread) => thread.id === threadId);
+  return findThreadInArray(readModel.threads, threadId);
 }
 
 export function findProjectById(

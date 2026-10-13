@@ -26,7 +26,10 @@ import {
   THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES,
 } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  scopeShellSnapshot,
+} from "../Services/ProjectionSnapshotQuery.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -252,22 +255,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             `EXPLAIN QUERY PLAN ${statement}`,
             params,
           );
-          // The shell is re-read for every thread event, per subscriber: the subquery must
-          // stop at the newest completed turn instead of sorting the thread's whole history.
-          const turnsAccess = plan.filter((row) => /^(SEARCH|SCAN) turns\b/.test(row.detail));
-          assert.lengthOf(turnsAccess, 1, JSON.stringify(plan));
-          assert.match(
-            turnsAccess[0]!.detail,
-            /^SEARCH turns USING INDEX idx_projection_turns_thread_requested \(thread_id=\?\)/,
-            JSON.stringify(plan),
-          );
-          // Only the turn id tie-break may sort ("LAST TERM OF ORDER BY"), never every turn.
+          // The shell is re-read for every thread event, per subscriber: recency is a
+          // trigger-maintained column (migration 087), so no read touches the turn history.
           assert.isFalse(
-            plan.some(
-              (row) =>
-                row.parent === turnsAccess[0]!.parent &&
-                row.detail === "USE TEMP B-TREE FOR ORDER BY",
-            ),
+            plan.some((row) => /\b(projection_turns|turns)\b/.test(row.detail)),
             JSON.stringify(plan),
           );
         }
@@ -2151,8 +2142,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const capture: SqlStatement.Transformer = (statement) =>
         Effect.sync(() => {
           const compiled = statement.compile();
-          // Not just "latest_user": listThreadRows selects latest_user_message_at.
-          if (compiled[0].includes("projection_thread_messages latest_user")) {
+          if (compiled[0].includes("threads.first_user_message_id")) {
             anchorQueries.push(compiled);
           }
           return statement;
@@ -2182,7 +2172,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         );
       }
 
-      // A3: the anchor query probes per thread and never scans message history.
+      // A3: anchors are primary-key lookups of the trigger-maintained ids (migration 087);
+      // no read walks a thread's message history.
       assert.equal(anchorQueries.length, 1);
       const [anchorStatement, anchorParams] = anchorQueries[0]!;
       const plan = yield* sql.unsafe<{ detail: string }>(
@@ -2191,21 +2182,17 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       );
       const planText = JSON.stringify(plan);
       assert.isFalse(
-        plan.some((row) => /SCAN (messages|first_user|latest_user)\b/.test(row.detail)),
+        plan.some((row) => /SCAN messages\b/.test(row.detail)),
         planText,
       );
       assert.isTrue(
         plan.some((row) => /SEARCH messages .*\(message_id=\?\)/.test(row.detail)),
         planText,
       );
-      assert.isTrue(
-        plan.some((row) => /SEARCH first_user .*\(thread_id=\?\)/.test(row.detail)),
-        planText,
-      );
-      assert.isTrue(
-        plan.some((row) => /SEARCH latest_user .*\(thread_id=\?\)/.test(row.detail)),
-        planText,
-      );
+      // Anchors carry no text: the engine only needs their id, role and order.
+      for (const thread of commandReadModel.threads) {
+        for (const message of thread.messages) assert.equal(message.text, "");
+      }
 
       yield* sql`DELETE FROM projection_thread_messages`;
       yield* sql`DELETE FROM projection_threads`;
@@ -2534,6 +2521,149 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         pagedIds,
         [1, 2, 3, 4, 5, 6].map((index) => `heavy-activity-${index}`),
       );
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
+  it.effect("serves bounded activity previews and the stored payload on request", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-preview', 'Preview', '/tmp/preview', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES
+          ('thread-preview', 'project-preview', 'Preview', '{"provider":"codex","model":"gpt-5-codex"}',
+           'full-access', 'default', NULL, NULL, NULL,
+           '2026-05-01T00:00:01.000Z', '2026-05-01T00:00:01.000Z', NULL)
+      `;
+      // Eight heavy tool outputs, the newest alone 5 MiB: past the relay's 4 MiB message cap.
+      const heavyPayload = (bytes: number) => ({
+        itemType: "command_execution",
+        status: "completed",
+        data: {
+          item: {
+            command: "cat big.log",
+            exitCode: 0,
+            aggregatedOutput: "y".repeat(bytes),
+            changes: [{ path: "src/a.ts", additions: 3, deletions: 1 }],
+          },
+        },
+      });
+      for (let index = 1; index <= 8; index++) {
+        const payload = heavyPayload(index === 8 ? 5 * 1024 * 1024 : 400 * 1024);
+        yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+          VALUES (${`preview-activity-${index}`}, 'thread-preview', NULL, 'tool', 'tool.completed', 'Ran',
+            ${JSON.stringify(payload)}, ${index}, ${`2026-05-01T00:00:0${index}.000Z`})`;
+      }
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('preview-activity-small', 'thread-preview', NULL, 'info', 'task.progress', 'Small',
+          ${JSON.stringify({ summary: "still small" })}, 9, '2026-05-01T00:00:09.000Z')`;
+
+      const limits = { messages: 150, activities: 150, proposedPlans: 30, checkpoints: 30 };
+      const window = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-preview"),
+        limits,
+        activityPayloads: "preview",
+      });
+      // Every activity fits once previewed, the 5 MiB one included.
+      assert.deepEqual(
+        window.thread.activities.map((activity) => activity.id),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+          .map((index) => `preview-activity-${index}`)
+          .concat(["preview-activity-small"]),
+      );
+      assert.equal(window.history.activities.hasMoreBefore, false);
+      const windowBytes = window.thread.activities.reduce(
+        (total, activity) => total + JSON.stringify(activity.payload).length,
+        0,
+      );
+      assert.isAtMost(windowBytes, 9 * 8 * 1024);
+      const newest = window.thread.activities.find(
+        (activity) => activity.id === "preview-activity-8",
+      )!;
+      assert.isDefined(newest.payloadPreview);
+      assert.isAbove(newest.payloadPreview!.fullBytes, 5 * 1024 * 1024);
+      // The preview keeps what collapsed rows read: command, exit code, file stats.
+      const item = (newest.payload as { data: { item: Record<string, unknown> } }).data.item;
+      assert.equal(item.command, "cat big.log");
+      assert.equal(item.exitCode, 0);
+      assert.deepEqual(item.changes, [{ path: "src/a.ts", additions: 3, deletions: 1 }]);
+      assert.isTrue(String(item.aggregatedOutput).startsWith("yyyy"));
+      assert.isTrue(String(item.aggregatedOutput).endsWith("…"));
+      const small = window.thread.activities.find(
+        (activity) => activity.id === "preview-activity-small",
+      )!;
+      assert.isUndefined(small.payloadPreview);
+      assert.deepEqual(small.payload, { summary: "still small" });
+
+      // A client that does not ask for previews keeps today's full, byte-bounded window:
+      // the 5 MiB activity does not fit behind the newest one.
+      const full = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-preview"),
+        limits,
+      });
+      assert.deepEqual(
+        full.thread.activities.map((activity) => activity.id),
+        ["preview-activity-small"],
+      );
+      assert.isTrue(full.thread.activities.every((activity) => !activity.payloadPreview));
+
+      // History pages preview the same way.
+      const page = yield* snapshotQuery.getThreadHistoryPage!({
+        threadId: ThreadId.make("thread-preview"),
+        collection: "activities",
+        mode: { kind: "before", cursor: full.history.activities.oldestCursor! },
+        limit: 150,
+        activityPayloads: "preview",
+      });
+      assert.equal(page.collection, "activities");
+      if (page.collection === "activities") {
+        assert.equal(page.items.length, 8);
+        assert.isTrue(page.items.every((activity) => activity.payloadPreview !== undefined));
+      }
+
+      const stored = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-preview"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isSome(stored));
+      if (Option.isSome(stored)) {
+        assert.equal(stored.value.kind, "tool.completed");
+        assert.deepEqual(stored.value.payload, heavyPayload(400 * 1024));
+        assert.equal(stored.value.payloadBytes, JSON.stringify(heavyPayload(400 * 1024)).length);
+      }
+      const otherThread = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-other"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isNone(otherThread));
+
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-05-02T00:00:00.000Z'`;
+      const deleted = yield* snapshotQuery.getActivityPayload!({
+        threadId: ThreadId.make("thread-preview"),
+        activityId: asEventId("preview-activity-3"),
+      });
+      assert.isTrue(Option.isNone(deleted));
 
       yield* sql`DELETE FROM projection_thread_activities`;
       yield* sql`DELETE FROM projection_threads`;
@@ -2929,4 +3059,62 @@ it("keeps the newest rows within both the count and the byte budget", () => {
     hasMoreBefore: false,
   });
   assert.equal(takeNewestRowsWithinByteBudget(rows, 2, 10_000).hasMoreBefore, true);
+});
+
+projectionSnapshotLayer("scoped shell snapshots", (it) => {
+  it.effect("equals the whole shell filtered to the scope", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_worktrees`;
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      for (const projectId of ["scope-p1", "scope-p2"]) {
+        yield* sql`INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${projectId}, ${projectId}, ${`/tmp/${projectId}`}, '[]',
+          '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')`;
+        yield* sql`INSERT INTO projection_worktrees (
+          worktree_id, project_id, branch, origin, created_at, updated_at
+        ) VALUES (${`${projectId}-wt`}, ${projectId}, 'main', 'main',
+          '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z')`;
+      }
+      const threads: ReadonlyArray<readonly [string, string, string | null]> = [
+        ["scope-t1", "scope-p1", null],
+        ["scope-t2", "scope-p1", null],
+        ["scope-t3", "scope-p2", null],
+        ["scope-deleted", "scope-p2", "2026-10-02T00:00:00.000Z"],
+      ];
+      for (const [threadId, projectId, deletedAt] of threads) {
+        yield* sql`INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, deleted_at
+        ) VALUES (
+          ${threadId}, ${projectId}, ${threadId}, '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access', 'default', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z',
+          ${deletedAt}
+        )`;
+        yield* sql`INSERT INTO projection_thread_sessions (thread_id, status, updated_at)
+          VALUES (${threadId}, 'idle', '2026-10-01T00:00:00.000Z')`;
+      }
+      const full = yield* query.getShellSnapshot();
+      const scopes = [
+        { projectIds: [ProjectId.make("scope-p1")] },
+        { threadIds: [ThreadId.make("scope-t3"), ThreadId.make("scope-deleted")] },
+        { projectIds: [ProjectId.make("scope-p1")], threadIds: [ThreadId.make("scope-t2")] },
+        { threadIds: [] },
+      ];
+      for (const scope of scopes) {
+        const scoped = yield* query.getScopedShellSnapshot!(scope);
+        assert.deepEqual(scoped, scopeShellSnapshot(full, scope), JSON.stringify(scope));
+      }
+      assert.deepEqual(
+        (yield* query.getScopedShellSnapshot!({
+          threadIds: [ThreadId.make("scope-t3")],
+        })).projects.map((project) => project.id),
+        ["scope-p2"],
+      );
+    }),
+  );
 });

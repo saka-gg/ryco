@@ -3,6 +3,7 @@ import type { ComponentProps } from "react";
 
 import { preloadableLazy, type PreloadableLazyComponent } from "../../lib/preloadableLazy";
 import type { PullRequestThreadDialog } from "../PullRequestThreadDialog";
+import type { ExpandedImageDialog } from "./ExpandedImageDialog";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /*
@@ -29,6 +30,27 @@ export const LazyContextHandoffInspectionPanel = preloadableLazy(() =>
 
 export const LazyComputerBetaPreview = preloadableLazy(() =>
   import("./ComputerBetaPreview").then((module) => module.ComputerBetaPreview),
+);
+
+// Annotated through the component type: its props interface is module-private.
+export const LazyExpandedImageDialog: PreloadableLazyComponent<
+  ComponentProps<typeof ExpandedImageDialog>
+> = preloadableLazy(() =>
+  import("./ExpandedImageDialog").then((module) => module.ExpandedImageDialog),
+);
+
+/**
+ * Wanted on every non-phone thread, but only ever shows cards once an Agent
+ * Control request is pending: it loads right after the first frame instead of
+ * with it.
+ */
+export const LazyAgentControlApprovals = preloadableLazy(() =>
+  import("../agent-control/AgentControlApprovals").then((module) => module.AgentControlApprovals),
+);
+
+/** The frozen phone tier's overview sheet; mounted on its first open and kept. */
+export const LazyPhoneOverviewSheet = preloadableLazy(() =>
+  import("../shell/phone/PhoneWorkSurface").then((module) => module.PhoneOverviewSheet),
 );
 
 // Annotated through the component type: its props interface is module-private.

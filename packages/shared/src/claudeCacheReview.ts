@@ -8,12 +8,12 @@
  * @module claudeCacheReview
  */
 import * as Schema from "effect/Schema";
-import {
-  ClaudeCacheObservation,
-  type ModelSelection,
-  type OrchestrationThread,
-  type OrchestrationThreadActivity,
+import type {
+  ModelSelection,
+  OrchestrationThread,
+  OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { ClaudeCacheObservation } from "@ryco/contracts/claude-cache";
 
 export interface ClaudeCacheReview {
   readonly observation: ClaudeCacheObservation;
@@ -52,13 +52,23 @@ export function latestClaudeCacheObservation(
 const sameSelection = (left: ModelSelection, right: ModelSelection) =>
   JSON.stringify(left) === JSON.stringify(right);
 
+/** What the resume review reads of a thread (a window snapshot or a client's subscribed copy). */
+export interface ClaudeCacheReviewThread {
+  readonly session: Pick<
+    NonNullable<OrchestrationThread["session"]>,
+    "providerName" | "runtimeSessionId" | "status" | "activeTurnId"
+  > | null;
+  readonly activities: readonly OrchestrationThreadActivity[];
+  readonly modelSelection: ModelSelection;
+}
+
 /**
  * Why native `/compact` cannot run before a send to `target`, or null when it can. Compaction
  * is a turn of the live runtime on the thread's current model, so it needs a ready, idle
  * session with a runtime; a stopped session has nothing to compact until a new one starts.
  */
 export function claudeCompactUnavailableReason(
-  thread: OrchestrationThread,
+  thread: ClaudeCacheReviewThread,
   target: ModelSelection,
 ): string | null {
   const session = thread.session;
@@ -75,7 +85,7 @@ export function claudeCompactUnavailableReason(
 
 /** An idle-time review heuristic, never a prediction of cache expiry or price. */
 export function assessClaudeCacheResume(
-  thread: OrchestrationThread,
+  thread: ClaudeCacheReviewThread,
   target: ModelSelection,
   now: number,
   context: ClaudeCacheResumeContext = {},

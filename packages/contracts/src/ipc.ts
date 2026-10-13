@@ -99,6 +99,7 @@ import type {
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
+  VcsPrefetchWorktreeBaseInput,
   VcsPullInput,
   VcsPullResult,
   VcsRemoveWorktreeInput,
@@ -204,6 +205,8 @@ import type {
   ContextHandoffRawPayloadChunkInput,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
+  OrchestrationGetActivityPayloadInput,
+  OrchestrationGetActivityPayloadResult,
   OrchestrationGetThreadHistoryPageInput,
   OrchestrationGetThreadWindowInput,
   OrchestrationThreadHistoryPage,
@@ -223,7 +226,7 @@ import type {
   OrchestrationReplayEventsPageInput,
   OrchestrationReplayEventsPageResult,
   OrchestrationReplayEventsResult,
-  OrchestrationShellStreamItem,
+  OrchestrationShellSubscriptionItem,
   OrchestrationSubscribeThreadInput,
   OrchestrationThreadStreamItem,
 } from "./orchestration.ts";
@@ -1114,6 +1117,14 @@ export interface EnvironmentApi {
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
+    /** Absent on transports without it; call only when the server advertises the capability. */
+    prewarmProviderSession?: (
+      input: import("./provider.ts").ProviderSessionPrewarmInput,
+    ) => Promise<import("./provider.ts").ProviderSessionPrewarmResult>;
+    /** Absent on transports without it; call only when the server advertises the capability. */
+    readProjectProviderCommands?: (
+      input: import("./provider.ts").ProviderProjectCommandsInput,
+    ) => Promise<import("./server.ts").ProviderProjectCommands>;
     getSettings: () => Promise<ServerSettings>;
     getProjectPreferences?: (input: {
       readonly projectId?: ProjectId;
@@ -1220,6 +1231,8 @@ export interface EnvironmentApi {
     applyIndexPatch: (input: GitApplyIndexPatchInput) => Promise<void>;
     readComparison: (input: GitReadComparisonInput) => Promise<GitReadComparisonResult>;
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
+    /** Absent on clients built without it; older servers answer "Unknown request tag". */
+    prefetchWorktreeBase?: (input: VcsPrefetchWorktreeBaseInput) => Promise<void>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;
     createRef: (input: VcsCreateRefInput) => Promise<VcsCreateRefResult>;
@@ -1304,6 +1317,10 @@ export interface EnvironmentApi {
     getThreadHistoryPage?: (
       input: OrchestrationGetThreadHistoryPageInput,
     ) => Promise<OrchestrationThreadHistoryPage>;
+    /** Optional so clients can feature-detect against older environments. */
+    getActivityPayload?: (
+      input: OrchestrationGetActivityPayloadInput,
+    ) => Promise<OrchestrationGetActivityPayloadResult>;
     replayEvents?: (
       input: OrchestrationReplayEventsInput,
     ) => Promise<OrchestrationReplayEventsResult>;
@@ -1311,7 +1328,7 @@ export interface EnvironmentApi {
       input: OrchestrationReplayEventsPageInput,
     ) => Promise<OrchestrationReplayEventsPageResult>;
     subscribeShell: (
-      callback: (event: OrchestrationShellStreamItem) => void,
+      callback: (event: OrchestrationShellSubscriptionItem) => void,
       options?: {
         onResubscribe?: () => void;
       },

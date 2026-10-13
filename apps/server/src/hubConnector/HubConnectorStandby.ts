@@ -1,5 +1,4 @@
 import { DEFAULT_HUB_CONNECTOR_CONFIG, type HubConnectorConfig } from "../config.ts";
-import { hubIdentityHoldsKeyMaterial } from "./HubIdentityRuntime.ts";
 
 /**
  * Resolve a Desktop standby connector once, at launch.
@@ -32,8 +31,11 @@ export async function resolveStandbyHubConnectorConfig(input: {
   // A standby connector that cannot start cleanly stays out of the way; the
   // operator sees the problem once they turn the connector on themselves.
   if (input.config.configurationIssue !== undefined) return DEFAULT_HUB_CONNECTOR_CONFIG;
+  // Key custody code loads only for a desktop launch that asks for standby.
   const holdsKeyMaterial =
-    input.holdsKeyMaterial ?? ((statePath: string) => hubIdentityHoldsKeyMaterial({ statePath }));
+    input.holdsKeyMaterial ??
+    (async (statePath: string) =>
+      (await import("./HubIdentityRuntime.ts")).hubIdentityHoldsKeyMaterial({ statePath }));
   let holds: boolean;
   try {
     holds = await holdsKeyMaterial(input.statePath);

@@ -1,6 +1,5 @@
 import type { NativeE2eeTrustSource } from "@ryco/contracts/native-e2ee";
 import { equalBytes } from "@noble/ciphers/utils.js";
-import { x25519 } from "@noble/curves/ed25519.js";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
@@ -25,6 +24,7 @@ import {
 import {
   E2EE_CLIENT_IDENTITY_ALGORITHM,
   e2eeKeyFingerprint,
+  e2eeX25519PublicKey,
   invalidRelayE2eeInput,
   validateE2eeAgreementPublicKey,
   validateE2eeClientIdentityPublicKey,
@@ -1709,7 +1709,7 @@ export class E2eeClientHandshake {
       // A local guard, not a protocol step: an agreement secret that does not
       // match the certificate's agreement key produces a Noise `s` the node
       // rejects at §8.6 step 5, one round trip and one single-use ticket later.
-      const derived = x25519.getPublicKey(credentials.agreementSecretKey);
+      const derived = e2eeX25519PublicKey(credentials.agreementSecretKey);
       if (!e2eeSecretBytesEqual(derived, credentials.agreementPublicKey)) {
         throw new TypeError(
           "Relay E2EE client agreement secret key does not match its certificate key.",

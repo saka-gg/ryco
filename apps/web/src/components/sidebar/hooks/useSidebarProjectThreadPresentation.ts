@@ -6,8 +6,9 @@ import {
   resolveThreadStatusPill,
   sortThreadsWithPinned,
 } from "../../Sidebar.logic";
-import { adaptProjectForSidebarTree } from "../sidebarTreeAdapters";
-import { useSidebarTree } from "./useSidebarTree";
+import { restatusSidebarTreeThread } from "../sidebarTreeAdapters";
+import { useSidebarProjectTreeCache } from "../sidebarProjectTreeCache";
+import { decorateSidebarTreeProject, type SidebarTreeThread } from "./useSidebarTree";
 import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../../types";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
 import { useUiStateStore } from "../../../uiStateStore";
@@ -16,7 +17,11 @@ const THREAD_PREVIEW_LIMIT = 6;
 
 export function useSidebarProjectThreadPresentation(params: {
   project: SidebarProjectSnapshot;
+  /** The project's server threads and its drafts, merged. */
   projectThreads: ReadonlyArray<SidebarThreadSummary>;
+  sidebarThreads: ReadonlyArray<SidebarThreadSummary>;
+  /** From the shared tree cache's `draftThreadsSelector(project)`. */
+  projectDraftThreads: ReadonlyArray<SidebarTreeThread>;
   sidebarWorktrees: ReadonlyArray<SidebarWorktreeSummary>;
   lastVisitedAtByThreadKey: ReadonlyMap<string, string | null>;
   threadSortOrder: SidebarThreadSortOrder;
@@ -27,6 +32,8 @@ export function useSidebarProjectThreadPresentation(params: {
   const {
     project,
     projectThreads,
+    sidebarThreads,
+    projectDraftThreads,
     sidebarWorktrees,
     lastVisitedAtByThreadKey,
     threadSortOrder,
@@ -141,32 +148,31 @@ export function useSidebarProjectThreadPresentation(params: {
     projectExpanded,
     visibleProjectThreads,
   ]);
-  const sidebarTreeInput = useMemo(() => {
-    return adaptProjectForSidebarTree({
-      lastVisitedAtByThreadKey,
-      project,
-      threads: sortThreadsWithPinned({
-        threads: projectThreads,
-        sortOrder: threadSortOrder,
-        pinnedThreadKeys,
-        getThreadKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      }),
-      worktrees: sidebarWorktrees,
-    });
-  }, [
-    lastVisitedAtByThreadKey,
-    pinnedThreadKeys,
+  // The structure is shared with the Sidebar's traversal, which asks for the
+  // same project first; visits only change status pills, applied here.
+  const structure = useSidebarProjectTreeCache().structure({
     project,
-    projectThreads,
-    sidebarWorktrees,
-    threadSortOrder,
-  ]);
-  const sidebarTree = useSidebarTree({
-    projects: [sidebarTreeInput.project],
-    threads: sidebarTreeInput.threads,
-    worktrees: sidebarTreeInput.worktrees,
+    threads: sidebarThreads,
+    drafts: projectDraftThreads,
+    worktrees: sidebarWorktrees,
+    sortOrder: threadSortOrder,
+    pinnedThreadKeys,
   });
-  const treeProject = sidebarTree.projects[0] ?? null;
+  const treeProject = useMemo(
+    () =>
+      structure === null
+        ? null
+        : decorateSidebarTreeProject(structure, {
+            restatusThread: (thread) =>
+              restatusSidebarTreeThread(
+                thread,
+                lastVisitedAtByThreadKey.get(
+                  scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+                ),
+              ),
+          }),
+    [lastVisitedAtByThreadKey, structure],
+  );
   const visibleTreeThreadKeys = useMemo(() => {
     if (projectExpanded) {
       return null;

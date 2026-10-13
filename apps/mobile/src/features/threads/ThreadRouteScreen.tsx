@@ -1,6 +1,6 @@
 import type { StaticScreenProps } from "@react-navigation/native";
 
-import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
 

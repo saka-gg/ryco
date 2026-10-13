@@ -7,7 +7,7 @@ import {
   DEVICE_FRAME_VERSION,
   type DeviceFrameDecodeErrorReason,
   type DeviceFrameHeader,
-} from "@ryco/contracts";
+} from "@ryco/contracts/device";
 
 /**
  * Encoded video rides its own WebSocket rather than the JSON RPC socket: a

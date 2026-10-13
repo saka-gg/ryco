@@ -331,6 +331,98 @@ describe("persistent Hub session", () => {
     session.dispose();
     expect(vi.getTimerCount()).toBe(0);
   });
+  it("reconnects at once on a lifecycle signal while waiting out its backoff", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.ready();
+    sockets[0]!.close(1006);
+    expect(sockets).toHaveLength(1);
+    session.resume();
+    expect(sockets).toHaveLength(2);
+    // Once per signal: a second signal while connecting does nothing more.
+    session.resume();
+    expect(sockets).toHaveLength(2);
+    // Consecutive failures keep their backoff: 1,000 ms after a second failure.
+    sockets[1]!.close(1006);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sockets).toHaveLength(3);
+    session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("leaves an authentication failure closed on a lifecycle signal", () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.ready();
+    sockets[0]!.close(4401);
+    session.resume();
+    expect(sockets).toHaveLength(1);
+  });
+  it("replaces a socket silent past the liveness bound without a probe wait", async () => {
+    const { session, sockets, onFailure } = harness();
+    session.start();
+    sockets[0]!.ready();
+    // A suspended timer clock: the heartbeat has not fired, the wall clock moved.
+    vi.setSystemTime(Date.now() + 46_000);
+    session.resume();
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(sockets[0]!.closed).toBe(1);
+    expect(sockets).toHaveLength(2);
+    // A stall probe does the same, then keeps the ordinary backoff.
+    sockets[1]!.ready();
+    vi.setSystemTime(Date.now() + 46_000);
+    session.probe();
+    expect(sockets[1]!.closed).toBe(1);
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(sockets).toHaveLength(3);
+    session.dispose();
+  });
+  it("holds new streams off a suspect socket until a frame proves it alive", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.ready();
+    session.probe();
+    const channel = session.createSocket();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(channel.readyState).toBe(0);
+    expect(sockets[0]!.frames().some((frame) => frame.type === "open")).toBe(false);
+    sockets[0]!.receive({ type: "ping", nonce: new Uint8Array(8) });
+    expect(channel.readyState).toBe(1);
+    expect(sockets[0]!.frames().filter((frame) => frame.type === "open")).toEqual([
+      { type: "open", streamId: 1 },
+    ]);
+    session.dispose();
+  });
+  it("carries a stream held off a dead socket to the replacement without closing it", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    const channel = session.createSocket();
+    const closed = vi.fn();
+    channel.onClose(closed);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sockets[0]!.closed).toBe(1);
+    expect(closed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    sockets[1]!.ready();
+    expect(channel.readyState).toBe(1);
+    expect(sockets[1]!.frames()).toEqual([{ type: "open", streamId: 1 }]);
+    session.dispose();
+  });
+  it("closes a never-opened stream that waited past its bound", async () => {
+    const { session, sockets } = harness();
+    const channel = session.createSocket();
+    const closed = vi.fn();
+    channel.onClose(closed);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets[0]!.closed).toBe(1);
+    expect(closed).toHaveBeenCalledOnce();
+    session.dispose();
+  });
   it("ignores a probe before READY", async () => {
     const { session, sockets, onFailure } = harness();
     session.start();

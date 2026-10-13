@@ -5,7 +5,7 @@ import {
   type KeybindingCommand,
   type KeybindingRule,
   type ResolvedKeybindingsConfig,
-} from "@ryco/contracts";
+} from "@ryco/contracts/keybindings";
 import {
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,

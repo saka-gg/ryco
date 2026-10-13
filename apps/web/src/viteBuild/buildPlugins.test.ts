@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { statSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,8 +7,10 @@ import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vite-plus/test";
 
 import { BOOT_FONT_SOURCE_NAME, findBootFontAsset } from "./bootFontPreload";
+import { resolveBootAssets, type BundleGraphEntry } from "./bundleGraph";
 import {
   createBootGraphMatcher,
+  createBootVendorMatcher,
   createWebCodeSplittingOptions,
   isLexicalModule,
   isMarkdownModule,
@@ -18,7 +21,7 @@ import {
   webChunkFileName,
   type ModuleGraphContext,
 } from "./codeSplitting";
-import { resolveWebModulePreloadDependencies } from "./modulePreload";
+import { bootPreloadTags, resolveWebModulePreloadDependencies } from "./modulePreload";
 import {
   createPrecompressedAssetsPlugin,
   PRECOMPRESS_MIN_BYTES,
@@ -37,13 +40,73 @@ describe("resolveWebModulePreloadDependencies", () => {
     ).toEqual(deps);
   });
 
-  it("keeps index.html free of eager preloads", () => {
+  it("leaves index.html's hints to the boot preload plugin", () => {
     expect(
       resolveWebModulePreloadDependencies("assets/index.js", [...deps], {
         hostId: "index.html",
         hostType: "html",
       }),
     ).toEqual([]);
+  });
+});
+
+describe("boot preload hints", () => {
+  // `index.html`'s module script imports boot (the preload helper) and then the
+  // app module dynamically; the app imports boot, its vendor chunk and the CSS.
+  const entries: ReadonlyArray<BundleGraphEntry> = [
+    {
+      fileName: "assets/index-Entry123.js",
+      isEntry: true,
+      imports: ["assets/boot-Boot1234.js"],
+      dynamicImports: ["assets/main-Main1234.js"],
+    },
+    {
+      fileName: "assets/boot-Boot1234.js",
+      imports: ["assets/boot-vendor-Vend1234.js", "assets/rolldown-runtime-Rt123456.js"],
+      dynamicImports: ["assets/HostedHubRoot-Lazy1234.js"],
+    },
+    {
+      fileName: "assets/boot-vendor-Vend1234.js",
+      imports: ["assets/rolldown-runtime-Rt123456.js"],
+    },
+    { fileName: "assets/rolldown-runtime-Rt123456.js" },
+    {
+      fileName: "assets/main-Main1234.js",
+      facadeModuleId: "/repo/apps/web/src/main.tsx",
+      imports: ["assets/boot-Boot1234.js", "assets/boot-vendor-Vend1234.js"],
+      importedCss: ["assets/main-Css12345.css"],
+      importedAssets: ["assets/dm-sans-Font1234.woff2"],
+    },
+    { fileName: "assets/main-Css12345.css" },
+    { fileName: "assets/HostedHubRoot-Lazy1234.js", imports: ["assets/icons-Icon1234.js"] },
+  ];
+
+  it("resolves the chain the entry evaluates before the app renders, helper first", () => {
+    expect(resolveBootAssets(entries)).toEqual({
+      entries: ["assets/index-Entry123.js"],
+      modules: [
+        "assets/index-Entry123.js",
+        "assets/boot-Boot1234.js",
+        "assets/boot-vendor-Vend1234.js",
+        "assets/rolldown-runtime-Rt123456.js",
+        "assets/main-Main1234.js",
+      ],
+      styles: ["assets/main-Css12345.css"],
+    });
+  });
+
+  it("preloads the boot chain and its stylesheet, never a later phase", () => {
+    const tags = bootPreloadTags(entries, "/base/");
+    expect(tags.map((tag) => tag.attrs)).toEqual([
+      { rel: "modulepreload", crossorigin: "", href: "/base/assets/boot-Boot1234.js" },
+      { rel: "modulepreload", crossorigin: "", href: "/base/assets/boot-vendor-Vend1234.js" },
+      { rel: "modulepreload", crossorigin: "", href: "/base/assets/rolldown-runtime-Rt123456.js" },
+      { rel: "modulepreload", crossorigin: "", href: "/base/assets/main-Main1234.js" },
+      // Same CORS mode as the stylesheet link the preload helper inserts.
+      { rel: "preload", as: "style", crossorigin: "", href: "/base/assets/main-Css12345.css" },
+    ]);
+    // Link tags only: the hosted CSP allows exactly one inline script.
+    expect(tags.every((tag) => tag.tag === "link" && tag.injectTo === "head")).toBe(true);
   });
 });
 
@@ -62,8 +125,9 @@ describe("web code splitting", () => {
     expect(isMergeableIconModule("/repo/apps/web/src/lucide-react/local.ts")).toBe(false);
 
     const { groups } = createWebCodeSplittingOptions({ bootEntry: "/repo/apps/web/src/main.tsx" });
-    expect(groups.map((group) => (typeof group.name === "string" ? group.name : "boot"))).toEqual([
-      "boot",
+    expect(groups.map((group) => (typeof group.name === "string" ? group.name : "boot*"))).toEqual([
+      "boot*",
+      "boot*",
       "icons",
       "vendor",
       "lexical",
@@ -73,6 +137,7 @@ describe("web code splitting", () => {
     // The boot graph stays one chunk: a size split cut the effect runtime into
     // chunks that import each other, and boot then read uninitialised bindings.
     expect(groups[0]).not.toHaveProperty("maxSize");
+    expect(groups[1]).not.toHaveProperty("maxSize");
     for (const group of groups) {
       // The boot group regroups modules every entry has already evaluated.
       if (!("minShareCount" in group)) continue;
@@ -169,7 +234,64 @@ describe("web code splitting", () => {
     expect(lookups - afterFirstPass).toBe(1);
   });
 
+  it("adds a build's boot roots and their static closure to the boot group", () => {
+    const graph: Record<string, { code: string; importedIds: string[] }> = {
+      "/repo/apps/web/src/main.tsx": { code: "main", importedIds: [] },
+      "/repo/apps/web/src/routeViews/Layout.tsx": {
+        code: "layout",
+        importedIds: ["/repo/apps/web/src/store.ts"],
+      },
+      "/repo/apps/web/src/store.ts": { code: "store", importedIds: [] },
+    };
+    const context: ModuleGraphContext = { getModuleInfo: (id) => graph[id] ?? null };
+    const withRoots = createBootGraphMatcher("/repo/apps/web/src/main.tsx", [
+      "/repo/apps/web/src/routeViews/Layout.tsx",
+    ]);
+    const without = createBootGraphMatcher("/repo/apps/web/src/main.tsx");
+    expect(withRoots("/repo/apps/web/src/routeViews/Layout.tsx", context)).toBe(true);
+    expect(withRoots("/repo/apps/web/src/store.ts", context)).toBe(true);
+    expect(without("/repo/apps/web/src/store.ts", context)).toBe(false);
+  });
+
+  it("puts the packages the boot graph imports in the boot vendor group", () => {
+    const nm = "/repo/node_modules/.bun/pkg@1/node_modules";
+    const graph: Record<string, { code: string; importedIds: string[] }> = {
+      "/repo/apps/web/src/main.tsx": {
+        code: "main",
+        importedIds: ["/repo/apps/web/src/app.ts", `${nm}/react/index.js`],
+      },
+      "/repo/apps/web/src/app.ts": {
+        code: "app",
+        importedIds: [`${nm}/effect/dist/Schema.js`, `${nm}/lucide-react/dist/esm/icons/x.js`],
+      },
+      "/repo/apps/web/src/lazy.ts": { code: "lazy", importedIds: [`${nm}/shiki/index.js`] },
+      [`${nm}/react/index.js`]: { code: "react", importedIds: [`${nm}/react/cjs/react.js`] },
+      [`${nm}/react/cjs/react.js`]: { code: "react impl", importedIds: [] },
+      [`${nm}/effect/dist/Schema.js`]: { code: "schema", importedIds: [] },
+      [`${nm}/lucide-react/dist/esm/icons/x.js`]: { code: "icon", importedIds: [] },
+      [`${nm}/shiki/index.js`]: { code: "shiki", importedIds: [] },
+    };
+    const context: ModuleGraphContext = { getModuleInfo: (id) => graph[id] ?? null };
+    const isBootVendor = createBootVendorMatcher("/repo/apps/web/src/main.tsx");
+    const captured = Object.keys(graph).filter((id) => isBootVendor(id, context));
+    expect(captured).toEqual([
+      `${nm}/react/index.js`,
+      `${nm}/react/cjs/react.js`,
+      `${nm}/effect/dist/Schema.js`,
+    ]);
+    // Ahead of `boot`, which would otherwise take them along as dependencies.
+    const { groups } = createWebCodeSplittingOptions({ bootEntry: "/repo/apps/web/src/main.tsx" });
+    const [boot, bootVendor] = groups as unknown as ReadonlyArray<{
+      readonly name: (id: string, context: ModuleGraphContext) => string | null;
+      readonly priority: number;
+    }>;
+    expect(boot!.name("/repo/apps/web/src/app.ts", context)).toBe("boot");
+    expect(bootVendor!.name(`${nm}/react/index.js`, context)).toBe("boot-vendor");
+    expect(bootVendor!.priority).toBeGreaterThan(boot!.priority);
+  });
+
   it("gives merged groups short file names and leaves other chunks alone", () => {
+    expect(webChunkFileName({ name: "boot-vendor" })).toBe("assets/boot-vendor-[hash].js");
     expect(webChunkFileName({ name: "icons~main~RootAppShell~ChatView" })).toBe(
       "assets/icons-[hash].js",
     );
@@ -181,6 +303,23 @@ describe("web code splitting", () => {
     expect(webChunkFileName({ name: "iconsPicker" })).toBe("assets/[name]-[hash].js");
     expect(webChunkFileName({ name: "markdown" })).toBe("assets/[name]-[hash].js");
     expect(webChunkFileName({ name: "RootAppShell" })).toBe("assets/[name]-[hash].js");
+  });
+});
+
+describe("public icons", () => {
+  // Losslessly optimised (oxipng, PNG frames in the ICO). The manifest icons
+  // download on every PWA install or update and the Hub serves them no-store.
+  const ceilings: ReadonlyArray<readonly [string, number]> = [
+    ["web-app-manifest-512x512.png", 128 * 1024],
+    ["web-app-manifest-192x192.png", 24 * 1024],
+    ["apple-touch-icon.png", 24 * 1024],
+    ["favicon-96x96.png", 8 * 1024],
+    ["favicon.ico", 8 * 1024],
+  ];
+
+  it.each(ceilings)("keeps %s small", (file, ceiling) => {
+    const size = statSync(new URL(`../../public/${file}`, import.meta.url)).size;
+    expect(size).toBeLessThanOrEqual(ceiling);
   });
 });
 

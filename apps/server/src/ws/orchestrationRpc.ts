@@ -22,6 +22,7 @@ import {
 } from "@ryco/contracts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
+import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
 import {
   makeThreadHistoryRecoveryRegistry,
   type ThreadStreamItemLike,
@@ -181,6 +182,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     }
     return query({
       threadId: input.threadId,
+      ...(input.activityPayloads !== undefined ? { activityPayloads: input.activityPayloads } : {}),
       limits: {
         messages: clamp(input.limits.messages, { minimum: 1, maximum: 200 }),
         proposedPlans: clamp(input.limits.proposedPlans, {
@@ -437,6 +439,12 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       observeRpcEffect(ORCHESTRATION_WS_METHODS.getThreadWindow, loadThreadWindow(input), {
         "rpc.aggregate": "orchestration",
       }),
+    [ORCHESTRATION_WS_METHODS.getActivityPayload]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.getActivityPayload,
+        loadActivityPayload(projectionSnapshotQuery.getActivityPayload, input),
+        { "rpc.aggregate": "orchestration" },
+      ),
     [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
@@ -531,6 +539,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               {
                 resumeFromSequence: input.resumeFromSequence,
                 threadPriorities: input.threadPriorities,
+                snapshotDelivery: input.snapshotDelivery,
               },
             ).pipe(
               observeArrays(isServerPerfProfileEnabled(), (items) =>

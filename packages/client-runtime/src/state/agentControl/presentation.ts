@@ -6,6 +6,7 @@
  * audit-safe prompt summary is the default text; full prompts appear only
  * in `detailSections`, which the card reveals through deliberate expansion.
  */
+import type { ThreadId } from "@ryco/contracts";
 import {
   AGENT_CONTROL_AUTOMATION_MAX_ACTIVE_PER_PROJECT,
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
@@ -14,8 +15,7 @@ import {
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
-  type ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/agent-control";
 
 export type AgentControlStatusTone = "pending" | "info" | "success" | "danger" | "muted";
 

@@ -63,6 +63,7 @@ import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
+import { findThreadInArray } from "../threadIndex.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -282,7 +283,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         }
         const storageThread =
           "threadId" in storageCommand
-            ? commandReadModel.threads.find((thread) => thread.id === storageCommand.threadId)
+            ? findThreadInArray(commandReadModel.threads, storageCommand.threadId)
             : undefined;
         const storageThreadPaths = storageThread
           ? [
@@ -390,8 +391,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               command,
               row,
               seenRequest: seen.length > 0,
-              session: commandReadModel.threads.find((thread) => thread.id === command.threadId)
-                ?.session,
+              session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
             },
             isQuestion ? "user-input" : "approval",
           );
@@ -428,9 +428,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                       threadId: command.threadId,
                       requestId: command.requestId,
                     }),
-                    session: commandReadModel.threads.find(
-                      (thread) => thread.id === command.threadId,
-                    )?.session,
+                    session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
                   });
                 }
                 if (envelope.command.type === "thread.user-input.respond") {
@@ -441,9 +439,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                       threadId: command.threadId,
                       requestId: command.requestId,
                     }),
-                    session: commandReadModel.threads.find(
-                      (thread) => thread.id === command.threadId,
-                    )?.session,
+                    session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
                   });
                 }
                 const committedEvents: OrchestrationEvent[] = [];

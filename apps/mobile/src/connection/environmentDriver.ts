@@ -173,6 +173,14 @@ export interface MobileEnvironmentDriverDeps {
    */
   readonly sessionHints?: SavedSessionHints;
   /**
+   * Whether the hosted primary connection may be built yet. The direct plane
+   * starts before the snapshot cache has hydrated (see `runtime/startupBarrier`),
+   * while hosted work stays behind full hydration: a primary connect asked for
+   * earlier is deferred and replayed by {@link MobileEnvironmentDriver.releaseDeferredPrimaryConnection}.
+   * Omitted, the primary is always admitted.
+   */
+  readonly admitPrimaryConnection?: () => boolean;
+  /**
    * Overrides the real saved-environment connect (which opens a live socket) —
    * used only by headless tests to drive the supervisor without a real WebSocket.
    */
@@ -194,6 +202,8 @@ export interface MobileEnvironmentDriver {
    * being replaced or forgotten, so no later connect starts from it.
    */
   readonly forgetSessionHint: (environmentId: EnvironmentId) => void;
+  /** Replay a primary connect `admitPrimaryConnection` deferred; a no-op otherwise. */
+  readonly releaseDeferredPrimaryConnection: () => void;
 }
 
 /**
@@ -568,6 +578,7 @@ export function createMobileEnvironmentDriver(
     }
   }
 
+  let primaryConnectionDeferred = false;
   supervisor = createEnvironmentConnectionSupervisor<SavedEnvironmentRecord>({
     isHostedMode: () => false,
     now: boundNow,
@@ -586,8 +597,12 @@ export function createMobileEnvironmentDriver(
     // selected Hub node, and that connection runs through the Hub relay. The
     // relay connection is installed by the lazily loaded hosted runtime, so the
     // relay and E2EE code stays off the launch path.
-    createPrimaryConnection: () =>
-      createHostedPrimaryConnectionIfLoaded({
+    createPrimaryConnection: () => {
+      if (deps.admitPrimaryConnection?.() === false) {
+        primaryConnectionDeferred = true;
+        return null;
+      }
+      return createHostedPrimaryConnectionIfLoaded({
         pushSequenceMonitor: noopPushSequenceMonitor,
         resetShellProjection: (environmentId) =>
           getSupervisor().resetShellProjection(environmentId),
@@ -595,7 +610,8 @@ export function createMobileEnvironmentDriver(
           getSupervisor().applyShellEvent(event, environmentId),
         syncShellSnapshot: (snapshot, environmentId, callbacks) =>
           getSupervisor().syncShellSnapshot(snapshot, environmentId, callbacks),
-      }),
+      });
+    },
     listSavedEnvironmentRecords: () => catalog.list(),
     hasSavedEnvironmentRegistryHydrated: () => catalog.hasHydrated(),
     waitForSavedEnvironmentRegistryHydration: () => catalog.waitForHydration(),
@@ -641,5 +657,10 @@ export function createMobileEnvironmentDriver(
     start: () => supervisor.start(),
     connectSavedEnvironment,
     forgetSessionHint: (environmentId) => sessionHints?.forget(environmentId),
+    releaseDeferredPrimaryConnection: () => {
+      if (!primaryConnectionDeferred) return;
+      primaryConnectionDeferred = false;
+      supervisor.connectPrimary();
+    },
   };
 }

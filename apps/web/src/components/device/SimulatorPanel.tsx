@@ -1,6 +1,7 @@
 // The interaction model is adapted from Synara v0.7.2 (MIT); see THIRD_PARTY_NOTICES.md.
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
+import { useDeviceRuntime } from "./useDeviceRuntime";
 import { DEVICE_WS_METHODS } from "@ryco/contracts";
 import type {
   DeviceDescriptor,
@@ -162,6 +163,7 @@ export default function SimulatorPanel(props: {
   readonly threadId: ThreadId | null;
 }) {
   const { environmentId, threadId } = props;
+  useDeviceRuntime(environmentId);
   const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app);
   const hostedWorkspace = useHostedWorkspaceState();
   const testingMutationReady =

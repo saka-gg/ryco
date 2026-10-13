@@ -126,6 +126,8 @@ export function deriveComposerFileUploadSendBlock(input: {
     readonly file: File | null;
     readonly uploadToken?: string | undefined;
     readonly expiresAt?: string | undefined;
+    /** A saved draft's attachment whose bytes are still loading. */
+    readonly bytesPending?: true | undefined;
   }>;
   readonly nowMs: number;
   /**
@@ -137,6 +139,9 @@ export function deriveComposerFileUploadSendBlock(input: {
 }): string | null {
   const records = input.records;
   for (const attachment of input.attachments) {
+    if (attachment.bytesPending) {
+      return `Loading '${attachment.name}'…`;
+    }
     if (attachment.type !== "file") {
       continue;
     }

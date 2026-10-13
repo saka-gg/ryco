@@ -331,6 +331,8 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  /** Probe in this directory, so its project and local commands are included. */
+  cwd?: string,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -344,6 +346,7 @@ const probeClaudeCapabilities = (
           await waitForAbortSignal(abort.signal);
         })(),
         options: {
+          ...(cwd !== undefined ? { cwd } : {}),
           persistSession: false,
           pathToClaudeCodeExecutable: claudeSettings.binaryPath,
           abortController: abort,

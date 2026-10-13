@@ -1215,14 +1215,18 @@ export const readStoredCodexThread = (input: {
       );
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
-      return parseThreadSnapshot(
-        yield* client.request("thread/read", {
-          threadId: input.providerThreadId,
-          includeTurns: true,
-        }),
-      );
+      return yield* requestStoredCodexThread(client, input.providerThreadId);
     }),
   );
+
+/** Reads a stored thread, with every turn, over an initialized app-server client. */
+export const requestStoredCodexThread = (
+  client: CodexClient.CodexAppServerClientShape,
+  providerThreadId: string,
+) =>
+  client
+    .request("thread/read", { threadId: providerThreadId, includeTurns: true })
+    .pipe(Effect.map(parseThreadSnapshot));
 
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,

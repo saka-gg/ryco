@@ -5,22 +5,24 @@ import {
   type WorkspacePhysicalProjectVariant,
 } from "@ryco/client-runtime/state/workspace";
 import type { Project, SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import type {
+  CommandId,
+  EnvironmentId,
+  MessageId,
+  ProjectId,
+  ThreadId,
+  WorktreeId,
+} from "@ryco/contracts";
+import { DEFAULT_MODEL } from "@ryco/contracts/model";
 import {
-  DEFAULT_MODEL,
   DEFAULT_AGENT_TOKEN_MODE,
-  ProviderInstanceId,
   type AgentTokenMode,
   type ClientOrchestrationCommand,
-  type CommandId,
-  type EnvironmentId,
-  type MessageId,
   type ModelSelection,
-  type ProjectId,
   type ProviderInteractionMode,
   type RuntimeMode,
-  type ThreadId,
-  type WorktreeId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
 import { inferNodeProjectTitle, validateNodeWorkspacePath } from "../projects/projectActions";
 import type { ProjectEnvironment } from "../projects/projectsModel";

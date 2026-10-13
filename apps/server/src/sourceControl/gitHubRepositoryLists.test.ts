@@ -4,6 +4,8 @@ import { Option, Result } from "effect";
 import {
   buildGitHubPullRequestInvolvementSearch,
   buildGitHubPullRequestListQuery,
+  buildGitHubPullRequestStatesQuery,
+  decodeGitHubPullRequestStatesJson,
   decodeGitHubIssueListPageJson,
   decodeGitHubPullRequestListPageJson,
   gitHubPullRequestListStates,
@@ -284,5 +286,53 @@ describe("gitHubRepositoryLists", () => {
       ),
     );
     assert.isFalse(isGitHubStackFieldUnsupportedDetail("Field 'title' doesn't exist on type 'X'"));
+  });
+});
+
+describe("pull request states by number", () => {
+  it("asks for every number in one document and decodes states, skipping unresolved ones", () => {
+    const query = buildGitHubPullRequestStatesQuery([12, 7, 0, -1]);
+    assert.include(query, "p12: pullRequest(number: 12)");
+    assert.include(query, "p7: pullRequest(number: 7)");
+    assert.notInclude(query, "number: 0");
+    const decoded = decodeGitHubPullRequestStatesJson(
+      JSON.stringify({
+        data: {
+          repository: {
+            p12: {
+              number: 12,
+              state: "MERGED",
+              isDraft: false,
+              closedAt: "2026-10-01T00:00:00Z",
+              mergedAt: "2026-10-01T00:00:00Z",
+            },
+            p7: null,
+            p9: { number: 9, state: "OPEN", isDraft: true, closedAt: null, mergedAt: null },
+          },
+        },
+        errors: [{ message: "Could not resolve to a PullRequest", path: ["repository", "p7"] }],
+      }),
+    );
+    assert.isTrue(Result.isSuccess(decoded));
+    if (!Result.isSuccess(decoded)) return;
+    assert.deepStrictEqual(
+      [...decoded.success],
+      [
+        [
+          12,
+          {
+            state: "merged",
+            isDraft: false,
+            closedAt: "2026-10-01T00:00:00Z",
+            mergedAt: "2026-10-01T00:00:00Z",
+          },
+        ],
+        [9, { state: "open", isDraft: true, closedAt: null, mergedAt: null }],
+      ],
+    );
+    const failed = decodeGitHubPullRequestStatesJson(
+      JSON.stringify({ data: null, errors: [{ message: "Bad credentials", path: null }] }),
+    );
+    assert.isTrue(Result.isFailure(failed));
   });
 });

@@ -58,6 +58,13 @@ import { adoptHostedEnvironmentRoute } from "../hostedHub/adoptHostedEnvironment
 import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 
+function samePreferences(
+  left: EffectiveProjectPreferences,
+  right: EffectiveProjectPreferences | null,
+): boolean {
+  return right !== null && JSON.stringify(left) === JSON.stringify(right);
+}
+
 export interface NewThreadOptions {
   modelSelection?: ModelSelection;
   branch?: string | null;
@@ -146,8 +153,9 @@ function useNewThreadState() {
         // while switching targets. Every other target's cached config is the
         // live one its config stream keeps current, so only the preferences
         // read stays on the path to the draft.
-        const { config, effective } = await readNewDraftDefaults({
+        const { config, effective, fresh } = await readNewDraftDefaults({
           api,
+          environmentId: input.environmentId,
           cachedConfig: readEnvironmentServerConfig(input.environmentId),
           requireFreshConfig: hosted || isHostedHubMode(),
           projectId: input.preferencesProjectId,
@@ -161,19 +169,45 @@ function useNewThreadState() {
         )
           throw new Error("The workspace connection changed. Try creating the draft again.");
         if (input.superseded()) return input.resume();
-        input.register(config, effective);
-        const store = useComposerDraftStore.getState();
-        store.applyStickyState(input.draftId);
-        const initialModel = input.explicitModelSelection ?? effective?.initialModelSelection.value;
-        if (initialModel)
-          store.setModelSelection(
-            input.draftId,
-            initialDraftModelSelection({
-              effective,
-              fallback: initialModel,
-              explicit: input.explicitModelSelection,
-            }),
-          );
+        const seed = (preferences: EffectiveProjectPreferences | null) => {
+          input.register(config, preferences);
+          const store = useComposerDraftStore.getState();
+          store.applyStickyState(input.draftId);
+          const initialModel =
+            input.explicitModelSelection ?? preferences?.initialModelSelection.value;
+          if (initialModel)
+            store.setModelSelection(
+              input.draftId,
+              initialDraftModelSelection({
+                effective: preferences,
+                fallback: initialModel,
+                explicit: input.explicitModelSelection,
+              }),
+            );
+          const seeded = useComposerDraftStore.getState();
+          return {
+            composer: seeded.getComposerDraft(input.draftId),
+            session: seeded.draftThreadsByThreadKey[input.draftId],
+          };
+        };
+        const seeded = seed(effective);
+        if (fresh) {
+          // Opened with this session's last answer for the project. The node's
+          // current one replaces it only if it differs and the draft is exactly
+          // as seeded: a choice the user already made is never overwritten.
+          void fresh
+            .then((current) => {
+              if (current === null || samePreferences(current, effective)) return;
+              const state = useComposerDraftStore.getState();
+              if (
+                state.getComposerDraft(input.draftId) !== seeded.composer ||
+                state.draftThreadsByThreadKey[input.draftId] !== seeded.session
+              )
+                return;
+              seed(current);
+            })
+            .catch(() => undefined);
+        }
 
         adoptHostedTarget(input.environmentId);
         await router.navigate({

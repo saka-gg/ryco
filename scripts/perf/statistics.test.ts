@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 
+import { DEFAULT_COMPARISON_POLICY, type PerfSample, sampleMetric } from "./model.ts";
 import { aggregate, finiteValues, median, percentile } from "./statistics.ts";
 
 describe("external performance statistics", () => {
@@ -29,6 +30,19 @@ describe("external performance statistics", () => {
       p95: 4,
       maximum: 4,
       minimum: 1,
+    });
+  });
+});
+
+describe("theme recalc metric", () => {
+  it("reads the probe's value and treats results recorded before it as unavailable", () => {
+    const sample = { themeRecalcMs: 41.5 } as unknown as PerfSample;
+    const legacy = {} as unknown as PerfSample;
+    assert.equal(sampleMetric(sample, "themeRecalcMs"), 41.5);
+    assert.equal(sampleMetric(legacy, "themeRecalcMs"), null);
+    assert.deepStrictEqual(DEFAULT_COMPARISON_POLICY.metrics.themeRecalcMs, {
+      relativePercent: 20,
+      absolute: 10,
     });
   });
 });

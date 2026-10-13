@@ -1,4 +1,5 @@
 import { Cache, Context, Duration, Effect, Exit, FileSystem, Layer } from "effect";
+import type { HttpClient } from "effect/http";
 import {
   SourceControlProviderError,
   type SourceControlProviderDiscoveryItem,
@@ -7,11 +8,11 @@ import {
 import type { SourceControlProviderKind } from "@ryco/contracts";
 import { detectSourceControlProviderFromRemoteUrl } from "@ryco/shared/sourceControl";
 
-import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
-import * as BitbucketApi from "./BitbucketApi.ts";
+import type * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
+import type * as BitbucketApi from "./BitbucketApi.ts";
 import * as ForgejoApi from "./ForgejoApi.ts";
-import * as GitHubCli from "./GitHubCli.ts";
-import * as GitLabCli from "./GitLabCli.ts";
+import type * as GitHubCli from "./GitHubCli.ts";
+import type * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import {
   azureDevOpsDiscovery,
@@ -24,6 +25,9 @@ import * as SourceControlProviderDiscovery from "./SourceControlProviderDiscover
 import { ServerConfig } from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import type * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import type { AtlassianConnectionRepository } from "../persistence/Services/AtlassianConnections.ts";
+import type { ServerSecretStore } from "../auth/Services/ServerSecretStore.ts";
 
 const PROVIDER_DETECTION_CACHE_CAPACITY = 2_048;
 const PROVIDER_DETECTION_CACHE_TTL = Duration.seconds(5);
@@ -734,46 +738,67 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
   },
 );
 
-export const make = Effect.fn("makeSourceControlProviderRegistry")(function* () {
-  const githubCli = yield* GitHubCli.GitHubCli;
-  const gitlabCli = yield* GitLabCli.GitLabCli;
-  const bitbucketApi = yield* BitbucketApi.BitbucketApi;
+/**
+ * The source-control clients behind the lazily loaded providers. Each is
+ * resolved on first use, so a server that never touches GitHub, GitLab,
+ * Bitbucket or Azure DevOps never loads their client code.
+ *
+ * Forgejo stays an eager service: it answers the synchronous remote-URL
+ * detection for self-hosted instances, which needs its configured hosts.
+ */
+export interface SourceControlClients {
+  readonly github: Effect.Effect<GitHubCli.GitHubCliShape>;
+  readonly gitlab: Effect.Effect<GitLabCli.GitLabCliShape>;
+  readonly bitbucket: Effect.Effect<BitbucketApi.BitbucketApiShape>;
+  readonly azureDevOps: Effect.Effect<AzureDevOpsCli.AzureDevOpsCliShape>;
+}
+
+const loadModule = <A>(kind: SourceControlProviderKind, load: () => Promise<A>) =>
+  Effect.tryPromise({ try: load, catch: (cause) => providerLoadError(kind, cause) });
+
+export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(function* (
+  clients: SourceControlClients,
+) {
   const forgejoApi = yield* ForgejoApi.ForgejoApi;
-  const azureDevOpsCli = yield* AzureDevOpsCli.AzureDevOpsCli;
   const fileSystem = yield* FileSystem.FileSystem;
 
   const github = yield* makeLazyProvider(
     "github",
-    Effect.tryPromise({
-      try: () => import("./GitHubSourceControlProvider.ts"),
-      catch: (cause) => providerLoadError("github", cause),
-    }).pipe(
-      Effect.flatMap((module) => module.make()),
-      Effect.provideService(GitHubCli.GitHubCli, githubCli),
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-    ),
+    Effect.gen(function* () {
+      const module = yield* loadModule("github", () => import("./GitHubSourceControlProvider.ts"));
+      const client = yield* loadModule("github", () => import("./GitHubCli.ts"));
+      return yield* module
+        .make()
+        .pipe(
+          Effect.provideService(client.GitHubCli, yield* clients.github),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+    }),
   );
 
   const gitlab = yield* makeLazyProvider(
     "gitlab",
-    Effect.tryPromise({
-      try: () => import("./GitLabSourceControlProvider.ts"),
-      catch: (cause) => providerLoadError("gitlab", cause),
-    }).pipe(
-      Effect.flatMap((module) => module.make()),
-      Effect.provideService(GitLabCli.GitLabCli, gitlabCli),
-    ),
+    Effect.gen(function* () {
+      const module = yield* loadModule("gitlab", () => import("./GitLabSourceControlProvider.ts"));
+      const client = yield* loadModule("gitlab", () => import("./GitLabCli.ts"));
+      return yield* module
+        .make()
+        .pipe(Effect.provideService(client.GitLabCli, yield* clients.gitlab));
+    }),
   );
 
   const bitbucket = yield* makeLazyProvider(
     "bitbucket",
-    Effect.tryPromise({
-      try: () => import("./BitbucketSourceControlProvider.ts"),
-      catch: (cause) => providerLoadError("bitbucket", cause),
-    }).pipe(
-      Effect.flatMap((module) => module.make()),
-      Effect.provideService(BitbucketApi.BitbucketApi, bitbucketApi),
-    ),
+    Effect.gen(function* () {
+      const module = yield* loadModule(
+        "bitbucket",
+        () => import("./BitbucketSourceControlProvider.ts"),
+      );
+      const client = yield* loadModule("bitbucket", () => import("./BitbucketApi.ts"));
+      return yield* module
+        .make()
+        .pipe(Effect.provideService(client.BitbucketApi, yield* clients.bitbucket));
+    }),
     { searchRepositories: true, cloneAuthentication: true },
   );
 
@@ -790,16 +815,21 @@ export const make = Effect.fn("makeSourceControlProviderRegistry")(function* () 
 
   const azureDevOps = yield* makeLazyProvider(
     "azure-devops",
-    Effect.tryPromise({
-      try: () => import("./AzureDevOpsSourceControlProvider.ts"),
-      catch: (cause) => providerLoadError("azure-devops", cause),
-    }).pipe(
-      Effect.flatMap((module) => module.make()),
-      Effect.provideService(AzureDevOpsCli.AzureDevOpsCli, azureDevOpsCli),
-    ),
+    Effect.gen(function* () {
+      const module = yield* loadModule(
+        "azure-devops",
+        () => import("./AzureDevOpsSourceControlProvider.ts"),
+      );
+      const client = yield* loadModule("azure-devops", () => import("./AzureDevOpsCli.ts"));
+      return yield* module
+        .make()
+        .pipe(Effect.provideService(client.AzureDevOpsCli, yield* clients.azureDevOps));
+    }),
   );
 
-  const bitbucketDiscovery = makeBitbucketDiscovery(bitbucketApi);
+  const bitbucketDiscovery = makeBitbucketDiscovery({
+    probeAuth: Effect.flatMap(clients.bitbucket, (client) => client.probeAuth),
+  });
   const forgejoDiscovery = makeForgejoDiscovery(forgejoApi);
 
   return yield* makeWithProviders([
@@ -832,4 +862,53 @@ export const make = Effect.fn("makeSourceControlProviderRegistry")(function* () 
   ]);
 });
 
-export const layer = Layer.effect(SourceControlProviderRegistry, make());
+/** Builds a client once, on first use, from the services the registry was built with. */
+const lazyClient = <A, E, R>(build: Effect.Effect<A, E, R>, context: Context.Context<R>) =>
+  // A client that cannot be built (a malformed environment override) fails the
+  // operation that needed it, as it failed the whole server before it was lazy.
+  Effect.cached(build.pipe(Effect.provideContext(context), Effect.orDie));
+
+export const layer = Layer.effect(
+  SourceControlProviderRegistry,
+  Effect.gen(function* () {
+    const context = yield* Effect.context<
+      | VcsProcess.VcsProcess
+      | FileSystem.FileSystem
+      | HttpClient.HttpClient
+      | AtlassianConnectionRepository
+      | ServerSecretStore
+      | GitVcsDriver.GitVcsDriver
+      | VcsDriverRegistry.VcsDriverRegistry
+    >();
+    return yield* makeWithClients({
+      github: yield* lazyClient(
+        Effect.flatMap(
+          Effect.promise(() => import("./GitHubCli.ts")),
+          (module) => module.make(),
+        ),
+        context,
+      ),
+      gitlab: yield* lazyClient(
+        Effect.flatMap(
+          Effect.promise(() => import("./GitLabCli.ts")),
+          (module) => module.make(),
+        ),
+        context,
+      ),
+      bitbucket: yield* lazyClient(
+        Effect.flatMap(
+          Effect.promise(() => import("./BitbucketApi.ts")),
+          (module) => module.make(),
+        ),
+        context,
+      ),
+      azureDevOps: yield* lazyClient(
+        Effect.flatMap(
+          Effect.promise(() => import("./AzureDevOpsCli.ts")),
+          (module) => module.make(),
+        ),
+        context,
+      ),
+    });
+  }),
+);

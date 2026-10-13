@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Modal, Pressable, ScrollView, View } from "react-native";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   ENVIRONMENT_MACHINE_KINDS,
-  type EnvironmentId,
   type EnvironmentMachineKind,
-} from "@ryco/contracts";
+} from "@ryco/contracts/environment";
 import {
   ENVIRONMENT_MACHINE_LABELS,
   resolveEnvironmentMachineKind,

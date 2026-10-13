@@ -1,8 +1,5 @@
-import {
-  TerminalInputRejectedError,
-  type EnvironmentApi,
-  type ScopedThreadRef,
-} from "@ryco/contracts";
+import type { ScopedThreadRef, EnvironmentApi } from "@ryco/contracts";
+import { TerminalInputRejectedError } from "@ryco/contracts/terminal";
 
 import { terminalSnippetError } from "@ryco/shared/terminalPaste";
 export {

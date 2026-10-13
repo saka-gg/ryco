@@ -6,7 +6,7 @@ import { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
 import { AuthError, ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { rejectCrossOriginMutation, respondToAuthError } from "../auth/http.ts";
-import { HubConnectorService } from "./HubConnectorLive.ts";
+import { awaitHubConnector } from "./HubConnectorService.ts";
 
 const authenticateOwner = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
@@ -43,7 +43,7 @@ export const hubConnectorStatusRouteLayer = HttpRouter.add(
   "/api/hub/status",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     return HttpServerResponse.jsonUnsafe(connector.status(), { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
@@ -54,7 +54,7 @@ export const hubConnectorEnrollmentRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () => connector.enroll(),
       catch: enrollmentFailure,
@@ -76,7 +76,7 @@ export const hubConnectorIdentityRouteLayer = HttpRouter.add(
   "/api/hub/identity",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const summary = yield* Effect.promise(() => connector.identitySummary());
     return HttpServerResponse.jsonUnsafe(summary, { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
@@ -98,7 +98,7 @@ export const hubConnectorEnrollmentReadRouteLayer = HttpRouter.add(
   "/api/hub/enrollment",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const enrollment = yield* Effect.tryPromise({
       try: () => connector.readEnrollment(),
       catch: enrollmentFailure,
@@ -135,7 +135,7 @@ export const hubConnectorResumeRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     yield* Effect.tryPromise({
       try: () => connector.resume(),
       catch: resumeFailure,
@@ -150,7 +150,7 @@ export const hubConnectorEnrollmentCancelRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const status = yield* Effect.tryPromise({
       try: () => connector.cancelEnrollment(),
       catch: enrollmentFailure,
@@ -175,7 +175,7 @@ export const hubConnectorLeaveRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const status = yield* Effect.tryPromise({
       try: () => connector.leave(),
       catch: leaveFailure,
@@ -275,7 +275,7 @@ export const hubConnectorE2eeClientsRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/clients",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const listing = yield* Effect.tryPromise({
       try: () => connector.e2ee.listClients(),
       catch: e2eeOperationFailure,
@@ -300,7 +300,7 @@ export const hubConnectorE2eeClientReadRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eeClientKeyBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const record = yield* Effect.tryPromise({
       try: () => connector.e2ee.getClient(body),
       catch: e2eeOperationFailure,
@@ -329,7 +329,7 @@ export const hubConnectorE2eeClientApprovalQrRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eeClientKeyBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () => connector.e2ee.createClientApprovalQr(body),
       catch: e2eeOperationFailure,
@@ -354,7 +354,7 @@ export const hubConnectorE2eeAuthorizationRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eeClientAuthorizationBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const key = {
       hubOrigin: body.hubOrigin,
       accountId: body.accountId,
@@ -395,7 +395,7 @@ export const hubConnectorE2eePairingWindowRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eePairingWindowBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const listing = yield* Effect.tryPromise({
       try: () =>
         body.action === "open"
@@ -425,7 +425,7 @@ export const hubConnectorE2eeRefusalsRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const listing = yield* Effect.tryPromise({
       try: () => connector.e2ee.clearRefusedPairingAttempts(),
       catch: e2eeOperationFailure,
@@ -440,7 +440,7 @@ export const hubConnectorE2eeSessionsRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/sessions",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     return HttpServerResponse.jsonUnsafe(connector.e2ee.listSessions(), { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
@@ -450,7 +450,7 @@ export const hubConnectorE2eePolicyReadRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/policy",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     return HttpServerResponse.jsonUnsafe(connector.e2ee.readPolicy(), { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
@@ -469,7 +469,7 @@ export const hubConnectorE2eePolicyPreviewRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eePolicyBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     return HttpServerResponse.jsonUnsafe(connector.e2ee.previewPolicy(body), { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
@@ -482,7 +482,7 @@ export const hubConnectorE2eePolicyApplyRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eePolicyBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () => connector.e2ee.applyPolicy(body),
       catch: e2eeOperationFailure,
@@ -505,7 +505,7 @@ export const hubConnectorE2eePolicyRecoverRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () => connector.e2ee.recoverPolicyGeneration(),
       catch: e2eeOperationFailure,
@@ -520,7 +520,7 @@ export const hubConnectorE2eePrekeyReadRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/prekey",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const certificate = yield* Effect.tryPromise({
       try: () => connector.e2ee.readPrekey(),
       catch: e2eeOperationFailure,
@@ -536,7 +536,7 @@ export const hubConnectorE2eePrekeyRotateRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const certificate = yield* Effect.tryPromise({
       try: () => connector.e2ee.rotatePrekey(),
       catch: e2eeOperationFailure,
@@ -550,7 +550,7 @@ export const hubConnectorE2eeContinuityReadRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/continuity",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const status = yield* Effect.tryPromise({
       try: () => connector.e2ee.readContinuity(),
       catch: e2eeOperationFailure,
@@ -574,7 +574,7 @@ export const hubConnectorE2eeContinuityRouteLayer = HttpRouter.add(
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
     const body = yield* decodeBody(E2eeContinuityBody);
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const result = yield* Effect.tryPromise({
       try: () => {
         switch (body.action) {
@@ -597,7 +597,7 @@ export const hubConnectorE2eeFallbackReadRouteLayer = HttpRouter.add(
   "/api/hub/e2ee/fallback",
   Effect.gen(function* () {
     yield* authenticateOwner;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     return HttpServerResponse.jsonUnsafe(connector.e2ee.readFallback(), { status: 200 });
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
@@ -609,7 +609,7 @@ export const hubConnectorE2eeFallbackResetRouteLayer = HttpRouter.add(
   Effect.gen(function* () {
     yield* authenticateOwner;
     yield* rejectCrossOriginMutation;
-    const connector = yield* HubConnectorService;
+    const connector = yield* awaitHubConnector;
     const state = yield* Effect.tryPromise({
       try: () => connector.e2ee.resetFallback(),
       catch: e2eeOperationFailure,

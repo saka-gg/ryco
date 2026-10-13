@@ -252,10 +252,10 @@ function sourceControlClient(environmentId: EnvironmentId) {
 // the client. The composer `#` picker, the context picker, the overview, the
 // explorer tabs and the pull request page therefore share one cache entry,
 // one poll timer and one provider call instead of one per distinct limit.
-// Every list read uses the server's default row shape (no `view`). A request option
-// other than the fixed superset limit (a view or field set, a query) changes
-// the payload and must be part of `buildKey`, or callers would share rows of
-// different shapes.
+// List reads use the server's default row shape, except the `picker` view (lean
+// rows for the composer's `#` menu). A request option other than the fixed
+// superset limit (a view or field set, a query) changes the payload and must be
+// part of `buildKey`, or callers would share rows of different shapes.
 // ---------------------------------------------------------------------------
 
 /** Every list surface asks for at most this many rows (100 is also one provider page). */
@@ -346,6 +346,12 @@ export interface SourceControlChangeRequestListInput {
   readonly limit?: number;
   /** Server-side filter relative to the authenticated viewer. Part of the cache key. */
   readonly involvement?: ChangeRequestInvolvement;
+  /**
+   * `picker`: lean rows (number, title, state, branches, author, timestamps) for pickers
+   * such as the composer's `#` menu. Part of the cache key: its rows lack checks, labels
+   * and diff stats.
+   */
+  readonly view?: "picker";
   readonly enabled?: boolean;
 }
 
@@ -356,7 +362,7 @@ export const changeRequestListBinding = sliceToRequestedLimit(
     isEnabled: (input) =>
       (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
     buildKey: (input) =>
-      `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.involvement ?? ""}`,
+      `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.state}${KEY_SEP}${input.involvement ?? ""}${KEY_SEP}${input.view ?? ""}`,
     resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
     resolveCwd: (input) => input.cwd as string,
     run: (input) =>
@@ -365,6 +371,7 @@ export const changeRequestListBinding = sliceToRequestedLimit(
         state: input.state,
         limit: SOURCE_CONTROL_LIST_SUPERSET_LIMIT,
         ...(input.involvement !== undefined ? { involvement: input.involvement } : {}),
+        ...(input.view !== undefined ? { view: input.view } : {}),
       }),
   }),
 );

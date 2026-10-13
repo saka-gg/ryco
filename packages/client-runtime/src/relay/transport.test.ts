@@ -22,7 +22,12 @@ import {
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
 } from "../authorization/runtime.ts";
-import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
+import {
+  hostedHubController,
+  hostedHubStore,
+  markHostedSessionReady,
+  markHostedSessionReplaying,
+} from "../authorization/state.ts";
 import type { HostedHubNode, HostedRelayFailure } from "../authorization/types.ts";
 import { RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
@@ -293,6 +298,96 @@ describe("HostedRelayAttemptFactory", () => {
     expect(changed).toHaveBeenCalledOnce();
   });
 
+  it("opens the relay socket beside the ticket and hands it only to that ticket's socket", async () => {
+    const early = { discard: vi.fn() };
+    const openEarly = vi.fn(() => early);
+    let finishTicket: (value: { ticket: string; expiresAt: number }) => void = () => {};
+    const createRelaySocket = vi.fn((input: { readonly earlySocket?: unknown }) => input);
+    const binding: HostedRelayAttemptBinding = {
+      nodeId: () => selectedNode.id,
+      generation: () => 4,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      openEarlyRelaySocket: openEarly,
+      issueRelayAttempt: (input) =>
+        new Promise((resolve) => {
+          finishTicket = (value) =>
+            resolve({ ...value, preparedSocketContext: input.preparedSocketContext });
+        }),
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+    const factory = new HostedRelayAttemptFactory(binding);
+    const url = factory.nextUrl();
+    // The upgrade is under way before the ticket has been issued.
+    await flush();
+    expect(openEarly).toHaveBeenCalledOnce();
+    finishTicket({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(1)),
+      expiresAt: Date.now() + 60_000,
+    });
+    factory.createSocket(await url);
+    expect(createRelaySocket.mock.calls[0]?.[0].earlySocket).toBe(early);
+    expect(early.discard).not.toHaveBeenCalled();
+  });
+
+  it("discards an early socket whose ticket failed and opens none on the retry", async () => {
+    const sockets: Array<{ discard: ReturnType<typeof vi.fn> }> = [];
+    const openEarly = vi.fn(() => {
+      const early = { discard: vi.fn() };
+      sockets.push(early);
+      return early;
+    });
+    const issue = vi
+      .fn()
+      .mockRejectedValueOnce(new HostedHubApiError("node_offline", 409))
+      .mockResolvedValue({
+        ticket: encodeBase64Url(new Uint8Array(32).fill(2)),
+        expiresAt: Date.now() + 60_000,
+        preparedSocketContext: undefined,
+      });
+    const createRelaySocket = vi.fn((input: { readonly earlySocket?: unknown }) => input);
+    const binding: HostedRelayAttemptBinding = {
+      nodeId: () => selectedNode.id,
+      generation: () => 4,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      openEarlyRelaySocket: openEarly,
+      issueRelayAttempt: issue,
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+    const factory = new HostedRelayAttemptFactory(binding);
+    await expect(factory.nextUrl()).rejects.toBeInstanceOf(HostedHubApiError);
+    expect(sockets[0]?.discard).toHaveBeenCalledOnce();
+    // Serial after a ticket-stage failure: a node offline is not also sent an upgrade.
+    factory.createSocket(await factory.nextUrl());
+    expect(openEarly).toHaveBeenCalledOnce();
+    expect(createRelaySocket.mock.calls[0]?.[0]).not.toHaveProperty("earlySocket");
+    // Back to overlapping once a ticket was issued.
+    await factory.nextUrl();
+    expect(openEarly).toHaveBeenCalledTimes(2);
+    // A ticket that is never consumed takes its early socket with it.
+    factory.reset();
+    expect(sockets[1]?.discard).toHaveBeenCalledOnce();
+  });
+
   it("publishes a bounded native grant failure before reconnect policy runs", async () => {
     const failure = vi.fn();
     const binding: HostedRelayAttemptBinding = {
@@ -523,32 +618,116 @@ describe("HostedRelayAttemptFactory", () => {
     expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
   });
 
-  it("re-enters the selected-node lifecycle only after the relay channel recovers", async () => {
-    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+  it("adopts the replacement channel: one ticket and no client rebuild per drop", async () => {
+    const issue = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: encodeBase64Url(new Uint8Array(32).fill(10)),
       expiresAt: Date.now() + 60_000,
       protocolMajor: 1,
       protocolMinor: 2,
     });
-    const retrySelectedNode = vi
-      .spyOn(hostedHubController, "retrySelectedNode")
-      .mockResolvedValue(undefined);
+    const retrySelectedNode = vi.spyOn(hostedHubController, "retrySelectedNode");
     hostedHubStore.setState({
       nodes: [selectedNode],
       browserStatus: "current",
       sessionStatus: "ready",
+      sessionEstablished: true,
+      transportStatus: "online",
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    const dispatch = { tag: ORCHESTRATION_WS_METHODS.dispatchCommand, stream: false } as const;
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    expect(issue).toHaveBeenCalledOnce();
+
+    lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
+    // The transport's own reconnect is the only re-establishment.
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    await flush();
+
+    expect(issue).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(2);
+    expect(retrySelectedNode).not.toHaveBeenCalled();
+    expect(nodeLifecycle.disconnectPrimaryEnvironment).not.toHaveBeenCalled();
+    expect(nodeLifecycle.connectPrimaryEnvironment).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      generation: 4,
+      transportStatus: "online",
+      sessionStatus: "stale",
+      sessionEstablished: false,
+    });
+    // Mutation authority waits for the replacement session's own snapshot.
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    markHostedSessionReplaying(selectedNode.environmentId, 4);
+    expect(lifecycle.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    expect(lifecycle.authorizeRequest?.(dispatch)).toBe("allowed");
+  });
+
+  it("never makes a session ready from a snapshot that lands before its replacement channel", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(13)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({
+      nodes: [selectedNode],
+      browserStatus: "current",
+      sessionStatus: "ready",
+      sessionEstablished: true,
       transportStatus: "online",
     });
     const factory = new HostedRelayAttemptFactory();
     const lifecycle = factory.lifecycleHandlers();
     factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
 
     lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
-    expect(retrySelectedNode).not.toHaveBeenCalled();
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState().sessionStatus).toBe("stale");
 
     factory.createSocket(await factory.nextUrl());
     sockets.at(-1)?.callbacks.onTransportStatus("online");
-    await vi.waitFor(() => expect(retrySelectedNode).toHaveBeenCalledOnce());
+    markHostedSessionReady(selectedNode.environmentId, 4);
+    expect(hostedHubStore.getState().sessionStatus).toBe("ready");
+  });
+
+  it("leaves a mutation lost with its channel uncertain on the adopted replacement", async () => {
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(14)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    hostedHubStore.setState({
+      nodes: [selectedNode],
+      browserStatus: "current",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      transportStatus: "online",
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    factory.createSocket(await factory.nextUrl());
+    lifecycle.onRequestStart?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
+
+    lifecycle.onClose?.({ code: 4000, reason: "network" }, { intentional: false });
+    // The protocol fails the lost request after the close.
+    lifecycle.onRequestExit?.({ id: "write-1", tag: WS_METHODS.terminalWrite, stream: false });
+    factory.createSocket(await factory.nextUrl());
+    sockets.at(-1)?.callbacks.onTransportStatus("online");
+    markHostedSessionReady(selectedNode.environmentId, 4);
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
   });
 
   it("does not rebuild the rpc client for the initial relay connection", async () => {

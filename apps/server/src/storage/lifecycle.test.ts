@@ -10,7 +10,10 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   acquireStoragePathUseLease,
+  acquireStoragePathUseLeaseHandle,
+  hasWorktreeCreationLease,
   isStoragePathBlocked,
+  retainStoragePathUseLease,
   storageLifecycleLock,
   storagePathBlocker,
 } from "./lifecycle.ts";
@@ -166,5 +169,52 @@ it.layer(SqlitePersistenceMemory)("storage admission for chat moves", (it) => {
       yield* yield* Fiber.join(lease);
       assert.isTrue(leased);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "retains a held use lease without the admission check, and re-checks once it is gone",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`DELETE FROM project_relocations`;
+        const root = yield* Effect.promise(async () =>
+          fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "ryco-use-lease-retain-"))),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => fs.rm(root, { recursive: true, force: true })),
+        );
+        const held = yield* acquireStoragePathUseLeaseHandle(sql, root);
+        assert.strictEqual(held.path, root);
+        assert.isTrue(hasWorktreeCreationLease(root));
+
+        // While held, retaining succeeds even where a fresh acquire is refused, and does not
+        // touch the admission lock: an exclusive holder does not delay it.
+        yield* journal({ id: "relocation-retain", state: "pending", sourcePath: root });
+        const claimEntered = yield* Deferred.make<void>();
+        const claiming = yield* Deferred.make<void>();
+        const claim = yield* storageLifecycleLock
+          .withPermit(
+            Deferred.succeed(claimEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(claiming)),
+            ),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(claimEntered);
+        const retained = yield* retainStoragePathUseLease(sql, held);
+        yield* Deferred.succeed(claiming, undefined);
+        yield* Fiber.join(claim);
+
+        // The retained use outlives the holder's lease; each release counts once.
+        yield* held.release;
+        yield* held.release;
+        assert.isTrue(hasWorktreeCreationLease(root));
+        yield* retained;
+        assert.isFalse(hasWorktreeCreationLease(root));
+
+        // With no use left, retaining is a full acquire and sees the pending move.
+        const refused = yield* Effect.result(retainStoragePathUseLease(sql, held));
+        assert.isTrue(Result.isFailure(refused));
+        assert.isFalse(hasWorktreeCreationLease(root));
+      }).pipe(Effect.scoped),
   );
 });

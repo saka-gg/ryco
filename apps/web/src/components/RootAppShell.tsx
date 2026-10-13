@@ -33,6 +33,7 @@ import {
   derivePhysicalProjectKeyFromPath,
 } from "../logicalProject";
 import { useServerConfig, useServerWelcomeSubscription } from "../rpc/serverState";
+import { isWebPerfProfileEnabled } from "../perf/perfInstrumentation";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -42,7 +43,11 @@ import {
   useSavedEnvironmentRegistryStore,
 } from "../environments/runtime";
 import { startDesktopWorkspaceBridge } from "../platform/desktopWorkspace";
-import { configureClientTracing } from "../observability/clientTracing";
+import {
+  configureClientTracing,
+  disableClientTracing,
+  shouldExportClientTraces,
+} from "../observability/clientTracing";
 import {
   getPrimaryKnownEnvironment,
   updatePrimaryEnvironmentDescriptor,
@@ -214,9 +219,14 @@ function HostedStaticEnvironmentBootstrap() {
 }
 
 function AuthenticatedTracingBootstrap() {
+  const observability = useServerConfig()?.observability;
+  const exportTraces = shouldExportClientTraces({
+    observability,
+    perfProfile: isWebPerfProfileEnabled(),
+  });
   useEffect(() => {
-    void configureClientTracing();
-  }, []);
+    void (exportTraces ? configureClientTracing() : disableClientTracing());
+  }, [exportTraces]);
 
   return null;
 }

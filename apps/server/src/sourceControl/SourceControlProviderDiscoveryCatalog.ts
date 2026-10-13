@@ -200,7 +200,7 @@ export const azureDevOpsDiscovery = {
 } satisfies SourceControlProviderDiscovery.SourceControlCliDiscoverySpec;
 
 export function makeBitbucketDiscovery(
-  bitbucket: BitbucketApi.BitbucketApiShape,
+  bitbucket: Pick<BitbucketApi.BitbucketApiShape, "probeAuth">,
 ): SourceControlProviderDiscovery.SourceControlApiDiscoverySpec {
   return {
     type: "api",
@@ -213,7 +213,7 @@ export function makeBitbucketDiscovery(
 }
 
 export function makeForgejoDiscovery(
-  forgejo: ForgejoApi.ForgejoApiShape,
+  forgejo: Pick<ForgejoApi.ForgejoApiShape, "probeAuth">,
 ): SourceControlProviderDiscovery.SourceControlApiDiscoverySpec {
   return {
     type: "api",

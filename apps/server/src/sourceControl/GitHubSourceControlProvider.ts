@@ -1169,6 +1169,33 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           }),
           Effect.mapError((cause) => providerError("getPullRequestState", cause)),
         ),
+    getPullRequestStates: (input) =>
+      github.getPullRequestStates({ cwd: input.cwd, numbers: input.numbers }).pipe(
+        Effect.map(
+          (records) =>
+            new Map(
+              [...records].map(([number, record]) => {
+                const terminal =
+                  record.state === "merged"
+                    ? (record.mergedAt ?? record.closedAt)
+                    : record.state === "closed"
+                      ? record.closedAt
+                      : null;
+                const terminalAt = terminal === null ? null : DateTime.make(terminal);
+                return [
+                  number,
+                  {
+                    state: record.state,
+                    isDraft: record.isDraft,
+                    terminalAt:
+                      terminalAt !== null && Option.isSome(terminalAt) ? terminalAt.value : null,
+                  },
+                ] as const;
+              }),
+            ),
+        ),
+        Effect.mapError((cause) => providerError("getPullRequestStates", cause)),
+      ),
     getIssueState: (input) =>
       github.getIssue({ cwd: input.cwd, reference: String(input.number) }).pipe(
         Effect.map((detail) => ({ state: detail.state })),

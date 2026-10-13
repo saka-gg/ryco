@@ -40,6 +40,8 @@ const auth = createPrimaryAuth({
 
 export const fetchSessionState = auth.fetchSessionState;
 export const issuePrimaryWebSocketToken = auth.issuePrimaryWebSocketToken;
+export const prefetchPrimaryWebSocketToken = auth.prefetchPrimaryWebSocketToken;
+export const discardPrefetchedPrimaryWebSocketToken = auth.discardPrefetchedPrimaryWebSocketToken;
 export const retryTransientBootstrap = auth.retryTransientBootstrap;
 export const createServerPairingCredential = auth.createServerPairingCredential;
 export const listServerPairingLinks = auth.listServerPairingLinks;

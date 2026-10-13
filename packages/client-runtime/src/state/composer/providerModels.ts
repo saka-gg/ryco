@@ -1,13 +1,14 @@
+import type { ServerProvider, ServerProviderModel } from "@ryco/contracts";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  type ModelCapabilities,
+} from "@ryco/contracts/model";
+import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
-  type ModelCapabilities,
   type ProviderInstanceId,
-  type ServerProvider,
-  type ServerProviderModel,
-} from "@ryco/contracts";
+} from "@ryco/contracts/provider-instance";
 import { createModelCapabilities, normalizeModelSlug } from "@ryco/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({

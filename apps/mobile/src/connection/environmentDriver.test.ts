@@ -72,6 +72,7 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
   }),
 }));
 
+import { installHostedPrimaryConnectionFactory } from "../hostedHub/primaryConnectionFactory";
 import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
@@ -873,6 +874,46 @@ describe("mobile environment driver", () => {
     expect(driver.supervisor.read(secondId)).toBeNull();
     expect(disposeFirst).not.toHaveBeenCalled();
     expect(disposeSecond).toHaveBeenCalledOnce();
+  });
+
+  it("defers the hosted primary until it is admitted, then connects it once", async () => {
+    const fake = createFakeCatalog();
+    const primaryId = "hosted-deferred" as EnvironmentId;
+    const factory = vi.fn(() => fakeConnection(primaryId, { kind: "primary" }));
+    installHostedPrimaryConnectionFactory(factory);
+    let admitted = false;
+    const connect = vi.fn(async (rec: SavedEnvironmentRecord) => fakeConnection(rec.environmentId));
+    try {
+      const driver = createMobileEnvironmentDriver({
+        catalog: fake.catalog,
+        remoteApi: noopRemoteApi,
+        subscribeResume: () => () => {},
+        connectSavedEnvironment: connect,
+        admitPrimaryConnection: () => admitted,
+      });
+      fake.setBearerToken(ENV_ID, "bearer-token");
+      fake.upsert(record());
+
+      // The direct plane starts before the snapshot cache has hydrated; the
+      // hosted primary does not.
+      const stop = driver.start();
+      await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
+      expect(factory).not.toHaveBeenCalled();
+      expect(driver.supervisor.read(primaryId)).toBeNull();
+
+      admitted = true;
+      driver.releaseDeferredPrimaryConnection();
+      expect(factory).toHaveBeenCalledOnce();
+      expect(driver.supervisor.read(primaryId)?.kind).toBe("primary");
+
+      // Released once: a second release does not build another candidate.
+      driver.releaseDeferredPrimaryConnection();
+      expect(factory).toHaveBeenCalledOnce();
+      stop();
+      await driver.supervisor.remove(primaryId);
+    } finally {
+      installHostedPrimaryConnectionFactory(null);
+    }
   });
 
   it("routes a thread-stream snapshot/event from the state sink into state/threads", () => {

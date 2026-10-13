@@ -24,6 +24,10 @@ import {
 } from "../persistence/Services/ProjectionWorktrees.ts";
 import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
 import {
+  makeRepositoryListCache,
+  type RepositoryListCache,
+} from "../sourceControl/repositoryListCache.ts";
+import {
   SourceControlProviderRegistry,
   type SourceControlProviderRegistryShape,
 } from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -61,12 +65,34 @@ const changeRequest = (overrides: Partial<ChangeRequest>): ChangeRequest => ({
 function makeContext(
   provider: Partial<SourceControlProviderShape>,
   fileSystem?: FileSystem.FileSystem,
+  options?: {
+    /** The repository index's open/recent listing; null when it cannot answer. */
+    readonly indexed?: ReadonlyArray<ChangeRequest> | null;
+    /** A real repository list cache (one repository) instead of reading through. */
+    readonly listCache?: RepositoryListCache;
+  },
 ) {
   const refreshes: Array<string> = [];
+  const listInvalidations: Array<string> = [];
   const resolved = { kind: "github", ...provider } as SourceControlProviderShape;
+  const listCache = options?.listCache;
   const ctx = {
     ownerEffect,
     fileSystem,
+    gitWorkflow: {
+      cachedRepositoryList: <A, E, R>(input: {
+        readonly key: string;
+        readonly load: Effect.Effect<A, E, R>;
+      }) =>
+        listCache
+          ? listCache.get({ repository: "repo", key: input.key, load: input.load })
+          : input.load,
+      invalidateRepositoryLists: (cwd: string) =>
+        Effect.sync(() => listInvalidations.push(cwd)).pipe(
+          Effect.andThen(listCache ? listCache.invalidate("repo") : Effect.void),
+        ),
+      indexedChangeRequests: () => Effect.succeed(options?.indexed ?? null),
+    },
     sourceControlRegistry: {
       resolve: () => Effect.succeed(resolved),
     },
@@ -80,7 +106,7 @@ function makeContext(
       Effect.sync(() => refreshes.push(`worktrees:${input.reason}`)),
     refreshGitStatus: () => Effect.sync(() => refreshes.push("git-status")),
   } as unknown as WsRpcContext;
-  return { handlers: makeSourceControlHandlers(ctx), refreshes };
+  return { handlers: makeSourceControlHandlers(ctx), refreshes, listInvalidations };
 }
 
 describe("selectCreatedChangeRequest", () => {
@@ -201,6 +227,92 @@ describe("pull request page handlers", () => {
       ]);
       expect(issues).toEqual([{ cwd: "/repo", state: "open", limit: 100 }]);
       expect(refreshes).toContain("worktrees:sourceControl.listChangeRequests");
+    }),
+  );
+
+  it.effect("serves the # picker from the repository index, else lean host rows", () =>
+    Effect.gen(function* () {
+      const listed: Array<unknown> = [];
+      const indexed = [1, 2, 3].map((number) => changeRequest({ number }));
+      const provider = {
+        listChangeRequests: (input: unknown) =>
+          Effect.sync(() => (listed.push(input), [changeRequest({ number: 9 })])),
+      } as Partial<SourceControlProviderShape>;
+      const fromIndex = makeContext(provider, undefined, { indexed });
+      const open = yield* fromIndex.handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 2,
+        view: "picker",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(open.map((item) => item.number)).toEqual([1, 2]);
+      expect(listed).toEqual([]);
+
+      // Merged rows are not indexed: the host is asked for the lean field set.
+      yield* fromIndex.handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "merged",
+        limit: 50,
+        view: "picker",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(listed).toEqual([
+        {
+          cwd: "/repo",
+          headSelector: "",
+          state: "merged",
+          limit: 50,
+          includeStackSummary: false,
+          fields: "summary",
+        },
+      ]);
+
+      // No index (unknown remote, failed listing): lean host rows as well.
+      const withoutIndex = makeContext(provider, undefined, { indexed: null });
+      yield* withoutIndex.handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        view: "picker",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(listed.at(-1)).toMatchObject({ state: "open", limit: 20, fields: "summary" });
+    }),
+  );
+
+  it.effect("shares list reads per repository until a change request mutation", () =>
+    Effect.gen(function* () {
+      let lists = 0;
+      const { handlers, listInvalidations } = makeContext(
+        {
+          listChangeRequests: () => Effect.sync(() => (lists++, [changeRequest({ number: 4 })])),
+          addChangeRequestComment: () => Effect.succeed({} as never),
+        },
+        undefined,
+        { listCache: makeRepositoryListCache() },
+      );
+      const list = handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 100,
+      }).pipe(Effect.provide(handlerLayer));
+      yield* Effect.all([list, list, list], { concurrency: "unbounded" });
+      yield* list;
+      expect(lists).toBe(1);
+      // Another state or involvement is another list.
+      yield* handlers[WS_METHODS.sourceControlListChangeRequests]({
+        cwd: "/repo",
+        state: "open",
+        limit: 100,
+        involvement: "authored",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(lists).toBe(2);
+
+      yield* handlers[WS_METHODS.sourceControlAddChangeRequestComment]({
+        cwd: "/repo",
+        reference: "4",
+        body: "LGTM",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(listInvalidations).toEqual(["/repo"]);
+      yield* list;
+      expect(lists).toBe(3);
     }),
   );
 
@@ -442,6 +554,12 @@ describe("workspace pull request links", () => {
           return { sequence: 1 };
         }),
       serverCommandId: (tag: string) => `${tag}-1`,
+      gitWorkflow: {
+        cachedRepositoryList: <A, E, R>(input: { readonly load: Effect.Effect<A, E, R> }) =>
+          input.load,
+        invalidateRepositoryLists: () => Effect.void,
+        indexedChangeRequests: () => Effect.succeed(null),
+      },
     } as unknown as WsRpcContext;
     return { handlers: makeSourceControlHandlers(ctx), dispatched, resolvedCwds };
   }

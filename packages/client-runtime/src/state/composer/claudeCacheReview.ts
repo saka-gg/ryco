@@ -1,14 +1,10 @@
-import {
-  CommandId,
-  MessageId,
-  type ClaudeResumeGuard,
-  type OrchestrationThread,
-} from "@ryco/contracts";
+import type { ClaudeResumeGuard, OrchestrationThread } from "@ryco/contracts";
+import { CommandId, MessageId } from "@ryco/contracts/base-schemas";
 import {
   assessClaudeCacheResume,
   claudeCompactUnavailableReason,
 } from "@ryco/shared/claudeCacheReview";
-import type { ClaudeCacheReview } from "@ryco/shared/claudeCacheReview";
+import type { ClaudeCacheReview, ClaudeCacheReviewThread } from "@ryco/shared/claudeCacheReview";
 import type { CommitSendTurnDispatchInput } from "./sendEngine.ts";
 
 export {
@@ -17,7 +13,15 @@ export {
   latestClaudeCacheObservation,
   type ClaudeCacheResumeContext,
   type ClaudeCacheReview,
+  type ClaudeCacheReviewThread,
 } from "@ryco/shared/claudeCacheReview";
+
+/** See `CommitSendTurnDispatchInput.readSubscribedClaudeReviewState`. */
+export interface SubscribedClaudeReviewState {
+  readonly thread: ClaudeCacheReviewThread;
+  /** The directory the next turn runs in (the thread's worktree, else its project root). */
+  readonly workspaceCwd: string | undefined;
+}
 
 export class ClaudeResumeReviewError extends Error {
   readonly _tag = "ClaudeResumeReviewError";
@@ -63,6 +67,17 @@ export async function reviewClaudeResumeBeforeSend(
     input.isFirstMessage ||
     !getWindow ||
     input.outgoingMessageText.trim().startsWith("/")
+  )
+    return undefined;
+  // The live subscription already holds what the review reads (at least the newest 40
+  // activities): a send it clears needs no review read. One it flags is re-read below, so
+  // the dialog and its guard always rest on the server's state.
+  const subscribed = input.readSubscribedClaudeReviewState?.();
+  if (
+    subscribed !== undefined &&
+    !assessClaudeCacheResume(subscribed.thread, input.modelSelection, Date.now(), {
+      workspaceCwd: subscribed.workspaceCwd,
+    })
   )
     return undefined;
   const readWindow = () =>

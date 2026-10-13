@@ -68,6 +68,11 @@ export interface RefreshWorktreeSourceControlStateInput {
 export interface KnownPullRequestState {
   readonly state: PullRequestState;
   readonly isDraft: boolean | null;
+  /**
+   * Present when the forge was just asked for this pull request (a batched state read): its
+   * close time (null while open) is then authoritative too, and the link is not re-read.
+   */
+  readonly reported?: { readonly terminalAt: string | null };
 }
 
 /**
@@ -208,7 +213,18 @@ export const refreshWorktreeSourceControlState = Effect.fn("refreshWorktreeSourc
     // One timestamp for both the event time and the first-observation fallback.
     const observedAt = new Date().toISOString();
 
-    const readPullRequestState = (number: number) =>
+    const readPullRequestState = (number: number) => {
+      const known = knownStates.get(number);
+      if (known?.reported !== undefined && known.isDraft !== null) {
+        return Effect.succeed({
+          state: known.state,
+          isDraft: known.isDraft,
+          reportedTerminalAt: known.reported.terminalAt,
+        });
+      }
+      return readPullRequestStateFromForge(number);
+    };
+    const readPullRequestStateFromForge = (number: number) =>
       provider.getPullRequestState({ number, cwd }).pipe(
         Effect.map((pr) => ({
           state: pr.state,

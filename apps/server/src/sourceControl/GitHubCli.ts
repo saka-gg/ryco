@@ -441,6 +441,15 @@ export interface GitHubCliShape {
    * diff stats and each row's stack summary. `involvement` makes it the same
    * GitHub search `gh pr list --search` runs.
    */
+  /** States of several pull requests of `cwd`'s repository: one GraphQL request per 50. */
+  readonly getPullRequestStates: (input: {
+    readonly cwd: string;
+    readonly numbers: ReadonlyArray<number>;
+  }) => Effect.Effect<
+    ReadonlyMap<number, GitHubRepositoryLists.GitHubPullRequestStateRecord>,
+    GitHubCliError
+  >;
+
   readonly listPullRequests: (input: {
     readonly cwd: string;
     readonly state: GitHubRepositoryLists.GitHubPullRequestListState;
@@ -1321,6 +1330,39 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
         after = decoded.success.endCursor;
       }
       return items.length > input.limit ? items.slice(0, input.limit) : items;
+    });
+
+  const getPullRequestStates: GitHubCliShape["getPullRequestStates"] = (input) =>
+    Effect.gen(function* () {
+      const numbers = [...new Set(input.numbers)].filter(
+        (number) => Number.isSafeInteger(number) && number > 0,
+      );
+      const states = new Map<number, GitHubRepositoryLists.GitHubPullRequestStateRecord>();
+      if (numbers.length === 0) return states;
+      const repository = yield* Cache.get(listRepositories, input.cwd);
+      const batch = GitHubRepositoryLists.GITHUB_PULL_REQUEST_STATES_BATCH_SIZE;
+      for (let start = 0; start < numbers.length; start += batch) {
+        const raw: string = yield* graphqlDocument({
+          cwd: input.cwd,
+          host: repository.host,
+          operation: "getPullRequestStates",
+          query: GitHubRepositoryLists.buildGitHubPullRequestStatesQuery(
+            numbers.slice(start, start + batch),
+          ),
+          variables: { owner: repository.owner, name: repository.name },
+          // A number that does not resolve fails only itself; the decoder decides.
+          acceptPartialData: true,
+        });
+        const decoded = GitHubRepositoryLists.decodeGitHubPullRequestStatesJson(raw);
+        if (Result.isFailure(decoded)) {
+          return yield* new GitHubCliError({
+            operation: "getPullRequestStates",
+            detail: decoded.failure,
+          });
+        }
+        for (const [number, state] of decoded.success) states.set(number, state);
+      }
+      return states;
     });
 
   const listPullRequests: GitHubCliShape["listPullRequests"] = (input) =>
@@ -2731,6 +2773,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     updatePullRequest,
     getPullRequestFileContents,
     listPullRequests,
+    getPullRequestStates,
     listOpenPullRequests: (input) =>
       executePrJson({
         cwd: input.cwd,

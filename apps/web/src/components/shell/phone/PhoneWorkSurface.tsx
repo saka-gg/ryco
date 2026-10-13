@@ -88,3 +88,22 @@ export function PhoneSurfaceScaffold(props: {
     </div>
   );
 }
+
+/**
+ * The thread overview as a phone work surface: `PhoneWorkSurfaceSheet` around
+ * `PhoneSurfaceScaffold`, one component so ChatView can load both lazily.
+ */
+export function PhoneOverviewSheet(props: {
+  children: ReactNode;
+  label: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <PhoneWorkSurfaceSheet label={props.label} open={props.open} onClose={props.onClose}>
+      <PhoneSurfaceScaffold title={props.label} backLabel="Back to thread" onBack={props.onClose}>
+        {props.children}
+      </PhoneSurfaceScaffold>
+    </PhoneWorkSurfaceSheet>
+  );
+}

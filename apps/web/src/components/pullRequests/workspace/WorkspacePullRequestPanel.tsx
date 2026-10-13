@@ -1,3 +1,5 @@
+// The reader styles load with the panel chunk, not the boot stylesheet.
+import "../pullRequests.css";
 import type { EnvironmentId } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { GitPullRequestIcon } from "lucide-react";

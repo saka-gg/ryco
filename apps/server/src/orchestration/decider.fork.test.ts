@@ -286,7 +286,11 @@ describe("decider thread.fork.create", () => {
       const projected = yield* projectAll(readModel, events);
       const fork = projected.threads.find((thread) => thread.id === FORK);
       assert.strictEqual(fork?.worktreeId, worktreeId);
-      assert.strictEqual(fork?.messages.length, 2);
+      // The command model keeps user-message anchors only: the inherited prompt, not the answer.
+      assert.deepEqual(
+        fork?.messages.map((message) => message.role),
+        ["user"],
+      );
       assert.strictEqual(fork?.proposedPlans.length, 1);
       assert.strictEqual(fork?.activities.length, 2);
       // Nothing started: no turn, no session.

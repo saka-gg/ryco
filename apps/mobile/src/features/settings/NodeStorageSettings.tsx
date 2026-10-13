@@ -1,10 +1,10 @@
 import { useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Pressable, ScrollView, View } from "react-native";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   DEFAULT_STORAGE_RETENTION_POLICY,
-  type EnvironmentId,
   type StorageRetentionPolicy,
-} from "@ryco/contracts";
+} from "@ryco/contracts/storage";
 import { createStorageManagementController } from "@ryco/client-runtime/state/storage";
 import { formatStorageSize, resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { AppText as Text } from "../../components/AppText";

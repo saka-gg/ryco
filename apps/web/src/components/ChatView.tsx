@@ -5,7 +5,7 @@ import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
-import type { ProviderOptionSelection } from "@ryco/contracts";
+import type { ProviderOptionSelection, ServerConfig } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
   hasRetiredProjectMemory,
@@ -17,6 +17,8 @@ import { TranscriptSelectionActions } from "./chat/TranscriptSelectionActions";
 import {
   appendSelectionQuote,
   checkpointRevertUnsupportedMessage,
+  requestProviderSessionPrewarm,
+  type SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
@@ -175,7 +177,10 @@ import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } fro
 import { isChatProject } from "@ryco/shared/projectKind";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
-import { useChatsAvailability } from "../hooks/useChatsAvailability";
+import {
+  useChatsAvailability,
+  useEnvironmentServerConfigSelector,
+} from "../hooks/useChatsAvailability";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
@@ -206,7 +211,6 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
-import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import type { NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -232,7 +236,6 @@ import { ChatHeader } from "./chat/ChatHeader";
 import type { ChatProjectTarget } from "./chat/ChatProjectActions";
 import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
-import { PhoneSurfaceScaffold, PhoneWorkSurfaceSheet } from "./shell/phone/PhoneWorkSurface";
 import { useChatSessionTabsPrefetch } from "./chat/useChatSessionTabsPrefetch";
 import {
   createSessionTabsSelector,
@@ -250,7 +253,6 @@ import {
   resolveProviderStatusNotice,
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
-import { AgentControlApprovals } from "./agent-control/AgentControlApprovals";
 import { DelegatedThreadsSection } from "./threads/DelegatedThreadsSection";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
@@ -259,13 +261,17 @@ import {
   deriveThreadSnoozeEligibility,
   isMaterializableCheckpointSummary,
   threadForkBoundaryQuote,
+  selectEnvironmentShellLive,
   selectThreadDetailLoaded,
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
+  LazyAgentControlApprovals,
   LazyChatOverviewPanel,
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
+  LazyExpandedImageDialog,
+  LazyPhoneOverviewSheet,
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
   notifyChatSurfaceLoadFailure,
@@ -545,6 +551,9 @@ function shouldIgnoreThreadMessageSearchShortcut(
   }
   return false;
 }
+
+const selectProviderSessionPrewarmSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.providerSessionPrewarm === true;
 
 export default function ChatView(props: ChatViewProps) {
   // React Compiler cannot preserve this component's manual memoization, so it
@@ -936,6 +945,11 @@ export default function ChatView(props: ChatViewProps) {
     [activeThread],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  // Rows painted from a cache (or kept after a disconnect) are last-known
+  // state: a send into them waits in the queue until the shell is live.
+  const activeEnvironmentShellLive = useStore((store) =>
+    selectEnvironmentShellLive(store, activeThreadRef?.environmentId ?? null),
+  );
   // Whether the open server thread's history window has been applied; drafts
   // have none to wait for.
   const activeThreadDetailLoaded = useStore((store) =>
@@ -3786,6 +3800,35 @@ export default function ChatView(props: ChatViewProps) {
     [getSteerEligibility],
   );
 
+  // The Claude resume review reads what the live thread subscription already holds: only a
+  // server thread whose shell is live (not cache) and whose detail is loaded qualifies.
+  const activeThreadShellLive = useStore((store) =>
+    selectEnvironmentShellLive(store, activeThread?.environmentId),
+  );
+  const readSubscribedClaudeReviewState = (): SubscribedClaudeReviewState | undefined => {
+    const thread = activeThread;
+    if (!thread || !isServerThread || !activeThreadShellLive || !activeThreadDetailLoaded) {
+      return undefined;
+    }
+    return {
+      thread: {
+        modelSelection: thread.modelSelection,
+        activities: thread.activities,
+        session: thread.session
+          ? {
+              providerName: thread.session.provider,
+              ...(thread.session.runtimeSessionId === undefined
+                ? {}
+                : { runtimeSessionId: RuntimeSessionId.make(thread.session.runtimeSessionId) }),
+              status: thread.session.orchestrationStatus,
+              activeTurnId: thread.session.activeTurnId ?? null,
+            }
+          : null,
+      },
+      workspaceCwd: thread.worktreePath ?? activeProject?.cwd,
+    };
+  };
+
   // Build the executeChatSendTurn input from a composer snapshot and dispatch it.
   // Shared by direct sends and queue flushes, so a queued message replays exactly
   // like a live send.
@@ -3897,6 +3940,7 @@ export default function ChatView(props: ChatViewProps) {
 
       const accepted = await executeChatSendTurn({
         ...(messageId !== undefined ? { messageId } : {}),
+        readSubscribedClaudeReviewState: readSubscribedClaudeReviewState,
         ...(hooks?.onBeforeTurnStart ? { onBeforeTurnStart: hooks.onBeforeTurnStart } : {}),
         ...(hooks?.onSendError ? { onSendError: hooks.onSendError } : {}),
         preserveComposerDraft: messageId !== undefined || composerChangedDuringPreparation(),
@@ -4356,7 +4400,14 @@ export default function ChatView(props: ChatViewProps) {
     // messages auto-dispatch, in order, once the thread reaches quiescence. A
     // queued send whose turn has not started yet (an off-screen background send
     // included) counts too: a direct send would race it into the bind window.
-    if (activeThreadKey && (phase === "running" || hasOutstandingQueuedDispatch(activeThreadKey))) {
+    // So does a thread shown from last-known state: the queue only drains once
+    // its environment's shell is live again.
+    if (
+      activeThreadKey &&
+      (phase === "running" ||
+        hasOutstandingQueuedDispatch(activeThreadKey) ||
+        (isServerThread && !activeEnvironmentShellLive))
+    ) {
       if (editorSendPreparationRef.current) return;
       editorSendPreparationRef.current = true;
       const composerChangedDuringPreparation = captureComposerContentGuard();
@@ -4907,6 +4958,53 @@ export default function ChatView(props: ChatViewProps) {
   const onUndoTurn = useCallback((turnCount: number) => {
     void onRevertToTurnCountRef.current(turnCount);
   }, []);
+  // Composer focus or the first keystroke starts the provider session the next send
+  // would start (`provider.prewarmSession`), so the send does not wait for the provider
+  // to boot. Skipped where that send first creates a worktree or a chat folder: the
+  // session's directory does not exist yet. Ref indirection keeps the callback stable
+  // for the memoized composer.
+  const providerSessionPrewarmSupported = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectProviderSessionPrewarmSupported,
+  );
+  const prewarmProviderSessionRef = useRef<() => void>(() => undefined);
+  // Refreshed after each commit, never during render.
+  useLayoutEffect(() => {
+    prewarmProviderSessionRef.current = () => {
+      const thread = activeThread;
+      if (
+        !thread ||
+        isPendingChat ||
+        !dispatchCapability.allowed ||
+        hostedDraftTarget.pending !== null ||
+        (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
+      )
+        return;
+      const isFirstMessage = !isServerThread || thread.messages.length === 0;
+      const plan = resolveChatSendWorktreePlan({
+        isServerThread,
+        isFirstMessage,
+        threadWorktreePath: thread.worktreePath,
+        activeThreadBranch,
+        currentGitRefName: gitStatusQuery.data?.refName ?? null,
+        sendEnvMode,
+      });
+      if (plan.shouldCreateWorktree || plan.shouldMaterializeLegacyBranchWorktree) return;
+      const modelSelection = readComposer()?.getSendContext().selectedModelSelection;
+      requestProviderSessionPrewarm({
+        api: readEnvironmentApi(environmentId),
+        supported: providerSessionPrewarmSupported,
+        request: {
+          threadId: thread.id,
+          ...(isServerThread ? {} : { projectId: thread.projectId }),
+          ...(modelSelection ? { modelSelection } : {}),
+          runtimeMode,
+          tokenMode,
+        },
+      });
+    };
+  });
+  const onComposerIntent = useCallback(() => prewarmProviderSessionRef.current(), []);
   // "Fork from here": desktop and tablet only (the frozen phone tier never
   // offers it), on server threads of machines that advertise `threadFork`.
   // Same ref indirection: the callback identity never changes.
@@ -5034,6 +5132,41 @@ export default function ChatView(props: ChatViewProps) {
           activeThreadRef,
         );
       },
+    },
+  );
+  const expandedImageDialogReady = useLazyComponentReady(
+    LazyExpandedImageDialog,
+    expandedImage !== null,
+    {
+      onLoadError: (error) => {
+        const preview = expandedImage;
+        closeExpandedImage();
+        notifyChatSurfaceLoadFailure(
+          "image preview",
+          error,
+          () => {
+            if (preview) setExpandedImage(preview);
+          },
+          activeThreadRef,
+        );
+      },
+    },
+  );
+  // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
+  // the native surface).
+  const agentControlApprovalsReady = useLazyComponentReady(
+    LazyAgentControlApprovals,
+    presentationTier !== "phone",
+    {
+      onLoadError: (error, retry) =>
+        notifyChatSurfaceLoadFailure("Agent Control approvals", error, retry),
+    },
+  );
+  const phoneOverviewSheetReady = useLazyComponentReady(
+    LazyPhoneOverviewSheet,
+    isPhoneTier && showPhoneOverviewSheet,
+    {
+      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("overview", error, retry),
     },
   );
   const sideChatThreadKey = !isPhoneTier ? activeThreadKey : null;
@@ -5631,10 +5764,12 @@ export default function ChatView(props: ChatViewProps) {
                     environmentId={environmentId}
                     parentThreadId={activeThreadId}
                   />
-                  <AgentControlApprovals
-                    environmentId={environmentId}
-                    activeThreadId={activeThreadId}
-                  />
+                  {agentControlApprovalsReady ? (
+                    <LazyAgentControlApprovals
+                      environmentId={environmentId}
+                      activeThreadId={activeThreadId}
+                    />
+                  ) : null}
                 </>
               ) : null}
               {showNewThreadComposerSpacer ? (
@@ -5678,6 +5813,7 @@ export default function ChatView(props: ChatViewProps) {
               <div className="relative z-10">
                 <ChatComposer
                   ref={composerRef}
+                  onComposerIntent={onComposerIntent}
                   composerDraftTarget={composerDraftTarget}
                   environmentId={environmentId}
                   routeKind={routeKind}
@@ -5852,8 +5988,12 @@ export default function ChatView(props: ChatViewProps) {
               onOpenChange={setProjectExplorerOpen}
             />
           ) : null}
-          {!isPhoneTier && expandedImage ? (
-            <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} contained />
+          {!isPhoneTier && expandedImage && expandedImageDialogReady ? (
+            <LazyExpandedImageDialog
+              preview={expandedImage}
+              onClose={closeExpandedImage}
+              contained
+            />
           ) : null}
         </div>
         {/* end chat column */}
@@ -5975,53 +6115,49 @@ export default function ChatView(props: ChatViewProps) {
           ) : null}
         </RightPanelSheet>
       ) : null}
-      {isPhoneTier ? (
+      {isPhoneTier && phoneOverviewSheetReady ? (
         // Phone tier: the overview promotes to a full-screen surface with an
         // explicit back affordance, consistent with the other work surfaces
         // (the audited right overlay had no close affordance at all).
-        <PhoneWorkSurfaceSheet
+        // The sheet stays mounted once it first opened, like the other work
+        // surfaces.
+        <LazyPhoneOverviewSheet
           label={planSidebarLabel}
           open={paneFocused && showPhoneOverviewSheet}
           onClose={closePlanSidebar}
         >
-          <PhoneSurfaceScaffold
-            title={planSidebarLabel}
-            backLabel="Back to thread"
-            onBack={closePlanSidebar}
-          >
-            {overviewPanelReady ? (
-              <LazyChatOverviewPanel
-                environmentId={environmentId}
-                gitCwd={sourceControlCwd}
-                activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
-                activeThreadBranch={activeThread?.branch ?? null}
-                activeWorktreePullRequests={activeWorktreePullRequests}
-                activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
-                activeWorktreeTitle={activeWorktreeSummary?.title}
-                postPushWorkflowWatch={postPushWorkflowWatch}
-                activeThreadKey={activeThreadKey}
-                activePlan={activePlan}
-                sidebarProposedPlan={sidebarProposedPlan}
-                threadSubagents={threadSubagents}
-                changedFileSummaries={activeThread?.turnDiffSummaries}
-                controls={overviewPanelControls}
-                markdownCwd={gitCwd ?? undefined}
-                workspaceRoot={activeWorkspaceRoot}
-                presentation="sheet"
-                onOpenFiles={onOpenFilesPanel}
-                onOpenReview={onOpenReviewPanel}
-                onOpenSubagent={onOpenSubagentPanel}
-                onOpenPullRequestInApp={openPullRequestInApp}
-                onPostPushDiscoveryComplete={clearPostPushWatch}
-              />
-            ) : null}
-          </PhoneSurfaceScaffold>
-        </PhoneWorkSurfaceSheet>
+          {overviewPanelReady ? (
+            <LazyChatOverviewPanel
+              environmentId={environmentId}
+              gitCwd={sourceControlCwd}
+              activeWorktreeBranch={activeWorktreeSummary?.branch ?? null}
+              activeThreadBranch={activeThread?.branch ?? null}
+              activeWorktreePullRequests={activeWorktreePullRequests}
+              activeWorktreeDiscoversPullRequests={activeWorktreeDiscoversPullRequests}
+              activeWorktreeTitle={activeWorktreeSummary?.title}
+              postPushWorkflowWatch={postPushWorkflowWatch}
+              activeThreadKey={activeThreadKey}
+              activePlan={activePlan}
+              sidebarProposedPlan={sidebarProposedPlan}
+              threadSubagents={threadSubagents}
+              changedFileSummaries={activeThread?.turnDiffSummaries}
+              controls={overviewPanelControls}
+              markdownCwd={gitCwd ?? undefined}
+              workspaceRoot={activeWorkspaceRoot}
+              presentation="sheet"
+              onOpenFiles={onOpenFilesPanel}
+              onOpenReview={onOpenReviewPanel}
+              onOpenSubagent={onOpenSubagentPanel}
+              onOpenPullRequestInApp={openPullRequestInApp}
+              onPostPushDiscoveryComplete={clearPostPushWatch}
+            />
+          ) : null}
+        </LazyPhoneOverviewSheet>
       ) : null}
 
-      {isPhoneTier && expandedImage && (
-        <ExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
-      )}
+      {isPhoneTier && expandedImage && expandedImageDialogReady ? (
+        <LazyExpandedImageDialog preview={expandedImage} onClose={closeExpandedImage} />
+      ) : null}
     </div>
   );
 }

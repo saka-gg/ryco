@@ -1,7 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Metric } from "effect";
+import { TestClock } from "effect/testing";
 
-import { makeWsReplayMetrics } from "./wsReplayMetrics.ts";
+import { makeWsReplayMetrics, RunningMax, WS_REPLAY_METRICS_SETTLE_MS } from "./wsReplayMetrics.ts";
 
 const findGaugeValue = (
   snapshots: ReadonlyArray<Metric.Metric.Snapshot>,
@@ -213,5 +214,64 @@ describe("wsReplayMetrics", () => {
 
       yield* metrics.reset;
     }),
+  );
+
+  it("keeps a running maximum that rises exactly and settles downward on rescan", () => {
+    const max = new RunningMax();
+    max.update(undefined, 3);
+    max.update(undefined, 5);
+    max.update(undefined, 5);
+    assert.equal(max.value, 5);
+    max.update(5, 1);
+    assert.deepEqual([max.value, max.stale], [5, false]);
+    max.update(5, 2);
+    // The true maximum (3) is unknown without a rescan; 5 stays as an upper bound.
+    assert.deepEqual([max.value, max.stale], [5, true]);
+    max.update(2, 7);
+    assert.deepEqual([max.value, max.stale], [7, false]);
+    max.recompute([3, 1, 2]);
+    assert.deepEqual([max.value, max.stale], [3, false]);
+  });
+
+  it.effect("settles stale maxima once per window with many subscriptions", () =>
+    Effect.gen(function* () {
+      const attributes = { stream: "thread" };
+      const subscriptions = yield* Effect.forEach(
+        Array.from({ length: 20 }, (_, index) => index),
+        (index) =>
+          makeWsReplayMetrics({
+            stream: "thread",
+            subscriptionId: `ws-replay-many-${index}`,
+            snapshotSequence: 0,
+          }),
+      );
+      for (const [index, metrics] of subscriptions.entries()) {
+        yield* metrics.recordLiveEnqueued(index + 1);
+      }
+      const lagOf = () =>
+        Metric.snapshot.pipe(
+          Effect.map((snapshots) =>
+            findGaugeValue(snapshots, "t3_ws_orchestration_replay_lag", attributes),
+          ),
+        );
+      const depthOf = () =>
+        Metric.snapshot.pipe(
+          Effect.map((snapshots) =>
+            findGaugeValue(snapshots, "t3_ws_orchestration_live_buffer_depth", attributes),
+          ),
+        );
+      assert.equal(yield* lagOf(), 20);
+      assert.equal(yield* depthOf(), 20);
+      // The subscription holding the maximum drains: the sum is exact at once,
+      // the maximum settles within one window.
+      yield* subscriptions[19]!.recordLiveDequeued(20);
+      assert.equal(yield* depthOf(), 19);
+      assert.equal(yield* lagOf(), 20);
+      yield* TestClock.adjust(WS_REPLAY_METRICS_SETTLE_MS);
+      assert.equal(yield* lagOf(), 19);
+      for (const metrics of subscriptions) yield* metrics.reset;
+      assert.equal(yield* lagOf(), 0);
+      assert.equal(yield* depthOf(), 0);
+    }).pipe(Effect.scoped),
   );
 });

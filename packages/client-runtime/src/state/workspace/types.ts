@@ -11,6 +11,7 @@ import type {
   ThreadId,
   ThreadLineage,
   ThreadSettlementOverride,
+  TurnId,
   WorktreeId,
 } from "@ryco/contracts";
 
@@ -94,6 +95,15 @@ export interface WorkspaceWorktreeMetadata {
   readonly updatedAt: string;
 }
 
+/** A thread's latest turn as cached: only once it ended, so a cached row never claims live work. */
+export interface WorkspaceThreadLatestTurn {
+  readonly turnId: TurnId;
+  readonly state: "interrupted" | "completed" | "error";
+  readonly requestedAt: string;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+}
+
 export interface WorkspaceThreadMetadata {
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
@@ -118,6 +128,12 @@ export interface WorkspaceThreadMetadata {
   readonly deliveryUnknown: boolean;
   /** Server-owned provenance. Optional: older caches omit it; validate before reuse. */
   readonly lineage?: ThreadLineage | null;
+  /**
+   * The thread's last activity, so cached rows settle and sort as the live
+   * ones do. Optional: older caches omit them; validate before reuse.
+   */
+  readonly latestUserMessageAt?: string | null;
+  readonly latestTurn?: WorkspaceThreadLatestTurn | null;
 }
 
 export const WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION = 1 as const;

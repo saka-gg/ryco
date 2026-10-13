@@ -1,14 +1,13 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  type EditorId,
-  type ServerConfig,
-  type ServerConfigStreamEvent,
-  type ServerConfigUpdatedPayload,
-  type ServerLifecycleWelcomePayload,
-  type ServerProvider,
-  type ServerProviderUpdatedPayload,
-  type ServerSettings,
+import type {
+  EditorId,
+  ServerConfig,
+  ServerConfigStreamEvent,
+  ServerConfigUpdatedPayload,
+  ServerLifecycleWelcomePayload,
+  ServerProvider,
+  ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
+import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import { Atom } from "effect/reactivity";
 
@@ -16,7 +15,11 @@ import type { WsRpcClient } from "./wsRpcClient.ts";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry.ts";
 import { projectServerConfigEvent } from "./serverConfigProjection.ts";
 
-export type ServerConfigUpdateSource = ServerConfigStreamEvent["type"];
+/** What changed the config; a provider delta reports as `providerStatuses`. */
+export type ServerConfigUpdateSource = Exclude<
+  ServerConfigStreamEvent["type"],
+  "providerStatusesDelta"
+>;
 
 export interface ServerConfigUpdatedNotification {
   readonly id: number;
@@ -91,10 +94,11 @@ export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
     return;
   }
   resolveServerConfig(nextConfig);
-  if (event.type === "snapshot" || event.type === "providerStatuses") {
+  const source = event.type === "providerStatusesDelta" ? "providerStatuses" : event.type;
+  if (source === "snapshot" || source === "providerStatuses") {
     emitProvidersUpdated({ providers: nextConfig.providers });
   }
-  emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), event.type);
+  emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), source);
 }
 
 export function applyProvidersUpdated(payload: ServerProviderUpdatedPayload): void {

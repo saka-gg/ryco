@@ -2,24 +2,27 @@ import {
   reviewClaudeResumeBeforeSend,
   revalidateClaudeResumeBeforeCommit,
   type ClaudeCacheReviewPresentation,
+  type SubscribedClaudeReviewState,
 } from "./claudeCacheReview.ts";
 import type { ClaudeResumeGuard, ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
-import {
-  DEFAULT_MODEL,
-  type AgentTokenMode,
-  CommandId,
-  type ProviderDriverKind,
-  type ComposerSourceControlContext,
-  type EnvironmentApi,
-  type ThreadGoalUpdate,
-  type MessageId,
-  type ModelSelection,
-  type ProjectId,
-  type ProviderInteractionMode,
-  type RuntimeMode,
-  type ThreadId,
+import type {
+  EnvironmentApi,
+  AgentTokenMode,
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
+  ProviderDriverKind,
+  ComposerSourceControlContext,
+  ThreadGoalUpdate,
 } from "@ryco/contracts";
+import {
+  CommandId,
+  type MessageId,
+  type ProjectId,
+  type ThreadId,
+} from "@ryco/contracts/base-schemas";
+import { DEFAULT_MODEL } from "@ryco/contracts/model";
 import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
 import type { ComposerAttachment } from "../../platform/index.ts";
@@ -275,6 +278,12 @@ export function buildSendTurnUploadTokenDispatchAttachment(input: {
 
 export interface CommitSendTurnDispatchInput {
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  /**
+   * The thread as the client's live subscription holds it (undefined when it is not live or
+   * not loaded). The Claude resume review is assessed from it first: a send that needs no
+   * review then skips the review's thread read.
+   */
+  readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
   readonly providerDriver?: ProviderDriverKind | null;
   /** Known source session; null means no session, undefined means unavailable. */
   readonly sourceProviderDriver?: ProviderDriverKind | null | undefined;

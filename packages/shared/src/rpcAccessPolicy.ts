@@ -1,11 +1,11 @@
+import type { RelayEffectiveRole } from "@ryco/contracts";
+import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
+import { DEVICE_WS_METHODS } from "@ryco/contracts/device";
 import {
-  AGENT_CONTROL_WS_METHODS,
   CONTEXT_HANDOFF_WS_METHODS,
-  DEVICE_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
-  WS_METHODS,
-  type RelayEffectiveRole,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 
 export type RpcMethod =
   | (typeof WS_METHODS)[keyof typeof WS_METHODS]
@@ -92,6 +92,8 @@ export const RPC_ACCESS_POLICY = {
   // not viewer — scripts and task outputs can carry prompts and secrets.
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "operator",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "viewer",
+  // The full payload of an activity the window already sent as a preview.
+  [ORCHESTRATION_WS_METHODS.getActivityPayload]: "viewer",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "viewer",
   // Steers the history recovery a viewer's own thread subscription runs.
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "viewer",
@@ -216,10 +218,15 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // Starts the provider process a send by the same operator would start.
+  [WS_METHODS.providerPrewarmSession]: "operator",
+  // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
+  [WS_METHODS.providerReadProjectCommands]: "operator",
   [WS_METHODS.vcsCreateRef]: "operator",
   [WS_METHODS.vcsCreateWorktree]: "operator",
   [WS_METHODS.vcsInit]: "operator",
   [WS_METHODS.vcsListRefs]: "operator",
+  [WS_METHODS.vcsPrefetchWorktreeBase]: "operator",
   [WS_METHODS.vcsReadLineBlame]: "operator",
   [WS_METHODS.vcsReadImageBlob]: "operator",
   [WS_METHODS.vcsReadLocalChanges]: "operator",
@@ -339,6 +346,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: "read",
   [ORCHESTRATION_WS_METHODS.getTaskOutput]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadHistoryPage]: "read",
+  [ORCHESTRATION_WS_METHODS.getActivityPayload]: "read",
   [ORCHESTRATION_WS_METHODS.getThreadWindow]: "read",
   // Idempotent: it sets a mode and the server spaces recovery reads per thread.
   [ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery]: "read",
@@ -463,10 +471,15 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  // Idempotent per thread: a repeat finds the session it already started.
+  [WS_METHODS.providerPrewarmSession]: "read",
+  [WS_METHODS.providerReadProjectCommands]: "read",
   [WS_METHODS.vcsCreateRef]: "mutation",
   [WS_METHODS.vcsCreateWorktree]: "mutation",
   [WS_METHODS.vcsInit]: "mutation",
   [WS_METHODS.vcsListRefs]: "read",
+  // Updates only a remote-tracking ref, like listRefs' origin fetch.
+  [WS_METHODS.vcsPrefetchWorktreeBase]: "read",
   [WS_METHODS.vcsReadLineBlame]: "read",
   [WS_METHODS.vcsReadImageBlob]: "read",
   [WS_METHODS.vcsReadLocalChanges]: "read",

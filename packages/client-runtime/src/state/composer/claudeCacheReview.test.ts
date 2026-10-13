@@ -299,6 +299,38 @@ describe("held send through native compaction", () => {
       claudeResumeGuard: { runtimeSessionId: "runtime-1" },
     });
   });
+  it("skips the review read when the live subscription shows nothing to review", async () => {
+    const f = setup("continue");
+    const fresh = fixture();
+    // Observed a minute ago on the same runtime and model: no review.
+    const recent = { ...observation, observedAt: new Date(now - 60_000).toISOString() };
+    const subscribed = {
+      ...fresh,
+      activities: [
+        { ...fresh.activities[0]!, payload: { usedTokens: 52_100, claudeCache: recent } },
+      ],
+    };
+    await commitSendTurnDispatch({
+      ...f.input,
+      readSubscribedClaudeReviewState: () => ({ thread: subscribed, workspaceCwd: undefined }),
+    });
+    expect(f.read).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
+  });
+  it("still reads the server's thread before showing a review the subscription flags", async () => {
+    const f = setup("continue");
+    await commitSendTurnDispatch({
+      ...f.input,
+      readSubscribedClaudeReviewState: () => ({ thread: fixture(), workspaceCwd: undefined }),
+    });
+    expect(f.read).toHaveBeenCalled();
+    expect(f.review).toHaveBeenCalledTimes(1);
+    expect(f.dispatch.mock.calls[0]?.[0]).toMatchObject({
+      claudeResumeGuard: { runtimeSessionId: "runtime-1" },
+    });
+  });
   it("is not working while the dialog is open and starts the turn at confirmation", async () => {
     const f = setup("continue");
     const order: string[] = [];

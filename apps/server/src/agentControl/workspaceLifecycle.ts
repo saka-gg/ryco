@@ -12,7 +12,11 @@ import {
   type OrchestrationShellSnapshot,
   type WorkspaceLifecycleAction,
 } from "@ryco/contracts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readScopedShellSnapshot,
+  readWorkspacePlacement,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { AgentControlPlanValidationError } from "./Errors.ts";
@@ -148,7 +152,12 @@ export const AgentControlWorkspacesLive = Layer.effect(
     const git = yield* GitVcsDriver;
     const load = (projectId: ProjectId, callerId: ThreadId | null) =>
       Effect.gen(function* () {
-        const snapshot = yield* projections.getShellSnapshot();
+        // The project's thread summaries, plus every placement for the overlap checks: no
+        // whole shell snapshot per tool call.
+        const placement = yield* readWorkspacePlacement(projections);
+        const scoped = yield* readScopedShellSnapshot(projections, { projectIds: [projectId] });
+        const snapshot = { ...scoped, placement };
+        // A caller outside the project is not in the scoped threads: denied, as before.
         const caller = callerId === null ? null : snapshot.threads.find((t) => t.id === callerId);
         const project = snapshot.projects.find((p) => p.id === projectId);
         if (!project || caller === undefined || (caller !== null && caller.projectId !== projectId))
@@ -260,7 +269,7 @@ export const AgentControlWorkspacesLive = Layer.effect(
           inspectCheckout(
             { policy, git },
             {
-              snapshot,
+              snapshot: snapshot.placement,
               project,
               directory,
               rowWorktreeId: row?.worktreeId ?? null,

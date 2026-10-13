@@ -3,13 +3,12 @@
 // generation-fenced keyed-query layer with staleTime-Infinity semantics and the
 // checkpoint retry policy (12 retries when not-ready, else 3). Only the
 // environmentApi import path differs; requests route through ensureEnvironmentApi.
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
-  type EnvironmentId,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   type OrchestrationGetTurnDiffResult,
-  type ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Atom } from "effect/reactivity";

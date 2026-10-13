@@ -1,7 +1,7 @@
 import type { StaticScreenProps } from "@react-navigation/native";
 import { useCallback } from "react";
 
-import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId } from "@ryco/contracts/base-schemas";
 
 import { ThreadDetailScreen } from "../threads/ThreadDetailScreen";
 import { useFileWorkspaceLayout, useRegisterFileWorkspaceInspector } from "./FileWorkspaceLayout";

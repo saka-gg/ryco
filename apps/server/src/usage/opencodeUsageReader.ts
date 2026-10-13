@@ -8,6 +8,7 @@ import { setImmediate } from "node:timers/promises";
 
 import type { UsageSourceStatus } from "@ryco/contracts";
 
+import { buildUsageFileAggregate, type UsageFileAggregate } from "./usageFileAggregate.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import { withTokenTotal, type UsageRecord } from "./usageRecord.ts";
 import {
@@ -110,7 +111,8 @@ export function parseOpenCodeUsageMessage(
 }
 
 export interface OpenCodeUsageResult {
-  readonly records: readonly UsageRecord[];
+  /** The store's usage, folded (or the cached fold when the store is unchanged). */
+  readonly aggregate: UsageFileAggregate;
   readonly status: UsageSourceStatus;
   readonly diagnosticCode?: string;
   readonly fileCount: number;
@@ -163,6 +165,7 @@ export async function readOpenCodeUsage(input: {
     found = false,
     cacheChanged = false;
   const records: UsageRecord[] = [];
+  let reusedAggregate: UsageFileAggregate | undefined;
   const liveFileKeys = new Set<string>();
   const rootKey = usageCacheRootKey("opencode", input.root);
   const check = () => {
@@ -220,7 +223,7 @@ export async function readOpenCodeUsage(input: {
     liveFileKeys.add(fileKey);
     const cached = input.cache.get(fileKey);
     if (cached?.fingerprint === fingerprint && cached.provider === "opencode") {
-      records.push(...cached.records);
+      reusedAggregate = cached.aggregate;
       reused++;
       checkingFinalIdentity = true;
       if ((await databaseFingerprint()) !== fingerprint) throw new Error("changed-store");
@@ -313,7 +316,7 @@ export async function readOpenCodeUsage(input: {
           size: stat.size,
           mtimeMs: stat.mtimeMs,
           fingerprint,
-          records: deduplicateUsageRecordsWithinFile(records),
+          aggregate: buildUsageFileAggregate(deduplicateUsageRecordsWithinFile(records)),
         });
         cacheChanged = true;
       } else if (input.cache.delete(fileKey)) cacheChanged = true;
@@ -322,6 +325,7 @@ export async function readOpenCodeUsage(input: {
     input.signal?.throwIfAborted();
     if (found) {
       records.length = 0;
+      reusedAggregate = undefined;
       if (input.cache.delete(databaseFileKey)) cacheChanged = true;
       diagnostic = checkingFinalIdentity
         ? "history-changed-during-scan"
@@ -383,13 +387,15 @@ export async function readOpenCodeUsage(input: {
       await setImmediate(undefined, { signal: input.signal });
     }
   }
+  const aggregate =
+    reusedAggregate ?? buildUsageFileAggregate(deduplicateUsageRecordsWithinFile(records));
   return {
-    records: deduplicateUsageRecordsWithinFile(records),
+    aggregate,
     status:
-      unsupported && records.length === 0
+      unsupported && aggregate.recordCount === 0
         ? "unsupported"
         : diagnostic !== undefined
-          ? records.length > 0
+          ? aggregate.recordCount > 0
             ? "partial"
             : "failed"
           : found

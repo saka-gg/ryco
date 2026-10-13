@@ -12,6 +12,15 @@
  * the server's `AutomationCentre` command; schedule rules live in
  * `@ryco/shared/automationSchedule`.
  */
+import type {
+  AutomationCentreRun,
+  AutomationCentreSnapshot,
+  ProjectId,
+  AgentTokenMode,
+  ModelSelection,
+  RuntimeMode,
+  ThreadEnvMode,
+} from "@ryco/contracts";
 import {
   AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
   type AgentControlAutomation,
@@ -23,14 +32,7 @@ import {
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
-  type AgentTokenMode,
-  type AutomationCentreRun,
-  type AutomationCentreSnapshot,
-  type ModelSelection,
-  type ProjectId,
-  type RuntimeMode,
-  type ThreadEnvMode,
-} from "@ryco/contracts";
+} from "@ryco/contracts/agent-control";
 import {
   AUTOMATION_LIMITS,
   DAY_MS,

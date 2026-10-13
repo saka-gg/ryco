@@ -4,7 +4,7 @@ import {
   CONTEXT_HANDOFF_MAX_INPUT_CHARS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ModelSelection,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 

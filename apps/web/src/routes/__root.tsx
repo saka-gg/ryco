@@ -1,4 +1,3 @@
-import { PreviewFileNavigationGuard } from "../components/PreviewFileNavigationGuard";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -19,9 +18,11 @@ import {
   isPhoneAppInterstitialEnabled,
   readMobileAppUrl,
 } from "../env";
+import { runHostedBootGate } from "../hostedHub/bootGate";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
 import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
+import { isPrimaryShellCacheEligible } from "../persistence/primaryShellCacheEligibility";
 import { hostedPwaLifecycle } from "../pwa/lifecycle";
 import { useHostedPwaSnapshot } from "../pwa/useHostedPwaSnapshot";
 import {
@@ -39,6 +40,14 @@ const RootAppShell = preloadableLazy(() =>
 );
 const HostedHubRoot = preloadableLazy(() =>
   import("../components/hostedHub/HostedHubRoot").then((module) => module.HostedHubRoot),
+);
+// File Preview drafts only exist once its (lazy) panel has opened, so the
+// guard that protects them loads after the first render instead of with boot.
+// It renders nothing, so its boundary never shows a fallback.
+const PreviewFileNavigationGuard = lazy(() =>
+  import("../components/PreviewFileNavigationGuard").then((module) => ({
+    default: module.PreviewFileNavigationGuard,
+  })),
 );
 const PhoneGetAppInterstitial = lazy(() =>
   import("../components/shell/phone/PhoneGetAppInterstitial").then((module) => ({
@@ -68,7 +77,9 @@ export const Route = createRootRouteWithContext<Record<string, never>>()({
   beforeLoad: ({ location, preload }) => resolveRootBeforeLoadContext(location.pathname, preload),
   component: () => (
     <>
-      <PreviewFileNavigationGuard />
+      <Suspense fallback={null}>
+        <PreviewFileNavigationGuard />
+      </Suspense>
       <RootRouteView />
     </>
   ),
@@ -80,6 +91,9 @@ export const Route = createRootRouteWithContext<Record<string, never>>()({
   pendingMinMs: 0,
   pendingMs: 0,
 });
+
+/** How long a boot waits for the cached primary shell before rendering without it. */
+const PRIMARY_SHELL_CACHE_BOOT_WAIT_MS = 150;
 
 function isNativeAuthorizationPath(pathname: string): boolean {
   return pathname.startsWith("/native/authorize/");
@@ -179,53 +193,10 @@ function resolveRootBeforeLoadContext(
 async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<RootBeforeLoadContext> {
   const currentUrl = new URL(window.location.href);
   if (isHostedHubMode()) {
-    // Code-only prefetches: fetching a chunk starts no session, ticket, relay
-    // or store work, so the hosted root's graph and the workspace-owner module
-    // download while the access check is on the wire instead of after it.
-    // Each failure is settled here, so a chunk that fails to load while the
-    // gate is still waiting is left for the route's own lazy load to report.
     // The same preloadable module `RootRouteView` renders, so the root match
     // commits the hosted root directly instead of suspending on it once.
     // `preload()` never rejects; a failed chunk surfaces from the render.
-    const hostedRoot = HostedHubRoot.preload();
-    const hostedRootAppShell = import("../components/hostedHub/hostedRootAppShell").catch(
-      () => undefined,
-    );
-    const workspaceOwners = import("../hostedHub/hostedWorkspaceOwners").catch(() => undefined);
-    const [
-      { installHostedConsoleBoundary },
-      { ensureWebHostedRuntimeConfigured, hostedHubController, hostedHubStore },
-      { bootstrapWithHostedReadCache, canShowHostedReadPreview },
-    ] = await Promise.all([
-      import("../hostedHub/logging"),
-      import("../hostedHub/state"),
-      import("../hostedHub/readCache"),
-    ]);
-    installHostedConsoleBoundary();
-    ensureWebHostedRuntimeConfigured();
-    // Start the routed-node orchestrator, workspace coordinator and browser
-    // lifecycle now, so route-derived demand reaches `selectNode` as soon as
-    // the directory is ready rather than once the hosted root has mounted.
-    // They only call into the hosted controller, which stays the one owner;
-    // the root retains them as well, so a failed load here changes nothing.
-    void workspaceOwners.then((owners) => {
-      owners?.retainHostedWorkspaceOwners();
-      owners?.prefetchHostedRouteCode(pathname);
-    });
-    // The gate waits for the account answer only. The directory has its own
-    // loading and stale surfaces, and waiting for it held a stalled network on
-    // the boot surface for a second request deadline.
-    await bootstrapWithHostedReadCache(() => hostedHubController.bootstrapAccess());
-    const needsWorkspaceShell =
-      hostedHubStore.getState().accountStatus === "authenticated" || canShowHostedReadPreview();
-    await Promise.all([
-      hostedRoot,
-      needsWorkspaceShell
-        ? hostedRootAppShell.then((shell) =>
-            shell?.preloadHostedRootAppShell().catch(() => undefined),
-          )
-        : undefined,
-    ]);
+    await runHostedBootGate({ pathname, hostedRoot: HostedHubRoot.preload() });
     markStartupPhase("root-before-load-ready");
     return { authGateState: { status: "hosted-hub" } };
   }
@@ -251,20 +222,113 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     };
   }
 
-  const { ensurePrimaryEnvironmentReady, resolveInitialServerAuthGateState } =
-    await import("../environments/primary");
+  // The primary environment's last-known shell is read while the auth and
+  // descriptor requests are on the wire, so the sidebar can paint it before
+  // the live snapshot arrives (see persistence/primaryShellCache).
+  const keepsLocalCaches = isPrimaryShellCacheEligible({
+    hostname: currentUrl.hostname,
+    desktop: isElectron,
+  });
+  const primaryShellCache =
+    keepsLocalCaches && pathname !== "/pair" && !isNativeAuthorizationPath(pathname)
+      ? loadPrimaryShellCache()
+      : null;
+  // Provider catalogs this page already holds, so the config snapshot can
+  // leave them out (loaded here, ahead of the first config subscription).
+  const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
+  const {
+    discardPrefetchedPrimaryWebSocketToken,
+    ensurePrimaryEnvironmentReady,
+    prefetchPrimaryWebSocketToken,
+    resolveInitialServerAuthGateState,
+  } = await import("../environments/primary");
+  const connectsEarly = !isNativeAuthorizationPath(pathname);
+  // The first socket's ws-token round trip overlaps the session check. With a
+  // valid session cookie it saves one round trip; without one it is a 401
+  // that is dropped, and the socket asks again once a session exists.
+  if (connectsEarly) prefetchPrimaryWebSocketToken();
   const [, authGateState] = await Promise.all([
     ensurePrimaryEnvironmentReady(),
     resolveInitialServerAuthGateState(),
   ]);
+  if (authGateState.status === "authenticated" && connectsEarly) {
+    startPrimaryConnectionEarly();
+    if (primaryShellCache !== null) await restorePrimaryShellCache(primaryShellCache);
+  } else {
+    discardPrefetchedPrimaryWebSocketToken();
+    if (authGateState.status !== "authenticated") {
+      // The server no longer accepts this browser's session: what it cached goes.
+      void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
+      void providerCatalogs?.then((clear) => clear?.());
+    }
+  }
   markStartupPhase("root-before-load-ready");
   measureStartupPhase("root-before-load", "root-before-load-start", "root-before-load-ready");
-  if (authGateState.status === "authenticated" && !isNativeAuthorizationPath(pathname)) {
-    startPrimaryConnectionEarly();
-  }
   return {
     authGateState,
   };
+}
+
+/** Resolves to a function that drops the persisted catalogs, or `null` when unavailable. */
+function attachProviderCatalogPersistence(): Promise<(() => Promise<void>) | null> {
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  return Promise.all([
+    import("@ryco/client-runtime/rpc"),
+    import("../persistence/providerCatalogStore"),
+  ])
+    .then(async ([{ providerCatalogCache }, { createIndexedDbProviderCatalogStore }]) => {
+      const store = createIndexedDbProviderCatalogStore({
+        factory: indexedDB,
+        origin: window.location.origin,
+      });
+      await providerCatalogCache.attachStore(store);
+      return async () => {
+        providerCatalogCache.clear();
+        await store.clear().catch(() => undefined);
+      };
+    })
+    .catch(() => null);
+}
+
+type PrimaryShellCacheModule = typeof import("../persistence/primaryShellCache");
+interface LoadedPrimaryShellCache {
+  readonly cache: PrimaryShellCacheModule;
+  readonly value: unknown;
+}
+
+function loadPrimaryShellCache(): Promise<LoadedPrimaryShellCache | null> {
+  return import("../persistence/primaryShellCache")
+    .then(async (cache) => ({ cache, value: await cache.readPrimaryShellCache() }))
+    .catch(() => null);
+}
+
+/**
+ * Paints the cached primary shell (when the store has nothing live for it)
+ * and starts keeping the cache current. Waits a bounded time for a slow read
+ * rather than holding the boot on storage; a read that loses the race still
+ * hydrates when it lands, unless live data has arrived by then.
+ */
+async function restorePrimaryShellCache(
+  pending: Promise<LoadedPrimaryShellCache | null>,
+): Promise<void> {
+  const restore = pending.then(async (loaded) => {
+    if (loaded === null) return;
+    const { readPrimaryEnvironmentDescriptor } = await import("../environments/primary");
+    const environmentId = readPrimaryEnvironmentDescriptor()?.environmentId;
+    if (!environmentId) return;
+    if (loaded.cache.hydratePrimaryShellFromCache({ value: loaded.value, environmentId })) {
+      markStartupPhase("primary-shell-cache-hydrated");
+    }
+    loaded.cache.startPrimaryShellCachePersistence({ environmentId });
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    restore.catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, PRIMARY_SHELL_CACHE_BOOT_WAIT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
 }
 
 /**

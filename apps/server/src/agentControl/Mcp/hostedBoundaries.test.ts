@@ -52,6 +52,8 @@ describe("pre-auth server environment descriptor", () => {
       "projectIcons",
       "projectPreferences",
       "projectSearchEmptyQuery",
+      "providerProjectCommands",
+      "providerSessionPrewarm",
       "repositoryIdentity",
       "requiredWorktreeBootstrap",
       "storageManagement",

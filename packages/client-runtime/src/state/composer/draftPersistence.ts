@@ -1,20 +1,21 @@
+import type { ScopedProjectRef, ScopedThreadRef } from "@ryco/contracts";
+import { type EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts/base-schemas";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
-  defaultInstanceIdForDriver,
-  type EnvironmentId,
-  ModelSelection,
-  ProjectId,
-  ProviderInstanceId,
-  ProviderInteractionMode,
-  ProviderDriverKind,
   ProviderOptionSelection,
+} from "@ryco/contracts/model";
+import {
+  ModelSelection,
+  ProviderInteractionMode,
   RuntimeMode,
   AgentTokenMode,
-  type ScopedProjectRef,
-  type ScopedThreadRef,
-  ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
+import {
+  defaultInstanceIdForDriver,
+  ProviderInstanceId,
+  ProviderDriverKind,
+} from "@ryco/contracts/provider-instance";
 import {
   parseScopedProjectKey,
   parseScopedThreadKey,
@@ -41,8 +42,23 @@ import type {
   DraftThreadState,
 } from "./draftStore.ts";
 
+/**
+ * The single entry every draft used to share. Read once to migrate it into the
+ * split layout below, then removed.
+ */
 export const COMPOSER_DRAFT_STORAGE_KEY = "ryco:composer-drafts:v1";
 export const COMPOSER_DRAFT_STORAGE_VERSION = 7;
+/**
+ * The split layout: one index entry (draft threads, sticky selections, which
+ * drafts exist) plus one entry per draft, so a keystroke rewrites only the
+ * draft it changed.
+ */
+export const COMPOSER_DRAFT_INDEX_STORAGE_KEY = "ryco:composer-drafts:v2";
+export const COMPOSER_DRAFT_ENTRY_STORAGE_KEY_PREFIX = "ryco:composer-draft:v2:";
+
+export function composerDraftEntryStorageKey(threadKey: string): string {
+  return `${COMPOSER_DRAFT_ENTRY_STORAGE_KEY_PREFIX}${threadKey}`;
+}
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export const isRuntimeMode = Schema.is(RuntimeMode);
 export const isAgentTokenMode = Schema.is(AgentTokenMode);
@@ -62,6 +78,11 @@ export const PersistedComposerImageAttachment = Schema.Struct({
   expiresAt: Schema.optionalKey(Schema.String),
   /** Non-uploaded streamed files restore as "attach again" rows. */
   uploadState: Schema.optionalKey(Schema.Literals(["needsReattach"])),
+  /**
+   * The bytes live in the platform's local blob store under `id` (web:
+   * IndexedDB) instead of `dataUrl`, keeping them out of the draft entry.
+   */
+  bytes: Schema.optionalKey(Schema.Literal("local")),
 });
 export type PersistedComposerImageAttachment = typeof PersistedComposerImageAttachment.Type;
 
@@ -97,7 +118,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
   tokenMode: Schema.optionalKey(AgentTokenMode),
 });
-type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
+export type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
 /**
  * Per-provider record of generic option selections. Used as a transient
@@ -525,6 +546,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
   const hasDataUrl = typeof dataUrl === "string" && dataUrl.length > 0;
   const hasUploadToken = typeof uploadToken === "string" && uploadToken.length > 0;
   const isNeedsReattach = uploadState === "needsReattach";
+  const hasLocalBytes = candidate.bytes === "local";
   if (
     typeof id !== "string" ||
     (type !== undefined && type !== "image" && type !== "file") ||
@@ -533,7 +555,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     typeof sizeBytes !== "number" ||
     !Number.isFinite(sizeBytes) ||
     id.length === 0 ||
-    (!hasDataUrl && !hasUploadToken && !isNeedsReattach)
+    (!hasDataUrl && !hasUploadToken && !isNeedsReattach && !hasLocalBytes)
   ) {
     return null;
   }
@@ -547,6 +569,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     ...(hasUploadToken ? { uploadToken } : {}),
     ...(typeof expiresAt === "string" && expiresAt.length > 0 ? { expiresAt } : {}),
     ...(uploadState === "needsReattach" ? { uploadState } : {}),
+    ...(hasLocalBytes && !hasDataUrl ? { bytes: "local" as const } : {}),
   };
 }
 
@@ -1067,58 +1090,61 @@ export function migratePersistedComposerDraftStoreState(
   };
 }
 
+/** One draft as persisted, or null when it holds nothing worth keeping. */
+export function partializeComposerThreadDraftState<TImage extends ComposerDraftImage>(
+  draft: ComposerThreadDraftState<TImage>,
+): PersistedComposerThreadDraftState | null {
+  const hasModelData =
+    Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
+  if (
+    draft.prompt.length === 0 &&
+    draft.persistedAttachments.length === 0 &&
+    draft.terminalContexts.length === 0 &&
+    !hasModelData &&
+    draft.runtimeMode === null &&
+    draft.interactionMode === null &&
+    draft.tokenMode == null
+  ) {
+    return null;
+  }
+  return {
+    prompt: draft.prompt,
+    attachments: draft.persistedAttachments,
+    ...(draft.terminalContexts.length > 0
+      ? {
+          terminalContexts: draft.terminalContexts.map((context) => ({
+            id: context.id,
+            threadId: context.threadId,
+            createdAt: context.createdAt,
+            terminalId: context.terminalId,
+            terminalLabel: context.terminalLabel,
+            lineStart: context.lineStart,
+            lineEnd: context.lineEnd,
+          })),
+        }
+      : {}),
+    ...(hasModelData
+      ? {
+          modelSelectionByProvider: compactModelSelectionByProvider(draft.modelSelectionByProvider),
+          activeProvider: draft.activeProvider,
+        }
+      : {}),
+    ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
+    ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+    ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
+  };
+}
+
 export function partializeComposerDraftStoreState<TImage extends ComposerDraftImage>(
   state: ComposerDraftStoreState<TImage>,
 ): PersistedComposerDraftStoreState {
-  const persistedDraftsByThreadKey: DeepMutable<
-    PersistedComposerDraftStoreState["draftsByThreadKey"]
-  > = {};
+  const persistedDraftsByThreadKey: Record<string, PersistedComposerThreadDraftState> = {};
   for (const [threadKey, draft] of Object.entries(state.draftsByThreadKey)) {
     if (typeof threadKey !== "string" || threadKey.length === 0) {
       continue;
     }
-    const hasModelData =
-      Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
-    if (
-      draft.prompt.length === 0 &&
-      draft.persistedAttachments.length === 0 &&
-      draft.terminalContexts.length === 0 &&
-      !hasModelData &&
-      draft.runtimeMode === null &&
-      draft.interactionMode === null &&
-      draft.tokenMode == null
-    ) {
-      continue;
-    }
-    const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
-      prompt: draft.prompt,
-      attachments: draft.persistedAttachments,
-      ...(draft.terminalContexts.length > 0
-        ? {
-            terminalContexts: draft.terminalContexts.map((context) => ({
-              id: context.id,
-              threadId: context.threadId,
-              createdAt: context.createdAt,
-              terminalId: context.terminalId,
-              terminalLabel: context.terminalLabel,
-              lineStart: context.lineStart,
-              lineEnd: context.lineEnd,
-            })),
-          }
-        : {}),
-      ...(hasModelData
-        ? {
-            modelSelectionByProvider: compactModelSelectionByProvider(
-              draft.modelSelectionByProvider,
-            ),
-            activeProvider: draft.activeProvider,
-          }
-        : {}),
-      ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
-      ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
-      ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
-    };
-    persistedDraftsByThreadKey[threadKey] = persistedDraft;
+    const persistedDraft = partializeComposerThreadDraftState(draft);
+    if (persistedDraft !== null) persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
   return {
     draftsByThreadKey: persistedDraftsByThreadKey,

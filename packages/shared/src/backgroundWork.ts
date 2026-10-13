@@ -1,6 +1,6 @@
 /** Compact background-only projection of normalized task activities. Agents keep
  * their existing projection; this module never creates agent identities. */
-import { EventId } from "@ryco/contracts";
+import { EventId } from "@ryco/contracts/base-schemas";
 import { INERT_TASK_TYPES } from "./taskClassification.ts";
 
 export const BACKGROUND_WORK_LIMIT = 100;

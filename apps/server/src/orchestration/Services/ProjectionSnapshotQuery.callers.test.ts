@@ -4,8 +4,9 @@
  * that needs projects, workspaces or thread placement reads them through `readProjectShells`,
  * `readWorkspacePlacement` or another narrow query instead.
  *
- * The callers listed below still need thread summaries (status, pending work, liveness, model
- * selection), or compare a whole snapshot's sequence. The list is a ratchet: a new caller, or
+ * Code that needs the summaries of a few threads or one project reads them through
+ * `readScopedShellSnapshot`. The callers listed below need every live thread's summary (status,
+ * pending work, liveness, model selection), or compare a whole snapshot's sequence. The list is a ratchet: a new caller, or
  * another call in a listed file, fails this test; so does a listed call that is gone, so the
  * list stays exact.
  */
@@ -19,34 +20,26 @@ const sourceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const ALLOWED_SHELL_SNAPSHOT_CALLERS: Readonly<Record<string, { count: number; why: string }>> = {
   "ws/orchestrationRpc.ts": { count: 1, why: "the shell subscription itself" },
-  "hubConnector/ThreadReadCacheSync.ts": { count: 1, why: "mirrors the shell for the hub" },
+  "hubConnector/threadReadCacheShellMirror.ts": {
+    count: 1,
+    why: "the cloud index's periodic rebuild; between rebuilds it patches changed rows",
+  },
   "orchestration/Services/ProjectionSnapshotQuery.ts": {
-    count: 3,
+    count: 4,
     why: "narrow-read fallbacks for test doubles",
   },
-  "orchestration/Layers/CheckpointReactor.ts": {
+  "workspace/WorkspaceLifecycle.ts": {
     count: 1,
-    why: "restore safety judges every live thread's busy state",
-  },
-  "workspace/WorkspaceLifecycle.ts": { count: 1, why: "workspace inspection uses thread status" },
-  "workspace/managedWorktreeMigration.ts": {
-    count: 1,
-    why: "a checkout is idle only when no thread has pending work",
+    why: "lifecycle suggestions plan across every project's threads",
   },
   "storage/StorageService.ts": {
     count: 1,
-    why: "the cleanup inventory protects checkouts by thread state",
+    why: "the cleanup inventory protects checkouts by every thread's state",
   },
-  "agentControl/workspaceLifecycle.ts": { count: 1, why: "workspace inspection" },
-  "agentControl/Layers/AgentControlDiagnostics.ts": {
+  "agentControl/Mcp/threadReads.ts": {
     count: 1,
-    why: "threads by provider instance",
+    why: "an unscoped thread listing pages over every thread",
   },
-  "agentControl/Layers/AgentControlActionValidator.ts": {
-    count: 1,
-    why: "validates plans against thread state",
-  },
-  "agentControl/Mcp/threadReads.ts": { count: 1, why: "lists threads with their status" },
 };
 
 const SHELL_SNAPSHOT_CALL = /\.getShellSnapshot\s*\(/g;

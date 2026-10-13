@@ -1,3 +1,4 @@
+import type { ModelSelection, ServerProvider } from "@ryco/contracts";
 import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_PROVIDER,
@@ -5,12 +6,12 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_OPTIONS_BY_PROVIDER,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+} from "@ryco/contracts/model";
+import {
   defaultInstanceIdForDriver,
-  type ModelSelection,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ServerProvider,
-} from "@ryco/contracts";
+} from "@ryco/contracts/provider-instance";
 import {
   createModelSelection,
   normalizeModelSlug,

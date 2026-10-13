@@ -24,10 +24,13 @@ vi.mock("expo-secure-store", () => ({
 vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 
 import {
+  EARLY_RELAY_SOCKET_TICKET_WAIT_MS,
+  MobileEarlyRelaySocket,
   MobileHostedRelaySocket,
   type MobileHostedRelaySocketOptions,
   type NativeSocketLike,
 } from "./relaySocket";
+import { decodeRelayFrame } from "@ryco/shared/relayCodec";
 
 const RELAY_URL = "wss://hub.example.test/v1/relay/client";
 const TOKEN = "session-token-value";
@@ -510,5 +513,123 @@ describe("WebSocket facade contract", () => {
   it("starts in CONNECTING before the mint resolves", () => {
     const harness = build();
     expect(harness.facade.readyState).toBe(harness.facade.CONNECTING);
+  });
+});
+
+describe("early relay socket", () => {
+  /** Proof mint and adoption chain several awaits. */
+  const drain = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+  function early(timers?: { setTimeout: typeof setTimeout; clearTimeout: typeof clearTimeout }) {
+    const sockets: FakeSocket[] = [];
+    const sign = vi.fn(async () => PROOF);
+    const socket = new MobileEarlyRelaySocket({
+      url: RELAY_URL,
+      readBearerToken: () => TOKEN,
+      dpopSigner: async () => ({ sign }) as unknown as DpopSignerService,
+      createSocket: (_url, headers) => {
+        const created = createFakeSocket(headers);
+        sockets.push(created);
+        return created;
+      },
+      ...(timers
+        ? {
+            setTimeout: (callback, delayMs) => timers.setTimeout(callback, delayMs),
+            clearTimeout: (timer) => timers.clearTimeout(timer as ReturnType<typeof setTimeout>),
+          }
+        : {}),
+    });
+    return { socket, sockets, sign };
+  }
+  const sentTypes = (socket: FakeSocket) =>
+    socket.sent.map((bytes) => {
+      const decoded = decodeRelayFrame(new Uint8Array(bytes));
+      if (!decoded.ok) throw new Error("decode");
+      return decoded.value.type;
+    });
+
+  it("upgrades with the session's proof before the ticket and authenticates on adoption", async () => {
+    const pre = early();
+    await drain();
+    expect(pre.sockets).toHaveLength(1);
+    expect(pre.sockets[0]!.headers).toEqual({ Authorization: `DPoP ${TOKEN}`, DPoP: PROOF });
+    // Opened while the ticket was still being issued: nothing is sent yet.
+    pre.sockets[0]!.setReadyState(1);
+    pre.sockets[0]!.emit("open");
+    expect(pre.sockets[0]!.sent).toHaveLength(0);
+
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    // No second socket: the early one carries the ticket in its first frame.
+    expect(harness.sockets).toHaveLength(0);
+    expect(sentTypes(pre.sockets[0]!)).toEqual(["auth"]);
+    emitFrame(pre.sockets[0]!, { type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    emitFrame(pre.sockets[0]!, {
+      type: "channel.open",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+    });
+    emitFrame(pre.sockets[0]!, { type: "channel.accept", ...VERSION, channelId: CHANNEL_ID });
+    await drain();
+    expect(harness.events.map((event) => event.type)).toContain("open");
+  });
+
+  it("authenticates when an adopted socket opens only after adoption", async () => {
+    const pre = early();
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    expect(harness.sockets).toHaveLength(0);
+    pre.sockets[0]!.setReadyState(1);
+    pre.sockets[0]!.emit("open");
+    expect(sentTypes(pre.sockets[0]!)).toEqual(["auth"]);
+  });
+
+  it("lets go of an opened socket whose ticket is late and opens a fresh one after it", async () => {
+    vi.useFakeTimers();
+    try {
+      const pre = early({ setTimeout, clearTimeout });
+      await drain();
+      pre.sockets[0]!.setReadyState(1);
+      pre.sockets[0]!.emit("open");
+      await vi.advanceTimersByTimeAsync(EARLY_RELAY_SOCKET_TICKET_WAIT_MS);
+      // Closed well before the Hub's authentication deadline.
+      expect(pre.sockets[0]!.closed).toEqual({ code: 1000, reason: "closed" });
+      const harness = build({ earlySocket: pre.socket });
+      await drain();
+      expect(harness.sockets).toHaveLength(1);
+      harness.sockets[0]!.setReadyState(1);
+      harness.sockets[0]!.emit("open");
+      expect(sentTypes(harness.sockets[0]!)).toEqual(["auth"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to a fresh socket when the early upgrade was refused", async () => {
+    const pre = early();
+    await drain();
+    pre.sockets[0]!.emit("close", { code: 4401, reason: "authentication_failed" });
+    const harness = build({ earlySocket: pre.socket });
+    await drain();
+    expect(harness.sockets).toHaveLength(1);
+  });
+
+  it("closes the early socket when its attempt is closed before adopting it", async () => {
+    const pre = early();
+    const harness = build({ earlySocket: pre.socket });
+    harness.facade.close();
+    await drain();
+    expect(pre.sockets[0]!.closed).not.toBeNull();
+    expect(harness.sockets).toHaveLength(0);
+  });
+
+  it("opens no socket at all when discarded while its proof is minted", async () => {
+    const pre = early();
+    pre.socket.discard();
+    await drain();
+    expect(pre.sockets).toHaveLength(0);
   });
 });

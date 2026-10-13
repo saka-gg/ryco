@@ -447,11 +447,15 @@ function reconcileDirectoryNodes(
 }
 
 /**
- * A directory read sent beside a session restore, in cookie mode only.
+ * A directory read sent beside a session restore.
  *
- * Both requests carry the same ambient cookie and the read needs nothing from
+ * Both requests carry the same credential — the ambient cookie, or the stored
+ * DPoP-bound token with a proof of its own — and the read needs nothing from
  * the restore's answer, so overlapping them takes a Hub round trip off every
- * cold start and resume. Its answer is held, never published by itself: only
+ * cold start and resume. In bearer mode this relies on the Hub never rotating
+ * the token on `GET /api/auth/session` (it answers the account and session
+ * only); a read failing on a token the restore did rotate would still be
+ * non-authoritative below, and a bearer `401` on this read clears nothing. Its answer is held, never published by itself: only
  * after the restore has validated the session does `#refreshDirectory` commit
  * it, under the same session fence an ordinary read has. `null` — the read
  * failed, was abandoned, or answered for a check that was replaced — is never
@@ -563,6 +567,14 @@ class HostedHubController {
   #accessCheckTimedOut = false;
   #sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
   #retrySelectedNodeOperation: AbortController | null = null;
+  /**
+   * The generation whose relay channel closed unintentionally and has not yet
+   * been replaced. While it is current, no shell snapshot may make the session
+   * ready: a snapshot can only belong to the lost channel.
+   */
+  #relayGapGeneration: number | null = null;
+  /** The plain bootstrap access check still waiting for its answer; see {@link accessCheckPending}. */
+  #accessCheckOperation: AbortController | null = null;
   #retrySelectedNodePromise: Promise<void> | null = null;
   #browserResumeOperation: AbortController | null = null;
   #browserResumePromise: Promise<void> | null = null;
@@ -608,8 +620,13 @@ class HostedHubController {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
     const operation = this.#replaceOperation();
     const access = settledSignal();
-    const promise = this.#restoreAccess(operation, access.settle).finally(() => {
+    this.#accessCheckOperation = operation;
+    const settle = () => {
+      if (this.#accessCheckOperation === operation) this.#accessCheckOperation = null;
       access.settle();
+    };
+    const promise = this.#restoreAccess(operation, settle).finally(() => {
+      settle();
       if (this.#operation === operation) this.#operation = null;
       if (this.#bootstrapPromise === promise) this.#bootstrapPromise = null;
       if (this.#bootstrapAccessPromise === access.promise) this.#bootstrapAccessPromise = null;
@@ -629,6 +646,16 @@ class HostedHubController {
    * long as `/api/nodes` took (or stalled). The read itself is unchanged and
    * still owned here.
    */
+  /**
+   * Whether a {@link bootstrap} access check is in flight and has not answered
+   * yet. Display-only readers use it to send a read beside the check and hold
+   * the answer until the session validates. A credential adoption is not such
+   * a check: reads sent during it could carry the credential being replaced.
+   */
+  accessCheckPending(): boolean {
+    return this.#accessCheckOperation !== null && !this.#accessCheckOperation.signal.aborted;
+  }
+
   bootstrapAccess(): Promise<void> {
     const settled = this.bootstrap();
     return this.#bootstrapAccessPromise ?? settled;
@@ -827,9 +854,8 @@ class HostedHubController {
     return { deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS };
   }
 
-  /** In cookie mode, the directory read sent beside an access check; see {@link HostedDirectoryPrefetch}. */
-  #prefetchDirectory(signal: AbortSignal): HostedDirectoryPrefetch | null {
-    if (getHostedHubApi().credentialMode !== "cookie") return null;
+  /** The directory read sent beside an access check; see {@link HostedDirectoryPrefetch}. */
+  #prefetchDirectory(signal: AbortSignal): HostedDirectoryPrefetch {
     return prefetchHostedDirectory(signal);
   }
 
@@ -1922,6 +1948,7 @@ class HostedHubController {
     this.#bootstrapAccessPromise = null;
     this.#accessCheckTimedOut = false;
     this.#clearSessionSyncTimer();
+    this.#relayGapGeneration = null;
     this.#retrySelectedNodeOperation?.abort();
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
@@ -2569,6 +2596,7 @@ class HostedHubController {
   connectionClosed(generation: number): void {
     const state = hostedHubStore.getState();
     if (state.generation !== generation || state.transportStatus === "terminal-failure") return;
+    this.#relayGapGeneration = generation;
     patchState({
       // Keep the directory-validated role while this retryable transport gap is
       // stale. Freshness still denies every mutation, but the shell and other
@@ -2582,9 +2610,38 @@ class HostedHubController {
     });
   }
 
+  /**
+   * The transport authenticated a replacement for a channel that closed
+   * unintentionally in this generation, and the client's subscriptions are
+   * resubscribing on it. The controller adopts that channel as the new session
+   * instead of rebuilding the client: one drop costs one ticket, one stream, one
+   * handshake and one shell snapshot. The session is not established again
+   * until the replacement's own shell snapshot is accepted
+   * ({@link markSessionReady}), under the same synchronization deadline as a
+   * fresh selection; until then `sessionStatus` stays stale or replaying, which
+   * admits no mutation.
+   */
+  connectionRecovered(generation: number): void {
+    const state = hostedHubStore.getState();
+    if (
+      state.generation !== generation ||
+      this.#relayGapGeneration !== generation ||
+      state.selectedNode === null ||
+      state.transportStatus === "terminal-failure"
+    ) {
+      return;
+    }
+    this.#relayGapGeneration = null;
+    patchState({ sessionEstablished: false, sessionRecoveredAfterUnknown: false });
+    this.#startSessionSyncTimer(generation);
+  }
+
   markSessionReady(environmentId: EnvironmentId): void {
     const state = hostedHubStore.getState();
     if (state.selectedNode?.environmentId !== environmentId) return;
+    // A snapshot that lands between an unintentional close and its replacement
+    // channel can only have come from the lost channel.
+    if (this.#relayGapGeneration === state.generation) return;
     this.#clearSessionSyncTimer();
     if (state.sessionStatus === "delivery-unknown") {
       patchState({

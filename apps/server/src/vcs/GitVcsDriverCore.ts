@@ -13,6 +13,7 @@ import {
   Duration,
   Effect,
   Exit,
+  Fiber,
   FileSystem,
   Option,
   Path,
@@ -899,6 +900,13 @@ const copyWorktreeDependencyInstallDirs = Effect.fn("copyWorktreeDependencyInsta
     ).pipe(Effect.asVoid);
   },
 );
+
+/**
+ * How long a finished worktree base prefetch stands in for the fetch a worktree
+ * creation would otherwise run. The composer prefetches when it enters worktree
+ * mode; a send within this window starts from that fetch.
+ */
+export const WORKTREE_BASE_PREFETCH_REUSE_MS = 60_000;
 
 export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* (options?: {
   executeOverride?: GitVcsDriver.GitVcsDriverShape["execute"];
@@ -2297,6 +2305,64 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return current;
     });
 
+  /** A base fetch started by `prefetchWorktreeBase`, keyed by repository and base. */
+  const worktreeBasePrefetches = new Map<
+    string,
+    { readonly fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null }
+  >();
+  const worktreeBaseKey = (cwd: string, refName: string) => `${path.resolve(cwd)}\u0000${refName}`;
+  /** Fetches the base a worktree names and returns its branch on origin. */
+  const fetchWorktreeBase = (cwd: string, refName: string) => {
+    if (refName === "origin/HEAD") return fetchOriginDefaultBranch(cwd);
+    const branch = refName.startsWith("origin/") ? refName.slice("origin/".length) : refName;
+    return fetchOriginBranch(cwd, branch).pipe(Effect.as(branch));
+  };
+  /** A prefetch of this base still running, or finished recently enough to reuse. */
+  const reusableWorktreeBasePrefetch = (key: string) => {
+    const entry = worktreeBasePrefetches.get(key);
+    if (!entry) return null;
+    if (
+      entry.settledAt !== null &&
+      Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
+    ) {
+      worktreeBasePrefetches.delete(key);
+      return null;
+    }
+    return entry;
+  };
+  const prefetchWorktreeBase: GitVcsDriver.GitVcsDriverShape["prefetchWorktreeBase"] = (input) =>
+    Effect.gen(function* () {
+      const key = worktreeBaseKey(input.cwd, input.refName);
+      const existing = reusableWorktreeBasePrefetch(key);
+      if (existing) return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
+      for (const [candidate, entry] of worktreeBasePrefetches) {
+        if (
+          entry.settledAt !== null &&
+          Date.now() - entry.settledAt > WORKTREE_BASE_PREFETCH_REUSE_MS
+        )
+          worktreeBasePrefetches.delete(candidate);
+      }
+      const entry: { fiber: Fiber.Fiber<string, GitCommandError>; settledAt: number | null } = {
+        fiber: undefined as unknown as Fiber.Fiber<string, GitCommandError>,
+        settledAt: null,
+      };
+      // Detached: a client that stops waiting (it navigated away) must not
+      // interrupt a fetch the first send may already be waiting on.
+      entry.fiber = yield* Effect.forkDetach(
+        fetchWorktreeBase(input.cwd, input.refName).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isSuccess(exit)) entry.settledAt = Date.now();
+              else if (worktreeBasePrefetches.get(key) === entry)
+                worktreeBasePrefetches.delete(key);
+            }),
+          ),
+        ),
+      );
+      worktreeBasePrefetches.set(key, entry);
+      yield* Fiber.join(entry.fiber).pipe(Effect.asVoid);
+    });
+
   const notARepositoryRefs = {
     exitCode: ChildProcessSpawner.ExitCode(128),
     stdout: "",
@@ -2629,14 +2695,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     let baseRef = input.refName;
     if (input.fetchOrigin) {
       // Only the base branch is fetched (not every head of origin): it is on
-      // the critical path before the first turn exists.
-      let baseBranch: string;
-      if (baseRef === "origin/HEAD") {
-        baseBranch = yield* fetchOriginDefaultBranch(input.cwd);
-      } else {
-        baseBranch = baseRef.startsWith("origin/") ? baseRef.slice("origin/".length) : baseRef;
-        yield* fetchOriginBranch(input.cwd, baseBranch);
-      }
+      // the critical path before the first turn exists. A prefetch of the same
+      // base (the composer asks for one when it enters worktree mode) stands in
+      // for it while running or recently finished; a failed one is retried here.
+      const prefetch = reusableWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
+      const prefetched = prefetch
+        ? yield* Fiber.join(prefetch.fiber).pipe(Effect.option)
+        : Option.none<string>();
+      const baseBranch = Option.isSome(prefetched)
+        ? prefetched.value
+        : yield* fetchWorktreeBase(input.cwd, baseRef);
       // Fully qualified refs prevent a same-named local branch from winning.
       baseRef = `refs/remotes/origin/${baseBranch}`;
     }
@@ -3201,6 +3269,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     listRefs,
     invalidateRefListing,
     createWorktree,
+    prefetchWorktreeBase,
     assertWorktreeSetupComplete: (checkoutPath) =>
       worktreePolicy
         .assertExistingPath({ path: checkoutPath, operation: "GitVcsDriver.worktreeSetup" })

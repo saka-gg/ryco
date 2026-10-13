@@ -21,7 +21,7 @@ import { ServerAuthLive } from "../auth/Layers/ServerAuth.ts";
 import { ServerSecretStoreLive } from "../auth/Layers/ServerSecretStore.ts";
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../config.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers/Sqlite.ts";
-import { HubConnectorService, type HubConnectorE2eeOperator } from "./HubConnectorLive.ts";
+import { hubConnectorReadyLayer, type HubConnectorE2eeOperator } from "./HubConnectorService.ts";
 import { hubConnectorRoutesLayer } from "./http.ts";
 import {
   stubClientListing,
@@ -159,7 +159,7 @@ const withHubRoutes = <A, E, R>(
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
-      Layer.provide(Layer.succeed(HubConnectorService, connector.service)),
+      Layer.provide(hubConnectorReadyLayer(connector.service)),
       Layer.provideMerge(
         ServerAuthLive.pipe(
           Layer.provideMerge(SqlitePersistenceLayerLive),

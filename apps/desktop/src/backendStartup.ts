@@ -193,6 +193,11 @@ export class BackendOutputTail {
     if (this.text.length > this.maxChars) this.text = this.text.slice(-this.maxChars);
   }
 
+  /** Everything kept, as printed. */
+  raw(): string {
+    return this.text;
+  }
+
   lines(maxLines = 8): string[] {
     return this.text
       .replace(ANSI_ESCAPE, "")
@@ -200,5 +205,50 @@ export class BackendOutputTail {
       .map((line) => line.trimEnd())
       .filter((line) => line.length > 0)
       .slice(-maxLines);
+  }
+}
+
+/** How much post-readiness backend output is kept in memory for a crash report. */
+export const BACKEND_POST_READY_TAIL_CHARS = 16_000;
+
+/**
+ * Routes backend stdout/stderr into the desktop's backend log.
+ *
+ * Until the backend serves, every chunk is copied: a failed start is explained
+ * there. Once it serves, the backend writes its own server.log (which
+ * Diagnostics tails), so copying would only duplicate it and put every log
+ * burst through Electron main's event loop and disk queue. From then on only a
+ * bounded tail is kept in memory, and written to the backend log if the backend
+ * exits unexpectedly — the stderr of a crash (an uncaught exception, a native
+ * abort) never reaches server.log.
+ */
+export class BackendOutputCapture {
+  private servingNoted = false;
+  private readonly postReadyTail = new BackendOutputTail(BACKEND_POST_READY_TAIL_CHARS);
+
+  private readonly writeLog: (chunk: Buffer | string) => void;
+
+  constructor(writeLog: (chunk: Buffer | string) => void) {
+    this.writeLog = writeLog;
+  }
+
+  push(chunk: Buffer, ready: boolean): void {
+    if (!ready) {
+      this.writeLog(chunk);
+      return;
+    }
+    if (!this.servingNoted) {
+      this.servingNoted = true;
+      this.writeLog("---- backend serving; its output continues in server.log ----\n");
+    }
+    this.postReadyTail.push(chunk);
+  }
+
+  /** Writes the kept output after an exit nobody asked for. */
+  recordUnexpectedExit(details: string): void {
+    const tail = this.postReadyTail.raw();
+    if (tail.length === 0) return;
+    this.writeLog(`---- last backend output before exit ${details} ----\n`);
+    this.writeLog(tail.endsWith("\n") ? tail : `${tail}\n`);
   }
 }

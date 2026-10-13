@@ -64,6 +64,7 @@ import {
   launchSetupScriptForWorktreeInBackground as launchSetupScriptInBackground,
   type OwnedCheckout,
 } from "./managedCheckout.ts";
+import { readWorktreeListFingerprint } from "./worktreeListFingerprint.ts";
 
 const RECONCILIATION_THROTTLE_MS = 5 * 60 * 1000;
 /**
@@ -83,6 +84,14 @@ export const INITIAL_COMMIT_MESSAGE = "Initial commit";
 // this sweep inspects is shared by all of them.
 let lastReconciliationAtMs = 0;
 const missingProjectRoots = new Set<ProjectId>();
+/**
+ * The last `git worktree list` per project with the registration fingerprint it was read under
+ * (see worktreeListFingerprint.ts): unchanged repositories skip git on later sweeps.
+ */
+const knownWorktreeListings = new Map<
+  ProjectId,
+  { readonly root: string; readonly fingerprint: string; readonly paths: readonly string[] }
+>();
 
 /** What `initializeGitForProject` does beyond `git init`, the main workspace and thread attachment. */
 export interface InitializeProjectGitOptions {
@@ -725,13 +734,34 @@ export const makeWorktreeOperations = (deps: {
     Effect.gen(function* () {
       const operation = "git.reconcileProjectWorktrees";
       const project = yield* loadProjectForGitWorkflow(operation, projectId);
-      const gitWorktreePaths = yield* gitWorkflow
-        .listWorktreePaths(project.workspaceRoot)
-        .pipe(
-          Effect.mapError((cause) =>
-            toGitManagerError(operation, "Failed to inspect git worktrees.", cause),
-          ),
-        );
+      // Read before git answers: a registration changing meanwhile yields another fingerprint
+      // next time, so a stale listing is never reused.
+      const fingerprint = yield* Effect.promise(() =>
+        readWorktreeListFingerprint(project.workspaceRoot),
+      );
+      const known = knownWorktreeListings.get(projectId);
+      const gitWorktreePaths =
+        fingerprint !== null &&
+        known !== undefined &&
+        known.root === project.workspaceRoot &&
+        known.fingerprint === fingerprint
+          ? known.paths
+          : yield* gitWorkflow.listWorktreePaths(project.workspaceRoot).pipe(
+              Effect.tap((paths) =>
+                Effect.sync(() => {
+                  if (fingerprint === null) knownWorktreeListings.delete(projectId);
+                  else
+                    knownWorktreeListings.set(projectId, {
+                      root: project.workspaceRoot,
+                      fingerprint,
+                      paths,
+                    });
+                }),
+              ),
+              Effect.mapError((cause) =>
+                toGitManagerError(operation, "Failed to inspect git worktrees.", cause),
+              ),
+            );
       // Read after git answered, so the plan sees rows as fresh as before. Only this project's
       // rows: the plan never looks at another project's workspaces or threads.
       const rows = yield* loadProjectWorkspaceRows(projectId, operation);

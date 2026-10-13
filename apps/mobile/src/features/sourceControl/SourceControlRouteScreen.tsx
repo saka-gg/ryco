@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Pressable, RefreshControl, ScrollView, View } from "react-native";
 
 import type { VcsStatusResult } from "@ryco/contracts";
-import { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
+import { WorktreeId } from "@ryco/contracts/worktree";
 
 import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";

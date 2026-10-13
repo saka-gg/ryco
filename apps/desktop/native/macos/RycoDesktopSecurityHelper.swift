@@ -17,16 +17,37 @@ private struct SuccessResponse {
   let fields: [String: Any]
 }
 
-private func readBoundedRequest() throws -> Data {
-  var result = Data()
-  while true {
-    guard let chunk = try FileHandle.standardInput.read(upToCount: 4_096) else { break }
-    if chunk.isEmpty { break }
-    result.append(chunk)
-    if result.count > maximumRequestBytes { throw HelperError.invalidRequest }
+/**
+ * Requests arrive one JSON object per line and are answered in order, one line
+ * each, until stdin closes, so the desktop can keep one helper for a burst of
+ * signatures instead of launching a process per operation. A final request
+ * without a trailing newline is still answered. Nothing persists between
+ * requests: every request carries its own key record.
+ */
+private final class RequestReader {
+  private var buffer = Data()
+  private var finished = false
+
+  /** The next request line, `nil` at end of input. Throws for an oversized line. */
+  func next() throws -> Data? {
+    while true {
+      if let newline = buffer.firstIndex(of: 0x0a) {
+        let line = buffer.subdata(in: buffer.startIndex..<newline)
+        buffer.removeSubrange(buffer.startIndex...newline)
+        return line
+      }
+      if buffer.count > maximumRequestBytes { throw HelperError.invalidRequest }
+      if finished {
+        guard !buffer.isEmpty else { return nil }
+        let line = buffer
+        buffer = Data()
+        return line
+      }
+      // Whatever has arrived: `read(upToCount:)` would wait for a full count or EOF.
+      let chunk = FileHandle.standardInput.availableData
+      if chunk.isEmpty { finished = true } else { buffer.append(chunk) }
+    }
   }
-  guard !result.isEmpty else { throw HelperError.invalidRequest }
-  return result
 }
 
 private func parseRequest(_ data: Data) throws -> [String: Any] {
@@ -293,9 +314,31 @@ private func writeResponse(_ body: [String: Any]) {
   FileHandle.standardOutput.write(Data([0x0a]))
 }
 
-do {
-  let response = try perform(parseRequest(readBoundedRequest()))
-  writeResponse(["ok": true].merging(response.fields) { current, _ in current })
-} catch {
-  writeResponse(["ok": false, "error": publicErrorCode(error)])
+private func respond(to line: Data) {
+  do {
+    guard !line.isEmpty else { throw HelperError.invalidRequest }
+    let response = try perform(parseRequest(line))
+    writeResponse(["ok": true].merging(response.fields) { current, _ in current })
+  } catch {
+    writeResponse(["ok": false, "error": publicErrorCode(error)])
+  }
+}
+
+private let reader = RequestReader()
+private var answered = 0
+while true {
+  let line: Data?
+  do {
+    line = try reader.next()
+  } catch {
+    // An oversized line cannot be resynchronised: answer it and stop.
+    writeResponse(["ok": false, "error": publicErrorCode(error)])
+    exit(0)
+  }
+  guard let request = line else { break }
+  respond(to: request)
+  answered += 1
+}
+if answered == 0 {
+  writeResponse(["ok": false, "error": publicErrorCode(HelperError.invalidRequest)])
 }

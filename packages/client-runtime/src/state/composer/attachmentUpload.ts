@@ -1,11 +1,9 @@
+import type { EnvironmentId, ThreadId, ExecutionEnvironmentCapabilities } from "@ryco/contracts";
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-  type EnvironmentId,
   type FileAttachmentCreateUploadUrlInput,
   type FileAttachmentCreateUploadUrlResult,
-  type ExecutionEnvironmentCapabilities,
-  type ThreadId,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 
 import type { ChatFileUploadReadiness } from "./attachmentUploadReadiness.ts";
 

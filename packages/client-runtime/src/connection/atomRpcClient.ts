@@ -1,4 +1,4 @@
-import { WsRpcGroup } from "@ryco/contracts";
+import { WsRpcGroup } from "@ryco/contracts/rpc";
 import * as Effect from "effect/Effect";
 import { AtomRegistry, AtomRpc } from "effect/reactivity";
 

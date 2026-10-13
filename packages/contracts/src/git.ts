@@ -155,6 +155,17 @@ export const VcsListRefsInput = Schema.Struct({
 });
 export type VcsListRefsInput = typeof VcsListRefsInput.Type;
 
+/**
+ * Fetches a new worktree's base from origin ahead of the first send, which then
+ * reuses that fetch while it is in flight or recent instead of fetching again.
+ * `refName` is the base the send will name (`origin/<branch>` or `origin/HEAD`).
+ */
+export const VcsPrefetchWorktreeBaseInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  refName: TrimmedNonEmptyStringSchema,
+});
+export type VcsPrefetchWorktreeBaseInput = typeof VcsPrefetchWorktreeBaseInput.Type;
+
 export const VcsCreateWorktreeInput = Schema.Struct({
   fetchOrigin: Schema.optional(Schema.Boolean),
   cwd: TrimmedNonEmptyStringSchema,

@@ -36,7 +36,7 @@ import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerAuthLive } from "./auth/Layers/ServerAuth.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import {
-  HubConnectorService,
+  hubConnectorReadyLayer,
   type HubConnectorE2eeOperator,
   type HubConnectorServiceShape,
 } from "./hubConnector/HubConnectorLive.ts";
@@ -212,7 +212,7 @@ const withLiveHubCliServer = <A, E, R>(
       disableLogger: true,
     }).pipe(
       Layer.provide(
-        Layer.succeed(HubConnectorService, {
+        hubConnectorReadyLayer({
           connectorEnabled: true,
           status: () => waitingStatus,
           resume: async () => undefined,

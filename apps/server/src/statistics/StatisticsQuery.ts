@@ -11,11 +11,15 @@
  * turn and request counters retain their final snapshots. Context-window gauges
  * remain a best-effort fallback for older/provider-limited data.
  *
- * The node:sqlite client is synchronous and owns one connection, so every row
- * read here stalls the event loop and every other reader/writer. Reads are kept
- * minimal: per-thread partial aggregates are cached in memory and only threads
- * with new orchestration events are re-read (see {@link StatisticsState}). Rows
- * are read in one transaction, then decoded and aggregated after it commits.
+ * The node:sqlite client is synchronous and the writer owns one connection, so
+ * rows are read in one transaction on the read-only worker connection
+ * (SqliteReadClient) when the runtime has one, then decoded and aggregated on
+ * the main thread in chunks. Reads are kept minimal: per-thread partial
+ * aggregates are cached in memory and persisted (statistics_thread_partials),
+ * and only threads with new orchestration events are re-read (see
+ * {@link StatisticsState}), also on the first open after a restart. The RPC
+ * serves the previous snapshot when a refresh takes longer than a short wait
+ * (stale-while-revalidate).
  *
  * A fork's inherited turns and activities are display copies of its source's history: the work
  * is already counted once, on the source, so every reader here leaves them out.
@@ -23,7 +27,7 @@
  * @module StatisticsQuery
  */
 import { type StatisticsSnapshot } from "@ryco/contracts";
-import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
+import { Context, Duration, Effect, Fiber, Layer, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
@@ -39,6 +43,7 @@ import {
   type ProjectionRepositoryError,
 } from "../persistence/Errors.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/Layers/ProjectionPipeline.ts";
+import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
 import {
   assembleStatisticsSnapshot,
   buildStatisticsThreadMeta,
@@ -58,7 +63,9 @@ import {
  * StatisticsQueryShape - service API.
  */
 export interface StatisticsQueryShape {
-  readonly getStatistics: () => Effect.Effect<StatisticsSnapshot, ProjectionRepositoryError>;
+  readonly getStatistics: (
+    options?: GetStatisticsOptions,
+  ) => Effect.Effect<StatisticsSnapshot, ProjectionRepositoryError>;
 }
 
 /**
@@ -79,6 +86,8 @@ const THREAD_SCOPED_PROJECTORS = JSON.stringify([
 
 /** Above this many changed threads a full read is as cheap as a scoped one. */
 const INCREMENTAL_THREAD_LIMIT = 256;
+/** Partials written per transaction when persisting. */
+const PERSIST_CHUNK_THREADS = 200;
 /** Yield to other fibers between aggregation chunks of this many threads. */
 const AGGREGATION_CHUNK_THREADS = 256;
 
@@ -144,6 +153,23 @@ export function selectStatisticsToolUses(sql: SqlClient.SqlClient, scope: string
   `;
 }
 
+/**
+ * Turns with their checkpoint file totals. SQLite sums the files (on the read worker when there
+ * is one), so the main thread never parses checkpoint_files_json. Malformed or non-array JSON
+ * counts as no files, and only numeric additions/deletions count, as before in JS.
+ */
+const checkpointFilesTotal = (sql: SqlClient.SqlClient, field: "additions" | "deletions") => sql`
+  CASE WHEN json_valid(turns.checkpoint_files_json) THEN
+    CASE WHEN json_type(turns.checkpoint_files_json) = 'array' THEN (
+      SELECT COALESCE(SUM(
+        CASE WHEN json_type(files.value, ${`$.${field}`}) IN ('integer', 'real')
+          THEN json_extract(files.value, ${`$.${field}`}) ELSE 0 END
+      ), 0)
+      FROM json_each(turns.checkpoint_files_json) AS files
+    ) ELSE 0 END
+  ELSE 0 END
+`;
+
 function selectStatisticsTurns(sql: SqlClient.SqlClient, scope: string | null) {
   return sql`
     SELECT
@@ -151,7 +177,12 @@ function selectStatisticsTurns(sql: SqlClient.SqlClient, scope: string | null) {
       started_at AS "startedAt",
       completed_at AS "completedAt",
       checkpoint_turn_count AS "checkpointTurnCount",
-      checkpoint_files_json AS "filesJson"
+      CASE WHEN json_valid(turns.checkpoint_files_json) THEN
+        CASE WHEN json_type(turns.checkpoint_files_json) = 'array'
+          THEN json_array_length(turns.checkpoint_files_json) ELSE 0 END
+      ELSE 0 END AS "filesChanged",
+      ${checkpointFilesTotal(sql, "additions")} AS additions,
+      ${checkpointFilesTotal(sql, "deletions")} AS deletions
     FROM projection_turns turns
     WHERE NOT ${inheritedTurnRowSql(sql, "turns")}
       ${scope === null ? sql`` : sql`AND thread_id IN (SELECT value FROM json_each(${scope}))`}
@@ -159,13 +190,15 @@ function selectStatisticsTurns(sql: SqlClient.SqlClient, scope: string | null) {
 }
 
 interface StatisticsRevision {
-  /** Writes on this connection. Never reset by a rollback. */
+  /** Writes on the main connection. Never reset by a rollback. */
   readonly writes: number;
-  /** Commits from other connections. */
+  /** Commits from other processes, as seen by the main connection. */
   readonly externalVersion: number;
   readonly eventSequence: number;
   /** Lowest cursor of the thread-scoped projectors (0 while one has none). */
   readonly projectedSequence: number;
+  /** The latest applied migration; persisted partials are only reused under the same schema. */
+  readonly schemaVersion: string;
 }
 
 /**
@@ -177,13 +210,34 @@ interface StatisticsRevision {
  * every miss, which also catches thread meta changes that re-bucket a partial.
  */
 interface StatisticsState {
-  readonly writes: number;
-  readonly externalVersion: number;
+  /** Null for partials restored from disk: they never match a live revision. */
+  readonly writes: number | null;
+  readonly externalVersion: number | null;
   readonly eventSequence: number;
   /** Every thread event up to this sequence is reflected in `partials`. */
   readonly coveredSequence: number;
   readonly partials: ReadonlyMap<string, StatisticsThreadPartial>;
-  readonly snapshot: StatisticsSnapshot;
+  /** Undefined for partials restored from disk. */
+  readonly snapshot: StatisticsSnapshot | undefined;
+}
+
+/**
+ * Bump whenever {@link computeStatisticsThreadPartial} would produce different
+ * partials for the same rows: persisted partials of another version are dropped.
+ */
+export const STATISTICS_PARTIAL_FORMAT_VERSION = 1;
+
+/** How long the RPC waits for a refresh before it answers with the previous snapshot. */
+export const STATISTICS_STALE_WHILE_REVALIDATE_WAIT_MS = 250;
+
+export interface GetStatisticsOptions {
+  /**
+   * Stale-while-revalidate: when a previous snapshot exists and a refresh takes
+   * longer than this, answer with the previous snapshot (its `generatedAt` says
+   * how old it is) and let the refresh finish in the background for the next
+   * request. Omit for a fresh answer.
+   */
+  readonly maxWaitMs?: number;
 }
 
 const decodeThreadRows = Schema.decodeUnknownEffect(Schema.Array(StatisticsThreadRow));
@@ -202,9 +256,15 @@ const readError = (operation: string) => (cause: SqlError | ProjectionRepository
     ? (cause as ProjectionRepositoryError)
     : toPersistenceSqlError(`StatisticsQuery.getStatistics:${operation}`)(cause);
 
-const makeStatisticsQuery = Effect.gen(function* () {
+export const makeStatisticsQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  // Row reads run on the read-only worker connection when the runtime has one, so neither the
+  // event loop nor the writer's connection is held while SQLite reads the history.
+  const reader = Option.getOrElse(yield* Effect.serviceOption(SqliteReadClient), () => sql);
+  const scope = yield* Effect.scope;
 
+  // Cheap (a few index probes) and on the main connection: total_changes() and data_version
+  // are per-connection, and only the writer's values say whether anything changed.
   const readRevision = sql<StatisticsRevision>`
     SELECT
       total_changes() AS writes,
@@ -218,36 +278,39 @@ const makeStatisticsQuery = Effect.gen(function* () {
         END
         FROM projection_state
         WHERE projector IN (SELECT value FROM json_each(${THREAD_SCOPED_PROJECTORS}))
-      ) AS "projectedSequence"
+      ) AS "projectedSequence",
+      COALESCE((SELECT CAST(MAX(migration_id) AS TEXT) FROM effect_sql_migrations), '0')
+        AS "schemaVersion"
   `.pipe(Effect.map((rows) => rows[0]!));
 
-  const listThreadRows = sql`
-    SELECT
-      t.thread_id AS "threadId",
-      t.project_id AS "projectId",
-      json_extract(t.model_selection_json, '$.model') AS "model",
-      COALESCE(
-        json_extract(t.model_selection_json, '$.instanceId'),
-        json_extract(t.model_selection_json, '$.provider')
-      ) AS "providerInstanceId",
-      t.created_at AS "createdAt",
-      COALESCE(
-        s.provider_name,
-        json_extract(t.model_selection_json, '$.instanceId'),
-        json_extract(t.model_selection_json, '$.provider')
-      ) AS "providerName"
-    FROM projection_threads t
-    LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
-  `.pipe(
-    Effect.flatMap(decodeThreadRows),
-    Effect.mapError((cause) =>
-      Schema.isSchemaError(cause)
-        ? decodeError("listThreads")(cause)
-        : toPersistenceSqlError("StatisticsQuery.getStatistics:listThreads:query")(cause),
-    ),
-  );
+  const listThreadRows = (db: SqlClient.SqlClient) =>
+    db`
+      SELECT
+        t.thread_id AS "threadId",
+        t.project_id AS "projectId",
+        json_extract(t.model_selection_json, '$.model') AS "model",
+        COALESCE(
+          json_extract(t.model_selection_json, '$.instanceId'),
+          json_extract(t.model_selection_json, '$.provider')
+        ) AS "providerInstanceId",
+        t.created_at AS "createdAt",
+        COALESCE(
+          s.provider_name,
+          json_extract(t.model_selection_json, '$.instanceId'),
+          json_extract(t.model_selection_json, '$.provider')
+        ) AS "providerName"
+      FROM projection_threads t
+      LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
+    `.pipe(
+      Effect.flatMap(decodeThreadRows),
+      Effect.mapError((cause) =>
+        Schema.isSchemaError(cause)
+          ? decodeError("listThreads")(cause)
+          : toPersistenceSqlError("StatisticsQuery.getStatistics:listThreads:query")(cause),
+      ),
+    );
 
-  const listProjectRows = sql`
+  const listProjectRows = (db: SqlClient.SqlClient) => db`
     SELECT
       project_id AS "projectId",
       title,
@@ -255,7 +318,7 @@ const makeStatisticsQuery = Effect.gen(function* () {
     FROM projection_projects
   `;
 
-  const listWorktreeRows = sql`
+  const listWorktreeRows = (db: SqlClient.SqlClient) => db`
     SELECT
       worktree_id AS "worktreeId",
       project_id AS "projectId",
@@ -274,42 +337,40 @@ const makeStatisticsQuery = Effect.gen(function* () {
     FROM projection_worktrees
   `;
 
-  const listThreadsWithEventsAfter = (sequence: number) =>
-    sql<{ readonly threadId: string }>`
+  const listThreadsWithEventsAfter = (db: SqlClient.SqlClient, sequence: number) =>
+    db<{ readonly threadId: string }>`
       SELECT DISTINCT stream_id AS "threadId"
       FROM orchestration_events
       WHERE sequence > ${sequence} AND aggregate_kind = 'thread'
     `;
 
   /**
-   * Everything one aggregation needs, read under one transaction. Returns the
-   * cached snapshot instead when nothing was written since it was computed.
+   * Everything one aggregation needs, read under one transaction of `db`.
    * `dirty` is null for a full rebuild.
    */
-  const readRows = (state: StatisticsState | undefined) =>
+  const readRows = (
+    db: SqlClient.SqlClient,
+    state: StatisticsState | undefined,
+    revision: StatisticsRevision,
+  ) =>
     Effect.gen(function* () {
-      const revision = yield* readRevision;
-      if (
-        state !== undefined &&
-        state.writes === revision.writes &&
-        state.externalVersion === revision.externalVersion
-      ) {
-        return { kind: "cached" as const, snapshot: state.snapshot };
-      }
-      const threadRows = yield* listThreadRows;
+      const threadRows = yield* listThreadRows(db);
       const threadMeta = buildStatisticsThreadMeta(threadRows);
-      // On this connection thread-scoped rows change only together with an
-      // event on the thread's stream, so new events (plus meta changes) name
-      // every thread to re-read. A commit from another connection, or events
-      // that disappeared, cannot be attributed: rebuild everything.
+      // Thread-scoped rows change only together with an event on the thread's
+      // stream, so new events (plus meta changes) name every thread to re-read.
+      // A commit from another process seen by a live cache, events that
+      // disappeared, or projections that were reset cannot be attributed:
+      // rebuild everything. Partials restored from disk carry no connection
+      // revision; they were validated against the schema and sequences on load.
       let dirty: Set<string> | null = null;
       if (
         state !== undefined &&
-        state.externalVersion === revision.externalVersion &&
-        revision.eventSequence >= state.eventSequence
+        (state.externalVersion === null || state.externalVersion === revision.externalVersion) &&
+        revision.eventSequence >= state.eventSequence &&
+        revision.projectedSequence >= state.coveredSequence
       ) {
         dirty = new Set<string>();
-        for (const row of yield* listThreadsWithEventsAfter(state.coveredSequence)) {
+        for (const row of yield* listThreadsWithEventsAfter(db, state.coveredSequence)) {
           dirty.add(row.threadId);
         }
         for (const [threadId, meta] of threadMeta) {
@@ -329,19 +390,18 @@ const makeStatisticsQuery = Effect.gen(function* () {
         read: (scope: string | null) => Effect.Effect<ReadonlyArray<unknown>, SqlError>,
       ) => (dirty !== null && dirty.size === 0 ? Effect.succeed([]) : read(scope));
       return {
-        kind: "rows" as const,
         revision,
         threadMeta,
         dirty,
-        projectRows: yield* listProjectRows,
-        worktreeRows: yield* listWorktreeRows,
-        tokenRows: yield* readScoped((scope) => selectStatisticsTokenActivities(sql, scope)),
-        toolRows: yield* readScoped((scope) => selectStatisticsToolUses(sql, scope)),
-        turnRows: yield* readScoped((scope) => selectStatisticsTurns(sql, scope)),
+        projectRows: yield* listProjectRows(db),
+        worktreeRows: yield* listWorktreeRows(db),
+        tokenRows: yield* readScoped((scope) => selectStatisticsTokenActivities(db, scope)),
+        toolRows: yield* readScoped((scope) => selectStatisticsToolUses(db, scope)),
+        turnRows: yield* readScoped((scope) => selectStatisticsTurns(db, scope)),
       };
     });
 
-  type ReadRows = Extract<Effect.Success<ReturnType<typeof readRows>>, { kind: "rows" }>;
+  type ReadRows = Effect.Success<ReturnType<typeof readRows>>;
 
   /** Decode and aggregate outside the transaction, yielding between thread chunks. */
   const aggregate = (state: StatisticsState | undefined, read: ReadRows) =>
@@ -360,6 +420,7 @@ const makeStatisticsQuery = Effect.gen(function* () {
         tools: toolRows,
       });
       const partials = new Map(read.dirty === null || state === undefined ? [] : state.partials);
+      const changed = new Set<string>();
       let processed = 0;
       for (const [threadId, rows] of groups) {
         const meta = read.threadMeta.get(threadId);
@@ -367,6 +428,7 @@ const makeStatisticsQuery = Effect.gen(function* () {
         // A thread without meta or rows contributes nothing and never turns dirty.
         if (meta === undefined && partial.earliest === undefined) partials.delete(threadId);
         else partials.set(threadId, partial);
+        changed.add(threadId);
         if (++processed % AGGREGATION_CHUNK_THREADS === 0) yield* Effect.yieldNow;
       }
       const snapshot = assembleStatisticsSnapshot({
@@ -378,40 +440,207 @@ const makeStatisticsQuery = Effect.gen(function* () {
       });
       const { revision } = read;
       return {
-        writes: revision.writes,
-        externalVersion: revision.externalVersion,
-        eventSequence: revision.eventSequence,
-        coveredSequence: Math.min(revision.eventSequence, revision.projectedSequence),
-        partials,
-        snapshot,
-      } satisfies StatisticsState;
+        state: {
+          writes: revision.writes,
+          externalVersion: revision.externalVersion,
+          eventSequence: revision.eventSequence,
+          coveredSequence: Math.min(revision.eventSequence, revision.projectedSequence),
+          partials,
+          snapshot,
+        } satisfies StatisticsState,
+        /** Thread ids whose partial was recomputed; null when every partial was. */
+        changed: read.dirty === null ? null : changed,
+      };
     });
+
+  /**
+   * Restores the partials the previous process persisted, when they were
+   * written under this schema and aggregation format and the history has not
+   * moved backwards since. Anything else, including unreadable rows, means a
+   * full recompute; the stored rows are a cache, never a source of truth.
+   */
+  const loadPersistedState = (revision: StatisticsRevision) =>
+    Effect.gen(function* () {
+      const [header] = yield* reader<{
+        readonly formatVersion: number;
+        readonly schemaVersion: string;
+        readonly coveredSequence: number;
+        readonly eventSequence: number;
+      }>`
+        SELECT
+          format_version AS "formatVersion",
+          schema_version AS "schemaVersion",
+          covered_sequence AS "coveredSequence",
+          event_sequence AS "eventSequence"
+        FROM statistics_partials_state WHERE id = 1
+      `;
+      if (
+        header === undefined ||
+        header.formatVersion !== STATISTICS_PARTIAL_FORMAT_VERSION ||
+        header.schemaVersion !== revision.schemaVersion ||
+        header.eventSequence > revision.eventSequence ||
+        header.coveredSequence > revision.projectedSequence
+      ) {
+        return undefined;
+      }
+      const rows = yield* reader<{ readonly threadId: string; readonly partialJson: string }>`
+        SELECT thread_id AS "threadId", partial_json AS "partialJson"
+        FROM statistics_thread_partials
+      `;
+      const partials = new Map<string, StatisticsThreadPartial>();
+      for (const row of rows) {
+        partials.set(row.threadId, JSON.parse(row.partialJson) as StatisticsThreadPartial);
+      }
+      return {
+        writes: null,
+        externalVersion: null,
+        eventSequence: header.eventSequence,
+        coveredSequence: header.coveredSequence,
+        partials,
+        snapshot: undefined,
+      } satisfies StatisticsState;
+    }).pipe(
+      // Older schema (no table yet) or a corrupt row: recompute instead.
+      Effect.catchCause(() => Effect.succeed(undefined)),
+    );
+
+  /**
+   * Writes the recomputed partials, so the next process starts incremental.
+   * Rows go in short transactions so the writer's connection is never held for
+   * a whole rebuild; the header is removed first and written last, so an
+   * interrupted write leaves no header and the next process recomputes.
+   * Returns how many rows this wrote on the main connection, so the cached
+   * revision can account for its own writes.
+   */
+  const persistState = (state: StatisticsState, changed: ReadonlySet<string> | null) =>
+    Effect.gen(function* () {
+      let ownWrites = 0;
+      const writeChunk = <A, E>(effect: Effect.Effect<A, E>) =>
+        sql.withTransaction(
+          Effect.gen(function* () {
+            const [before] = yield* sql<{ readonly writes: number }>`
+              SELECT total_changes() AS writes
+            `;
+            const result = yield* effect;
+            const [after] = yield* sql<{ readonly writes: number }>`
+              SELECT total_changes() AS writes
+            `;
+            ownWrites += (after?.writes ?? 0) - (before?.writes ?? 0);
+            return result;
+          }),
+        );
+      yield* writeChunk(
+        Effect.gen(function* () {
+          yield* sql`DELETE FROM statistics_partials_state`;
+          if (changed === null) yield* sql`DELETE FROM statistics_thread_partials`;
+        }),
+      );
+      const threadIds = [...(changed ?? state.partials.keys())];
+      for (let offset = 0; offset < threadIds.length; offset += PERSIST_CHUNK_THREADS) {
+        yield* writeChunk(
+          Effect.forEach(
+            threadIds.slice(offset, offset + PERSIST_CHUNK_THREADS),
+            (threadId) => {
+              const partial = state.partials.get(threadId);
+              return partial === undefined
+                ? sql`DELETE FROM statistics_thread_partials WHERE thread_id = ${threadId}`
+                : sql`
+                    INSERT INTO statistics_thread_partials (thread_id, partial_json)
+                    VALUES (${threadId}, ${JSON.stringify(partial)})
+                    ON CONFLICT (thread_id) DO UPDATE SET partial_json = excluded.partial_json
+                  `;
+            },
+            { discard: true },
+          ),
+        );
+      }
+      yield* writeChunk(
+        Effect.gen(function* () {
+          const [schema] = yield* sql<{ readonly version: string }>`
+            SELECT COALESCE(CAST(MAX(migration_id) AS TEXT), '0') AS version
+            FROM effect_sql_migrations
+          `;
+          yield* sql`
+            INSERT INTO statistics_partials_state (
+              id, format_version, schema_version, covered_sequence, event_sequence, updated_at
+            ) VALUES (
+              1, ${STATISTICS_PARTIAL_FORMAT_VERSION}, ${schema?.version ?? "0"},
+              ${state.coveredSequence}, ${state.eventSequence}, ${new Date().toISOString()}
+            )
+          `;
+        }),
+      );
+      return ownWrites;
+    }).pipe(
+      // A cache write must never fail a read; the next process recomputes instead.
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to persist statistics partials", { cause }).pipe(Effect.as(0)),
+      ),
+    );
 
   // Keep only one aggregation state and serialize misses, so simultaneous
   // requests share the work without retaining historical analytics copies.
   const cacheLock = yield* Semaphore.make(1);
   let cached: StatisticsState | undefined;
-  const getStatistics: StatisticsQueryShape["getStatistics"] = () =>
+  let restored = false;
+
+  const refresh: Effect.Effect<StatisticsSnapshot, ProjectionRepositoryError> =
+    cacheLock.withPermit(
+      Effect.gen(function* () {
+        const revision = yield* readRevision.pipe(Effect.mapError(readError("revision")));
+        let state = cached;
+        if (
+          state?.snapshot !== undefined &&
+          state.writes === revision.writes &&
+          state.externalVersion === revision.externalVersion
+        ) {
+          return state.snapshot;
+        }
+        if (state === undefined && !restored) {
+          restored = true;
+          state = yield* loadPersistedState(revision);
+        }
+        const read = yield* reader
+          .withTransaction(readRows(reader, state, revision))
+          .pipe(Effect.mapError(readError("transaction")));
+        const next = yield* aggregate(state, read);
+        const ownWrites =
+          next.changed === null || next.changed.size > 0
+            ? yield* persistState(next.state, next.changed)
+            : 0;
+        cached = { ...next.state, writes: revision.writes + ownWrites };
+        return next.state.snapshot!;
+      }),
+    );
+
+  // One background refresh at a time for stale-while-revalidate callers.
+  let backgroundRefresh: Fiber.Fiber<StatisticsSnapshot, ProjectionRepositoryError> | undefined;
+  const sharedRefresh = Effect.suspend(() => {
+    if (backgroundRefresh !== undefined) return Effect.succeed(backgroundRefresh);
+    return Effect.forkIn(
+      refresh.pipe(Effect.ensuring(Effect.sync(() => (backgroundRefresh = undefined)))),
+      scope,
+    ).pipe(Effect.tap((fiber) => Effect.sync(() => (backgroundRefresh = fiber))));
+  });
+
+  const getStatistics: StatisticsQueryShape["getStatistics"] = (options) =>
     Effect.gen(function* () {
       // A caller may inspect uncommitted data. Never publish that result into
       // the shared cache: a rollback does not reset SQLite's total_changes.
       if (Option.isSome(yield* Effect.serviceOption(sql.transactionService))) {
-        const read = yield* readRows(undefined).pipe(Effect.mapError(readError("query")));
-        if (read.kind === "cached") return read.snapshot;
-        return (yield* aggregate(undefined, read)).snapshot;
+        const revision = yield* readRevision.pipe(Effect.mapError(readError("revision")));
+        const read = yield* readRows(sql, undefined, revision).pipe(
+          Effect.mapError(readError("query")),
+        );
+        return (yield* aggregate(undefined, read)).state.snapshot!;
       }
-      return yield* cacheLock.withPermit(
-        Effect.gen(function* () {
-          const state = cached;
-          const read = yield* sql
-            .withTransaction(readRows(state))
-            .pipe(Effect.mapError(readError("transaction")));
-          if (read.kind === "cached") return read.snapshot;
-          const next = yield* aggregate(state, read);
-          cached = next;
-          return next.snapshot;
-        }),
+      const stale = cached?.snapshot;
+      if (options?.maxWaitMs === undefined || stale === undefined) return yield* refresh;
+      const fiber = yield* sharedRefresh;
+      const fresh = yield* Fiber.join(fiber).pipe(
+        Effect.timeoutOption(Duration.millis(options.maxWaitMs)),
       );
+      return Option.getOrElse(fresh, () => stale);
     });
 
   return { getStatistics } satisfies StatisticsQueryShape;

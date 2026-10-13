@@ -45,6 +45,7 @@ import {
 import {
   Cause,
   Clock,
+  type Duration,
   Effect,
   Exit,
   Fiber,
@@ -94,12 +95,14 @@ import {
   CodexSessionRuntimePendingUserInputNotFoundError,
   isCodexStartupPhaseTimeout,
   makeCodexSessionRuntime,
-  readStoredCodexThread,
+  requestStoredCodexThread,
   type CodexAgentControlInjection,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
+import { parseCodexSkillsListResponse } from "./CodexProvider.ts";
+import { makeCodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
 import {
   agentControlHostContext,
   installAgentControlNativeHttp,
@@ -148,6 +151,8 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** How long the shared stored-thread reader stays up unused. */
+  readonly storedThreadReaderIdleTimeout?: Duration.Input;
 }
 
 interface CodexAdapterSessionContext {
@@ -1929,6 +1934,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     providerInstanceId: boundInstanceId,
   });
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  // History reads of threads without a live runtime share one read-only app-server.
+  const storedThreadReader = yield* makeCodexStoredThreadReader({
+    binaryPath: codexConfig.binaryPath,
+    cwd: process.cwd(),
+    ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+    ...(options?.environment ? { environment: options.environment } : {}),
+    ...(options?.storedThreadReaderIdleTimeout !== undefined
+      ? { idleTimeout: options.storedThreadReaderIdleTimeout }
+      : {}),
+  });
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -2543,6 +2558,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
 
+  // Project skills come from the same shared read-only app-server: skills/list starts no
+  // thread and no MCP server.
+  const readProjectCommands: NonNullable<CodexAdapterShape["readProjectCommands"]> = (cwd) =>
+    storedThreadReader
+      .withClient((client) => client.request("skills/list", { cwds: [cwd] }))
+      .pipe(
+        Effect.map((response) => ({
+          skills: parseCodexSkillsListResponse(response, cwd),
+          slashCommands: [],
+        })),
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "skills/list",
+              detail: formatCodexRuntimeErrorDetail(cause),
+              cause,
+            }),
+        ),
+      );
+
   const readThreadHistory: NonNullable<CodexAdapterShape["readThreadHistory"]> = (input) =>
     Effect.gen(function* () {
       if (!Schema.is(CodexResumeCursorSchema)(input.resumeCursor)) {
@@ -2552,6 +2588,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           issue: "Missing Codex thread identity.",
         });
       }
+      const providerThreadId = input.resumeCursor.threadId;
       // A separate read-only client also works when the live runtime's reader
       // is broken or the Codex app owns the thread's writer lease.
       const existing = sessions.get(input.threadId);
@@ -2570,16 +2607,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : Option.none();
       const snapshot = Option.isSome(liveSnapshot)
         ? liveSnapshot.value
-        : yield* readStoredCodexThread({
-            binaryPath: codexConfig.binaryPath,
-            cwd: input.cwd ?? process.cwd(),
-            providerThreadId: input.resumeCursor.threadId,
-            ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
-            ...(options?.environment ? { environment: options.environment } : {}),
-          }).pipe(
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "thread/read", cause)),
-          );
+        : yield* storedThreadReader
+            .withClient((client) => requestStoredCodexThread(client, providerThreadId))
+            .pipe(
+              Effect.mapError((cause) =>
+                mapCodexRuntimeError(input.threadId, "thread/read", cause),
+              ),
+            );
       const messages: Array<ProviderThreadHistory["messages"][number]> = [];
       const items: Array<ProviderRuntimeEvent> = [];
       const completedTurnIds: Array<TurnId> = [];
@@ -2809,6 +2843,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     readThreadHistory,
+    readProjectCommands,
     rollbackThread,
     setThreadGoal,
     getThreadGoal,

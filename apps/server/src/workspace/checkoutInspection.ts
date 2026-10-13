@@ -3,7 +3,13 @@ import { lstat, readdir, readFile, stat as statAsync } from "node:fs/promises";
 import path from "node:path";
 
 import { Data, Duration, Effect, Exit } from "effect";
-import type { OrchestrationShellSnapshot, ProjectId, WorktreeId } from "@ryco/contracts";
+import type {
+  OrchestrationProjectShell,
+  OrchestrationThreadShell,
+  OrchestrationWorktreeShell,
+  ProjectId,
+  WorktreeId,
+} from "@ryco/contracts";
 import { parseWorktreeStatus, type ParsedWorktreeStatus } from "@ryco/shared/workspaceLifecycle";
 
 import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
@@ -388,7 +394,16 @@ export const inspectProjectGitFacts = (
 export const inspectCheckout = (
   deps: InspectionDeps,
   input: {
-    readonly snapshot: Pick<OrchestrationShellSnapshot, "projects" | "threads" | "worktrees">;
+    /** Every live project, thread placement and workspace, for the overlap checks. */
+    readonly snapshot: {
+      readonly projects: ReadonlyArray<Pick<OrchestrationProjectShell, "id" | "workspaceRoot">>;
+      readonly threads: ReadonlyArray<Pick<OrchestrationThreadShell, "projectId" | "worktreePath">>;
+      readonly worktrees?:
+        | ReadonlyArray<
+            Pick<OrchestrationWorktreeShell, "worktreeId" | "worktreePath" | "checkoutRemovedAt">
+          >
+        | undefined;
+    };
     readonly project: { readonly id: ProjectId; readonly workspaceRoot: string };
     readonly directory: string;
     readonly rowWorktreeId: WorktreeId | null;

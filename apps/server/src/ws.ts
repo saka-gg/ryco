@@ -1,5 +1,5 @@
 import { Effect, Layer } from "effect";
-import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
+import { WsDeviceRpcGroup, WsHostedRpcGroup } from "@ryco/contracts";
 import { HttpRouter, HttpServerRequest } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 
@@ -10,11 +10,7 @@ import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { AtlassianConnectionRepositoryLive } from "./persistence/Layers/AtlassianConnections.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as SourceControlDiscoveryLayer from "./sourceControl/SourceControlDiscovery.ts";
-import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
-import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
-import * as GitHubCli from "./sourceControl/GitHubCli.ts";
-import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
@@ -50,15 +46,7 @@ export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
       SourceControlDiscoveryLayer.layer.pipe(
         Layer.provide(
           SourceControlProviderRegistry.layer.pipe(
-            Layer.provide(
-              Layer.mergeAll(
-                AzureDevOpsCli.layer,
-                BitbucketApi.layer,
-                ForgejoApi.layer,
-                GitHubCli.layer,
-                GitLabCli.layer,
-              ),
-            ),
+            Layer.provide(ForgejoApi.layer),
             Layer.provideMerge(AtlassianConnectionRepositoryLive),
             Layer.provideMerge(SqlitePersistenceLayerLive),
             Layer.provide(ServerSecretStoreLive),
@@ -71,6 +59,12 @@ export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
     ),
   );
 
+/**
+ * The main socket serves the application group and the simulator control group
+ * together, as the hosted relay channel already does, so a direct client needs
+ * no second socket or ws-token for device control. Older clients send only
+ * application RPCs and are unaffected; `/ws/device` stays for them.
+ */
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.succeed(
     HttpRouter.add(
@@ -81,13 +75,18 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const serverAuth = yield* ServerAuth;
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
-        const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
+        const principal = directRpcPrincipal(session);
+        const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsHostedRpcGroup, {
           spanPrefix: "ws.rpc",
           spanAttributes: {
             "rpc.transport": "websocket",
             "rpc.system": "effect-rpc",
           },
-        }).pipe(Effect.provide(makeServerWsRpcLayer(directRpcPrincipal(session))));
+        }).pipe(
+          Effect.provide(
+            Layer.merge(makeServerWsRpcLayer(principal), makeDeviceWsRpcLayer(principal)),
+          ),
+        );
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
           () => rpcWebSocketHttpEffect,
@@ -99,10 +98,9 @@ export const websocketRpcRouteLayer = Layer.unwrap(
 );
 
 /**
- * Simulator control uses its own authenticated Effect-RPC socket. Keeping this
- * bounded group separate prevents the application's main RPC union from
- * exceeding TS7's handler-service inference limit and gives client-runtime a
- * natural low-priority channel to supervise independently.
+ * The dedicated simulator control socket, kept for clients that predate device
+ * control on the main socket. Current clients use it only when the main socket
+ * answers a device RPC with "Unknown request tag" (an older server).
  */
 export const deviceWebsocketRpcRouteLayer = Layer.unwrap(
   Effect.succeed(

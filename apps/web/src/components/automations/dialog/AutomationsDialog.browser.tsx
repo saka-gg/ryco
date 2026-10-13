@@ -1,4 +1,6 @@
 import "../../../index.css";
+// The feature stylesheet loads with its page or dialog chunk in the app.
+import "../styles/automations.css";
 
 import { ProviderInstanceId, type AgentControlAutomationId } from "@ryco/contracts";
 import { blankScheduleDraft, useAgentControlStore } from "@ryco/client-runtime/state/agentControl";

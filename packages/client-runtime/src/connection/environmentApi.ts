@@ -27,6 +27,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       deleteLocalTask: rpcClient.server.deleteLocalTask,
       delegateLocalTask: rpcClient.server.delegateLocalTask,
       getDailyRecap: rpcClient.server.getDailyRecap,
+      prewarmProviderSession: rpcClient.server.prewarmProviderSession,
+      readProjectProviderCommands: rpcClient.server.readProjectProviderCommands,
       getSettings: rpcClient.server.getSettings,
       getProjectPreferences: rpcClient.server.getProjectPreferences,
       updateSettings: rpcClient.server.updateSettings,
@@ -82,6 +84,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       refreshStatus: rpcClient.vcs.refreshStatus,
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
+      prefetchWorktreeBase: rpcClient.vcs.prefetchWorktreeBase,
       readLineBlame: rpcClient.vcs.readLineBlame,
       readImageBlob: rpcClient.vcs.readImageBlob,
       readLocalChanges: rpcClient.vcs.readLocalChanges,
@@ -145,6 +148,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
         : {}),
       ...(rpcClient.orchestration.getThreadHistoryPage
         ? { getThreadHistoryPage: rpcClient.orchestration.getThreadHistoryPage }
+        : {}),
+      ...(rpcClient.orchestration.getActivityPayload
+        ? { getActivityPayload: rpcClient.orchestration.getActivityPayload }
         : {}),
       subscribeShell: (callback, options) =>
         rpcClient.orchestration.subscribeShell(callback, options),

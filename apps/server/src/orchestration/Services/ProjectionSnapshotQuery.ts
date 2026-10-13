@@ -8,6 +8,7 @@
  */
 import type {
   CheckpointRevertActivityPayload,
+  EventId,
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -103,6 +104,41 @@ export function pendingGoalSyncThreadsOf(
   };
 }
 
+/**
+ * Narrows a shell snapshot. `projectIds` keeps those live projects, their workspaces and their
+ * live threads; `threadIds` keeps those live threads (and their projects and workspaces); both
+ * together keep their intersection. Sequence and `updatedAt` stay those of the whole shell.
+ */
+export interface ProjectionShellScope {
+  readonly projectIds?: ReadonlyArray<ProjectId>;
+  readonly threadIds?: ReadonlyArray<ThreadId>;
+}
+
+/** The scoped snapshot derived from a whole one, for callers given a narrow test double. */
+export function scopeShellSnapshot(
+  snapshot: OrchestrationShellSnapshot,
+  scope: ProjectionShellScope,
+): OrchestrationShellSnapshot {
+  const projectIds = scope.projectIds === undefined ? undefined : new Set<string>(scope.projectIds);
+  const threadIds = scope.threadIds === undefined ? undefined : new Set<string>(scope.threadIds);
+  const threads = snapshot.threads.filter(
+    (thread) =>
+      (projectIds === undefined || projectIds.has(thread.projectId)) &&
+      (threadIds === undefined || threadIds.has(thread.id)),
+  );
+  const projectsInScope =
+    projectIds ??
+    (threadIds === undefined ? undefined : new Set<string>(threads.map((t) => t.projectId)));
+  const inScope = (projectId: string) =>
+    projectsInScope === undefined || projectsInScope.has(projectId);
+  return {
+    ...snapshot,
+    projects: snapshot.projects.filter((project) => inScope(project.id)),
+    worktrees: (snapshot.worktrees ?? []).filter((worktree) => inScope(worktree.projectId)),
+    threads,
+  };
+}
+
 export interface ProjectionThreadCheckpointContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -114,6 +150,29 @@ export interface ProjectionThreadCheckpointContext {
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
+export interface ThreadHistoryRepairContextInput {
+  readonly threadId: ThreadId;
+  readonly turnIds: ReadonlyArray<string>;
+  readonly messageIds: ReadonlyArray<string>;
+  readonly activityIds: ReadonlyArray<string>;
+  /** Also key activities without a turn (a recovered activity has none). */
+  readonly includeTurnlessActivities: boolean;
+}
+
+/** An activity's identity for history dedupe: `providerItemId` is its payload's, when a string. */
+export interface ThreadHistoryActivityKey {
+  readonly id: string;
+  readonly turnId: TurnId | null;
+  readonly kind: string;
+  readonly providerItemId: string | null;
+}
+
+export interface ThreadHistoryRepairContext {
+  readonly messages: ReadonlyArray<OrchestrationMessage>;
+  readonly activityKeys: ReadonlyArray<ThreadHistoryActivityKey>;
+  readonly requestActivities: ReadonlyArray<OrchestrationThreadActivity>;
+}
+
 export interface ProjectionSnapshotQueryShape {
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
@@ -131,6 +190,15 @@ export interface ProjectionSnapshotQueryShape {
    * projector cursor state.
    */
   readonly getSnapshot: () => Effect.Effect<OrchestrationReadModel, ProjectionRepositoryError>;
+
+  /**
+   * The shell snapshot narrowed to some projects or threads (see {@link ProjectionShellScope}),
+   * for server code that needs thread summaries of a few threads only. Optional for test
+   * doubles; read it through {@link readScopedShellSnapshot}.
+   */
+  readonly getScopedShellSnapshot?: (
+    scope: ProjectionShellScope,
+  ) => Effect.Effect<OrchestrationShellSnapshot, ProjectionRepositoryError>;
 
   /**
    * Read the latest orchestration shell snapshot.
@@ -277,6 +345,24 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
+   * Read one stored activity payload of an active thread, with its encoded
+   * size, for a client expanding a row the window sent as a preview.
+   * Optional so existing test doubles stay valid; the RPC reports it
+   * unavailable.
+   */
+  readonly getActivityPayload?: (input: {
+    readonly threadId: ThreadId;
+    readonly activityId: EventId;
+  }) => Effect.Effect<
+    Option.Option<{
+      readonly kind: string;
+      readonly payload: unknown;
+      readonly payloadBytes: number;
+    }>,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Read only the file-path references carried by a thread's task activities
    * (workflow `runHandles.scriptPath` and task `outputFile`). Deliberately
    * narrow: the task-output RPC re-authorizes on every poll of a running
@@ -314,6 +400,17 @@ export interface ProjectionSnapshotQueryShape {
     readonly turnId: TurnId;
     readonly limit: number;
   }) => Effect.Effect<ReadonlyArray<OrchestrationMessage>, ProjectionRepositoryError>;
+
+  /**
+   * What provider history recovery compares a recovered transcript against, without hydrating
+   * the thread: the messages of the given turns or ids, the identity keys (no payloads) of the
+   * activities of the given turns or ids (and of turnless ones when asked), and every
+   * pending-request lifecycle activity of the thread. Optional so existing test doubles stay
+   * valid; callers fall back to `getThreadDetailById`.
+   */
+  readonly getThreadHistoryRepairContext?: (
+    input: ThreadHistoryRepairContextInput,
+  ) => Effect.Effect<ThreadHistoryRepairContext, ProjectionRepositoryError>;
 
   /**
    * Count projected user messages for one thread (aggregate only). Turn start
@@ -402,6 +499,14 @@ export const readWorkspacePlacement = (
   query: ShellSnapshotFallback<"getWorkspacePlacement">,
 ): Effect.Effect<ProjectionWorkspacePlacement, ProjectionRepositoryError> =>
   query.getWorkspacePlacement?.() ?? Effect.map(query.getShellSnapshot(), workspacePlacementOf);
+
+/** Thread summaries of some projects or threads; see {@link readProjectShells}. */
+export const readScopedShellSnapshot = (
+  query: ShellSnapshotFallback<"getScopedShellSnapshot">,
+  scope: ProjectionShellScope,
+): Effect.Effect<OrchestrationShellSnapshot, ProjectionRepositoryError> =>
+  query.getScopedShellSnapshot?.(scope) ??
+  Effect.map(query.getShellSnapshot(), (snapshot) => scopeShellSnapshot(snapshot, scope));
 
 /** Threads whose goal synchronization is pending; see {@link readProjectShells}. */
 export const readPendingGoalSyncThreads = (

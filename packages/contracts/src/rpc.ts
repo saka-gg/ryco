@@ -58,6 +58,11 @@ import {
 } from "./automationCentre.ts";
 import { ModelSelection } from "./orchestration.ts";
 import {
+  ProviderProjectCommandsInput,
+  ProviderSessionPrewarmInput,
+  ProviderSessionPrewarmResult,
+} from "./provider.ts";
+import {
   AcpRegistrySearchInput,
   AcpRegistrySearchResult,
   AcpRegistryInstallInput,
@@ -162,6 +167,7 @@ import {
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
+  VcsPrefetchWorktreeBaseInput,
   GitManagerServiceError,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
@@ -225,6 +231,7 @@ import {
   OrchestrationGetSnapshotError,
   OrchestrationSearchThreadMessagesInput,
   OrchestrationThreadHistoryError,
+  OrchestrationGetActivityPayloadError,
   OrchestrationGetTurnDiffError,
   OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
@@ -278,6 +285,7 @@ import {
 } from "./terminal.ts";
 import {
   ServerConfigStreamEvent,
+  ServerSubscribeConfigInput,
   ServerConfig,
   ServerLocalDiagnosticsMetrics,
   ServerProviderUpdateError,
@@ -288,6 +296,7 @@ import {
   ServerUpsertKeybindingResult,
   KeybindingsReplaceCustomInput,
   KeybindingsReplaceCustomResult,
+  ProviderProjectCommands,
 } from "./server.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
@@ -428,6 +437,7 @@ export const WS_METHODS = {
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
+  vcsPrefetchWorktreeBase: "vcs.prefetchWorktreeBase",
   vcsReadLineBlame: "vcs.readLineBlame",
   vcsReadImageBlob: "vcs.readImageBlob",
   vcsReadLocalChanges: "vcs.readLocalChanges",
@@ -503,6 +513,8 @@ export const WS_METHODS = {
   notesCommand: "notes.command",
 
   serverRefreshProviders: "server.refreshProviders",
+  providerPrewarmSession: "provider.prewarmSession",
+  providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
   serverUpsertKeybinding: "server.upsertKeybinding",
   keybindingsReplaceCustom: "keybindings.replaceCustom",
@@ -929,6 +941,18 @@ export const WsServerGetDailyRecapRpc = Rpc.make(WS_METHODS.serverGetDailyRecap,
   error: Schema.Union([DailyRecapReadError, AuthRpcError]),
 });
 
+export const WsProviderPrewarmSessionRpc = Rpc.make(WS_METHODS.providerPrewarmSession, {
+  payload: ProviderSessionPrewarmInput,
+  success: ProviderSessionPrewarmResult,
+  error: AuthRpcError,
+});
+
+export const WsProviderReadProjectCommandsRpc = Rpc.make(WS_METHODS.providerReadProjectCommands, {
+  payload: ProviderProjectCommandsInput,
+  success: ProviderProjectCommands,
+  error: AuthRpcError,
+});
+
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
     /**
@@ -1161,6 +1185,13 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
       query: Schema.optional(Schema.String),
       /** Narrow to change requests involving the authenticated viewer. */
       involvement: Schema.optional(ChangeRequestInvolvement),
+      /**
+       * `picker`: rows for a picker that shows number, title and state (the composer's `#`
+       * menu). Rows carry identity, branches, state, draft, author and timestamps only, no
+       * checks, labels, assignees, diff stats or stack summaries. Older servers ignore it and
+       * return full rows, which are a superset.
+       */
+      view: Schema.optional(Schema.Literals(["picker"])),
     }),
     success: Schema.Array(ChangeRequest),
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
@@ -1895,6 +1926,11 @@ export const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   error: Schema.Union([GitCommandError, AuthRpcError]),
 });
 
+export const WsVcsPrefetchWorktreeBaseRpc = Rpc.make(WS_METHODS.vcsPrefetchWorktreeBase, {
+  payload: VcsPrefetchWorktreeBaseInput,
+  error: Schema.Union([GitCommandError, AuthRpcError]),
+});
+
 export const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   payload: VcsCreateWorktreeInput,
   success: VcsCreateWorktreeResult,
@@ -2030,6 +2066,15 @@ export const WsOrchestrationGetThreadHistoryPageRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetActivityPayloadRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getActivityPayload,
+  {
+    payload: OrchestrationRpcSchemas.getActivityPayload.input,
+    success: OrchestrationRpcSchemas.getActivityPayload.output,
+    error: OrchestrationGetActivityPayloadError,
+  },
+);
+
 export const WsOrchestrationSetThreadHistoryRecoveryRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
   {
@@ -2124,7 +2169,7 @@ export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTermina
 });
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
-  payload: Schema.Struct({}),
+  payload: ServerSubscribeConfigInput,
   success: ServerConfigStreamEvent,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError]),
   stream: true,
@@ -2322,6 +2367,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
   | typeof WsServerRefreshProvidersRpc
+  | typeof WsProviderPrewarmSessionRpc
+  | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
   | typeof WsServerUpsertKeybindingRpc
   | typeof WsKeybindingsReplaceCustomRpc
@@ -2446,6 +2493,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsVcsApplyIndexPatchRpc
   | typeof WsVcsReadComparisonRpc
   | typeof WsVcsListRefsRpc
+  | typeof WsVcsPrefetchWorktreeBaseRpc
   | typeof WsVcsCreateWorktreeRpc
   | typeof WsVcsRemoveWorktreeRpc
   | typeof WsVcsCreateRefRpc
@@ -2487,6 +2535,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationSearchThreadMessagesRpc
   | typeof WsOrchestrationGetThreadWindowRpc
   | typeof WsOrchestrationGetThreadHistoryPageRpc
+  | typeof WsOrchestrationGetActivityPayloadRpc
   | typeof WsOrchestrationSetThreadHistoryRecoveryRpc
   | typeof WsOrchestrationReplayEventsRpc
   | typeof WsOrchestrationReplayEventsPageRpc
@@ -2526,6 +2575,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,
   WsServerRefreshProvidersRpc,
+  WsProviderPrewarmSessionRpc,
+  WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
   WsServerUpsertKeybindingRpc,
   WsKeybindingsReplaceCustomRpc,
@@ -2650,6 +2701,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsVcsApplyIndexPatchRpc,
   WsVcsReadComparisonRpc,
   WsVcsListRefsRpc,
+  WsVcsPrefetchWorktreeBaseRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,
   WsVcsCreateRefRpc,
@@ -2691,6 +2743,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationSearchThreadMessagesRpc,
   WsOrchestrationGetThreadWindowRpc,
   WsOrchestrationGetThreadHistoryPageRpc,
+  WsOrchestrationGetActivityPayloadRpc,
   WsOrchestrationSetThreadHistoryRecoveryRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationReplayEventsPageRpc,
@@ -2704,10 +2757,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
 );
 
 /**
- * Hosted relay channels carry both groups through one lifecycle-owned encrypted
- * channel. Direct clients keep the device group on its own low-priority socket
- * so video-adjacent work cannot contend with chat RPC. The explicit annotation
- * keeps the merged RPC union within the compiler's serializable type limit.
+ * Hosted relay channels and the direct main socket carry both groups on one
+ * connection; device video frames keep their own binary socket. Older servers
+ * serve the device group only on `/ws/device`. The explicit annotation keeps
+ * the merged RPC union within the compiler's serializable type limit.
  */
 export const WsHostedRpcGroup: RpcGroup.RpcGroup<
   RpcGroup.Rpcs<typeof WsRpcGroup> | RpcGroup.Rpcs<typeof WsDeviceRpcGroup>

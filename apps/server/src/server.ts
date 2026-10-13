@@ -34,7 +34,11 @@ import {
   BROWSER_API_CORS_OPTIONS,
   serveStaticRequest,
 } from "./http.ts";
-import { installHttpStartupGate, isEarlyStaticRequest } from "./httpStartupGate.ts";
+import {
+  installHttpStartupGate,
+  isEarlyStaticAssetRequest,
+  isEarlyStaticRequest,
+} from "./httpStartupGate.ts";
 import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
 import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
@@ -48,7 +52,10 @@ import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
-import { HubConnectorLive } from "./hubConnector/HubConnectorLive.ts";
+import {
+  HubConnectorDeferredLive,
+  HubConnectorStart,
+} from "./hubConnector/HubConnectorDeferred.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
@@ -68,11 +75,7 @@ import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReap
 import { OpenCodeRuntimeLive } from "./provider/opencodeRuntime.ts";
 import { CheckpointDiffQueryLive } from "./checkpointing/Layers/CheckpointDiffQuery.ts";
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore.ts";
-import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
-import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as ForgejoApi from "./sourceControl/ForgejoApi.ts";
-import * as GitHubCli from "./sourceControl/GitHubCli.ts";
-import * as GitLabCli from "./sourceControl/GitLabCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ThreadPriorityCandidateQueryLive } from "./threadPriority/ThreadPriorityCandidateQuery.ts";
 import { ThreadPriorityCoordinatorLive } from "./threadPriority/ThreadPriorityCoordinator.ts";
@@ -86,6 +89,7 @@ import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationRe
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
+import { ProviderSessionPrewarmLive } from "./orchestration/Layers/ProviderSessionPrewarm.ts";
 import { ContextHandoffCoordinatorLive } from "./orchestration/Layers/ContextHandoffCoordinator.ts";
 import { ContextHandoffServiceLive } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
@@ -258,23 +262,27 @@ const HttpServerLive = Layer.unwrap(
           websocket: { perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE },
         },
       );
-      // While the runtime graph builds, a desktop backend's gate answers
-      // static-shell requests itself (same handler as the router's catch-all
-      // route), so the renderer can load from `http-bound` in parallel; API,
-      // auth and WebSocket requests stay held. Other modes keep `/` held too:
-      // readiness probes such as the SSH launcher's `wait_ready` poll it and
-      // must not report a server ready before its router serves.
+      // While the runtime graph builds (migrations, projector catch-up, read
+      // model), the gate answers static-shell requests itself (same handler as
+      // the router's catch-all route), so clients load the UI in parallel; API,
+      // auth and WebSocket requests stay held. A desktop backend serves the
+      // document too, so the renderer loads from `http-bound`. Other modes
+      // serve assets only and keep `/` held: readiness probes such as the SSH
+      // launcher's `wait_ready` poll it and must not report a server ready
+      // before its router serves.
       const earlyStaticServingLayer = Layer.effectDiscard(
         Effect.gen(function* () {
           const server = yield* HttpServer.HttpServer;
           const gate = startupGate;
-          if (config.mode === "desktop" && gate !== undefined && !gate.isOpen()) {
+          if (gate !== undefined && !gate.isOpen()) {
+            const servesEarly =
+              config.mode === "desktop" ? isEarlyStaticRequest : isEarlyStaticAssetRequest;
             const handler = yield* NodeHttpServer.makeHandler(
               HttpMiddleware.cors(BROWSER_API_CORS_OPTIONS)(serveStaticRequest),
               { scope: yield* Effect.scope },
             );
             gate.setEarlyRequestHandler((request, response) => {
-              if (!isEarlyStaticRequest(request)) return false;
+              if (!servesEarly(request)) return false;
               handler(request, response);
               return true;
             });
@@ -313,6 +321,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
+  Layer.provideMerge(ProviderSessionPrewarmLive),
   Layer.provideMerge(ContextHandoffCoordinatorLive),
   Layer.provideMerge(ContextHandoffServiceLive),
   Layer.provideMerge(ContextHandoffRepositoryLive),
@@ -403,15 +412,7 @@ const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
 );
 
 const SourceControlProviderRegistryLayerLive = SourceControlProviderRegistry.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      AzureDevOpsCli.layer,
-      BitbucketApi.layer,
-      ForgejoApi.layer,
-      GitHubCli.layer,
-      GitLabCli.layer,
-    ),
-  ),
+  Layer.provide(ForgejoApi.layer),
   Layer.provideMerge(AtlassianConnectionRepositoryLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provide(ServerSecretStoreLive),
@@ -708,10 +709,14 @@ export const makeServerLayer = Layer.unwrap(
       Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup;
+        const hubConnector = yield* HubConnectorStart;
         const port = boundTcpPort(server.address);
         if (port !== null) writeDesktopLifecycleFrame({ type: "http-serving", port });
         recordDesktopStartupPhase("http-serving");
         yield* startup.markHttpServing;
+        // Process lock and key custody: built now that handlers are attached;
+        // Hub routes wait for it rather than the whole server.
+        yield* hubConnector.start;
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(
@@ -794,7 +799,7 @@ export const makeServerLayer = Layer.unwrap(
         Layer.provide(
           HttpRouter.serve(makeRoutesLayer, {
             disableLogger: !config.logWebSocketEvents,
-          }).pipe(Layer.provide(HubConnectorLive)),
+          }).pipe(Layer.provideMerge(HubConnectorDeferredLive)),
         ),
       ),
       runtimeStateLayer,

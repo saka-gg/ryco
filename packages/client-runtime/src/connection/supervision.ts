@@ -21,6 +21,7 @@ import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import type { EnvironmentConnection } from "./connection.ts";
+import { approximateJsonSize } from "./approximateJsonSize.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { planEvictionsToCapacity } from "./evictionPolicy.ts";
 import {
@@ -111,6 +112,12 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
     threadId: ThreadId,
   ) => boolean;
   readonly syncThreadDetailSnapshot: (environmentId: EnvironmentId, snapshot: unknown) => void;
+  /**
+   * Ask windows and history pages for bounded activity previews. Only a client
+   * that fetches full payloads on demand (`orchestration.getActivityPayload`)
+   * may set it; servers without previews ignore it.
+   */
+  readonly threadWindowActivityPayloads?: "preview";
   readonly syncThreadWindowSnapshot?: (
     environmentId: EnvironmentId,
     snapshot: OrchestrationThreadWindowSnapshot,
@@ -196,13 +203,8 @@ function classifyThreadWindowFailure(error: unknown): SubscriptionFailureKind {
   return "failed";
 }
 
-const estimateJsonLength = (value: unknown): number => {
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 0;
-  }
-};
+// Retained-memory budgets need magnitudes only: walk instead of serializing every event.
+const estimateJsonLength = approximateJsonSize;
 
 /**
  * The row a live thread event writes in the client's thread state, and how
@@ -473,11 +475,17 @@ export function createEnvironmentConnectionSupervisor<
     return connection;
   };
 
+  const activityPayloads = input.threadWindowActivityPayloads;
+  const activityPayloadsRequest = activityPayloads !== undefined ? { activityPayloads } : {};
   const historyPagination = createThreadHistoryPaginationController({
     request: (environmentId, request) => {
       const query = require(environmentId).client.orchestration.getThreadHistoryPage;
       return query
-        ? query(request)
+        ? query(
+            request.collection === "activities" && activityPayloads !== undefined
+              ? { ...request, activityPayloads }
+              : request,
+          )
         : Promise.reject(new Error("Thread history pagination is unavailable"));
     },
     apply: (environmentId, threadId, page) => {
@@ -496,6 +504,7 @@ export function createEnvironmentConnectionSupervisor<
       const snapshot = await query({
         threadId: scope.threadId,
         limits: current?.windowLimits ?? THREAD_WINDOW_LIMITS,
+        ...activityPayloadsRequest,
       });
       if (input.syncThreadWindowSnapshot) {
         input.syncThreadWindowSnapshot(scope.environmentId, snapshot);
@@ -644,7 +653,7 @@ export function createEnvironmentConnectionSupervisor<
       subscribing = true;
       pendingFailure = null;
       unsubscribeCurrent = subscribeWindow(
-        { threadId: entry.threadId, limits: entry.windowLimits },
+        { threadId: entry.threadId, limits: entry.windowLimits, ...activityPayloadsRequest },
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;

@@ -344,6 +344,44 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "vcs",
         },
       ),
+    [WS_METHODS.vcsPrefetchWorktreeBase]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsPrefetchWorktreeBase,
+        ownerEffect(
+          WS_METHODS.vcsPrefetchWorktreeBase,
+          Effect.gen(function* () {
+            // Only a known project's checkout: this runs git against `cwd`.
+            const project = yield* projectionSnapshotQuery
+              .getActiveProjectByWorkspaceRoot(input.cwd)
+              .pipe(
+                Effect.map(Option.getOrNull),
+                Effect.mapError(
+                  (cause) =>
+                    new GitCommandError({
+                      operation: "vcs.prefetchWorktreeBase",
+                      cwd: input.cwd,
+                      command: "git fetch",
+                      detail: "Failed to load project.",
+                      cause,
+                    }),
+                ),
+              );
+            if (!project) {
+              return yield* new GitCommandError({
+                operation: "vcs.prefetchWorktreeBase",
+                cwd: input.cwd,
+                command: "git fetch",
+                detail: "No project uses this folder.",
+              });
+            }
+            yield* gitWorkflow.prefetchWorktreeBase({
+              cwd: project.workspaceRoot,
+              refName: input.refName,
+            });
+          }),
+        ),
+        { "rpc.aggregate": "vcs" },
+      ),
     [WS_METHODS.vcsCreateWorktree]: (input) =>
       observeRpcEffect(
         WS_METHODS.vcsCreateWorktree,

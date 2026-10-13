@@ -7,6 +7,7 @@ import {
   HUB_SESSION_MAX_QUEUED_FRAMES,
   type HubSessionFrame,
 } from "@ryco/contracts/hub-session";
+import { bytesEqual } from "@ryco/shared/bytesEqual";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import type { RelaySocket, RelayTimers } from "./relayEngine.ts";
 
@@ -31,6 +32,7 @@ export interface HostedHubSessionOptions {
 }
 interface LogicalStream {
   readonly id: number;
+  readonly createdAt: number;
   state: number;
   opened: boolean;
   readonly open: Set<() => void>;
@@ -50,6 +52,14 @@ const READY_TIMEOUT_MS = 10_000;
  * as lost — the node connector's bound for the same question.
  */
 export const HUB_SESSION_PROBE_TIMEOUT_MS = 5_000;
+/**
+ * How long a logical stream that was never opened may wait across lost
+ * connections for a replacement `ready`. Its ticket is unused until the stream
+ * opens, so carrying it to the next connection saves a ticket and a reconnect
+ * of the relay attempt riding it; past this bound it is closed like any other
+ * stream so its owner retries on its own schedule.
+ */
+const PENDING_STREAM_MAX_WAIT_MS = READY_TIMEOUT_MS;
 
 /** One account-owned physical connection; logical relay tickets and E2EE remain per node. */
 export class HostedHubSession {
@@ -96,6 +106,7 @@ export class HostedHubSession {
       throw new Error("Hub session channel capacity reached.");
     const stream: LogicalStream = {
       id: ++this.#nextStream,
+      createdAt: this.#options.timers.now(),
       state: 0,
       opened: false,
       open: new Set(),
@@ -131,8 +142,38 @@ export class HostedHubSession {
       },
     };
     this.start();
-    if (this.#ready) this.#options.timers.queueMicrotask(() => this.#openStream(stream));
+    // A socket under suspicion carries no new stream: one sent into a dead path
+    // would only be lost with it. The stream opens once a frame proves the
+    // socket alive, or on the replacement's `ready`.
+    if (this.#ready && this.#probeDeadline === undefined)
+      this.#options.timers.queueMicrotask(() => this.#openStream(stream));
     return socket;
+  }
+
+  /**
+   * A lifecycle signal — foreground, `online`, a network change — says the
+   * network may have changed or come back.
+   *
+   * A session waiting out its reconnect backoff connects at once instead: the
+   * signal is new information the backoff could not have had. This happens once
+   * per signal; the failure count is kept, so consecutive failures still back
+   * off. An online session is probed ({@link probe}), and one already silent past
+   * the liveness bound is replaced at once rather than after the probe wait. A
+   * disposed session — signed out, or an authentication or protocol failure —
+   * stays closed.
+   */
+  resume(): void {
+    if (this.#disposed || !this.#started) return;
+    if (this.#ready) {
+      if (!this.#silentPastDeadBound()) {
+        this.probe();
+        return;
+      }
+      this.#lost("network", true);
+    }
+    if (this.#socket !== null || this.#retry === undefined) return;
+    this.#clearTimer("retry");
+    this.#connect();
   }
 
   /**
@@ -151,6 +192,13 @@ export class HostedHubSession {
   probe(timeoutMs = HUB_SESSION_PROBE_TIMEOUT_MS): void {
     const socket = this.#socket;
     if (this.#disposed || !this.#ready || !socket || this.#probeDeadline !== undefined) return;
+    // Nothing for longer than the bound the Hub itself closes a silent peer
+    // after: the socket is gone, and a probe wait would only delay the
+    // replacement.
+    if (this.#silentPastDeadBound()) {
+      this.#lost("network", true);
+      return;
+    }
     const sentAt = this.#options.timers.now();
     // Reuse a pending heartbeat probe: its pong is the answer either way, and a
     // second nonce would make the first one's valid pong look forged.
@@ -165,6 +213,12 @@ export class HostedHubSession {
       if (this.#socket !== socket || !this.#ready || this.#disposed) return;
       if (this.#lastReceived < sentAt) this.#lost("network", true);
     }, timeoutMs);
+  }
+
+  #silentPastDeadBound(): boolean {
+    return (
+      this.#options.timers.now() - this.#lastReceived >= HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS
+    );
   }
 
   dispose(): void {
@@ -251,12 +305,19 @@ export class HostedHubSession {
       return;
     }
     this.#lastReceived = this.#options.timers.now();
+    // Any frame answers a pending suspicion probe; streams held back from the
+    // suspect socket may open now.
+    if (this.#probeDeadline !== undefined) {
+      this.#clearTimer("probe");
+      this.#openPendingStreams();
+      if (!this.#ready) return;
+    }
     switch (frame.type) {
       case "ping":
         this.#sendControl({ type: "pong", nonce: frame.nonce });
         return;
       case "pong":
-        if (!this.#probe || !frame.nonce.every((byte, index) => byte === this.#probe![index])) {
+        if (!this.#probe || !bytesEqual(frame.nonce, this.#probe)) {
           this.#lost("protocol", false);
           return;
         }
@@ -296,6 +357,12 @@ export class HostedHubSession {
     if (this.#disposed) return;
     this.#options.onInvalidate?.(event);
     for (const listener of Array.from(this.#invalidations)) listener(event);
+  }
+
+  #openPendingStreams(): void {
+    for (const stream of Array.from(this.#streams.values())) {
+      if (stream.state === 0) this.#openStream(stream);
+    }
   }
 
   #openStream(stream: LogicalStream): void {
@@ -438,8 +505,14 @@ export class HostedHubSession {
     this.#probe = null;
     this.#clearTimers();
     this.#discardQueue();
-    for (const stream of Array.from(this.#streams.values()))
+    const now = this.#options.timers.now();
+    for (const stream of Array.from(this.#streams.values())) {
+      // A stream that never opened sent nothing on the lost socket: while
+      // reconnecting it waits, bounded, for the replacement `ready` instead.
+      if (retryable && stream.state === 0 && now - stream.createdAt < PENDING_STREAM_MAX_WAIT_MS)
+        continue;
       this.#closeStream(stream, 1012, "session unavailable", false);
+    }
     socket?.close(1000, "session unavailable");
     this.#options.onFailure?.({ kind, retryable });
     if (this.#disposed) return;

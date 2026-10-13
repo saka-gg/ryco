@@ -15,6 +15,7 @@ import * as GitHubCli from "./GitHubCli.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+import { makeFromClientServices } from "./sourceControlProviderRegistryTestLayer.ts";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
@@ -40,6 +41,7 @@ function makeRegistry(input: {
   readonly githubCli?: Partial<GitHubCli.GitHubCliShape>;
   readonly process?: Partial<VcsProcess.VcsProcessShape>;
   readonly bitbucketApi?: Partial<BitbucketApi.BitbucketApiShape>;
+  readonly onClientUse?: (client: string) => void;
 }) {
   const driver = {
     listRemotes: () =>
@@ -76,7 +78,7 @@ function makeRegistry(input: {
       }),
   });
 
-  return SourceControlProviderRegistry.make().pipe(
+  return makeFromClientServices(input.onClientUse).pipe(
     Effect.provide(
       Layer.mergeAll(
         registryLayer,
@@ -188,6 +190,23 @@ it.effect("forwards Bitbucket repository search and clone auth through the lazy 
     });
     assert.strictEqual(yield* Ref.get(searchRepositoriesCalled), true);
     assert.strictEqual(yield* Ref.get(cloneAuthenticationCalled), true);
+  }),
+);
+
+it.effect("resolves a provider's client only when that provider is used", () =>
+  Effect.gen(function* () {
+    const used: string[] = [];
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: "git@github.com:pingdotgg/ryco.git" }],
+      githubCli: { listLabels: () => Effect.succeed([]) },
+      onClientUse: (client) => used.push(client),
+    });
+    assert.deepStrictEqual(used, []);
+
+    const provider = yield* registry.resolve({ cwd: "/repo" });
+    assert.strictEqual(provider.kind, "github");
+    yield* provider.listLabels({ cwd: "/repo" });
+    assert.deepStrictEqual(used, ["github"]);
   }),
 );
 

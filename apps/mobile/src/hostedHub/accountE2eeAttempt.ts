@@ -1,5 +1,6 @@
 import { getHostedHubApi, hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
+  awaitNativeE2eeEnrollmentSettled,
   createNativeE2eeTrustResolver,
   type NativeE2eeReadyEnrollment,
 } from "@ryco/client-runtime/authorization/e2ee";
@@ -101,11 +102,29 @@ function trustedRecord(selection: MobileRelaySelectionSnapshot) {
   });
 }
 
+/**
+ * How long a relay attempt waits for an enrollment in progress before failing
+ * into the reconnect backoff. At launch the per-launch upsert runs beside the
+ * directory read, and an auto-selected node can win that race.
+ */
+export const MOBILE_ENROLLMENT_GATE_WAIT_MS = 10_000;
+
 /** Prepare public state only. Ticket and grant are deliberately not issued here. */
 export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySocketContext> {
   const selection = currentSelection();
   if (selection === null) throw new Error("No authorized hosted node is selected.");
-  const enrollmentState = getMobileNativeE2eeEnrollmentCoordinator()?.getState();
+  const coordinator = getMobileNativeE2eeEnrollmentCoordinator();
+  const enrollmentState =
+    coordinator === null
+      ? undefined
+      : await awaitNativeE2eeEnrollmentSettled(coordinator, {
+          timeoutMs: MOBILE_ENROLLMENT_GATE_WAIT_MS,
+          timers: {
+            setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+            clearTimeout: (timer) => globalThis.clearTimeout(timer),
+          },
+        });
+  if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
   if (enrollmentState?.status !== "ready" || enrollmentState.ready === null) {
     throw new Error("Native E2EE enrollment is not ready.");
   }

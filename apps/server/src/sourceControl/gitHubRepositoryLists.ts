@@ -452,3 +452,89 @@ export function decodeGitHubIssueListPageJson(
 export function isGitHubStackFieldUnsupportedDetail(detail: string): boolean {
   return /field '(?:stack|stackEntry)' doesn't exist on type/iu.test(detail);
 }
+
+// ── Pull request states by number ────────────────────────────────────
+
+/** Pull requests one state query asks for (aliases per document). */
+export const GITHUB_PULL_REQUEST_STATES_BATCH_SIZE = 50;
+
+export interface GitHubPullRequestStateRecord {
+  readonly state: "open" | "closed" | "merged";
+  readonly isDraft: boolean;
+  readonly closedAt: string | null;
+  readonly mergedAt: string | null;
+}
+
+/**
+ * One document reading the state of several pull requests of a repository by number (an
+ * alias per number), instead of one `gh pr view` process per pull request.
+ */
+export function buildGitHubPullRequestStatesQuery(numbers: ReadonlyArray<number>): string {
+  const fields = numbers
+    .filter((number) => Number.isSafeInteger(number) && number > 0)
+    .map(
+      (number) =>
+        `p${number}: pullRequest(number: ${number}) { number state isDraft closedAt mergedAt }`,
+    )
+    .join("\n    ");
+  return `query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    ${fields}
+  }
+}`;
+}
+
+const RawPullRequestStatesResponseSchema = Schema.Struct({
+  errors: Schema.optional(Schema.NullOr(Schema.Array(Schema.NullOr(RawGraphQlErrorSchema)))),
+  data: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        repository: Schema.optional(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown))),
+      }),
+    ),
+  ),
+});
+const decodePullRequestStatesResponse = decodeJsonResult(RawPullRequestStatesResponseSchema);
+
+/**
+ * States by number. A number GitHub cannot resolve (deleted, transferred, no access to that
+ * one) is left out with its error; any other error fails the read.
+ */
+export function decodeGitHubPullRequestStatesJson(
+  raw: string,
+): Result.Result<ReadonlyMap<number, GitHubPullRequestStateRecord>, string> {
+  const decoded = decodePullRequestStatesResponse(raw);
+  if (Result.isFailure(decoded)) {
+    return Result.fail(`Invalid GitHub pull request states: ${formatSchemaError(decoded.failure)}`);
+  }
+  const fatal = (decoded.success.errors ?? []).flatMap((error) => {
+    const path = error?.path ?? [];
+    const alias = path[1];
+    return path[0] === "repository" && typeof alias === "string" && /^p\d+$/u.test(alias)
+      ? []
+      : [error?.message?.trim() || "GitHub GraphQL returned an error."];
+  });
+  if (fatal.length > 0) return Result.fail(`GitHub GraphQL returned errors: ${fatal.join("; ")}`);
+  const repository = decoded.success.data?.repository;
+  if (!repository) return Result.fail("GitHub returned no repository for the pull request states.");
+  const states = new Map<number, GitHubPullRequestStateRecord>();
+  for (const node of Object.values(repository)) {
+    if (!isRecord(node) || typeof node.number !== "number") continue;
+    const state =
+      node.state === "OPEN"
+        ? "open"
+        : node.state === "CLOSED"
+          ? "closed"
+          : node.state === "MERGED"
+            ? "merged"
+            : null;
+    if (state === null) continue;
+    states.set(node.number, {
+      state,
+      isDraft: node.isDraft === true,
+      closedAt: typeof node.closedAt === "string" ? node.closedAt : null,
+      mergedAt: typeof node.mergedAt === "string" ? node.mergedAt : null,
+    });
+  }
+  return Result.succeed(states);
+}

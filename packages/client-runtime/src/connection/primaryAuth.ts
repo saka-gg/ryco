@@ -84,6 +84,11 @@ export interface PrimaryAuthDependencies {
 }
 
 const AUTH_SESSION_ESTABLISH_TIMEOUT_MS = 2_000;
+/**
+ * A prefetched ws-token is used only this soon after it was requested. Tokens
+ * live five minutes on the server; a boot that takes longer asks again.
+ */
+const PREFETCHED_WS_TOKEN_MAX_AGE_MS = 60_000;
 const AUTH_SESSION_ESTABLISH_STEP_MS = 100;
 const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
@@ -148,29 +153,52 @@ export function createPrimaryAuth(deps: PrimaryAuthDependencies) {
       }
       return (await response.json()) as AuthSessionState;
     });
+  const requestWebSocketToken = async (signal?: AbortSignal): Promise<AuthWebSocketTokenResult> => {
+    const response = await fetchControlPlane("/api/auth/ws-token", {
+      ...credentials,
+      method: "POST",
+      ...(signal === undefined ? {} : { signal }),
+    });
+    if (!response.ok)
+      throw new BootstrapHttpError({
+        message: `Failed to issue websocket token (${response.status}).`,
+        status: response.status,
+      });
+    return (await response.json()) as AuthWebSocketTokenResult;
+  };
+  /**
+   * A ws-token requested alongside the boot's session check, before anyone
+   * knows whether the session is authenticated. The first socket attempt uses
+   * it if it succeeded and is still fresh; a failed one (no session yet, a
+   * restarting server) is simply dropped, and the attempt asks again.
+   */
+  let prefetchedWebSocketToken: {
+    readonly requestedAt: number;
+    readonly result: Promise<AuthWebSocketTokenResult | null>;
+  } | null = null;
+  const takePrefetchedWebSocketToken = async (): Promise<AuthWebSocketTokenResult | null> => {
+    const prefetched = prefetchedWebSocketToken;
+    prefetchedWebSocketToken = null;
+    if (!prefetched || now() - prefetched.requestedAt > PREFETCHED_WS_TOKEN_MAX_AGE_MS) return null;
+    const result = await prefetched.result;
+    return result !== null && now() - prefetched.requestedAt <= PREFETCHED_WS_TOKEN_MAX_AGE_MS
+      ? result
+      : null;
+  };
   /**
    * Every reconnect attempt resolves its socket URL through this request, so a
    * hung one would stall reconnecting; `signal` lets the attempt abandon it.
    */
   const issuePrimaryWebSocketToken = async (
     signal?: AbortSignal,
-  ): Promise<AuthWebSocketTokenResult> =>
-    retryTransientBootstrap(
-      async () => {
-        const response = await fetchControlPlane("/api/auth/ws-token", {
-          ...credentials,
-          method: "POST",
-          ...(signal === undefined ? {} : { signal }),
-        });
-        if (!response.ok)
-          throw new BootstrapHttpError({
-            message: `Failed to issue websocket token (${response.status}).`,
-            status: response.status,
-          });
-        return (await response.json()) as AuthWebSocketTokenResult;
-      },
+  ): Promise<AuthWebSocketTokenResult> => {
+    const prefetched = await takePrefetchedWebSocketToken();
+    if (prefetched) return prefetched;
+    return retryTransientBootstrap(
+      () => requestWebSocketToken(signal),
       signal === undefined ? undefined : { signal },
     );
+  };
   const exchangeBootstrapCredential = async (credential: string): Promise<AuthBootstrapResult> =>
     retryTransientBootstrap(async () => {
       const response = await fetchControlPlane("/api/auth/bootstrap", {
@@ -267,6 +295,20 @@ export function createPrimaryAuth(deps: PrimaryAuthDependencies) {
   return {
     fetchSessionState,
     issuePrimaryWebSocketToken,
+    /**
+     * Starts one ws-token request in parallel with the boot's session check,
+     * for the first primary socket attempt to use. One attempt, no retries:
+     * whatever fails here is asked again by the socket itself.
+     */
+    prefetchPrimaryWebSocketToken: () => {
+      if (prefetchedWebSocketToken) return;
+      const result = requestWebSocketToken().catch(() => null);
+      prefetchedWebSocketToken = { requestedAt: now(), result };
+    },
+    /** Drops a prefetched ws-token the boot will not use (no authenticated session). */
+    discardPrefetchedPrimaryWebSocketToken: () => {
+      prefetchedWebSocketToken = null;
+    },
     fetchHubStatus: () => get<HubConnectorStatus>("/api/hub/status", "Unable to read Hub status."),
     fetchHubIdentity: () =>
       get<HubIdentitySummary>("/api/hub/identity", "Unable to read Hub identity state."),
@@ -389,6 +431,7 @@ export function createPrimaryAuth(deps: PrimaryAuthDependencies) {
         });
     },
     resetForTests: () => {
+      prefetchedWebSocketToken = null;
       bootstrapPromise = null;
       resolvedAuthenticatedGateState = null;
     },

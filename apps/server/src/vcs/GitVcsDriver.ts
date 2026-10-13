@@ -245,6 +245,14 @@ export interface GitVcsDriverShape {
   readonly createWorktree: (
     input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
+  /**
+   * Fetches a worktree base from origin ahead of `createWorktree`, which reuses
+   * the fetch while it runs and for a short while after it finished.
+   */
+  readonly prefetchWorktreeBase: (input: {
+    readonly cwd: string;
+    readonly refName: string;
+  }) => Effect.Effect<void, GitCommandError>;
   readonly fetchPullRequestBranch: (
     input: GitFetchPullRequestBranchInput,
   ) => Effect.Effect<void, GitCommandError>;

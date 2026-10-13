@@ -158,6 +158,33 @@ describe("server boot import boundaries", () => {
       graph.externals.filter((specifier) => /^(?:react|zustand)(?:\/|$)/u.test(specifier)),
     ).toEqual([]);
   });
+
+  it("keeps optional feature stacks off the serve path", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
+    // Native Computer use loads only when Desktop hands over a native bridge; the turn
+    // lifecycle and the tool guidance the provider reactor reads stay eager.
+    expect(reached(/^apps\/server\/src\/computer\//u).toSorted()).toEqual([
+      "apps/server/src/computer/computerTurnLifecycle.ts",
+      "apps/server/src/computer/computerVisibleUse.ts",
+      "apps/server/src/computer/tools/computerGuidance.ts",
+    ]);
+    // The Hub connector, key custody and relay E2EE build after the router serves.
+    expect(
+      reached(
+        /^apps\/server\/src\/hubConnector\/(?:HubConnector|HubConnectorLive|HubIdentityRuntime|NodeE2ee\w*)\.ts$/u,
+      ),
+    ).toEqual([]);
+    expect(reached(/^packages\/shared\/src\/relayE2ee(?!Constants)/u)).toEqual([]);
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@noble/"))).toEqual([]);
+    // Source-control clients load with the provider that uses them (Forgejo answers
+    // synchronous remote detection and stays eager).
+    expect(
+      reached(
+        /^apps\/server\/src\/sourceControl\/(?:GitHubCli|GitLabCli|BitbucketApi|AzureDevOpsCli|gitHubPullRequests|gitLabMergeRequests|bitbucketPullRequests|azureDevOpsPullRequests)\.ts$/u,
+      ),
+    ).toEqual([]);
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */
@@ -203,6 +230,33 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     for (const chunk of serve.chunks) {
       // A type name only the generated Codex protocol schema defines.
       expect(readFileSync(chunk, "utf8")).not.toContain("V2ListMcpServerStatusResponse");
+    }
+  });
+
+  it("bundles effect and the platform packages instead of resolving them per file", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    expect(
+      serve.externals.filter((specifier) =>
+        /^(?:effect|@effect\/[\w-]+|mime|ws|undici)(?:\/|$)/u.test(specifier),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps the boot chunks within budget", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    const bytes = serve.chunks.reduce((total, chunk) => total + statSync(chunk).size, 0);
+    // 6.6 MB with effect and the platform packages bundled in, and with Computer use,
+    // the Hub connector and the source-control clients behind import(). Raise it only
+    // for code that every boot needs.
+    expect(bytes).toBeLessThan(7_000_000);
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      // Region markers rolldown leaves in the output name the modules each chunk holds.
+      expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/GitHubCli\.ts$/mu);
     }
   });
 });

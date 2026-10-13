@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   CommandId,
   ProjectId,
+  ThreadId,
   WorktreeId,
   WorkspaceLifecycleError,
   type OrchestrationWorktreeShell,
@@ -20,7 +21,10 @@ import {
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import { validateWorktreeRoot } from "../project/worktreeRoot.ts";
 import { assertWorktreeSetupComplete } from "../project/worktreeSetupState.ts";
-import { readWorkspacePlacement } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  readScopedShellSnapshot,
+  readWorkspacePlacement,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { WorkspaceLifecycleDeps } from "./WorkspaceLifecycle.ts";
 import { containsPath, samePath } from "./checkoutInspection.ts";
 
@@ -96,8 +100,9 @@ export function makeManagedWorktreeMigration(
   const idle = (worktree: OrchestrationWorktreeShell, candidate: string) =>
     Effect.gen(function* () {
       if (hasWorktreeCreationLease(candidate)) return false;
-      // The whole shell: pending work is judged from the live threads' summaries.
-      const snapshot = yield* deps.snapshots.getShellSnapshot();
+      // Overlaps are judged against every placement; pending work from the summaries of the
+      // threads attached to this workspace only.
+      const snapshot = yield* readWorkspacePlacement(deps.snapshots);
       if (
         snapshot.projects.some(
           (project) =>
@@ -121,12 +126,13 @@ export function makeManagedWorktreeMigration(
       WHERE project_id = ${worktree.projectId} AND (worktree_id = ${worktree.worktreeId} OR worktree_path = ${worktree.worktreePath}) LIMIT 5001`;
       if (threads.length > 5000) return false;
       const ids = new Set(threads.map((thread) => thread.thread_id));
-      if (
-        snapshot.threads.some(
-          (thread) => ids.has(thread.id) && threadPendingWork(thread, Date.now()).length > 0,
-        )
-      )
-        return false;
+      const attached =
+        ids.size === 0
+          ? []
+          : (yield* readScopedShellSnapshot(deps.snapshots, {
+              threadIds: [...ids].map((threadId) => ThreadId.make(threadId)),
+            })).threads;
+      if (attached.some((thread) => threadPendingWork(thread, Date.now()).length > 0)) return false;
       // A provider that is ready between turns still owns its working directory.
       if (!deps.sessionDirectory) return false;
       const bindings = yield* deps.sessionDirectory.listBindings();

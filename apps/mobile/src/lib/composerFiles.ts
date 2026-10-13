@@ -2,7 +2,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-} from "@ryco/contracts";
+} from "@ryco/contracts/orchestration";
 
 import {
   draftImageAttachmentFromPickerAsset,

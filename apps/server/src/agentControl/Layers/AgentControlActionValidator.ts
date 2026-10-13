@@ -10,10 +10,14 @@ import type {
   RuntimeMode,
   ServerProvider,
 } from "@ryco/contracts";
-import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
+import { AGENT_CONTROL_CAPABILITIES, ThreadId } from "@ryco/contracts";
 import { Effect, Layer, Option } from "effect";
 
-import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  readProjectShells,
+  readScopedShellSnapshot,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceService, type DeviceServiceShape } from "../../device/Services/DeviceService.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
@@ -469,18 +473,28 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             }),
       ),
     );
-  const loadState = Effect.all({
-    snapshot: deps.projections.getShellSnapshot(),
-    providers: deps.getProviders,
-  }).pipe(
-    Effect.mapError(
-      () =>
-        new AgentControlPlanValidationError({
-          reason: "project-unavailable",
-          detail: "Current Ryco state is unavailable.",
-        }),
-    ),
-  );
+  // Every live project (plans may create threads in other projects) and the summaries of the
+  // threads this validation names: no whole shell snapshot per tool call.
+  const loadState = (threadIds: ReadonlyArray<string>) =>
+    Effect.all({
+      projects: readProjectShells(deps.projections),
+      scoped: readScopedShellSnapshot(deps.projections, {
+        threadIds: [...new Set(threadIds)].map((threadId) => ThreadId.make(threadId)),
+      }),
+      providers: deps.getProviders,
+    }).pipe(
+      Effect.map(({ projects, scoped, providers }) => ({
+        snapshot: { ...scoped, projects } satisfies OrchestrationShellSnapshot,
+        providers,
+      })),
+      Effect.mapError(
+        () =>
+          new AgentControlPlanValidationError({
+            reason: "project-unavailable",
+            detail: "Current Ryco state is unavailable.",
+          }),
+      ),
+    );
 
   const requireBaseRef = (cwd: string, baseRef: string) =>
     deps.listRefs({ cwd, query: baseRef, limit: 200 }).pipe(
@@ -500,7 +514,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
 
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
-      const { snapshot, providers } = yield* loadState;
+      const { snapshot, providers } = yield* loadState([
+        input.session.threadId,
+        ...targetThreadIds(input.plan),
+      ]);
       const caller = snapshot.threads.find((thread) => thread.id === input.session.threadId);
       if (
         !caller ||
@@ -664,7 +681,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           ) {
             return yield* fail("privilege-escalation", "Automation execution scope is denied.");
           }
-          const { snapshot, providers } = yield* loadState;
+          const { snapshot, providers } = yield* loadState([]);
           yield* validatePlanAgainstSnapshot({
             plan: { kind: "createThreads", entries: [definition.execution] },
             originProjectId: definition.execution.projectId,
@@ -698,7 +715,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
               "External thread control authority is absent.",
             );
           }
-          const { snapshot, providers } = yield* loadState;
+          const { snapshot, providers } = yield* loadState([plan.threadId]);
           const target = snapshot.threads.find((thread) => thread.id === plan.threadId);
           // An out-of-scope target is reported exactly like a missing one.
           if (!target || !scopeAllows(target.projectId)) {
@@ -753,7 +770,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail("invalid-plan", "External integrations may request exactly one task.");
         }
         const entry = input.plan.entries[0]!;
-        const { snapshot, providers } = yield* loadState;
+        const { snapshot, providers } = yield* loadState([]);
         yield* validatePlanAgainstSnapshot({
           plan: input.plan,
           originProjectId: entry.projectId,
@@ -782,7 +799,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       yield* validateAutomation(deps.automations.validateLifecyclePlan(plan));
       if (plan.kind === "cancelAutomation") return;
       const definition = plan.kind === "createAutomation" ? plan.definition : plan.after;
-      const { snapshot, providers } = yield* loadState;
+      const { snapshot, providers } = yield* loadState([]);
       yield* validatePlanAgainstSnapshot({
         plan: { kind: "createThreads", entries: [definition.execution] },
         originProjectId: definition.execution.projectId,
@@ -831,7 +848,11 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         return yield* fail("caller-stale", "Proposal origin evidence is incomplete.");
       }
       const principal = proposal.principal;
-      const { snapshot, providers } = yield* loadState;
+      const { snapshot, providers } = yield* loadState([
+        ...("threadId" in principal ? [principal.threadId] : []),
+        ...targetThreadIds(proposal.plan),
+        ...agentControlTargetSnapshots(principal).map((target) => target.threadId),
+      ]);
       if (principal.kind === "provider-session") {
         const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
         if (!origin || origin.projectId !== originProjectId) {

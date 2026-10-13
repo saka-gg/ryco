@@ -10,7 +10,8 @@ import {
   wsConnectionStatusAtom,
 } from "@ryco/client-runtime/rpc";
 import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { DEFAULT_AGENT_TOKEN_MODE, type ScopedThreadRef } from "@ryco/contracts";
+import type { ScopedThreadRef } from "@ryco/contracts";
+import { DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   commitSendTurnDispatch,

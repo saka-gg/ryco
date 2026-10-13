@@ -21,7 +21,27 @@ vi.mock("expo-constants", () => ({
   default: { expoConfig: { extra: { node: { httpBaseUrl: "http://node.local:44342" } } } },
 }));
 
-import { createMobileConnectionRegistry } from "./bootstrap";
+// The snapshot cache read is held open so a test can observe what starts
+// before it completes.
+const persistence = vi.hoisted(() => ({
+  release: null as (() => void) | null,
+  initialize: null as unknown as () => Promise<void>,
+}));
+persistence.initialize = () =>
+  new Promise<void>((resolve) => {
+    persistence.release = resolve;
+  });
+vi.mock("../persistence/environmentSnapshotPersistence", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../persistence/environmentSnapshotPersistence")>()),
+  initializeMobileSnapshotPersistence: () => persistence.initialize(),
+}));
+
+import {
+  createMobileConnectionRegistry,
+  initializeMobileRuntime,
+  resetMobileRuntimeInitForTests,
+} from "./bootstrap";
+import { mobileRuntimeStartupBarrier } from "./startupBarrier";
 
 describe("mobile runtime bootstrap", () => {
   it("constructs the connection registry with fake adapters without error", async () => {
@@ -67,5 +87,27 @@ describe("mobile runtime bootstrap", () => {
     expect(typeof registry.remoteApi.bootstrapRemoteBearerSession).toBe("function");
     expect(typeof registry.remoteApi.issueRemoteWebSocketToken).toBe("function");
     expect(typeof registry.remoteApi.resolveRemoteWebSocketConnectionUrl).toBe("function");
+  });
+
+  it("starts the direct driver once the catalog is hydrated, before the snapshot cache", async () => {
+    resetMobileRuntimeInitForTests();
+    const registry = createMobileConnectionRegistry();
+    const start = vi.spyOn(registry.driver, "start");
+    const release = vi.spyOn(registry.driver, "releaseDeferredPrimaryConnection");
+    try {
+      initializeMobileRuntime();
+
+      await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+      // The cache read is still open: the hosted primary stays deferred.
+      expect(persistence.release).not.toBeNull();
+      expect(mobileRuntimeStartupBarrier.isHydrated()).toBe(false);
+      expect(release).not.toHaveBeenCalled();
+
+      persistence.release!();
+      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+      expect(mobileRuntimeStartupBarrier.isHydrated()).toBe(true);
+    } finally {
+      resetMobileRuntimeInitForTests();
+    }
   });
 });
