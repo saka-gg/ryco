@@ -320,6 +320,7 @@ export interface WsRpcClient {
     readonly applyWorkspace: RpcUnaryMethod<typeof WS_METHODS.lifecycleApplyWorkspace>;
     readonly suggestions: RpcUnaryMethod<typeof WS_METHODS.lifecycleSuggestions>;
     readonly listTrash: RpcUnaryMethod<typeof WS_METHODS.lifecycleListTrash>;
+    readonly diskUsage: RpcUnaryMethod<typeof WS_METHODS.lifecycleDiskUsage>;
   };
   readonly storage: {
     readonly scan: RpcUnaryMethod<typeof WS_METHODS.storageScan>;
@@ -845,6 +846,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.lifecycleSuggestions](input)),
       listTrash: (input) =>
         transport.request((client) => client[WS_METHODS.lifecycleListTrash](input)),
+      diskUsage: (input) =>
+        transport.request((client) => client[WS_METHODS.lifecycleDiskUsage](input)),
     },
     storage: {
       scan: (input) => transport.request((client) => client[WS_METHODS.storageScan](input)),

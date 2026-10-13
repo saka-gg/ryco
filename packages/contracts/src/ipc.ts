@@ -2,6 +2,8 @@ import type { EffectiveProjectPreferences } from "./settings.ts";
 import type {
   LifecycleSuggestions,
   TrashListResult,
+  WorkspaceDiskUsageInput,
+  WorkspaceDiskUsageResult,
   WorkspaceLifecycleApplyInput,
   WorkspaceLifecycleListInputType,
   WorkspaceLifecyclePreview,
@@ -1278,6 +1280,8 @@ export interface EnvironmentApi {
     applyWorkspace: (input: WorkspaceLifecycleApplyInput) => Promise<WorkspaceLifecycleResult>;
     suggestions: (input: Record<string, never>) => Promise<LifecycleSuggestions>;
     listTrash: (input: Record<string, never>) => Promise<TrashListResult>;
+    /** Optional so clients can feature-detect against older environments. */
+    diskUsage?: (input: WorkspaceDiskUsageInput) => Promise<WorkspaceDiskUsageResult>;
   };
   worktrees?: {
     setManualPosition: (input: WorktreesSetManualPositionInput) => Promise<EmptyRpcResult>;

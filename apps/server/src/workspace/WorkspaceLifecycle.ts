@@ -20,6 +20,8 @@ import {
   type TrashListResult,
   type WorkspaceActionAvailability,
   type WorkspaceCheckoutState,
+  type WorkspaceDiskUsageInput,
+  type WorkspaceDiskUsageResult,
   type WorkspaceLifecycleAction,
   type WorkspaceLifecycleApplyInput,
   WorkspaceLifecycleError,
@@ -82,6 +84,7 @@ import {
   type ProjectGitFacts,
   samePath,
 } from "./checkoutInspection.ts";
+import { type DiskUsageCache, exclusiveDiskUsage, makeDiskUsageCache } from "./diskUsage.ts";
 import {
   WorkspaceAccessPolicy,
   type WorkspaceAccessPolicyShape,
@@ -123,6 +126,10 @@ export interface WorkspaceLifecycleShape {
     | (() => Effect.Effect<void, WorkspaceLifecycleError>)
     | undefined;
   readonly listTrash: () => Effect.Effect<TrashListResult, WorkspaceLifecycleError>;
+  /** Disk space each of the project's checkouts takes on this node. */
+  readonly diskUsage: (
+    input: WorkspaceDiskUsageInput,
+  ) => Effect.Effect<WorkspaceDiskUsageResult, WorkspaceLifecycleError>;
 }
 
 export class WorkspaceLifecycle extends Context.Service<
@@ -148,6 +155,7 @@ export interface WorkspaceLifecycleDeps {
   >;
   readonly settings: Pick<ServerSettingsShape, "getSettings">;
   readonly fence: CheckoutFence;
+  readonly diskUsage?: DiskUsageCache;
   readonly now?: () => number;
   readonly migration?: { readonly sql: SqlClient.SqlClient; readonly stateDir: string } | undefined;
 }
@@ -415,6 +423,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       const terminals = yield* deps.terminals.listDiagnostics;
       return { placement, threads, trashed, terminals, nowMs: now() } satisfies LoadedContext;
     }).pipe(Effect.mapError(() => lifecycleError("Workspace state is unavailable.")));
+
+  const diskUsageCache = deps.diskUsage ?? makeDiskUsageCache();
 
   // Shared by list() and suggestions() (read-only listings): a reopened
   // Projects page or overlapping reads reuse each checkout's recent Git reads.
@@ -1324,6 +1334,60 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                   },
                 ],
           ),
+        };
+      }),
+    diskUsage: ({ projectId, refresh }) =>
+      Effect.gen(function* () {
+        const placement = yield* readWorkspacePlacement(deps.snapshots).pipe(
+          Effect.mapError(() => lifecycleError("Workspace state is unavailable.")),
+        );
+        const project = placement.projects.find((candidate) => candidate.id === projectId);
+        if (!project) return yield* Effect.fail(lifecycleError("The project is unavailable."));
+        const checkouts: Array<{
+          readonly worktreeId: WorktreeId;
+          readonly main: boolean;
+          readonly path: string;
+        }> = [];
+        for (const worktree of placement.worktrees) {
+          if (worktree.projectId !== projectId || worktree.checkoutRemovedAt != null) continue;
+          const checkoutPath = worktree.worktreePath ?? project.workspaceRoot;
+          // One folder recorded twice (a main record and its root) is measured once.
+          if (checkouts.some((checkout) => samePath(checkout.path, checkoutPath))) continue;
+          checkouts.push({
+            worktreeId: worktree.worktreeId,
+            main: worktree.origin === "main" || samePath(checkoutPath, project.workspaceRoot),
+            path: checkoutPath,
+          });
+        }
+        const measured = yield* Effect.forEach(
+          checkouts,
+          (checkout) =>
+            deps.policy
+              .assertExistingPath({ path: checkout.path, operation: "lifecycle.diskUsage" })
+              .pipe(
+                Effect.flatMap((canonical) =>
+                  Effect.promise(() => diskUsageCache.read(canonical, refresh === true)).pipe(
+                    Effect.map((read) => ({ ...checkout, path: canonical, ...read })),
+                  ),
+                ),
+                // A missing or out-of-bounds checkout is reported unmeasured.
+                Effect.orElseSucceed(() => ({
+                  ...checkout,
+                  usage: { bytes: null, partial: false },
+                  measuredAtMs: now(),
+                })),
+              ),
+          { concurrency: "unbounded" },
+        );
+        const exclusive = exclusiveDiskUsage(measured);
+        return {
+          workspaces: measured.map((checkout, index) => ({
+            worktreeId: checkout.worktreeId,
+            main: checkout.main,
+            bytes: exclusive[index]!.bytes,
+            partial: exclusive[index]!.partial,
+            measuredAt: new Date(checkout.measuredAtMs).toISOString(),
+          })),
         };
       }),
     listTrash: () =>

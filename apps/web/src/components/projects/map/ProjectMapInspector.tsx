@@ -29,6 +29,7 @@ import {
   GitPullRequestIcon,
   PauseIcon,
   PlayIcon,
+  RefreshCwIcon,
   Settings2Icon,
   ShieldCheckIcon,
   SquarePenIcon,
@@ -76,6 +77,12 @@ import {
 } from "../projectsSearch";
 import { PROJECT_SECTION_COMPONENTS } from "../sections/projectSectionComponents";
 import { visibleProjectSections, type ProjectSectionProps } from "../sections/projectSectionTypes";
+import {
+  diskSizeText,
+  diskText,
+  diskUsageMeasuring,
+  sumDiskSizes,
+} from "../sections/projectDiskUsage.logic";
 import { availableWorkspaceActions } from "../sections/projectWorkspaces.logic";
 import { useProjectEditAccess } from "../sections/useProjectEditAccess";
 import { WorkspaceReview } from "../sections/WorkspaceReview";
@@ -195,6 +202,7 @@ function ProjectPanel(props: {
           </LinkRow>
         ))}
       </Section>
+      <DiskUsageSection details={props.details} onSelect={props.onSelect} />
       <section aria-label="Settings" className="mt-4 border-t border-border/60 pt-3">
         <div className="mb-3 flex min-w-0 items-center gap-2">
           <h4 className="text-[11px] font-medium text-muted-foreground">Settings</h4>
@@ -256,6 +264,57 @@ function ProjectPanel(props: {
  * The project's schedules in one line — "3 schedules · 1 waiting ›" — that
  * opens the Automations dialog on this project (it grows out of the line).
  */
+/** What the project takes on each device's disk, and a way to measure again. */
+function DiskUsageSection(props: {
+  readonly details: readonly MapCheckoutDetail[];
+  readonly onSelect: (selection: MapSelection) => void;
+}) {
+  const { details } = props;
+  if (details.every((detail) => detail.diskUsage.status === "unavailable")) return null;
+  const total = sumDiskSizes(details.flatMap((detail) => detail.checkout.workspaces));
+  const measuring = details.some((detail) => diskUsageMeasuring(detail.diskUsage));
+  return (
+    <Section title={`On disk${total ? ` · ${diskSizeText(total)}` : ""}`}>
+      {details.map((detail) => (
+        <LinkRow
+          key={detail.checkout.key}
+          onClick={() => props.onSelect({ kind: "device", checkoutKey: detail.checkout.key })}
+          icon={
+            <DeviceIcon
+              environmentId={detail.member.environmentId}
+              label={detail.checkout.deviceLabel}
+              className="size-3.5 shrink-0 text-muted-foreground"
+            />
+          }
+          trailing={
+            <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+              {diskText(sumDiskSizes(detail.checkout.workspaces), detail.diskUsage)}
+            </span>
+          }
+        >
+          {detail.checkout.deviceLabel}
+        </LinkRow>
+      ))}
+      <p className="px-2 pt-1 text-[11.5px] text-muted-foreground">
+        Main checkouts include the repository's Git data; worktrees count their own files.
+      </p>
+      <div className="px-2 pt-2">
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={measuring}
+          onClick={() => {
+            for (const detail of details) detail.remeasureDisk();
+          }}
+        >
+          <RefreshCwIcon className={cn("size-3", measuring && "animate-spin")} />
+          {measuring ? "Measuring…" : "Measure again"}
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
 function AutomationsEntry(props: {
   readonly snapshot: SidebarProjectSnapshot;
   readonly details: readonly MapCheckoutDetail[];
@@ -398,6 +457,11 @@ function DevicePanel(props: {
             </button>,
           ],
           ["Connection", status],
+          ...(detail.diskUsage.status === "unavailable"
+            ? []
+            : ([
+                ["On disk", diskText(sumDiskSizes(detail.checkout.workspaces), detail.diskUsage)],
+              ] as const)),
         ]}
       />
       <Actions disabledReason={access.reason}>
@@ -483,8 +547,15 @@ function DevicePanel(props: {
               )
             }
             trailing={
-              workspace.archived ? (
-                <span className="text-[11px] text-muted-foreground">Archived</span>
+              workspace.archived || workspace.disk ? (
+                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                  {[
+                    workspace.archived ? "Archived" : null,
+                    workspace.disk ? diskSizeText(workspace.disk) : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
               ) : null
             }
           >
@@ -676,6 +747,9 @@ function WorkspacePanel(props: {
               {path ?? "—"}
             </span>,
           ],
+          ...(workspace.checkoutRemoved || detail.diskUsage.status === "unavailable"
+            ? []
+            : ([["On disk", diskText(workspace.disk, detail.diskUsage)]] as const)),
           ...(twins.length
             ? ([
                 [

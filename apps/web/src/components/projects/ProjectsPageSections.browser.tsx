@@ -7,6 +7,7 @@ import {
   WorktreeId,
   type DispatchableClientOrchestrationCommand,
   type EnvironmentApi,
+  type WorkspaceDiskUsageInput,
   type WorkspaceLifecycleApplyInput,
   type WorkspaceLifecyclePreview,
   type WorkspaceLifecycleRequest,
@@ -110,6 +111,7 @@ const lifecycle = {
   results: [] as WorkspaceLifecycleResult[],
   previews: [] as WorkspaceLifecycleRequest[],
   applied: [] as WorkspaceLifecycleApplyInput[],
+  diskRequests: [] as WorkspaceDiskUsageInput[],
   reset() {
     this.summaries = [
       workspaceSummary({
@@ -133,8 +135,18 @@ const lifecycle = {
     this.results = [];
     this.previews = [];
     this.applied = [];
+    this.diskRequests = [];
   },
 };
+
+const MB = 1024 * 1024;
+const diskUsageOf = (worktreeId: string, main: boolean, bytes: number) => ({
+  worktreeId: WorktreeId.make(worktreeId),
+  main,
+  bytes,
+  partial: false,
+  measuredAt: FIXTURE_NOW_ISO,
+});
 
 function installDispatch() {
   dispatched = [];
@@ -214,6 +226,16 @@ function installDispatch() {
         );
       },
       listTrash: async () => ({ threads: [], truncated: false }),
+      diskUsage: async (input: WorkspaceDiskUsageInput) => {
+        lifecycle.diskRequests.push(input);
+        return {
+          workspaces: [
+            diskUsageOf("worktree-main", true, 1536 * MB),
+            diskUsageOf("worktree-projects", false, 512 * MB),
+            diskUsageOf("worktree-old", false, 100 * MB),
+          ],
+        };
+      },
     },
   } as unknown as EnvironmentApi);
 }
@@ -327,6 +349,28 @@ describe("Project page sections", () => {
       await checkouts.getByRole("button", { name: /Studio/ }).click();
       expect(projectsTestSearchLog.last()).toMatchObject({ env: STUDIO_ENV, project: RYCO_STUDIO });
     });
+
+    it("says how much disk each checkout takes, and breaks it down by workspace", async () => {
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL });
+      const checkouts = screen.getByRole("group", { name: "Checkouts" });
+      await expect
+        .poll(() => checkouts.getByRole("button", { name: /This device/ }).element().textContent)
+        .toContain("2.1 GB on disk");
+
+      const fold = screen.getByRole("button", { name: "On disk · 2.1 GB" });
+      await fold.click();
+      const rows = screen.getByRole("list", { name: "Disk usage by workspace" });
+      await expect
+        .poll(() =>
+          [...rows.element().querySelectorAll('[role="listitem"]')].map((row) => row.textContent),
+        )
+        .toEqual(["Main checkout1.5 GB", "projects-page512 MB", "old-experimentArchived100 MB"]);
+
+      await screen.getByRole("button", { name: "Measure again" }).click();
+      await expect
+        .poll(() => lifecycle.diskRequests.at(-1))
+        .toEqual({ projectId: RYCO_LOCAL, refresh: true });
+    });
   });
 
   describe("Section navigation", () => {
@@ -418,6 +462,23 @@ describe("Project page sections", () => {
         .poll(() => mapNode("workspace", "projects-page").textContent)
         .toContain("2 modified, 1 untracked");
       expect(mapNode("workspace", "projects-page").textContent).toContain("Unmerged commits");
+    });
+
+    it("says how much disk the project takes on each device, and measures again on request", async () => {
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
+      // Studio cannot measure here, so the project's total is a lower bound.
+      await expect.poll(() => mapNode("project", "on disk").textContent).toContain("≥ 2.1 GB");
+      expect(mapNode("device", "This device").textContent).toContain("2.1 GB");
+      expect(mapNode("workspace", "projects-page").textContent).toContain("512 MB");
+      expect(lifecycle.diskRequests).toEqual([{ projectId: RYCO_LOCAL, refresh: false }]);
+
+      await clickNode("project", "on disk");
+      const inspector = screen.getByRole("complementary", { name: "Details" });
+      await expect.element(inspector.getByText("On disk · At least 2.1 GB")).toBeVisible();
+      await inspector.getByRole("button", { name: "Measure again" }).click();
+      await expect
+        .poll(() => lifecycle.diskRequests.at(-1))
+        .toEqual({ projectId: RYCO_LOCAL, refresh: true });
     });
 
     it("fans a workspace's threads out from its tally, and folds them back", async () => {

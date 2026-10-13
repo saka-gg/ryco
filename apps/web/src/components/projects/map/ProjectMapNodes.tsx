@@ -23,6 +23,12 @@ import {
   type MapThread,
   type MapWorkspace,
 } from "./projectMap.logic";
+import {
+  diskSizeText,
+  formatDiskSize,
+  LOWER_BOUND_NOTE,
+  type DiskSize,
+} from "../sections/projectDiskUsage.logic";
 import { nextRunLabel } from "./projectMapModel";
 
 /** Ports are where wires plug in: the n8n read of "this connects to that". */
@@ -49,6 +55,21 @@ const TALLY_ORDER: Record<InboxGlyphKind, number> = {
   idle: 7,
 };
 
+/** Where a disk figure stands: still being measured, or no device can measure it. */
+export type MapDiskState = "measuring" | "unavailable" | "ready";
+
+/** A checkout's size, said quietly; a lower bound says so on hover. */
+function DiskSizeLabel(props: { readonly size: DiskSize; readonly className?: string }) {
+  return (
+    <span
+      className={cn("shrink-0 tabular-nums", props.className)}
+      title={props.size.partial ? LOWER_BOUND_NOTE : "Space on this device's disk"}
+    >
+      {formatDiskSize(props.size)}
+    </span>
+  );
+}
+
 /** A thread as a dot in a tally: the inbox's colour language, no motion. */
 function TallyDot(props: { readonly glyph: InboxGlyphKind; readonly archived: boolean }) {
   return (
@@ -61,9 +82,18 @@ export const MapProjectNode = memo(function MapProjectNode(props: {
   readonly devices: number;
   readonly workspaces: number;
   readonly threads: number;
+  /** Every device's checkouts together. */
+  readonly disk: DiskSize | null;
+  readonly diskState: MapDiskState;
   readonly repository: string | null;
 }) {
-  const { snapshot } = props;
+  const { snapshot, disk } = props;
+  const diskValue = disk ? formatDiskSize(disk) : props.diskState === "measuring" ? "…" : "—";
+  const diskTitle = disk
+    ? `${diskSizeText(disk)} across every device's checkouts: main checkout with its Git data, and worktrees.`
+    : props.diskState === "measuring"
+      ? "Measuring the checkouts…"
+      : "These devices cannot measure their checkouts.";
   return (
     <>
       <div className="flex items-center gap-2.5 px-3.5 pt-3.5">
@@ -85,19 +115,21 @@ export const MapProjectNode = memo(function MapProjectNode(props: {
           ? props.repository
           : snapshot.cwd}
       </div>
-      <div className="mt-2.5 grid grid-cols-3 border-t border-border/60">
+      <div className="mt-2.5 grid grid-cols-4 border-t border-border/60">
         {(
           [
-            [props.devices, props.devices === 1 ? "device" : "devices"],
-            [props.workspaces, props.workspaces === 1 ? "workspace" : "workspaces"],
-            [props.threads, props.threads === 1 ? "thread" : "threads"],
+            [props.devices, props.devices === 1 ? "device" : "devices", undefined],
+            [props.workspaces, props.workspaces === 1 ? "workspace" : "workspaces", undefined],
+            [props.threads, props.threads === 1 ? "thread" : "threads", undefined],
+            [diskValue, "on disk", diskTitle],
           ] as const
-        ).map(([value, label]) => (
+        ).map(([value, label, title]) => (
           <div
             key={label}
-            className="flex flex-col px-3.5 py-1.5 not-first:border-l not-first:border-border/60"
+            title={title}
+            className="flex min-w-0 flex-col px-3 py-1.5 not-first:border-l not-first:border-border/60"
           >
-            <span className="text-[14px] font-semibold tabular-nums">{value}</span>
+            <span className="truncate text-[14px] font-semibold tabular-nums">{value}</span>
             <span className="map-detail text-[10.5px] text-muted-foreground">{label}</span>
           </div>
         ))}
@@ -115,6 +147,8 @@ const STATUS_TEXT: Record<MapCheckout["status"], string> = {
 
 export const MapDeviceNode = memo(function MapDeviceNode(props: {
   readonly checkout: MapCheckout;
+  /** All of the device's checkouts of the project. */
+  readonly disk: DiskSize | null;
 }) {
   const { checkout } = props;
   return (
@@ -138,11 +172,11 @@ export const MapDeviceNode = memo(function MapDeviceNode(props: {
           </span>
         )}
       </div>
-      <div
-        className="map-detail truncate px-3 pt-1 pb-2.5 font-mono text-[11px] text-muted-foreground"
-        title="Checkout folder"
-      >
-        {checkout.cwd}
+      <div className="map-detail flex min-w-0 items-baseline gap-2 px-3 pt-1 pb-2.5 text-[11px] text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate font-mono" title="Checkout folder">
+          {checkout.cwd}
+        </span>
+        {props.disk ? <DiskSizeLabel size={props.disk} /> : null}
       </div>
     </>
   );
@@ -227,6 +261,12 @@ export const MapWorkspaceNode = memo(function MapWorkspaceNode(props: {
             <span>No threads</span>
           ) : null}
         </span>
+        {workspace.disk ? (
+          <DiskSizeLabel
+            size={workspace.disk}
+            className="map-detail text-[11px] leading-4 text-muted-foreground"
+          />
+        ) : null}
         {workspace.threads.length > 0 ? (
           <button
             type="button"

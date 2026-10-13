@@ -26,6 +26,11 @@ import { projectRepositoryLabel } from "../projectsModel.logic";
 import type { WorkspaceReviewAction } from "../projectsSearch";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
 import {
+  diskUsageMeasuring,
+  sumDiskSizes,
+  type DiskSize,
+} from "../sections/projectDiskUsage.logic";
+import {
   automationIdle,
   buildProjectMap,
   expandableWorkspaceKeys,
@@ -61,6 +66,7 @@ import {
   MapProjectNode,
   MapThreadNode,
   MapWorkspaceNode,
+  type MapDiskState,
   type MapPort,
 } from "./ProjectMapNodes";
 import { useMapCamera, type MapBounds, type MapMarquee } from "./useMapCamera";
@@ -559,6 +565,18 @@ export function ProjectMap() {
       }
     return { workspaces, threads };
   }, [checkouts]);
+  const disk = useMemo(() => {
+    const byCheckout = new Map<string, DiskSize | null>(
+      checkouts.map((checkout) => [checkout.key, sumDiskSizes(checkout.workspaces)]),
+    );
+    const total = sumDiskSizes(checkouts.flatMap((checkout) => checkout.workspaces));
+    const state: MapDiskState = details.some((detail) => diskUsageMeasuring(detail.diskUsage))
+      ? "measuring"
+      : details.some(({ diskUsage }) => diskUsage.status === "ready")
+        ? "ready"
+        : "unavailable";
+    return { byCheckout, total, state };
+  }, [checkouts, details]);
   const allExpandable = useMemo(() => expandableWorkspaceKeys(checkouts), [checkouts]);
 
   function renderNode(model: NodeModel, index: number, state: "live" | "exiting") {
@@ -571,10 +589,18 @@ export function ProjectMap() {
           devices={checkouts.length}
           workspaces={totals.workspaces}
           threads={totals.threads}
+          disk={disk.total}
+          diskState={disk.state}
           repository={projectRepositoryLabel(snapshot.repositoryIdentity)}
         />
       );
-    else if (node.kind === "device" && detail) body = <MapDeviceNode checkout={detail.checkout} />;
+    else if (node.kind === "device" && detail)
+      body = (
+        <MapDeviceNode
+          checkout={detail.checkout}
+          disk={disk.byCheckout.get(detail.checkout.key) ?? null}
+        />
+      );
     else if (workspace)
       body = (
         <MapWorkspaceNode

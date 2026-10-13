@@ -103,10 +103,12 @@ export function workspaceFacts(summary: WorkspaceLifecycleSummary): WorkspaceFac
  * checkout may be synthesized locally (no registered id), so it matches the
  * inspected main record instead.
  */
-export function findWorkspaceSummary(
-  summaries: readonly WorkspaceLifecycleSummary[],
+export function findWorkspaceSummary<
+  Summary extends { readonly worktreeId: string; readonly main: boolean },
+>(
+  summaries: readonly Summary[],
   row: { readonly worktreeId: string; readonly main: boolean },
-): WorkspaceLifecycleSummary | null {
+): Summary | null {
   return (
     summaries.find((summary) => summary.worktreeId === row.worktreeId) ??
     (row.main ? (summaries.find((summary) => summary.main) ?? null) : null)
