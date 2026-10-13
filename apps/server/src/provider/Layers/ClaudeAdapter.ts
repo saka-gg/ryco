@@ -1,5 +1,5 @@
 import { isClaudeNativeCompaction } from "../claudeNativeCompaction.ts";
-import { type ClaudeResumeState, readClaudeResumeState } from "../claudeResumeCursor.ts";
+import { readClaudeResumeState } from "../claudeResumeCursor.ts";
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
 import {
