@@ -1,16 +1,29 @@
-import { parseScopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import {
+  parseScopedThreadKey,
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@ryco/client-runtime/scoped";
 import { type ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useRef } from "react";
 
-import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
+import {
+  getFallbackThreadIdAfterDelete,
+  shouldConfirmSidebarThreadSelectionDelete,
+} from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { readEnvironmentApi } from "../environmentApi";
 import { sidebarUndo } from "../sidebarUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
-import { selectThreadByRef, selectThreadsForEnvironment, useStore } from "../store";
+import {
+  selectSidebarThreadSummaryByRef,
+  selectThreadByRef,
+  selectThreadsForEnvironment,
+  useStore,
+} from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "./useSettings";
@@ -352,11 +365,38 @@ export function useThreadActions() {
     [confirmThreadDelete, trashThread, resolveThreadTarget],
   );
 
+  /**
+   * Moves several threads to Trash after one confirmation (a multiple
+   * selection). False when the reader declined, so the selection can stay.
+   */
+  const confirmAndTrashThreads = useCallback(
+    async (targets: readonly ScopedThreadRef[]): Promise<boolean> => {
+      if (targets.length === 0) return true;
+      const state = useStore.getState();
+      const summaries = targets.map((target) => selectSidebarThreadSummaryByRef(state, target));
+      const localApi = readLocalApi();
+      if (
+        localApi &&
+        shouldConfirmSidebarThreadSelectionDelete({ confirmThreadDelete, threads: summaries })
+      ) {
+        const confirmed = await localApi.dialogs.confirm(
+          trashConfirmationMessage(summaries.map((summary) => summary?.title ?? "")),
+        );
+        if (!confirmed) return false;
+      }
+      const deletedThreadKeys = new Set(targets.map(scopedThreadKey));
+      for (const target of targets) await trashThread(target, { deletedThreadKeys });
+      return true;
+    },
+    [confirmThreadDelete, trashThread],
+  );
+
   return {
     archiveThread,
     unarchiveThread,
     trashThread,
     confirmAndTrashThread,
+    confirmAndTrashThreads,
     untrashThread,
     deleteThreadPermanently,
     stopThreadSession,

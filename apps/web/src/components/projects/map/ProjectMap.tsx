@@ -21,7 +21,7 @@ import {
 
 import { useEvent } from "../../../hooks/useEvent";
 import { readMotionDurationMs } from "../../../lib/perf/motion";
-import { cn } from "../../../lib/utils";
+import { cn, isMacPlatform } from "../../../lib/utils";
 import { projectRepositoryLabel } from "../projectsModel.logic";
 import type { WorkspaceReviewAction } from "../projectsSearch";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
@@ -38,7 +38,22 @@ import {
   type MapThread,
   type MapWorkspace,
 } from "./projectMap.logic";
-import { ProjectMapInspector, mapInspectorWidth, type MapSelection } from "./ProjectMapInspector";
+import { ProjectMapInspector, mapInspectorWidth } from "./ProjectMapInspector";
+import {
+  itemKey,
+  itemOfNode,
+  itemsInBox,
+  orderedItems,
+  rangeTo,
+  selectedItems,
+  selectionFromItems,
+  selectionKey,
+  selectionOf,
+  toggleItem,
+  visibleSelection,
+  type MapItemRef,
+  type MapSelection,
+} from "./projectMapSelection.logic";
 import {
   MapAutomationNode,
   MapDeviceNode,
@@ -48,30 +63,19 @@ import {
   MapWorkspaceNode,
   type MapPort,
 } from "./ProjectMapNodes";
-import { useMapCamera, type MapBounds } from "./useMapCamera";
+import { useMapCamera, type MapBounds, type MapMarquee } from "./useMapCamera";
 import { useProjectMapCheckouts, type MapCheckoutDetail } from "./useProjectMapCheckouts";
 
 const EXIT_MS = 240;
+/** The key that toggles a card in or out of the selection: ⌘ on macOS, ctrl elsewhere. */
+const isToggleModifier = (event: { readonly metaKey: boolean; readonly ctrlKey: boolean }) =>
+  isMacPlatform(navigator.platform) ? event.metaKey : event.ctrlKey;
+/** The item keys a selection holds, joined: equal when the same cards are picked. */
+const itemsSignature = (items: readonly MapItemRef[]) => items.map(itemKey).join("\n");
 /** How much of the canvas's right edge the inspector covers for a selection. */
 const inspectorInset = (selection: MapSelection | null) =>
   selection ? mapInspectorWidth(selection) + 24 : 0;
 const TOOLBAR_INSET = 44;
-
-function selectionKey(selection: MapSelection | null): string | null {
-  if (!selection) return null;
-  switch (selection.kind) {
-    case "project":
-      return mapKey.project();
-    case "device":
-      return mapKey.device(selection.checkoutKey);
-    case "workspace":
-      return mapKey.workspace(selection.checkoutKey, selection.id);
-    case "automation":
-      return mapKey.automation(selection.checkoutKey, selection.id);
-    case "thread":
-      return mapKey.thread(selection.checkoutKey, selection.id);
-  }
-}
 
 /** The checkout and tree id of a workspace a URL names (registered or tree id). */
 function findWorkspaceTarget(
@@ -83,20 +87,6 @@ function findWorkspaceTarget(
     for (const workspace of detail.checkout.workspaces)
       if (workspace.registeredId === requested || workspace.id === requested)
         return { checkoutKey: detail.checkout.key, id: workspace.id };
-  return null;
-}
-
-function selectionOf(node: MapNode): MapSelection | null {
-  if (node.kind === "project") return { kind: "project" };
-  if (!node.checkoutKey) return null;
-  if (node.kind === "device") return { kind: "device", checkoutKey: node.checkoutKey };
-  if (!node.refId) return null;
-  if (node.kind === "workspace")
-    return { kind: "workspace", checkoutKey: node.checkoutKey, id: node.refId };
-  if (node.kind === "automation")
-    return { kind: "automation", checkoutKey: node.checkoutKey, id: node.refId };
-  if (node.kind === "thread")
-    return { kind: "thread", checkoutKey: node.checkoutKey, id: node.refId };
   return null;
 }
 
@@ -234,10 +224,23 @@ export function ProjectMap() {
   const exitingNodes = useRetained(models, motionOn);
   const exitingEdges = useRetained(layout.edges, motionOn);
 
-  const [selection, setSelection] = useState<MapSelection | null>(null);
+  const [rawSelection, setSelection] = useState<MapSelection | null>(null);
+  /* Cards that left the map (hidden, folded, trashed) drop out of a multiple selection. */
+  const liveKeys = useMemo(() => new Set(layout.nodes.map((node) => node.key)), [layout.nodes]);
+  const selection = useMemo(
+    () => visibleSelection(rawSelection, liveKeys),
+    [liveKeys, rawSelection],
+  );
   const [hover, setHover] = useState<string | null>(null);
-  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dragKeys, setDragKeys] = useState<ReadonlySet<string> | null>(null);
   const selectedKey = selectionKey(selection);
+  const selectedKeys = useMemo(() => {
+    const keys = new Set(selectedItems(selection).map(itemKey));
+    if (selectedKey) keys.add(selectedKey);
+    return keys;
+  }, [selectedKey, selection]);
+  /* Where a shift-click range starts: the last card clicked on its own or toggled. */
+  const anchor = useRef<string | null>(null);
   const focusKey = hover ?? selectedKey;
   const lit = useMemo(
     () =>
@@ -261,6 +264,8 @@ export function ProjectMap() {
   const fitRequest = useRef<(animate: boolean) => void>(() => {});
   /* Until the reader moves the camera, the map keeps fitting as data arrives. */
   const autoFit = useRef(true);
+  /* The camera reports a marquee; the map knows what it touches. */
+  const marqueeRequest = useRef<(marquee: MapMarquee | null) => void>(() => {});
   const {
     hostRef,
     worldRef,
@@ -275,6 +280,7 @@ export function ProjectMap() {
     onUserMove: () => {
       autoFit.current = false;
     },
+    onMarquee: (marquee) => marqueeRequest.current(marquee),
   });
   const fitAll = useEvent((animate: boolean) => {
     autoFit.current = true;
@@ -325,11 +331,13 @@ export function ProjectMap() {
       insetTop: TOOLBAR_INSET,
     });
   });
-  const select = useEvent((next: MapSelection | null) => {
+  const select = useEvent((next: MapSelection | null, options?: { readonly reveal?: boolean }) => {
     setSelection(next);
     selectionInset.current = inspectorInset(next);
     const key = selectionKey(next);
-    if (key) requestAnimationFrame(() => revealKey(key, false));
+    if (!key) return;
+    anchor.current = key;
+    if (options?.reveal !== false) requestAnimationFrame(() => revealKey(key, false));
   });
 
   /* A workspace (and review) named by the URL: from a sidebar or Inbox menu. */
@@ -413,12 +421,50 @@ export function ProjectMap() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selection]);
 
-  /* Drag a node to move it; a press without movement selects it. */
+  /* A marquee adds what it touches to the selection it started from, live. */
+  const [marqueeBox, setMarqueeBox] = useState<MapBounds | null>(null);
+  const marqueeBase = useRef<readonly MapItemRef[] | null>(null);
+  const onMarquee = useEvent((marquee: MapMarquee | null) => {
+    if (!marquee) {
+      marqueeBase.current = null;
+      setMarqueeBox(null);
+      return;
+    }
+    marqueeBase.current ??= selectedItems(selection);
+    setMarqueeBox(marquee.screen);
+    const picked = [...marqueeBase.current, ...itemsInBox(layoutRef.current.nodes, marquee.world)];
+    if (itemsSignature(picked) !== itemsSignature(selectedItems(selection)))
+      select(selectionFromItems(picked), { reveal: false });
+  });
+  useEffect(() => {
+    marqueeRequest.current = onMarquee;
+  }, [onMarquee]);
+
+  /* ⌘/ctrl-A picks every card on the map, as in a file browser; not while typing. */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.key.toLowerCase() !== "a") return;
+      if (!isToggleModifier(event) || event.shiftKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const host = hostRef.current;
+      if (!host || (target && target !== document.body && !host.contains(target))) return;
+      if (target?.closest("input, textarea, select, [contenteditable]")) return;
+      const all = selectionFromItems(orderedItems(layoutRef.current.nodes));
+      if (!all) return;
+      event.preventDefault();
+      select(all, { reveal: false });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hostRef, select]);
+
+  /* Drag a node to move it (with the rest of a multiple selection it is
+     part of); a press without movement selects it. */
   const drag = useRef<{
     key: string;
     x: number;
     y: number;
-    base: { dx: number; dy: number };
+    bases: ReadonlyMap<string, { dx: number; dy: number }>;
     moved: boolean;
     node: MapNode;
   } | null>(null);
@@ -429,11 +475,12 @@ export function ProjectMap() {
     )
       return;
     event.stopPropagation();
+    const keys = selectedKeys.size > 1 && selectedKeys.has(node.key) ? selectedKeys : [node.key];
     drag.current = {
       key: node.key,
       x: event.clientX,
       y: event.clientY,
-      base: offsets.get(node.key) ?? { dx: 0, dy: 0 },
+      bases: new Map([...keys].map((key) => [key, offsets.get(key) ?? { dx: 0, dy: 0 }])),
       moved: false,
       node,
     };
@@ -449,18 +496,34 @@ export function ProjectMap() {
     if (!current.moved) {
       current.moved = true;
       autoFit.current = false;
-      setDragKey(current.key);
+      setDragKeys(new Set(current.bases.keys()));
     }
-    setOffsets((map) =>
-      new Map(map).set(current.key, { dx: current.base.dx + dx, dy: current.base.dy + dy }),
-    );
+    setOffsets((map) => {
+      const next = new Map(map);
+      for (const [key, base] of current.bases)
+        next.set(key, { dx: base.dx + dx, dy: base.dy + dy });
+      return next;
+    });
   });
-  const onNodePointerUp = useEvent(() => {
+  const onNodePointerUp = useEvent((event: React.PointerEvent) => {
     const current = drag.current;
     drag.current = null;
     if (!current) return;
     if (current.moved) {
-      setDragKey(null);
+      setDragKeys(null);
+      return;
+    }
+    /* As in a file browser: ⌘/ctrl toggles a card, shift picks the run from the anchor. */
+    const item = itemOfNode(current.node);
+    if (item && isToggleModifier(event)) {
+      select(toggleItem(selection, item), { reveal: false });
+      anchor.current = itemKey(item);
+      return;
+    }
+    if (item && event.shiftKey) {
+      select(rangeTo(selection, orderedItems(layout.nodes), anchor.current, item), {
+        reveal: false,
+      });
       return;
     }
     const next = selectionOf(current.node);
@@ -543,8 +606,8 @@ export function ProjectMap() {
         data-key={node.key}
         data-state={state}
         data-lit={lit ? (lit.has(node.key) ? "on" : "off") : undefined}
-        data-selected={live && node.key === selectedKey ? "" : undefined}
-        data-dragging={node.key === dragKey ? "" : undefined}
+        data-selected={live && selectedKeys.has(node.key) ? "" : undefined}
+        data-dragging={dragKeys?.has(node.key) ? "" : undefined}
         data-muted={
           workspace?.archived ||
           workspace?.checkoutRemoved ||
@@ -589,8 +652,10 @@ export function ProjectMap() {
         ref={hostRef}
         data-project-map=""
         data-focus={lit ? "" : undefined}
-        data-dragging={dragKey ? "" : undefined}
-        className="map-canvas @container/map relative min-h-0 flex-1 overflow-clip select-none"
+        data-dragging={dragKeys ? "" : undefined}
+        // Focusable so ⌘/ctrl-A and Escape reach the map once it is clicked.
+        tabIndex={-1}
+        className="map-canvas @container/map relative min-h-0 flex-1 overflow-clip outline-none select-none"
       >
         <div aria-hidden className="map-grid pointer-events-none absolute inset-0" />
         <div ref={worldRef} className="map-world absolute top-0 left-0 origin-top-left">
@@ -644,6 +709,18 @@ export function ProjectMap() {
           {models.map((model, index) => renderNode(model, index, "live"))}
           {exitingNodes.map((model, index) => renderNode(model, index, "exiting"))}
         </div>
+        {marqueeBox ? (
+          <div
+            aria-hidden
+            data-map-marquee=""
+            className="map-marquee pointer-events-none absolute top-0 left-0 z-[5]"
+            style={{
+              transform: `translate(${marqueeBox.x}px, ${marqueeBox.y}px)`,
+              width: marqueeBox.w,
+              height: marqueeBox.h,
+            }}
+          />
+        ) : null}
 
         <div
           data-map-ui

@@ -123,6 +123,78 @@ export function announceWorkspaceLifecycleResult(
   );
 }
 
+/** A workspace action that runs without a review: hiding or restoring the record. */
+export type WorkspaceDirectAction = Exclude<WorkspaceActionId, WorkspaceReviewAction>;
+
+const DIRECT_ACTION_DONE: Readonly<Record<WorkspaceDirectAction, string>> = {
+  archive: "Archived",
+  restore: "Restored",
+};
+
+const workspaces = (count: number) => `${count} workspace${count === 1 ? "" : "s"}`;
+
+/**
+ * One direct action over several workspaces (a multiple selection on the
+ * map): each is previewed and applied in turn, and the outcome is told once.
+ * Checkout changes are reviewed one workspace at a time, so they never batch.
+ */
+export async function runWorkspaceLifecycleBatch(
+  targets: ReadonlyArray<WorkspaceLifecycleTarget & { readonly action: WorkspaceDirectAction }>,
+): Promise<void> {
+  if (targets.length === 0) return;
+  const action = targets[0]!.action;
+  const failed: Array<{ readonly target: (typeof targets)[number]; readonly reason: string }> = [];
+  let done = 0;
+  for (const target of targets) {
+    const lifecycle = readLifecycleApi(target.environmentId);
+    if (!lifecycle) {
+      failed.push({ target, reason: "This device does not support workspace actions." });
+      continue;
+    }
+    try {
+      const preview = await lifecycle.previewWorkspace({
+        worktreeId: target.worktreeId,
+        action: target.action,
+      });
+      if (preview.blockers.length > 0) {
+        failed.push({ target, reason: preview.blockers.join(" ") });
+        continue;
+      }
+      const result = await lifecycle.applyWorkspace({
+        ...preview.request,
+        expectedFingerprint: preview.fingerprint,
+      });
+      if (result.outcome === "completed") done += 1;
+      else failed.push({ target, reason: result.message });
+    } catch (error) {
+      failed.push({
+        target,
+        reason: error instanceof Error ? error.message : "An error occurred.",
+      });
+    }
+  }
+  useWorkspaceLifecycleChanges.getState().markChanged();
+  const verb = DIRECT_ACTION_DONE[action];
+  if (failed.length === 0) {
+    toastManager.add({ type: "success", title: `${verb} ${workspaces(done)}` });
+    return;
+  }
+  toastManager.add(
+    stackedThreadToast({
+      type: done > 0 ? "warning" : "error",
+      title:
+        done > 0
+          ? `${verb} ${done} of ${workspaces(targets.length)}`
+          : `${WORKSPACE_LIFECYCLE_ACTION_LABELS[action]} did not run`,
+      description: failed.map(({ target, reason }) => `${target.title}: ${reason}`).join("\n"),
+      actionProps: {
+        children: "Retry",
+        onClick: () => void runWorkspaceLifecycleBatch(failed.map(({ target }) => target)),
+      },
+    }),
+  );
+}
+
 /**
  * Entry point for every surface (sidebar worktree menu, Inbox Workspace submenu,
  * the project page). Hiding/restoring a record runs directly; anything that
