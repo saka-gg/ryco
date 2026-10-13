@@ -458,9 +458,21 @@ export function resolveThreadBranchUpdate(
 export function resolveLiveThreadBranchUpdate(input: {
   worktreeBranchPrefix: string;
   threadBranch: string | null;
+  /** The checkout the thread runs in: its worktree, else the project root. */
+  threadCwd: string | null;
+  /** The checkout `gitStatus` was read from. */
+  gitCwd: string | null;
+  /** The branch the thread's worktree record holds, when it has one. */
+  worktreeBranch?: string | null | undefined;
   gitStatus: VcsStatusResult | null;
 }): { branch: string | null } | null {
   if (!input.gitStatus) {
+    return null;
+  }
+
+  // Status read from another checkout (the project root while a first send hands
+  // the draft over to its new worktree) says nothing about this thread's branch.
+  if (input.threadCwd === null || input.gitCwd !== input.threadCwd) {
     return null;
   }
 
@@ -472,11 +484,14 @@ export function resolveLiveThreadBranchUpdate(input: {
     return null;
   }
 
+  // A status still on the temporary branch after a rename is stale, unless the
+  // worktree record agrees with it: then the thread's stored branch is the wrong one.
   if (
     input.threadBranch !== null &&
     input.gitStatus.refName !== null &&
     !isTemporaryWorktreeBranch(input.threadBranch, input.worktreeBranchPrefix) &&
-    isTemporaryWorktreeBranch(input.gitStatus.refName, input.worktreeBranchPrefix)
+    isTemporaryWorktreeBranch(input.gitStatus.refName, input.worktreeBranchPrefix) &&
+    input.worktreeBranch !== input.gitStatus.refName
   ) {
     return null;
   }

@@ -8,7 +8,16 @@ import { Effect, Option } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { resolveProjectWorktreesDir } from "./projectMetadataPaths.ts";
 
-export const createWorktreeDirectoryId = (): string => randomBytes(4).toString("hex");
+/**
+ * Four hex characters: ids only need to be unique within one parent directory,
+ * and allocation retries against the disk and the reservation table. Directories
+ * created with the earlier eight-character ids keep them.
+ */
+export const createWorktreeDirectoryId = (): string => randomBytes(2).toString("hex");
+
+/** A managed directory name, with a current (4) or earlier (8) character id. */
+export const MANAGED_WORKTREE_DIRECTORY_SEGMENT =
+  /^(?:[a-f0-9]{4}|[a-f0-9]{8})_[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 
 export function worktreeDirectorySlug(value: string, fallback = "new-worktree"): string {
   return directorySlug(value, fallback);

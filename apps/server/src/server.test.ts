@@ -4389,7 +4389,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           assert.match(
             createdWorktreeInput?.path ?? "",
             new RegExp(
-              `^${expectedRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{8}_default-project/[a-f0-9]{8}_main$`,
+              `^${expectedRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{4}_default-project/[a-f0-9]{4}_main$`,
             ),
           );
 
@@ -4616,7 +4616,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       assert.match(
         path.basename(preparePullRequestThread.mock.calls[0]![0].worktreesDir!),
-        /^[a-f0-9]{8}_default-project$/,
+        /^[a-f0-9]{4}_default-project$/,
       );
       assert.equal(
         path.dirname(preparePullRequestThread.mock.calls[0]![0].worktreesDir!),
@@ -7704,7 +7704,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.match(
           createdWorktreeInput?.path ?? "",
           new RegExp(
-            `^${resolveManagedWorktreesRoot(config).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{8}_default-project/[a-f0-9]{8}_bootstrap-thread$`,
+            `^${resolveManagedWorktreesRoot(config).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/[a-f0-9]{4}_default-project/[a-f0-9]{4}_bootstrap-thread$`,
           ),
         );
         assert.deepEqual(runForThread.mock.calls[0]?.[0], {

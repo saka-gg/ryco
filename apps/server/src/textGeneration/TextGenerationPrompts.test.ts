@@ -125,9 +125,31 @@ describe("buildBranchNamePrompt", () => {
     expect(result.prompt).toContain("image/png");
     expect(result.prompt).toContain("12345 bytes");
   });
+
+  it("asks for the kind of change only when change types are wanted", () => {
+    const typed = buildBranchNamePrompt({ message: "Fix login", branchChangeTypes: true });
+    expect(typed.prompt).toContain("Start the branch with the kind of change, one of feat, fix,");
+    expect(typed.prompt).not.toContain("Use plain words only");
+
+    const plain = buildBranchNamePrompt({ message: "Fix login" });
+    expect(plain.prompt).not.toContain("kind of change");
+  });
 });
 
 describe("buildThreadTitlePrompt", () => {
+  it("asks for a typed branch alongside the title when change types are wanted", () => {
+    const typed = buildThreadTitlePrompt({
+      message: "Fix the reconnect spinner",
+      includeBranch: true,
+      branchChangeTypes: true,
+    });
+    expect(typed.prompt).toContain("for example fix/login-redirect");
+    expect(
+      buildThreadTitlePrompt({ message: "Fix the reconnect spinner", branchChangeTypes: true })
+        .prompt,
+    ).not.toContain("kind of change");
+  });
+
   it("asks for a title and a branch in one response when the branch is wanted", () => {
     const combined = buildThreadTitlePrompt({
       message: "Fix the reconnect spinner",

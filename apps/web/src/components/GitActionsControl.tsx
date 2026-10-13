@@ -1,5 +1,5 @@
 import { type ChangeRequest, type ScopedThreadRef, WorktreeId } from "@ryco/contracts";
-import { scopedThreadKey } from "@ryco/client-runtime/scoped";
+import { scopeProjectRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import type {
   GitActionProgressEvent,
   GitRunStackedActionResult,
@@ -126,7 +126,11 @@ import { useServerConfig } from "~/rpc/serverState";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useStore } from "~/store";
-import { createThreadSelectorByRef } from "~/storeSelectors";
+import {
+  createProjectSelectorByRef,
+  createThreadSelectorByRef,
+  createWorktreeSelector,
+} from "~/storeSelectors";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 
 interface GitActionsControlProps {
@@ -1187,6 +1191,26 @@ function useThreadBranchPersistence(
         ? store.getDraftThreadByRef(activeThreadRef)
         : null,
   );
+  const activeWorktreeSelector = useMemo(
+    () => createWorktreeSelector(activeThreadRef?.environmentId, activeServerThread?.worktreeId),
+    [activeThreadRef?.environmentId, activeServerThread?.worktreeId],
+  );
+  const activeWorktree = useStore(activeWorktreeSelector);
+  const projectOwner = activeServerThread ?? activeDraftThread ?? null;
+  const projectEnvironmentId = projectOwner?.environmentId ?? null;
+  const projectId = projectOwner?.projectId ?? null;
+  const activeProjectSelector = useMemo(
+    () =>
+      createProjectSelectorByRef(
+        projectEnvironmentId && projectId ? scopeProjectRef(projectEnvironmentId, projectId) : null,
+      ),
+    [projectEnvironmentId, projectId],
+  );
+  const activeProjectCwd = useStore(activeProjectSelector)?.cwd ?? null;
+  const activeThreadCwd =
+    (activeServerThread !== undefined
+      ? activeServerThread.worktreePath
+      : (activeDraftThread?.worktreePath ?? null)) ?? activeProjectCwd;
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const setThreadBranch = useStore((store) => store.setThreadBranch);
 
@@ -1203,6 +1227,25 @@ function useThreadBranchPersistence(
 
         const worktreePath = activeServerThread.worktreePath;
         const api = readEnvironmentApi(activeThreadRef.environmentId);
+        // A branch renamed in the checkout (by the agent, or in a terminal) also
+        // renames its worktree record, so the sidebar and inbox show the live name.
+        if (
+          api &&
+          branch !== null &&
+          worktreePath !== null &&
+          activeWorktree !== null &&
+          activeWorktree.branch !== branch
+        ) {
+          void api.orchestration
+            .dispatchCommand({
+              type: "worktree.meta.update",
+              commandId: newCommandId(),
+              worktreeId: WorktreeId.make(activeWorktree.id),
+              branch,
+              changedAt: new Date().toISOString(),
+            })
+            .catch(() => undefined);
+        }
         if (api) {
           void api.orchestration
             .dispatchCommand({
@@ -1232,13 +1275,20 @@ function useThreadBranchPersistence(
       activeDraftThread,
       activeServerThread,
       activeThreadRef,
+      activeWorktree,
       draftId,
       setDraftThreadContext,
       setThreadBranch,
     ],
   );
 
-  return { activeServerThread, activeDraftThread, persistThreadBranchSync };
+  return {
+    activeServerThread,
+    activeDraftThread,
+    activeThreadCwd,
+    activeWorktreeBranch: activeWorktree?.branch ?? null,
+    persistThreadBranchSync,
+  };
 }
 
 /**
@@ -1255,8 +1305,13 @@ export function GitThreadSync({
 }: Pick<GitActionsControlProps, "gitCwd" | "activeThreadRef" | "draftId">): null {
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
   const worktreeBranchPrefix = useWorktreeBranchPrefix(activeEnvironmentId);
-  const { activeServerThread, activeDraftThread, persistThreadBranchSync } =
-    useThreadBranchPersistence(activeThreadRef, draftId);
+  const {
+    activeServerThread,
+    activeDraftThread,
+    activeThreadCwd,
+    activeWorktreeBranch,
+    persistThreadBranchSync,
+  } = useThreadBranchPersistence(activeThreadRef, draftId);
   const { data: gitStatus = null } = useGitStatus({
     environmentId: activeEnvironmentId,
     cwd: gitCwd,
@@ -1276,6 +1331,9 @@ export function GitThreadSync({
     const branchUpdate = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix,
       threadBranch: activeServerThread?.branch ?? activeDraftThread?.branch ?? null,
+      threadCwd: activeThreadCwd,
+      gitCwd,
+      worktreeBranch: activeWorktreeBranch,
       gitStatus,
     });
     if (!branchUpdate) {
@@ -1286,6 +1344,9 @@ export function GitThreadSync({
   }, [
     activeServerThread?.branch,
     activeDraftThread?.branch,
+    activeThreadCwd,
+    activeWorktreeBranch,
+    gitCwd,
     gitStatus,
     isGitActionRunning,
     isSelectingWorktreeBase,

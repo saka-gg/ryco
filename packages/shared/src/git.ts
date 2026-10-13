@@ -139,9 +139,27 @@ export function isManagedWorktreeBranch(
   );
 }
 
+/** The kinds of change a generated branch may start with, as in `fix/login-redirect`. */
+export const WORKTREE_BRANCH_CHANGE_TYPES = [
+  "feat",
+  "fix",
+  "refactor",
+  "perf",
+  "docs",
+  "test",
+  "build",
+  "ci",
+  "chore",
+] as const;
+
+/**
+ * With `changeTypes`, a name the model started with a known kind of change
+ * (`fix/…`) replaces the prefix namespace; any other name stays under the prefix.
+ */
 export function buildGeneratedWorktreeBranchName(
   raw: string,
   prefix: string = WORKTREE_BRANCH_PREFIX,
+  options?: { readonly changeTypes?: boolean | undefined },
 ): string {
   const normalized = raw
     .trim()
@@ -151,9 +169,20 @@ export function buildGeneratedWorktreeBranchName(
     (candidate) =>
       candidate.length > 0 && normalized.toLowerCase().startsWith(`${candidate.toLowerCase()}/`),
   );
-  const fragment =
-    existingPrefix === undefined ? normalized : normalized.slice(existingPrefix.length + 1);
-  return prefixWorktreeBranch(sanitizeBranchFragment(fragment), prefix);
+  const fragment = sanitizeBranchFragment(
+    existingPrefix === undefined ? normalized : normalized.slice(existingPrefix.length + 1),
+  );
+  if (options?.changeTypes === true) {
+    const [changeType = "", ...rest] = fragment.split("/");
+    const description = rest.join("-");
+    if (
+      /[a-z0-9]/.test(description) &&
+      (WORKTREE_BRANCH_CHANGE_TYPES as ReadonlyArray<string>).includes(changeType)
+    ) {
+      return `${changeType}/${sanitizeBranchFragment(description)}`;
+    }
+  }
+  return prefixWorktreeBranch(fragment, prefix);
 }
 
 /**

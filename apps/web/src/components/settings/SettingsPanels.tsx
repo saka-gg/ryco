@@ -812,6 +812,38 @@ export function GeneralSettingsPanel({
                 }
               />
             )}
+
+            {!isPhoneTier && (
+              <SettingsRow
+                title="Name branches by change type"
+                description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
+                owner="node"
+                scope={nodeScopeLabel}
+                resetAction={
+                  settings.worktreeBranchChangeTypes !==
+                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
+                    <SettingResetButton
+                      label="change type branch names"
+                      onClick={() =>
+                        updateSettings({
+                          worktreeBranchChangeTypes:
+                            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
+                        })
+                      }
+                    />
+                  ) : null
+                }
+                control={
+                  <Switch
+                    checked={settings.worktreeBranchChangeTypes}
+                    onCheckedChange={(checked) =>
+                      updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
+                    }
+                    aria-label="Name worktree branches by change type"
+                  />
+                }
+              />
+            )}
           </>
         )}
 

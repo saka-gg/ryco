@@ -66,6 +66,8 @@ export interface BranchNameGenerationInput {
   cwd: string;
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** Start the branch with the kind of change, as in `fix/login-redirect`. */
+  branchChangeTypes?: boolean;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }
@@ -80,6 +82,8 @@ export interface ThreadTitleGenerationInput {
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
   /** When true, the same request also names a git branch for the work (one call, not two). */
   includeBranch?: boolean;
+  /** Start that branch with the kind of change, as in `fix/login-redirect`. */
+  branchChangeTypes?: boolean;
   /** What model and provider to use for generation. */
   modelSelection: ModelSelection;
 }

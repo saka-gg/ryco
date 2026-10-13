@@ -8,6 +8,7 @@
  */
 import { Schema } from "effect";
 import { ThreadPriorityCandidateRanking, type ChatAttachment } from "@ryco/contracts";
+import { WORKTREE_BRANCH_CHANGE_TYPES } from "@ryco/shared/git";
 
 import { limitSection } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
@@ -162,8 +163,12 @@ export function buildPrContentPrompt(input: PrContentPromptInput) {
 export interface BranchNamePromptInput {
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  /** Start the branch with the kind of change, as in `fix/login-redirect`. */
+  branchChangeTypes?: boolean | undefined;
   policy?: TextGenerationPolicy | undefined;
 }
+
+const BRANCH_CHANGE_TYPE_RULE = `Start the branch with the kind of change, one of ${WORKTREE_BRANCH_CHANGE_TYPES.join(", ")}, then a slash and 2-6 plain words (for example fix/login-redirect); no issue prefixes.`;
 
 interface PromptFromMessageInput {
   instruction: string;
@@ -209,7 +214,9 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput) {
     rules: [
       "Branch should describe the requested work from the user message.",
       "Keep it short and specific (2-6 words).",
-      "Use plain words only, no issue prefixes and no punctuation-heavy text.",
+      input.branchChangeTypes === true
+        ? BRANCH_CHANGE_TYPE_RULE
+        : "Use plain words only, no issue prefixes and no punctuation-heavy text.",
       "If images are attached, use them as primary context for visual/UI issues.",
     ],
     message: input.message,
@@ -232,6 +239,8 @@ export interface ThreadTitlePromptInput {
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
   /** Also ask for a git branch name for the same work, in the same response. */
   includeBranch?: boolean | undefined;
+  /** Start that branch with the kind of change, as in `fix/login-redirect`. */
+  branchChangeTypes?: boolean | undefined;
   policy?: TextGenerationPolicy | undefined;
 }
 
@@ -250,7 +259,9 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
       "Avoid quotes, filler, prefixes, and trailing punctuation.",
       ...(wantsBranch
         ? [
-            "Branch should describe the requested work in 2-6 plain words, with no issue prefixes and no punctuation-heavy text.",
+            input.branchChangeTypes === true
+              ? `Branch should describe the requested work. ${BRANCH_CHANGE_TYPE_RULE}`
+              : "Branch should describe the requested work in 2-6 plain words, with no issue prefixes and no punctuation-heavy text.",
           ]
         : []),
       "If images are attached, use them as primary context for visual/UI issues.",

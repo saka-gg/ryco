@@ -663,6 +663,9 @@ export const ServerSettings = Schema.Struct({
   worktreeBranchPrefix: WorktreeBranchPrefix.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKTREE_BRANCH_PREFIX)),
   ),
+  // Generated worktree branch names start with the kind of change (fix/, feat/, ...)
+  // instead of the prefix. The prefix still names the temporary branch of the first turn.
+  worktreeBranchChangeTypes: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   defaultThreadEnvMode: ThreadEnvMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("local" as const satisfies ThreadEnvMode)),
   ),
@@ -836,6 +839,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(Schema.String, Schema.NullOr(WorktreeRoot)),
   ),
   worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
+  worktreeBranchChangeTypes: Schema.optionalKey(Schema.Boolean),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   defaultAgentTokenMode: Schema.optionalKey(AgentTokenMode),
   addProjectBaseDirectory: Schema.optionalKey(Schema.String),

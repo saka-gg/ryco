@@ -338,6 +338,10 @@ describe("worktree branch prefix settings", () => {
     expect(decodeServerSettings({}).worktreeBranchPrefix).toBe("ryco");
     expect(DEFAULT_SERVER_SETTINGS.worktreeBranchPrefix).toBe("ryco");
     expect(decodeServerSettingsPatch({})).not.toHaveProperty("worktreeBranchPrefix");
+    expect(decodeServerSettings({}).worktreeBranchChangeTypes).toBe(true);
+    expect(
+      decodeServerSettings({ worktreeBranchChangeTypes: false }).worktreeBranchChangeTypes,
+    ).toBe(false);
   });
 
   it.each(["", "team", "Team/agents", "team.v2", "agent_work", "team-1"])(

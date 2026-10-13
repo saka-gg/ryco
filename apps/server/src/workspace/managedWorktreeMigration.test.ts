@@ -257,7 +257,7 @@ describe("managed worktree migration", () => {
       const rows = await f.journal();
       expect(rows[0]?.state).toBe("complete");
       const target = rows[0]!.destination_path;
-      expect(target).toMatch(/original-root\/[a-f0-9]{8}_ryco\/[a-f0-9]{8}_fix-login$/);
+      expect(target).toMatch(/original-root\/[a-f0-9]{4}_ryco\/[a-f0-9]{4}_fix-login$/);
       expect(await fs.readFile(path.join(target, "keep.txt"), "utf8")).toBe("unsaved-on-disk");
       expect(f.git(f.repo, "worktree", "list", "--porcelain")).toContain(`worktree ${target}`);
       const snapshot = await f.runtime.runPromise(f.snapshots.getShellSnapshot());

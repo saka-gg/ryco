@@ -1099,6 +1099,62 @@ describe("resolveThreadBranchUpdate", () => {
 });
 
 describe("resolveLiveThreadBranchUpdate", () => {
+  const CHECKOUT = "/worktrees/0a1b_fix-login";
+
+  it("ignores status read from another checkout during the draft handoff", () => {
+    assert.equal(
+      resolveLiveThreadBranchUpdate({
+        worktreeBranchPrefix: "ryco",
+        threadBranch: "ryco/c459ff02",
+        threadCwd: CHECKOUT,
+        gitCwd: "/repo",
+        gitStatus: status({ refName: "main" }),
+      }),
+      null,
+    );
+  });
+
+  it("ignores status while the thread's checkout is unknown", () => {
+    assert.equal(
+      resolveLiveThreadBranchUpdate({
+        worktreeBranchPrefix: "ryco",
+        threadBranch: "main",
+        threadCwd: null,
+        gitCwd: CHECKOUT,
+        gitStatus: status({ refName: "ryco/c459ff02" }),
+      }),
+      null,
+    );
+  });
+
+  it("repairs a stored branch when the worktree record agrees with the temporary live branch", () => {
+    assert.deepEqual(
+      resolveLiveThreadBranchUpdate({
+        worktreeBranchPrefix: "ryco",
+        threadBranch: "main",
+        threadCwd: CHECKOUT,
+        gitCwd: CHECKOUT,
+        worktreeBranch: "ryco/940f4976",
+        gitStatus: status({ refName: "ryco/940f4976" }),
+      }),
+      { branch: "ryco/940f4976" },
+    );
+  });
+
+  it("keeps a renamed branch while the worktree record has already moved on", () => {
+    assert.equal(
+      resolveLiveThreadBranchUpdate({
+        worktreeBranchPrefix: "ryco",
+        threadBranch: "fix/login-redirect",
+        threadCwd: CHECKOUT,
+        gitCwd: CHECKOUT,
+        worktreeBranch: "fix/login-redirect",
+        gitStatus: status({ refName: "ryco/940f4976" }),
+      }),
+      null,
+    );
+  });
+
   it.each(["team/tools/deadbeef", "ryco/deadbeef"])(
     "does not regress to %s after configuring a prefix",
     (refName) => {
@@ -1106,6 +1162,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
         resolveLiveThreadBranchUpdate({
           worktreeBranchPrefix: "team/tools",
           threadBranch: "team/tools/fix-bug",
+          threadCwd: CHECKOUT,
+          gitCwd: CHECKOUT,
           gitStatus: status({ refName }),
         }),
         null,
@@ -1117,6 +1175,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
     const update = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix: "ryco",
       threadBranch: "feature/old-ref",
+      threadCwd: CHECKOUT,
+      gitCwd: CHECKOUT,
       gitStatus: status({ refName: "effect-atom" }),
     });
 
@@ -1129,6 +1189,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
     const update = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix: "ryco",
       threadBranch: "feature/old-ref",
+      threadCwd: CHECKOUT,
+      gitCwd: CHECKOUT,
       gitStatus: null,
     });
 
@@ -1139,6 +1201,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
     const update = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix: "ryco",
       threadBranch: "effect-atom",
+      threadCwd: CHECKOUT,
+      gitCwd: CHECKOUT,
       gitStatus: status({ refName: "effect-atom" }),
     });
 
@@ -1149,6 +1213,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
     const update = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix: "ryco",
       threadBranch: "effect-atom",
+      threadCwd: CHECKOUT,
+      gitCwd: CHECKOUT,
       gitStatus: status({ refName: null }),
     });
 
@@ -1159,6 +1225,8 @@ describe("resolveLiveThreadBranchUpdate", () => {
     const update = resolveLiveThreadBranchUpdate({
       worktreeBranchPrefix: "ryco",
       threadBranch: "ryco/github-query-rate-limit",
+      threadCwd: CHECKOUT,
+      gitCwd: CHECKOUT,
       gitStatus: status({ refName: "ryco/bda76797" }),
     });
 
