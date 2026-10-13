@@ -1337,7 +1337,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           const canRevertAgentWork = typeof row.revertTurnCount === "number";
           return (
             <div className="flex justify-end">
-              <div className="group flex max-w-[80%] flex-col items-end">
+              <div className="group flex min-w-0 max-w-[80%] flex-col items-end">
                 <div
                   className="relative rounded-2xl rounded-br-sm bg-foreground/8 px-3 py-2 shadow-md/5 transition-[background-color,box-shadow] duration-200 group-hover:bg-foreground/10 group-hover:shadow-lg/8"
                   {...messageLongPress}
@@ -2294,7 +2294,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
         }
 
         return (
-          <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
+          <div className="whitespace-pre-wrap wrap-anywhere text-sm leading-relaxed text-foreground">
             {inlineNodes}
           </div>
         );
@@ -2330,7 +2330,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     }
 
     return (
-      <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
+      <div className="whitespace-pre-wrap wrap-anywhere text-sm leading-relaxed text-foreground">
         {inlineNodes}
       </div>
     );
@@ -2341,7 +2341,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   }
 
   return (
-    <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
+    <div className="whitespace-pre-wrap wrap-anywhere text-sm leading-relaxed text-foreground">
       <SkillInlineText text={props.text} skills={props.skills} searchHighlight={searchHighlight} />
     </div>
   );

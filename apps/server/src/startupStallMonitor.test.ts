@@ -1,5 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
+import { vi } from "vitest";
 
 import {
   describeStartupPhasesOverlapping,
@@ -8,13 +10,24 @@ import {
   trackStartupPhase,
 } from "./startupStallMonitor.ts";
 
-const blockEventLoop = (ms: number) =>
-  Effect.sync(() => {
-    const until = Date.now() + ms;
-    while (Date.now() < until) {
-      // Busy-wait: simulates synchronous work that stalls the event loop.
-    }
-  });
+// Native histogram sampling and JS timers can run in either order after a busy-wait.
+// Control the sensor and the sampling clock so CI load cannot hide the stall.
+const histogram = vi.hoisted(() => {
+  const sensor = {
+    max: 0,
+    enable: vi.fn(),
+    disable: vi.fn(),
+    reset: vi.fn(() => {
+      sensor.max = 0;
+    }),
+  };
+  return sensor;
+});
+
+vi.mock("node:perf_hooks", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:perf_hooks")>();
+  return { ...actual, monitorEventLoopDelay: vi.fn(() => histogram) };
+});
 
 describe("startupStallMonitor", () => {
   it.effect("reports phases in flight and phases that ended inside the window", () =>
@@ -41,7 +54,7 @@ describe("startupStallMonitor", () => {
     }),
   );
 
-  it.live("reports an event-loop stall with the phase that caused it", () =>
+  it.effect("reports an event-loop stall with the phase that caused it", () =>
     Effect.gen(function* () {
       const reports: Array<StartupStallReport> = [];
       const phase = `test.blocking.${crypto.randomUUID()}`;
@@ -49,14 +62,23 @@ describe("startupStallMonitor", () => {
         { windowMs: 1_500, sampleIntervalMs: 20, eventLoopStallMs: 150, threadpoolStallMs: 10_000 },
         (report) => Effect.sync(() => reports.push(report)),
       ).pipe(Effect.forkChild);
-      yield* Effect.sleep("100 millis");
-      yield* trackStartupPhase(phase, blockEventLoop(300));
-      yield* Effect.sleep("200 millis");
+      yield* TestClock.adjust(20);
+      expect(reports).toEqual([]);
+      yield* trackStartupPhase(
+        phase,
+        Effect.sync(() => {
+          histogram.max = 300_000_000;
+        }),
+      );
+      yield* TestClock.adjust(20);
+      yield* TestClock.adjust(20);
       yield* Fiber.interrupt(monitor);
 
-      const stall = reports.find((report) => report.kind === "event-loop");
-      expect(stall?.delayMs).toBeGreaterThanOrEqual(150);
-      expect(stall?.phases.some((name) => name.startsWith(phase))).toBe(true);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({ kind: "event-loop", delayMs: 300 });
+      expect(reports[0]?.phases.some((name) => name.startsWith(phase))).toBe(true);
+      expect(histogram.enable).toHaveBeenCalledOnce();
+      expect(histogram.disable).toHaveBeenCalledOnce();
     }),
   );
 });

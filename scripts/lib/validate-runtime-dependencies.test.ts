@@ -76,6 +76,28 @@ describe("staged runtime imports", () => {
     expect(() => validateStagedRuntimeDependencies(stage)).toThrow(/provider\.mjs -> missing-sdk/);
   });
 
+  it("allows Bun SQLite in the backend's lazy client while validating the chunk and its dependencies", () => {
+    const stage = fixture();
+    write(stage, "apps/server/dist/bin.mjs", 'export const load = () => import("./sqlite.mjs");');
+    write(stage, "apps/server/dist/sqlite.mjs", 'import { Database } from "bun:sqlite";');
+    expect(validateStagedRuntimeDependencies(stage)).toBe(1);
+
+    write(stage, "apps/server/dist/sqlite.mjs", 'import "bun:sqlite"; import "missing-sdk";');
+    expect(() => validateStagedRuntimeDependencies(stage)).toThrow(/sqlite\.mjs -> missing-sdk/);
+    rmSync(join(stage, "apps/server/dist/sqlite.mjs"));
+    expect(() => validateStagedRuntimeDependencies(stage)).toThrow(/bin\.mjs -> \.\/sqlite\.mjs/);
+  });
+
+  it("rejects Bun SQLite in Electron and unknown Bun specifiers in the backend", () => {
+    const stage = fixture();
+    write(stage, "apps/desktop/dist-electron/main.cjs", 'require("bun:sqlite");');
+    expect(() => validateStagedRuntimeDependencies(stage)).toThrow(/main\.cjs -> bun:sqlite/);
+
+    write(stage, "apps/desktop/dist-electron/main.cjs", 'require("electron");');
+    write(stage, "apps/server/dist/bin.mjs", 'import "bun:missing";');
+    expect(() => validateStagedRuntimeDependencies(stage)).toThrow(/bin\.mjs -> bun:missing/);
+  });
+
   it("does not resolve a missing dependency from ancestor development node_modules", () => {
     const stage = fixture();
     dependency(dirname(stage), "workspace-only", "./index.js");

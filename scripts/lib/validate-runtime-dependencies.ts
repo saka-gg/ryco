@@ -96,6 +96,9 @@ export function validateStagedRuntimeDependencies(stageAppDir: string): number {
       for (const imported of collectRuntimeImports(readFileSync(importer, "utf8"))) {
         if (isBuiltin(imported.specifier) || (electron && imported.specifier === "electron"))
           continue;
+        // The shared backend bundles a lazy SQLite client selected only under Bun.
+        // Its builtin has no staged file; Node desktop launches use NodeSqliteClient instead.
+        if (!electron && imported.specifier === "bun:sqlite") continue;
         imports.push({ ...imported, importer });
       }
     }
