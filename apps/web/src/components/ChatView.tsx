@@ -118,7 +118,6 @@ import {
   isLatestTurnSettled,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
-import { selectEnvironmentShellLive } from "@ryco/client-runtime/state/threads";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadSummaryByRef,
