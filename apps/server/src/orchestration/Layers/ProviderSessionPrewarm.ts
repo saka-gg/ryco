@@ -4,9 +4,11 @@ import { stat } from "node:fs/promises";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   ProviderDriverKind,
+  type ProviderInstanceId,
   type ProviderSession,
   type ProviderSessionPrewarmInput,
   type ProviderSessionPrewarmResult,
+  type RuntimeSessionId,
   type ThreadId,
 } from "@ryco/contracts";
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect";
@@ -81,44 +83,62 @@ export const makeProviderSessionPrewarm = Effect.fnUntraced(function* (
     return true;
   };
 
+  type StartedSession = ProviderSession & {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly runtimeSessionId: RuntimeSessionId;
+  };
+  const isStarted = (session: ProviderSession | undefined): session is StartedSession =>
+    session?.runtimeSessionId !== undefined && session.providerInstanceId !== undefined;
+  const bindingOf = (session: StartedSession) => ({
+    threadId: session.threadId,
+    provider: session.provider,
+    providerInstanceId: session.providerInstanceId,
+    runtimeSessionId: session.runtimeSessionId,
+  });
+
   /**
-   * Stops exactly the runtime an entry started (never a successor bound since). With
-   * `discardNativeConversation`, also clears the resume cursor that start persisted, but only
-   * while the binding is still that runtime's: a successor's binding is left alone.
+   * Clears the resume cursor a start persisted for a conversation the provider never kept, but
+   * only while the binding is still that runtime's: a successor's binding is left alone.
    */
-  const stopRuntime = (
-    session: ProviderSession | undefined,
-    reason: string,
-    discardNativeConversation: boolean,
-  ) => {
-    if (session?.runtimeSessionId === undefined || session.providerInstanceId === undefined) {
-      return Effect.void;
-    }
-    const binding = {
-      threadId: session.threadId,
-      provider: session.provider,
-      providerInstanceId: session.providerInstanceId,
-      runtimeSessionId: session.runtimeSessionId,
-    };
-    return providerService.stopSessionBinding(binding).pipe(
-      Effect.tap((result) =>
-        Effect.logDebug("provider.session.prewarm.stopped", {
-          threadId: session.threadId,
-          reason,
-          result,
-        }),
-      ),
-      Effect.andThen(
-        discardNativeConversation
-          ? providerService.retireSessionBinding(binding)
-          : Effect.succeed(false),
-      ),
+  const discardNativeConversation = (session: StartedSession, reason: string) =>
+    providerService.retireSessionBinding(bindingOf(session)).pipe(
+      Effect.asVoid,
       Effect.catchCause((cause) =>
-        Effect.logWarning("provider.session.prewarm.stop-failed", {
+        Effect.logWarning("provider.session.prewarm.discard-failed", {
           threadId: session.threadId,
           reason,
           cause: Cause.pretty(cause),
         }),
+      ),
+    );
+
+  /** Stops exactly the runtime an entry started (never a successor bound since). */
+  const stopRuntime = (
+    session: ProviderSession | undefined,
+    reason: string,
+    discardConversation: boolean,
+  ) => {
+    if (!isStarted(session)) return Effect.void;
+    // The cursor goes first. Each step takes the thread's start lock on its own, so a send
+    // landing between them then starts fresh instead of resuming what this runtime never kept.
+    return (discardConversation ? discardNativeConversation(session, reason) : Effect.void).pipe(
+      Effect.andThen(
+        providerService.stopSessionBinding(bindingOf(session)).pipe(
+          Effect.tap((result) =>
+            Effect.logDebug("provider.session.prewarm.stopped", {
+              threadId: session.threadId,
+              reason,
+              result,
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider.session.prewarm.stop-failed", {
+              threadId: session.threadId,
+              reason,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
       ),
     );
   };
@@ -233,10 +253,14 @@ export const makeProviderSessionPrewarm = Effect.fnUntraced(function* (
       const resolved = yield* resolveStart(input);
       if (resolved === "already-running") return { status: "already-running" } as const;
       if (typeof resolved === "string") return skipped(resolved);
-      const { start, opensNativeConversation } = resolved;
+      const { start } = resolved;
       const key = threadProviderStartKey(start);
       const existing = entries.get(input.threadId);
       if (existing?.key === key) return { status: "pending" } as const;
+      // The cursor `resolveStart` saw may be the one the entry being replaced persisted; retiring
+      // that entry drops it, so the replacement opens a new conversation just the same.
+      const opensNativeConversation =
+        resolved.opensNativeConversation || existing?.opensNativeConversation === true;
       if (existing) yield* retire(existing, "replaced");
       if (!(yield* makeRoom(start))) return skipped("prewarm pool full");
       const entry: Entry = {

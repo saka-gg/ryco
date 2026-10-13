@@ -2466,9 +2466,35 @@ describe("ProviderCommandReactor", () => {
         }),
       );
     // Promotion stops the sessions; the binding keeps its cursor and cwd.
-    const stopRuntime = async (harness: Harness) => {
+    const stopRuntime = async (
+      harness: Harness,
+      options?: { readonly completedTurn?: boolean },
+    ) => {
       harness.runtimeSessions.splice(0);
       const now = new Date().toISOString();
+      // The mock sendTurn projects no turn: a completed one needs a running session that
+      // names it, released below by the stop (see the delegation fixture).
+      if (options?.completedTurn) {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-session-running-${crypto.randomUUID()}`),
+            threadId: T,
+            session: {
+              threadId: T,
+              status: "running",
+              providerName: "claudeAgent",
+              providerInstanceId: CLAUDE.instanceId,
+              runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+              runtimeMode: "approval-required",
+              activeTurnId: asTurnId("turn-1"),
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          }),
+        );
+      }
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.session.set",
@@ -2485,6 +2511,16 @@ describe("ProviderCommandReactor", () => {
             lastError: null,
             updatedAt: now,
           },
+          ...(options?.completedTurn
+            ? {
+                turnOutcome: {
+                  turnId: asTurnId("turn-1"),
+                  state: "completed" as const,
+                  reason: "provider-turn-completed" as const,
+                  completedAt: now,
+                },
+              }
+            : {}),
           createdAt: now,
         }),
       );
@@ -2655,6 +2691,64 @@ describe("ProviderCommandReactor", () => {
         messageId: "after-move",
         detail: "Permission denied",
       });
+    });
+
+    // Codex keeps a thread's rollout only once a turn ran: a cursor an unclaimed prewarm (or a
+    // crash before the first turn) persisted resumes nothing. With no completed turn there is
+    // nothing to lose, so the start retries fresh instead of failing every send for good.
+    it("starts fresh when a thread without a completed turn resumes a missing conversation", async () => {
+      const harness = await createHarness({
+        startSessionEffect: ({ call }) =>
+          call === 1
+            ? Effect.fail(
+                new ProviderAdapterProcessError({
+                  provider: "codex",
+                  threadId: "thread-1",
+                  detail: "Codex App Server failed to resume the thread.",
+                  cause: new Error(
+                    "no rollout found for thread id 019a0000-0000-7000-8000-000000000001",
+                  ),
+                }),
+              )
+            : undefined,
+      });
+      await sendMessage(harness, "first");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ resumePolicy: "fresh" });
+      expect(await failuresOf(harness)).toEqual([]);
+    });
+
+    it("keeps failing when a thread with a completed turn resumes a missing conversation", async () => {
+      const harness = await createHarness({
+        threadModelSelection: CLAUDE,
+        startSessionEffect: ({ call }) =>
+          call === 2
+            ? Effect.fail(
+                new ProviderAdapterProcessError({
+                  provider: "codex",
+                  threadId: "thread-1",
+                  detail: "Codex App Server failed to resume the thread.",
+                  cause: new Error(
+                    "no rollout found for thread id 019a0000-0000-7000-8000-000000000002",
+                  ),
+                }),
+              )
+            : undefined,
+      });
+      await sendMessage(harness, "first");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await stopRuntime(harness, { completedTurn: true });
+
+      await sendMessage(harness, "second");
+      await waitFor(async () => (await failuresOf(harness)).length === 1);
+      await harness.drain();
+
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).not.toHaveProperty("resumePolicy", "fresh");
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
     });
 
     it("defers a mode restart to the next turn instead of resuming a moved conversation", async () => {
@@ -7527,6 +7621,24 @@ describe("ProviderCommandReactor", () => {
       await waitFor(() => harness.retireSessionBinding.mock.calls.length === 1);
       expect(harness.retireSessionBinding).toHaveBeenCalledWith(
         expect.objectContaining({ runtimeSessionId: "runtime-1" }),
+      );
+    });
+
+    // The replacement's start reads the cursor its predecessor persisted; it must still count
+    // as opening a new conversation, or its own stop leaves a cursor nothing can resume.
+    it("drops the resume cursor of a prewarm that replaced another new-conversation prewarm", async () => {
+      const harness = await prewarmHarness({ prewarm: { idleTimeout: "200 millis" } });
+      await harness.run(harness.prewarm!.prewarm({ threadId }));
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      await harness.run(
+        harness.prewarm!.prewarm({
+          threadId,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-mini" },
+        }),
+      );
+      await waitFor(() => harness.retireSessionBinding.mock.calls.length === 2);
+      expect(harness.retireSessionBinding).toHaveBeenLastCalledWith(
+        expect.objectContaining({ runtimeSessionId: "runtime-2" }),
       );
     });
 

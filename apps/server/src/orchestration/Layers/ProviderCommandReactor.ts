@@ -64,6 +64,7 @@ import {
   ThreadId,
   type ProviderInteractionMode,
   type ProviderSession,
+  type ProviderSessionResumePolicy,
   type RuntimeMode,
   type AgentTokenMode,
   type TurnId,
@@ -887,12 +888,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
 
     // Fenced: a Stop cancels the start (pending or in flight). The start is
     // detached inside ProviderService, so cancelling it returns at once.
-    const startProviderSession = (input?: { readonly resumeCursor?: unknown }) =>
+    const startProviderSession = (input?: {
+      readonly resumeCursor?: unknown;
+      readonly resumePolicy?: ProviderSessionResumePolicy;
+    }) =>
       laneControl.guardStart(
         startFence,
         providerService.startSession(
           threadId,
-          threadProviderStartInput(desiredStart, input?.resumeCursor),
+          threadProviderStartInput(desiredStart, input),
           heldPathLease !== undefined ? { heldPathLease } : undefined,
         ),
       );
@@ -931,6 +935,25 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           createdAt,
         });
       });
+
+    /**
+     * A start that finds no conversation to resume, on a thread no turn ever completed in and
+     * that inherits none, starts fresh instead: the persisted cursor can only name a
+     * conversation the provider never kept (a prewarm's unused thread/start, a crash before
+     * the first turn; Codex writes a rollout with the first turn), so nothing is lost. Other
+     * threads keep the failure, since their context would need a handoff.
+     */
+    const startFreshWhenConversationMissing = (start: ReturnType<typeof startProviderSession>) =>
+      thread.latestCompletedTurnAt != null || thread.lineage != null
+        ? start
+        : start.pipe(
+            Effect.catchIf(isMissingConversationError, (error) =>
+              Effect.logInfo(
+                "provider command reactor started fresh after the persisted conversation was not found",
+                { threadId, kind: options.kind, cause: Cause.pretty(Cause.fail(error)) },
+              ).pipe(Effect.andThen(startProviderSession({ resumePolicy: "fresh" }))),
+            ),
+          );
 
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
@@ -1104,6 +1127,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       }
     }
     const startedSession = yield* startProviderSession(undefined).pipe(
+      startFreshWhenConversationMissing,
       failMissingMovedConversation(relocation, options.kind),
     );
     yield* bindSessionToThread(startedSession);

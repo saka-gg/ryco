@@ -12,6 +12,7 @@ import type {
   ModelSelection,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionResumePolicy,
   ProviderSessionStartInput,
   RuntimeMode,
   ThreadId,
@@ -31,7 +32,10 @@ export interface ThreadProviderStart {
 
 export function threadProviderStartInput(
   start: ThreadProviderStart,
-  resumeCursor?: unknown,
+  options?: {
+    readonly resumeCursor?: unknown;
+    readonly resumePolicy?: ProviderSessionResumePolicy;
+  },
 ): ProviderSessionStartInput {
   return {
     threadId: start.threadId,
@@ -39,7 +43,8 @@ export function threadProviderStartInput(
     providerInstanceId: start.providerInstanceId,
     ...(start.cwd ? { cwd: start.cwd } : {}),
     modelSelection: start.modelSelection,
-    ...(resumeCursor !== undefined ? { resumeCursor } : {}),
+    ...(options?.resumeCursor !== undefined ? { resumeCursor: options.resumeCursor } : {}),
+    ...(options?.resumePolicy !== undefined ? { resumePolicy: options.resumePolicy } : {}),
     runtimeMode: start.runtimeMode,
     tokenMode: start.tokenMode,
     ...(start.customSystemPrompt !== undefined
