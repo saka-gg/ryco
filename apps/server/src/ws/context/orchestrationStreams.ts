@@ -266,6 +266,7 @@ export const toShellStreamEvent = (
   switch (event.type) {
     case "project.created":
     case "project.meta-updated":
+    case "project.avatar-set":
       return projectionSnapshotQuery.getProjectShellById(event.payload.projectId).pipe(
         Effect.map((project) =>
           Option.map(project, (nextProject) => ({

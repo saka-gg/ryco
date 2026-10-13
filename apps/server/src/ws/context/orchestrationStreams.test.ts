@@ -378,6 +378,39 @@ describe("toShellStreamEvent", () => {
     }),
   );
 
+  it.effect("streams a new project image as a project upsert from the SQL row", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-1");
+      const project = {
+        id: projectId,
+        customAvatarContentHash: "hash-2",
+      } as unknown as OrchestrationProjectShell;
+      const result = yield* toShellStreamEvent(
+        {
+          ...makeQuery(Option.none()),
+          getProjectShellById: () => Effect.succeed(Option.some(project)),
+        },
+        {
+          sequence: 9,
+          eventId: EventId.make("event-avatar-9"),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: "2026-04-05T00:00:03.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "project.avatar-set",
+          payload: { projectId, contentHash: "hash-2", updatedAt: "2026-04-05T00:00:03.000Z" },
+        },
+      );
+      assert.deepStrictEqual(
+        result,
+        Option.some({ kind: "project-upserted" as const, sequence: 9, project }),
+      );
+    }),
+  );
+
   it.effect("drops unmapped non-thread events", () =>
     Effect.gen(function* () {
       const result = yield* toShellStreamEvent(makeQuery(Option.some(mergedWorktree)), {

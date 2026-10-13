@@ -79,6 +79,7 @@ export function makeThreadReadCacheShellMirror(
     switch (event.type) {
       case "project.created":
       case "project.meta-updated":
+      case "project.avatar-set":
         projects.add(event.payload.projectId);
         return;
       case "worktree.created":
