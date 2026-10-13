@@ -39,6 +39,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const traeLaunch = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "trae" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(traeLaunch, {
         command: "trae",
@@ -49,6 +51,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace", editor: "kiro" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(kiroLaunch, {
         command: "kiro",
@@ -59,6 +62,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace", editor: "vscode" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodeLaunch, {
         command: "code",
@@ -68,6 +72,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const vscodeInsidersLaunch = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "vscode-insiders" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodeInsidersLaunch, {
         command: "code-insiders",
@@ -77,6 +83,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const vscodiumLaunch = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace", editor: "vscodium" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodiumLaunch, {
         command: "codium",
@@ -104,6 +112,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace", editor: "zed" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(zedLaunch, {
         command: "zed",
@@ -271,6 +280,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const traeLineAndColumn = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "trae" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(traeLineAndColumn, {
         command: "trae",
@@ -281,6 +292,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "kiro" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(kiroLineAndColumn, {
         command: "kiro",
@@ -291,6 +303,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscode" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodeLineAndColumn, {
         command: "code",
@@ -300,6 +313,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const vscodeInsidersLineAndColumn = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscode-insiders" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodeInsidersLineAndColumn, {
         command: "code-insiders",
@@ -309,6 +324,8 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
       const vscodiumLineAndColumn = yield* resolveEditorLaunch(
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "vscodium" },
         "darwin",
+        { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(vscodiumLineAndColumn, {
         command: "codium",
@@ -319,6 +336,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace/src/open.ts:71:5", editor: "zed" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(zedLineAndColumn, {
         command: "zed",
@@ -329,6 +347,7 @@ it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
         { cwd: "/tmp/workspace/AGENTS.md:48", editor: "zed" },
         "darwin",
         { PATH: "" },
+        { darwinAppRoots: [] },
       );
       assert.deepEqual(zedLineOnly, {
         command: "zed",
@@ -861,6 +880,8 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
 
       const bundles: ReadonlyArray<readonly [string, string]> = [
         ["Windsurf.app/Contents/Resources/app/bin", "windsurf"],
+        ["Visual Studio Code.app/Contents/Resources/app/bin", "code"],
+        ["Zed.app/Contents/MacOS", "cli"],
         ["Positron.app/Contents/Resources/app/bin", "positron"],
         ["Sublime Text.app/Contents/SharedSupport/bin", "subl"],
         ["Xcode.app/Contents/Developer/usr/bin", "xed"],
@@ -899,6 +920,8 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
         subl: "sublime-text",
         xed: "xcode",
         studio: "android-studio",
+        code: "vscode",
+        cli: "zed",
       };
       for (const [, binary] of bundles) {
         assert.include(editors, editorIdByBinary[binary] ?? binary);

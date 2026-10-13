@@ -11,11 +11,16 @@ import {
   VSCodium,
   Zed,
 } from "../Icons";
+import { isMacPlatform, isWindowsPlatform } from "../../lib/utils";
 import {
   AndroidStudioIcon,
+  ExplorerIcon,
+  FinderIcon,
   NovaIcon,
   PositronIcon,
   SublimeTextIcon,
+  TerminalAppIcon,
+  WindowsTerminalIcon,
   WindsurfIcon,
   XcodeIcon,
 } from "../OpenAppIcons";
@@ -68,6 +73,19 @@ export const EDITOR_ICONS = {
 
 export { getEditorLabel };
 
+/** Icon of an editor target; the file manager uses the platform's own app icon. */
+export function getEditorIcon(editor: EditorId, platform: string): Icon {
+  if (editor === "file-manager") {
+    if (isMacPlatform(platform)) return FinderIcon;
+    if (isWindowsPlatform(platform)) return ExplorerIcon;
+  }
+  if (editor === "terminal") {
+    if (isMacPlatform(platform)) return TerminalAppIcon;
+    if (isWindowsPlatform(platform)) return WindowsTerminalIcon;
+  }
+  return EDITOR_ICONS[editor];
+}
+
 export function resolveEditorOptions(
   platform: string,
   availableEditors: ReadonlyArray<EditorId>,
@@ -75,7 +93,7 @@ export function resolveEditorOptions(
   const available = new Set(availableEditors);
   return EDITORS.filter((editor) => available.has(editor.id)).map((editor) => ({
     label: getEditorLabel(editor.id, platform),
-    Icon: EDITOR_ICONS[editor.id],
+    Icon: getEditorIcon(editor.id, platform),
     value: editor.id,
   }));
 }
