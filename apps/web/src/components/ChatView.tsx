@@ -615,7 +615,6 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.setStickyModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
-  const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const routerNavigate = useNavigate();
   const navigate = useCallback<typeof routerNavigate>(
     (options) => (paneFocusedRef.current ? routerNavigate(options) : Promise.resolve()),
@@ -3248,7 +3247,6 @@ export default function ChatView(props: ChatViewProps) {
   // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
   // Don't auto-open for plans carried over from a previous turn (the user can open manually).
   useEffect(() => {
-    if (!autoOpenPlanSidebar) return;
     if (!activePlan) return;
     if (planSidebarOpen) return;
     const latestTurnId = activeLatestTurn?.turnId ?? null;
@@ -3281,13 +3279,7 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
     setPlanSidebarOpen(true);
-  }, [
-    activePlan,
-    activeLatestTurn?.turnId,
-    autoOpenPlanSidebar,
-    planSidebarOpen,
-    sidebarProposedPlan?.turnId,
-  ]);
+  }, [activePlan, activeLatestTurn?.turnId, planSidebarOpen, sidebarProposedPlan?.turnId]);
 
   useEffect(() => {
     if (!activeThread?.id || terminalState.terminalOpen) return;
@@ -4729,7 +4721,7 @@ export default function ChatView(props: ChatViewProps) {
         // Optimistically open the plan sidebar when implementing (not refining).
         // "default" mode here means the agent is executing the plan, which produces
         // step-tracking activities that the sidebar will display.
-        if (nextInteractionMode === "default" && autoOpenPlanSidebar) {
+        if (nextInteractionMode === "default") {
           planSidebarDismissedForTurnRef.current = null;
           setPlanSidebarOpen(true);
         }
@@ -4763,7 +4755,6 @@ export default function ChatView(props: ChatViewProps) {
       setComposerDraftInteractionMode,
       setComposerDraftTokenMode,
       setThreadError,
-      autoOpenPlanSidebar,
       prepareEditorSend,
       environmentId,
       tokenMode,
@@ -4862,8 +4853,8 @@ export default function ChatView(props: ChatViewProps) {
         return waitForStartedServerThread(scopeThreadRef(activeThread.environmentId, nextThreadId));
       })
       .then(() => {
-        // Signal that the plan sidebar should open on the new thread when enabled.
-        planSidebarOpenOnNextThreadRef.current = autoOpenPlanSidebar;
+        // Signal that the plan sidebar should open on the new thread.
+        planSidebarOpenOnNextThreadRef.current = true;
         return navigate({
           to: "/$environmentId/$threadId",
           params: {
@@ -4916,7 +4907,6 @@ export default function ChatView(props: ChatViewProps) {
     resetLocalDispatch,
     runtimeMode,
     tokenMode,
-    autoOpenPlanSidebar,
     prepareEditorSend,
     environmentId,
   ]);

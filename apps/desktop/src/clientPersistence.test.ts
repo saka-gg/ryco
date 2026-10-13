@@ -53,7 +53,6 @@ function makeSecretStorage(available: boolean): DesktopSecretStorage {
 const clientSettings: ClientSettings = {
   aiFocusEnabled: false,
   aiFocusRefreshIntervalMs: 600_000,
-  autoOpenPlanSidebar: false,
   confirmThreadArchive: true,
   confirmThreadDelete: false,
   confirmThreadUnpin: false,

@@ -95,7 +95,6 @@ export const ClientSettingsSchema = Schema.Struct({
   aiFocusRefreshIntervalMs: AiFocusRefreshIntervalMs.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AI_FOCUS_REFRESH_INTERVAL_MS)),
   ),
-  autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -883,7 +882,6 @@ export const ClientSettingsPatch = Schema.Struct({
   localOnboardingCompletedEnvironmentIds: Schema.optionalKey(Schema.Array(EnvironmentId)),
   aiFocusEnabled: Schema.optionalKey(Schema.Boolean),
   aiFocusRefreshIntervalMs: Schema.optionalKey(AiFocusRefreshIntervalMs),
-  autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),

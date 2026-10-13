@@ -931,7 +931,6 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       "ryco:client-settings:v1",
       JSON.stringify({
         ...DEFAULT_CLIENT_SETTINGS,
-        autoOpenPlanSidebar: true,
       }),
     );
     const mounted = await mountChatView({
@@ -998,7 +997,6 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       "ryco:client-settings:v1",
       JSON.stringify({
         ...DEFAULT_CLIENT_SETTINGS,
-        autoOpenPlanSidebar: true,
       }),
     );
     const mounted = await mountChatView({

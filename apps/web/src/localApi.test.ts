@@ -694,7 +694,6 @@ describe("wsApi", () => {
     const clientSettings = {
       aiFocusEnabled: false,
       aiFocusRefreshIntervalMs: 600_000 as const,
-      autoOpenPlanSidebar: false,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,
@@ -765,7 +764,6 @@ describe("wsApi", () => {
     const clientSettings = {
       aiFocusEnabled: false,
       aiFocusRefreshIntervalMs: 600_000 as const,
-      autoOpenPlanSidebar: false,
       confirmThreadArchive: true,
       confirmThreadDelete: false,
       confirmThreadUnpin: false,

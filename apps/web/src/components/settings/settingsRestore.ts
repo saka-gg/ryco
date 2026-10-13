@@ -9,7 +9,6 @@ const RESTORABLE_SETTINGS = {
   followUpBehavior: "Follow-up while working",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
-  autoOpenPlanSidebar: "Auto-open overview",
   enableLegacyTokenStreaming: "Stream token by token",
   enableProviderUpdateChecks: "Provider update checks",
   continueThreadsAfterRestart: "Continue after restart",

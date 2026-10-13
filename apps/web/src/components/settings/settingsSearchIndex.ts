@@ -160,13 +160,6 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
-    title: "Auto-open overview",
-    owner: "client",
-    description: "Open the overview when plans or progress appear.",
-    keywords: "panel plan",
-  },
-  {
-    section: "general",
     title: "New threads",
     owner: "node",
     description: "Default workspace mode for newly created drafts.",

@@ -695,34 +695,6 @@ export function GeneralSettingsPanel({
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}
       <SettingsSection title="Projects & threads">
-        <SettingsRow
-          title="Auto-open overview"
-          description="Open the overview automatically when plans, progress, or implementation steps appear."
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
-              <SettingResetButton
-                label="auto-open overview"
-                onClick={() =>
-                  updateSettings({
-                    autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.autoOpenPlanSidebar}
-              onCheckedChange={(checked) =>
-                updateSettings({ autoOpenPlanSidebar: Boolean(checked) })
-              }
-              aria-label="Open the overview automatically"
-            />
-          }
-        />
-
         {(!supportsProjectPreferences || isPhoneTier) && (
           <>
             <SettingsRow
