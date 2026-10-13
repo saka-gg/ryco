@@ -27,7 +27,12 @@ export function deriveThreadActivityStatus(
   if (thread.hasPendingApprovals) return "approval";
   if (thread.hasPendingUserInput) return "input";
   const phase = derivePhase(thread.session);
-  if (phase === "running" || thread.latestTurn?.state === "running") return "working";
+  if (
+    phase === "running" ||
+    thread.latestTurn?.state === "running" ||
+    thread.backgroundLiveness === "working"
+  )
+    return "working";
   if (phase === "connecting") return "connecting";
   if (
     isPlanFollowUpReady({
@@ -38,7 +43,6 @@ export function deriveThreadActivityStatus(
     })
   )
     return "plan-ready";
-  if (thread.backgroundLiveness === "working") return "working";
   if (thread.backgroundLiveness === "monitoring") return "monitoring";
   return "idle";
 }

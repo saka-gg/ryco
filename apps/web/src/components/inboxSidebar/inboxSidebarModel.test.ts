@@ -1238,3 +1238,35 @@ describe("delegated thread folding", () => {
     expect(ids(section(sections, "recent")?.rows)).toEqual(["child"]);
   });
 });
+
+it("keeps a settled foreground turn with background work Working across inbox and status pills", () => {
+  const background = thread("background", {
+    interactionMode: "plan",
+    hasActionableProposedPlan: true,
+    backgroundLiveness: "working",
+    latestTurn: {
+      turnId: TurnId.make("settled-turn"),
+      state: "completed",
+      requestedAt: "2026-08-23T10:00:00.000Z",
+      startedAt: "2026-08-23T10:00:00.000Z",
+      completedAt: "2026-08-23T10:01:00.000Z",
+      assistantMessageId: null,
+    },
+  });
+  const rows = build({ threads: [background] }).flatMap((section) => section.rows);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ state: "working", statusLabel: "Working" });
+  expect(resolveThreadStatusPill({ thread: background })).toMatchObject({
+    label: "Working",
+    pulse: true,
+  });
+  expect(
+    resolveThreadStatusPill({ thread: { ...background, hasPendingApprovals: true } }),
+  ).toMatchObject({ label: "Pending Approval" });
+  expect(
+    resolveThreadStatusPill({ thread: { ...background, hasPendingUserInput: true } }),
+  ).toMatchObject({ label: "Awaiting Input" });
+  expect(
+    resolveThreadStatusPill({ thread: { ...background, backgroundLiveness: null } }),
+  ).toMatchObject({ label: "Plan Ready" });
+});

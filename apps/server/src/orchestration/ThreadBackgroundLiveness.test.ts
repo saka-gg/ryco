@@ -53,7 +53,7 @@ describe("ThreadBackgroundLiveness", () => {
     expect(liveness.listLiveThreadIds()).toEqual(["t-monitor"]);
   });
 
-  it("agents present as working; monitors as monitoring; agents win", () => {
+  it("keeps working until both agents and background tasks finish", () => {
     const liveness = ThreadBackgroundLiveness.make();
     const threadId = "t-live-1";
     liveness.recordTaskLiveness({
@@ -63,7 +63,7 @@ describe("ThreadBackgroundLiveness", () => {
       status: undefined,
       kind: "started",
     });
-    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
     liveness.recordTaskLiveness({
       threadId,
       taskId: "a1",
@@ -79,7 +79,7 @@ describe("ThreadBackgroundLiveness", () => {
       status: "completed",
       kind: "completed",
     });
-    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
     liveness.recordTaskLiveness({
       threadId,
       taskId: "m1",
@@ -148,7 +148,7 @@ describe("ThreadBackgroundLiveness", () => {
       kind: "progress",
       agentId: "",
     });
-    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
     liveness.recordTaskLiveness({
       threadId,
       taskId: "b2",
@@ -202,8 +202,8 @@ describe("ThreadBackgroundLiveness", () => {
       kind: "started",
     });
     expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
-    // Later transition reveals it's a shell: downgrade to monitoring, not
-    // a stale duplicate pinning "working".
+    // Later transition reveals it is a shell: it still counts as work,
+    // but must not leave a duplicate agent entry behind.
     liveness.recordTaskLiveness({
       threadId,
       taskId: "x1",
@@ -211,7 +211,7 @@ describe("ThreadBackgroundLiveness", () => {
       status: "running",
       kind: "progress",
     });
-    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
     // Turning out to be inert or agent-owned drops the prior entry too.
     liveness.recordTaskLiveness({
       threadId,
@@ -254,12 +254,12 @@ it("retains monitor classification on sparse updates and ignores late terminal-t
   const base = { threadId: "history", taskId: "monitor", taskType: undefined, status: undefined };
   liveness.recordTaskLiveness({ ...base, taskType: "local_bash", kind: "started", attempt: 1 });
   liveness.recordTaskLiveness({ ...base, kind: "updated", status: "running" });
-  expect(liveness.getThreadBackgroundLiveness("history")).toBe("monitoring");
+  expect(liveness.getThreadBackgroundLiveness("history")).toBe("working");
   liveness.recordTaskLiveness({ ...base, kind: "completed" });
   liveness.recordTaskLiveness({ ...base, kind: "updated", status: "running" });
   expect(liveness.getThreadBackgroundLiveness("history")).toBeNull();
   liveness.recordTaskLiveness({ ...base, kind: "started", attempt: 2 });
-  expect(liveness.getThreadBackgroundLiveness("history")).toBe("monitoring");
+  expect(liveness.getThreadBackgroundLiveness("history")).toBe("working");
 });
 
 it("settles workflow-owned members with the coordinator, including delayed member updates", () => {
@@ -289,3 +289,24 @@ it("settles workflow-owned members with the coordinator, including delayed membe
   });
   expect(liveness.getThreadBackgroundLiveness("workflow")).toBeNull();
 });
+
+it.each(["local_bash", "shell", "monitor", "monitor_mcp"])(
+  "keeps %s working through sparse updates until it stops",
+  (taskType) => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const task = { threadId: "background", taskId: "task", taskType, status: "running" };
+    liveness.recordTaskLiveness({ ...task, kind: "started" });
+    expect(liveness.getThreadBackgroundLiveness(task.threadId)).toBe("working");
+    liveness.recordTaskLiveness({
+      ...task,
+      taskType: undefined,
+      status: undefined,
+      kind: "progress",
+    });
+    expect(liveness.getThreadBackgroundLiveness(task.threadId)).toBe("working");
+    liveness.recordTaskLiveness({ ...task, status: "stopped", kind: "updated" });
+    expect(liveness.getThreadBackgroundLiveness(task.threadId)).toBeNull();
+    liveness.recordTaskLiveness({ ...task, kind: "progress" });
+    expect(liveness.getThreadBackgroundLiveness(task.threadId)).toBeNull();
+  },
+);
