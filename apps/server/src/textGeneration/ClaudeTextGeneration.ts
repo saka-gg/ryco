@@ -364,6 +364,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const { prompt, outputSchema } = buildBranchNamePrompt({
       message: input.message,
       attachments: input.attachments,
+      branchChangeTypes: input.branchChangeTypes,
     });
 
     const generated = yield* runClaudeNamingJson({
@@ -386,6 +387,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       message: input.message,
       attachments: input.attachments,
       includeBranch: input.includeBranch,
+      branchChangeTypes: input.branchChangeTypes,
     });
 
     const generated = yield* runClaudeNamingJson({

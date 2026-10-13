@@ -18,7 +18,10 @@ import {
   isStoragePathBlocked,
   storageLifecycleLock,
 } from "../storage/lifecycle.ts";
-import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
+import {
+  MANAGED_WORKTREE_DIRECTORY_SEGMENT,
+  resolveWorktreeCheckoutPath,
+} from "../project/worktreeCheckoutPaths.ts";
 import { validateWorktreeRoot } from "../project/worktreeRoot.ts";
 import { assertWorktreeSetupComplete } from "../project/worktreeSetupState.ts";
 import {
@@ -68,7 +71,7 @@ export function makeManagedWorktreeMigration(
 ) {
   const passLock = Semaphore.makeUnsafe(1);
   const validateLayout = (row: Relocation) => {
-    const segment = /^[a-f0-9]{8}_[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
+    const segment = MANAGED_WORKTREE_DIRECTORY_SEGMENT;
     if (
       !path.isAbsolute(row.source_path) ||
       !path.isAbsolute(row.destination_path) ||

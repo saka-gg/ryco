@@ -1,7 +1,13 @@
 import "../index.css";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { EnvironmentId, ThreadId, type ServerConfig, type VcsStatusResult } from "@ryco/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  type ServerConfig,
+  type VcsStatusResult,
+} from "@ryco/contracts";
 import { useState } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -11,6 +17,8 @@ const SHARED_THREAD_ID = ThreadId.make("thread-shared");
 const ENVIRONMENT_A = EnvironmentId.make("environment-local");
 const ENVIRONMENT_B = EnvironmentId.make("environment-remote");
 const GIT_CWD = "/repo/project";
+const PROJECT_ID = ProjectId.make("project-shared");
+const WORKTREE_CWD = "/repo/worktrees/0a1b_task";
 const BRANCH_NAME = "feature/toast-scope";
 
 function createDeferredPromise<T>() {
@@ -35,6 +43,7 @@ const {
   pullMutateAsyncSpy,
   liveBranchRef,
   hasServerThreadRef,
+  serverThreadWorktreePathRef,
   refreshGitStatusSpy,
   runStackedActionMutateAsyncSpy,
   setDraftThreadContextSpy,
@@ -54,6 +63,7 @@ const {
   ),
   liveBranchRef: { current: "" },
   hasServerThreadRef: { current: true },
+  serverThreadWorktreePathRef: { current: null as string | null },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
   runStackedActionMutateAsyncSpy: vi.fn(() => activeRunStackedActionDeferredRef.current.promise),
   setDraftThreadContextSpy: vi.fn(),
@@ -223,11 +233,13 @@ vi.mock("~/store", () => ({
             ? {
                 [SHARED_THREAD_ID]: {
                   id: SHARED_THREAD_ID,
+                  projectId: PROJECT_ID,
                   branch: BRANCH_NAME,
-                  worktreePath: null,
+                  worktreePath: serverThreadWorktreePathRef.current,
                 },
               }
             : {},
+          projectById: { [PROJECT_ID]: { id: PROJECT_ID, cwd: GIT_CWD } },
           threadSessionById: {},
           threadTurnStateById: {},
           messageIdsByThreadId: {},
@@ -244,11 +256,13 @@ vi.mock("~/store", () => ({
             ? {
                 [SHARED_THREAD_ID]: {
                   id: SHARED_THREAD_ID,
+                  projectId: PROJECT_ID,
                   branch: BRANCH_NAME,
-                  worktreePath: null,
+                  worktreePath: serverThreadWorktreePathRef.current,
                 },
               }
             : {},
+          projectById: { [PROJECT_ID]: { id: PROJECT_ID, cwd: GIT_CWD } },
           threadSessionById: {},
           threadTurnStateById: {},
           messageIdsByThreadId: {},
@@ -339,6 +353,7 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     activeRunStackedActionDeferredRef.current = createDeferredPromise<never>();
     activeDraftThreadRef.current = null;
     hasServerThreadRef.current = true;
+    serverThreadWorktreePathRef.current = null;
     primaryServerConfigRef.current = null;
     resetPrimaryEnvironmentDescriptorForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
@@ -460,6 +475,7 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     hasServerThreadRef.current = false;
     activeDraftThreadRef.current = {
       threadId: SHARED_THREAD_ID,
+      projectId: PROJECT_ID,
       environmentId: ENVIRONMENT_A,
       branch: null,
       worktreePath: null,
@@ -504,6 +520,7 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
         hasServerThreadRef.current = false;
         activeDraftThreadRef.current = {
           threadId: SHARED_THREAD_ID,
+          projectId: PROJECT_ID,
           environmentId,
           branch: null,
           worktreePath: null,
@@ -534,6 +551,7 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
       hasServerThreadRef.current = false;
       activeDraftThreadRef.current = {
         threadId: SHARED_THREAD_ID,
+        projectId: PROJECT_ID,
         environmentId,
         branch: "feature/meaningful-name",
         worktreePath: null,
@@ -562,10 +580,34 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     });
   });
 
+  it("records only the branch of the thread's own checkout", async () => {
+    serverThreadWorktreePathRef.current = WORKTREE_CWD;
+    liveBranchRef.current = "main";
+    const threadRef = scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID);
+    // The project root's status while the view still follows the promoted draft.
+    const screen = await render(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+
+    try {
+      await Promise.resolve();
+      expect(setThreadBranchSpy).not.toHaveBeenCalled();
+
+      liveBranchRef.current = "fix/live-name";
+      await screen.rerender(<GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />);
+      expect(setThreadBranchSpy).toHaveBeenCalledExactlyOnceWith(
+        threadRef,
+        "fix/live-name",
+        WORKTREE_CWD,
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("does not overwrite a selected base branch while a new worktree draft is being configured", async () => {
     hasServerThreadRef.current = false;
     activeDraftThreadRef.current = {
       threadId: SHARED_THREAD_ID,
+      projectId: PROJECT_ID,
       environmentId: ENVIRONMENT_A,
       branch: "feature/base-branch",
       worktreePath: null,

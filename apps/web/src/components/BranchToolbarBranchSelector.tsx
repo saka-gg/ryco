@@ -176,13 +176,7 @@ export function BranchToolbarBranchSelector({
       }
       if (api && hasServerThread) {
         const changedAt = new Date().toISOString();
-        void api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: activeThreadId,
-          branch,
-          worktreePath,
-        });
+        // Record first, thread second: the same order as a server-side rename.
         if (branch && serverThread.worktreeId) {
           void api.orchestration.dispatchCommand({
             type: "worktree.meta.update",
@@ -192,6 +186,13 @@ export function BranchToolbarBranchSelector({
             changedAt,
           });
         }
+        void api.orchestration.dispatchCommand({
+          type: "thread.meta.update",
+          commandId: newCommandId(),
+          threadId: activeThreadId,
+          branch,
+          worktreePath,
+        });
       }
       if (hasServerThread) {
         onActiveThreadBranchOverrideChange?.(branch);

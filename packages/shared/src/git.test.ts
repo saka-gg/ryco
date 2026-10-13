@@ -172,6 +172,22 @@ describe("configurable worktree namespaces", () => {
     expect(buildGeneratedWorktreeBranchName(raw, prefix)).toBe(expected);
   });
 
+  it.each([
+    ["fix/Login Redirect", "ryco", "fix/login-redirect"],
+    ["ryco/feat/Project Map", "ryco", "feat/project-map"],
+    ["refs/heads/chore/deps/Bump Effect", "team/agents", "chore/deps-bump-effect"],
+    ["feature/New Login", "ryco", "ryco/feature/new-login"],
+    ["Login redirect", "ryco", "ryco/login-redirect"],
+    ["fix/", "ryco", "ryco/fix"],
+    ["fix/login", "", "fix/login"],
+  ])("with change types builds %j using %j", (raw, prefix, expected) => {
+    expect(buildGeneratedWorktreeBranchName(raw, prefix, { changeTypes: true })).toBe(expected);
+  });
+
+  it("keeps a change type under the prefix when change types are off", () => {
+    expect(buildGeneratedWorktreeBranchName("fix/Login", "ryco")).toBe("ryco/fix/login");
+  });
+
   it("limits generated suffixes to 64 characters without truncating the prefix", () => {
     expect(buildGeneratedWorktreeBranchName("A".repeat(100), "team/agents")).toBe(
       `team/agents/${"a".repeat(64)}`,

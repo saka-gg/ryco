@@ -222,6 +222,8 @@ describe("ProviderCommandReactor", () => {
   async function createHarness(input?: {
     readonly getSession?: ProviderServiceShape["getSession"];
     readonly worktreeBranchPrefix?: string;
+    readonly worktreeBranchChangeTypes?: boolean;
+    readonly projectWorktreeBranchPrefix?: string;
     readonly setThreadGoal?: NonNullable<ProviderServiceShape["setThreadGoal"]>;
     readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     readonly clearThreadGoal?: NonNullable<ProviderServiceShape["clearThreadGoal"]>;
@@ -690,6 +692,16 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         ServerSettingsService.layerTest({
           worktreeBranchPrefix: input?.worktreeBranchPrefix ?? "ryco",
+          ...(input?.worktreeBranchChangeTypes !== undefined
+            ? { worktreeBranchChangeTypes: input.worktreeBranchChangeTypes }
+            : {}),
+          ...(input?.projectWorktreeBranchPrefix !== undefined
+            ? {
+                projectPreferences: {
+                  "project-1": { worktreeBranchPrefix: input.projectWorktreeBranchPrefix },
+                },
+              }
+            : {}),
         }),
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -1901,6 +1913,73 @@ describe("ProviderCommandReactor", () => {
       });
     },
   );
+
+  it.each([
+    {
+      name: "names the branch by change type",
+      harnessInput: { worktreeBranchChangeTypes: true },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "fix/Reconnect Backoff",
+      expected: "fix/reconnect-backoff",
+    },
+    {
+      name: "keeps the prefix when change types are off",
+      harnessInput: { worktreeBranchChangeTypes: false },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "reconnect backoff",
+      expected: "ryco/reconnect-backoff",
+    },
+    {
+      name: "renames a temporary branch named with the project's own prefix",
+      harnessInput: { worktreeBranchChangeTypes: false, projectWorktreeBranchPrefix: "team" },
+      temporaryBranch: "team/1234abcd",
+      generated: "reconnect backoff",
+      expected: "team/reconnect-backoff",
+    },
+  ])("$name", async ({ harnessInput, temporaryBranch, generated, expected }) => {
+    const harness = await createHarness(harnessInput);
+    harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-typed-branch"),
+        threadId: ThreadId.make("thread-1"),
+        branch: temporaryBranch,
+        worktreePath: "/tmp/provider-project-worktree",
+      }),
+    );
+    harness.generateBranchName.mockImplementation(() => Effect.succeed({ branch: generated }));
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-typed-branch"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-typed-branch"),
+          role: "user",
+          text: "Add a safer reconnect backoff.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.renameBranch.mock.calls.length === 1);
+    expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject(
+      harnessInput.worktreeBranchChangeTypes ? { branchChangeTypes: true } : {},
+    );
+    if (!harnessInput.worktreeBranchChangeTypes) {
+      expect(harness.generateBranchName.mock.calls[0]?.[0]).not.toHaveProperty("branchChangeTypes");
+    }
+    expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+      oldBranch: temporaryBranch,
+      newBranch: expected,
+    });
+  });
 
   it("forwards codex model options through session start and turn send", async () => {
     const harness = await createHarness();

@@ -79,12 +79,12 @@ describe("worktree checkout paths", () => {
     };
     expect(
       await Effect.runPromise(resolveWorktreeCheckoutPath({ ...base, location: undefined })),
-    ).toMatch(/^\/app\/\.ryco\/worktrees\/[a-f0-9]{8}_ryco\/[a-f0-9]{8}_bug-fix$/);
+    ).toMatch(/^\/app\/\.ryco\/worktrees\/[a-f0-9]{4}_ryco\/[a-f0-9]{4}_bug-fix$/);
     expect(
       await Effect.runPromise(
         resolveWorktreeCheckoutPath({ ...base, location: "projectMetadata" }),
       ),
-    ).toMatch(/^\/repo\/\.ryco\/worktrees\/[a-f0-9]{8}_bug-fix$/);
+    ).toMatch(/^\/repo\/\.ryco\/worktrees\/[a-f0-9]{4}_bug-fix$/);
   });
   it("persists the initial project name across renames and concurrent allocations", async () => {
     await Effect.runPromise(
@@ -99,7 +99,7 @@ describe("worktree checkout paths", () => {
               ],
               { concurrency: 2 },
             );
-            expect(names[0]).toMatch(/^[a-f0-9]{8}_ryco$/);
+            expect(names[0]).toMatch(/^[a-f0-9]{4}_ryco$/);
             expect(names[1]).toBe(names[0]);
             expect(yield* resolveManagedProjectDirectory("project-id", "New name")).toBe(names[0]);
             const sql = yield* SqlClient.SqlClient;

@@ -75,6 +75,7 @@ import {
   buildGeneratedWorktreeBranchName,
   extractTemporaryWorktreeBranchPrefix,
 } from "@ryco/shared/git";
+import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
 import {
   Cache,
   Cause,
@@ -1486,13 +1487,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       oldBranch: input.oldBranch,
       newBranch: input.targetBranch,
     });
-    yield* orchestrationEngine.dispatch({
-      type: "thread.meta.update",
-      commandId: serverCommandId("worktree-branch-rename"),
-      threadId: input.threadId,
-      branch: renamed.branch,
-      worktreePath: input.worktreePath,
-    });
+    // The worktree record moves first: clients trust a temporary live branch over
+    // the thread's stored one only while the record still agrees with it.
     if (input.worktreeId !== null) {
       yield* orchestrationEngine.dispatch({
         type: "worktree.meta.update",
@@ -1502,6 +1498,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         changedAt: new Date().toISOString(),
       });
     }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: serverCommandId("worktree-branch-rename"),
+      threadId: input.threadId,
+      branch: renamed.branch,
+      worktreePath: input.worktreePath,
+    });
     yield* vcsStatusBroadcaster
       .refreshStatus(input.worktreePath)
       .pipe(Effect.ignoreCause({ log: true }));
@@ -1517,6 +1520,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     function* (input: {
       readonly threadId: ThreadId;
       readonly thread: OrchestrationThreadShell;
+      readonly project: Parameters<typeof resolveProjectPreferences>[0]["project"];
       readonly cwd: string;
       readonly messageText: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
@@ -1545,7 +1549,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection: modelSelection, worktreeBranchPrefix } = settings.value;
+      const { textGenerationModelSelection: modelSelection, worktreeBranchChangeTypes } =
+        settings.value;
+      // The temporary branch was named with the project's effective prefix.
+      const worktreeBranchPrefix = resolveProjectPreferences({
+        settings: settings.value,
+        ...(input.project !== undefined ? { project: input.project } : {}),
+      }).worktreeBranchPrefix.value;
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;
@@ -1558,6 +1568,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         message: input.messageText,
         ...(attachments.length > 0 ? { attachments } : {}),
         modelSelection,
+        ...(worktreeBranchChangeTypes ? { branchChangeTypes: true } : {}),
       };
 
       const titled = wantsTitle
@@ -1594,7 +1605,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           Option.getOrUndefined(titled)?.branch ??
           (yield* textGeneration.generateBranchName({ ...generationInput, cwd: worktreePath }))
             .branch;
-        const targetBranch = buildGeneratedWorktreeBranchName(generatedBranch, branchPrefix);
+        const targetBranch = buildGeneratedWorktreeBranchName(generatedBranch, branchPrefix, {
+          changeTypes: worktreeBranchChangeTypes,
+        });
         if (targetBranch === oldBranch) return;
         yield* renameWorktreeBranchWhenIdle({
           threadId,
@@ -2116,6 +2129,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       yield* generateFirstTurnTitleAndBranch({
         threadId: event.payload.threadId,
         thread,
+        project,
         cwd:
           resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }) ??
           process.cwd(),
