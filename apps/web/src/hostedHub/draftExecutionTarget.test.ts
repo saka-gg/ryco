@@ -74,9 +74,18 @@ function harness() {
       label: "Target",
       logicalKey: (value) => value.name,
     });
+  const beginChat = (environmentId = target) =>
+    controller.beginChat({
+      draftId,
+      sourceEnvironmentId: source,
+      sourceProjectId: ProjectId.make("pending-chat"),
+      environmentId,
+      label: "Target",
+    });
   return {
     controller,
     begin,
+    beginChat,
     move,
     moveToChat,
     release,
@@ -274,6 +283,40 @@ describe("hosted draft device switching", () => {
     expect(test.moveToChat).toHaveBeenCalledWith(draftId, target);
     expect(test.move).not.toHaveBeenCalled();
     expect(test.controller.getSnapshot()).toBeNull();
+  });
+
+  it("moves an unsent chat to a chat on the target once the lease arrives", async () => {
+    const test = harness();
+    test.setPreviewProjects(true);
+    test.beginChat();
+    // A chat never offers the target's projects, even when cached ones exist.
+    expect(test.controller.getSnapshot()?.phase).toBe("connecting");
+    expect(test.moveToChat).not.toHaveBeenCalled();
+    test.waiters[0]!(lease());
+    await settle();
+    expect(test.moveToChat).toHaveBeenCalledWith(draftId, target);
+    expect(test.move).not.toHaveBeenCalled();
+    expect(test.controller.getSnapshot()).toBeNull();
+  });
+
+  it("keeps an unsent chat where it is when the target cannot connect", async () => {
+    const test = harness();
+    test.beginChat();
+    test.waiters[0]!(null);
+    await settle();
+    expect(test.controller.getSnapshot()?.phase).toBe("error");
+    expect(test.moveToChat).not.toHaveBeenCalled();
+    test.controller.retry();
+    test.waiters[1]!(lease());
+    await settle();
+    expect(test.moveToChat).toHaveBeenCalledWith(draftId, target);
+  });
+
+  it("ignores a chat move to the device it already runs on", () => {
+    const test = harness();
+    test.beginChat(source);
+    expect(test.controller.getSnapshot()).toBeNull();
+    expect(test.adopt).not.toHaveBeenCalled();
   });
 
   it("keeps the source draft after failure and allows a successful retry", async () => {

@@ -4,7 +4,10 @@ import {
   type WorkspaceMachineCatalogInput,
 } from "@ryco/client-runtime/state/workspace";
 import { describe, expect, it } from "vite-plus/test";
-import { hostedComposerExecutionTargets } from "./ExecutionTarget.logic";
+import {
+  chatComposerExecutionTargets,
+  hostedComposerExecutionTargets,
+} from "./ExecutionTarget.logic";
 
 const source = EnvironmentId.make("source");
 function machine(label: string, overrides: Partial<WorkspaceMachineCatalogInput> = {}) {
@@ -55,6 +58,52 @@ describe("hosted composer devices", () => {
     ).toEqual([
       { environmentId: source, label: "Source", disabled: true, status: "Refreshing devices…" },
       { environmentId: "Second", label: "Second", disabled: true, status: "Refreshing devices…" },
+    ]);
+  });
+});
+
+describe("chat composer devices", () => {
+  const candidate = (
+    label: string,
+    overrides: { reachable?: boolean; chatsAvailable?: boolean | null } = {},
+  ) => ({
+    environmentId: EnvironmentId.make(label),
+    label,
+    reachable: overrides.reachable ?? true,
+    chatsAvailable: overrides.chatsAvailable === undefined ? true : overrides.chatsAvailable,
+  });
+
+  it("offers every reachable device that supports chats, current device first", () => {
+    const list = chatComposerExecutionTargets({
+      candidates: [
+        candidate("Zeta"),
+        candidate("Offline", { reachable: false }),
+        candidate("Legacy", { chatsAvailable: false }),
+        candidate("Unknown", { chatsAvailable: null }),
+        candidate("Source"),
+      ],
+      environmentId: EnvironmentId.make("Source"),
+      label: "Source",
+    });
+    expect(list.map((target) => [target.label, target.disabled, target.status])).toEqual([
+      ["Source", false, "Online"],
+      ["Unknown", false, "Online"],
+      ["Zeta", false, "Online"],
+      ["Legacy", true, "No chats"],
+      ["Offline", true, "Unavailable"],
+    ]);
+  });
+
+  it("keeps the current device listed when no candidate describes it", () => {
+    expect(
+      chatComposerExecutionTargets({
+        candidates: [candidate("Other"), candidate("Other")],
+        environmentId: source,
+        label: "This Mac",
+      }),
+    ).toEqual([
+      { environmentId: source, label: "This Mac", disabled: true, status: "Unavailable" },
+      { environmentId: "Other", label: "Other", disabled: false, status: "Online" },
     ]);
   });
 });

@@ -179,6 +179,7 @@ import { getProviderSupportsAskMode, resolveSelectableProvider } from "../provid
 import { useSettings } from "../hooks/useSettings";
 import {
   useChatsAvailability,
+  useEnvironmentChatsAvailable,
   useEnvironmentServerConfigSelector,
 } from "../hooks/useChatsAvailability";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
@@ -191,6 +192,7 @@ import {
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
 import {
   buildChatDraftTarget,
+  resolveChatsAvailability,
   CHAT_PROJECT_LABEL,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
@@ -371,7 +373,11 @@ import {
 } from "../hostedHub/hostedConnectionCoordinator";
 import { adoptRoutedHostedNode } from "../hostedHub/nodeRoutes";
 import { useHostedDraftExecutionTarget } from "../hooks/useHostedDraftExecutionTarget";
-import { hostedComposerExecutionTargets } from "./chat/ExecutionTarget.logic";
+import {
+  chatComposerExecutionTargets,
+  hostedComposerExecutionTargets,
+  type ChatExecutionCandidate,
+} from "./chat/ExecutionTarget.logic";
 import { DraftDeviceProjectDialog } from "./chat/DraftDeviceProjectDialog";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { Button } from "./ui/button";
@@ -1345,6 +1351,61 @@ export default function ChatView(props: ChatViewProps) {
     savedEnvironmentRuntimeById,
   ]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  // An unsent "No project" chat needs no project on its device, so it can move
+  // to any reachable device whose node supports chats.
+  const primaryChatsAvailable = useEnvironmentChatsAvailable(primaryEnvironmentId);
+  const chatExecutionCandidates = useMemo<ReadonlyArray<ChatExecutionCandidate>>(() => {
+    if (!isPendingChat || hostedWorkspace.status !== "signed-out") return [];
+    const chatsAvailable = (candidateEnvironmentId: EnvironmentId) => {
+      if (candidateEnvironmentId === primaryEnvironmentId) return primaryChatsAvailable;
+      const config = savedEnvironmentRuntimeById[candidateEnvironmentId]?.serverConfig;
+      return config ? resolveChatsAvailability(config).available : null;
+    };
+    if (desktopWorkspace.status === "ready") {
+      return desktopExecutionMachines.map((machine) => ({
+        environmentId: machine.environmentId,
+        label: machine.label,
+        reachable: machine.canMutate,
+        chatsAvailable: chatsAvailable(machine.environmentId),
+      }));
+    }
+    return [
+      ...(primaryEnvironmentId
+        ? [
+            {
+              environmentId: primaryEnvironmentId,
+              label: primaryDeviceName,
+              reachable: true,
+              chatsAvailable: primaryChatsAvailable,
+            },
+          ]
+        : []),
+      ...Object.values(savedEnvironmentRegistry).map((record) => {
+        const runtime = savedEnvironmentRuntimeById[record.environmentId];
+        return {
+          environmentId: record.environmentId,
+          label: resolveEnvironmentOptionLabel({
+            isPrimary: false,
+            environmentId: record.environmentId,
+            runtimeLabel: runtime?.descriptor?.label ?? null,
+            savedLabel: record.label,
+          }),
+          reachable: runtime?.connectionState === "connected",
+          chatsAvailable: chatsAvailable(record.environmentId),
+        };
+      }),
+    ];
+  }, [
+    desktopExecutionMachines,
+    desktopWorkspace.status,
+    hostedWorkspace.status,
+    isPendingChat,
+    primaryChatsAvailable,
+    primaryDeviceName,
+    primaryEnvironmentId,
+    savedEnvironmentRegistry,
+    savedEnvironmentRuntimeById,
+  ]);
 
   const openPullRequestDialog = useCallback(
     (reference?: string) => {
@@ -2572,12 +2633,21 @@ export default function ChatView(props: ChatViewProps) {
       (activeThread.session !== null && activeThread.session.status !== "closed")),
   );
 
+  const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
   // Handle environment change for draft threads.  When the user picks a
   // different environment we update the draft context to point at the physical
   // project in that environment while keeping the same logical project.
   const onEnvironmentChange = useCallback(
     (nextEnvironmentId: EnvironmentId) => {
       if (envLocked || !draftId) return;
+      if (isPendingChat) {
+        const target = chatExecutionCandidates.find(
+          (candidate) => candidate.environmentId === nextEnvironmentId,
+        );
+        if (!target?.reachable || target.chatsAvailable === false) return;
+        moveDraftThreadToProject(draftId, buildChatDraftTarget(nextEnvironmentId, newProjectId()));
+        return;
+      }
       const target = logicalProjectEnvironments.find(
         (env) => env.environmentId === nextEnvironmentId,
       );
@@ -2586,11 +2656,23 @@ export default function ChatView(props: ChatViewProps) {
         projectRef: scopeProjectRef(target.environmentId, target.projectId),
       });
     },
-    [draftId, envLocked, logicalProjectEnvironments, setDraftThreadContext],
+    [
+      chatExecutionCandidates,
+      draftId,
+      envLocked,
+      isPendingChat,
+      logicalProjectEnvironments,
+      moveDraftThreadToProject,
+      setDraftThreadContext,
+    ],
   );
   const hostedDraftTarget = useHostedDraftExecutionTarget({
     draftId,
     project: activeProject ?? null,
+    pendingChat:
+      isPendingChat && draftThread
+        ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
+        : null,
     locked: envLocked || routeKind === "server" || isSendBusy,
   });
   const hostedDemandEnvironmentId = hostedDraftTarget.pending?.environmentId ?? environmentId;
@@ -2616,14 +2698,27 @@ export default function ChatView(props: ChatViewProps) {
   const executionTargets = useMemo(
     () =>
       hostedWorkspace.status === "signed-out"
-        ? logicalProjectEnvironments
+        ? isPendingChat
+          ? chatComposerExecutionTargets({
+              candidates: chatExecutionCandidates,
+              environmentId,
+              label: primaryDeviceName,
+            })
+          : logicalProjectEnvironments
         : hostedComposerExecutionTargets({
             machines: hostedWorkspace.machines,
             ready: hostedWorkspace.status === "ready",
             environmentId,
             label: primaryDeviceName,
           }),
-    [environmentId, hostedWorkspace, logicalProjectEnvironments, primaryDeviceName],
+    [
+      chatExecutionCandidates,
+      environmentId,
+      hostedWorkspace,
+      isPendingChat,
+      logicalProjectEnvironments,
+      primaryDeviceName,
+    ],
   );
   const onExecutionTargetChange =
     hostedWorkspace.status === "signed-out"
@@ -2732,7 +2827,6 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
-  const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
   // Points a draft at a new "No project" chat in place, keeping its prompt,
   // attachments and model; returns the chat's (not yet created) project id.
   const moveDraftToNewChat = useCallback(

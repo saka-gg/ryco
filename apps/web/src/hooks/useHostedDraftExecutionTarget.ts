@@ -1,6 +1,6 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import type { Project } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ScopedProjectRef } from "@ryco/contracts";
 import { useSyncExternalStore } from "react";
 import { buildChatDraftTarget, useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { newProjectId } from "../lib/utils";
@@ -85,6 +85,8 @@ export function useHostedDraftTargetSelection() {
 export function useHostedDraftExecutionTarget(input: {
   readonly draftId: DraftId | null | undefined;
   readonly project: Project | null;
+  /** The unsent "No project" chat draft's client-generated project; it moves as a chat. */
+  readonly pendingChat: ScopedProjectRef | null;
   readonly locked: boolean;
 }) {
   const settings = useSettings((value) => ({
@@ -95,11 +97,22 @@ export function useHostedDraftExecutionTarget(input: {
   return {
     pending: selection?.draftId === input.draftId ? selection : null,
     selectEnvironment: (environmentId: EnvironmentId) => {
-      if (input.locked || !input.draftId || !input.project) return;
+      if (input.locked || !input.draftId) return;
       const machine = readHostedWorkspaceState().machines.find(
         (candidate) => candidate.environmentId === environmentId,
       );
-      if (machine)
+      if (!machine) return;
+      if (input.pendingChat) {
+        hostedDraftTargetController.beginChat({
+          draftId: input.draftId,
+          sourceEnvironmentId: input.pendingChat.environmentId,
+          sourceProjectId: input.pendingChat.projectId,
+          environmentId,
+          label: machine.label,
+        });
+        return;
+      }
+      if (input.project)
         hostedDraftTargetController.begin({
           draftId: input.draftId,
           project: input.project,
