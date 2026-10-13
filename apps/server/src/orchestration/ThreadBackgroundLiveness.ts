@@ -9,9 +9,8 @@
  * server restart the registry is empty until new task events arrive, which
  * matches reality: orphaned background work is not live.
  *
- * "monitoring" is reserved for watch loops (monitor tasks and background
- * shells) when they are the ONLY live work; any agent work presents as
- * "working".
+ * All live background work presents as "working", including background
+ * shells and monitor tasks that outlive the foreground turn.
  *
  * @module ThreadBackgroundLivenessService
  */
@@ -66,8 +65,7 @@ export class ThreadBackgroundLivenessService extends Context.Service<
     readonly clearThreadLiveness: (threadId: string) => void;
 
     /**
-     * Two-state vocabulary by design: any live agent work is "working";
-     * "monitoring" only when watch loops are the ONLY live work.
+     * Any live agent, background shell, or monitor task keeps the thread working.
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
 
@@ -215,11 +213,8 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       if (!state) {
         return null;
       }
-      if (state.agents.size > 0) {
+      if (state.agents.size > 0 || state.monitors.size > 0) {
         return "working";
-      }
-      if (state.monitors.size > 0) {
-        return "monitoring";
       }
       return null;
     },
