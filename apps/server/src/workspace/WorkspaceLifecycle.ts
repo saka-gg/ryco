@@ -228,19 +228,33 @@ export const toTrashedThreadSummary = (row: ProjectionTrashedThread): TrashedThr
 const normalizeRequest = (request: WorkspaceLifecycleRequest): WorkspaceLifecycleRequest => {
   const removal = request.action === "remove-checkout" || request.action === "remove-stale-record";
   const discard = request.action === "remove-checkout" && request.discard === true;
+  const deleteConversations = discard && request.deleteConversations === true;
   return {
     worktreeId: request.worktreeId,
     action: request.action,
-    // Discarding moves conversations to Trash instead.
-    archiveConversations: removal && !discard ? request.archiveConversations !== false : false,
-    deleteBranch: request.action === "remove-checkout" ? request.deleteBranch === true : false,
+    // Delete archives the conversations it keeps; it never leaves them live on a
+    // hidden workspace.
+    archiveConversations: discard
+      ? !deleteConversations
+      : removal
+        ? request.archiveConversations !== false
+        : false,
+    // Delete always deletes the branch (when it still exists).
+    deleteBranch:
+      request.action === "remove-checkout" ? discard || request.deleteBranch === true : false,
     discard,
+    deleteConversations,
   };
 };
 
+/** The user deleted the workspace: its record only stays as provenance and allows nothing. */
+const isTombstoned = (worktree: Pick<OrchestrationWorktreeShell, "checkoutRemovalReason">) =>
+  worktree.checkoutRemovalReason === "deleted";
+const WORKSPACE_DELETED = "The workspace was deleted.";
+
 type BlockerState = Pick<
   WorkspaceState,
-  "worktree" | "main" | "facts" | "inspectionError" | "activeWork" | "conversations"
+  "worktree" | "main" | "facts" | "inspectionError" | "activeWork"
 >;
 
 const activeWorkBlocker = (state: BlockerState) =>
@@ -248,18 +262,41 @@ const activeWorkBlocker = (state: BlockerState) =>
     ? `Associated work is still active: ${state.activeWork.join("; ")}.`
     : null;
 
+/** The checkout is gone: recorded as removed, or found missing. */
+const checkoutGone = (state: BlockerState) =>
+  state.worktree.checkoutRemovedAt != null || state.facts?.checkout === "missing";
+
+/** Why the checkout cannot be checked out again at its recorded path; empty when it can. */
+function recreateCheckoutBlockers(state: BlockerState): string[] {
+  const { worktree, facts } = state;
+  if (!facts) return [state.inspectionError ?? "The checkout could not be inspected."];
+  const blockers: string[] = [];
+  if (facts.checkout === "present") blockers.push("The checkout already exists.");
+  else if (facts.gitRegistered)
+    blockers.push(
+      "Git still registers this missing path. Run `git worktree prune` in the project, then retry.",
+    );
+  if (facts.branchHead === null)
+    blockers.push(`Branch ${worktree.branch} no longer exists; the checkout cannot be recreated.`);
+  return blockers;
+}
+
+/** Restore checks the checkout out again when it is gone and its branch still exists. */
+const restoreRecreatesCheckout = (state: BlockerState) =>
+  checkoutGone(state) && recreateCheckoutBlockers(state).length === 0;
+
 /**
  * "Delete workspace": the work it throws away is reviewed, not blocking. Only
  * what cannot be done safely blocks: an uninspectable or foreign directory,
- * a stale Git registration, active work, or nothing left to delete.
+ * a stale Git registration, or active work. A checkout that is already
+ * removed leaves nothing on disk to verify.
  */
-function discardBlockers(state: BlockerState, request: WorkspaceLifecycleRequest): string[] {
+function discardBlockers(state: BlockerState): string[] {
   const { worktree, facts } = state;
   const blockers: string[] = [];
-  const checkoutRemoved = worktree.checkoutRemovedAt != null;
-  if (!facts) blockers.push(state.inspectionError ?? "The checkout could not be inspected.");
-  else if (!checkoutRemoved) {
-    if (facts.checkout === "missing") {
+  if (worktree.checkoutRemovedAt == null) {
+    if (!facts) blockers.push(state.inspectionError ?? "The checkout could not be inspected.");
+    else if (facts.checkout === "missing") {
       if (facts.gitRegistered)
         blockers.push(
           "The checkout directory is missing but Git still registers it. Run `git worktree prune` in the project, then retry.",
@@ -269,13 +306,7 @@ function discardBlockers(state: BlockerState, request: WorkspaceLifecycleRequest
         blockers.push("Git does not register this directory as a worktree of the project.");
       if (!facts.status) blockers.push("The checkout status could not be read.");
     }
-  } else if (
-    state.conversations.length === 0 &&
-    !(request.deleteBranch && facts.branchHead !== null)
-  )
-    blockers.push(
-      "Nothing is left to delete: the checkout is removed and no conversations remain.",
-    );
+  }
   const activeWork = activeWorkBlocker(state);
   if (activeWork) blockers.push(activeWork);
   return blockers;
@@ -288,8 +319,9 @@ export function workspaceActionBlockers(
 ): string[] {
   const { worktree, facts } = state;
   if (state.main) return [MAIN_PROTECTED];
+  if (isTombstoned(worktree)) return [WORKSPACE_DELETED];
   if (request.action === "remove-checkout" && request.discard === true)
-    return discardBlockers(state, request);
+    return discardBlockers(state);
   const blockers: string[] = [];
   const activeWork = activeWorkBlocker(state);
   const checkoutRemoved = worktree.checkoutRemovedAt != null;
@@ -299,7 +331,13 @@ export function workspaceActionBlockers(
       if (activeWork) blockers.push(activeWork);
       break;
     case "restore":
-      if (worktree.archivedAt === null) blockers.push("The workspace is not archived.");
+      // Restoring unarchives, and recreates a checkout that is gone when it can.
+      if (worktree.archivedAt === null && !restoreRecreatesCheckout(state))
+        blockers.push(
+          ...(checkoutGone(state)
+            ? recreateCheckoutBlockers(state)
+            : ["The workspace is not archived."]),
+        );
       break;
     case "remove-checkout": {
       if (checkoutRemoved) {
@@ -355,19 +393,7 @@ export function workspaceActionBlockers(
       if (activeWork) blockers.push(activeWork);
       break;
     case "recreate-checkout":
-      if (!facts) {
-        blockers.push(state.inspectionError ?? "The checkout could not be inspected.");
-        break;
-      }
-      if (facts.checkout === "present") blockers.push("The checkout already exists.");
-      else if (facts.gitRegistered)
-        blockers.push(
-          "Git still registers this missing path. Run `git worktree prune` in the project, then retry.",
-        );
-      if (facts.branchHead === null)
-        blockers.push(
-          `Branch ${worktree.branch} no longer exists; the checkout cannot be recreated.`,
-        );
+      blockers.push(...recreateCheckoutBlockers(state));
       break;
   }
   return blockers;
@@ -626,7 +652,15 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             .filter((thread) => thread.archivedAt === null && threadHasConversation(thread))
             .map((thread) => thread.id)
         : [];
-    const trashConversationIds = discard ? state.conversations.map((thread) => thread.id) : [];
+    // Delete deletes the conversations when asked; otherwise only never-used ones, which hold
+    // nothing to keep and would linger on a hidden workspace.
+    const trashConversationIds = discard
+      ? state.conversations
+          .filter(
+            (thread) => request.deleteConversations === true || !threadHasConversation(thread),
+          )
+          .map((thread) => thread.id)
+      : [];
     const removeCheckout =
       request.action === "remove-checkout" &&
       !checkoutRemoved &&
@@ -635,6 +669,9 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       request.action === "remove-checkout" &&
       request.deleteBranch === true &&
       (!discard || state.facts?.branchHead != null);
+    const recreateCheckout =
+      request.action === "recreate-checkout" ||
+      (request.action === "restore" && restoreRecreatesCheckout(state));
     const status = state.facts?.status ?? null;
     const discardsFiles =
       removeCheckout &&
@@ -646,11 +683,12 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     return {
       archiveWorkspace: request.action === "archive",
       restoreWorkspace:
-        request.action === "restore" ||
-        (request.action === "recreate-checkout" && state.worktree.archivedAt !== null),
+        (request.action === "restore" || request.action === "recreate-checkout") &&
+        state.worktree.archivedAt !== null,
       removeCheckout,
-      recreateCheckout: request.action === "recreate-checkout",
-      recordCheckoutRemoval: removal && !checkoutRemoved,
+      recreateCheckout,
+      // Delete records the removal even when it is already recorded: as deleted.
+      recordCheckoutRemoval: removal && (discard || !checkoutRemoved),
       stopSessionThreadIds: removeCheckout
         ? state.conversations
             .filter((thread) => thread.session !== null && thread.session.status !== "stopped")
@@ -667,6 +705,10 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       discard,
       trashConversationIds,
       discardsWork: discard && (discardsFiles || (deleteBranch && state.facts?.unmerged !== false)),
+      // A record is provenance for its conversations, Trash included: only one no
+      // conversation belongs to is deleted (the decider enforces the same rule).
+      // Otherwise it stays hidden until the last of them is gone.
+      deleteRecord: discard && state.conversations.length === 0 && state.trashedCount === 0,
     };
   };
 
@@ -675,7 +717,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     request: WorkspaceLifecycleRequest,
     effects: WorkspaceLifecycleEffects,
   ): string[] => {
-    if (effects.discard) return describeDiscard(state, effects);
+    if (effects.discard) return describeDiscard(state, request, effects);
     const details: string[] = [];
     if (effects.removeCheckout && state.worktree.worktreePath)
       details.push(
@@ -709,19 +751,29 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     }
     if (request.action === "archive")
       details.push("Hides the workspace. Its directory, branch and conversations are untouched.");
-    if (request.action === "recreate-checkout")
+    if (effects.recreateCheckout)
       details.push(
         `Checks out the existing branch ${state.worktree.branch} at ${state.worktree.worktreePath ?? "its recorded path"}.`,
       );
+    if (request.action === "restore") {
+      if (effects.restoreWorkspace) details.push("Shows the workspace again.");
+      if (!effects.recreateCheckout && checkoutGone(state))
+        details.push(
+          `The checkout stays removed: ${recreateCheckoutBlockers(state).join(" ")} Its conversations stay readable but cannot continue here.`,
+        );
+    }
     return details;
   };
 
   /** What "Delete workspace" throws away, then what it keeps. */
-  const describeDiscard = (state: WorkspaceState, effects: WorkspaceLifecycleEffects): string[] => {
+  const describeDiscard = (
+    state: WorkspaceState,
+    request: WorkspaceLifecycleRequest,
+    effects: WorkspaceLifecycleEffects,
+  ): string[] => {
     const details: string[] = [];
     const status = state.facts?.status ?? null;
-    if (state.worktree.checkoutRemovedAt != null)
-      details.push("The checkout is already removed; this finishes deleting the workspace.");
+    if (state.worktree.checkoutRemovedAt != null) details.push("The checkout is already removed.");
     if (effects.removeCheckout && state.worktree.worktreePath)
       details.push(
         `Removes the checkout at ${state.worktree.worktreePath} with \`git worktree remove --force\`.`,
@@ -746,22 +798,40 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       details.push(
         `Stops ${plural(effects.stopSessionThreadIds.length, "provider session")} first; nothing is removed if any fails to stop.`,
       );
-    const trashed = effects.trashConversationIds?.length ?? 0;
-    if (trashed > 0)
-      details.push(
-        `Moves ${plural(trashed, "conversation")} to Trash. Restore ${trashed === 1 ? "it" : "them"} from Trash; history is kept until you delete it permanently.`,
-      );
-    if (state.trashedCount > 0)
-      details.push(`${plural(state.trashedCount, "conversation")} already in Trash stay there.`);
     const unmerged = state.facts?.unmerged !== false;
     details.push(
       effects.deleteBranch
         ? unmerged
           ? `Deletes branch ${state.worktree.branch}, including commits the project HEAD does not contain, only if it still points at the reviewed commit.`
           : `Deletes the merged branch ${state.worktree.branch} only if it still points at the reviewed commit.`
-        : state.facts?.branchHead === null
-          ? `Branch ${state.worktree.branch} no longer exists.`
-          : `Keeps the branch ${state.worktree.branch}${unmerged ? " with its unmerged commits" : ""}.`,
+        : !state.facts
+          ? `Keeps branch ${state.worktree.branch}: ${state.inspectionError ?? "it could not be inspected."}`
+          : `Branch ${state.worktree.branch} no longer exists.`,
+    );
+    const archived = effects.archiveConversationIds.length;
+    const trashed = effects.trashConversationIds?.length ?? 0;
+    if (archived > 0)
+      details.push(
+        `Archives ${plural(archived, "conversation")}; history stays readable in the archive.`,
+      );
+    if (trashed > 0)
+      details.push(
+        request.deleteConversations
+          ? `Deletes ${plural(trashed, "conversation")} with their history after a short grace period.`
+          : `Deletes ${plural(trashed, "never-used conversation")}.`,
+      );
+    if (effects.unchangedConversations > 0)
+      details.push(
+        `${plural(effects.unchangedConversations, "archived conversation")} ${effects.unchangedConversations === 1 ? "stays" : "stay"} in the archive.`,
+      );
+    if (state.trashedCount > 0)
+      details.push(`${plural(state.trashedCount, "conversation")} already in Trash stay there.`);
+    details.push(
+      effects.deleteRecord
+        ? "Deletes the workspace record: no conversation belongs to it."
+        : !request.deleteConversations && (archived > 0 || effects.unchangedConversations > 0)
+          ? "Kept conversations stay in the archive; the workspace is hidden."
+          : "The workspace is hidden; its record is dropped once its conversations are deleted.",
     );
     return details;
   };
@@ -820,7 +890,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       request,
       workspace: summarize(state),
       effects,
-      summary: summarizeWorkspaceLifecycleEffects(request.action, effects),
+      summary: summarizeWorkspaceLifecycleEffects(request.action, effects, request),
       details: describeDetails(state, request, effects),
       blockers: workspaceActionBlockers(state, request),
       fingerprint: fingerprintOf(state, request, effects),
@@ -901,6 +971,57 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         const worktreeId = state.worktree.worktreeId;
         const projectRoot = state.project.workspaceRoot;
 
+        // Shared by Restore and Recreate checkout: check the existing branch out again at the
+        // recorded path, then clear the removal and the archive from the record.
+        const recreateCheckout = Effect.gen(function* () {
+          const path = state.worktree.worktreePath!;
+          const created = yield* Effect.exit(
+            deps.git.createWorktree({
+              projectId: state.worktree.projectId,
+              cwd: projectRoot,
+              refName: state.worktree.branch,
+              path,
+            }),
+          );
+          if (created._tag === "Failure") {
+            step("recreate-checkout", "failed", "Git could not recreate the checkout.");
+            return result("failed", "The checkout could not be recreated. Nothing was changed.");
+          }
+          step(
+            "recreate-checkout",
+            "done",
+            `Checked out ${state.worktree.branch} at ${created.value.worktree.path}.`,
+          );
+          const recordUpdate = Effect.gen(function* () {
+            if (state.worktree.checkoutRemovedAt != null)
+              yield* dispatch({
+                type: "worktree.checkout.restore",
+                commandId: commandId("checkout-restore"),
+                worktreeId,
+                worktreePath: created.value.worktree.path,
+                restoredAt: stamp(),
+              });
+            if (state.worktree.archivedAt !== null)
+              yield* dispatch({
+                type: "worktree.restore",
+                commandId: commandId("restore"),
+                worktreeId,
+                restoredAt: stamp(),
+              });
+          });
+          const recorded = yield* Effect.exit(recordUpdate);
+          yield* deps.git.invalidateStatus(projectRoot);
+          if (recorded._tag === "Failure") {
+            step("update-record", "failed", "The workspace record could not be updated.");
+            return result(
+              "partial",
+              "The checkout was recreated, but its record was not updated. Retry to finish.",
+            );
+          }
+          step("update-record", "done", "Workspace record restored.");
+          return result("completed", preview.summary);
+        });
+
         switch (request.action) {
           case "archive":
             yield* dispatch({
@@ -916,6 +1037,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             return result("completed", preview.summary);
 
           case "restore":
+            if (effects.recreateCheckout) return yield* recreateCheckout;
             yield* dispatch({
               type: "worktree.restore",
               commandId: commandId("restore"),
@@ -927,54 +1049,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             step("update-record", "done", "Workspace restored.");
             return result("completed", preview.summary);
 
-          case "recreate-checkout": {
-            const path = state.worktree.worktreePath!;
-            const created = yield* Effect.exit(
-              deps.git.createWorktree({
-                projectId: state.worktree.projectId,
-                cwd: projectRoot,
-                refName: state.worktree.branch,
-                path,
-              }),
-            );
-            if (created._tag === "Failure") {
-              step("recreate-checkout", "failed", "Git could not recreate the checkout.");
-              return result("failed", "The checkout could not be recreated. Nothing was changed.");
-            }
-            step(
-              "recreate-checkout",
-              "done",
-              `Checked out ${state.worktree.branch} at ${created.value.worktree.path}.`,
-            );
-            const recordUpdate = Effect.gen(function* () {
-              if (state.worktree.checkoutRemovedAt != null)
-                yield* dispatch({
-                  type: "worktree.checkout.restore",
-                  commandId: commandId("checkout-restore"),
-                  worktreeId,
-                  worktreePath: created.value.worktree.path,
-                  restoredAt: stamp(),
-                });
-              if (state.worktree.archivedAt !== null)
-                yield* dispatch({
-                  type: "worktree.restore",
-                  commandId: commandId("restore"),
-                  worktreeId,
-                  restoredAt: stamp(),
-                });
-            });
-            const recorded = yield* Effect.exit(recordUpdate);
-            yield* deps.git.invalidateStatus(projectRoot);
-            if (recorded._tag === "Failure") {
-              step("update-record", "failed", "The workspace record could not be updated.");
-              return result(
-                "partial",
-                "The checkout was recreated, but its record was not updated. Retry to finish.",
-              );
-            }
-            step("update-record", "done", "Workspace record restored.");
-            return result("completed", preview.summary);
-          }
+          case "recreate-checkout":
+            return yield* recreateCheckout;
 
           case "remove-checkout":
           case "remove-stale-record": {
@@ -1125,30 +1201,50 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
               yield* deps.git.invalidateStatus(projectRoot);
             }
 
-            // 5. Record the removal; the record, path and branch stay as provenance.
-            if (effects.recordCheckoutRemoval) {
+            // 5. Record the removal; the record, path and branch stay as provenance. A delete
+            // records it last (as deleted, which hides the workspace), so a retry after a
+            // failed follow-up step can still finish it.
+            const recordRemoval = Effect.gen(function* () {
+              if (!effects.recordCheckoutRemoval) return null;
               const recorded = yield* Effect.exit(
                 dispatch({
                   type: "worktree.checkout.remove",
-                  commandId: commandId("checkout-remove"),
+                  commandId: commandId(effects.discard ? "checkout-delete" : "checkout-remove"),
                   worktreeId,
-                  reason: effects.removeCheckout ? "removed" : "missing",
+                  reason: effects.discard
+                    ? "deleted"
+                    : effects.removeCheckout
+                      ? "removed"
+                      : "missing",
                   removedAt: stamp(),
                 }),
               );
               if (recorded._tag === "Failure") {
                 step("update-record", "failed", "The workspace record was not updated.");
                 return result(
-                  effects.removeCheckout ? "partial" : "failed",
-                  effects.removeCheckout
-                    ? "The checkout was removed, but its record was not updated. Retry to finish; history is unchanged."
-                    : "The workspace record was not updated. Nothing was changed.",
+                  effects.removeCheckout || effects.discard ? "partial" : "failed",
+                  effects.discard
+                    ? `${preview.summary} The workspace record was not updated; retry to finish.`
+                    : effects.removeCheckout
+                      ? "The checkout was removed, but its record was not updated. Retry to finish; history is unchanged."
+                      : "The workspace record was not updated. Nothing was changed.",
                 );
               }
-              step("update-record", "done", "Workspace record kept with its branch and path.");
+              step(
+                "update-record",
+                "done",
+                effects.discard
+                  ? "Workspace hidden; its record stays only as provenance."
+                  : "Workspace record kept with its branch and path.",
+              );
+              return null;
+            });
+            if (!effects.discard) {
+              const failed = yield* recordRemoval;
+              if (failed) return failed;
             }
 
-            // 6. Archive conversations (never delete them).
+            // 6. Archive conversations; a delete deletes the ones it does not keep.
             const failedArchives: ThreadId[] = [];
             for (const threadId of effects.archiveConversationIds) {
               const archived = yield* Effect.exit(
@@ -1164,8 +1260,8 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                   ? `Archived ${plural(effects.archiveConversationIds.length, "conversation")}.`
                   : `${plural(failedArchives.length, "conversation")} could not be archived.`,
               );
-            // A discard moves them to Trash instead, where they stay restorable.
             const trashIds = effects.trashConversationIds ?? [];
+            const failedTrash: ThreadId[] = [];
             for (const threadId of trashIds) {
               const trashed = yield* Effect.exit(
                 dispatch({
@@ -1174,19 +1270,27 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                   threadId,
                 }),
               );
-              if (trashed._tag === "Failure") failedArchives.push(threadId);
+              if (trashed._tag === "Failure") failedTrash.push(threadId);
             }
             if (trashIds.length > 0)
               step(
                 "archive-conversations",
-                failedArchives.length === 0 ? "done" : "failed",
-                failedArchives.length === 0
-                  ? `Moved ${plural(trashIds.length, "conversation")} to Trash.`
-                  : `${plural(failedArchives.length, "conversation")} could not be moved to Trash.`,
+                failedTrash.length === 0 ? "done" : "failed",
+                failedTrash.length === 0
+                  ? `Deleted ${plural(trashIds.length, "conversation")}.`
+                  : `${plural(failedTrash.length, "conversation")} could not be deleted.`,
+              );
+            const conversationsFailed = failedArchives.length > 0 || failedTrash.length > 0;
+            // A delete never hides a workspace whose conversations were not settled.
+            if (effects.discard && conversationsFailed)
+              return result(
+                "partial",
+                `${preview.summary} Some conversations were not updated; retry to finish.`,
               );
 
             // 7. Branch deletion is explicit, pinned to the reviewed commit, and
-            // merged-only unless the reviewed discard said otherwise.
+            // merged-only unless the reviewed discard said otherwise. Inspection already
+            // refuses a branch another checkout uses.
             let branchFailed = false;
             if (effects.deleteBranch && state.facts?.branchHead) {
               const deleted = yield* Effect.exit(
@@ -1212,10 +1316,42 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
                   : `Deleted ${state.facts.unmerged === false ? "merged " : ""}branch ${state.worktree.branch}.`,
               );
             }
-            if (failedArchives.length > 0 || branchFailed)
+            if (!effects.discard) {
+              if (conversationsFailed || branchFailed)
+                return result(
+                  "partial",
+                  `${preview.summary} Some follow-up steps failed; retry to finish. History is unchanged.`,
+                );
+              return result("completed", preview.summary);
+            }
+
+            // 8. A delete hides the workspace, then drops a record no conversation
+            // belongs to. A failure leaves it hidden, so it is never shown again.
+            const failed = yield* recordRemoval;
+            if (failed) return failed;
+            if (effects.deleteRecord) {
+              const deleted = yield* Effect.exit(
+                dispatch({
+                  type: "worktree.delete",
+                  commandId: commandId("delete-record"),
+                  worktreeId,
+                  deletedAt: stamp(),
+                  deletedBranch: effects.deleteBranch && !branchFailed,
+                }),
+              );
+              if (deleted._tag === "Failure") {
+                step("update-record", "failed", "The workspace record could not be deleted.");
+                return result(
+                  "partial",
+                  `${preview.summary} The hidden workspace record could not be deleted.`,
+                );
+              }
+              step("update-record", "done", "Workspace record deleted.");
+            }
+            if (branchFailed)
               return result(
                 "partial",
-                `${preview.summary} Some follow-up steps failed; retry to finish. History is unchanged.`,
+                `${preview.summary} Branch ${state.worktree.branch} was kept.`,
               );
             return result("completed", preview.summary);
           }
@@ -1236,8 +1372,9 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
     list: (projectId) =>
       Effect.gen(function* () {
         const context = yield* loadContext({ projectId });
+        // A deleted workspace is hidden everywhere.
         const worktrees = context.placement.worktrees.filter(
-          (worktree) => worktree.projectId === projectId,
+          (worktree) => worktree.projectId === projectId && !isTombstoned(worktree),
         );
         const projectFacts = worktrees.some((worktree) => worktree.worktreePath !== null)
           ? yield* projectFactsFor(context, projectId)
@@ -1266,7 +1403,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
         );
         const plan = planLifecycleSuggestions({
           threads: context.threads,
-          worktrees: context.placement.worktrees,
+          worktrees: context.placement.worktrees.filter((worktree) => !isTombstoned(worktree)),
           projectRoots: new Map(
             context.placement.projects.map((project) => [project.id, project.workspaceRoot]),
           ),

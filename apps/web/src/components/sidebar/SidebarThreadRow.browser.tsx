@@ -133,7 +133,7 @@ function rowProps(id: string, isActive = false): SidebarThreadRowProps {
     navigateToDraft: vi.fn(),
     handleMultiSelectContextMenu: async () => undefined,
     handleThreadContextMenu: async () => undefined,
-    requestTrashThread: async () => undefined,
+    requestDeleteThread: async () => undefined,
     clearSelection: vi.fn(),
     commitRename: async () => undefined,
     cancelRename: vi.fn(),

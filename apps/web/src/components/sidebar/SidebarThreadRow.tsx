@@ -79,7 +79,7 @@ export interface SidebarThreadRowProps {
     threadRef: ScopedThreadRef,
     position: { x: number; y: number },
   ) => Promise<void>;
-  requestTrashThread: (
+  requestDeleteThread: (
     thread: SidebarThreadSummary & { draftId?: DraftId | undefined },
     opts?: { deletedThreadKeys?: ReadonlySet<string> },
   ) => Promise<void>;
@@ -180,7 +180,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     navigateToDraft,
     handleMultiSelectContextMenu,
     handleThreadContextMenu,
-    requestTrashThread,
+    requestDeleteThread,
     clearSelection,
     commitRename,
     cancelRename,
@@ -445,9 +445,9 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      void requestTrashThread(thread);
+      void requestDeleteThread(thread);
     },
-    [requestTrashThread, thread],
+    [requestDeleteThread, thread],
   );
   // Rows navigate imperatively, so the router's intent preloading never sees
   // them: warm the route (and the thread's detail) on hover and press.
@@ -617,9 +617,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                           data-thread-selection-safe
                           data-testid={`thread-close-${thread.id}`}
                           aria-label={
-                            draftId
-                              ? `Discard draft ${thread.title}`
-                              : `Move ${thread.title} to Trash`
+                            draftId ? `Discard draft ${thread.title}` : `Delete ${thread.title}`
                           }
                           className={`inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                           onPointerDown={stopPropagationOnPointerDown}
@@ -629,9 +627,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                         </button>
                       }
                     />
-                    <TooltipPopup side="top">
-                      {draftId ? "Discard draft" : "Move to Trash"}
-                    </TooltipPopup>
+                    <TooltipPopup side="top">{draftId ? "Discard draft" : "Delete"}</TooltipPopup>
                   </Tooltip>
                 ) : null}
                 {canArchiveThread && !isThreadRunning && appSettingsConfirmThreadArchive ? (

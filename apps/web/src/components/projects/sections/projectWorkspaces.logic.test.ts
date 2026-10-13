@@ -15,6 +15,7 @@ import {
   unlistedWorkspaces,
   workspaceFacts,
   workspaceInspectionSignature,
+  workspaceLostWorkFacts,
 } from "./projectWorkspaces.logic";
 
 function summary(overrides: Partial<WorkspaceLifecycleSummary> = {}): WorkspaceLifecycleSummary {
@@ -56,17 +57,36 @@ function summary(overrides: Partial<WorkspaceLifecycleSummary> = {}): WorkspaceL
 }
 
 describe("workspace rows", () => {
-  it("offers only what the inspection allows, archive first and removal last", () => {
-    expect(availableWorkspaceActions(summary())).toEqual(["archive", "remove-checkout"]);
-    expect(availableWorkspaceActions(summary({ discardBlockers: [] }))).toEqual([
-      "archive",
-      "remove-checkout",
+  it("offers Archive or Restore, then Delete, and nothing for the main checkout", () => {
+    expect(availableWorkspaceActions(summary())).toEqual(["archive", "delete-workspace"]);
+    expect(availableWorkspaceActions(summary({ archivedAt: "2026-10-01T00:00:00.000Z" }))).toEqual([
+      "restore",
       "delete-workspace",
     ]);
     expect(
-      availableWorkspaceActions(summary({ discardBlockers: ["Associated work is still active."] })),
-    ).toEqual(["archive", "remove-checkout"]);
+      availableWorkspaceActions(
+        summary({ checkout: "removed", checkoutRemovedAt: "2026-10-01T00:00:00.000Z" }),
+      ),
+    ).toEqual(["restore", "delete-workspace"]);
+    expect(availableWorkspaceActions(summary({ checkout: "missing" }))).toEqual([
+      "restore",
+      "delete-workspace",
+    ]);
+    expect(availableWorkspaceActions(summary({ main: true }))).toEqual([]);
     expect(availableWorkspaceActions(null)).toEqual([]);
+  });
+
+  it("counts only the work a delete would lose", () => {
+    expect(workspaceLostWorkFacts(summary())).toEqual([]);
+    expect(
+      workspaceLostWorkFacts(
+        summary({
+          unmerged: true,
+          activeWork: ["Fix login: a turn is running"],
+          changes: { ...summary().changes!, modified: 2, protectedIgnored: 1 },
+        }),
+      ).map((fact) => fact.label),
+    ).toEqual(["2 modified", "1 ignored file", "Unmerged commits"]);
   });
 
   it("stays quiet for a clean, merged checkout", () => {

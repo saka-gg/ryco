@@ -4,7 +4,12 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import { WorktreePullRequestLink, type EnvironmentId, type ProjectId } from "@ryco/contracts";
+import {
+  WorktreePullRequestLink,
+  type EnvironmentId,
+  type ProjectId,
+  type WorktreeCheckoutRemovalReason,
+} from "@ryco/contracts";
 import { Option, Schema } from "effect";
 import type { DraftId, DraftThreadState } from "../../composerDraftStore";
 import {
@@ -393,6 +398,7 @@ function readExplicitWorktrees(
       {
         archivedAt: readNullableString(record.archivedAt),
         checkoutRemovedAt: readNullableString(record.checkoutRemovedAt),
+        checkoutRemovalReason: readCheckoutRemovalReason(record.checkoutRemovalReason),
         branch,
         environmentId,
         issueNumber: readNumber(record.issueNumber),
@@ -434,6 +440,10 @@ function readPullRequestLinks(value: unknown): {
 
 function readPullRequestState(value: unknown): "open" | "closed" | "merged" | null {
   return value === "open" || value === "closed" || value === "merged" ? value : null;
+}
+
+function readCheckoutRemovalReason(value: unknown): WorktreeCheckoutRemovalReason | null {
+  return value === "removed" || value === "missing" || value === "deleted" ? value : null;
 }
 
 function readIssueState(value: unknown): "open" | "closed" | null {

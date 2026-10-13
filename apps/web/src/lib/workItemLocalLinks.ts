@@ -1,4 +1,5 @@
 import type { AtlassianConnectionSummary, AtlassianProjectLink, VcsRef } from "@ryco/contracts";
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 
 import type { SidebarWorktreeSummary } from "../types";
 
@@ -46,6 +47,8 @@ export function findLinkedWorkItemWorktrees(input: {
   const normalizedKey = normalizeWorkItemKey(input.key);
   const linked = new Map<SidebarWorktreeSummary["id"], LinkedWorkItemWorktree>();
   for (const worktree of input.worktrees) {
+    // A deleted workspace is gone for the reader; only its conversations remain.
+    if (isWorkspaceDeleted(worktree)) continue;
     const metadataMatches =
       worktree.workItemProvider === "jira" &&
       worktree.workItemKey !== null &&

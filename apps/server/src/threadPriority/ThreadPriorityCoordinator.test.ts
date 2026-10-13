@@ -92,6 +92,7 @@ function makeHarness(options: {
     generateThreadTitle: unused,
     generateIssueContent: unused,
     answerSideQuestion: () => Effect.die("Unexpected side question"),
+    summarizeWorkspaceChanges: () => Effect.die("Unexpected workspace change summary"),
     rankInboxThreads: (input) => {
       providerCalls += 1;
       return (options.rank ?? defaultRank)(input);

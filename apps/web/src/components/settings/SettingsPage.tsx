@@ -188,7 +188,7 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
     id: "archived",
     label: "Archive",
     icon: ArchiveIcon,
-    description: "Archived threads and Trash on this device. Restore or delete them.",
+    description: "Archived threads on this device. Unarchive or delete them.",
   },
 ];
 

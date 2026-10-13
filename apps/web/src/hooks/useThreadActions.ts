@@ -5,6 +5,7 @@ import {
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
 import { type ScopedThreadRef, ThreadId } from "@ryco/contracts";
+import { THREAD_DELETE_UNDO_MS } from "@ryco/shared/workspaceLifecycle";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useRef } from "react";
 
@@ -16,6 +17,7 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { readEnvironmentApi } from "../environmentApi";
 import { sidebarUndo } from "../sidebarUndo";
+import { undoThreadDeletes } from "../threadDeleteUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
 import {
@@ -29,13 +31,83 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "./useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 
-type TrashThreadOptions = {
+type DeleteThreadOptions = {
+  /** Every thread deleted alongside this one, so the fallback route skips them too. */
   deletedThreadKeys?: ReadonlySet<string>;
   optimistic?: boolean;
+  /** False when the caller shows one Undo toast for a whole selection. */
+  notify?: boolean;
 };
+
+/** A thread the server accepted for deletion; Undo restores it until the grace period ends. */
+export interface DeletedThread {
+  readonly threadRef: ScopedThreadRef;
+  readonly title: string;
+}
+
+export type DeleteThread = (
+  target: ScopedThreadRef,
+  opts?: DeleteThreadOptions,
+) => Promise<DeletedThread | null>;
 
 const errorDescription = (error: unknown) =>
   error instanceof Error ? error.message : "An error occurred.";
+
+/** One toast per delete action (a single thread or a whole selection), with Undo for all of it. */
+function presentThreadDeleteToast(deleted: readonly DeletedThread[]): void {
+  if (deleted.length === 0) return;
+  const single = deleted.length === 1 ? deleted[0] : undefined;
+  toastManager.add({
+    type: "success",
+    title: single ? `Deleted "${single.title}"` : `Deleted ${deleted.length} conversations`,
+    timeout: THREAD_DELETE_UNDO_MS,
+    actionProps: {
+      children: "Undo",
+      onClick: () =>
+        void Promise.all(
+          deleted.map((entry) =>
+            undoThreadDeletes(entry.threadRef.environmentId, [entry.threadRef.threadId]),
+          ),
+        ).catch((error: unknown) =>
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: single ? "Failed to restore conversation" : "Failed to restore conversations",
+              description: errorDescription(error),
+            }),
+          ),
+        ),
+    },
+  });
+}
+
+/**
+ * Deletes a selection in order with one Undo toast. Threads the server
+ * accepted before a failure stay deleted (and undoable); the failure is shown.
+ */
+export async function deleteThreadSelection(
+  deleteThread: DeleteThread,
+  targets: readonly ScopedThreadRef[],
+): Promise<void> {
+  const deletedThreadKeys = new Set(targets.map(scopedThreadKey));
+  const deleted: DeletedThread[] = [];
+  try {
+    for (const target of targets) {
+      const result = await deleteThread(target, { deletedThreadKeys, notify: false });
+      if (result) deleted.push(result);
+    }
+  } catch (error) {
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Failed to delete conversation",
+        description: errorDescription(error),
+      }),
+    );
+  } finally {
+    presentThreadDeleteToast(deleted);
+  }
+}
 
 export function useThreadActions() {
   const sidebarThreadSortOrder = useSettings((settings) => settings.sidebarThreadSortOrder);
@@ -113,27 +185,6 @@ export function useThreadActions() {
     });
   }, []);
 
-  const untrashThread = useCallback(async (target: ScopedThreadRef) => {
-    const api = readEnvironmentApi(target.environmentId);
-    if (!api) throw new Error("This environment is not connected.");
-    await api.orchestration.dispatchCommand({
-      type: "thread.untrash",
-      commandId: newCommandId(),
-      threadId: target.threadId,
-    });
-  }, []);
-
-  /** Separately confirmed by the caller; only a thread in Trash can be deleted permanently. */
-  const deleteThreadPermanently = useCallback(async (target: ScopedThreadRef) => {
-    const api = readEnvironmentApi(target.environmentId);
-    if (!api) throw new Error("This environment is not connected.");
-    await api.orchestration.dispatchCommand({
-      type: "thread.delete",
-      commandId: newCommandId(),
-      threadId: target.threadId,
-    });
-  }, []);
-
   /** Stops the provider runtime; the conversation and its terminal history stay. */
   const stopThreadSession = useCallback(async (target: ScopedThreadRef) => {
     const api = readEnvironmentApi(target.environmentId);
@@ -179,15 +230,16 @@ export function useThreadActions() {
   }, []);
 
   /**
-   * Moves a thread to Trash: hidden everywhere, its session stopped, and its history,
-   * attachments, terminal history and unsent draft kept for a later restore.
+   * Deletes a thread: the server hides it everywhere at once and purges it,
+   * attachments and terminal history included, after `THREAD_DELETE_GRACE_MS`.
+   * Until then the toast's Undo restores it. Confirmation is the caller's.
    */
-  const trashThread = useCallback(
-    async (target: ScopedThreadRef, opts: TrashThreadOptions = {}) => {
+  const deleteThread = useCallback<DeleteThread>(
+    async (target, opts = {}) => {
       const api = readEnvironmentApi(target.environmentId);
-      if (!api) return;
+      if (!api) return null;
       const resolved = resolveThreadTarget(target);
-      if (!resolved) return;
+      if (!resolved) return null;
       const { thread, threadRef } = resolved;
       const threads = selectThreadsForEnvironment(useStore.getState(), threadRef.environmentId);
       const deletedIds =
@@ -216,26 +268,10 @@ export function useThreadActions() {
           commandId: newCommandId(),
           threadId: threadRef.threadId,
         })
-        .then((result) => {
-          toastManager.add({
-            type: "success",
-            title: `Moved "${thread.title}" to Trash`,
-            description: "Restore it from Settings › Archive › Trash.",
-            actionProps: {
-              children: "Undo",
-              onClick: () =>
-                void untrashThread(threadRef).catch((error: unknown) =>
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title: "Failed to restore thread",
-                      description: errorDescription(error),
-                    }),
-                  ),
-                ),
-            },
-          });
-          return result;
+        .then((): DeletedThread => {
+          const deleted = { threadRef, title: thread.title };
+          if (opts.notify !== false) presentThreadDeleteToast([deleted]);
+          return deleted;
         });
 
       if (opts.optimistic) {
@@ -246,7 +282,7 @@ export function useThreadActions() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Failed to move thread to Trash",
+              title: "Failed to delete conversation",
               description: errorDescription(error),
             }),
           );
@@ -303,10 +339,10 @@ export function useThreadActions() {
         } else {
           cleanupDeletedThread();
         }
-        return;
+        return null;
       }
 
-      await dispatchDelete;
+      const deleted = await dispatchDelete;
       clearProjectDraftThreadById(
         scopeProjectRef(threadRef.environmentId, thread.projectId),
         threadRef,
@@ -327,11 +363,12 @@ export function useThreadActions() {
               ),
               replace: true,
             });
-            return;
+            return deleted;
           }
         }
         await router.navigate({ to: "/", replace: true });
       }
+      return deleted;
     },
     [
       clearProjectDraftThreadById,
@@ -340,11 +377,10 @@ export function useThreadActions() {
       router,
       resolveThreadTarget,
       sidebarThreadSortOrder,
-      untrashThread,
     ],
   );
 
-  const confirmAndTrashThread = useCallback(
+  const confirmAndDeleteThread = useCallback(
     async (target: ScopedThreadRef) => {
       const api = readEnvironmentApi(target.environmentId);
       if (!api) return;
@@ -354,22 +390,22 @@ export function useThreadActions() {
       const { thread } = resolved;
 
       if (confirmThreadDelete && localApi) {
-        const confirmed = await localApi.dialogs.confirm(trashConfirmationMessage([thread.title]));
+        const confirmed = await localApi.dialogs.confirm(deleteConfirmationMessage([thread.title]));
         if (!confirmed) {
           return;
         }
       }
 
-      await trashThread(target);
+      await deleteThread(target);
     },
-    [confirmThreadDelete, trashThread, resolveThreadTarget],
+    [confirmThreadDelete, deleteThread, resolveThreadTarget],
   );
 
   /**
-   * Moves several threads to Trash after one confirmation (a multiple
-   * selection). False when the reader declined, so the selection can stay.
+   * Deletes several threads after one confirmation (a multiple selection),
+   * with one Undo toast. False when the reader declined, so the selection can stay.
    */
-  const confirmAndTrashThreads = useCallback(
+  const confirmAndDeleteThreads = useCallback(
     async (targets: readonly ScopedThreadRef[]): Promise<boolean> => {
       if (targets.length === 0) return true;
       const state = useStore.getState();
@@ -380,35 +416,29 @@ export function useThreadActions() {
         shouldConfirmSidebarThreadSelectionDelete({ confirmThreadDelete, threads: summaries })
       ) {
         const confirmed = await localApi.dialogs.confirm(
-          trashConfirmationMessage(summaries.map((summary) => summary?.title ?? "")),
+          deleteConfirmationMessage(summaries.map((summary) => summary?.title ?? "")),
         );
         if (!confirmed) return false;
       }
-      const deletedThreadKeys = new Set(targets.map(scopedThreadKey));
-      for (const target of targets) await trashThread(target, { deletedThreadKeys });
+      await deleteThreadSelection(deleteThread, targets);
       return true;
     },
-    [confirmThreadDelete, trashThread],
+    [confirmThreadDelete, deleteThread],
   );
 
   return {
     archiveThread,
     unarchiveThread,
-    trashThread,
-    confirmAndTrashThread,
-    confirmAndTrashThreads,
-    untrashThread,
-    deleteThreadPermanently,
+    deleteThread,
+    confirmAndDeleteThread,
+    confirmAndDeleteThreads,
     stopThreadSession,
     interruptThreadTurn,
   };
 }
 
-/** Shared by every "Move to Trash" confirmation (single row, menu, multi-select). */
-export function trashConfirmationMessage(titles: ReadonlyArray<string>): string {
-  const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} threads`;
-  return [
-    `Move ${subject} to Trash?`,
-    "History, attachments and terminal history are kept. Restore from Settings › Archive › Trash; Ryco never empties Trash automatically.",
-  ].join("\n");
+/** Shared by every Delete confirmation (single row, menu, multi-select). */
+export function deleteConfirmationMessage(titles: ReadonlyArray<string>): string {
+  const subject = titles.length === 1 ? `"${titles[0]}"` : `${titles.length} conversations`;
+  return `Delete ${subject}? You can undo for a few seconds; after that it's gone for good, including attachments and terminal history.`;
 }

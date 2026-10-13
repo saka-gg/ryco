@@ -84,6 +84,50 @@ describe("composeSidebarTree", () => {
     expect(tree.projects[0]?.worktrees).toHaveLength(0);
   });
 
+  it("never lists a deleted workspace, nor a derived row for its archived conversations", () => {
+    const tree = composeSidebarTree({
+      isGitRepoByProjectId: new Map([[ProjectId.make("project-1"), true]]),
+      nowMs: Date.parse("2026-05-08T00:00:00.000Z"),
+      projects: [makeProject()],
+      threads: [
+        makeThread({
+          archivedAt: "2026-05-02T00:00:00.000Z",
+          id: ThreadId.make("thread-kept"),
+          worktreeId: "worktree-deleted",
+          worktreePath: "/repo/project-deleted",
+        }),
+        makeThread({
+          id: ThreadId.make("thread-unarchived"),
+          worktreeId: "worktree-deleted",
+          worktreePath: "/repo/project-deleted",
+        }),
+      ],
+      worktrees: [
+        makeWorktree({ worktreeId: "worktree-main" }),
+        makeWorktree({
+          archivedAt: "2026-05-02T00:00:00.000Z",
+          branch: "feature/deleted",
+          checkoutRemovedAt: "2026-05-02T00:00:00.000Z",
+          checkoutRemovalReason: "deleted",
+          origin: "branch",
+          worktreeId: "worktree-deleted",
+          worktreePath: "/repo/project-deleted",
+        }),
+      ],
+    });
+    const project = tree.projects[0]!;
+    const listed = [...project.worktrees, ...project.archivedWorktrees];
+    expect(listed.map((entry) => entry.worktree.worktreeId)).not.toContain("worktree-deleted");
+    // The kept conversation stays in the project's archive; one the reader
+    // unarchived still shows, under a derived row.
+    expect(project.archivedSessions.map((thread) => thread.id)).toContain(
+      ThreadId.make("thread-kept"),
+    );
+    expect(
+      listed.flatMap((entry) => entry.sessions.concat(entry.archivedSessions)).map((t) => t.id),
+    ).toEqual([ThreadId.make("thread-unarchived")]);
+  });
+
   it("pins main before manually ordered worktrees", () => {
     const tree = composeSidebarTree({
       isGitRepoByProjectId: new Map([[ProjectId.make("project-1"), true]]),

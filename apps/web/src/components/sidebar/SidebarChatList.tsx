@@ -33,7 +33,7 @@ export interface SidebarChatListProps {
   readonly activeRouteThreadKey: string | null;
   readonly handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   readonly archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
-  readonly trashThread: ReturnType<typeof useThreadActions>["trashThread"];
+  readonly deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   readonly stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
   readonly interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
   readonly attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
@@ -44,7 +44,7 @@ export interface SidebarChatListProps {
 /**
  * The sidebar's "Chats" section: "No project" chats live here instead of in the
  * project tree, newest first, one row per chat thread. Rows reuse the project
- * tree's thread row (rename, archive, Trash, selection); their menu swaps the
+ * tree's thread row (rename, archive, delete, selection); their menu swaps the
  * project items for chat folder actions and the chat menu extensions (see
  * `chatRowMenu.ts`, where "Turn into project…" plugs in).
  */
@@ -101,7 +101,7 @@ export const SidebarChatList = memo(function SidebarChatList(props: SidebarChatL
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
     defaultThreadEnvMode,
-    trashThread: props.trashThread,
+    deleteThread: props.deleteThread,
     archiveThread: props.archiveThread,
     stopThreadSession: props.stopThreadSession,
     interruptThreadTurn: props.interruptThreadTurn,
@@ -191,7 +191,7 @@ export const SidebarChatList = memo(function SidebarChatList(props: SidebarChatL
                 navigateToDraft={actions.navigateToDraft}
                 handleMultiSelectContextMenu={actions.handleMultiSelectContextMenu}
                 handleThreadContextMenu={actions.handleThreadContextMenu}
-                requestTrashThread={actions.requestTrashThread}
+                requestDeleteThread={actions.requestDeleteThread}
                 clearSelection={clearSelection}
                 commitRename={actions.commitRename}
                 cancelRename={actions.cancelRename}

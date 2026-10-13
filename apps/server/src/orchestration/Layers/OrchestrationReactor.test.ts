@@ -6,6 +6,7 @@ import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { ThreadPurgeReactor } from "../Services/ThreadPurgeReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 
@@ -77,6 +78,15 @@ describe("OrchestrationReactor", () => {
             drainThrough: () => Effect.void,
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(ThreadPurgeReactor, {
+            start: () => {
+              started.push("thread-purge-reactor");
+              return Effect.void;
+            },
+            awaitStartupSweep: Effect.succeed(null),
+          }),
+        ),
       ),
     );
 
@@ -84,7 +94,7 @@ describe("OrchestrationReactor", () => {
     const scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
 
-    expect(started).toHaveLength(6);
+    expect(started).toHaveLength(7);
     expect(started.slice(0, 2)).toEqual(["context-handoff-recovery", "checkpoint-revert-recovery"]);
     expect(new Set(started.slice(2))).toEqual(
       new Set([
@@ -92,6 +102,7 @@ describe("OrchestrationReactor", () => {
         "provider-command-reactor",
         "checkpoint-reactor",
         "thread-deletion-reactor",
+        "thread-purge-reactor",
       ]),
     );
 
@@ -125,6 +136,7 @@ describe("OrchestrationReactor", () => {
         ),
         Layer.provideMerge(Layer.mock(CheckpointReactor)({ drain: Effect.void })),
         Layer.provideMerge(Layer.mock(ThreadDeletionReactor)({})),
+        Layer.provideMerge(Layer.mock(ThreadPurgeReactor)({})),
       ),
     );
     const reactor = await runtime.runPromise(Effect.service(OrchestrationReactor));

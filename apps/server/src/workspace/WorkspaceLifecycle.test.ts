@@ -214,6 +214,14 @@ function fixture() {
           };
           state.trashed.push({ threadId: command.threadId, worktreeId: topicId });
           break;
+        case "worktree.delete":
+          state.snapshot = {
+            ...state.snapshot,
+            worktrees: state.snapshot.worktrees?.filter(
+              (row) => row.worktreeId !== command.worktreeId,
+            ),
+          };
+          break;
       }
       return Effect.succeed({ sequence: state.commands.length });
     });
@@ -762,28 +770,33 @@ describe("workspace lifecycle service", () => {
       worktreeId: topicId,
       action: "remove-checkout",
       discard: true,
-      deleteBranch: true,
-      // Ignored: a discard moves conversations to Trash.
-      archiveConversations: true,
+      // Ignored: a delete always deletes the branch and archives what it keeps.
+      deleteBranch: false,
+      archiveConversations: false,
     });
     expect(preview.blockers).toEqual([]);
+    expect(preview.request).toMatchObject({
+      deleteBranch: true,
+      archiveConversations: true,
+      deleteConversations: false,
+    });
     expect(preview.summary).toBe(
-      "Delete 1 workspace: remove its checkout, move 3 conversations to Trash, delete branch topic. Work that exists only here is lost.",
+      "Delete 1 workspace: remove its checkout, delete branch topic, archive 1 conversation, delete 1 unused conversation. Kept conversations stay in the archive; the workspace is hidden. Work that exists only here is lost.",
     );
     expect(preview.effects).toMatchObject({
       discard: true,
       discardsWork: true,
-      archiveConversationIds: [],
-      unchangedConversations: 0,
+      archiveConversationIds: [activeId],
+      trashConversationIds: [pristineId],
+      unchangedConversations: 1,
+      deleteRecord: false,
     });
-    expect(preview.effects.trashConversationIds?.toSorted()).toEqual(
-      [activeId, archivedId, pristineId].toSorted(),
-    );
     const details = preview.details.join(" ");
     expect(details).toContain("git worktree remove --force");
     expect(details).toContain("Discards uncommitted changes to 1 tracked file.");
     expect(details).toContain("Deletes 1 untracked file.");
     expect(details).toContain("including commits the project HEAD does not contain");
+    expect(details).toContain("Kept conversations stay in the archive; the workspace is hidden.");
 
     expect(result.outcome).toBe("completed");
     expect(existsSync(f.checkout)).toBe(false);
@@ -791,9 +804,65 @@ describe("workspace lifecycle service", () => {
     expect(f.branchExists("topic")).toBe(false);
     expect(f.state.stopped).toEqual([activeId]);
     const types = f.commandTypes();
+    expect(types.filter((type) => type === "thread.archive")).toHaveLength(1);
+    expect(
+      f.state.commands.flatMap((command) =>
+        command.type === "thread.trash" ? [command.threadId] : [],
+      ),
+    ).toEqual([pristineId]);
+    expect(types).not.toContain("thread.delete");
+    expect(types).not.toContain("worktree.delete");
+    // The workspace is hidden last, as deleted: its record stays only as provenance.
+    expect(types.at(-1)).toBe("worktree.checkout.remove");
+    const record = f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId);
+    expect(record?.checkoutRemovalReason).toBe("deleted");
+  });
+
+  it("deletes the conversations too when asked", async () => {
+    const f = fixture();
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+      deleteConversations: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.summary).toBe(
+      "Delete 1 workspace: remove its checkout, delete branch topic, delete 3 conversations.",
+    );
+    expect(preview.effects.archiveConversationIds).toEqual([]);
+    expect(preview.effects.trashConversationIds?.toSorted()).toEqual(
+      [activeId, archivedId, pristineId].toSorted(),
+    );
+    expect(preview.details.join(" ")).toContain(
+      "The workspace is hidden; its record is dropped once its conversations are deleted.",
+    );
+    expect(result.outcome).toBe("completed");
+    const types = f.commandTypes();
     expect(types.filter((type) => type === "thread.trash")).toHaveLength(3);
     expect(types).not.toContain("thread.archive");
-    expect(types).not.toContain("thread.delete");
+    // Deleted conversations still reference the record until they are purged.
+    expect(types).not.toContain("worktree.delete");
+    expect(
+      f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId)?.checkoutRemovalReason,
+    ).toBe("deleted");
+    expect(f.branchExists("topic")).toBe(false);
+  });
+
+  it("binds the conversation choice to the reviewed fingerprint", async () => {
+    const f = fixture();
+    const kept = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout", discard: true }),
+    );
+    const result = await f.run((s) =>
+      s.apply({
+        ...kept.request,
+        deleteConversations: true,
+        expectedFingerprint: kept.fingerprint,
+      }),
+    );
+    expect(result.outcome).toBe("blocked");
+    expect(f.commandTypes()).toEqual([]);
   });
 
   it("refuses a discard when the checkout changed after review, and while work is active", async () => {
@@ -806,7 +875,7 @@ describe("workspace lifecycle service", () => {
     } as const;
     const preview = await f.run((s) => s.preview(request));
     expect(preview.blockers).toEqual([]);
-    expect(preview.details.join(" ")).toContain("Keeps the branch topic.");
+    expect(preview.details.join(" ")).toContain("Deletes the merged branch topic");
     writeFileSync(path.join(f.checkout, "late.txt"), "written after review");
     const stale = await f.run((s) =>
       s.apply({ ...preview.request, expectedFingerprint: preview.fingerprint }),
@@ -832,28 +901,134 @@ describe("workspace lifecycle service", () => {
     expect(f.commandTypes()).toEqual([]);
   });
 
-  it("finishes deleting a workspace whose checkout was already removed", async () => {
+  it("deletes a workspace whose checkout was already removed, and hides it", async () => {
     const f = fixture();
     await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout" });
+    // Conversations in Trash never block deleting the workspace.
+    f.state.trashed.push({ threadId: ThreadId.make("in-trash"), worktreeId: topicId });
     const { preview, result } = await f.previewAndApply({
       worktreeId: topicId,
       action: "remove-checkout",
       discard: true,
-      deleteBranch: true,
     });
     expect(preview.blockers).toEqual([]);
     expect(preview.summary).toBe(
-      "Delete 1 workspace: move 3 conversations to Trash, delete branch topic.",
+      "Delete 1 workspace: delete branch topic, delete 1 unused conversation. Kept conversations stay in the archive; the workspace is hidden.",
     );
+    expect(preview.details.join(" ")).toContain("The checkout is already removed.");
     expect(result.outcome).toBe("completed");
     expect(f.state.removals).toBe(1);
     expect(f.branchExists("topic")).toBe(false);
-    expect(f.commandTypes().filter((type) => type === "worktree.checkout.remove")).toHaveLength(1);
+    expect(
+      f.state.commands.flatMap((command) =>
+        command.type === "worktree.checkout.remove" ? [command.reason] : [],
+      ),
+    ).toEqual(["removed", "deleted"]);
+    expect(f.commandTypes()).not.toContain("worktree.delete");
 
-    const done = await f.run((s) =>
-      s.preview({ worktreeId: topicId, action: "remove-checkout", discard: true }),
+    // A deleted workspace allows nothing and is listed nowhere.
+    for (const action of ["restore", "recreate-checkout", "remove-checkout"] as const) {
+      const again = await f.run((s) => s.preview({ worktreeId: topicId, action, discard: true }));
+      expect(again.blockers).toEqual(["The workspace was deleted."]);
+      expect(again.workspace.actions.every((entry) => !entry.available)).toBe(true);
+    }
+    const listed = await f.run((s) => s.list(projectId));
+    expect(listed.map((summary) => summary.worktreeId)).toEqual([mainId]);
+    const blocked = await f.run((s) => s.applyCurrent({ worktreeId: topicId, action: "restore" }));
+    expect(blocked.outcome).toBe("blocked");
+  });
+
+  it("deletes an archived workspace without conversations in one step", async () => {
+    const f = fixture();
+    f.state.snapshot = { ...f.state.snapshot, threads: [] };
+    await f.previewAndApply({ worktreeId: topicId, action: "archive" });
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects.deleteRecord).toBe(true);
+    expect(preview.summary).toBe("Delete 1 workspace: remove its checkout, delete branch topic.");
+    expect(result.outcome).toBe("completed");
+    expect(f.git(f.repo, "worktree", "list")).not.toContain(f.checkout);
+    expect(f.commandTypes()).toEqual([
+      "worktree.archive",
+      "worktree.checkout.remove",
+      "worktree.delete",
+    ]);
+    expect(f.state.snapshot.worktrees?.some((w) => w.worktreeId === topicId)).toBe(false);
+  });
+
+  it("keeps a branch another checkout uses when deleting", async () => {
+    const f = fixture();
+    await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout" });
+    const other = path.join(f.root, "other");
+    f.git(f.repo, "worktree", "add", other, "topic");
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      discard: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects.deleteBranch).toBe(false);
+    expect(preview.details.join(" ")).toContain("Keeps branch topic: Branch is checked out");
+    expect(result.outcome).toBe("completed");
+    expect(f.branchExists("topic")).toBe(true);
+    expect(existsSync(other)).toBe(true);
+    expect(
+      f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId)?.checkoutRemovalReason,
+    ).toBe("deleted");
+  });
+
+  it("restores a removed checkout on its existing branch", async () => {
+    const f = fixture();
+    await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout" });
+    const listed = (await f.run((s) => s.list(projectId))).find((w) => w.worktreeId === topicId);
+    expect(listed?.actions.find((entry) => entry.action === "restore")?.available).toBe(true);
+    const { preview, result } = await f.previewAndApply({ worktreeId: topicId, action: "restore" });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects).toMatchObject({ recreateCheckout: true, restoreWorkspace: true });
+    expect(preview.summary).toBe(
+      "Restore 1 workspace: recreate its checkout on branch topic. Conversations stay as they are.",
     );
-    expect(done.blockers.join(" ")).toContain("Nothing is left to delete");
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(true);
+    expect(f.git(f.checkout, "symbolic-ref", "--short", "HEAD").trim()).toBe("topic");
+    expect(f.commandTypes().slice(-2)).toEqual(["worktree.checkout.restore", "worktree.restore"]);
+    const record = f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId);
+    expect(record).toMatchObject({ archivedAt: null, checkoutRemovedAt: null });
+  });
+
+  it("recreates a missing checkout of a workspace that is not archived", async () => {
+    const f = fixture();
+    f.git(f.repo, "worktree", "remove", f.checkout);
+    const { preview, result } = await f.previewAndApply({ worktreeId: topicId, action: "restore" });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects).toMatchObject({ recreateCheckout: true, restoreWorkspace: false });
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(true);
+    expect(f.commandTypes()).toEqual([]);
+  });
+
+  it("only unarchives a workspace whose branch is gone", async () => {
+    const f = fixture();
+    await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout", deleteBranch: true });
+    expect(f.branchExists("topic")).toBe(false);
+    const { preview, result } = await f.previewAndApply({ worktreeId: topicId, action: "restore" });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.effects).toMatchObject({ recreateCheckout: false, restoreWorkspace: true });
+    expect(preview.details.join(" ")).toContain("The checkout stays removed");
+    expect(preview.details.join(" ")).toContain("Branch topic no longer exists");
+    expect(result.outcome).toBe("completed");
+    expect(f.commandTypes().at(-1)).toBe("worktree.restore");
+    const record = f.state.snapshot.worktrees?.find((w) => w.worktreeId === topicId);
+    expect(record?.archivedAt).toBeNull();
+    expect(record?.checkoutRemovalReason).toBe("removed");
+
+    // Nothing is left to restore now.
+    const again = await f.run((s) => s.preview({ worktreeId: topicId, action: "restore" }));
+    expect(again.blockers.join(" ")).toContain("Branch topic no longer exists");
   });
 
   it("suggests only eligible conversations and finished checkouts", async () => {

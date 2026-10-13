@@ -6,8 +6,6 @@ import {
   CopyIcon,
   Edit3Icon,
   ExternalLinkIcon,
-  FolderMinusIcon,
-  FolderPlusIcon,
   FolderRootIcon,
   LinkIcon,
   type LucideIcon,
@@ -351,27 +349,15 @@ function ArchivedWorktreeRow(props: {
           <RotateCcwIcon className="size-3.5" />
         </button>
         {canManage ? (
-          checkoutRemoved ? (
-            <button
-              type="button"
-              className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-foreground ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
-              aria-label={`Recreate checkout ${props.worktree.worktree.branch}`}
-              title="Recreate checkout"
-              onClick={() => props.onWorkspaceAction(props.worktree, "recreate-checkout")}
-            >
-              <FolderPlusIcon className="size-3.5" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-destructive ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
-              aria-label={`Remove checkout ${props.worktree.worktree.branch}`}
-              title="Remove checkout (keeps history and branch)"
-              onClick={() => props.onWorkspaceAction(props.worktree, "remove-checkout")}
-            >
-              <FolderMinusIcon className="size-3.5" />
-            </button>
-          )
+          <button
+            type="button"
+            className={`inline-flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-secondary hover:text-destructive ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
+            aria-label={`Delete workspace ${props.worktree.worktree.branch}`}
+            title="Delete workspace…"
+            onClick={() => props.onWorkspaceAction(props.worktree, "delete-workspace")}
+          >
+            <Trash2Icon className="size-3.5" />
+          </button>
         ) : null}
       </div>
     </SidebarMenuSubItem>
@@ -790,6 +776,7 @@ function WorktreeMenuItems(props: {
         {
           archivedAt: props.worktree.worktree.archivedAt ?? null,
           checkoutRemovedAt: props.worktree.worktree.checkoutRemovedAt ?? null,
+          checkoutRemovalReason: props.worktree.worktree.checkoutRemovalReason ?? null,
         },
         { protectedWorkspace: !props.canManage },
       ).map((item) => {
@@ -812,9 +799,6 @@ function WorktreeMenuItems(props: {
 const WORKSPACE_ACTION_ICONS: Record<WorkspaceActionId, LucideIcon> = {
   archive: ArchiveIcon,
   restore: ArchiveRestoreIcon,
-  "remove-checkout": FolderMinusIcon,
-  "remove-stale-record": FolderMinusIcon,
-  "recreate-checkout": FolderPlusIcon,
   "delete-workspace": Trash2Icon,
 };
 

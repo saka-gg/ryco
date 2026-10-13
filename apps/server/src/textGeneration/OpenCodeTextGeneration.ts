@@ -25,6 +25,7 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import { type TextGenerationShape, validateRankInboxThreadsResult } from "./TextGeneration.ts";
 import {
@@ -32,6 +33,7 @@ import {
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitleResult,
+  sanitizeWorkspaceChangesSummary,
 } from "./TextGenerationUtils.ts";
 import {
   OpenCodeRuntime,
@@ -110,7 +112,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads";
+      | "rankInboxThreads"
+      | "summarizeWorkspaceChanges";
     readonly cwd: string;
     readonly prompt: string;
     readonly outputSchemaJson: S;
@@ -453,6 +456,20 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     return yield* validateRankInboxThreadsResult(input, generated.rankings);
   });
 
+  const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
+    "OpenCodeTextGeneration.summarizeWorkspaceChanges",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildWorkspaceChangesSummaryPrompt(input);
+    const generated = yield* runOpenCodeJson({
+      operation: "summarizeWorkspaceChanges",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+    });
+    return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
@@ -461,5 +478,6 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     generateIssueContent,
     rankInboxThreads,
     answerSideQuestion,
+    summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;
 });

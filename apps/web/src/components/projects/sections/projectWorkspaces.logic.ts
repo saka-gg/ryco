@@ -1,32 +1,26 @@
-import type { WorkspaceActionId } from "@ryco/client-runtime/state/lifecycle";
-import type {
-  LifecycleSuggestions,
-  WorkspaceLifecycleAction,
-  WorkspaceLifecycleSummary,
-} from "@ryco/contracts";
-
-/** Row menu order: hide/show first, then the checkout changes, removal last. */
-export const WORKSPACE_MENU_ACTIONS: readonly WorkspaceLifecycleAction[] = [
-  "archive",
-  "restore",
-  "recreate-checkout",
-  "remove-stale-record",
-  "remove-checkout",
-];
+import {
+  listWorkspaceLifecycleActions,
+  type WorkspaceActionId,
+} from "@ryco/client-runtime/state/lifecycle";
+import type { LifecycleSuggestions, WorkspaceLifecycleSummary } from "@ryco/contracts";
 
 /**
- * The actions the server's inspection allows right now, in menu order, with
- * "Delete workspace" last when the node can delete it.
+ * The actions a workspace offers, in menu order: Archive or Restore, then
+ * "Delete workspace" (its review says what it would discard or why it cannot
+ * run). The main checkout offers none.
  */
 export function availableWorkspaceActions(
   summary: WorkspaceLifecycleSummary | null | undefined,
 ): WorkspaceActionId[] {
   if (!summary) return [];
-  const actions: WorkspaceActionId[] = WORKSPACE_MENU_ACTIONS.filter(
-    (action) => summary.actions.find((entry) => entry.action === action)?.available === true,
-  );
-  if (summary.discardBlockers?.length === 0) actions.push("delete-workspace");
-  return actions;
+  return listWorkspaceLifecycleActions(
+    {
+      archivedAt: summary.archivedAt,
+      checkoutRemovedAt: summary.checkoutRemovedAt,
+      checkout: summary.checkout,
+    },
+    { protectedWorkspace: summary.main },
+  ).map((item) => item.action);
 }
 
 export interface WorkspaceFact {
@@ -70,6 +64,20 @@ export function workspaceFacts(summary: WorkspaceLifecycleSummary): WorkspaceFac
     case "present":
       break;
   }
+  facts.push(...workspaceLostWorkFacts(summary));
+  if (summary.activeWork.length > 0) {
+    facts.push({ label: "In use", tone: "warning", detail: summary.activeWork.join("; ") });
+  }
+  return facts;
+}
+
+/**
+ * The work that exists only in this checkout, as short counts: what deleting
+ * the workspace would lose (uncommitted and untracked files, ignored files
+ * that are not caches, unmerged commits).
+ */
+export function workspaceLostWorkFacts(summary: WorkspaceLifecycleSummary): WorkspaceFact[] {
+  const facts: WorkspaceFact[] = [];
   const changes = summary.checkout === "present" ? summary.changes : null;
   if (changes) {
     if (changes.truncated) {
@@ -91,9 +99,6 @@ export function workspaceFacts(summary: WorkspaceLifecycleSummary): WorkspaceFac
   }
   if (!summary.main && summary.unmerged === true) {
     facts.push({ label: "Unmerged commits", tone: "warning" });
-  }
-  if (summary.activeWork.length > 0) {
-    facts.push({ label: "In use", tone: "warning", detail: summary.activeWork.join("; ") });
   }
   return facts;
 }
@@ -165,6 +170,7 @@ export function workspaceInspectionSignature(
     readonly worktreePath: string | null;
     readonly archivedAt?: string | null | undefined;
     readonly checkoutRemovedAt?: string | null | undefined;
+    readonly checkoutRemovalReason?: string | null | undefined;
   }>,
 ): string {
   return worktrees
@@ -175,6 +181,7 @@ export function workspaceInspectionSignature(
         worktree.worktreePath ?? "",
         worktree.archivedAt ?? "",
         worktree.checkoutRemovedAt ?? "",
+        worktree.checkoutRemovalReason ?? "",
       ].join("\u0001"),
     )
     .toSorted()

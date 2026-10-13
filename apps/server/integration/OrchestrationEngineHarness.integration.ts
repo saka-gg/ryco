@@ -69,6 +69,7 @@ import {
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
+import { ThreadPurgeReactor } from "../src/orchestration/Services/ThreadPurgeReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ContextHandoffCoordinatorLive } from "../src/orchestration/Layers/ContextHandoffCoordinator.ts";
 import { ContextHandoffServiceLive } from "../src/orchestration/contextHandoff/ContextHandoffService.ts";
@@ -412,6 +413,12 @@ export const makeOrchestrationIntegrationHarness = (
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
           drainThrough: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(ThreadPurgeReactor, {
+          start: () => Effect.void,
+          awaitStartupSweep: Effect.succeed(null),
         }),
       ),
     );

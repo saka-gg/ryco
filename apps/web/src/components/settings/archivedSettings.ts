@@ -1,6 +1,4 @@
-import { projectPlaceLabel } from "@ryco/client-runtime/state/composer";
-import type { TrashedThreadSummary } from "@ryco/contracts";
-import { isChatProject, projectKindOf, type ProjectKindCarrier } from "@ryco/shared/projectKind";
+import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
 
 interface ArchivedSettingsProject extends ProjectKindCarrier {
   readonly id: string;
@@ -98,30 +96,4 @@ export function selectArchivedSettingsGroups<
     }),
   );
   return [...projectGroups, ...chatGroups];
-}
-
-/** Where a trashed conversation lives, as Settings → Archive → Trash lists it. */
-export interface TrashedThreadPlace {
-  /** "No project" for a chat, else its project's title ("Removed project" once that is gone). */
-  readonly label: string;
-  /**
-   * A chat's folder, offered for deletion alongside the conversation. Null for a regular project,
-   * and for a chat whose folder this client does not know (its project is no longer listed).
-   */
-  readonly chatFolder: string | null;
-}
-
-/**
- * The node's own `projectKind` says whether a trashed conversation is a chat, even once its
- * project has left the client's store. Nodes that predate it send none; the store answers then.
- */
-export function describeTrashedThreadPlace(
-  thread: Pick<TrashedThreadSummary, "projectKind" | "projectTitle">,
-  storeProject: (ProjectKindCarrier & { readonly cwd: string }) | null | undefined,
-): TrashedThreadPlace {
-  const kind = { kind: thread.projectKind ?? projectKindOf(storeProject) };
-  return {
-    label: projectPlaceLabel(kind, thread.projectTitle ?? "Removed project"),
-    chatFolder: isChatProject(kind) ? (storeProject?.cwd ?? null) : null,
-  };
 }

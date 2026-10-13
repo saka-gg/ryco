@@ -12,10 +12,11 @@ import { ProjectKind } from "./orchestration.ts";
 import { WorktreeId, WorktreeOrigin } from "./worktree.ts";
 
 /**
- * Workspace lifecycle is separate from conversation lifecycle. No action here ever
- * deletes a conversation; checkout removal archives the workspace's conversations
- * by default and keeps their history and the branch. Only an explicit discard
- * ("Delete workspace") throws work away, and it moves conversations to Trash.
+ * Workspace lifecycle is separate from conversation lifecycle. Users see Archive,
+ * Restore and Delete; the other actions serve Agent Control and older clients.
+ * Delete (`remove-checkout` + `discard`) throws the checkout's work away and
+ * archives the workspace's conversations, unless `deleteConversations` asks to
+ * delete them too (they are purged after the delete grace period).
  */
 export const WorkspaceLifecycleAction = Schema.Literals([
   "archive",
@@ -141,11 +142,18 @@ export const WorkspaceLifecycleRequest = Schema.Struct({
   /**
    * Off by default; `remove-checkout` only. "Delete workspace": the checkout is
    * removed even with uncommitted, untracked or ignored files (they are lost),
-   * an unmerged branch may be deleted, and the workspace's conversations move to
-   * Trash instead of the archive. Also finishes a workspace whose checkout is
-   * already removed. Active work still blocks it.
+   * the branch is deleted (also unmerged), and the workspace is recorded as
+   * deleted: hidden everywhere, kept only as provenance for its conversations.
+   * Also finishes a workspace whose checkout is already removed. Active work
+   * still blocks it.
    */
   discard: Schema.optional(Schema.Boolean),
+  /**
+   * Discard only, off by default: the workspace's conversations are deleted too
+   * (after the delete grace period). Off: they are archived and kept, and the
+   * workspace record stays hidden as their provenance.
+   */
+  deleteConversations: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceLifecycleRequest = typeof WorkspaceLifecycleRequest.Type;
 
@@ -164,10 +172,12 @@ export const WorkspaceLifecycleEffects = Schema.Struct({
   branch: TrimmedNonEmptyString,
   /** The request discards ("Delete workspace"). Absent from nodes that predate it. */
   discard: Schema.optional(Schema.Boolean),
-  /** Conversations moved to Trash, where they stay restorable. */
+  /** Conversations deleted with the workspace (pending delete, purged after the grace period). */
   trashConversationIds: Schema.optional(Schema.Array(ThreadId)),
   /** Work that exists nowhere else is lost: changed or untracked files, unmerged commits. */
   discardsWork: Schema.optional(Schema.Boolean),
+  /** The workspace record is deleted too: no conversation (live or in Trash) belongs to it. */
+  deleteRecord: Schema.optional(Schema.Boolean),
 });
 export type WorkspaceLifecycleEffects = typeof WorkspaceLifecycleEffects.Type;
 
@@ -281,6 +291,22 @@ export const CheckoutRemovalSuggestion = Schema.Struct({
 });
 export type CheckoutRemovalSuggestion = typeof CheckoutRemovalSuggestion.Type;
 
+export const WorkspaceChangesSummaryInput = Schema.Struct({
+  worktreeId: WorktreeId,
+});
+export type WorkspaceChangesSummaryInput = typeof WorkspaceChangesSummaryInput.Type;
+
+/**
+ * A short AI-written description of the work that exists only in a checkout
+ * (uncommitted and untracked files, unmerged commits). Informational: never part
+ * of a review fingerprint. Null when there is nothing to describe or no model
+ * could produce it.
+ */
+export const WorkspaceChangesSummaryResult = Schema.Struct({
+  summary: Schema.NullOr(Schema.String),
+});
+export type WorkspaceChangesSummaryResult = typeof WorkspaceChangesSummaryResult.Type;
+
 export const LifecycleSuggestions = Schema.Struct({
   generatedAt: IsoDateTime,
   threads: Schema.Array(ThreadArchiveSuggestion),
@@ -288,6 +314,10 @@ export const LifecycleSuggestions = Schema.Struct({
 });
 export type LifecycleSuggestions = typeof LifecycleSuggestions.Type;
 
+/**
+ * Legacy: `lifecycle.listTrash` stays for older clients. Trash is now only the
+ * short pending-delete state; clients no longer list it.
+ */
 export const TrashedThreadSummary = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,

@@ -252,6 +252,7 @@ export const AcpRegistryDriver: ProviderDriver<AcpRegistrySettings, AcpRegistryD
         generateThreadTitle: () => unsupported("generateThreadTitle"),
         generateIssueContent: () => unsupported("generateIssueContent"),
         rankInboxThreads: () => unsupported("rankInboxThreads"),
+        summarizeWorkspaceChanges: () => unsupported("summarizeWorkspaceChanges"),
       };
       return {
         instanceId: input.instanceId,

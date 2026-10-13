@@ -997,6 +997,113 @@ it.effect(
     }),
 );
 
+it.effect("compensation archives an owned thread that holds work and keeps its checkout", () =>
+  Effect.gen(function* () {
+    const ownedWorktreeId = WorktreeId.make("worktree-owned-used");
+    const ownedCheckoutPath = "/workspace/worktrees/owned-used";
+    const executing: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-recovery-used"),
+      requestId: AgentControlRequestId.make("request-recovery-used"),
+      status: "executing",
+    };
+    const running: AgentControlOperation = {
+      operationId: AgentControlOperationId.make("operation-recovery-used"),
+      proposalId: executing.proposalId,
+      actionKind: "createThreads",
+      status: "running",
+      attempt: 1,
+      state: {
+        completedSteps: ["planned-thread-ids"],
+        resources: {
+          threadIds: [threadId],
+          ownedThreadIds: [threadId],
+          worktreeIds: [ownedWorktreeId],
+          ownedWorktrees: [
+            {
+              worktreeId: ownedWorktreeId,
+              projectId,
+              branch: "ryco/agent-control-owned-used",
+              checkoutPath: ownedCheckoutPath,
+            },
+          ],
+        },
+        commandReceipts: [],
+      },
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const proposalRef = yield* Ref.make(executing);
+    const operationRef = yield* Ref.make(running);
+    const applied = yield* Ref.make<ReadonlyArray<string>>([]);
+    const removedPaths = yield* Ref.make<ReadonlyArray<string>>([]);
+
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.modify(proposalRef, (current) => {
+            const next: AgentControlProposal = {
+              ...current,
+              status: "failed",
+              result: input.result,
+            };
+            return [next, next];
+          }),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+        checkpoint: (input: { readonly state: AgentControlOperation["state"] }) =>
+          Ref.updateAndGet(operationRef, (current) => ({ ...current, state: input.state })),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string }) =>
+          Ref.update(applied, (types) => [...types, command.type]).pipe(
+            Effect.andThen(
+              command.type === "thread.delete"
+                ? Effect.fail(new Error("must be moved to Trash first"))
+                : Effect.succeed({ sequence: 1 }),
+            ),
+          ),
+        applyWithDispatcher: () => Effect.die("unused"),
+      },
+      projections: {
+        getThreadShellById: (id: ThreadId) =>
+          Effect.succeed(id === threadId ? Option.some(target) : Option.none()),
+        getWorktreeShellById: () => Effect.die("checkout must be kept"),
+        getProjectShellById: () => Effect.die("checkout must be kept"),
+      },
+      git: {
+        removeWorktree: (input: { readonly path: string }) =>
+          Ref.update(removedPaths, (paths) => [...paths, input.path]),
+      },
+    });
+
+    yield* execution.recoverIncomplete;
+
+    // The conversation is kept (archived, never trashed), so its checkout stays.
+    assert.deepStrictEqual(yield* Ref.get(applied), ["thread.delete", "thread.archive"]);
+    assert.deepStrictEqual(yield* Ref.get(removedPaths), []);
+    const operation = yield* Ref.get(operationRef);
+    assert.strictEqual(operation.status, "failed");
+    assert.deepStrictEqual(operation.state.compensation, { attempted: true, completed: false });
+  }),
+);
+
 it.effect("executes model and interaction preferences through orchestration exactly once", () =>
   Effect.gen(function* () {
     const nextPlan = {

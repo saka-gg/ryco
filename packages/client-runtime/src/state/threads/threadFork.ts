@@ -35,7 +35,7 @@ export type ThreadForkWorktreeStartKind = ThreadForkWorktreeStart["kind"];
  */
 const THREAD_FORK_ERROR_COPY = {
   unavailable: "Forking isn't available for this thread on this machine.",
-  "source-unavailable": "The original thread was deleted or moved to Trash.",
+  "source-unavailable": "The original thread was deleted.",
   "boundary-unsupported": "You can only fork from the final reply of a completed turn.",
   "boundary-stale": "This reply changed or no longer exists. Choose a reply again.",
   "source-busy": "The original thread is busy, for example reverting.",

@@ -7,19 +7,26 @@ import { TextGenerationError } from "@ryco/contracts";
 /**
  * Operations that run as lightweight, isolated CLI calls: no user config,
  * project instructions, MCP servers, plugins, hooks or tools, in an empty
- * directory. Side questions always do; titles and branch names try it first
- * and fall back to the full configuration (see `withFullConfigFallback`).
+ * directory. Side questions always do; titles, branch names and workspace
+ * change summaries try it first and fall back to the full configuration (see
+ * `withFullConfigFallback`).
  */
 export type LightweightTextGenerationOperation =
   | "answerSideQuestion"
   | "generateThreadTitle"
-  | "generateBranchName";
+  | "generateBranchName"
+  | "summarizeWorkspaceChanges";
 
 /** The system prompt that replaces the provider's coding-agent prompt for a lightweight call. */
 export function lightweightSystemPrompt(operation: string): string {
-  return operation === "answerSideQuestion"
-    ? "Answer only from the supplied context. You have no tools or mutation authority."
-    : "Name the user's request as asked, from the supplied message only. You have no tools or mutation authority.";
+  switch (operation) {
+    case "answerSideQuestion":
+      return "Answer only from the supplied context. You have no tools or mutation authority.";
+    case "summarizeWorkspaceChanges":
+      return "Describe the supplied git change data only. You have no tools or mutation authority.";
+    default:
+      return "Name the user's request as asked, from the supplied message only. You have no tools or mutation authority.";
+  }
 }
 
 /** Never pass main-turn control credentials to an independent side process. */

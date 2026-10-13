@@ -651,7 +651,7 @@ describe("PhoneHome", () => {
         "Copy Path",
         "Copy Thread ID",
         "Archive thread",
-        "Move to Trash",
+        "Delete…",
       ]) {
         await expect.element(page.getByRole("button", { name: label })).toBeVisible();
       }

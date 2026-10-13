@@ -15,7 +15,11 @@ import { buildThreadRouteParams, resolveThreadRouteTarget } from "../../../threa
 import { useThreadSelectionStore } from "../../../threadSelectionStore";
 import type { useRouter } from "@tanstack/react-router";
 import type { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
-import { trashConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
+import {
+  deleteConfirmationMessage,
+  deleteThreadSelection,
+  type useThreadActions,
+} from "../../../hooks/useThreadActions";
 import {
   isTrailingDoubleClick,
   resolveSidebarNewThreadSeedContext,
@@ -46,7 +50,7 @@ export function useSidebarThreadActions(params: {
   appSettingsConfirmThreadArchive: boolean;
   appSettingsConfirmThreadUnpin: boolean;
   defaultThreadEnvMode: ThreadEnvMode;
-  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
+  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
   interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
@@ -74,7 +78,7 @@ export function useSidebarThreadActions(params: {
     selectedThreadCount,
     appSettingsConfirmThreadDelete,
     defaultThreadEnvMode,
-    trashThread,
+    deleteThread,
     handleNewThread,
     markThreadUnread,
     sidebarThreadByKeyRef,
@@ -86,7 +90,7 @@ export function useSidebarThreadActions(params: {
     setRenamingTitle,
     renamingCommittedRef,
     renamingInputRef,
-    requestTrashThread,
+    requestDeleteThread,
     attemptArchiveThread,
     startThreadRename,
     cancelRename,
@@ -194,7 +198,7 @@ export function useSidebarThreadActions(params: {
       const clicked = await api.contextMenu.show(
         [
           { id: "mark-unread", label: `Mark unread (${count})` },
-          { id: "trash", label: `Move to Trash (${count})`, destructive: true },
+          { id: "delete", label: `Delete (${count})`, destructive: true },
         ],
         position,
       );
@@ -208,16 +212,16 @@ export function useSidebarThreadActions(params: {
         return;
       }
 
-      if (clicked !== "trash") return;
+      if (clicked !== "delete") return;
 
-      const shouldConfirmTrash = shouldConfirmSidebarThreadSelectionDelete({
+      const shouldConfirmDelete = shouldConfirmSidebarThreadSelectionDelete({
         confirmThreadDelete: appSettingsConfirmThreadDelete,
         threads: threadKeys.map((threadKey) => sidebarThreadByKeyRef.current.get(threadKey)),
       });
 
-      if (shouldConfirmTrash) {
+      if (shouldConfirmDelete) {
         const confirmed = await api.dialogs.confirm(
-          trashConfirmationMessage(
+          deleteConfirmationMessage(
             threadKeys.map(
               (threadKey) => sidebarThreadByKeyRef.current.get(threadKey)?.title ?? "",
             ),
@@ -226,20 +230,19 @@ export function useSidebarThreadActions(params: {
         if (!confirmed) return;
       }
 
-      const deletedThreadKeys = new Set(threadKeys);
-      for (const threadKey of threadKeys) {
-        const thread = sidebarThreadByKeyRef.current.get(threadKey);
-        if (!thread) continue;
-        await trashThread(scopeThreadRef(thread.environmentId, thread.id), {
-          deletedThreadKeys,
-        });
-      }
+      await deleteThreadSelection(
+        deleteThread,
+        threadKeys.flatMap((threadKey) => {
+          const thread = sidebarThreadByKeyRef.current.get(threadKey);
+          return thread ? [scopeThreadRef(thread.environmentId, thread.id)] : [];
+        }),
+      );
       removeFromSelection(threadKeys);
     },
     [
       appSettingsConfirmThreadDelete,
       clearSelection,
-      trashThread,
+      deleteThread,
       markThreadUnread,
       removeFromSelection,
       sidebarThreadByKeyRef,
@@ -353,7 +356,7 @@ export function useSidebarThreadActions(params: {
     renamingInputRef,
     navigateToThread,
     navigateToDraft,
-    requestTrashThread,
+    requestDeleteThread,
     handleThreadClick,
     handleMultiSelectContextMenu,
     createThreadForProjectMember,

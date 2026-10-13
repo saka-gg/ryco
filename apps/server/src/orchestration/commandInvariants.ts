@@ -295,6 +295,25 @@ export function requireWorktree(input: {
   );
 }
 
+/** A deleted workspace's record only stays as provenance for its conversations: it is never restored. */
+export function requireWorktreeNotDeleted(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly worktreeId: WorktreeId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  return findWorktreeById(input.readModel, input.worktreeId)?.checkoutRemovalReason === "deleted"
+    ? Effect.fail(
+        invariantError(input.command.type, `Workspace '${input.worktreeId}' was deleted.`),
+      )
+    : Effect.void;
+}
+
+/** Why a conversation of a deleted workspace cannot continue. */
+export const deletedWorkspaceTurnBlocker = (
+  worktree: Pick<OrchestrationWorktreeShell, "title" | "branch">,
+) =>
+  `The workspace "${worktree.title ?? worktree.branch}" was deleted; this conversation is read-only.`;
+
 export function requireProjectAbsent(input: {
   readonly readModel: OrchestrationReadModel;
   readonly command: OrchestrationCommand;
@@ -480,6 +499,7 @@ export function threadLifecycleTurnBlocker(
     thread.worktreePath !== null &&
     isSamePathText(thread.worktreePath, worktree.worktreePath)
   ) {
+    if (worktree.checkoutRemovalReason === "deleted") return deletedWorkspaceTurnBlocker(worktree);
     return `The checkout for workspace "${worktree.title ?? worktree.branch}" was removed. Recreate the checkout before continuing; history stays readable.`;
   }
   return null;

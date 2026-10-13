@@ -36,7 +36,7 @@ import {
   type ThreadMenuActionItem,
 } from "../threadMenuInventory";
 import type { useRouter } from "@tanstack/react-router";
-import { trashConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
+import { deleteConfirmationMessage, type useThreadActions } from "../../../hooks/useThreadActions";
 import {
   canArchiveSidebarThread,
   shouldConfirmSidebarThreadArchive,
@@ -54,7 +54,7 @@ export function useThreadMenuActions(params: {
   appSettingsConfirmThreadDelete: boolean;
   appSettingsConfirmThreadArchive: boolean;
   appSettingsConfirmThreadUnpin: boolean;
-  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
+  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
   stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
   interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
@@ -88,7 +88,7 @@ export function useThreadMenuActions(params: {
     appSettingsConfirmThreadDelete,
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
-    trashThread,
+    deleteThread,
     archiveThread,
     stopThreadSession,
     interruptThreadTurn,
@@ -107,8 +107,9 @@ export function useThreadMenuActions(params: {
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Drafts are discarded locally; server threads move to Trash (never deleted here).
-  const requestTrashThread = useCallback(
+  // Drafts are discarded locally; server threads are deleted with an Undo window
+  // (the server purges them once it ends).
+  const requestDeleteThread = useCallback(
     async (
       thread: SidebarThreadSummary & { draftId?: DraftId | undefined },
       opts: { deletedThreadKeys?: ReadonlySet<string> } = {},
@@ -131,7 +132,7 @@ export function useThreadMenuActions(params: {
           thread,
         })
       ) {
-        const message = trashConfirmationMessage([thread.title]);
+        const message = deleteConfirmationMessage([thread.title]);
         const localApi = readLocalApi();
         const confirmed = localApi
           ? await localApi.dialogs.confirm(message)
@@ -140,7 +141,7 @@ export function useThreadMenuActions(params: {
           return;
         }
       }
-      await trashThread(threadRef, {
+      await deleteThread(threadRef, {
         ...opts,
         // Always optimistic after the (synchronous) confirmation. The
         // non-optimistic branch awaits the WS round-trip before touching
@@ -149,7 +150,7 @@ export function useThreadMenuActions(params: {
         optimistic: true,
       });
     },
-    [appSettingsConfirmThreadDelete, trashThread, router],
+    [appSettingsConfirmThreadDelete, deleteThread, router],
   );
 
   /** The registered workspace record a thread belongs to, if any. */
@@ -480,14 +481,14 @@ export function useThreadMenuActions(params: {
         await attemptArchiveThread(threadRef);
         return;
       }
-      if (actionId !== "trash" && actionId !== "discard-draft") return;
-      await requestTrashThread(thread);
+      if (actionId !== "delete" && actionId !== "discard-draft") return;
+      await requestDeleteThread(thread);
     },
     [
       attemptArchiveThread,
       appSettingsConfirmThreadArchive,
       appSettingsConfirmThreadUnpin,
-      requestTrashThread,
+      requestDeleteThread,
       interruptThreadTurn,
       resolveThreadWorkspace,
       router,
@@ -510,7 +511,7 @@ export function useThreadMenuActions(params: {
     setRenamingTitle,
     renamingCommittedRef,
     renamingInputRef,
-    requestTrashThread,
+    requestDeleteThread,
     attemptArchiveThread,
     startThreadRename,
     cancelRename,

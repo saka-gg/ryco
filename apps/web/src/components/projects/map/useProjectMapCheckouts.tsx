@@ -1,4 +1,5 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 import {
   deriveScheduleRows,
   pendingScheduleProposals,
@@ -192,6 +193,8 @@ function CheckoutSource(props: {
       listed.add(workspace.id);
       if (workspace.registeredId) listed.add(workspace.registeredId);
     }
+    // A deleted workspace stays out, even when a node still reports it.
+    for (const worktree of worktrees) if (isWorkspaceDeleted(worktree)) listed.add(worktree.id);
     for (const summary of unlistedWorkspaces(summaries, listed)) {
       const workspace = summaryOnlyWorkspace(summary, usages);
       summaryById.set(workspace.id, summary);
@@ -270,6 +273,7 @@ function CheckoutSource(props: {
     remeasureDisk,
     scoped,
     treeProject,
+    worktrees,
   ]);
 
   useEffect(() => onChange(key, detail), [detail, key, onChange]);

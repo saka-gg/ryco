@@ -51,7 +51,7 @@ interface SidebarProjectItemProps {
   activeRouteThreadKey: string | null;
   handleNewThread: ReturnType<typeof useNewThreadHandler>["handleNewThread"];
   archiveThread: ReturnType<typeof useThreadActions>["archiveThread"];
-  trashThread: ReturnType<typeof useThreadActions>["trashThread"];
+  deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   stopThreadSession: ReturnType<typeof useThreadActions>["stopThreadSession"];
   interruptThreadTurn: ReturnType<typeof useThreadActions>["interruptThreadTurn"];
   threadJumpLabelByKey: ReadonlyMap<string, string>;
@@ -73,7 +73,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     activeRouteThreadKey,
     handleNewThread,
     archiveThread,
-    trashThread,
+    deleteThread,
     stopThreadSession,
     interruptThreadTurn,
     threadJumpLabelByKey,
@@ -305,7 +305,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     appSettingsConfirmThreadArchive,
     appSettingsConfirmThreadUnpin,
     defaultThreadEnvMode,
-    trashThread,
+    deleteThread,
     archiveThread,
     stopThreadSession,
     interruptThreadTurn,
@@ -327,7 +327,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
     renamingInputRef,
     navigateToThread,
     navigateToDraft,
-    requestTrashThread,
+    requestDeleteThread,
     handleThreadClick,
     handleMultiSelectContextMenu,
     createThreadForProjectMember,
@@ -551,7 +551,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
                 navigateToDraft={navigateToDraft}
                 handleMultiSelectContextMenu={handleMultiSelectContextMenu}
                 handleThreadContextMenu={handleThreadContextMenu}
-                requestTrashThread={requestTrashThread}
+                requestDeleteThread={requestDeleteThread}
                 clearSelection={clearSelection}
                 commitRename={commitRename}
                 cancelRename={cancelRename}
@@ -592,7 +592,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
           navigateToDraft={navigateToDraft}
           handleMultiSelectContextMenu={handleMultiSelectContextMenu}
           handleThreadContextMenu={handleThreadContextMenu}
-          requestTrashThread={requestTrashThread}
+          requestDeleteThread={requestDeleteThread}
           clearSelection={clearSelection}
           commitRename={commitRename}
           cancelRename={cancelRename}

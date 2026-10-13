@@ -136,16 +136,22 @@ describe("createProjectsNavigation", () => {
 
   it("opens a workspace review on the map, and closes it in place", () => {
     const harness = setup({ search: { env: "e1", project: "p1" }, rows, selected: 0 });
-    harness.nav.openWorkspaceReview("wt-1", "remove-checkout");
+    harness.nav.openWorkspaceReview("wt-1", "delete-workspace");
     expect(harness.commits.at(-1)).toEqual({
-      next: { env: "e1", project: "p1", view: "map", workspace: "wt-1", review: "remove-checkout" },
+      next: {
+        env: "e1",
+        project: "p1",
+        view: "map",
+        workspace: "wt-1",
+        review: "delete-workspace",
+      },
       push: false,
     });
     // Moving between sections keeps the review open.
     harness.nav.revealSection("danger");
     expect(harness.commits.at(-1)?.next).toMatchObject({
       workspace: "wt-1",
-      review: "remove-checkout",
+      review: "delete-workspace",
     });
     harness.nav.closeWorkspaceReview();
     expect(harness.commits.at(-1)?.next).toMatchObject({ workspace: "wt-1", review: undefined });

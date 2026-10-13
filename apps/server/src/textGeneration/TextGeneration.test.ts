@@ -21,6 +21,8 @@ const makeStubTextGeneration = (overrides: Partial<TextGenerationShape>): TextGe
   generateIssueContent: () => Effect.die("generateIssueContent stub not configured for this test"),
   rankInboxThreads: () => Effect.die("rankInboxThreads stub not configured for this test"),
   answerSideQuestion: () => Effect.die("answerSideQuestion stub not configured for this test"),
+  summarizeWorkspaceChanges: () =>
+    Effect.die("summarizeWorkspaceChanges stub not configured for this test"),
   ...overrides,
 });
 

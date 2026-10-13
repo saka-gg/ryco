@@ -43,6 +43,19 @@ export function makeLifecycleHandlers(ctx: WsRpcContext) {
         WS_METHODS.lifecycleDiskUsage,
         service((lifecycle) => lifecycle.diskUsage(input)),
       ),
+    [WS_METHODS.lifecycleSummarizeChanges]: (input) =>
+      ctx.ownerEffect(
+        WS_METHODS.lifecycleSummarizeChanges,
+        Option.match(ctx.workspaceChangeSummary, {
+          onNone: () =>
+            Effect.fail(
+              new WorkspaceLifecycleError({
+                detail: "Workspace change summaries are unavailable on this node.",
+              }),
+            ),
+          onSome: (summaries) => summaries.summarize(input),
+        }),
+      ),
     [WS_METHODS.lifecycleListTrash]: () =>
       ctx.withAccess(
         "viewer",

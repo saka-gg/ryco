@@ -18,12 +18,14 @@ import {
   buildPrContentPrompt,
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
+  buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   extractJsonObject,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitleResult,
+  sanitizeWorkspaceChangesSummary,
 } from "./TextGenerationUtils.ts";
 import {
   applyCursorAcpModelSelection,
@@ -31,6 +33,8 @@ import {
 } from "../provider/acp/CursorAcpSupport.ts";
 
 const CURSOR_TIMEOUT_MS = 180_000;
+/** A workspace change summary is short and optional; no summary is the fallback. */
+const CURSOR_SUMMARY_TIMEOUT_MS = 30_000;
 
 function mapCursorAcpError(
   operation:
@@ -39,7 +43,8 @@ function mapCursorAcpError(
     | "generateBranchName"
     | "generateThreadTitle"
     | "generateIssueContent"
-    | "rankInboxThreads",
+    | "rankInboxThreads"
+    | "summarizeWorkspaceChanges",
   detail: string,
   cause: unknown,
 ): TextGenerationError {
@@ -75,6 +80,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     prompt,
     outputSchemaJson,
     modelSelection,
+    timeoutMs = CURSOR_TIMEOUT_MS,
   }: {
     operation:
       | "generateCommitMessage"
@@ -82,11 +88,13 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads";
+      | "rankInboxThreads"
+      | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
     modelSelection: ModelSelection;
+    timeoutMs?: number;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
       const outputRef = yield* Ref.make("");
@@ -131,7 +139,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
           prompt: [{ type: "text", text: prompt }],
         });
       }).pipe(
-        Effect.timeoutOption(CURSOR_TIMEOUT_MS),
+        Effect.timeoutOption(timeoutMs),
         Effect.flatMap(
           Option.match({
             onNone: () =>
@@ -329,6 +337,21 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     return yield* validateRankInboxThreadsResult(input, generated.rankings);
   });
 
+  const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
+    "CursorTextGeneration.summarizeWorkspaceChanges",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildWorkspaceChangesSummaryPrompt(input);
+    const generated = yield* runCursorJson({
+      operation: "summarizeWorkspaceChanges",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      modelSelection: input.modelSelection,
+      timeoutMs: CURSOR_SUMMARY_TIMEOUT_MS,
+    });
+    return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
@@ -336,6 +359,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
     generateThreadTitle,
     generateIssueContent,
     rankInboxThreads,
+    summarizeWorkspaceChanges,
     answerSideQuestion: (_input: Parameters<TextGenerationShape["answerSideQuestion"]>[0]) =>
       Effect.fail(
         new TextGenerationError({

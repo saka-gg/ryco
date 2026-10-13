@@ -5,8 +5,6 @@ import type {
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
-  FolderMinusIcon,
-  FolderPlusIcon,
   OctagonPauseIcon,
   SquareIcon,
   Trash2Icon,
@@ -21,9 +19,6 @@ import type { MapCheckoutDetail } from "./useProjectMapCheckouts";
 export const ACTION_ICONS: Record<WorkspaceActionId, typeof ArchiveIcon> = {
   archive: ArchiveIcon,
   restore: ArchiveRestoreIcon,
-  "recreate-checkout": FolderPlusIcon,
-  "remove-stale-record": FolderMinusIcon,
-  "remove-checkout": FolderMinusIcon,
   "delete-workspace": Trash2Icon,
 };
 
@@ -32,7 +27,7 @@ export const THREAD_ACTION_ICONS: Record<ThreadLifecycleActionId, typeof Archive
   "stop-session": SquareIcon,
   archive: ArchiveIcon,
   unarchive: ArchiveRestoreIcon,
-  trash: Trash2Icon,
+  delete: Trash2Icon,
 };
 
 export function Kind(props: { readonly icon: ReactNode; readonly children: ReactNode }) {

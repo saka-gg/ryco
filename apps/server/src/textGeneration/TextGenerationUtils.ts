@@ -181,3 +181,24 @@ export function normalizeCliError(
     cause: error,
   });
 }
+
+/** Bound on a workspace change summary shown in the Delete dialog. */
+const WORKSPACE_CHANGES_SUMMARY_MAX_CHARS = 400;
+
+/**
+ * Normalise a model's workspace change summary to plain prose on one line:
+ * no markdown emphasis, bullets or wrapping quotes, bounded in length.
+ */
+export function sanitizeWorkspaceChangesSummary(raw: string): string {
+  const plain = raw
+    .trim()
+    .replace(/^["'“”]+|["'“”]+$/g, "")
+    .replace(/^\s*(?:#+|>|[-•*]|\d+[.)])\s+/gm, "")
+    .replace(/[`*]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (plain.length <= WORKSPACE_CHANGES_SUMMARY_MAX_CHARS) return plain;
+  const cut = limitUnicode(plain, WORKSPACE_CHANGES_SUMMARY_MAX_CHARS - 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 200 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}

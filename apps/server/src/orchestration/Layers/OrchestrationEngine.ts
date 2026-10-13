@@ -58,7 +58,7 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
-import { findThreadWorktree } from "../commandInvariants.ts";
+import { deletedWorkspaceTurnBlocker, findThreadWorktree } from "../commandInvariants.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
@@ -347,8 +347,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             });
           }
           if (blocker !== null) {
+            const deletedWorkspace = storageThread
+              ? findThreadWorktree(commandReadModel, storageThread)
+              : undefined;
             return yield* storageReadinessError(
-              "Checkout cleanup is pending or complete. Restore/recreate the checkout before starting work.",
+              deletedWorkspace?.checkoutRemovalReason === "deleted"
+                ? deletedWorkspaceTurnBlocker(deletedWorkspace)
+                : "Checkout cleanup is pending or complete. Restore/recreate the checkout before starting work.",
             );
           }
         }

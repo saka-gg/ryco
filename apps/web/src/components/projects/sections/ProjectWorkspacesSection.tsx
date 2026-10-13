@@ -1,4 +1,5 @@
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 import { ThreadId, WS_METHODS } from "@ryco/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { ChevronRightIcon, FolderIcon, GitBranchIcon, MapIcon, RefreshCwIcon } from "lucide-react";
@@ -67,7 +68,7 @@ function WorkspaceSuggestions(props: {
   readonly threadIds: readonly string[];
   readonly threadWorktreeIds: ReadonlyMap<string, string>;
   readonly canMutate: boolean;
-  readonly onReviewRemoval: (worktreeId: string) => void;
+  readonly onReviewDelete: (worktreeId: string) => void;
   readonly onArchived: () => void;
 }) {
   const { member, inspection } = props;
@@ -143,9 +144,9 @@ function WorkspaceSuggestions(props: {
               size="xs"
               variant="outline"
               disabled={!props.canMutate}
-              onClick={() => props.onReviewRemoval(checkout.worktreeId)}
+              onClick={() => props.onReviewDelete(checkout.worktreeId)}
             >
-              Review removal
+              Delete…
             </Button>
           </div>
         ))}
@@ -408,8 +409,11 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
   const { nav } = useProjectsPage();
   const ref = useMemo(() => scopeProjectRef(member.environmentId, member.id), [member]);
   const threads = useStore(useShallow((state) => selectSidebarThreadsForProjectRef(state, ref)));
-  const worktrees = useStore(
-    useShallow((state) => selectSidebarWorktreesForProjectRef(state, ref)),
+  const records = useStore(useShallow((state) => selectSidebarWorktreesForProjectRef(state, ref)));
+  // A deleted workspace only remains as its kept conversations' provenance.
+  const worktrees = useMemo(
+    () => records.filter((worktree) => !isWorkspaceDeleted(worktree)),
+    [records],
   );
   const listCapability = useHostedRpcCapability(WS_METHODS.lifecycleListWorkspaces);
   const suggestionsCapability = useHostedRpcCapability(WS_METHODS.lifecycleSuggestions);
@@ -486,7 +490,7 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
         threadIds={threadIds}
         threadWorktreeIds={threadWorktreeIds}
         canMutate={canMutate}
-        onReviewRemoval={(worktreeId) => nav.openWorkspaceReview(worktreeId, "remove-checkout")}
+        onReviewDelete={(worktreeId) => nav.openWorkspaceReview(worktreeId, "delete-workspace")}
         onArchived={reinspect}
       />
       {canManageNode ? (

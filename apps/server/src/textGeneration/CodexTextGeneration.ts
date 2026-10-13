@@ -30,12 +30,14 @@ import {
   buildThreadTitlePrompt,
   buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
+  buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
   sanitizeThreadTitleResult,
+  sanitizeWorkspaceChangesSummary,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
@@ -43,7 +45,10 @@ import { codexServiceTierForSelection } from "../provider/CodexServiceTier.ts";
 
 const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
-/** Titles and branch names are short; the user's own message is the fallback title. */
+/**
+ * Titles, branch names and workspace change summaries are short; each has a
+ * fallback (the user's own message, or no summary).
+ */
 const CODEX_NAMING_TIMEOUT_MS = 30_000;
 const CODEX_TIMEOUT_DETAIL = "Codex CLI request timed out.";
 
@@ -192,7 +197,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateThreadTitle"
       | "generateIssueContent"
       | "rankInboxThreads"
-      | "answerSideQuestion";
+      | "answerSideQuestion"
+      | "summarizeWorkspaceChanges";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -328,13 +334,13 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   });
 
   /**
-   * Titles and branch names: lightweight first, in an empty directory, then
+   * Titles, branch names and change summaries: lightweight first, in an empty directory, then
    * once with the user's full configuration when that may be what was missing.
    */
   const runCodexNamingJson = <S extends Schema.Top>(input: {
     readonly operation: Extract<
       LightweightTextGenerationOperation,
-      "generateThreadTitle" | "generateBranchName"
+      "generateThreadTitle" | "generateBranchName" | "summarizeWorkspaceChanges"
     >;
     readonly cwd: string;
     readonly prompt: string;
@@ -527,6 +533,21 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     return yield* validateRankInboxThreadsResult(input, generated.rankings);
   });
 
+  const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
+    "CodexTextGeneration.summarizeWorkspaceChanges",
+  )(function* (input) {
+    const { prompt, outputSchema } = buildWorkspaceChangesSummaryPrompt(input);
+    const generated = yield* runCodexNamingJson({
+      operation: "summarizeWorkspaceChanges",
+      cwd: input.cwd,
+      prompt,
+      outputSchemaJson: outputSchema,
+      imagePaths: [],
+      modelSelection: input.modelSelection,
+    });
+    return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
+  });
+
   return {
     generateCommitMessage,
     generatePrContent,
@@ -535,5 +556,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     generateIssueContent,
     rankInboxThreads,
     answerSideQuestion,
+    summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;
 });

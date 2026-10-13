@@ -70,6 +70,7 @@ const checkout = (key: string, overrides: Partial<MapCheckout> = {}): MapCheckou
 const options = (overrides: Partial<MapOptions> = {}): MapOptions => ({
   hiddenCheckouts: new Set(),
   expanded: new Set(),
+  showActive: true,
   showArchived: true,
   showAutomations: true,
   offsets: new Map(),
@@ -125,6 +126,24 @@ describe("buildProjectMap", () => {
     expect(node(layout, mapKey.workspace("mac", "old"))).toBeUndefined();
     expect(node(layout, mapKey.automation("mac", "nightly"))).toBeUndefined();
     expect(node(layout, mapKey.device("studio"))).toBeUndefined();
+  });
+
+  it("shows only archived workspaces when active ones are hidden", () => {
+    const layout = buildProjectMap(
+      [
+        checkout("mac", {
+          workspaces: [
+            workspace("main", { main: true, branch: "main" }),
+            workspace("live"),
+            workspace("old", { archived: true }),
+          ],
+        }),
+      ],
+      options({ showActive: false }),
+    );
+    expect(node(layout, mapKey.workspace("mac", "main"))).toBeUndefined();
+    expect(node(layout, mapKey.workspace("mac", "live"))).toBeUndefined();
+    expect(node(layout, mapKey.workspace("mac", "old"))).toBeDefined();
   });
 
   it("joins the same branch on two devices with one arc, never the main checkout", () => {

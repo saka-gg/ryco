@@ -4,6 +4,7 @@ import "./projects.css";
 
 import {
   ProjectId,
+  ThreadId,
   WorktreeId,
   type DispatchableClientOrchestrationCommand,
   type EnvironmentApi,
@@ -112,6 +113,9 @@ const lifecycle = {
   previews: [] as WorkspaceLifecycleRequest[],
   applied: [] as WorkspaceLifecycleApplyInput[],
   diskRequests: [] as WorkspaceDiskUsageInput[],
+  /** What `summarizeChanges` answers; a promise holds the answer back. */
+  workSummary: null as string | null | Promise<string | null>,
+  summarizeRequests: [] as string[],
   reset() {
     this.summaries = [
       workspaceSummary({
@@ -136,6 +140,8 @@ const lifecycle = {
     this.previews = [];
     this.applied = [];
     this.diskRequests = [];
+    this.workSummary = null;
+    this.summarizeRequests = [];
   },
 };
 
@@ -165,7 +171,15 @@ function installDispatch() {
         const workspace = lifecycle.summaries.find(
           (summary) => summary.worktreeId === request.worktreeId,
         )!;
-        if (request.discard)
+        if (request.discard) {
+          const conversations = workspace.conversations.active + workspace.conversations.archived;
+          const ids = Array.from({ length: conversations }, (_, index) =>
+            ThreadId.make(`thread-${index}`),
+          );
+          const changes = workspace.changes;
+          const discardsWork =
+            workspace.unmerged === true ||
+            (changes !== null && changes.modified + changes.untracked > 0);
           return {
             request,
             workspace,
@@ -176,20 +190,21 @@ function installDispatch() {
               recreateCheckout: false,
               recordCheckoutRemoval: true,
               stopSessionThreadIds: [],
-              archiveConversationIds: [],
+              archiveConversationIds: request.deleteConversations ? [] : ids,
               unchangedConversations: 0,
               discardedRegenerableIgnored: 0,
               deleteBranch: request.deleteBranch === true,
               branch: workspace.branch,
               discard: true,
-              trashConversationIds: [],
-              discardsWork: true,
+              trashConversationIds: request.deleteConversations ? ids : [],
+              discardsWork,
             },
-            summary: `Delete 1 workspace: remove its checkout, ${request.deleteBranch ? "delete" : "keep"} branch ${workspace.branch}. Work that exists only here is lost.`,
-            details: ["Discards uncommitted changes to 48 tracked files."],
-            blockers: [],
+            summary: `Delete 1 workspace: remove its checkout, delete branch ${workspace.branch}.`,
+            details: [],
+            blockers: lifecycle.blockers,
             fingerprint: `fp-${lifecycle.previews.length}`,
           } satisfies WorkspaceLifecyclePreview;
+        }
         const archive = request.archiveConversations !== false;
         return {
           request,
@@ -226,6 +241,10 @@ function installDispatch() {
         );
       },
       listTrash: async () => ({ threads: [], truncated: false }),
+      summarizeChanges: async (input: { worktreeId: string }) => {
+        lifecycle.summarizeRequests.push(input.worktreeId);
+        return { summary: await lifecycle.workSummary };
+      },
       diskUsage: async (input: WorkspaceDiskUsageInput) => {
         lifecycle.diskRequests.push(input);
         return {
@@ -516,51 +535,122 @@ describe("Project page sections", () => {
         .toBe(false);
     });
 
-    it("reviews a checkout removal inside the inspector and applies exactly the reviewed preview", async () => {
+    it("reviews a delete inside the inspector and applies exactly the reviewed preview", async () => {
       const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
       await clickNode("workspace", "projects-page");
       const inspector = screen.getByRole("complementary", { name: "Details" });
-      await inspector.getByRole("button", { name: "Remove checkout…" }).click();
-      const review = inspector.getByRole("region", { name: /Remove checkout/ });
+      // Only Archive and Delete: the checkout-only actions are gone.
       await expect
-        .element(
-          review.getByText("Remove 1 checkout, archive 1 conversation, keep history and branch."),
-        )
+        .element(inspector.getByRole("button", { name: "Archive workspace" }))
         .toBeVisible();
-      // Options re-inspect: the summary always matches what Confirm will do.
-      await review
-        .getByRole("checkbox", { name: /Archive this workspace's conversations/ })
-        .click();
       await expect
-        .element(review.getByText("Remove 1 checkout, keep 1 conversation, history and branch."))
-        .toBeVisible();
-      await review.getByRole("button", { name: "Remove checkout" }).click();
+        .element(inspector.getByRole("button", { name: "Remove checkout…" }))
+        .not.toBeInTheDocument();
+      await inspector.getByRole("button", { name: "Delete workspace…" }).click();
+      const review = inspector.getByRole("region", { name: /Delete workspace/ });
+      await expect
+        .element(review.getByTestId("workspace-review-summary"))
+        .toHaveTextContent("Removes the checkout from disk and deletes branch projects-page.");
+      expect(lifecycle.previews.at(-1)).toMatchObject({
+        action: "remove-checkout",
+        discard: true,
+        deleteBranch: true,
+        deleteConversations: false,
+      });
+      // Nothing is lost, so nothing to describe and a plain confirm.
+      await expect
+        .element(review.getByTestId("workspace-review-lost-work"))
+        .not.toBeInTheDocument();
+      expect(lifecycle.summarizeRequests).toEqual([]);
+      await expect.element(review.getByText("They stay in the archive.")).toBeVisible();
+      // Options re-inspect: the confirm always applies what the preview says.
+      await review.getByRole("checkbox", { name: /Also delete 1 conversation/ }).click();
+      await expect.element(review.getByText("You can undo for a few seconds.")).toBeVisible();
+      await expect
+        .poll(() => lifecycle.previews.at(-1))
+        .toMatchObject({ deleteConversations: true });
+      await review.getByRole("button", { name: "Delete workspace" }).click();
       await expect.poll(() => lifecycle.applied).toHaveLength(1);
       expect(lifecycle.applied[0]).toMatchObject({
         worktreeId: "worktree-projects",
         action: "remove-checkout",
-        archiveConversations: false,
+        discard: true,
+        deleteBranch: true,
+        deleteConversations: true,
         expectedFingerprint: `fp-${lifecycle.previews.length}`,
       });
       // Completed: the review closes back to the workspace's details.
       await expect
-        .element(inspector.getByRole("button", { name: "Remove checkout…" }))
+        .element(inspector.getByRole("button", { name: "Delete workspace…" }))
         .toBeVisible();
     });
 
-    it("lands a menu's review deep link in the inspector and refuses to confirm while blocked", async () => {
-      lifecycle.blockers = ["The checkout has 2 modified files."];
+    it("spells out the work a delete would lose, with its AI description, and deletes anyway", async () => {
+      let describe: (summary: string | null) => void = () => undefined;
+      lifecycle.workSummary = new Promise((resolve) => {
+        describe = resolve;
+      });
+      lifecycle.summaries = lifecycle.summaries.map((summary) =>
+        summary.worktreeId === "worktree-projects"
+          ? {
+              ...summary,
+              unmerged: true,
+              changes: { ...summary.changes!, modified: 3, untracked: 1 },
+            }
+          : summary,
+      );
       const screen = await renderPage({
         env: LOCAL_ENV,
         project: RYCO_LOCAL,
         view: "map",
         workspace: "worktree-projects",
-        review: "remove-checkout",
+        review: "delete-workspace",
       });
-      const review = screen.getByRole("region", { name: /Remove checkout/ });
+      const review = screen.getByRole("region", { name: /Delete workspace/ });
+      const lost = review.getByTestId("workspace-review-lost-work");
+      await expect
+        .element(lost.getByText("This work exists only here and will be lost:"))
+        .toBeVisible();
+      await expect.element(lost).toMatchTextContent(/3 modified, 1 untracked · Unmerged commits/);
+      await expect
+        .element(review.getByTestId("workspace-review-work-description-loading"))
+        .toBeInTheDocument();
+      describe("Reworks the relay reconnect backoff and adds two tests.");
+      await expect
+        .element(review.getByText("Reworks the relay reconnect backoff and adds two tests."))
+        .toBeVisible();
+      // Asked once per open, even as options re-inspect.
+      await review.getByRole("checkbox", { name: /Also delete 1 conversation/ }).click();
+      await expect
+        .poll(() => lifecycle.previews.at(-1))
+        .toMatchObject({ deleteConversations: true });
+      expect(lifecycle.summarizeRequests).toEqual(["worktree-projects"]);
+      // No acknowledgement checkbox: the button says what happens.
+      await review.getByRole("button", { name: "Delete anyway" }).click();
+      await expect.poll(() => lifecycle.applied).toHaveLength(1);
+      expect(lifecycle.applied[0]).toMatchObject({
+        action: "remove-checkout",
+        discard: true,
+        deleteBranch: true,
+        expectedFingerprint: `fp-${lifecycle.previews.length}`,
+      });
+    });
+
+    it("lands a menu's review deep link in the inspector and refuses to confirm while blocked", async () => {
+      lifecycle.blockers = ["A thread in this workspace is running."];
+      const screen = await renderPage({
+        env: LOCAL_ENV,
+        project: RYCO_LOCAL,
+        view: "map",
+        workspace: "worktree-projects",
+        review: "delete-workspace",
+      });
+      const review = screen.getByRole("region", { name: /Delete workspace/ });
       await expect.element(review.getByText("Nothing will change:")).toBeVisible();
-      await expect.element(review.getByText("The checkout has 2 modified files.")).toBeVisible();
-      await expect.element(review.getByRole("button", { name: "Remove checkout" })).toBeDisabled();
+      await expect
+        .element(review.getByText("A thread in this workspace is running."))
+        .toBeVisible();
+      await expect.element(review.getByRole("button", { name: "Delete workspace" })).toBeDisabled();
       expect(lifecycle.applied).toEqual([]);
     });
 
@@ -577,16 +667,16 @@ describe("Project page sections", () => {
         project: RYCO_LOCAL,
         view: "map",
         workspace: "worktree-projects",
-        review: "remove-checkout",
+        review: "delete-workspace",
       });
-      const review = screen.getByRole("region", { name: /Remove checkout/ });
-      await review.getByRole("button", { name: "Remove checkout" }).click();
-      await expect.element(review.getByText("Remove checkout partly completed")).toBeVisible();
+      const review = screen.getByRole("region", { name: /Delete workspace/ });
+      await review.getByRole("button", { name: "Delete workspace" }).click();
+      await expect.element(review.getByText("Delete workspace partly completed")).toBeVisible();
       await expect.element(review.getByText("Run git worktree prune.")).toBeVisible();
       const previewsBefore = lifecycle.previews.length;
       await review.getByRole("button", { name: "Retry" }).click();
       await expect.poll(() => lifecycle.previews.length).toBeGreaterThan(previewsBefore);
-      await expect.element(review.getByRole("button", { name: "Remove checkout" })).toBeEnabled();
+      await expect.element(review.getByRole("button", { name: "Delete workspace" })).toBeEnabled();
     });
 
     it("reports a run that settles after its review closed as a toast, not a navigation", async () => {
@@ -599,15 +689,15 @@ describe("Project page sections", () => {
         project: RYCO_LOCAL,
         view: "map",
         workspace: "worktree-projects",
-        review: "remove-checkout",
+        review: "delete-workspace",
       });
       const api = readEnvironmentApi(LOCAL_ENV)!;
       const toast = vi.spyOn(toastManager, "add");
       const applyWorkspace = vi
         .spyOn(api.lifecycle!, "applyWorkspace")
         .mockImplementation(async () => pending);
-      const review = screen.getByRole("region", { name: /Remove checkout/ });
-      await review.getByRole("button", { name: "Remove checkout" }).click();
+      const review = screen.getByRole("region", { name: /Delete workspace/ });
+      await review.getByRole("button", { name: "Delete workspace" }).click();
       await expect.poll(() => applyWorkspace.mock.calls.length).toBe(1);
       screen.unmount();
       finish({
@@ -617,7 +707,7 @@ describe("Project page sections", () => {
       });
       await expect
         .poll(() => toast.mock.calls.map(([options]) => options.title))
-        .toContain("Remove checkout partly completed");
+        .toContain("Delete workspace partly completed");
       toast.mockRestore();
     });
 
@@ -627,9 +717,9 @@ describe("Project page sections", () => {
         project: RYCO_LOCAL,
         view: "map",
         workspace: "worktree-projects",
-        review: "remove-checkout",
+        review: "delete-workspace",
       });
-      await expect.element(screen.getByRole("region", { name: /Remove checkout/ })).toBeVisible();
+      await expect.element(screen.getByRole("region", { name: /Delete workspace/ })).toBeVisible();
       await expect
         .poll(() => projectsTestSearchLog.last())
         .toEqual({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
@@ -656,50 +746,6 @@ describe("Project page sections", () => {
       )!;
       expect(getComputedStyle(wire).stroke).not.toBe("none");
       expect(wire.getAttribute("d")).toMatch(/^M /);
-    });
-
-    it("deletes a workspace whose removal is blocked by its own work, after an explicit yes", async () => {
-      lifecycle.blockers = ["48 tracked files have uncommitted changes."];
-      lifecycle.summaries = lifecycle.summaries.map((summary) =>
-        summary.worktreeId === "worktree-projects"
-          ? { ...summary, unmerged: true, discardBlockers: [] }
-          : summary,
-      );
-      const screen = await renderPage({
-        env: LOCAL_ENV,
-        project: RYCO_LOCAL,
-        view: "map",
-        workspace: "worktree-projects",
-        review: "remove-checkout",
-      });
-      const blocked = screen.getByRole("region", { name: /Remove checkout/ });
-      await expect.element(blocked.getByText("Nothing will change:")).toBeVisible();
-      await blocked.getByRole("button", { name: "Delete workspace instead…" }).click();
-
-      const review = screen.getByRole("region", { name: /Delete workspace/ });
-      await expect
-        .element(review.getByText(/Delete 1 workspace: remove its checkout, delete branch/))
-        .toBeVisible();
-      expect(lifecycle.previews.at(-1)).toMatchObject({
-        action: "remove-checkout",
-        discard: true,
-        deleteBranch: true,
-      });
-      // Losing work needs a yes to this exact preview.
-      const confirm = review.getByRole("button", { name: "Delete workspace" });
-      await expect.element(confirm).toBeDisabled();
-      await review
-        .getByRole("checkbox", { name: /work which exists only in this workspace/ })
-        .click();
-      await confirm.click();
-      await expect.poll(() => lifecycle.applied).toHaveLength(1);
-      expect(lifecycle.applied[0]).toMatchObject({
-        worktreeId: "worktree-projects",
-        action: "remove-checkout",
-        discard: true,
-        deleteBranch: true,
-        expectedFingerprint: `fp-${lifecycle.previews.length}`,
-      });
     });
 
     it("edits the project in its card: name and settings, without leaving the map", async () => {
@@ -861,7 +907,7 @@ describe("Project page sections", () => {
       expect(selectedNodes()).toEqual([]);
     });
 
-    it("moves several threads to Trash after one confirmation", async () => {
+    it("deletes several threads after one confirmation", async () => {
       const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
       const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
       await screen.getByRole("button", { name: "Threads" }).click();
@@ -869,11 +915,11 @@ describe("Project page sections", () => {
       await clickNodeWith(TOGGLE_KEY, "thread", "Add a projects page");
       const inspector = screen.getByRole("complementary", { name: "Details" });
       await expect.element(inspector.getByText("2 items selected")).toBeVisible();
-      await inspector.getByRole("button", { name: "Move 2 threads to Trash" }).click();
+      await inspector.getByRole("button", { name: "Delete 2 threads…" }).click();
       // One question for the whole selection, not one per thread. (The fixture
-      // seeds sidebar summaries only, so the trash itself has no thread to resolve.)
+      // seeds sidebar summaries only, so the delete itself has no thread to resolve.)
       await expect.poll(() => confirm.mock.calls.length).toBe(1);
-      expect(confirm.mock.calls[0]?.[0]).toMatch(/^Move 2 threads to Trash\?/);
+      expect(confirm.mock.calls[0]?.[0]).toMatch(/^Delete 2 conversations\?/);
       confirm.mockRestore();
     });
 
@@ -897,7 +943,7 @@ describe("Project page sections", () => {
   });
 
   describe("Review dialog", () => {
-    it("reviews a menu's checkout change in a dialog, without leaving the page", async () => {
+    it("reviews a menu's delete in a dialog, without leaving the page", async () => {
       await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL });
       await render(<WorkspaceReviewDialog />);
       const searches = projectsTestSearchLog.entries.length;
@@ -905,16 +951,14 @@ describe("Project page sections", () => {
         environmentId: LOCAL_ENV,
         projectId: ProjectId.make(RYCO_LOCAL),
         worktreeId: WorktreeId.make("worktree-projects"),
-        action: "remove-checkout",
+        action: "delete-workspace",
         title: "projects-page",
       });
       const popup = page.getByTestId("workspace-review-dialog");
       await expect
-        .element(
-          popup.getByText("Remove 1 checkout, archive 1 conversation, keep history and branch."),
-        )
-        .toBeVisible();
-      await popup.getByRole("button", { name: "Remove checkout" }).click();
+        .element(popup.getByTestId("workspace-review-summary"))
+        .toHaveTextContent("Removes the checkout from disk and deletes branch projects-page.");
+      await popup.getByRole("button", { name: "Delete workspace" }).click();
       await expect.poll(() => lifecycle.applied).toHaveLength(1);
       await expect.poll(() => useWorkspaceReviewDialog.getState().target).toBeNull();
       expect(projectsTestSearchLog.entries).toHaveLength(searches);

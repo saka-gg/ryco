@@ -165,8 +165,8 @@ const THREAD_BULK: ReadonlyArray<{
   { id: "archive", label: (count) => `Archive ${formatCount(count, "thread")}` },
   { id: "unarchive", label: (count) => `Unarchive ${formatCount(count, "thread")}` },
   {
-    id: "trash",
-    label: (count) => `Move ${formatCount(count, "thread")} to Trash`,
+    id: "delete",
+    label: (count) => `Delete ${formatCount(count, "thread")}…`,
     destructive: true,
   },
 ];
@@ -266,8 +266,8 @@ export function ProjectMapSelectionPanel(props: {
   const performThreads = (id: ThreadLifecycleActionId, entries: readonly ThreadEntry[]) =>
     run(async () => {
       const targets = entries.map((entry) => entry.target);
-      if (id === "trash") {
-        await threadActions.confirmAndTrashThreads(targets);
+      if (id === "delete") {
+        await threadActions.confirmAndDeleteThreads(targets);
         return;
       }
       const failures: string[] = [];
@@ -385,7 +385,7 @@ export function ProjectMapSelectionPanel(props: {
           ) : null}
           {reviewedSingly ? (
             <p className="mt-2 text-[11.5px] text-muted-foreground">
-              Removing or deleting a checkout is reviewed one workspace at a time.
+              Deleting a workspace is reviewed one workspace at a time.
             </p>
           ) : null}
         </>

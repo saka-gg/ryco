@@ -23,7 +23,16 @@ export const WorktreeCheckoutLocation = Schema.Literals(["appManaged", "projectM
 export type WorktreeCheckoutLocation = typeof WorktreeCheckoutLocation.Type;
 
 /** Why a workspace record no longer has a checkout: removed by Ryco, or found missing. */
-export const WorktreeCheckoutRemovalReason = Schema.Literals(["removed", "missing"]);
+export const WorktreeCheckoutRemovalReason = Schema.Literals([
+  "removed",
+  "missing",
+  /**
+   * The user deleted the workspace. The record only stays as provenance for the
+   * conversations kept from it: every surface hides it, and it is dropped once
+   * no conversation references it.
+   */
+  "deleted",
+]);
 export type WorktreeCheckoutRemovalReason = typeof WorktreeCheckoutRemovalReason.Type;
 
 /** How a pull request came to be linked to a workspace. */
