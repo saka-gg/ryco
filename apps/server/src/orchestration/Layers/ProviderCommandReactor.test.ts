@@ -502,6 +502,7 @@ describe("ProviderCommandReactor", () => {
         return "stopped" as const;
       }),
     );
+    const retireSessionBinding = vi.fn(() => Effect.succeed(false));
     const service: ProviderServiceShape = {
       ...(input?.setThreadGoal ? { setThreadGoal: input.setThreadGoal } : {}),
       ...(input?.getThreadGoal ? { getThreadGoal: input.getThreadGoal } : {}),
@@ -512,7 +513,7 @@ describe("ProviderCommandReactor", () => {
         Effect.succeed(Option.fromNullishOr(persistedBindings.get(threadId))),
       getSession: input?.getSession ?? (() => Effect.succeed(Option.none())),
       restoreSessionBinding: () => Effect.succeed(false),
-      retireSessionBinding: () => Effect.succeed(false),
+      retireSessionBinding: retireSessionBinding as ProviderServiceShape["retireSessionBinding"],
       stopSessionBinding: stopSessionBinding as ProviderServiceShape["stopSessionBinding"],
       listStaleSessionBindings: () => Effect.succeed([]),
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
@@ -810,6 +811,7 @@ describe("ProviderCommandReactor", () => {
       drain,
       reactor,
       stopSessionBinding,
+      retireSessionBinding,
       prewarm: Option.getOrUndefined(
         await runtime.runPromise(Effect.serviceOption(ProviderSessionPrewarm)),
       ),
@@ -7514,6 +7516,30 @@ describe("ProviderCommandReactor", () => {
       await Effect.runPromise(harness.engine.dispatch(turnStart("after-idle")));
       await waitFor(() => harness.sendTurn.mock.calls.length === 1);
       expect(harness.startSession).toHaveBeenCalledTimes(2);
+    });
+
+    // Codex writes a thread's rollout with its first turn: the cursor an unclaimed prewarm
+    // persisted names a conversation that cannot be resumed, so the stop must drop it.
+    it("drops the resume cursor of an unclaimed prewarm that opened a new conversation", async () => {
+      const harness = await prewarmHarness({ prewarm: { idleTimeout: "60 millis" } });
+      await harness.run(harness.prewarm!.prewarm({ threadId }));
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      await waitFor(() => harness.retireSessionBinding.mock.calls.length === 1);
+      expect(harness.retireSessionBinding).toHaveBeenCalledWith(
+        expect.objectContaining({ runtimeSessionId: "runtime-1" }),
+      );
+    });
+
+    it("keeps the resume cursor when an unclaimed prewarm resumed an existing conversation", async () => {
+      const harness = await prewarmHarness({ prewarm: { idleTimeout: "60 millis" } });
+      harness.persistedBindings.set(threadId, {
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        hasResumeCursor: true,
+      });
+      await harness.run(harness.prewarm!.prewarm({ threadId }));
+      await waitFor(() => harness.runtimeSessions.length === 1);
+      await waitFor(() => harness.stopSessionBinding.mock.calls.length === 1);
+      expect(harness.retireSessionBinding).not.toHaveBeenCalled();
     });
 
     it("does nothing for a thread whose session runs, and bounds the pool per instance", async () => {
