@@ -16,6 +16,12 @@ export interface MapBounds {
   readonly h: number;
 }
 
+/** A selection box being drawn: in host pixels to draw it, in world units to hit test. */
+export interface MapMarquee {
+  readonly screen: MapBounds;
+  readonly world: MapBounds;
+}
+
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 2;
 const clamp = (value: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, value));
@@ -30,12 +36,16 @@ const PAN_BLOCKERS = "[data-map-node], [data-map-ui], button, a, input, textarea
  * only the rounded zoom (for the % readout and level of detail) is state.
  * Trackpad scroll pans, ⌘/ctrl-scroll or pinch zooms at the pointer, drag on
  * empty canvas pans, double-click fits. Camera moves ease unless motion is off.
+ * With `onMarquee`, a shift- or ⌘/ctrl-drag on empty canvas draws a selection
+ * box instead of panning, as in a file browser.
  */
 export function useMapCamera(options: {
   readonly onFit: () => void;
   readonly onBackgroundClick: () => void;
   /** The reader moved the camera (pan, scroll, zoom): stop auto-fitting. */
   readonly onUserMove?: () => void;
+  /** The box as it is drawn; null once the drag ends. */
+  readonly onMarquee?: (marquee: MapMarquee | null) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<HTMLDivElement | null>(null);
@@ -45,6 +55,8 @@ export function useMapCamera(options: {
   const onFit = useEvent(options.onFit);
   const onBackgroundClick = useEvent(options.onBackgroundClick);
   const onUserMove = useEvent(() => options.onUserMove?.());
+  const onMarquee = useEvent((marquee: MapMarquee | null) => options.onMarquee?.(marquee));
+  const marquees = options.onMarquee !== undefined;
 
   const apply = useCallback(() => {
     const host = hostRef.current;
@@ -192,11 +204,19 @@ export function useMapCamera(options: {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    let drag: { x: number; y: number; cx: number; cy: number; moved: boolean; id: number } | null =
-      null;
+    let drag: {
+      x: number;
+      y: number;
+      cx: number;
+      cy: number;
+      moved: boolean;
+      id: number;
+      marquee: boolean;
+    } | null = null;
     const onDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
       if ((event.target as Element | null)?.closest(PAN_BLOCKERS)) return;
+      const marquee = marquees && (event.shiftKey || event.metaKey || event.ctrlKey);
       drag = {
         x: event.clientX,
         y: event.clientY,
@@ -204,9 +224,10 @@ export function useMapCamera(options: {
         cy: camera.current.y,
         moved: false,
         id: event.pointerId,
+        marquee,
       };
       host.setPointerCapture(event.pointerId);
-      host.dataset.panning = "";
+      host.dataset[marquee ? "marquee" : "panning"] = "";
     };
     const onMove = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.id) return;
@@ -214,16 +235,36 @@ export function useMapCamera(options: {
       const dy = event.clientY - drag.y;
       if (!drag.moved && Math.abs(dx) + Math.abs(dy) > 3) {
         drag.moved = true;
-        onUserMove();
+        if (!drag.marquee) onUserMove();
       }
-      setCamera({ x: drag.cx + dx, y: drag.cy + dy });
+      if (!drag.marquee) {
+        setCamera({ x: drag.cx + dx, y: drag.cy + dy });
+        return;
+      }
+      if (!drag.moved) return;
+      const rect = host.getBoundingClientRect();
+      const screen = {
+        x: Math.min(drag.x, event.clientX) - rect.left,
+        y: Math.min(drag.y, event.clientY) - rect.top,
+        w: Math.abs(dx),
+        h: Math.abs(dy),
+      };
+      const { x, y, k } = camera.current;
+      onMarquee({
+        screen,
+        world: { x: (screen.x - x) / k, y: (screen.y - y) / k, w: screen.w / k, h: screen.h / k },
+      });
     };
     const onUp = (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.id) return;
-      const moved = drag.moved;
+      const { moved, marquee } = drag;
       drag = null;
       delete host.dataset.panning;
-      if (!moved) onBackgroundClick();
+      delete host.dataset.marquee;
+      // A modified click on empty canvas keeps the selection, as in a file browser.
+      if (marquee) {
+        if (moved) onMarquee(null);
+      } else if (!moved) onBackgroundClick();
     };
     const onWheel = (event: WheelEvent) => {
       // Overlays (inspector, controls) scroll themselves.
@@ -255,7 +296,7 @@ export function useMapCamera(options: {
       host.removeEventListener("wheel", onWheel);
       host.removeEventListener("dblclick", onDoubleClick);
     };
-  }, [onBackgroundClick, onFit, onUserMove, setCamera, zoomAt]);
+  }, [marquees, onBackgroundClick, onFit, onMarquee, onUserMove, setCamera, zoomAt]);
 
   return { hostRef, worldRef, camera, zoom, setCamera, fit, zoomBy, reveal };
 }

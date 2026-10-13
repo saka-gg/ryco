@@ -50,6 +50,7 @@ import {
   useProjectWorkspaceInspection,
   type WorkspaceInspection,
 } from "../sections/useProjectWorkspaceInspection";
+import { useProjectEditAccess, type ProjectEditAccess } from "../sections/useProjectEditAccess";
 import { useEnvironmentPresence } from "../useEnvironmentPresence";
 import type { MapCheckout, MapPresenceStatus } from "./projectMap.logic";
 import { summaryOnlyWorkspace, toMapAutomation, toMapWorkspace } from "./projectMapModel";
@@ -83,6 +84,8 @@ export interface MapCheckoutDetail {
   /** The checkout's automation centre read (null until it lands): the dialog's counts. */
   readonly automationSnapshot: AutomationCentreSnapshot | null;
   readonly inspection: WorkspaceInspection;
+  /** Whether this client can change the checkout now (a multiple selection spans devices). */
+  readonly access: ProjectEditAccess;
   readonly automationError: string | null;
   readonly automationBusy: boolean;
   readonly automationDisabledReason: string | null;
@@ -113,6 +116,12 @@ function CheckoutSource(props: {
   const { snapshot, member, onChange } = props;
   const key = projectCheckoutKey(member.environmentId, member.id);
   const presence = useEnvironmentPresence(member.environmentId);
+  // A fresh object each render: rebuilt from its fields so the detail stays put.
+  const { canEdit, reason, canManageNode, nodeReason } = useProjectEditAccess(member.environmentId);
+  const access = useMemo<ProjectEditAccess>(
+    () => ({ canEdit, reason, canManageNode, nodeReason }),
+    [canEdit, canManageNode, nodeReason, reason],
+  );
   // A checkout on another desktop Hub machine connects on demand: hold it
   // while the map shows it, as the settings view does for the scoped device.
   const isPrimary = presence.isPrimary;
@@ -220,6 +229,7 @@ function CheckoutSource(props: {
       runs,
       automationSnapshot: centre.snapshot,
       inspection,
+      access,
       automationError: centre.error,
       automationBusy: centre.busy,
       automationDisabledReason: centre.disabledReason,
@@ -231,6 +241,7 @@ function CheckoutSource(props: {
       reinspect,
     };
   }, [
+    access,
     centre.busy,
     centre.disabledReason,
     centre.error,

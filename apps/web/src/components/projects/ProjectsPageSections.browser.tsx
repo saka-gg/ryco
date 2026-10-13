@@ -38,6 +38,7 @@ import {
   __setEnvironmentApiOverrideForTests,
   readEnvironmentApi,
 } from "../../environmentApi";
+import { isMacPlatform } from "../../lib/utils";
 import { toastManager } from "../ui/toast";
 import { WorkspaceReviewDialog } from "../worktrees/WorkspaceReviewDialog";
 import { openWorkspaceReviewDialog, useWorkspaceReviewDialog } from "../../workspaceLifecycle";
@@ -242,6 +243,21 @@ async function clickNode(kind: string, text: string) {
   await expect.poll(() => mapNode(kind, text)).toBeTruthy();
   await userEvent.click(mapNode(kind, text));
 }
+
+/** The map's toggle key: ⌘ on macOS, ctrl elsewhere. */
+const TOGGLE_KEY = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+
+async function clickNodeWith(key: string, kind: string, text: string) {
+  await expect.poll(() => mapNode(kind, text)).toBeTruthy();
+  await userEvent.keyboard(`{${key}>}`);
+  await userEvent.click(mapNode(kind, text));
+  await userEvent.keyboard(`{/${key}}`);
+}
+
+const selectedNodes = () =>
+  [...document.querySelectorAll<HTMLElement>('[data-map-node][data-state="live"][data-selected]')]
+    .map((node) => node.dataset.key)
+    .toSorted();
 
 function scrollRegion(): HTMLElement | null {
   return document.querySelector<HTMLElement>("[data-projects-focus-anchor]");
@@ -705,6 +721,99 @@ describe("Project page sections", () => {
       await expect
         .poll(() => dispatched.find((command) => command.type === "thread.meta.update"))
         .toMatchObject({ threadId: "thread-relay", title: "Fix relay reconnects" });
+    });
+
+    it("gathers workspaces like a file browser and archives them together", async () => {
+      lifecycle.summaries[2] = workspaceSummary({
+        worktreeId: WorktreeId.make("worktree-old"),
+        title: "old-experiment",
+        branch: "old-experiment",
+        archivedAt: "2026-09-01T09:00:00.000Z",
+        actions: [
+          { action: "archive", available: false, blockers: [] },
+          { action: "restore", available: true, blockers: [] },
+          { action: "remove-checkout", available: true, blockers: [] },
+          { action: "remove-stale-record", available: false, blockers: [] },
+          { action: "recreate-checkout", available: false, blockers: [] },
+        ],
+      });
+      const toast = vi.spyOn(toastManager, "add");
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
+      await clickNode("workspace", "projects-page");
+      await clickNodeWith(TOGGLE_KEY, "workspace", "old-experiment");
+      const inspector = screen.getByRole("complementary", { name: "Details" });
+      await expect.element(inspector.getByText("2 items selected")).toBeVisible();
+      expect(selectedNodes()).toEqual([
+        mapNode("workspace", "old-experiment").dataset.key,
+        mapNode("workspace", "projects-page").dataset.key,
+      ]);
+      // Each action counts the cards it applies to; checkout changes stay one at a time.
+      await expect
+        .element(inspector.getByRole("button", { name: "Restore 1 workspace" }))
+        .toBeVisible();
+      await expect.element(inspector.getByText(/reviewed one workspace at a time/)).toBeVisible();
+      await inspector.getByRole("button", { name: "Archive 1 workspace" }).click();
+      await expect.poll(() => lifecycle.applied).toHaveLength(1);
+      expect(lifecycle.applied[0]).toMatchObject({
+        worktreeId: "worktree-projects",
+        action: "archive",
+      });
+      await expect
+        .poll(() => toast.mock.calls.map(([options]) => options.title))
+        .toContain("Archived 1 workspace");
+      toast.mockRestore();
+      // Toggling a card out leaves the other inspected on its own.
+      await clickNodeWith(TOGGLE_KEY, "workspace", "old-experiment");
+      await expect.element(inspector.getByText("2 items selected")).not.toBeInTheDocument();
+      expect(selectedNodes()).toEqual([mapNode("workspace", "projects-page").dataset.key]);
+    });
+
+    it("selects a run with shift-click, acts on each schedule it can, and every card with ⌘/ctrl-A", async () => {
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
+      await clickNode("automation", "Triage new issues");
+      await clickNodeWith("Shift", "automation", "Summarise relay logs");
+      const inspector = screen.getByRole("complementary", { name: "Details" });
+      await expect.element(inspector.getByText("3 items selected")).toBeVisible();
+      await expect
+        .element(inspector.getByRole("button", { name: "Approve 1 due run" }))
+        .toBeVisible();
+      await expect
+        .element(inspector.getByRole("button", { name: "Resume 1 schedule" }))
+        .toBeVisible();
+      await inspector.getByRole("button", { name: "Pause 2 schedules" }).click();
+      await expect.poll(() => automationCentreFixture.commands).toHaveLength(2);
+      expect(automationCentreFixture.commands.map((command) => command.input)).toMatchObject([
+        { kind: "save", automationId: "auto-triage", definition: { enabled: false } },
+        { kind: "save", automationId: "auto-nightly", definition: { enabled: false } },
+      ]);
+
+      await userEvent.keyboard(`{${TOGGLE_KEY}>}a{/${TOGGLE_KEY}}`);
+      const cards = document.querySelectorAll(
+        '[data-map-node="workspace"][data-state="live"], [data-map-node="automation"][data-state="live"]',
+      ).length;
+      await expect.poll(() => selectedNodes().length).toBe(cards);
+      await expect.element(inspector.getByText(`${cards} items selected`)).toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      await expect
+        .poll(() => document.querySelector(".map-inspector")?.hasAttribute("data-open"))
+        .toBe(false);
+      expect(selectedNodes()).toEqual([]);
+    });
+
+    it("moves several threads to Trash after one confirmation", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, view: "map" });
+      await screen.getByRole("button", { name: "Threads" }).click();
+      await clickNode("thread", "Fix the relay reconnect");
+      await clickNodeWith(TOGGLE_KEY, "thread", "Add a projects page");
+      const inspector = screen.getByRole("complementary", { name: "Details" });
+      await expect.element(inspector.getByText("2 items selected")).toBeVisible();
+      await inspector.getByRole("button", { name: "Move 2 threads to Trash" }).click();
+      // One question for the whole selection, not one per thread. (The fixture
+      // seeds sidebar summaries only, so the trash itself has no thread to resolve.)
+      await expect.poll(() => confirm.mock.calls.length).toBe(1);
+      expect(confirm.mock.calls[0]?.[0]).toMatch(/^Move 2 threads to Trash\?/);
+      confirm.mockRestore();
     });
 
     it("reaches the Danger zone from the bar's menu while on the map", async () => {

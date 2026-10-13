@@ -33,6 +33,15 @@
 .map-canvas[data-panning] {
   cursor: grabbing;
 }
+/* Shift- or ⌘/ctrl-drag on empty canvas: a selection box, as in a file browser. */
+.map-canvas[data-marquee] {
+  cursor: crosshair;
+}
+.map-marquee {
+  border: 1px solid color-mix(in srgb, var(--foreground) 45%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+}
 .map-grid {
   background-image: radial-gradient(
     circle at 1px 1px,
@@ -122,6 +131,11 @@
 .map-node[data-lit="off"] .map-card {
   opacity: 0.34;
   filter: saturate(0.4);
+}
+/* What is selected stays legible while another card's lineage is lit. */
+.map-node[data-lit="off"][data-selected] .map-card {
+  opacity: 1;
+  filter: none;
 }
 .map-label {
   transition:

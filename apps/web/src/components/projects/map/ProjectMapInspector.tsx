@@ -7,7 +7,6 @@ import {
   listThreadLifecycleActions,
   WORKSPACE_LIFECYCLE_ACTION_LABELS,
   type ThreadLifecycleActionId,
-  type WorkspaceActionId,
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
@@ -21,26 +20,19 @@ import {
 } from "@ryco/contracts";
 import { useRouter } from "@tanstack/react-router";
 import {
-  ArchiveIcon,
-  ArchiveRestoreIcon,
   CalendarClockIcon,
   ChevronRightIcon,
   ClockIcon,
   ExternalLinkIcon,
   FolderIcon,
-  FolderMinusIcon,
-  FolderPlusIcon,
   GitBranchIcon,
   GitPullRequestIcon,
-  OctagonPauseIcon,
   PauseIcon,
   PlayIcon,
   Settings2Icon,
   ShieldCheckIcon,
-  SquareIcon,
   SquarePenIcon,
   SquareTerminalIcon,
-  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -88,109 +80,21 @@ import { availableWorkspaceActions } from "../sections/projectWorkspaces.logic";
 import { useProjectEditAccess } from "../sections/useProjectEditAccess";
 import { WorkspaceReview } from "../sections/WorkspaceReview";
 import { nextRunLabel } from "./projectMapModel";
+import type { MapSelection } from "./projectMapSelection.logic";
+import {
+  ACTION_ICONS,
+  Actions,
+  Facts,
+  findDetail,
+  Kind,
+  LinkRow,
+  Section,
+  THREAD_ACTION_ICONS,
+  Title,
+} from "./ProjectMapInspectorParts";
+import { ProjectMapSelectionPanel } from "./ProjectMapSelectionPanel";
 import { useNowMs } from "./ProjectMapNodes";
 import type { MapCheckoutDetail } from "./useProjectMapCheckouts";
-
-export type MapSelection =
-  | { readonly kind: "project" }
-  | { readonly kind: "device"; readonly checkoutKey: string }
-  | {
-      readonly kind: "workspace";
-      readonly checkoutKey: string;
-      readonly id: string;
-      /** A checkout change under review, shown in place of the details. */
-      readonly review?: WorkspaceReviewAction | undefined;
-    }
-  | { readonly kind: "automation"; readonly checkoutKey: string; readonly id: string }
-  | { readonly kind: "thread"; readonly checkoutKey: string; readonly id: string };
-
-const ACTION_ICONS: Record<WorkspaceActionId, typeof ArchiveIcon> = {
-  archive: ArchiveIcon,
-  restore: ArchiveRestoreIcon,
-  "recreate-checkout": FolderPlusIcon,
-  "remove-stale-record": FolderMinusIcon,
-  "remove-checkout": FolderMinusIcon,
-  "delete-workspace": Trash2Icon,
-};
-
-/* ---------------------------------------------------------------- pieces */
-
-function Kind(props: { readonly icon: ReactNode; readonly children: ReactNode }) {
-  return (
-    <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-      {props.icon}
-      {props.children}
-    </div>
-  );
-}
-
-function Title(props: { readonly mono?: boolean; readonly children: ReactNode }) {
-  return (
-    <h3
-      className={cn(
-        "mt-1.5 mr-7 break-words text-[15px] font-semibold tracking-tight",
-        props.mono && "font-mono text-[14px] font-medium",
-      )}
-    >
-      {props.children}
-    </h3>
-  );
-}
-
-function Facts(props: { readonly rows: ReadonlyArray<readonly [string, ReactNode]> }) {
-  return (
-    <dl className="mt-3.5 grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-[12.5px]">
-      {props.rows.map(([label, value]) => (
-        <div key={label} className="contents">
-          <dt className="text-muted-foreground">{label}</dt>
-          <dd className="min-w-0 break-words">{value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function Section(props: { readonly title: string; readonly children: ReactNode }) {
-  return (
-    <section className="mt-4 border-t border-border/60 pt-3">
-      <h4 className="mb-1.5 text-[11px] font-medium text-muted-foreground">{props.title}</h4>
-      <div className="-mx-2 flex flex-col">{props.children}</div>
-    </section>
-  );
-}
-
-function LinkRow(props: {
-  readonly onClick: () => void;
-  readonly icon: ReactNode;
-  readonly children: ReactNode;
-  readonly trailing?: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      className="flex h-7 min-w-0 items-center gap-2 rounded-md px-2 text-left text-[12.5px] outline-hidden transition-colors duration-(--app-motion-duration-chip) hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      {props.icon}
-      <span className="min-w-0 flex-1 truncate">{props.children}</span>
-      {props.trailing}
-    </button>
-  );
-}
-
-function Actions(props: { readonly children: ReactNode; readonly disabledReason?: string | null }) {
-  return (
-    <>
-      <div className="mt-4 flex flex-wrap gap-1.5">{props.children}</div>
-      {props.disabledReason ? (
-        <p className="mt-2 text-[11.5px] text-muted-foreground">{props.disabledReason}</p>
-      ) : null}
-    </>
-  );
-}
-
-const findDetail = (details: readonly MapCheckoutDetail[], key: string) =>
-  details.find((detail) => detail.checkout.key === key) ?? null;
 
 /* ---------------------------------------------------------------- kinds */
 
@@ -1094,14 +998,6 @@ function AutomationPanel(props: {
   );
 }
 
-const THREAD_ACTION_ICONS: Record<ThreadLifecycleActionId, typeof ArchiveIcon> = {
-  "interrupt-turn": OctagonPauseIcon,
-  "stop-session": SquareIcon,
-  archive: ArchiveIcon,
-  unarchive: ArchiveRestoreIcon,
-  trash: Trash2Icon,
-};
-
 function ThreadPanel(props: {
   readonly detail: MapCheckoutDetail;
   readonly id: string;
@@ -1305,6 +1201,16 @@ export function ProjectMapInspector(props: {
         details={details}
         onSelect={props.onSelect}
         onOpenSettings={() => props.onOpenSettings()}
+      />
+    );
+  } else if (selection?.kind === "many") {
+    // One key for the whole run, so adding a card does not replay the entrance.
+    contentKey = "many";
+    content = (
+      <ProjectMapSelectionPanel
+        items={selection.items}
+        details={details}
+        onSelect={props.onSelect}
       />
     );
   } else if (selection && detail) {
