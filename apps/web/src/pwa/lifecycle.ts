@@ -24,10 +24,13 @@ export interface HostedPwaServiceWorker extends EventTarget {
 export interface HostedPwaServiceWorkerRegistration extends EventTarget {
   readonly installing: HostedPwaServiceWorker | null;
   readonly waiting: HostedPwaServiceWorker | null;
+  update(): Promise<unknown>;
 }
 
 export interface HostedPwaServiceWorkerContainer extends EventTarget {
   readonly controller: HostedPwaServiceWorker | null;
+  /** The registration controlling this page, if any. */
+  getRegistration(): Promise<HostedPwaServiceWorkerRegistration | undefined>;
   register(
     scriptUrl: string,
     options: { readonly scope: string },
@@ -60,6 +63,11 @@ export interface HostedPwaRuntime {
     readonly userAgent: string;
   };
   readonly window: HostedPwaWindow;
+  /**
+   * Tab-scoped storage for the stale-build recovery guard (`sessionStorage`).
+   * Absent or throwing: recovery is still bounded to one reload per page.
+   */
+  readonly sessionStorage?: Pick<Storage, "getItem" | "setItem">;
 }
 
 interface InstallPromptEvent extends Event {
@@ -73,6 +81,33 @@ const REGISTRATION_IDLE_TIMEOUT_MS = 5_000;
 /** The longest the app's boot may hold registration back. */
 const HOSTED_PWA_READINESS_TIMEOUT_MS = 15_000;
 const REGISTRATION_ERROR = "Installation is temporarily unavailable.";
+/**
+ * Dispatched by Vite's built preload helper when a dynamic import, or a chunk
+ * or stylesheet it preloads, fails. Every code-split load goes through it:
+ * `lazyRouteComponent`, `React.lazy`, `preloadableLazy` and plain `import()`.
+ */
+const PRELOAD_ERROR_EVENT = "vite:preloadError";
+/** The longest a stale build waits for its update to finish installing. */
+const STALE_BUILD_UPDATE_TIMEOUT_MS = 20_000;
+const STALE_BUILD_UPDATE_POLL_MS = 250;
+/**
+ * Automatic recovery takes at most this many actions per tab in this window
+ * (activating a waiting update, or the one follow-up reload described in
+ * `recoverFromStaleBuild`), so an origin that alternates between two builds (a
+ * rolling deploy) or a build that is itself missing a chunk cannot keep
+ * reloading the tab; the update control still offers a newer build.
+ */
+const STALE_BUILD_RECOVERY_WINDOW_MS = 60_000;
+const STALE_BUILD_RECOVERY_LIMIT = 2;
+/**
+ * After asking a waiting worker to activate, reload anyway if control has not
+ * changed by then. Chromium can stall a `skipWaiting()` activation when the
+ * old worker is restarted for a fetch meanwhile (the reloading page's own
+ * requests); a reposted message does not resume it, but releasing this client
+ * does, and a navigation during activation waits for the new worker.
+ */
+const ACTIVATION_RELOAD_FALLBACK_MS = 5_000;
+const STALE_BUILD_RECOVERY_KEY = "ryco:pwa:stale-build-recovery:v1";
 const initialSnapshot: HostedPwaSnapshot = {
   errorMessage: null,
   installState: "hidden",
@@ -107,6 +142,7 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
   let controllerObserved = Boolean(runtime.navigator.serviceWorker?.controller);
   let reloadIssued = false;
   let reloadRequested = false;
+  let recoveringStaleBuild = false;
   const listeners = new Set<() => void>();
   const displayMode = runtime.window.matchMedia("(display-mode: standalone)");
 
@@ -150,11 +186,21 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
     controllerObserved = Boolean(runtime.navigator.serviceWorker?.controller);
     if (reloadIssued || (!reloadRequested && !wasControlled)) return;
     reloadRequested = false;
+    reload();
+  };
+
+  let activationFallback: ReturnType<typeof setTimeout> | undefined;
+  const reload = () => {
+    clearTimeout(activationFallback);
+    if (reloadIssued) return;
     reloadIssued = true;
     runtime.window.reload();
   };
 
   const observeRegistration = (nextRegistration: HostedPwaServiceWorkerRegistration) => {
+    // Recovery can observe the controlling registration before `register()`
+    // resolves the same object.
+    if (registration === nextRegistration) return;
     registration = nextRegistration;
     if (nextRegistration.waiting) publish({ updateState: "ready" });
     nextRegistration.addEventListener("updatefound", () => {
@@ -186,6 +232,109 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
     }
   };
 
+  const activate = (waiting: HostedPwaServiceWorker) => {
+    reloadRequested = true;
+    publish({ updateState: "activating" });
+    // eslint-disable-next-line unicorn/require-post-message-target-origin -- ServiceWorker.postMessage has no targetOrigin parameter.
+    waiting.postMessage({ type: ACTIVATION_MESSAGE });
+    clearTimeout(activationFallback);
+    activationFallback = setTimeout(() => {
+      if (started && reloadRequested) reload();
+    }, ACTIVATION_RELOAD_FALLBACK_MS);
+  };
+
+  /** Automatic recoveries this tab started in the current window (`sessionStorage`). */
+  const readRecoveryGuard = (now: number): { readonly since: number; readonly count: number } => {
+    try {
+      const raw = runtime.sessionStorage?.getItem(STALE_BUILD_RECOVERY_KEY);
+      const value = raw ? (JSON.parse(raw) as { since?: unknown; count?: unknown }) : null;
+      if (
+        typeof value?.since === "number" &&
+        typeof value.count === "number" &&
+        now - value.since >= 0 &&
+        now - value.since < STALE_BUILD_RECOVERY_WINDOW_MS
+      ) {
+        return { since: value.since, count: value.count };
+      }
+    } catch {
+      // Unreadable: a fresh window.
+    }
+    return { since: now, count: 0 };
+  };
+  const writeRecoveryGuard = (guard: { readonly since: number; readonly count: number }) => {
+    try {
+      runtime.sessionStorage?.setItem(STALE_BUILD_RECOVERY_KEY, JSON.stringify(guard));
+    } catch {
+      // Storage unavailable: `reloadIssued` still bounds this page to one reload.
+    }
+  };
+
+  /**
+   * A chunk this build needs is gone from the origin: a deploy or a rollback
+   * replaced the build while the page ran. Without a service worker the
+   * router's own reload (or "Reload app") fetches the new build. A controlled
+   * page would be answered from the worker's cached boot document instead, and
+   * the new worker installs only to wait behind this page, so ask for the
+   * update, wait a bounded time for it to install, and activate it: the
+   * existing controller-change reload then boots the new build. No newer
+   * worker means no reload, so a build that is genuinely broken cannot loop.
+   */
+  const recoverFromStaleBuild = async () => {
+    const serviceWorker = runtime.navigator.serviceWorker;
+    if (recoveringStaleBuild || reloadIssued || !serviceWorker?.controller) return;
+    recoveringStaleBuild = true;
+    try {
+      const controlling = registration ?? (await serviceWorker.getRegistration().catch(() => null));
+      if (!started || !controlling) return;
+      observeRegistration(controlling);
+      const deadline = Date.now() + STALE_BUILD_UPDATE_TIMEOUT_MS;
+      if (!controlling.waiting) {
+        // A navigation's own update check may already be installing it; the
+        // update joins that job. A failed or hung check still waits for it.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          controlling.update().catch(() => undefined),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, STALE_BUILD_UPDATE_TIMEOUT_MS);
+          }),
+        ]);
+        clearTimeout(timer);
+      }
+      while (!controlling.waiting && controlling.installing && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, STALE_BUILD_UPDATE_POLL_MS));
+      }
+      const waiting = controlling.waiting;
+      if (!started || snapshot.updateState === "activating") return;
+      const guard = readRecoveryGuard(Date.now());
+      if (!waiting) {
+        // Nothing newer, yet this tab activated an update moments ago: this
+        // page booted the previous worker's cached document while that
+        // activation completed (the reload that releases a stalled activation
+        // is still answered by the old worker), and the new worker claimed it
+        // before this lifecycle started. One more reload loads the new build.
+        // Without an earlier activation this is the current build failing, and
+        // reloading would not help.
+        if (guard.count === 0 || guard.count >= STALE_BUILD_RECOVERY_LIMIT) return;
+        writeRecoveryGuard({ since: guard.since, count: guard.count + 1 });
+        reload();
+        return;
+      }
+      // The update control offers it either way; only the automatic
+      // activation is guarded.
+      publish({ updateState: "ready" });
+      if (guard.count >= STALE_BUILD_RECOVERY_LIMIT) return;
+      writeRecoveryGuard({ since: guard.since, count: guard.count + 1 });
+      activate(waiting);
+    } finally {
+      recoveringStaleBuild = false;
+    }
+  };
+  // Never `preventDefault()`: the failed import must still reject, so its
+  // caller shows its error (or the router reloads) as it would otherwise.
+  const onPreloadError: EventListener = () => {
+    void recoverFromStaleBuild();
+  };
+
   const registerWhenSettled = async () => {
     await runtime.whenAppReady?.().catch(() => undefined);
     const idle = runtime.window.requestIdleCallback?.bind(runtime.window);
@@ -202,10 +351,21 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
     activateUpdate(): void {
       const waiting = registration?.waiting;
       if (!waiting || snapshot.updateState !== "ready") return;
-      reloadRequested = true;
-      publish({ updateState: "activating" });
-      // eslint-disable-next-line unicorn/require-post-message-target-origin -- ServiceWorker.postMessage has no targetOrigin parameter.
-      waiting.postMessage({ type: ACTIVATION_MESSAGE });
+      activate(waiting);
+    },
+    /**
+     * "Reload app": switches to a waiting update when one is ready, since a
+     * plain reload of a controlled page boots the cached build again; reloads
+     * otherwise. An update already activating reloads through its controller
+     * change.
+     */
+    reloadApp(): void {
+      if (snapshot.updateState === "activating") return;
+      if (snapshot.updateState === "ready" && registration?.waiting) {
+        activate(registration.waiting);
+        return;
+      }
+      reload();
     },
     dismissInstall(): void {
       installPrompt = null;
@@ -238,6 +398,7 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
       });
       runtime.window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
       runtime.window.addEventListener("appinstalled", onAppInstalled);
+      runtime.window.addEventListener(PRELOAD_ERROR_EVENT, onPreloadError);
       displayMode.addEventListener("change", onDisplayModeChange);
       runtime.navigator.serviceWorker?.addEventListener("controllerchange", onControllerChange);
 
@@ -255,8 +416,11 @@ export function createHostedPwaLifecycle(runtime: HostedPwaRuntime) {
       controllerObserved = false;
       reloadIssued = false;
       reloadRequested = false;
+      recoveringStaleBuild = false;
+      clearTimeout(activationFallback);
       runtime.window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
       runtime.window.removeEventListener("appinstalled", onAppInstalled);
+      runtime.window.removeEventListener(PRELOAD_ERROR_EVENT, onPreloadError);
       displayMode.removeEventListener("change", onDisplayModeChange);
       runtime.navigator.serviceWorker?.removeEventListener("controllerchange", onControllerChange);
       snapshot = initialSnapshot;
@@ -301,8 +465,17 @@ function whenBrowserAppReady(): Promise<void> {
   });
 }
 
+function browserSessionStorage(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 function createBrowserRuntime(): HostedPwaRuntime {
   const browserNavigator = navigator as Navigator & { readonly standalone?: boolean };
+  const storage = browserSessionStorage();
   return {
     whenAppReady: whenBrowserAppReady,
     baseUrl: import.meta.env.BASE_URL,
@@ -320,6 +493,7 @@ function createBrowserRuntime(): HostedPwaRuntime {
         ? { standalone: browserNavigator.standalone }
         : {}),
     },
+    ...(storage ? { sessionStorage: storage } : {}),
     window: {
       addEventListener: window.addEventListener.bind(window),
       removeEventListener: window.removeEventListener.bind(window),

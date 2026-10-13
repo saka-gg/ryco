@@ -1,5 +1,5 @@
 import { DownloadIcon, RefreshCwIcon, SmartphoneIcon, XIcon } from "lucide-react";
-import { useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 
 import { Button } from "../ui/button";
 import {
@@ -7,6 +7,7 @@ import {
   type HostedPwaLifecycle,
   type HostedPwaSnapshot,
 } from "../../pwa/lifecycle";
+import { useHostedPwaSnapshot } from "../../pwa/useHostedPwaSnapshot";
 import { HostedRelayTrustNotice } from "./HostedRelayTrustNotice";
 
 export function HostedPwaControls({
@@ -26,11 +27,7 @@ function ConnectedHostedPwaControls({
   readonly compact: boolean;
   readonly lifecycle: HostedPwaLifecycle;
 }) {
-  const snapshot = useSyncExternalStore(
-    lifecycle.subscribe,
-    lifecycle.getSnapshot,
-    lifecycle.getSnapshot,
-  );
+  const snapshot = useHostedPwaSnapshot(lifecycle);
   const [showInstructions, setShowInstructions] = useState(false);
   const installAvailable =
     snapshot.installState === "native-available" || snapshot.installState === "manual-available";

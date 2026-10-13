@@ -4,11 +4,13 @@
  * before it runs, so a single static import can pull a heavy package back into
  * every boot; the bundler keeps `import()` boundaries as separate chunks.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vite-plus/test";
+
+import { isBundledPatchedPackageImport, patchAddedExports } from "../scripts/patchedPackages.ts";
 
 const serverRoot = fileURLToPath(new URL("..", import.meta.url));
 const repoRoot = path.resolve(serverRoot, "../..");
@@ -63,8 +65,14 @@ function resolveRelative(specifier: string, importer: string): string | null {
   return null;
 }
 
-/** The static import closure of `entry`: workspace files plus external specifiers. */
-function staticGraph(entry: string) {
+const DYNAMIC_IMPORT = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
+
+/**
+ * The static import closure of `entry`: workspace files plus external
+ * specifiers. With `dynamic`, `import("...")` edges are followed too: everything
+ * the server can load.
+ */
+function staticGraph(entry: string, options?: { readonly dynamic?: boolean }) {
   const files = new Set<string>();
   const externals = new Set<string>();
   const pending = [path.resolve(serverRoot, entry)];
@@ -73,10 +81,16 @@ function staticGraph(entry: string) {
     if (files.has(file)) continue;
     files.add(file);
     if (!/\.(?:ts|tsx|js|mjs)$/u.test(file)) continue;
-    for (const match of readFileSync(file, "utf8").matchAll(STATIC_IMPORT)) {
+    const source = readFileSync(file, "utf8");
+    const specifiers = [...source.matchAll(STATIC_IMPORT)].flatMap((match) => {
       const clause = match[1]?.trim();
-      if (clause !== undefined && /^\{\s*(?:type\s+[\w$]+\s*,?\s*)+\}$/u.test(clause)) continue;
-      const specifier = (match[2] ?? match[3])!;
+      if (clause !== undefined && /^\{\s*(?:type\s+[\w$]+\s*,?\s*)+\}$/u.test(clause)) return [];
+      return [(match[2] ?? match[3])!];
+    });
+    if (options?.dynamic) {
+      for (const match of source.matchAll(DYNAMIC_IMPORT)) specifiers.push(match[1]!);
+    }
+    for (const specifier of specifiers) {
       const resolved = specifier.startsWith(".")
         ? resolveRelative(specifier, file)
         : resolveWorkspaceExport(specifier);
@@ -91,7 +105,23 @@ function staticGraph(entry: string) {
   return { files: relativeFiles, externals: [...externals] };
 }
 
+/** Provider SDK packages, each tens of megabytes of evaluated code (or a native binary). */
+const PROVIDER_SDKS =
+  /^(?:@anthropic-ai\/(?:claude-agent-sdk|sdk)|@github\/copilot-sdk|@opencode-ai\/sdk)(?:\/|$)/u;
+
 describe("server boot import boundaries", () => {
+  it("bundles every dependency it imports through an export only a repo patch adds", () => {
+    // npm installs of the published `ryco-cli` get upstream packages: an
+    // external import of a patch-added export fails at startup there.
+    const patchAdded = patchAddedExports();
+    expect(patchAdded.size).toBeGreaterThan(0);
+    const graph = staticGraph("src/bin.ts", { dynamic: true });
+    const unbundled = graph.externals.filter(
+      (specifier) => patchAdded.has(specifier) && !isBundledPatchedPackageImport(specifier),
+    );
+    expect(unbundled).toEqual([]);
+  });
+
   it("keeps the process entry free of the server graph", () => {
     const graph = staticGraph("src/bin.ts");
     expect(graph.files.toSorted()).toEqual([
@@ -114,6 +144,9 @@ describe("server boot import boundaries", () => {
     expect(graph.externals).not.toContain("sharp");
     // Only the patch parser; the package root pulls in shiki and its grammars.
     expect(graph.externals).not.toContain("@pierre/diffs");
+    // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
+    // SDK-free cursor modules).
+    expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
     // Protocol schemas load with the Codex/ACP features that use them. The error classes are
     // schema-free (chat forks classify Codex request failures with them).
     expect(
@@ -153,7 +186,7 @@ const hasCurrentBuild =
   existsSync(builtEntry) && readFileSync(builtEntry, "utf8").includes("enableCompileCache");
 
 describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
-  it("keeps sharp, the @pierre/diffs root and the Codex schema out of the boot chunks", () => {
+  it("keeps sharp, the @pierre/diffs root, provider SDKs and the Codex schema out of the boot chunks", () => {
     const entryClosure = builtStaticClosure(builtEntry);
     expect(entryClosure.chunks).toEqual([builtEntry]);
 
@@ -162,9 +195,30 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
     expect(serve.externals).not.toContain("sharp");
     expect(serve.externals).not.toContain("@pierre/diffs");
+    expect(serve.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
+    // Bundled: only its patch exposes the parser (see `scripts/patchedPackages.ts`).
+    expect(serve.externals.filter((specifier) => specifier.startsWith("@pierre/diffs"))).toEqual(
+      [],
+    );
     for (const chunk of serve.chunks) {
       // A type name only the generated Codex protocol schema defines.
       expect(readFileSync(chunk, "utf8")).not.toContain("V2ListMcpServerStatusResponse");
     }
+  });
+});
+
+describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {
+  it("leaves no import of a patch-added export to the installed package", () => {
+    const patchAdded = patchAddedExports();
+    const distDir = path.join(serverRoot, "dist");
+    const external = new Set<string>();
+    for (const file of readdirSync(distDir)) {
+      if (!file.endsWith(".mjs")) continue;
+      const source = readFileSync(path.join(distDir, file), "utf8");
+      for (const match of source.matchAll(CHUNK_STATIC_IMPORT))
+        external.add((match[1] ?? match[2])!);
+      for (const match of source.matchAll(DYNAMIC_IMPORT)) external.add(match[1]!);
+    }
+    expect([...external].filter((specifier) => patchAdded.has(specifier))).toEqual([]);
   });
 });

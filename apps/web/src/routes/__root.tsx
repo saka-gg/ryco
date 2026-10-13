@@ -22,6 +22,8 @@ import {
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
 import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
+import { hostedPwaLifecycle } from "../pwa/lifecycle";
+import { useHostedPwaSnapshot } from "../pwa/useHostedPwaSnapshot";
 import {
   markInterstitialDismissed,
   readInterstitialDismissed,
@@ -369,9 +371,16 @@ function RootRouteView() {
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
   const router = useRouter();
   const hosted = isHostedHubMode();
-  const message = hosted
-    ? "The hosted client could not continue. Retry or reload the app."
-    : errorMessage(error);
+  // A newer build waiting behind this page (a deploy replaced the chunk that
+  // failed): "Reload app" switches to it, since a plain reload of a
+  // service-worker-controlled page boots the cached build again.
+  const updateState = useHostedPwaSnapshot(hostedPwaLifecycle)?.updateState ?? "idle";
+  const message =
+    updateState !== "idle"
+      ? "A new version of the app is ready. Update to continue."
+      : hosted
+        ? "The hosted client could not continue. Retry or reload the app."
+        : errorMessage(error);
   const details = errorDetails(error);
 
   return (
@@ -394,8 +403,19 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
           <Button size="sm" onClick={() => retryRootRoute(router, reset)}>
             Try again
           </Button>
-          <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
-            Reload app
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={updateState === "activating"}
+            onClick={() =>
+              hostedPwaLifecycle ? hostedPwaLifecycle.reloadApp() : window.location.reload()
+            }
+          >
+            {updateState === "ready"
+              ? "Update app"
+              : updateState === "activating"
+                ? "Updating…"
+                : "Reload app"}
           </Button>
         </div>
 
