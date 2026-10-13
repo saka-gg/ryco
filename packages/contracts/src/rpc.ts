@@ -393,6 +393,8 @@ import {
 import {
   LifecycleSuggestions,
   TrashListResult,
+  WorkspaceDiskUsageInput,
+  WorkspaceDiskUsageResult,
   WorkspaceLifecycleApplyInput,
   WorkspaceLifecycleError,
   WorkspaceLifecycleListInput,
@@ -465,6 +467,7 @@ export const WS_METHODS = {
   lifecycleApplyWorkspace: "lifecycle.applyWorkspace",
   lifecycleSuggestions: "lifecycle.suggestions",
   lifecycleListTrash: "lifecycle.listTrash",
+  lifecycleDiskUsage: "lifecycle.diskUsage",
 
   // Sidebar hierarchy methods
   threadsSetManualBucket: "threads.setManualBucket",
@@ -1831,6 +1834,12 @@ export const WsLifecycleListTrashRpc = Rpc.make(WS_METHODS.lifecycleListTrash, {
   error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
 });
 
+export const WsLifecycleDiskUsageRpc = Rpc.make(WS_METHODS.lifecycleDiskUsage, {
+  payload: WorkspaceDiskUsageInput,
+  success: WorkspaceDiskUsageResult,
+  error: Schema.Union([WorkspaceLifecycleError, AuthRpcError]),
+});
+
 export const WsThreadsSetManualBucketRpc = Rpc.make(WS_METHODS.threadsSetManualBucket, {
   payload: ThreadsSetManualBucketInput,
   success: EmptyRpcResult,
@@ -2477,6 +2486,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsLifecycleApplyWorkspaceRpc
   | typeof WsLifecycleSuggestionsRpc
   | typeof WsLifecycleListTrashRpc
+  | typeof WsLifecycleDiskUsageRpc
   | typeof WsThreadsSetManualBucketRpc
   | typeof WsThreadsForkRpc
   | typeof WsThreadsSetManualPositionRpc
@@ -2685,6 +2695,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsLifecycleApplyWorkspaceRpc,
   WsLifecycleSuggestionsRpc,
   WsLifecycleListTrashRpc,
+  WsLifecycleDiskUsageRpc,
   WsThreadsSetManualBucketRpc,
   WsThreadsForkRpc,
   WsThreadsSetManualPositionRpc,

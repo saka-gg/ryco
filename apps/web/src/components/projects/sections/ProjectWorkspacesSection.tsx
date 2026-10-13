@@ -1,7 +1,7 @@
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { ThreadId, WS_METHODS } from "@ryco/contracts";
 import { useRouter } from "@tanstack/react-router";
-import { ChevronRightIcon, GitBranchIcon, MapIcon } from "lucide-react";
+import { ChevronRightIcon, FolderIcon, GitBranchIcon, MapIcon, RefreshCwIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -36,6 +36,13 @@ import { Button } from "../../ui/button";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { NewWorktreeDialog } from "../../worktrees/NewWorktreeDialog";
 import { useProjectsPage } from "../ProjectsPageContext";
+import {
+  diskSizeOf,
+  diskUsageMeasuring,
+  formatDiskSize,
+  LOWER_BOUND_NOTE,
+  readingTotal,
+} from "./projectDiskUsage.logic";
 import { ProjectNodeSettingsScope } from "./ProjectNodeSettingsScope";
 import { ProjectSection } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
@@ -45,6 +52,7 @@ import {
   workspaceFacts,
   workspaceInspectionSignature,
 } from "./projectWorkspaces.logic";
+import { useCheckoutDiskUsage } from "./useProjectDiskUsage";
 import {
   useProjectWorkspaceInspection,
   type WorkspaceInspection,
@@ -205,6 +213,109 @@ function Disclosure(props: {
 }
 
 /**
+ * How much disk the checkout takes on its device, workspace by workspace
+ * (largest first), with a way to measure again. Folded, the label still says
+ * the total.
+ */
+function DiskUsageBreakdown(props: {
+  readonly member: SidebarProjectGroupMember;
+  readonly worktrees: ReadonlyArray<{
+    readonly id: string;
+    readonly title?: string | null | undefined;
+    readonly branch: string;
+    readonly archivedAt?: string | null | undefined;
+  }>;
+  readonly inspection: WorkspaceInspection;
+}) {
+  const { reading, remeasure } = useCheckoutDiskUsage(props.member);
+  const [open, setOpen] = useState(false);
+  if (reading.status === "unavailable") return null;
+  const total = readingTotal(reading);
+  const measuring = diskUsageMeasuring(reading);
+  const summaries = props.inspection.status === "ready" ? props.inspection.summaries : [];
+  const rows = (reading.status === "ready" ? reading.workspaces : [])
+    .map((usage) => {
+      const worktree = props.worktrees.find((candidate) => candidate.id === usage.worktreeId);
+      const summary = summaries.find((candidate) => candidate.worktreeId === usage.worktreeId);
+      return {
+        usage,
+        name: usage.main
+          ? "Main checkout"
+          : (worktree?.title ?? worktree?.branch ?? summary?.title ?? "Workspace"),
+        archived: Boolean(worktree?.archivedAt ?? summary?.archivedAt),
+      };
+    })
+    .toSorted((left, right) => (right.usage.bytes ?? -1) - (left.usage.bytes ?? -1));
+  const oldest = rows.reduce<string | null>(
+    (earliest, row) =>
+      earliest === null || row.usage.measuredAt < earliest ? row.usage.measuredAt : earliest,
+    null,
+  );
+  return (
+    <Disclosure
+      open={open}
+      onToggle={() => setOpen((value) => !value)}
+      label={
+        <span title={total?.partial ? LOWER_BOUND_NOTE : undefined}>
+          On disk{total ? ` · ${formatDiskSize(total)}` : ""}
+        </span>
+      }
+      hint={measuring ? "Measuring…" : null}
+    >
+      <div role="list" aria-label="Disk usage by workspace" className="flex flex-col">
+        {rows.map(({ usage, name, archived }) => {
+          const size = diskSizeOf(usage);
+          return (
+            <div
+              key={usage.worktreeId}
+              role="listitem"
+              className={cn(
+                "flex min-w-0 items-center gap-2.5 py-2 text-[13px]",
+                SETTINGS_INSET_CLASS,
+              )}
+            >
+              {usage.main ? (
+                <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <GitBranchIcon className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <span className={cn("min-w-0 flex-1 truncate", !usage.main && "font-mono text-xs")}>
+                {name}
+              </span>
+              {archived ? (
+                <span className="shrink-0 text-[11px] text-muted-foreground">Archived</span>
+              ) : null}
+              <span
+                className="shrink-0 text-xs text-muted-foreground tabular-nums"
+                title={size?.partial ? LOWER_BOUND_NOTE : undefined}
+              >
+                {size ? formatDiskSize(size) : "Unavailable"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div
+        className={cn(
+          "flex items-center gap-3 border-t border-border/60 py-2.5",
+          SETTINGS_INSET_CLASS,
+        )}
+      >
+        <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">
+          The main checkout includes the repository&apos;s Git data; worktrees count their own
+          files.
+          {oldest ? ` Measured ${formatRelativeTimeLabel(oldest)}.` : ""}
+        </p>
+        <Button size="xs" variant="outline" disabled={measuring} onClick={remeasure}>
+          <RefreshCwIcon className={cn("size-3", measuring && "animate-spin")} />
+          {measuring ? "Measuring…" : "Measure again"}
+        </Button>
+      </div>
+    </Disclosure>
+  );
+}
+
+/**
  * This project's override of the device's cleanup suggestions. The override
  * is the whole policy: until it is set the device setting applies, and it
  * can be reset back to it.
@@ -287,8 +398,8 @@ function CleanupSuggestionSettings(props: { readonly member: SidebarProjectGroup
 }
 
 /**
- * The checkout's workspaces, in brief: how many there are and how many need
- * care, with the map one click away (it shows them across every device, with
+ * The checkout's workspaces, in brief: how many there are, how many need care
+ * and how much disk they take, with the map one click away (it shows them across every device, with
  * their threads and automations, and reviews checkout changes in place).
  * Cleanup suggestions and their timing stay here, with the other settings.
  */
@@ -368,6 +479,7 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
           </Button>
         }
       />
+      <DiskUsageBreakdown member={member} worktrees={worktrees} inspection={inspection} />
       <WorkspaceSuggestions
         member={member}
         inspection={inspection}

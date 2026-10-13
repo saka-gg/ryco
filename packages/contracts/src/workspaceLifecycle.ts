@@ -98,6 +98,36 @@ export type WorkspaceLifecycleSummary = typeof WorkspaceLifecycleSummary.Type;
 export const WorkspaceLifecycleListInput = Schema.Struct({ projectId: ProjectId });
 export type WorkspaceLifecycleListInputType = typeof WorkspaceLifecycleListInput.Type;
 
+export const WorkspaceDiskUsageInput = Schema.Struct({
+  projectId: ProjectId,
+  /** Measure again instead of answering from the node's recent measurements. */
+  refresh: Schema.optional(Schema.Boolean),
+});
+export type WorkspaceDiskUsageInput = typeof WorkspaceDiskUsageInput.Type;
+
+/**
+ * Space one workspace's checkout takes on the node's disk. A checkout nested
+ * inside another is counted once, under itself; the main checkout includes the
+ * repository's Git data, which its worktrees share.
+ */
+export const WorkspaceDiskUsage = Schema.Struct({
+  worktreeId: WorktreeId,
+  /** The project root/main checkout. */
+  main: Schema.Boolean,
+  /** Null when the checkout could not be measured at all. */
+  bytes: Schema.NullOr(NonNegativeInt),
+  /** Unreadable entries or the time limit cut the measurement short: a lower bound. */
+  partial: Schema.Boolean,
+  measuredAt: IsoDateTime,
+});
+export type WorkspaceDiskUsage = typeof WorkspaceDiskUsage.Type;
+
+/** Workspaces whose checkout is on disk; removed checkouts take no space and are left out. */
+export const WorkspaceDiskUsageResult = Schema.Struct({
+  workspaces: Schema.Array(WorkspaceDiskUsage),
+});
+export type WorkspaceDiskUsageResult = typeof WorkspaceDiskUsageResult.Type;
+
 export const WorkspaceLifecycleRequest = Schema.Struct({
   worktreeId: WorktreeId,
   action: WorkspaceLifecycleAction,

@@ -10,6 +10,7 @@
  *   │  └─ automation (schedules the device runs) below its workspaces
  */
 import type { InboxGlyphKind } from "../../inboxSidebar/inboxRowPresentation";
+import type { DiskSize } from "../sections/projectDiskUsage.logic";
 import type { WorkspaceFact } from "../sections/projectWorkspaces.logic";
 
 export type MapPresenceStatus = "online" | "connecting" | "offline" | "unknown";
@@ -48,6 +49,8 @@ export interface MapWorkspace {
   /** What needs care, stated once (inspection facts). */
   readonly facts: readonly WorkspaceFact[];
   readonly threads: readonly MapThread[];
+  /** Space its checkout takes on the device; null until measured or when it cannot be. */
+  readonly disk: DiskSize | null;
 }
 
 /** Paused, or finished with nothing waiting or starting: drawn quietly. */
@@ -159,7 +162,7 @@ export interface ProjectMapLayout {
 
 /* Geometry. Heights are fixed so the layout never waits on the DOM. */
 export const MAP_SIZE = {
-  project: { w: 300, h: 118 },
+  project: { w: 340, h: 118 },
   device: { w: 302, h: 66 },
   workspace: { w: 268, h: 62 },
   automation: { w: 268, h: 62 },

@@ -35,8 +35,10 @@ import {
 } from "../projectsModel.logic";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
 import { useEnvironmentPresence, type EnvironmentPresenceStatus } from "../useEnvironmentPresence";
+import { formatDiskSize, LOWER_BOUND_NOTE, readingTotal } from "./projectDiskUsage.logic";
 import { ProjectSection, useSavedFlash } from "./ProjectSection";
 import type { ProjectSectionProps } from "./projectSectionTypes";
+import { useCheckoutDiskUsage } from "./useProjectDiskUsage";
 
 const STATUS_LABEL: Record<EnvironmentPresenceStatus, string> = {
   online: "Online",
@@ -84,7 +86,8 @@ function useCheckoutActivity(member: SidebarProjectGroupMember) {
 }
 
 /**
- * One checkout: its device, reachability, path and how busy it is. With more
+ * One checkout: its device, reachability, path, how busy it is and how much
+ * disk it takes there (main checkout with its Git data, and worktrees). With more
  * than one, the rows are how the page switches which checkout it edits.
  */
 function CheckoutRow(props: {
@@ -95,6 +98,7 @@ function CheckoutRow(props: {
 }) {
   const presence = useEnvironmentPresence(props.member.environmentId);
   const activity = useCheckoutActivity(props.member);
+  const disk = readingTotal(useCheckoutDiskUsage(props.member).reading);
   const body = (
     <>
       <span className="grid size-8 shrink-0 place-items-center rounded-[min(var(--radius-lg),0.625rem)] bg-foreground/5 text-foreground/80">
@@ -121,6 +125,16 @@ function CheckoutRow(props: {
           <span className="shrink-0 tabular-nums">
             {activity.count} thread{activity.count === 1 ? "" : "s"}
           </span>
+          {disk ? (
+            <span
+              className="shrink-0 tabular-nums"
+              title={
+                disk.partial ? LOWER_BOUND_NOTE : "Main checkout with its Git data, and worktrees"
+              }
+            >
+              · {formatDiskSize(disk)} on disk
+            </span>
+          ) : null}
           {activity.lastActive > 0 ? (
             <span className="hidden shrink-0 @[36rem]/detail:inline">
               · <RelativeTime value={new Date(activity.lastActive).toISOString()} withSuffix />

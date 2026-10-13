@@ -38,6 +38,11 @@ export function makeLifecycleHandlers(ctx: WsRpcContext) {
         WS_METHODS.lifecycleSuggestions,
         service((lifecycle) => lifecycle.suggestions()),
       ),
+    [WS_METHODS.lifecycleDiskUsage]: (input) =>
+      ctx.ownerEffect(
+        WS_METHODS.lifecycleDiskUsage,
+        service((lifecycle) => lifecycle.diskUsage(input)),
+      ),
     [WS_METHODS.lifecycleListTrash]: () =>
       ctx.withAccess(
         "viewer",

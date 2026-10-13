@@ -699,6 +699,23 @@ describe("workspace lifecycle service", () => {
     }
   });
 
+  it("measures each checkout's disk usage; a missing checkout is unmeasured", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.checkout, "large.bin"), Buffer.alloc(512 * 1024));
+    const measured = await f.run((s) => s.diskUsage({ projectId }));
+    const topic = measured.workspaces.find((workspace) => workspace.worktreeId === topicId);
+    expect(topic?.bytes).toBeGreaterThanOrEqual(512 * 1024);
+    expect(topic?.partial).toBe(false);
+    expect(measured.workspaces.some((workspace) => workspace.worktreeId === mainId)).toBe(true);
+
+    rmSync(f.checkout, { recursive: true, force: true });
+    const after = await f.run((s) => s.diskUsage({ projectId, refresh: true }));
+    expect(after.workspaces.find((workspace) => workspace.worktreeId === topicId)).toMatchObject({
+      bytes: null,
+      partial: false,
+    });
+  });
+
   it("recreates a removed checkout on its existing branch", async () => {
     const f = fixture();
     await f.previewAndApply({ worktreeId: topicId, action: "remove-checkout" });

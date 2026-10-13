@@ -11,7 +11,7 @@ import {
   scheduleRowPresentation,
   type ScheduleRow,
 } from "@ryco/client-runtime/state/agentControl";
-import type { WorkspaceLifecycleSummary } from "@ryco/contracts";
+import type { WorkspaceDiskUsage, WorkspaceLifecycleSummary } from "@ryco/contracts";
 import { rel, scheduleLabel } from "@ryco/shared/automationSchedule";
 
 import { inboxGlyphLabel, resolveInboxGlyph } from "../../inboxSidebar/inboxRowPresentation";
@@ -22,6 +22,7 @@ import {
   workspaceFacts,
   type WorkspaceFact,
 } from "../sections/projectWorkspaces.logic";
+import { diskSizeOf, type DiskSize } from "../sections/projectDiskUsage.logic";
 import type {
   MapAutomation,
   MapThread,
@@ -57,14 +58,25 @@ function originOf(node: SidebarTreeWorktree): MapWorkspaceOrigin {
   return null;
 }
 
-/** A tree worktree, with what the server's inspection found about it. */
+/** The measured size of a workspace's checkout, matched as its inspection is. */
+function diskOf(
+  usages: readonly WorkspaceDiskUsage[],
+  row: { readonly worktreeId: string; readonly main: boolean },
+): DiskSize | null {
+  const usage = findWorkspaceSummary(usages, row);
+  return usage ? diskSizeOf(usage) : null;
+}
+
+/** A tree worktree, with what the server's inspection and measurement found about it. */
 export function toMapWorkspace(
   node: SidebarTreeWorktree,
   summaries: readonly WorkspaceLifecycleSummary[],
   archived: boolean,
+  diskUsage: readonly WorkspaceDiskUsage[],
 ): { readonly workspace: MapWorkspace; readonly summary: WorkspaceLifecycleSummary | null } {
   const main = node.worktree.origin === "main";
-  const summary = findWorkspaceSummary(summaries, { worktreeId: node.worktree.worktreeId, main });
+  const row = { worktreeId: node.worktree.worktreeId, main };
+  const summary = findWorkspaceSummary(summaries, row);
   const checkoutRemoved =
     node.worktree.checkoutRemovedAt != null || summary?.checkout === "removed";
   /* Without an inspection, a removed checkout is still worth saying. */
@@ -89,12 +101,16 @@ export function toMapWorkspace(
         ...node.sessions.map((thread) => toMapThread(thread, false)),
         ...node.archivedSessions.map((thread) => toMapThread(thread, true)),
       ],
+      disk: checkoutRemoved ? null : diskOf(diskUsage, row),
     },
   };
 }
 
 /** A registered workspace the sidebar's tree does not list (no threads known). */
-export function summaryOnlyWorkspace(summary: WorkspaceLifecycleSummary): MapWorkspace {
+export function summaryOnlyWorkspace(
+  summary: WorkspaceLifecycleSummary,
+  diskUsage: readonly WorkspaceDiskUsage[],
+): MapWorkspace {
   return {
     id: summary.worktreeId,
     registeredId: summary.worktreeId,
@@ -106,6 +122,7 @@ export function summaryOnlyWorkspace(summary: WorkspaceLifecycleSummary): MapWor
     origin: null,
     facts: workspaceFacts(summary),
     threads: [],
+    disk: summary.checkout === "removed" ? null : diskOf(diskUsage, summary),
   };
 }
 

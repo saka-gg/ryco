@@ -116,6 +116,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             applyWorkspace: rpcClient.lifecycle.applyWorkspace,
             suggestions: rpcClient.lifecycle.suggestions,
             listTrash: rpcClient.lifecycle.listTrash,
+            diskUsage: rpcClient.lifecycle.diskUsage,
           },
         }
       : {}),

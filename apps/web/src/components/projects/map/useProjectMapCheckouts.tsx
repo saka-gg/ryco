@@ -50,6 +50,8 @@ import {
   useProjectWorkspaceInspection,
   type WorkspaceInspection,
 } from "../sections/useProjectWorkspaceInspection";
+import type { DiskUsageReading } from "../sections/projectDiskUsage.logic";
+import { useCheckoutDiskUsage } from "../sections/useProjectDiskUsage";
 import { useProjectEditAccess, type ProjectEditAccess } from "../sections/useProjectEditAccess";
 import { useEnvironmentPresence } from "../useEnvironmentPresence";
 import type { MapCheckout, MapPresenceStatus } from "./projectMap.logic";
@@ -84,6 +86,10 @@ export interface MapCheckoutDetail {
   /** The checkout's automation centre read (null until it lands): the dialog's counts. */
   readonly automationSnapshot: AutomationCentreSnapshot | null;
   readonly inspection: WorkspaceInspection;
+  /** How much disk the checkout's workspaces take on the device. */
+  readonly diskUsage: DiskUsageReading;
+  /** Measure the checkout's workspaces again instead of reading the device's recent figures. */
+  readonly remeasureDisk: () => void;
   /** Whether this client can change the checkout now (a multiple selection spans devices). */
   readonly access: ProjectEditAccess;
   readonly automationError: string | null;
@@ -155,6 +161,7 @@ function CheckoutSource(props: {
     enabled: listCapability.allowed,
     suggestionsEnabled: false,
   });
+  const { reading: diskUsage, remeasure: remeasureDisk } = useCheckoutDiskUsage(member);
   const centre = useAutomationCentre(member.environmentId, ProjectId.make(member.id));
   // Schedule words ("today 16:00") change with the day, not the minute.
   const dayMs = dayStart(useMinuteNow());
@@ -163,6 +170,7 @@ function CheckoutSource(props: {
 
   const detail = useMemo<MapCheckoutDetail>(() => {
     const summaries = inspection.status === "ready" ? inspection.summaries : [];
+    const usages = diskUsage.status === "ready" ? diskUsage.workspaces : [];
     const nodes = new Map<string, SidebarTreeWorktree>();
     const summaryById = new Map<string, WorkspaceLifecycleSummary>();
     const threadById = new Map<string, SidebarTreeThread>();
@@ -170,7 +178,7 @@ function CheckoutSource(props: {
       ...(treeProject?.worktrees ?? []).map((node) => ({ node, archived: false })),
       ...(treeProject?.archivedWorktrees ?? []).map((node) => ({ node, archived: true })),
     ].map(({ node, archived }) => {
-      const { workspace, summary } = toMapWorkspace(node, summaries, archived);
+      const { workspace, summary } = toMapWorkspace(node, summaries, archived, usages);
       nodes.set(workspace.id, node);
       if (summary) summaryById.set(workspace.id, summary);
       for (const thread of [...node.sessions, ...node.archivedSessions])
@@ -185,7 +193,7 @@ function CheckoutSource(props: {
       if (workspace.registeredId) listed.add(workspace.registeredId);
     }
     for (const summary of unlistedWorkspaces(summaries, listed)) {
-      const workspace = summaryOnlyWorkspace(summary);
+      const workspace = summaryOnlyWorkspace(summary, usages);
       summaryById.set(workspace.id, summary);
       workspaces.push(workspace);
     }
@@ -229,6 +237,8 @@ function CheckoutSource(props: {
       runs,
       automationSnapshot: centre.snapshot,
       inspection,
+      diskUsage,
+      remeasureDisk,
       access,
       automationError: centre.error,
       automationBusy: centre.busy,
@@ -249,6 +259,7 @@ function CheckoutSource(props: {
     command,
     dayMs,
     decide,
+    diskUsage,
     inspection,
     key,
     member,
@@ -256,6 +267,7 @@ function CheckoutSource(props: {
     presence.label,
     presence.status,
     reinspect,
+    remeasureDisk,
     scoped,
     treeProject,
   ]);

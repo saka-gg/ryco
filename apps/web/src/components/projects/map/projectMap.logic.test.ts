@@ -33,6 +33,7 @@ const workspace = (id: string, overrides: Partial<MapWorkspace> = {}): MapWorksp
   origin: null,
   facts: [],
   threads: [],
+  disk: null,
   ...overrides,
 });
 
