@@ -70,6 +70,19 @@ export function readEnvironmentServerConfig(
   return useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig ?? null;
 }
 
+const selectChatsAvailable = (config: ServerConfig | null): boolean | null =>
+  config === null ? null : resolveChatsAvailability(config).available;
+
+/**
+ * Whether an environment's node supports chats, null while its config is
+ * unknown. A narrow subscription: unrelated config pushes do not re-render.
+ */
+export function useEnvironmentChatsAvailable(
+  environmentId: EnvironmentId | null | undefined,
+): boolean | null {
+  return useEnvironmentServerConfigSelector(environmentId, selectChatsAvailable);
+}
+
 const PHONE_TIER_CHATS_UNAVAILABLE: ChatsAvailability = {
   available: false,
   reason: "unsupported",

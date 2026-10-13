@@ -48,7 +48,8 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
   let operation: {
     readonly sequence: number;
     readonly logicalKey: (project: Project) => string;
-    readonly sourceLogicalKey: string;
+    /** Null for a "No project" chat draft: it lands as a chat, never in a project. */
+    readonly sourceLogicalKey: string | null;
     readonly release: () => void;
     unsubscribeRoute: () => void;
     unsubscribeProjects: () => void;
@@ -130,9 +131,14 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
         chooseTarget(request, active.chosen);
         return;
       }
+      const sourceLogicalKey = active.sourceLogicalKey;
+      if (sourceLogicalKey === null) {
+        chooseTarget(request, { kind: "chat" });
+        return;
+      }
       const matches = ports
         .readProjects(request.environmentId)
-        .filter((project) => active.logicalKey(project) === active.sourceLogicalKey);
+        .filter((project) => active.logicalKey(project) === sourceLogicalKey);
       if (matches.length === 1 && matches[0])
         chooseTarget(request, { kind: "project", projectId: matches[0].id });
       else publish({ ...request, phase: "project" });
@@ -140,6 +146,68 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       if (attempt === loadSequence)
         fail(request, "Could not connect to this device. Your draft is preserved.");
     }
+  };
+  const start = (input: {
+    readonly draftId: DraftId;
+    readonly sourceEnvironmentId: EnvironmentId;
+    readonly sourceProjectId: ProjectId;
+    readonly sourceLogicalKey: string | null;
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly logicalKey: (project: Project) => string;
+  }) => {
+    if (
+      input.sourceEnvironmentId === input.environmentId ||
+      !ports.targetIsEligible(input.environmentId)
+    )
+      return;
+    const request: HostedDraftTargetSelection = {
+      sequence: ++sequence,
+      draftId: input.draftId,
+      sourceEnvironmentId: input.sourceEnvironmentId,
+      sourceProjectId: input.sourceProjectId,
+      environmentId: input.environmentId,
+      label: input.label,
+      phase: "connecting",
+    };
+    if (!ports.sourceIsCurrent(request)) return;
+    cancel(false);
+    operation = {
+      sequence: request.sequence,
+      logicalKey: input.logicalKey,
+      sourceLogicalKey: input.sourceLogicalKey,
+      release: ports.retain(input.environmentId),
+      unsubscribeRoute: () => undefined,
+      unsubscribeProjects: () => undefined,
+      previewing: false,
+      chosen: null,
+    };
+    publish(request);
+    if (!ports.adopt(input.environmentId)) {
+      cancel(false);
+      return;
+    }
+    operation.unsubscribeRoute = ports.subscribeRoute(() => {
+      if (!current(request)) cancel(false);
+    });
+    const preview = () => {
+      if (
+        !current(request) ||
+        !operation ||
+        operation.chosen ||
+        // A chat has no project to pick: it waits for the lease and moves.
+        operation.sourceLogicalKey === null ||
+        selection?.phase !== "connecting" ||
+        !ports.canPreviewProjects?.(request.environmentId) ||
+        ports.readProjects(request.environmentId).length === 0
+      )
+        return;
+      operation.previewing = true;
+      publish({ ...request, phase: "project" });
+    };
+    operation.unsubscribeProjects = ports.subscribeProjects?.(preview) ?? (() => undefined);
+    preview();
+    void load(request);
   };
   return {
     getSnapshot: () => selection,
@@ -156,56 +224,31 @@ export function createHostedDraftTargetController(ports: HostedDraftTargetPorts)
       readonly label: string;
       readonly logicalKey: (project: Project) => string;
     }) {
-      if (
-        input.project.environmentId === input.environmentId ||
-        !ports.targetIsEligible(input.environmentId)
-      )
-        return;
-      const request: HostedDraftTargetSelection = {
-        sequence: ++sequence,
+      start({
         draftId: input.draftId,
         sourceEnvironmentId: input.project.environmentId,
         sourceProjectId: input.project.id,
+        sourceLogicalKey: input.logicalKey(input.project),
         environmentId: input.environmentId,
         label: input.label,
-        phase: "connecting",
-      };
-      if (!ports.sourceIsCurrent(request)) return;
-      cancel(false);
-      operation = {
-        sequence: request.sequence,
         logicalKey: input.logicalKey,
-        sourceLogicalKey: input.logicalKey(input.project),
-        release: ports.retain(input.environmentId),
-        unsubscribeRoute: () => undefined,
-        unsubscribeProjects: () => undefined,
-        previewing: false,
-        chosen: null,
-      };
-      publish(request);
-      if (!ports.adopt(input.environmentId)) {
-        cancel(false);
-        return;
-      }
-      operation.unsubscribeRoute = ports.subscribeRoute(() => {
-        if (!current(request)) cancel(false);
       });
-      const preview = () => {
-        if (
-          !current(request) ||
-          !operation ||
-          operation.chosen ||
-          selection?.phase !== "connecting" ||
-          !ports.canPreviewProjects?.(request.environmentId) ||
-          ports.readProjects(request.environmentId).length === 0
-        )
-          return;
-        operation.previewing = true;
-        publish({ ...request, phase: "project" });
-      };
-      operation.unsubscribeProjects = ports.subscribeProjects?.(preview) ?? (() => undefined);
-      preview();
-      void load(request);
+    },
+    /** Moves an unsent "No project" chat draft to a chat on another device. */
+    beginChat(input: {
+      readonly draftId: DraftId;
+      readonly sourceEnvironmentId: EnvironmentId;
+      readonly sourceProjectId: ProjectId;
+      readonly environmentId: EnvironmentId;
+      readonly label: string;
+    }) {
+      if (!ports.moveToChat) return;
+      start({
+        ...input,
+        sourceLogicalKey: null,
+        // Never consulted: a chat source has no logical project to match.
+        logicalKey: () => "",
+      });
     },
     cancel,
     selectProject(projectId: ProjectId) {
