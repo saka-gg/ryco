@@ -16,7 +16,6 @@ import {
   use,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -122,12 +121,6 @@ import { formatTimestamp } from "../../timestampFormat";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
 import {
-  readTimelineRowHeight,
-  readTimelineWidth,
-  rememberTimelineRowHeight,
-  rememberTimelineWidth,
-} from "./timelineRowHeights";
-import {
   type ActivityPayloadOutput,
   useActivityPayloadOutput,
 } from "../../rpc/useActivityPayloadOutput";
@@ -189,14 +182,6 @@ function TimelineStableProvider({
     content
   );
 }
-/**
- * The first-pass height of a row type nothing has measured yet; per-type averages
- * take over after one row of each type renders. Real rows are compact work rows
- * (~32 px), user bubbles (~70 px) and replies of a few hundred px, and the list
- * renders (viewport + 2 x draw distance) / estimate rows up front: the old 56 px
- * rendered about 25 rows to fill one screen. Overshooting only costs one more pass.
- */
-const TIMELINE_ESTIMATED_ROW_HEIGHT = 120;
 const NOOP_CLOSE_DIFF = () => {};
 /* Top clearance mirrors the footer: when the desktop header overlays the
    transcript, the chat shell publishes `--chat-header-clearance` and the
@@ -417,49 +402,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
-  );
-  // The width rows wrap at, which remembered row heights are keyed by. Until the
-  // viewport is attached, the width this thread last laid out at is the best guess.
-  const listWidthRef = useRef<number | undefined>(readTimelineWidth(routeThreadKey));
-  const attachTimelineViewport = useCallback(
-    (element: HTMLDivElement | null) => {
-      if (element) {
-        listWidthRef.current = Math.round(element.getBoundingClientRect().width);
-        rememberTimelineWidth(routeThreadKey, listWidthRef.current);
-      }
-      setTimelineViewportElement(element);
-    },
-    [routeThreadKey],
-  );
-  // A revisited thread lays out from the heights its rows measured last time.
-  // The list has no per-row estimate, and `getFixedItemSize` would make it
-  // ignore a row that measures differently, so the remembered heights go into
-  // its known sizes before its first layout (that waits for the scroller's
-  // first resize observation, after this commit). Every rendered row is still
-  // measured: one that matches costs nothing more, and one whose content or
-  // expansion changed since is corrected like any estimate.
-  const rowsAtMountRef = useRef(rows);
-  useLayoutEffect(() => {
-    const knownSizes = listRef.current?.getState?.()?.sizes;
-    if (!knownSizes) return;
-    for (const row of rowsAtMountRef.current) {
-      if (knownSizes.has(row.id)) continue;
-      const height = readTimelineRowHeight(routeThreadKey, row.id, listWidthRef.current);
-      if (height !== undefined) knownSizes.set(row.id, height);
-    }
-    // The timeline mounts per thread, so this runs once: later rows are measured as they arrive.
-  }, [listRef, routeThreadKey]);
-  const rememberRowHeight = useCallback(
-    (info: { readonly itemKey: string; readonly size: number }) =>
-      rememberTimelineRowHeight(
-        routeThreadKey,
-        info.itemKey,
-        listWidthRef.current,
-        // The size the list keeps (and compares a measurement against), which can
-        // differ from the reported one by sub-pixel rounding.
-        listRef.current?.getState?.()?.sizes.get(info.itemKey) ?? info.size,
-      ),
-    [listRef, routeThreadKey],
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
@@ -699,8 +641,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
     const measure = () => {
       const viewportWidth = timelineViewportElement.getBoundingClientRect().width;
-      listWidthRef.current = Math.round(viewportWidth);
-      rememberTimelineWidth(routeThreadKey, viewportWidth);
       const nextHasPersistentGutter = resolveTimelineMinimapHasPersistentGutter(viewportWidth);
       setMinimapHasPersistentGutter((current) =>
         current === nextHasPersistentGutter ? current : nextHasPersistentGutter,
@@ -719,7 +659,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [evaluateIsAtEnd, routeThreadKey, timelineViewportElement]);
+  }, [evaluateIsAtEnd, timelineViewportElement]);
+
+  // Diagnostic: LegendList keeps its rows hidden until it decides the layout is
+  // ready, and an opened thread has sometimes stayed blank until the user
+  // scrolled. Once rows stop changing for a second, a transcript that is still
+  // hidden (or shows no row) is reported once per mount with the list's state.
+  const reportedBlankRef = useRef(false);
+  useEffect(() => {
+    if (reportedBlankRef.current || rows.length === 0) return;
+    const timeoutId = window.setTimeout(() => {
+      const scrollNode = listRef.current?.getScrollableNode?.();
+      if (!(scrollNode instanceof HTMLElement)) return;
+      const blank = describeBlankTimeline(scrollNode);
+      if (!blank) return;
+      reportedBlankRef.current = true;
+      const state = listRef.current?.getState?.();
+      console.warn("[MessagesTimeline] transcript still blank 1s after its rows settled", {
+        routeThreadKey,
+        rows: rows.length,
+        ...blank,
+        scrollTop: scrollNode.scrollTop,
+        scrollHeight: scrollNode.scrollHeight,
+        clientHeight: scrollNode.clientHeight,
+        listScroll: state?.scroll,
+        listScrollLength: state?.scrollLength,
+        listContentLength: state?.contentLength,
+        listRange: [state?.start, state?.end],
+        listBufferedRange: [state?.startBuffered, state?.endBuffered],
+        listIsAtEnd: state?.isAtEnd,
+      });
+    }, 1_000);
+    return () => window.clearTimeout(timeoutId);
+  }, [listRef, routeThreadKey, rows]);
 
   const previousRowCountRef = useRef(rows.length);
   useEffect(() => {
@@ -895,15 +867,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
         <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
-          <div ref={attachTimelineViewport} className="relative h-full min-h-0">
+          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
             <LegendList<MessagesTimelineRow>
               ref={listRef}
               data={rows}
               keyExtractor={keyExtractor}
               getItemType={timelineRowItemType}
-              onItemSizeChanged={rememberRowHeight}
               renderItem={renderItem}
-              estimatedItemSize={TIMELINE_ESTIMATED_ROW_HEIGHT}
+              estimatedItemSize={56}
               recycleItems={false}
               initialScrollAtEnd={initialScrollOffset === undefined}
               {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
@@ -962,6 +933,30 @@ interface TimelinePositionState {
   readonly scrollLength?: number;
   readonly positionAtIndex?: (index: number) => number | undefined;
   readonly sizeAtIndex?: (index: number) => number | undefined;
+}
+
+/**
+ * Why a laid-out transcript shows nothing, or null when it shows rows. A
+ * collapsed scroller (a hidden pane) is not reported.
+ */
+function describeBlankTimeline(
+  scrollNode: HTMLElement,
+): { readonly hidden: boolean; readonly mountedRows: number; readonly rowsInView: number } | null {
+  const viewport = scrollNode.getBoundingClientRect();
+  if (viewport.height <= 0) return null;
+  const rowElements = scrollNode.querySelectorAll<HTMLElement>("[data-timeline-root]");
+  let hidden = false;
+  for (let node = rowElements[0]?.parentElement ?? null; node && node !== scrollNode;) {
+    if (node.style.opacity === "0") hidden = true;
+    node = node.parentElement;
+  }
+  let rowsInView = 0;
+  for (const element of rowElements) {
+    const box = element.getBoundingClientRect();
+    if (box.height > 0 && box.bottom > viewport.top && box.top < viewport.bottom) rowsInView += 1;
+  }
+  if (!hidden && rowsInView > 0) return null;
+  return { hidden, mountedRows: rowElements.length, rowsInView };
 }
 
 function resolveTimelineRowTop(state: TimelinePositionState, rowIndex: number): number | null {
