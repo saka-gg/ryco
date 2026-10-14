@@ -421,7 +421,8 @@
     "./automationWhenParser": {
       "types": "./src/automationWhenParser.ts",
       "import": "./src/automationWhenParser.ts"
-    }
+    },
+    "./savedEnvironmentRecord": "./src/savedEnvironmentRecord.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

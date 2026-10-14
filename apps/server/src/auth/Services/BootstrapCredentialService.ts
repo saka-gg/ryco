@@ -2,6 +2,8 @@ import type { AuthPairingLink, ServerAuthBootstrapMethod } from "@ryco/contracts
 import { Data, DateTime, Duration, Context } from "effect";
 import type { Effect, Stream } from "effect";
 
+import type { AuthAccessLink } from "../../persistence/Services/AuthAccessLink.ts";
+
 export type BootstrapCredentialRole = "owner" | "client";
 
 export interface BootstrapGrant {
@@ -10,6 +12,8 @@ export interface BootstrapGrant {
   readonly subject: string;
   readonly label?: string;
   readonly expiresAt: DateTime.DateTime;
+  /** Present for a grant issued over a trusted relay channel; its session inherits it. */
+  readonly link?: AuthAccessLink;
 }
 
 export class BootstrapCredentialError extends Data.TaggedError("BootstrapCredentialError")<{
@@ -41,6 +45,11 @@ export interface BootstrapCredentialServiceShape {
     readonly role?: BootstrapCredentialRole;
     readonly subject?: string;
     readonly label?: string;
+    /**
+     * Hub-linked direct access. A linked grant is never listed or published as
+     * an owner pairing link: it exists only for the device that asked for it.
+     */
+    readonly link?: AuthAccessLink;
   }) => Effect.Effect<IssuedBootstrapCredential, BootstrapCredentialError>;
   readonly listActive: () => Effect.Effect<
     ReadonlyArray<AuthPairingLink>,

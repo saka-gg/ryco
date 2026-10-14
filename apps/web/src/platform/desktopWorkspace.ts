@@ -22,6 +22,7 @@ import {
   workspaceMetadataToCachedShellSnapshot,
 } from "../workspaceMetadataProjection";
 import { reconcileDesktopWorkspaceCacheHydration } from "./desktopWorkspaceCacheHydration";
+import { renewDesktopMachineDirectAccess } from "./desktopHubLinkedDirectAccess";
 
 const SIGNED_OUT: DesktopWorkspaceStateProjection = {
   status: "signed-out",
@@ -263,6 +264,10 @@ async function applyConnectionCommand(
           connected: connection.shellSnapshotReadiness.read() !== null,
         })
         .catch(() => undefined);
+      const machine = current.machines.find(
+        (candidate) => candidate.environmentId === command.environmentId,
+      );
+      if (machine) renewDesktopMachineDirectAccess(machine);
     } catch (error) {
       if (!isCurrent()) return;
       await globalThis.window?.desktopBridge

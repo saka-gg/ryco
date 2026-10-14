@@ -15,6 +15,7 @@ import type {
 import { Data, DateTime, Context } from "effect";
 import type { Effect } from "effect";
 import type * as HttpServerRequest from "effect/http/HttpServerRequest";
+import type { AuthAccessLink } from "../../persistence/Services/AuthAccessLink.ts";
 import type { SessionRole } from "./SessionCredentialService.ts";
 
 export interface AuthenticatedSession {
@@ -23,6 +24,8 @@ export interface AuthenticatedSession {
   readonly method: ServerAuthSessionMethod;
   readonly role: SessionRole;
   readonly expiresAt?: DateTime.DateTime;
+  /** A Hub-linked session's device and role ceiling; see `directRpcPrincipal`. */
+  readonly link?: AuthAccessLink;
 }
 
 export class AuthError extends Data.TaggedError("AuthError")<{

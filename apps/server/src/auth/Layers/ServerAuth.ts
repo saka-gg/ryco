@@ -227,6 +227,7 @@ export const makeServerAuth = Effect.gen(function* () {
         method: session.method,
         role: session.role,
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+        ...(session.link === null ? {} : { link: session.link }),
       })),
       Effect.catchTags({
         SessionCredentialError: (cause) =>
@@ -301,6 +302,12 @@ export const makeServerAuth = Effect.gen(function* () {
   ) =>
     bootstrapCredentials.consume(credential).pipe(
       Effect.mapError(toBootstrapExchangeAuthError),
+      // A Hub-linked grant belongs to a native device's bearer store; it never
+      // becomes a browser cookie.
+      Effect.filterOrFail(
+        (grant) => grant.link === undefined,
+        () => new AuthError({ message: "Invalid bootstrap credential.", status: 401 }),
+      ),
       Effect.flatMap((grant) =>
         sessions
           .issue({
@@ -350,6 +357,7 @@ export const makeServerAuth = Effect.gen(function* () {
                 ...requestMetadata,
                 ...(grant.label ? { label: grant.label } : {}),
               },
+              ...(grant.link === undefined ? {} : { link: grant.link }),
             })
             .pipe(
               Effect.mapError(

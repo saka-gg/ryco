@@ -201,7 +201,6 @@ describe("NodeAccountGrantVerifier", () => {
     }
 
     for (const local of [
-      { status: "pending" as const, maxRole: "owner", capabilitySet: ["ryco.rpc"] },
       { status: "revoked" as const, maxRole: "owner", capabilitySet: ["ryco.rpc"] },
       { status: "approved" as const, maxRole: "viewer", capabilitySet: ["ryco.rpc"] },
       { status: "approved" as const, maxRole: "owner", capabilitySet: [] },
@@ -214,6 +213,24 @@ describe("NodeAccountGrantVerifier", () => {
           authorization: { lookupClientAuthorization: () => local },
         }).verify(context.input),
       ).toEqual({ accepted: false, reason: "grant_policy" });
+    }
+  });
+
+  it("admits an enrolled device whose only local record is an unanswered pending request", () => {
+    const context = fixture();
+    for (const pending of [
+      { status: "pending" as const, maxRole: "owner", capabilitySet: ["ryco.rpc"] },
+      // Pending metadata is display-only: a narrow ceiling there is not a restriction.
+      { status: "pending" as const, maxRole: "viewer", capabilitySet: [] },
+    ]) {
+      expect(
+        makeNodeAccountGrantVerifier({
+          state: context.state,
+          connectorGeneration: () => 8,
+          policy: () => policy("require-e2ee"),
+          authorization: { lookupClientAuthorization: () => pending },
+        }).verify(context.input),
+      ).toEqual({ accepted: true, localAuthority: undefined });
     }
   });
 

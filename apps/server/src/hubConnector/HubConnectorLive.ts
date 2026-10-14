@@ -12,7 +12,9 @@ import {
   RpcInboundRejectedError,
   RpcOutputRefusedError,
 } from "../ws/RpcByteSession.ts";
-import { relayRpcPrincipal } from "../ws/RpcPrincipal.ts";
+import { relayRpcPrincipal, type RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
+import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
+import { base64UrlEncode } from "../auth/utils.ts";
 import { makeDeviceWsRpcLayer } from "../ws/index.ts";
 import { makeServerWsRpcLayer } from "../ws.ts";
 import { HubConnector } from "./HubConnector.ts";
@@ -46,6 +48,7 @@ import {
   nodeE2eeChannelPlaintextCeiling,
 } from "./NodeE2eeRelayChannel.ts";
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
+import { relayChannelAuthority } from "./relayChannelAuthority.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -322,6 +325,24 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     const environment = yield* ServerEnvironment;
     const descriptor = yield* environment.getDescriptor;
     const externalTopology = yield* AgentControlExternalTopologyService;
+    // Optional so a connector built without the auth stack (tests) still runs;
+    // the server always provides it.
+    const authSessions = yield* Effect.serviceOption(SessionCredentialService);
+    // Hub-linked direct sessions follow their device: a revoked enrollment or a
+    // withdrawn local authorization ends them, like the relay lease.
+    const revokeLinkedSessions = (
+      selector: { readonly enrollmentId: string } | { readonly clientFingerprint: string },
+    ) =>
+      Option.isNone(authSessions)
+        ? Promise.resolve()
+        : runPromise(
+            authSessions.value.revokeLinked(selector).pipe(
+              Effect.asVoid,
+              Effect.catchCause((cause) =>
+                Effect.logError("Failed to revoke Hub-linked direct sessions", { cause }),
+              ),
+            ),
+          );
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
@@ -482,6 +503,10 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 return nodeE2eeAdvertisementAnnouncement(advertisement);
               })();
         const connectionIdentity = connection();
+        // Set at row N3 from the handshake's own snapshot and cleared when the
+        // session leaves the directory, so a request never reads a lease that
+        // has ended. Read through the principal by `auth.issueLinkedDirectAccess`.
+        let channelAuthority: RelayChannelAuthority = { trustSource: "none" };
         let e2ee: NodeE2eeChannelSession;
         e2ee = makeNodeE2eeChannelSession({
           // §8.3: the node's own channel state, never a value a peer supplies.
@@ -523,13 +548,19 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               use,
             ),
           rateLimiter: handshakeRateLimiter,
-          registerSession: (session) =>
-            sessionDirectory.register({
+          registerSession: (session) => {
+            channelAuthority = relayChannelAuthority(effectiveRole, session);
+            const release = sessionDirectory.register({
               ...session,
               terminate: () => {
                 void e2ee.revokeAccountGrant();
               },
-            }),
+            });
+            return () => {
+              channelAuthority = { trustSource: "none" };
+              release();
+            };
+          },
           recordPeerLegacyFallback: () => {
             void identity
               .recordE2eeFallback({
@@ -550,7 +581,11 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
             makeRpcByteSession(
               WsHostedRpcGroup,
               Layer.merge(
-                makeServerWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
+                makeServerWsRpcLayer(
+                  relayRpcPrincipal(effectiveRole, channelId, () =>
+                    e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" },
+                  ),
+                ),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
               ),
               // A refused response is a value carrying its reason, not a defect,
@@ -628,6 +663,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       },
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
+        await revokeLinkedSessions({ enrollmentId: frame.enrollmentId });
       },
       processLock,
       // Only a lock actually held: past an unusable one the connector asks
@@ -709,6 +745,8 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       e2ee: makeNodeE2eeOperator({
         identity,
         sessions: sessionDirectory,
+        onClientAuthorizationWithdrawn: (fingerprint) =>
+          revokeLinkedSessions({ clientFingerprint: base64UrlEncode(fingerprint) }),
         asIdentityOwner,
         // §12.5 Display: the live §5.5 U1 pair, read from the connection the
         // advertiser is on right now. It is not in the durable counter and must

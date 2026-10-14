@@ -14,6 +14,8 @@ import {
   type VisibilityAwarePoller,
 } from "../../lib/visibilityPolling";
 import { webAppLifecycle } from "../../platform/appLifecycle";
+import { linkDesktopMachineDirectAccess } from "../../platform/desktopHubLinkedDirectAccess";
+import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import {
   retainDesktopWorkspaceInteractiveScope,
   retainDesktopWorkspaceProviderScope,
@@ -53,7 +55,13 @@ import {
   savedChangeRelaunch,
   useDesktopRelaunchGuard,
 } from "./useDesktopRelaunchGuard";
-import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
+import {
+  canEditHubOrigin,
+  desktopDirectAccessOutcomeMessage,
+  desktopWorkspaceMachineTrustPresentation,
+  presentHubStatus,
+  type HubAction,
+} from "./hubStatus";
 import {
   clearHubEnrollmentIntent,
   consumeHubEnrollmentIntent,
@@ -111,6 +119,30 @@ export function HubSection({
   const desktopWorkspace = useDesktopWorkspaceState();
   const [snapshot, setSnapshot] = useState<HubSnapshot | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [linkingEnvironmentId, setLinkingEnvironmentId] = useState<string | null>(null);
+  // Hub machine ids that already have a direct connection linked through the Hub.
+  const directlyLinkedHubIds = useSavedEnvironmentRegistryStore((state) =>
+    Object.values(state.byId)
+      .flatMap((record) => (record.hubLink ? [record.hubLink.hubEnvironmentId] : []))
+      .toSorted()
+      .join("\n"),
+  );
+  const trust = (machine: (typeof desktopWorkspace.machines)[number]) =>
+    desktopWorkspaceMachineTrustPresentation({
+      nativeTrust: machine.nativeTrust,
+      online: machine.online,
+      connected: machine.connectionState === "connected",
+      accountE2ee: desktopWorkspace.accountE2ee,
+      isThisDevice: machine.environmentId === desktopWorkspace.localEnvironmentId,
+      directLinked: directlyLinkedHubIds.split("\n").includes(machine.environmentId),
+    });
+  const addDirectAccess = async (machine: (typeof desktopWorkspace.machines)[number]) => {
+    setWorkspaceError(null);
+    setLinkingEnvironmentId(machine.environmentId);
+    const outcome = await linkDesktopMachineDirectAccess(machine).catch((): "failed" => "failed");
+    setLinkingEnvironmentId(null);
+    setWorkspaceError(desktopDirectAccessOutcomeMessage(machine.label, outcome));
+  };
   const interactiveWorkspaceReleasesRef = useRef(new Map<string, () => void>());
   const closeSettings = useSettingsDialogStore((state) => state.closeSettings);
   const [verificationTarget, setVerificationTarget] = useState<{
@@ -896,80 +928,81 @@ export function HubSection({
           }
         >
           <DataList>
-            {desktopWorkspace.machines.map((machine) => (
-              <DataListItem
-                key={`${machine.nodeId ?? "unknown"}:${machine.environmentId}`}
-                term={machine.label}
-                action={
-                  <div className="flex flex-wrap justify-end gap-1.5">
-                    {machine.nodeId &&
-                    machine.online &&
-                    (machine.nativeTrust === "unverified" ||
-                      machine.nativeTrust === "unknown" ||
-                      machine.nativeTrust === "account-trusted") ? (
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        onClick={() => {
-                          void beginDesktopMachineVerification({
-                            nodeId: machine.nodeId!,
-                            environmentId: machine.environmentId,
-                          });
-                        }}
-                      >
-                        {machine.nativeTrust === "account-trusted"
-                          ? "Verify independently"
-                          : "Verify"}
-                      </Button>
-                    ) : null}
-                    {(machine.nativeTrust === "verified" ||
-                      machine.nativeTrust === "account-trusted") &&
-                    machine.online ? (
-                      machine.connectionState === "connected" ? (
-                        <>
+            {desktopWorkspace.machines.map((machine) => {
+              const presentation = trust(machine);
+              return (
+                <DataListItem
+                  key={`${machine.nodeId ?? "unknown"}:${machine.environmentId}`}
+                  term={machine.label}
+                  action={
+                    <div className="flex flex-wrap justify-end gap-1.5">
+                      {machine.nodeId && presentation.verifyAction !== null ? (
+                        <Button
+                          size="xs"
+                          variant={
+                            presentation.verifyAction === "verify-independently"
+                              ? "ghost"
+                              : "outline"
+                          }
+                          onClick={() => {
+                            void beginDesktopMachineVerification({
+                              nodeId: machine.nodeId!,
+                              environmentId: machine.environmentId,
+                            });
+                          }}
+                        >
+                          {presentation.verifyAction === "verify-independently"
+                            ? "Verify independently"
+                            : "Verify"}
+                        </Button>
+                      ) : null}
+                      {presentation.directAccessAction ? (
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          disabled={linkingEnvironmentId === machine.environmentId}
+                          onClick={() => void addDirectAccess(machine)}
+                        >
+                          {linkingEnvironmentId === machine.environmentId
+                            ? "Adding direct access…"
+                            : "Add direct access"}
+                        </Button>
+                      ) : null}
+                      {presentation.connectionActions ? (
+                        machine.connectionState === "connected" ? (
+                          <>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => openDesktopMachine(machine.environmentId)}
+                            >
+                              Open
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => disconnectDesktopMachine(machine.environmentId)}
+                            >
+                              Disconnect
+                            </Button>
+                          </>
+                        ) : (
                           <Button
                             size="xs"
                             variant="outline"
-                            onClick={() => openDesktopMachine(machine.environmentId)}
+                            onClick={() => connectDesktopMachine(machine.environmentId)}
                           >
-                            Open
+                            Connect
                           </Button>
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            onClick={() => disconnectDesktopMachine(machine.environmentId)}
-                          >
-                            Disconnect
-                          </Button>
-                        </>
-                      ) : (
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          onClick={() => connectDesktopMachine(machine.environmentId)}
-                        >
-                          Connect
-                        </Button>
-                      )
-                    ) : null}
-                  </div>
-                }
-              >
-                {machine.nativeTrust === "verified"
-                  ? machine.online
-                    ? `Encrypted · Verified locally · ${machine.connectionState === "connected" ? "Connected" : "Online"}`
-                    : "Encrypted · Verified locally · Offline"
-                  : machine.nativeTrust === "account-trusted"
-                    ? machine.online
-                      ? `Encrypted · Account trusted · ${machine.connectionState === "connected" ? "Connected" : "Online"}`
-                      : "Encrypted · Account trusted · Offline"
-                    : machine.nativeTrust === "identity-conflict"
-                      ? "Identity changed · Locked"
-                      : machine.online
-                        ? "Needs verification"
-                        : "Needs verification · Offline"}
-              </DataListItem>
-            ))}
+                        )
+                      ) : null}
+                    </div>
+                  }
+                >
+                  {presentation.label}
+                </DataListItem>
+              );
+            })}
           </DataList>
           {verificationTarget ? (
             <div className="mt-3 flex flex-col gap-2 border-t border-border/60 py-3 sm:flex-row">

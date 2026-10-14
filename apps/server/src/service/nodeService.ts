@@ -249,6 +249,59 @@ export interface NodeServiceStatus {
   readonly lingering: boolean | null;
 }
 
+type LaunchctlRun = (
+  args: ReadonlyArray<string>,
+  options?: { readonly allowFailure?: boolean },
+) => Promise<ProcessRunResult>;
+
+const LAUNCHD_BOOTOUT_SETTLE_ATTEMPTS = 40;
+const LAUNCHD_BOOTOUT_SETTLE_INTERVAL_MS = 250;
+
+/**
+ * Load `definitionPath` as `target`, replacing a loaded definition in place.
+ *
+ * `launchctl bootout` returns before launchd has finished tearing the job
+ * down, and a `bootstrap` in that window fails with "Bootstrap failed: 5:
+ * Input/output error". So wait, bounded, until the label is really gone, and
+ * retry the bootstrap once after a further settle if launchd still refuses.
+ */
+export async function bootstrapLaunchdService(input: {
+  readonly domain: string;
+  readonly target: string;
+  readonly definitionPath: string;
+  readonly replace: boolean;
+  readonly run: LaunchctlRun;
+  readonly sleep?: (ms: number) => Promise<void>;
+}): Promise<void> {
+  const sleep =
+    input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const loaded = async () =>
+    (await input.run(["print", input.target], { allowFailure: true })).code === 0;
+  const waitUntilUnloaded = async () => {
+    for (let attempt = 0; attempt < LAUNCHD_BOOTOUT_SETTLE_ATTEMPTS; attempt += 1) {
+      if (!(await loaded())) return;
+      await sleep(LAUNCHD_BOOTOUT_SETTLE_INTERVAL_MS);
+    }
+  };
+  if (input.replace) {
+    await input.run(["bootout", input.target], { allowFailure: true });
+    await waitUntilUnloaded();
+  } else if (await loaded()) {
+    return;
+  }
+  const first = await input.run(["bootstrap", input.domain, input.definitionPath], {
+    allowFailure: true,
+  });
+  if (first.code === 0) return;
+  // A concurrent start may have loaded it meanwhile; that is the goal state.
+  if (!input.replace && (await loaded())) return;
+  await sleep(LAUNCHD_BOOTOUT_SETTLE_INTERVAL_MS * 4);
+  await waitUntilUnloaded();
+  await input.run(["bootstrap", input.domain, input.definitionPath]);
+}
+
+const launchctl: LaunchctlRun = (args, options) => run("launchctl", args, options);
+
 export async function installNodeService(
   platform: NodeServicePlatform,
   spec: NodeServiceSpec,
@@ -260,8 +313,13 @@ export async function installNodeService(
   if (platform === "launchd") {
     const target = `${launchdDomain()}/${spec.label}`;
     // Replace a previous definition in place: bootstrap refuses a loaded label.
-    await run("launchctl", ["bootout", target], { allowFailure: true });
-    await run("launchctl", ["bootstrap", launchdDomain(), definitionPath]);
+    await bootstrapLaunchdService({
+      domain: launchdDomain(),
+      target,
+      definitionPath,
+      replace: true,
+      run: launchctl,
+    });
     await run("launchctl", ["enable", target], { allowFailure: true });
     await run("launchctl", ["kickstart", "-k", target], { allowFailure: true });
   } else {
@@ -299,14 +357,13 @@ export async function uninstallNodeService(
 export async function startNodeService(platform: NodeServicePlatform, label: string) {
   if (platform === "launchd") {
     const target = `${launchdDomain()}/${label}`;
-    const loaded = await run("launchctl", ["print", target], { allowFailure: true });
-    if (loaded.code !== 0) {
-      await run("launchctl", [
-        "bootstrap",
-        launchdDomain(),
-        nodeServiceDefinitionPath(platform, label),
-      ]);
-    }
+    await bootstrapLaunchdService({
+      domain: launchdDomain(),
+      target,
+      definitionPath: nodeServiceDefinitionPath(platform, label),
+      replace: false,
+      run: launchctl,
+    });
     await run("launchctl", ["kickstart", target]);
   } else {
     await run("systemctl", ["--user", "start", systemdUnitName(label)]);

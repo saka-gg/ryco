@@ -1112,8 +1112,14 @@ export function createEnvironmentConnectionSupervisor<
   const syncSaved = async () => {
     const records = input.listSavedEnvironmentRecords();
     const expected = new Set(records.map((record) => record.environmentId));
+    // Desktop's Hub relay connections register as `saved` without a registry
+    // record. A registry write must not drop them: they are owned by main's
+    // workspace demand, not by this sync.
     const stale = [...connections.values()]
-      .filter((connection) => connection.kind === "saved")
+      .filter(
+        (connection) =>
+          connection.kind === "saved" && connection.knownEnvironment.source !== "hub-hosted",
+      )
       .map((connection) => connection.environmentId)
       .filter((environmentId) => !expected.has(environmentId));
     await Promise.all(

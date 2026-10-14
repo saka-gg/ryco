@@ -4,6 +4,7 @@ import {
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
+  type SavedEnvironmentHubLink,
   type OrchestrationEvent,
   type OrchestrationThreadHistoryCollection,
   type OrchestrationThreadHistoryPageInfo,
@@ -1854,6 +1855,11 @@ export async function addSavedEnvironment(input: {
   readonly host?: string;
   readonly pairingCode?: string;
   readonly desktopSsh?: DesktopSshEnvironmentTarget;
+  /**
+   * Set when the code came from `auth.issueLinkedDirectAccess` over the Hub
+   * relay. A pairing without it is the user's own and is never relinked.
+   */
+  readonly hubLink?: SavedEnvironmentHubLink;
 }): Promise<SavedEnvironmentRecord> {
   const resolvedTarget = resolveRemotePairingTarget({
     ...(input.pairingUrl !== undefined ? { pairingUrl: input.pairingUrl } : {}),
@@ -1890,6 +1896,7 @@ export async function addSavedEnvironment(input: {
     ...((input.desktopSsh ?? existingRecord?.desktopSsh)
       ? { desktopSsh: input.desktopSsh ?? existingRecord?.desktopSsh }
       : {}),
+    ...(input.hubLink ? { hubLink: input.hubLink } : {}),
   };
 
   await persistSavedEnvironmentRecord(record);

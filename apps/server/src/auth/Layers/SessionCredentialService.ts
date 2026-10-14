@@ -44,6 +44,13 @@ const BEARER_PAIRING_MAX_AGE = Duration.days(365);
  * when its successor took over. Presented later, the pairing is revoked.
  */
 const SUPERSEDED_SESSION_GRACE = Duration.minutes(1);
+/**
+ * The longest a Hub-linked session lives, and the cap on its rotation chain.
+ * It is renewed by asking the node again over the relay, so a device whose Hub
+ * enrollment was revoked while this node was off the Hub loses direct access
+ * within this bound.
+ */
+export const LINKED_SESSION_MAX_AGE = Duration.days(7);
 /** The least time between two rotations of one pairing. */
 const BEARER_ROTATION_MIN_INTERVAL = Duration.hours(1);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
@@ -296,22 +303,27 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       ),
     );
 
+  /** Drops revoked sessions from the connected set and announces their removal. */
+  const forgetRevoked = (revokedSessionIds: ReadonlyArray<AuthSessionId>) =>
+    Effect.gen(function* () {
+      if (revokedSessionIds.length === 0) return;
+      yield* Ref.update(connectedSessionsRef, (current) => {
+        const next = new Map(current);
+        for (const revokedSessionId of revokedSessionIds) next.delete(revokedSessionId);
+        return next;
+      });
+      yield* Effect.forEach(revokedSessionIds, emitRemoved, {
+        concurrency: "unbounded",
+        discard: true,
+      });
+    });
+
   // Revoking any session of a pairing revokes the whole pairing.
   const revokeChain = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
       const revokedSessionIds = yield* authSessions.revoke({ sessionId, revokedAt });
-      if (revokedSessionIds.length > 0) {
-        yield* Ref.update(connectedSessionsRef, (current) => {
-          const next = new Map(current);
-          for (const revokedSessionId of revokedSessionIds) next.delete(revokedSessionId);
-          return next;
-        });
-        yield* Effect.forEach(revokedSessionIds, emitRemoved, {
-          concurrency: "unbounded",
-          discard: true,
-        });
-      }
+      yield* forgetRevoked(revokedSessionIds);
       return revokedSessionIds;
     });
 
@@ -333,8 +345,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     Effect.gen(function* () {
       const sessionId = AuthSessionId.make(crypto.randomUUID());
       const issuedAt = yield* DateTime.now;
+      const ttl = input?.ttl ?? DEFAULT_SESSION_TTL;
       const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+        milliseconds:
+          input?.link === undefined
+            ? Duration.toMillis(ttl)
+            : Math.min(Duration.toMillis(ttl), Duration.toMillis(LINKED_SESSION_MAX_AGE)),
       });
       const claims = sessionClaims({
         sessionId,
@@ -360,6 +376,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         },
         issuedAt,
         expiresAt,
+        ...(input?.link === undefined ? {} : { link: input.link }),
       });
       yield* emitUpsert(
         toAuthClientSession({
@@ -454,6 +471,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         expiresAt: DateTime.makeUnsafe(claims.exp),
         subject: claims.sub,
         role: claims.role,
+        link: record.link,
       } satisfies VerifiedSession;
     }).pipe(Effect.mapError(toVerificationFailure("Failed to verify session credential.")));
 
@@ -539,6 +557,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         expiresAt: row.value.expiresAt,
         subject: row.value.subject,
         role: row.value.role,
+        link: row.value.link,
       } satisfies VerifiedSession;
     }).pipe(Effect.mapError(toVerificationFailure("Failed to verify websocket token.")));
 
@@ -627,14 +646,20 @@ export const makeSessionCredentialService = Effect.gen(function* () {
               message: "This session was renewed recently.",
             });
           }
+          // A linked chain never outlives its device's last relay renewal.
+          const chainMaxAge =
+            current.link === null ? BEARER_PAIRING_MAX_AGE : LINKED_SESSION_MAX_AGE;
           const expiresAtMs = Math.min(
             nowMs + Duration.toMillis(DEFAULT_SESSION_TTL),
-            current.chainIssuedAt.epochMilliseconds + Duration.toMillis(BEARER_PAIRING_MAX_AGE),
+            current.chainIssuedAt.epochMilliseconds + Duration.toMillis(chainMaxAge),
           );
           if (expiresAtMs <= current.expiresAt.epochMilliseconds) {
             return yield* new SessionRotationError({
               reason: "renewal-limit",
-              message: "This pairing is a year old and cannot renew again. Pair it again.",
+              message:
+                current.link === null
+                  ? "This pairing is a year old and cannot renew again. Pair it again."
+                  : "Direct access linked through the Hub renews only through the Hub.",
             });
           }
 
@@ -648,6 +673,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
             client: current.client,
             issuedAt: now,
             expiresAt,
+            ...(current.link === null ? {} : { link: current.link }),
             rotation: {
               rotatedFrom: current.sessionId,
               chainId: current.chainId,
@@ -685,6 +711,14 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         ),
       );
 
+  const revokeLinked: SessionCredentialServiceShape["revokeLinked"] = (selector) =>
+    Effect.gen(function* () {
+      const revokedAt = yield* DateTime.now;
+      const revoked = yield* authSessions.revokeLinked({ ...selector, revokedAt });
+      yield* forgetRevoked(revoked.map((session) => session.sessionId));
+      return new Set(revoked.map((session) => session.chainId)).size;
+    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")));
+
   const revokeAllExcept: SessionCredentialServiceShape["revokeAllExcept"] = (sessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
@@ -692,24 +726,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         currentSessionId: sessionId,
         revokedAt,
       });
-      const revokedSessionIds = revoked.map((session) => session.sessionId);
-      if (revokedSessionIds.length > 0) {
-        yield* Ref.update(connectedSessionsRef, (current) => {
-          const next = new Map(current);
-          for (const revokedSessionId of revokedSessionIds) {
-            next.delete(revokedSessionId);
-          }
-          return next;
-        });
-        yield* Effect.forEach(
-          revokedSessionIds,
-          (revokedSessionId) => emitRemoved(revokedSessionId),
-          {
-            concurrency: "unbounded",
-            discard: true,
-          },
-        );
-      }
+      yield* forgetRevoked(revoked.map((session) => session.sessionId));
       // Clients revoked, not sessions: each pairing counts once, however many
       // times it rotated.
       return new Set(revoked.map((session) => session.chainId)).size;
@@ -728,6 +745,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       return Stream.fromPubSub(changesPubSub);
     },
     revoke,
+    revokeLinked,
     revokeAllExcept,
     markConnected,
     markDisconnected,

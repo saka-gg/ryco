@@ -1,4 +1,6 @@
 import type {
+  DesktopWorkspaceMachineProjection,
+  DesktopWorkspaceStateProjection,
   HubConnectorStatus,
   HubConnectorFailureCode,
   HubIdentitySummary,
@@ -355,4 +357,107 @@ export function presentHubStatus(
  */
 export function canEditHubOrigin(identity: HubIdentitySummary): boolean {
   return identity.enrolled === "none";
+}
+
+/**
+ * How one Desktop workspace machine row reads, and whether it offers the
+ * manual verification ceremony.
+ *
+ * An unpinned remote machine is account-trusted once this installation's Hub
+ * enrollment is ready. Until then it is not "unverified" in any sense a person
+ * can act on: the enrollment is being secured or retried on its own, and
+ * offering Verify there would start a pairing request the node's owner then
+ * has to answer for nothing. Verify stays available as the explicit recovery
+ * path once enrollment has actually failed, and as the independent upgrade
+ * for an account-trusted machine.
+ */
+export function desktopWorkspaceMachineTrustPresentation(input: {
+  readonly nativeTrust: DesktopWorkspaceMachineProjection["nativeTrust"];
+  readonly online: boolean;
+  readonly connected: boolean;
+  readonly accountE2ee: DesktopWorkspaceStateProjection["accountE2ee"];
+  /**
+   * The machine this Desktop runs on. Desktop already holds its node's direct
+   * local connection, so the row offers neither a relay connection to itself
+   * nor a verification of itself.
+   */
+  readonly isThisDevice?: boolean;
+  /** A direct connection to this machine was linked through the Hub. */
+  readonly directLinked?: boolean;
+}): {
+  readonly label: string;
+  readonly verifyAction: "verify" | "verify-independently" | null;
+  readonly connectionActions: boolean;
+  /** Offer "Add direct access": a trusted, online machine with no direct link yet. */
+  readonly directAccessAction: boolean;
+} {
+  if (input.isThisDevice === true) {
+    return {
+      label:
+        input.nativeTrust === "verified"
+          ? "Encrypted · Verified locally · This device"
+          : "This device",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    };
+  }
+  const presence = input.online ? (input.connected ? "Connected" : "Online") : "Offline";
+  const trusted = input.nativeTrust === "verified" || input.nativeTrust === "account-trusted";
+  const row = (
+    label: string,
+    verifyAction: "verify" | "verify-independently" | null,
+  ): ReturnType<typeof desktopWorkspaceMachineTrustPresentation> => ({
+    label: trusted && input.directLinked === true ? `${label} · Direct access ready` : label,
+    verifyAction,
+    connectionActions: input.online && trusted,
+    directAccessAction: input.online && trusted && input.directLinked !== true,
+  });
+  switch (input.nativeTrust) {
+    case "verified":
+      return row(`Encrypted · Verified locally · ${presence}`, null);
+    case "account-trusted":
+      return row(
+        `Encrypted · Account trusted · ${presence}`,
+        input.online ? "verify-independently" : null,
+      );
+    case "identity-conflict":
+      return row("Identity changed · Locked", null);
+    case "unverified":
+    case "unknown":
+    case "not-required":
+      break;
+  }
+  if (input.accountE2ee === "securing") {
+    return row(input.online ? "Securing this device…" : "Securing this device… · Offline", null);
+  }
+  if (input.accountE2ee === "revoked") {
+    return row("This device was revoked on the Hub · Sign in again", null);
+  }
+  return row(
+    input.online ? "Needs verification" : "Needs verification · Offline",
+    input.online ? "verify" : null,
+  );
+}
+
+/**
+ * What "Add direct access" reports. `null` once linked: the row itself then
+ * reads "Direct access ready".
+ */
+export function desktopDirectAccessOutcomeMessage(
+  label: string,
+  outcome: "linked" | "already-paired" | "no-direct-endpoint" | "unreachable" | "failed",
+): string | null {
+  switch (outcome) {
+    case "linked":
+      return null;
+    case "already-paired":
+      return `${label} is already paired directly on this device.`;
+    case "no-direct-endpoint":
+      return `${label} only listens on its own loopback address, so no other device can reach it directly.`;
+    case "unreachable":
+      return `None of ${label}'s direct addresses answered from this network.`;
+    case "failed":
+      return `Direct access to ${label} could not be set up. Try again in a moment.`;
+  }
 }

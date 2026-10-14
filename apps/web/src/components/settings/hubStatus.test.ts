@@ -6,7 +6,11 @@ import {
   type HubIdentitySummary,
 } from "@ryco/contracts";
 
-import { canEditHubOrigin, presentHubStatus } from "./hubStatus.ts";
+import {
+  canEditHubOrigin,
+  desktopWorkspaceMachineTrustPresentation,
+  presentHubStatus,
+} from "./hubStatus.ts";
 
 const NOW = Date.parse("2026-07-26T12:00:00.000Z");
 
@@ -261,5 +265,111 @@ describe("canEditHubOrigin", () => {
     // Fail-safe: an unreadable store may still hold an identity, and re-pointing
     // it would strand the node in a permanent origin mismatch.
     expect(canEditHubOrigin(identity("unknown"))).toBe(false);
+  });
+});
+
+describe("desktopWorkspaceMachineTrustPresentation", () => {
+  const present = (
+    input: Partial<Parameters<typeof desktopWorkspaceMachineTrustPresentation>[0]>,
+  ) =>
+    desktopWorkspaceMachineTrustPresentation({
+      nativeTrust: "unverified",
+      online: true,
+      connected: false,
+      accountE2ee: "ready",
+      ...input,
+    });
+
+  it("labels account and local trust with presence", () => {
+    expect(present({ nativeTrust: "account-trusted", connected: true })).toEqual({
+      label: "Encrypted · Account trusted · Connected",
+      verifyAction: "verify-independently",
+      connectionActions: true,
+      directAccessAction: true,
+    });
+    expect(present({ nativeTrust: "account-trusted", online: false })).toEqual({
+      label: "Encrypted · Account trusted · Offline",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+    expect(present({ nativeTrust: "verified" })).toEqual({
+      label: "Encrypted · Verified locally · Online",
+      verifyAction: null,
+      connectionActions: true,
+      directAccessAction: true,
+    });
+    expect(present({ nativeTrust: "identity-conflict" })).toMatchObject({
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+  });
+
+  it("offers this Desktop's own machine neither a relay connection nor a verification", () => {
+    expect(present({ nativeTrust: "verified", isThisDevice: true })).toEqual({
+      label: "Encrypted · Verified locally · This device",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+    expect(
+      present({ nativeTrust: "unknown", isThisDevice: true, accountE2ee: "securing" }),
+    ).toEqual({
+      label: "This device",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+  });
+
+  it("offers direct access once per trusted machine and says when it is linked", () => {
+    expect(present({ nativeTrust: "account-trusted", directLinked: true })).toMatchObject({
+      label: "Encrypted · Account trusted · Online · Direct access ready",
+      directAccessAction: false,
+    });
+    // Never for a machine Desktop cannot yet reach through the Hub.
+    expect(present({ nativeTrust: "unverified" }).directAccessAction).toBe(false);
+  });
+
+  it("does not offer the manual ceremony while this device is still being secured", () => {
+    expect(present({ accountE2ee: "securing" })).toEqual({
+      label: "Securing this device…",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+    expect(present({ nativeTrust: "unknown", accountE2ee: "securing", online: false })).toEqual({
+      label: "Securing this device… · Offline",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+  });
+
+  it("points a revoked device at sign-in rather than at a pairing request", () => {
+    expect(present({ accountE2ee: "revoked" })).toEqual({
+      label: "This device was revoked on the Hub · Sign in again",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+  });
+
+  it("keeps manual verification as the recovery path once enrollment failed", () => {
+    for (const accountE2ee of ["unavailable", undefined] as const) {
+      expect(present({ accountE2ee })).toEqual({
+        label: "Needs verification",
+        verifyAction: "verify",
+        connectionActions: false,
+        directAccessAction: false,
+      });
+    }
+    expect(present({ accountE2ee: "unavailable", online: false })).toEqual({
+      label: "Needs verification · Offline",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
   });
 });

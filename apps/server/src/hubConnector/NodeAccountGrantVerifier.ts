@@ -96,6 +96,12 @@ export function makeNodeAccountGrantVerifier(options: {
       } catch {
         return reject("grant_policy");
       }
+      // §18.7 lets only a local restriction or denial outrank the grant. A
+      // pending §13.2 request is neither: it is an unanswered ceremony that
+      // grants nothing, so the device is admitted exactly as one with no
+      // record. Otherwise one abandoned verification would lock an enrolled
+      // device out of this node until an owner approved it here.
+      if (local?.status === "pending") local = undefined;
       if (
         local !== undefined &&
         (local.status !== "approved" || !local.capabilitySet.includes(capability))

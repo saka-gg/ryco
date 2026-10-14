@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
-import { AuthSessionId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { AuthSessionId, EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { AdvertisedEndpoint } from "./remoteAccess.ts";
 
 /**
  * Declares the server's overall authentication posture.
@@ -269,3 +270,35 @@ export const AuthSessionState = Schema.Struct({
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
+
+/**
+ * Hub-linked direct access
+ * (`docs/superpowers/specs/2026-10-14-hub-linked-direct-access-design.md`).
+ * Asked over a native E2EE Hub relay channel; the node answers with a one-time
+ * code the device redeems at a direct endpoint like a pasted pairing link.
+ */
+export const AuthIssueLinkedDirectAccessInput = Schema.Struct({
+  /** How the node's owner sees this device under Connections. */
+  deviceLabel: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+});
+export type AuthIssueLinkedDirectAccessInput = typeof AuthIssueLinkedDirectAccessInput.Type;
+
+export const AuthLinkedDirectAccess = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("issued"),
+    /** The node's direct environment id, distinct from its Hub environment id. */
+    environmentId: EnvironmentId,
+    label: Schema.String,
+    /** Non-loopback endpoints, most private first. Probe before redeeming. */
+    endpoints: Schema.Array(AdvertisedEndpoint),
+    /** Single use; redeem with `POST /api/auth/bootstrap/bearer` before `expiresAt`. */
+    credential: TrimmedNonEmptyString,
+    expiresAt: Schema.DateTimeUtc,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("unavailable"),
+    /** The node listens on loopback only, so no other device can reach it directly. */
+    reason: Schema.Literal("no-direct-endpoint"),
+  }),
+]);
+export type AuthLinkedDirectAccess = typeof AuthLinkedDirectAccess.Type;

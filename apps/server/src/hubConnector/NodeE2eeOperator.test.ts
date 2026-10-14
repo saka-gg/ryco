@@ -144,4 +144,38 @@ describe("node E2EE operator client views", () => {
     expect((await listed())?.observedRole).toBe("owner");
     expect((await read()).observedRole).toBe("owner");
   });
+
+  it("withdraws a device's Hub-linked direct access when its local authorization is reduced", async () => {
+    const path = join(await mkdtemp(join(tmpdir(), "ryco-e2ee-operator-")), "clients.json");
+    const client = await makeNodeClientAuthorizationClient({
+      store: await makeNodeClientAuthorizationStore({ path }),
+    });
+    const fingerprintBytes = Uint8Array.from({ length: 32 }, (_, offset) => offset + 2);
+    await client.commitPairingAdmission(
+      client.evaluatePairingAdmission({
+        hubOrigin: key.hubOrigin,
+        accountId: key.accountId,
+        clientIdentityFingerprint: fingerprintBytes,
+        safetyNumber: Array.from({ length: 12 }, () => "12345").join(" "),
+        observedRole: "owner",
+      }),
+    );
+    const withdrawn: Uint8Array[] = [];
+    const operator = makeNodeE2eeOperator({
+      identity: { e2eeAuthorizationAdmin: client } as unknown as HubIdentityRuntimeShape,
+      sessions: makeNodeE2eeSessionDirectory(),
+      hubOrigin: () => key.hubOrigin,
+      onClientAuthorizationWithdrawn: async (fingerprint) => {
+        withdrawn.push(fingerprint);
+      },
+    });
+    const recordKey = { ...key, fingerprint: formatE2eeKeyFingerprint(fingerprintBytes) };
+
+    await operator.approveClient({ ...recordKey, maxRole: "owner", capabilitySet: ["ryco.rpc"] });
+    expect(withdrawn).toHaveLength(0);
+    await operator.narrowClient({ ...recordKey, maxRole: "viewer" });
+    await operator.revokeClient(recordKey);
+    await operator.purgeClient(recordKey);
+    expect(withdrawn).toEqual([fingerprintBytes, fingerprintBytes, fingerprintBytes]);
+  });
 });

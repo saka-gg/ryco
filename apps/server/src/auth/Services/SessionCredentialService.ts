@@ -7,6 +7,8 @@ import type {
 import { Data, DateTime, Duration, Context } from "effect";
 import type { Effect, Stream } from "effect";
 
+import type { AuthAccessLink } from "../../persistence/Services/AuthAccessLink.ts";
+
 export type SessionRole = "owner" | "client";
 
 export interface IssuedSession {
@@ -26,6 +28,8 @@ export interface VerifiedSession {
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly role: SessionRole;
+  /** Set for a Hub-linked session: its device and the role it may exercise. */
+  readonly link: AuthAccessLink | null;
 }
 
 export type SessionCredentialChange =
@@ -81,6 +85,11 @@ export interface SessionCredentialServiceShape {
     readonly method?: ServerAuthSessionMethod;
     readonly role?: SessionRole;
     readonly client?: AuthClientMetadata;
+    /**
+     * A Hub-linked session. It lives at most `LINKED_SESSION_MAX_AGE` from
+     * issue, and rotation never carries its chain past that.
+     */
+    readonly link?: AuthAccessLink;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
   /**
    * Verifies a session token. A rotated session's first use supersedes the
@@ -123,6 +132,14 @@ export interface SessionCredentialServiceShape {
   >;
   readonly streamChanges: Stream.Stream<SessionCredentialChange>;
   readonly revoke: (sessionId: AuthSessionId) => Effect.Effect<boolean, SessionCredentialError>;
+  /**
+   * Ends every Hub-linked session of one device: its Hub enrollment was
+   * revoked, or its local client authorization withdrawn. Returns how many
+   * pairings it revoked.
+   */
+  readonly revokeLinked: (
+    selector: { readonly enrollmentId: string } | { readonly clientFingerprint: string },
+  ) => Effect.Effect<number, SessionCredentialError>;
   /** Revokes every pairing but this session's own; returns how many pairings it revoked. */
   readonly revokeAllExcept: (
     sessionId: AuthSessionId,

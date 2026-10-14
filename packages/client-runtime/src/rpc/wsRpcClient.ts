@@ -343,6 +343,8 @@ export interface WsRpcClient {
     readonly getAdvertisedEndpoints: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverGetAdvertisedEndpoints
     >;
+    /** Hub relay channels from a native device only; see `hubLinkedDirectAccess.ts`. */
+    readonly issueLinkedDirectAccess: RpcUnaryMethod<typeof WS_METHODS.authIssueLinkedDirectAccess>;
     readonly getDiagnosticsMetrics: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverGetDiagnosticsMetrics
     >;
@@ -874,6 +876,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
       getAdvertisedEndpoints: () =>
         transport.request((client) => client[WS_METHODS.serverGetAdvertisedEndpoints]({})),
+      issueLinkedDirectAccess: (input) =>
+        transport.request((client) => client[WS_METHODS.authIssueLinkedDirectAccess](input)),
       getDiagnosticsMetrics: () =>
         transport.request((client) => client[WS_METHODS.serverGetDiagnosticsMetrics]({})),
       getStatistics: () =>

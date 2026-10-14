@@ -155,7 +155,9 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
         label: input?.label ?? null,
         createdAt: now,
         expiresAt: expiresAt,
+        ...(input?.link === undefined ? {} : { link: input.link }),
       });
+      if (input?.link !== undefined) return issued;
       yield* emitUpsert({
         id,
         credential,
@@ -241,13 +243,15 @@ export const makeBootstrapCredentialService = Effect.gen(function* () {
       });
 
       if (Option.isSome(consumed)) {
-        yield* emitRemoved(consumed.value.id);
+        const link = consumed.value.link;
+        if (link === null) yield* emitRemoved(consumed.value.id);
         return {
           method: consumed.value.method,
           role: consumed.value.role,
           subject: consumed.value.subject,
           ...(consumed.value.label ? { label: consumed.value.label } : {}),
           expiresAt: consumed.value.expiresAt,
+          ...(link === null ? {} : { link }),
         } satisfies BootstrapGrant;
       }
 

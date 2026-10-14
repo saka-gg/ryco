@@ -19,6 +19,28 @@ npm install -g ryco-cli
 ryco
 ```
 
+### Run an unreleased build from a checkout
+
+To run a node from source — for example a branch that is not on npm yet — clone the repository on
+that machine and run, from its root:
+
+```bash
+bun run node:update
+```
+
+It pulls the current branch (`git pull --ff-only`), installs dependencies, builds the CLI with its
+bundled web app, and points the background service at this checkout's build, restarting it. The
+node's identity, Hub link, and saved settings live in the Ryco home (`~/.ryco`), not in the build, so
+they carry over. Run the same command again after every pull you want to deploy.
+
+- `bun run node:update -- --no-pull` builds what is checked out without pulling.
+- `bun run node:update -- --install-service` also installs the service when none exists yet; without
+  it, a machine with no service is only built, and you start it with
+  `node apps/server/dist/bin.mjs serve`.
+
+The build compiles the native resource monitor, so it needs [rustup](https://rustup.rs); the script
+installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`.
+
 ## Provider Setup
 
 Install and authenticate at least one provider before using Ryco:
