@@ -70,6 +70,8 @@ function toastFailure(title: string, error: unknown) {
  */
 export function ProjectImage(props: {
   readonly member: SidebarProjectGroupMember;
+  /** The name the project is listed under; its monogram stands in for missing artwork. */
+  readonly name: string;
   readonly canEdit: boolean;
   readonly compact?: boolean;
 }) {
@@ -95,6 +97,7 @@ export function ProjectImage(props: {
         cwd={member.cwd}
         projectId={member.id}
         customAvatarContentHash={member.customAvatarContentHash ?? null}
+        fallbackName={props.name}
         fillContainer
       />
       {uploading ? (
@@ -377,7 +380,7 @@ export function ProjectHero(props: { readonly canEdit: boolean }) {
   return (
     <header className="flex min-w-0 flex-col gap-5">
       <div className="flex min-w-0 items-center gap-4">
-        <ProjectImage member={member} canEdit={props.canEdit} />
+        <ProjectImage member={member} name={snapshot.displayName} canEdit={props.canEdit} />
         <div className="min-w-0 flex-1">
           <ProjectNameField member={member} canEdit={props.canEdit} />
           <ProjectMetaLine snapshot={snapshot} member={member} />

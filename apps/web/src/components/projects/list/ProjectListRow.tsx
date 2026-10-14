@@ -46,6 +46,7 @@ export const ProjectListRow = memo(function ProjectListRow(props: {
             cwd={row.snapshot.cwd}
             projectId={row.snapshot.id}
             customAvatarContentHash={row.snapshot.customAvatarContentHash ?? null}
+            fallbackName={row.name}
             className="size-5"
           />
         </span>
