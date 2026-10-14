@@ -144,7 +144,12 @@ function ProjectPanel(props: {
     <>
       <Kind icon={<FolderIcon className="size-3.5" />}>Project</Kind>
       <div className="mt-2 mr-7 flex min-w-0 items-center gap-3">
-        <ProjectImage member={member} canEdit={access.canEdit} compact />
+        <ProjectImage
+          member={member}
+          name={props.snapshot.displayName}
+          canEdit={access.canEdit}
+          compact
+        />
         <div className="min-w-0 flex-1">
           <ProjectNameField member={member} canEdit={access.canEdit} compact />
           <p className="truncate font-mono text-[11px] text-muted-foreground" title={member.cwd}>
