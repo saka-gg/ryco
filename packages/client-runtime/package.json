@@ -146,6 +146,10 @@
       "types": "./src/state/device/index.ts",
       "import": "./src/state/device/index.ts"
     },
+    "./state/worktree-setup": {
+      "types": "./src/state/worktree-setup/index.ts",
+      "import": "./src/state/worktree-setup/index.ts"
+    },
     "./state/workspace": {
       "types": "./src/state/workspace/index.ts",
       "import": "./src/state/workspace/index.ts"

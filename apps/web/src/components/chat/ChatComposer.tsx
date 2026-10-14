@@ -306,6 +306,11 @@ export interface ChatComposerProps {
   isConnecting: boolean;
   isSendBusy: boolean;
   isPreparingWorktree: boolean;
+  /**
+   * A first send's new worktree is being set up: the primary action is Stop
+   * (it cancels the setup) instead of a busy send button.
+   */
+  isWorktreeSetupRunning?: boolean;
   environmentUnavailable: {
     readonly label: string;
     readonly connectionState: "connecting" | "disconnected" | "error";
@@ -509,6 +514,7 @@ export const ChatComposer = memo(
       isConnecting,
       isSendBusy,
       isPreparingWorktree,
+      isWorktreeSetupRunning = false,
       environmentUnavailable,
       activePendingApproval,
       pendingApprovals,
@@ -3009,7 +3015,7 @@ export const ChatComposer = memo(
                 contextWindowAccount={contextWindowAccount}
                 claudeCacheObservation={claudeCacheObservation}
                 pendingAction={pendingPrimaryAction}
-                isRunning={phase === "running"}
+                isRunning={phase === "running" || isWorktreeSetupRunning}
                 showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                 promptHasText={prompt.trim().length > 0}
                 isSendBusy={isSendBusy}

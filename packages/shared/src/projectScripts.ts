@@ -32,6 +32,14 @@ export function projectScriptRuntimeEnv(
   return env;
 }
 
+/** Every setup-script terminal's id starts with this. */
+export const PROJECT_SETUP_TERMINAL_ID_PREFIX = "setup-";
+
+/** The terminal a project's setup script runs in. */
+export function projectSetupTerminalId(scriptId: string): string {
+  return `${PROJECT_SETUP_TERMINAL_ID_PREFIX}${scriptId}`;
+}
+
 export function setupProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
   return scripts.find((script) => script.runOnWorktreeCreate) ?? null;
 }

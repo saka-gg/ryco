@@ -39,6 +39,7 @@ export * from "./filesystem.ts";
 export * from "./device.ts";
 export * from "./rpc.ts";
 export * from "./worktree.ts";
+export * from "./worktreeSetup.ts";
 
 export * from "./resourceTelemetry.ts";
 export * from "./computerUse.ts";

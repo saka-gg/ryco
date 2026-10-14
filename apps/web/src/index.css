@@ -2134,6 +2134,77 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* First-send worktree setup: the working row's stage card, from send to the
+   agent taking over (WorktreeSetupWorkingRow). Durations are the approved
+   prototype's, expressed against the stack token so reduced motion collapses
+   them; the spinners pause with the activity play state. */
+.worktree-setup-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows calc(var(--app-motion-duration-stack, 260ms) * 360 / 260)
+      cubic-bezier(0.22, 1, 0.36, 1),
+    opacity calc(var(--app-motion-duration-stack, 260ms) * 220 / 260) ease;
+}
+.worktree-setup-collapse[data-open="false"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.worktree-setup-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+.worktree-setup-enter {
+  animation: worktree-setup-enter calc(var(--app-motion-duration-stack, 260ms) * 320 / 260)
+    cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes worktree-setup-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+    filter: blur(2px);
+  }
+}
+.worktree-setup-pop {
+  animation: worktree-setup-pop var(--app-motion-duration-stack, 260ms)
+    cubic-bezier(0.34, 1.45, 0.55, 1) both;
+}
+@keyframes worktree-setup-pop {
+  from {
+    opacity: 0;
+    scale: 0.4;
+  }
+}
+.worktree-setup-spin {
+  animation: worktree-setup-spin 0.8s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+@keyframes worktree-setup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.worktree-setup-mark > * {
+  transition:
+    opacity calc(var(--app-motion-duration-stack, 260ms) * 220 / 260),
+    scale var(--app-motion-duration-stack, 260ms) cubic-bezier(0.34, 1.45, 0.55, 1);
+}
+.worktree-setup-mark > [data-shown="false"] {
+  opacity: 0;
+  scale: 0.4;
+}
+.worktree-setup-bar-fill {
+  transition: width calc(var(--app-motion-duration-stack, 260ms) * 180 / 260) linear;
+}
+.worktree-setup-chip {
+  transition: opacity calc(var(--app-motion-duration-stack, 260ms) * 300 / 260);
+}
+@media (prefers-reduced-motion: reduce) {
+  .worktree-setup-spin {
+    animation: none;
+  }
+}
+
 /* Transcript chapters (WorkChapterRow): steps grow in, scroll out of the live
    ticker, settle with a drawn check; the live node breathes and its rail
    carries a travelling highlight. Every loop is transform/opacity only, so the

@@ -642,8 +642,15 @@ export interface TerminalStateStoreState {
   terminalLaunchContextByThreadKey: Record<string, ThreadTerminalLaunchContext>;
   terminalEventEntriesByKey: Record<string, ReadonlyArray<TerminalEventEntry>>;
   terminalEventReconciliationByKey: Record<string, TerminalReconciliationState>;
+  /**
+   * Terminals whose id starts with this prefix register without opening the
+   * drawer when they start (a first send's setup script, which its setup row
+   * reports instead). Not persisted.
+   */
+  quietTerminalStartPrefixByThreadKey: Record<string, string>;
   nextTerminalEventId: number;
   setTerminalOpen: (threadRef: ScopedThreadRef, open: boolean) => void;
+  setQuietTerminalStart: (threadRef: ScopedThreadRef, prefix: string | null) => void;
   setTerminalHeight: (threadRef: ScopedThreadRef, height: number) => void;
   splitTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
   newTerminal: (threadRef: ScopedThreadRef, terminalId: string) => void;
@@ -705,8 +712,20 @@ export function createTerminalStateStore(options?: {
           terminalEventEntriesByKey: {},
           nextTerminalEventId: 1,
           terminalEventReconciliationByKey: {},
+          quietTerminalStartPrefixByThreadKey: {},
           setTerminalOpen: (threadRef, open) =>
             updateTerminal(threadRef, (state) => setThreadTerminalOpen(state, open)),
+          setQuietTerminalStart: (threadRef, prefix) =>
+            set((state) => {
+              const threadKey = terminalThreadKey(threadRef);
+              if ((state.quietTerminalStartPrefixByThreadKey[threadKey] ?? null) === prefix) {
+                return state;
+              }
+              const next = { ...state.quietTerminalStartPrefixByThreadKey };
+              if (prefix === null) delete next[threadKey];
+              else next[threadKey] = prefix;
+              return { quietTerminalStartPrefixByThreadKey: next };
+            }),
           setTerminalHeight: (threadRef, height) =>
             updateTerminal(threadRef, (state) => setThreadTerminalHeight(state, height)),
           splitTerminal: (threadRef, terminalId) =>
@@ -793,13 +812,15 @@ export function createTerminalStateStore(options?: {
 
               if (event.type === "started" || event.type === "restarted") {
                 const replay = isTerminalReplayEvent(event);
+                const quietPrefix = state.quietTerminalStartPrefixByThreadKey[threadKey];
+                const quiet = quietPrefix !== undefined && event.terminalId.startsWith(quietPrefix);
                 nextTerminalStateByThreadKey = updateTerminalStateByThreadKey(
                   nextTerminalStateByThreadKey,
                   threadRef,
                   (current) => {
                     // Catch-up for a session that kept running (e.g. behind a closed
                     // drawer) is not a start: it must not reopen or refocus anything.
-                    if (replay) return registerThreadTerminal(current, event.terminalId);
+                    if (replay || quiet) return registerThreadTerminal(current, event.terminalId);
                     let nextState = current;
                     if (!current.terminalIds.includes(event.terminalId)) {
                       nextState = newThreadTerminal(nextState, event.terminalId);

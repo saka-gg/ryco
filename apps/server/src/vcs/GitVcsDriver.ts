@@ -31,6 +31,23 @@ export interface GitWorktreeCreationContext {
   readonly projectTitle?: string | undefined;
   readonly initialName?: string | undefined;
   readonly settingsSnapshot?: ServerSettings | undefined;
+  /** Observes the fetch and checkout while the worktree is created. */
+  readonly progress?: GitWorktreeCreationProgress | undefined;
+}
+
+export interface GitWorktreeCreationProgress {
+  readonly onFetchStarted?: () => Effect.Effect<void>;
+  /**
+   * `reused`: a prefetch of the same base stood in for the fetch. `branch`:
+   * the base's branch on origin (`origin/HEAD` resolved to its target).
+   */
+  readonly onFetchFinished?: (input: {
+    readonly reused: boolean;
+    readonly branch: string;
+  }) => Effect.Effect<void>;
+  readonly onCheckoutStarted?: () => Effect.Effect<void>;
+  /** Git's own "Updating files" percentage. */
+  readonly onCheckoutProgress?: (percent: number) => Effect.Effect<void>;
 }
 
 export interface ExecuteGitInput {
@@ -103,6 +120,12 @@ export interface GitPreparedCommitContext {
 export interface ExecuteGitProgress {
   readonly onStdoutLine?: (line: string) => Effect.Effect<void, never>;
   readonly onStderrLine?: (line: string) => Effect.Effect<void, never>;
+  /**
+   * Also end a stderr line at a bare carriage return, as a terminal shows a
+   * progress meter redrawing itself. Off, such updates arrive only once the
+   * meter prints its final newline.
+   */
+  readonly splitStderrAtCarriageReturn?: boolean;
   readonly onHookStarted?: (hookName: string) => Effect.Effect<void, never>;
   readonly onHookFinished?: (input: {
     hookName: string;

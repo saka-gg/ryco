@@ -1,6 +1,6 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
-import { GitPullRequestIcon, TerminalSquareIcon } from "lucide-react";
+import { GitBranchIcon, GitPullRequestIcon, LockIcon, TerminalSquareIcon } from "lucide-react";
 import { memo, useCallback, useMemo } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
@@ -16,6 +16,7 @@ import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { ProjectSwitcher } from "./ProjectSwitcher";
+import { RollingText } from "./chat/RollingText";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { LazyNewWorktreeDialog } from "./worktrees/lazyWorktreeDialogs";
@@ -63,7 +64,18 @@ interface BranchToolbarProps {
   terminalToggleShortcutLabel: string | null;
   onToggleTerminal: () => void;
   terminalCount: number;
+  /**
+   * A first send is setting up this draft's new worktree: where it runs is
+   * decided, so the choices give way to what was chosen. `branch` is the new
+   * worktree's branch once it exists.
+   */
+  worktreeLaunch?: { readonly branch: string | null };
 }
+
+// The static twins of the toolbar's ghost `xs` controls, so a locked label
+// takes exactly the place of the control it replaces.
+const LOCKED_TOOLBAR_LABEL_CLASS_NAME =
+  "worktree-setup-enter inline-flex h-7 min-w-0 shrink-0 items-center gap-1 rounded-md px-[calc(--spacing(2)-1px)] font-medium text-muted-foreground/70 text-sm sm:h-6 sm:text-xs";
 
 export const BranchToolbar = memo(function BranchToolbar({
   environmentId,
@@ -83,6 +95,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   terminalToggleShortcutLabel,
   onToggleTerminal,
   terminalCount,
+  worktreeLaunch,
 }: BranchToolbarProps) {
   const threadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -163,6 +176,11 @@ export const BranchToolbar = memo(function BranchToolbar({
 
           {canChooseEnvMode ? (
             <BranchToolbarEnvModeSelector value={envMode} onChange={handleEnvModeChange} />
+          ) : worktreeLaunch ? (
+            <span className={LOCKED_TOOLBAR_LABEL_CLASS_NAME}>
+              <LockIcon className="size-3" aria-hidden />
+              New worktree
+            </span>
           ) : null}
         </div>
       )}
@@ -207,6 +225,21 @@ export const BranchToolbar = memo(function BranchToolbar({
 
       {contextControlsHoisted ? null : (
         <div className="flex min-w-0 flex-1 items-center justify-end gap-0.5 md:ml-auto md:flex-none">
+          {worktreeLaunch ? (
+            <span
+              className={LOCKED_TOOLBAR_LABEL_CLASS_NAME}
+              data-testid="branch-toolbar-launch-branch"
+            >
+              <GitBranchIcon className="size-3 shrink-0" aria-hidden />
+              <RollingText
+                className="min-w-0 max-w-[240px]"
+                text={
+                  worktreeLaunch.branch ??
+                  (draftThread?.branch ? `From ${draftThread.branch}` : "New branch")
+                }
+              />
+            </span>
+          ) : null}
           {canChooseEnvMode && onOpenWorktreeSources ? (
             <Tooltip>
               <TooltipTrigger
@@ -231,17 +264,21 @@ export const BranchToolbar = memo(function BranchToolbar({
             </Tooltip>
           ) : null}
 
-          <BranchToolbarBranchSelector
-            className="min-w-0"
-            environmentId={environmentId}
-            threadId={threadId}
-            {...(draftId ? { draftId } : {})}
-            envLocked={envLocked}
-            {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
-            {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
-            {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
-            {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
-          />
+          {worktreeLaunch ? null : (
+            <BranchToolbarBranchSelector
+              className="min-w-0"
+              environmentId={environmentId}
+              threadId={threadId}
+              {...(draftId ? { draftId } : {})}
+              envLocked={envLocked}
+              {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
+              {...(onActiveThreadBranchOverrideChange
+                ? { onActiveThreadBranchOverrideChange }
+                : {})}
+              {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
+              {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+            />
+          )}
         </div>
       )}
     </div>

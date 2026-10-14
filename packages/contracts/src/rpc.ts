@@ -41,6 +41,12 @@ import {
 } from "./sessionImport.ts";
 import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import {
+  WorktreeSetupCancelInput,
+  WorktreeSetupCancelResult,
+  WorktreeSetupSnapshot,
+  WorktreeSetupSubscribeInput,
+} from "./worktreeSetup.ts";
+import {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitReadImageBlobInput,
@@ -447,6 +453,7 @@ export const WS_METHODS = {
   vcsRefreshStatus: "vcs.refreshStatus",
   vcsListRefs: "vcs.listRefs",
   vcsPrefetchWorktreeBase: "vcs.prefetchWorktreeBase",
+  vcsCancelWorktreeSetup: "vcs.cancelWorktreeSetup",
   vcsReadLineBlame: "vcs.readLineBlame",
   vcsReadImageBlob: "vcs.readImageBlob",
   vcsReadLocalChanges: "vcs.readLocalChanges",
@@ -619,6 +626,7 @@ export const WS_METHODS = {
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
+  subscribeWorktreeSetup: "subscribeWorktreeSetup",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
@@ -1955,6 +1963,19 @@ export const WsVcsPrefetchWorktreeBaseRpc = Rpc.make(WS_METHODS.vcsPrefetchWorkt
   error: Schema.Union([GitCommandError, AuthRpcError]),
 });
 
+export const WsVcsCancelWorktreeSetupRpc = Rpc.make(WS_METHODS.vcsCancelWorktreeSetup, {
+  payload: WorktreeSetupCancelInput,
+  success: WorktreeSetupCancelResult,
+  error: AuthRpcError,
+});
+
+export const WsSubscribeWorktreeSetupRpc = Rpc.make(WS_METHODS.subscribeWorktreeSetup, {
+  payload: WorktreeSetupSubscribeInput,
+  success: WorktreeSetupSnapshot,
+  error: AuthRpcError,
+  stream: true,
+});
+
 export const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   payload: VcsCreateWorktreeInput,
   success: VcsCreateWorktreeResult,
@@ -2527,6 +2548,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsVcsReadComparisonRpc
   | typeof WsVcsListRefsRpc
   | typeof WsVcsPrefetchWorktreeBaseRpc
+  | typeof WsVcsCancelWorktreeSetupRpc
+  | typeof WsSubscribeWorktreeSetupRpc
   | typeof WsVcsCreateWorktreeRpc
   | typeof WsVcsRemoveWorktreeRpc
   | typeof WsVcsCreateRefRpc
@@ -2738,6 +2761,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsVcsReadComparisonRpc,
   WsVcsListRefsRpc,
   WsVcsPrefetchWorktreeBaseRpc,
+  WsVcsCancelWorktreeSetupRpc,
+  WsSubscribeWorktreeSetupRpc,
   WsVcsCreateWorktreeRpc,
   WsVcsRemoveWorktreeRpc,
   WsVcsCreateRefRpc,

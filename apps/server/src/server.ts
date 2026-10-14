@@ -83,6 +83,7 @@ import { ThreadPriorityCoordinatorLive } from "./threadPriority/ThreadPriorityCo
 import { ThreadPriorityRepositoryLive } from "./threadPriority/ThreadPriorityRepository.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { TerminalManagerLive } from "./terminal/Layers/Manager.ts";
+import { WorktreeSetupTrackerLive } from "./project/Layers/WorktreeSetupTracker.ts";
 import * as GitManager from "./git/GitManager.ts";
 import { KeybindingsLive } from "./keybindings.ts";
 import { ServerRuntimeStartup, ServerRuntimeStartupLive } from "./serverRuntimeStartup.ts";
@@ -511,7 +512,8 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(TerminalLayerLive),
+  // With the one in-memory feed of first-send worktree setups, shared by every connection.
+  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, WorktreeSetupTrackerLive)),
   Layer.provideMerge(AgentControlLayerLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),

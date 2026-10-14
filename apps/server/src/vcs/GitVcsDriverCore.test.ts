@@ -35,7 +35,12 @@ import { canonicalizeWorktreePath } from "../project/worktreeRoot.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
-import { makeGitVcsDriverCore, parseGitConfigList, parseListedRefs } from "./GitVcsDriverCore.ts";
+import {
+  makeGitVcsDriverCore,
+  parseGitCheckoutProgressPercent,
+  parseGitConfigList,
+  parseListedRefs,
+} from "./GitVcsDriverCore.ts";
 import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
 
 // Observe actual destination-lock acquisition for deterministic pre-mkdir races.
@@ -1069,6 +1074,66 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         });
         assert.lengthOf(fetchArgs, 2);
       }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("reports the fetch and Git's checkout meter while creating a worktree", () =>
+      Effect.gen(function* () {
+        const remote = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(remote);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        // Enough files that Git draws its "Updating files" meter.
+        for (let index = 0; index < 400; index += 1) {
+          yield* fileSystem.writeFileString(pathService.join(remote, `f${index}.txt`), `${index}`);
+        }
+        yield* git(remote, ["add", "-A"]);
+        yield* git(remote, ["commit", "-m", "many files"]);
+        const cwd = yield* makeTmpDir();
+        // Through the transport: a local clone copies object files, and an
+        // object store this freshly written can race that copy.
+        yield* git(cwd, ["clone", "--no-local", remote, "."]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const root = yield* makeTmpDir();
+        const events: string[] = [];
+        const percents: number[] = [];
+
+        yield* driver.createWorktree({
+          cwd,
+          path: pathService.join(root, "progress"),
+          refName: `origin/${initialBranch}`,
+          newRefName: "feature/progress",
+          fetchOrigin: true,
+          progress: {
+            onFetchStarted: () => Effect.sync(() => events.push("fetch-started")),
+            onFetchFinished: ({ reused, branch }) =>
+              Effect.sync(() => events.push(`fetch-finished:${reused}:${branch}`)),
+            onCheckoutStarted: () => Effect.sync(() => events.push("checkout-started")),
+            onCheckoutProgress: (percent) => Effect.sync(() => percents.push(percent)),
+          },
+        });
+
+        assert.deepEqual(events, [
+          "fetch-started",
+          `fetch-finished:false:${initialBranch}`,
+          "checkout-started",
+        ]);
+        // Updates arrive one per meter redraw, not only with the final line.
+        assert.isAbove(percents.length, 1);
+        assert.equal(percents.at(-1), 100);
+        assert.deepEqual(
+          percents.toSorted((a, b) => a - b),
+          percents,
+        );
+      }).pipe(Effect.provide(ServerConfigLayer)),
+    );
+    it.effect("parses Git's checkout meter lines", () =>
+      Effect.sync(() => {
+        assert.equal(parseGitCheckoutProgressPercent("Updating files:  78% (2104/2700)"), 78);
+        assert.equal(
+          parseGitCheckoutProgressPercent("Updating files: 100% (2700/2700), done."),
+          100,
+        );
+        assert.isNull(parseGitCheckoutProgressPercent("Preparing worktree (new branch 'a')"));
+      }),
     );
     it.effect("asks origin when the recorded origin/HEAD names a branch origin renamed", () =>
       Effect.gen(function* () {

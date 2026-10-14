@@ -85,6 +85,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       onStatus: (input, callback, options) => rpcClient.vcs.onStatus(input, callback, options),
       listRefs: rpcClient.vcs.listRefs,
       prefetchWorktreeBase: rpcClient.vcs.prefetchWorktreeBase,
+      onWorktreeSetup: rpcClient.vcs.onWorktreeSetup,
+      cancelWorktreeSetup: rpcClient.vcs.cancelWorktreeSetup,
       readLineBlame: rpcClient.vcs.readLineBlame,
       readImageBlob: rpcClient.vcs.readImageBlob,
       readLocalChanges: rpcClient.vcs.readLocalChanges,

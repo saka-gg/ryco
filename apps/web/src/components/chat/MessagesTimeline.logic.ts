@@ -702,6 +702,8 @@ function deriveTurnFolds(input: {
   latestTurn: TimelineLatestTurn | null;
   unsettledTurnId: TurnId | null;
   activeTurnStartedAt: string | null;
+  /** See `deriveMessagesTimelineRows`' `launchTurnDurationStart`. */
+  launchTurnDurationStart: string | null;
   turnFoldExpandedById: Readonly<Record<string, boolean>>;
   liveSettledTurnIds: ReadonlySet<TurnId>;
 }): ReadonlyMap<string, TurnFold> {
@@ -744,6 +746,7 @@ function deriveTurnFolds(input: {
   }
 
   const foldsByAnchorEntryId = new Map<string, TurnFold>();
+  const firstTurnId = groupsByTurnId.keys().next().value ?? null;
   for (const [turnId, group] of groupsByTurnId) {
     const isRunning = turnId === input.unsettledTurnId;
     if (!isRunning && group.hasStreamingMessage) continue;
@@ -776,6 +779,7 @@ function deriveTurnFolds(input: {
     const authoritativeStart =
       input.latestTurn?.turnId === turnId ? input.latestTurn.startedAt : null;
     const durationStart =
+      (turnId === firstTurnId ? input.launchTurnDurationStart : null) ??
       authoritativeStart ??
       (isRunning ? input.activeTurnStartedAt : null) ??
       group.startBoundary ??
@@ -1070,7 +1074,18 @@ export function deriveMessagesTimelineRows(input: {
   turnFoldExpandedById?: Readonly<Record<string, boolean>>;
   workGroupExpandedById?: Readonly<Record<string, boolean>>;
   isWorking: boolean;
+  /**
+   * Keeps the working row up although nothing works: a first send's worktree
+   * setup failed, and the row reports it with the message it kept.
+   */
+  showSetupRow?: boolean | undefined;
   activeTurnStartedAt: string | null;
+  /**
+   * Counts the thread's first turn from this instant instead of its start: a
+   * first send that set up a worktree, so the turn reads as one wait from the
+   * moment the message was sent.
+   */
+  launchTurnDurationStart?: string | null | undefined;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
   /** Per-turn rollback target for the changed-files card's Undo action. */
@@ -1119,6 +1134,7 @@ export function deriveMessagesTimelineRows(input: {
     latestTurn: input.latestTurn ?? null,
     unsettledTurnId,
     activeTurnStartedAt: input.activeTurnStartedAt,
+    launchTurnDurationStart: input.launchTurnDurationStart ?? null,
     turnFoldExpandedById: input.turnFoldExpandedById ?? {},
     liveSettledTurnIds: input.liveSettledTurnIds ?? EMPTY_TURN_ID_SET,
   });
@@ -1422,7 +1438,7 @@ export function deriveMessagesTimelineRows(input: {
   chapters.close();
   chapters.finalize(foldsByAnchorEntryId);
 
-  if (input.isWorking && !hasRunningFold) {
+  if ((input.isWorking || input.showSetupRow) && !hasRunningFold) {
     nextRows.push({
       kind: "working",
       id: "working-indicator-row",

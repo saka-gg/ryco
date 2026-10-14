@@ -36,6 +36,7 @@ import {
   type ServerChatsCapability,
   type ServerProvider,
   SourceControlProviderError,
+  WORKTREE_SETUP_CANCELLED_MESSAGE,
   WsRpcGroup,
   WorktreeId,
 } from "@ryco/contracts";
@@ -141,6 +142,13 @@ import { toGitManagerError } from "./context/gitErrors.ts";
 import { makeOrchestrationStreamHelpers } from "./context/orchestrationStreams.ts";
 import { makeAppendSetupScriptActivity } from "./context/managedCheckout.ts";
 import { makeWorktreeOperations } from "./context/worktreeOperations.ts";
+import {
+  watchSetupScriptTerminal,
+  worktreeCreationProgress,
+} from "./context/worktreeSetupProgress.ts";
+import { WorktreeSetupTracker } from "../project/Services/WorktreeSetupTracker.ts";
+import { setupProjectScript } from "@ryco/shared/projectScripts";
+import { makeWorktreeSetupTracker } from "../project/Layers/WorktreeSetupTracker.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
 export { toAuthAccessStreamEvent } from "./context/authEvents.ts";
@@ -226,6 +234,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const vcsProvisioning = yield* VcsProvisioningService;
     const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
     const terminalManager = yield* TerminalManager;
+    // Optional for the same route-test reason; production provides the shared
+    // tracker. A test without it gets one private to this context.
+    const worktreeSetupTrackerOption = yield* Effect.serviceOption(WorktreeSetupTracker);
+    const worktreeSetupTracker = Option.isSome(worktreeSetupTrackerOption)
+      ? worktreeSetupTrackerOption.value
+      : yield* makeWorktreeSetupTracker;
     const providerRegistry = yield* ProviderRegistry;
     const modelManifest = yield* Effect.serviceOption(ModelManifest);
     // Optional for the same reason as ContextHandoffInspection: route tests
@@ -630,6 +644,23 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         let shouldRunSetupScript = bootstrap?.runSetupScript ?? false;
         let targetWorktreeId: WorktreeId | null = null;
         let preparedChat: PreparedChatProject | undefined;
+        // A first send that prepares a worktree publishes its stages live, so
+        // the sending client can show them instead of a generic "working".
+        const setupProgress =
+          bootstrap?.prepareWorktree && bootstrap.createThread
+            ? yield* worktreeSetupTracker.begin({
+                threadId: command.threadId,
+                baseRef: bootstrap.prepareWorktree.baseBranch,
+                ...(bootstrap.prepareWorktree.branch
+                  ? { branch: bootstrap.prepareWorktree.branch }
+                  : {}),
+                fetchOrigin: bootstrap.prepareWorktree.fetchOrigin === true,
+              })
+            : null;
+        // Set once a setup-script watcher owns releasing the progress feed.
+        let setupProgressHandedToScript = false;
+        const worktreeSetupCancelledError = () =>
+          new OrchestrationDispatchCommandError({ message: WORKTREE_SETUP_CANCELLED_MESSAGE });
 
         const cleanupCreatedThread = () =>
           Effect.gen(function* () {
@@ -753,10 +784,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
                           error,
                           requestedAt,
                           worktreePath,
-                        }),
+                        }).pipe(
+                          Effect.andThen(
+                            setupProgress?.stage("setup-script", { status: "failed" }) ??
+                              Effect.void,
+                          ),
+                        ),
                       onSuccess: (setupResult) => {
                         if (setupResult.status !== "started") {
-                          return Effect.void;
+                          return (
+                            setupProgress?.stage("setup-script", { status: "skipped" }) ??
+                            Effect.void
+                          );
                         }
                         return recordSetupScriptStarted({
                           requestedAt,
@@ -764,12 +803,33 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
                           scriptId: setupResult.scriptId,
                           scriptName: setupResult.scriptName,
                           terminalId: setupResult.terminalId,
-                        });
+                        }).pipe(
+                          Effect.andThen(
+                            setupProgress
+                              ? Effect.gen(function* () {
+                                  yield* setupProgress.stage("setup-script", {
+                                    status: "running",
+                                    detail: setupResult.scriptName,
+                                  });
+                                  yield* setupProgress.setCheckout({
+                                    setupTerminalId: setupResult.terminalId,
+                                  });
+                                  setupProgressHandedToScript = true;
+                                  yield* watchSetupScriptTerminal({
+                                    handle: setupProgress,
+                                    terminalManager,
+                                    threadId: command.threadId,
+                                    terminalId: setupResult.terminalId,
+                                  });
+                                })
+                              : Effect.void,
+                          ),
+                        );
                       },
                     }),
                   );
               })()
-            : Effect.void;
+            : (setupProgress?.stage("setup-script", { status: "skipped" }) ?? Effect.void);
 
         const bootstrapProgram = Effect.gen(function* () {
           // A chat's project must exist before preferences resolve against it.
@@ -787,6 +847,18 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           });
           const { settings, project: bootstrapProject, choices } = resolved;
           shouldRunSetupScript = resolved.runSetupScript;
+          if (setupProgress) {
+            // Named from the start, so the stage row reads the same before and
+            // while it runs; a setup that will not run one says so up front.
+            const setupScript =
+              shouldRunSetupScript && bootstrapProject
+                ? setupProjectScript(bootstrapProject.scripts)
+                : null;
+            yield* setupProgress.stage(
+              "setup-script",
+              setupScript ? { detail: setupScript.name } : { status: "skipped" },
+            );
+          }
           if (bootstrap?.prepareWorktree && bootstrapProject) targetProjectId = bootstrapProject.id;
           // A thread created after its worktree starts on that worktree's branch
           // and path, with no follow-up metadata update.
@@ -825,7 +897,11 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           if (!bootstrap?.prepareWorktree) yield* createBootstrapThread();
 
           if (bootstrap?.prepareWorktree) {
+            if (setupProgress && (yield* setupProgress.cancelRequested)) {
+              return yield* Effect.fail(worktreeSetupCancelledError());
+            }
             const worktree = yield* gitWorkflow.createWorktree({
+              ...(setupProgress ? { progress: worktreeCreationProgress(setupProgress) } : {}),
               settingsSnapshot: settings,
               projectId: targetProjectId ?? bootstrapProject?.id,
               cwd: bootstrap.prepareWorktree.projectCwd,
@@ -867,6 +943,32 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               );
             }
             targetWorktreePath = worktree.worktree.path;
+            if (setupProgress) {
+              yield* setupProgress.stage("checkout", { status: "done", percent: 100 });
+              yield* setupProgress.setCheckout({
+                branch: worktree.worktree.refName,
+                worktreePath: worktree.worktree.path,
+              });
+              // Publishing the thread promotes the draft on every client, so a
+              // cancel is honoured only before that: the checkout is removed
+              // again and the draft keeps the message.
+              if (!(yield* setupProgress.markUncancellable)) {
+                const projectCwd = bootstrap.prepareWorktree.projectCwd;
+                yield* gitWorkflow
+                  .removeWorktree({ cwd: projectCwd, path: worktree.worktree.path, force: true })
+                  .pipe(Effect.ignoreCause({ log: true }));
+                if (bootstrap.prepareWorktree.branch) {
+                  yield* gitWorkflow
+                    .deleteBranch({
+                      cwd: projectCwd,
+                      refName: worktree.worktree.refName,
+                      force: true,
+                    })
+                    .pipe(Effect.ignoreCause({ log: true }));
+                }
+                return yield* Effect.fail(worktreeSetupCancelledError());
+              }
+            }
             if (bootstrap.createThread) {
               yield* createBootstrapThread({
                 branch: worktree.worktree.refName,
@@ -947,17 +1049,39 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
               );
             }
           }
-          return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
+          if (!setupProgress) return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
+          yield* setupProgress.stage("agent", { status: "running" });
+          const started = yield* orchestrationEngine.dispatch(finalTurnStartCommand);
+          yield* setupProgress.stage("agent", { status: "done" });
+          yield* setupProgress.finish("done");
+          if (!setupProgressHandedToScript) yield* setupProgress.release;
+          return started;
         });
+
+        const settleSetupProgress = (cause: Cause.Cause<unknown>, message: string) =>
+          setupProgress
+            ? Effect.gen(function* () {
+                const cancelled =
+                  Cause.hasInterruptsOnly(cause) || message === WORKTREE_SETUP_CANCELLED_MESSAGE;
+                yield* setupProgress.finish(
+                  cancelled ? "cancelled" : "failed",
+                  cancelled ? undefined : message,
+                );
+                yield* setupProgress.release;
+              })
+            : Effect.void;
 
         return yield* bootstrapProgram.pipe(
           Effect.catchCause((cause) => {
             const dispatchError = toBootstrapDispatchCommandCauseError(cause);
             if (Cause.hasInterruptsOnly(cause)) {
-              return Effect.fail(dispatchError);
+              return settleSetupProgress(cause, dispatchError.message).pipe(
+                Effect.andThen(Effect.fail(dispatchError)),
+              );
             }
             const chatProjectId = bootstrap?.createChatProject?.projectId;
-            return cleanupCreatedThread().pipe(
+            return settleSetupProgress(cause, dispatchError.message).pipe(
+              Effect.andThen(cleanupCreatedThread()),
               Effect.andThen(
                 Effect.suspend(() =>
                   preparedChat
@@ -1244,6 +1368,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       vcsProvisioning,
       vcsStatusBroadcaster,
       terminalManager,
+      worktreeSetupTracker,
       providerRegistry,
       modelManifest,
       providerService,

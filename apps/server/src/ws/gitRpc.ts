@@ -23,6 +23,7 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
     gitWorkflow,
     vcsStatusBroadcaster,
     vcsProvisioning,
+    worktreeSetupTracker,
     refreshGitStatus,
     attachLinkedIssuesToPrAction,
     projectionWorktrees,
@@ -55,6 +56,23 @@ export const makeGitHandlers = (ctx: WsRpcContext) => {
         {
           "rpc.aggregate": "vcs",
         },
+      ),
+    [WS_METHODS.subscribeWorktreeSetup]: (input) =>
+      observeRpcStream(
+        WS_METHODS.subscribeWorktreeSetup,
+        ownerStream(WS_METHODS.subscribeWorktreeSetup, worktreeSetupTracker.stream(input.threadId)),
+        { "rpc.aggregate": "vcs" },
+      ),
+    [WS_METHODS.vcsCancelWorktreeSetup]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.vcsCancelWorktreeSetup,
+        ownerEffect(
+          WS_METHODS.vcsCancelWorktreeSetup,
+          worktreeSetupTracker
+            .cancel(input.threadId)
+            .pipe(Effect.map((cancelled) => ({ cancelled }))),
+        ),
+        { "rpc.aggregate": "vcs" },
       ),
     [WS_METHODS.vcsRefreshStatus]: (input) =>
       observeRpcEffect(

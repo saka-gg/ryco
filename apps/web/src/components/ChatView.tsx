@@ -387,6 +387,22 @@ import {
   isVersionMismatchDismissed,
   resolveServerConfigVersionMismatch,
 } from "../versionSkew";
+import {
+  isWorktreeLaunchSettingUp,
+  readWorktreeLaunch,
+  resolveWorktreeLaunchWorkStartedAt,
+  stopWorktreeLaunchFeed,
+  useWorktreeLaunchStore,
+} from "@ryco/client-runtime/state/worktree-setup";
+import {
+  forgetWorktreeLaunch,
+  readWorktreeLaunchRetry,
+} from "./chat/worktreeLaunch/worktreeLaunchSend";
+import { useFirstSendTransition } from "./chat/worktreeLaunch/useFirstSendTransition";
+import type {
+  WorktreeSetupActions,
+  WorktreeSetupTimelineState,
+} from "./chat/worktreeLaunch/WorktreeSetupTimelineContext";
 
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -397,6 +413,8 @@ const PROVIDER_STATUS_KEY_SEPARATOR = "\0";
 // Stable identity so the message-queue selector doesn't churn on empty threads.
 const EMPTY_QUEUED_MESSAGES: readonly QueuedMessage[] = Object.freeze([]);
 const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
+/** A launch handed off this recently is still being carried over by a new view. */
+const CONTINUED_LAUNCH_WINDOW_MS = 5_000;
 
 /**
  * Whether a thread opens with the overview rail docked: only where the rail
@@ -593,6 +611,14 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  // A first send into a new worktree, from the send until its turn settles.
+  // The draft's view and the thread's view that replaces it share it.
+  const worktreeLaunch = useWorktreeLaunchStore(
+    (store) => store.launchesByKey[routeThreadKey] ?? null,
+  );
+  const worktreeSetupRunning = isWorktreeLaunchSettingUp(worktreeLaunch);
+  const worktreeSetupFailed = worktreeLaunch?.phase === "failed";
+  const worktreeSetupOnScreen = worktreeSetupRunning || worktreeSetupFailed;
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const serverThread = useStore(
@@ -890,7 +916,21 @@ export default function ChatView(props: ChatViewProps) {
   // initial value applies the same to a fresh mount: chrome and composer
   // commit first, the timeline follows in the transition.
   const activeThreadIdRaw = activeThread?.id ?? null;
-  const deferredActiveThreadId = useDeferredValue(activeThreadIdRaw, null);
+  // A view taking a launch over mid-flight (the thread's view replacing the
+  // draft's at the hand-off) paints its timeline at once: deferring it would
+  // blank the message and the setup row for a frame.
+  const [continuesWorktreeLaunch] = useState(() => {
+    const launch = readWorktreeLaunch(routeThreadKey);
+    return (
+      launch !== null &&
+      (launch.phase !== "handed-off" ||
+        Date.now() - (launch.handedOffAtMs ?? 0) < CONTINUED_LAUNCH_WINDOW_MS)
+    );
+  });
+  const deferredActiveThreadId = useDeferredValue(
+    activeThreadIdRaw,
+    continuesWorktreeLaunch ? activeThreadIdRaw : null,
+  );
   const isActiveThreadIdFresh = deferredActiveThreadId === activeThreadIdRaw;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = enforceBuildMode
@@ -2063,11 +2103,18 @@ export default function ChatView(props: ChatViewProps) {
       sideChatConnection.phase,
     ],
   );
-  const activeWorkStartedAt = deriveActiveWorkStartedAt(
-    activeLatestTurn,
-    activeThread?.session ?? null,
-    localDispatchStartedAt,
+  // A launched first turn counts from the send, through its worktree setup.
+  const launchWorkStartedAt = resolveWorktreeLaunchWorkStartedAt(
+    worktreeLaunch,
+    activeThread?.messages,
   );
+  const activeWorkStartedAt =
+    launchWorkStartedAt ??
+    deriveActiveWorkStartedAt(
+      activeLatestTurn,
+      activeThread?.session ?? null,
+      localDispatchStartedAt,
+    );
   const serverMessages = activeThread?.messages;
   const { attachmentPreviewHandoffByMessageId, handoffAttachmentPreviews } =
     useChatAttachmentPreviewHandoff({
@@ -2169,6 +2216,19 @@ export default function ChatView(props: ChatViewProps) {
       presentationTier,
       historyPending: threadHistoryPending,
     });
+  const chatColumnRef = useRef<HTMLDivElement | null>(null);
+  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const newThreadHeroRef = useRef<HTMLDivElement | null>(null);
+  const composerBoxRef = useRef<HTMLDivElement | null>(null);
+  // The first send from the new-thread surface: hero out, composer to its dock.
+  const { captureFirstSendLayout, enteringMessageId } = useFirstSendTransition({
+    showNewThreadSurface,
+    chatColumnRef,
+    heroRef: newThreadHeroRef,
+    composerBoxRef,
+    composerBarRef: composerOverlayRef,
+    latestOptimisticMessageId: optimisticUserMessages.at(-1)?.id ?? null,
+  });
 
   const loadedThreadMessageSearchOccurrences = useMemo(
     () =>
@@ -2627,9 +2687,10 @@ export default function ChatView(props: ChatViewProps) {
     [handleOpenHeaderLinkedItem, headerPullRequest?.number, openPullRequestInApp],
   );
   const envLocked = Boolean(
-    activeThread &&
-    (activeThread.messages.length > 0 ||
-      (activeThread.session !== null && activeThread.session.status !== "closed")),
+    worktreeSetupOnScreen ||
+    (activeThread &&
+      (activeThread.messages.length > 0 ||
+        (activeThread.session !== null && activeThread.session.status !== "closed"))),
   );
 
   const moveDraftThreadToProject = useComposerDraftStore((store) => store.moveDraftThreadToProject);
@@ -3377,6 +3438,107 @@ export default function ChatView(props: ChatViewProps) {
     isGitRepo,
   });
 
+  // The send's Stop while its worktree is still being set up: the node removes
+  // the half-made checkout and the draft gets its message back. A stop that
+  // comes too late for that (the thread is already being created) stops the
+  // turn as soon as it starts instead.
+  const cancelWorktreeSetup = useCallback(() => {
+    const launch = readWorktreeLaunch(routeThreadKey);
+    if (launch?.phase !== "preparing" || !activeThreadId) return;
+    const launches = useWorktreeLaunchStore.getState();
+    launches.requestCancel(routeThreadKey);
+    const stopOnStart = () => launches.setInterruptOnStart(routeThreadKey);
+    const cancel = readEnvironmentApi(environmentId)?.vcs.cancelWorktreeSetup;
+    if (!cancel) {
+      stopOnStart();
+      return;
+    }
+    void cancel({ threadId: activeThreadId }).then((result) => {
+      if (!result.cancelled) stopOnStart();
+    }, stopOnStart);
+  }, [activeThreadId, environmentId, routeThreadKey]);
+  useEffect(() => {
+    if (!worktreeLaunch?.interruptOnStart || worktreeLaunch.phase !== "handed-off") return;
+    if (phase !== "running") return;
+    useWorktreeLaunchStore.getState().clearInterruptOnStart(routeThreadKey);
+    void onInterrupt();
+  }, [onInterrupt, phase, routeThreadKey, worktreeLaunch?.interruptOnStart, worktreeLaunch?.phase]);
+  const retryWorktreeSetup = useCallback(() => {
+    void readWorktreeLaunchRetry(routeThreadKey)?.resend();
+  }, [routeThreadKey]);
+  const dismissWorktreeSetup = useCallback(() => {
+    readWorktreeLaunchRetry(routeThreadKey)?.restore();
+    forgetWorktreeLaunch(routeThreadKey);
+  }, [routeThreadKey]);
+  // "Work locally" switches the draft to the project checkout; the message goes
+  // out again once that switch has rendered (the send reads the mode it shows).
+  const workLocallyRequestedRef = useRef(false);
+  const workLocallyAfterFailedSetup = useCallback(() => {
+    if (!draftId) return;
+    workLocallyRequestedRef.current = true;
+    setDraftThreadContext(draftId, { envMode: "local", worktreePath: null });
+  }, [draftId, setDraftThreadContext]);
+  useEffect(() => {
+    if (!workLocallyRequestedRef.current || sendEnvMode !== "local") return;
+    workLocallyRequestedRef.current = false;
+    const retry = readWorktreeLaunchRetry(routeThreadKey);
+    // The local send has no setup to show; the failed one leaves the row.
+    stopWorktreeLaunchFeed(routeThreadKey);
+    useWorktreeLaunchStore.getState().remove(routeThreadKey);
+    void retry?.resend();
+  }, [routeThreadKey, sendEnvMode]);
+  // A failed launch lives with the view that shows its message: leaving it
+  // hands the message back to the draft's composer rather than losing it.
+  useEffect(
+    () => () => {
+      if (readWorktreeLaunch(routeThreadKey)?.phase !== "failed") return;
+      readWorktreeLaunchRetry(routeThreadKey)?.restore();
+      forgetWorktreeLaunch(routeThreadKey);
+    },
+    [routeThreadKey],
+  );
+  const openWorktreeSetupTerminal = useCallback(
+    (terminalId: string) => {
+      storeSetTerminalOpen(routeThreadRef, true);
+      storeSetActiveTerminal(routeThreadRef, terminalId);
+    },
+    [routeThreadRef, storeSetActiveTerminal, storeSetTerminalOpen],
+  );
+  const worktreeSetupActions = useMemo<WorktreeSetupActions>(
+    () => ({
+      onCancel: cancelWorktreeSetup,
+      onRetry: retryWorktreeSetup,
+      onWorkLocally: workLocallyAfterFailedSetup,
+      onDismiss: dismissWorktreeSetup,
+      onOpenTerminal: openWorktreeSetupTerminal,
+    }),
+    [
+      cancelWorktreeSetup,
+      dismissWorktreeSetup,
+      openWorktreeSetupTerminal,
+      retryWorktreeSetup,
+      workLocallyAfterFailedSetup,
+    ],
+  );
+  // The working row presents the launch while it owns the thread's wait: its
+  // setup, its failure, and the first turn it hands the thread to. The frozen
+  // phone tier keeps its generic row (AGENTS.md).
+  const worktreeSetupTimeline = useMemo<WorktreeSetupTimelineState | null>(
+    () =>
+      worktreeLaunch &&
+      presentationTier !== "phone" &&
+      (worktreeSetupFailed || launchWorkStartedAt !== null)
+        ? { launch: worktreeLaunch, actions: worktreeSetupActions }
+        : null,
+    [
+      launchWorkStartedAt,
+      presentationTier,
+      worktreeLaunch,
+      worktreeSetupActions,
+      worktreeSetupFailed,
+    ],
+  );
+
   useEffect(() => {
     setPendingServerThreadBranch(undefined);
   }, [activeThread?.id]);
@@ -3929,6 +4091,8 @@ export default function ChatView(props: ChatViewProps) {
     },
   ): Promise<boolean> => {
     if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return false;
+    // What a failed worktree launch sends again, before this send's own edits.
+    const snapshotForResend = composerSnapshot;
     const api = readEnvironmentApi(environmentId);
     // A pending chat's project is created by this send, so it is not in the store yet.
     if (
@@ -4029,6 +4193,8 @@ export default function ChatView(props: ChatViewProps) {
         readSubscribedClaudeReviewState: readSubscribedClaudeReviewState,
         ...(hooks?.onBeforeTurnStart ? { onBeforeTurnStart: hooks.onBeforeTurnStart } : {}),
         ...(hooks?.onSendError ? { onSendError: hooks.onSendError } : {}),
+        resendFailedWorktreeLaunch: (failedMessageId) =>
+          dispatchComposerSnapshotRef.current(snapshotForResend, settingsSnapshot, failedMessageId),
         preserveComposerDraft: messageId !== undefined || composerChangedDuringPreparation(),
         composer: composerSnapshot,
         thread: {
@@ -4093,6 +4259,7 @@ export default function ChatView(props: ChatViewProps) {
         ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
         scroll: {
           scrollToEndBeforeOptimistic: async () => {
+            captureFirstSendLayout();
             isAtEndRef.current = true;
             setTimelineLiveFollowEnabled(true);
             showScrollDebouncer.current.cancel();
@@ -5319,8 +5486,6 @@ export default function ChatView(props: ChatViewProps) {
   // in-flow layout, where the variable stays unset and the old spacers apply.
   const composerOverlayActive = presentationTier !== "phone" && !showNewThreadSurface;
   const headerOverlayActive = presentationTier !== "phone";
-  const chatColumnRef = useRef<HTMLDivElement | null>(null);
-  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
   const chatShellRef = useRef<HTMLDivElement | null>(null);
   const headerOverlayRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
@@ -5624,6 +5789,11 @@ export default function ChatView(props: ChatViewProps) {
                 activeTurnId={activeLatestTurn?.turnId ?? null}
                 latestTurn={activeLatestTurn}
                 activeTurnStartedAt={activeWorkStartedAt}
+                worktreeSetup={worktreeSetupTimeline}
+                launchTurnDurationStart={
+                  worktreeLaunch?.phase === "handed-off" ? launchWorkStartedAt : null
+                }
+                enteringMessageId={enteringMessageId}
                 listRef={legendListRef}
                 targetMessageId={
                   threadMessageSearchTarget?.messageId ?? rawSearch.messageId ?? null
@@ -5712,6 +5882,7 @@ export default function ChatView(props: ChatViewProps) {
               composer read as one vertically centered block. */}
           {showNewThreadSurface ? (
             <div
+              ref={newThreadHeroRef}
               className={cn(
                 "shrink-0",
                 !reducedMotion && "animate-in fade-in slide-in-from-bottom-1",
@@ -5895,7 +6066,7 @@ export default function ChatView(props: ChatViewProps) {
                 getSteerUnavailableReason={getQueuedSteerUnavailableReason}
                 onSteer={(message) => void handleSteerQueuedMessage(message)}
               />
-              <div className="relative z-10">
+              <div ref={composerBoxRef} className="relative z-10">
                 <ChatComposer
                   ref={composerRef}
                   onComposerIntent={onComposerIntent}
@@ -5920,6 +6091,12 @@ export default function ChatView(props: ChatViewProps) {
                     hostedDraftTarget.pending !== null
                   }
                   isPreparingWorktree={isPreparingWorktree}
+                  isWorktreeSetupRunning={
+                    // Until the thread's own view takes over after the hand-off,
+                    // the draft's keeps offering Stop, not a busy send button.
+                    worktreeSetupRunning ||
+                    (worktreeLaunch?.phase === "handed-off" && isSendBusy && !isServerThread)
+                  }
                   environmentUnavailable={activeEnvironmentUnavailableState}
                   activePendingApproval={activePendingApproval}
                   pendingApprovals={pendingApprovals}
@@ -5962,7 +6139,7 @@ export default function ChatView(props: ChatViewProps) {
                   followUpSurfaceAllowsSteer={presentationTier !== "phone"}
                   getFollowUpSteerUnavailableReason={getFollowUpSteerUnavailableReason}
                   onSend={onSend}
-                  onInterrupt={onInterrupt}
+                  onInterrupt={worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt}
                   onImplementPlanInNewThread={onImplementPlanInNewThread}
                   onRespondToApproval={onRespondToApproval}
                   onSelectActivePendingUserInputOption={onSelectActivePendingUserInputOption}
@@ -6011,6 +6188,15 @@ export default function ChatView(props: ChatViewProps) {
                       }
                     : {})}
                   envLocked={envLocked}
+                  {...(worktreeLaunch && worktreeSetupOnScreen && presentationTier !== "phone"
+                    ? {
+                        worktreeLaunch: {
+                          branch: worktreeLaunch.snapshot?.worktreePath
+                            ? (worktreeLaunch.snapshot.branch ?? null)
+                            : null,
+                        },
+                      }
+                    : {})}
                   onComposerFocusRequest={scheduleComposerFocus}
                   onOpenWorktreeSources={openWorktreeSources}
                   contextControlsHoisted={showNewThreadSurface}

@@ -116,6 +116,12 @@ import type {
   VcsCreateRefResult,
 } from "./git.ts";
 import type {
+  WorktreeSetupCancelInput,
+  WorktreeSetupCancelResult,
+  WorktreeSetupSnapshot,
+  WorktreeSetupSubscribeInput,
+} from "./worktreeSetup.ts";
+import type {
   AgentControlDecideProposalInput,
   AgentControlGetProposalInput,
   AgentControlGetProposalResult,
@@ -1255,6 +1261,19 @@ export interface EnvironmentApi {
     listRefs: (input: VcsListRefsInput) => Promise<VcsListRefsResult>;
     /** Absent on clients built without it; older servers answer "Unknown request tag". */
     prefetchWorktreeBase?: (input: VcsPrefetchWorktreeBaseInput) => Promise<void>;
+    /**
+     * Live progress of the worktree a first send prepares. Absent on clients
+     * built without it; older servers end the stream at once (`onError`).
+     */
+    onWorktreeSetup?: (
+      input: WorktreeSetupSubscribeInput,
+      callback: (snapshot: WorktreeSetupSnapshot) => void,
+      options?: {
+        onError?: () => void;
+      },
+    ) => () => void;
+    /** Stops a worktree setup before its turn starts. */
+    cancelWorktreeSetup?: (input: WorktreeSetupCancelInput) => Promise<WorktreeSetupCancelResult>;
     createWorktree: (input: VcsCreateWorktreeInput) => Promise<VcsCreateWorktreeResult>;
     removeWorktree: (input: VcsRemoveWorktreeInput) => Promise<void>;
     createRef: (input: VcsCreateRefInput) => Promise<VcsCreateRefResult>;
