@@ -110,7 +110,9 @@ export function validateStagedRuntimeDependencies(stageAppDir: string): number {
       {
         input: JSON.stringify({ stageRoot, imports }),
         encoding: "utf8",
-        timeout: 30_000,
+        // Hang guard only. The first reads of a freshly installed stage can be slow on a cold
+        // machine (macOS scans new files on first access), so this is not a performance budget.
+        timeout: 5 * 60_000,
         maxBuffer: 4 * 1024 * 1024,
         env: { ...process.env, NODE_PATH: "", NODE_OPTIONS: "" },
       },
