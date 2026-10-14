@@ -36,6 +36,7 @@ export function makeRuntimeAgent(
     runHandles: null,
     recentActivity: [],
     firstSeenAt,
+    spawnTurnId: null,
     startedAt: firstSeenAt,
     completedAt: null,
     updatedAt: firstSeenAt,

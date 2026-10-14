@@ -453,6 +453,43 @@ describe("deriveAgentPanelModel", () => {
     expect(model.liveCount).toBe(0);
   });
 
+  it("batches direct spawns by the turn that launched them", () => {
+    const inTurn = (turnId: string | null, row: OrchestrationThreadActivity) =>
+      ({ ...row, turnId }) as OrchestrationThreadActivity;
+    const roster = fold([
+      inTurn("turn-1", activity("task.started", { taskId: "a", title: "A" }, stampFor(1))),
+      inTurn("turn-1", activity("task.started", { taskId: "b", title: "B" }, stampFor(2))),
+      // A background agent settles in a later turn; its batch must not move.
+      inTurn(
+        "turn-2",
+        activity("task.completed", { taskId: "a", status: "completed" }, stampFor(3)),
+      ),
+      inTurn("turn-2", activity("task.started", { taskId: "c", title: "C" }, stampFor(4))),
+      // No spawn turn (older history): joins the batch still running.
+      activity("task.started", { taskId: "d", title: "D" }, stampFor(5)),
+    ]);
+
+    const groups = deriveAgentPanelModel({ agents: roster }).directGroups;
+
+    expect(groups.map((group) => group.agents.map((agent) => agent.id))).toEqual([
+      ["a", "b"],
+      ["c", "d"],
+    ]);
+    expect(roster.find((agent) => agent.id === "a")?.spawnTurnId).toBe("turn-1");
+  });
+
+  it("starts a new batch for a turn-less spawn once the previous batch settled", () => {
+    const roster = fold([
+      activity("task.started", { taskId: "a", title: "A" }, stampFor(1)),
+      activity("task.completed", { taskId: "a", status: "completed" }, stampFor(2)),
+      activity("task.started", { taskId: "b", title: "B" }, stampFor(3)),
+    ]);
+
+    expect(
+      deriveAgentPanelModel({ agents: roster }).directGroups.map((group) => group.agents.length),
+    ).toEqual([1, 1]);
+  });
+
   it("keeps direct spawns in first-seen order as their activity changes", () => {
     const directRoster = fold([
       activity("task.started", { taskId: "direct-a", title: "First" }, "2026-08-01T11:00:00.000Z"),

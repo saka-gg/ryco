@@ -1779,6 +1779,7 @@ describe("fork from here", () => {
       onOpenTurnDiff: () => {},
       onCloseDiff: () => {},
       onOpenAgents: () => {},
+      onOpenAgent: () => {},
       onOpenMessageActions: () => {},
     };
     const onForkFromMessage = () => {};
@@ -2179,6 +2180,7 @@ describe("timeline context split", () => {
     "onOpenTurnDiff",
     "onCloseDiff",
     "onOpenAgents",
+    "onOpenAgent",
     "onOpenMessageActions",
   ];
 
@@ -2207,6 +2209,7 @@ describe("timeline context split", () => {
       onOpenTurnDiff: () => {},
       onCloseDiff: () => {},
       onOpenAgents: () => {},
+      onOpenAgent: () => {},
       onOpenMessageActions: () => {},
     };
   }

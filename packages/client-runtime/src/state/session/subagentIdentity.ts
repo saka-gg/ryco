@@ -181,6 +181,84 @@ export function splitSubagentLabelScope(label: string): {
   return match ? { scope: match[1]!, name: match[2]! } : { scope: null, name: label.trim() };
 }
 
+/** Task verbs say what an agent does, not which agent it is. */
+const MONOGRAM_SKIPPED_VERBS: ReadonlySet<string> = new Set([
+  "add",
+  "analyze",
+  "audit",
+  "build",
+  "check",
+  "compare",
+  "create",
+  "debug",
+  "design",
+  "document",
+  "draft",
+  "explore",
+  "find",
+  "fix",
+  "implement",
+  "inspect",
+  "investigate",
+  "look",
+  "map",
+  "plan",
+  "read",
+  "refactor",
+  "research",
+  "review",
+  "run",
+  "scan",
+  "search",
+  "summarize",
+  "test",
+  "trace",
+  "update",
+  "validate",
+  "verify",
+  "write",
+]);
+
+const MONOGRAM_SKIPPED_WORDS: ReadonlySet<string> = new Set([
+  "a",
+  "an",
+  "and",
+  "for",
+  "in",
+  "of",
+  "on",
+  "the",
+  "to",
+  "with",
+]);
+
+/**
+ * Initials for an agent's monogram avatar, from its row label: "Trace Ryco
+ * worktree flow" → "RW", "verify:implementor" → "I", "Explore 2" → "E2". A
+ * leading task verb and filler words are skipped while two words remain, so
+ * agents launched for related tasks still read apart.
+ */
+export function subagentMonogramInitials(label: string): string {
+  const words = splitSubagentLabelScope(label)
+    .name.replace(/([\p{Ll}\d])(\p{Lu})/gu, "$1 $2")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word.length > 0);
+  const meaningful = words.filter((word) => !MONOGRAM_SKIPPED_WORDS.has(word.toLowerCase()));
+  const candidates = meaningful.length > 0 ? meaningful : words;
+  const named =
+    candidates.length > 2 && MONOGRAM_SKIPPED_VERBS.has(candidates[0]!.toLowerCase())
+      ? candidates.slice(1)
+      : candidates;
+  if (named.length === 0) {
+    return "?";
+  }
+  return named
+    .slice(0, 2)
+    .map((word) => Array.from(word)[0]!)
+    .join("")
+    .toLocaleUpperCase();
+}
+
 /** Runtime task ids are raw while transcript keys use `subagent:<id>`. */
 export function canonicalSubagentIdentityKey(key: string): string {
   const trimmed = key.trim();

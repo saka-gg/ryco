@@ -110,6 +110,44 @@ describe("AgentsPanel", () => {
     expect(rowIds()).toEqual(["child"]);
   });
 
+  it("groups direct spawns per turn and folds an older settled batch", async () => {
+    const settled = { status: "completed" as const, completedAt: "2026-08-10T10:00:30.000Z" };
+    const model = deriveAgentPanelModel({
+      agents: [
+        makeRuntimeAgent("old-a", { title: "Map the parser", spawnTurnId: "t1", ...settled }),
+        makeRuntimeAgent("old-b", { title: "Map the lexer", spawnTurnId: "t1", ...settled }),
+        makeRuntimeAgent("new-a", {
+          title: "Trace Ryco worktree flow",
+          spawnTurnId: "t2",
+          progress: "Reading ChatView.tsx",
+          firstSeenAt: "2026-08-10T10:01:00.000Z",
+        }),
+        makeRuntimeAgent("new-b", {
+          title: "Trace t3code worktree flow",
+          spawnTurnId: "t2",
+          firstSeenAt: "2026-08-10T10:01:01.000Z",
+          ...settled,
+          completedAt: "2026-08-10T10:01:30.000Z",
+        }),
+      ],
+    });
+
+    mounted = await render(
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel model={model} />
+      </div>,
+    );
+
+    const headers = page.getByRole("button", { name: /2 subagents/ });
+    await expect.element(headers.nth(0)).toHaveAttribute("aria-expanded", "false");
+    await expect.element(headers.nth(1)).toHaveAttribute("aria-expanded", "true");
+    expect(headers.nth(1).element().textContent).toContain("1 working");
+    expect(rowIds()).toEqual(["new-a", "new-b"]);
+
+    await headers.nth(0).click();
+    expect(rowIds()).toEqual(["old-a", "old-b", "new-a", "new-b"]);
+  });
+
   it("keeps fixed role-aware rows in spawn order while live state changes", async () => {
     const onOpenAgent = vi.fn();
     const reviewer = makeRuntimeAgent("reviewer-1", {

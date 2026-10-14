@@ -5618,6 +5618,7 @@ export default function ChatView(props: ChatViewProps) {
                 key={activeThread.id}
                 agentPanelModel={agentPanelModel}
                 onOpenAgents={onOpenAgentsPanel}
+                onOpenAgent={onOpenRuntimeAgentPanel}
                 isWorking={isWorking}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnId={activeLatestTurn?.turnId ?? null}
