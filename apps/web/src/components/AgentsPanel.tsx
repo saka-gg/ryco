@@ -26,11 +26,14 @@ import { landingFlashClass, scrollRowIntoView, useLandingFlash } from "../hooks/
 import {
   agentPanelRoster,
   agentPhaseStatusText,
+  agentWorkflowStatusText,
   canonicalSubagentIdentityKey,
+  isActiveSubagentStatus,
   type ThreadSubagentView,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
   summarizeAgentWorkflow,
+  type AgentPanelDirectGroup,
   type AgentPanelModel,
   type AgentPanelWorkflowGroup,
   type RuntimeSubagent,
@@ -41,6 +44,7 @@ import {
   AGENT_STATUS_VISUALS,
   AgentElapsed,
   AgentLabel,
+  AgentMonogramStack,
   AgentRosterProvider,
   AgentRow,
   AgentRowList,
@@ -362,6 +366,74 @@ function WorkflowSection({
   );
 }
 
+/**
+ * One turn's direct spawns. A lone spawn is just its row; a batch gets a
+ * collapsible header with the agents' monograms and its status, open while
+ * any agent works (or for the newest batch) until the user toggles it.
+ */
+function DirectSpawnGroupSection({
+  group,
+  newest,
+}: {
+  group: AgentPanelDirectGroup;
+  newest: boolean;
+}) {
+  const workingCount = group.agents.filter((agent) => isActiveSubagentStatus(agent.status)).length;
+  const failedCount = group.agents.filter((agent) => agent.status === "failed").length;
+  const [open, setOpen] = useState(() => workingCount > 0 || newest);
+  if (group.agents.length === 1) {
+    return <AgentRow agent={group.agents[0]!} />;
+  }
+  const totalTokens = group.agents.reduce((sum, agent) => sum + (agent.usage?.totalTokens ?? 0), 0);
+  const status = agentWorkflowStatusText({
+    live: workingCount > 0,
+    livePhase: null,
+    workingCount,
+    failedCount,
+  });
+  return (
+    <section data-direct-spawn-group={group.key}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-accent/30 focus-visible:ring-2 focus-visible:ring-ring/50"
+      >
+        <AgentMonogramStack agents={group.agents} />
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-[-0.01em]">
+          {group.agents.length} subagents
+        </span>
+        <span className="flex shrink-0 items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground/80 tabular-nums">
+          <span
+            className={cn(
+              workingCount > 0
+                ? "text-info-foreground"
+                : failedCount > 0 && "text-destructive-foreground",
+            )}
+          >
+            {status}
+          </span>
+          {totalTokens > 0 ? <span>· {formatSubagentTokenCount(totalTokens)} tok</span> : null}
+        </span>
+        <ChevronRightIcon
+          aria-hidden
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground transition-transform",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open ? (
+        <AgentRowList>
+          {group.agents.map((agent) => (
+            <AgentRow key={agent.id} agent={agent} />
+          ))}
+        </AgentRowList>
+      ) : null}
+    </section>
+  );
+}
+
 /** One agent's header and activity feed, inside the Agents surface. */
 function AgentDetailView({
   selected,
@@ -563,8 +635,12 @@ export function AgentsPanel({
                   Direct spawns
                 </div>
                 <AgentRowList>
-                  {model.directAgents.map((agent) => (
-                    <AgentRow key={agent.id} agent={agent} />
+                  {model.directGroups.map((group, index) => (
+                    <DirectSpawnGroupSection
+                      key={group.key}
+                      group={group}
+                      newest={index === model.directGroups.length - 1}
+                    />
                   ))}
                 </AgentRowList>
               </section>

@@ -29,15 +29,8 @@ import {
   timelineRowShowsMessage,
   type ContextHandoffTimelineEntry,
 } from "../../session-logic";
-import {
-  agentWorkflowStatusText,
-  emptyAgentPanelModel,
-  formatSubagentTokenCount,
-  isActiveSubagentStatus,
-  summarizeAgentWorkflow,
-  type AgentPanelModel,
-} from "../../threadWorkspaceViewModel";
-import { glassSurfaceClassName } from "../mobile/GlassSurface";
+import { emptyAgentPanelModel, type AgentPanelModel } from "../../threadWorkspaceViewModel";
+import { AgentSpawnRow } from "./AgentSpawnRow";
 import { type TurnDiffSummary } from "../../types";
 import { summarizeTurnDiffStats } from "../../lib/turnDiffTree";
 import ChatMarkdown from "../ChatMarkdown";
@@ -46,7 +39,6 @@ import {
   BotIcon,
   CheckIcon,
   ChevronDownIcon,
-  ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
   FileDiffIcon,
@@ -200,6 +192,7 @@ const TIMELINE_LIST_FOOTER = (
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
+const NOOP_OPEN_AGENT = (_agentId: string) => {};
 const EMPTY_THREAD_MESSAGE_SEARCH_OCCURRENCES_BY_MESSAGE_ID: ReadonlyMap<
   MessageId,
   ReadonlyArray<ThreadMessageSearchOccurrence>
@@ -216,6 +209,8 @@ const MESSAGE_ACTION_BUTTON_CLASS_NAME =
 interface MessagesTimelineProps {
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
+  /** Opens one agent in the Agents panel. */
+  onOpenAgent?: (agentId: string) => void;
   isWorking: boolean;
   activeTurnInProgress: boolean;
   activeTurnId?: TurnId | null;
@@ -284,6 +279,7 @@ interface MessagesTimelineProps {
 export const MessagesTimeline = memo(function MessagesTimeline({
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
   onOpenAgents = NOOP_OPEN_AGENTS,
+  onOpenAgent = NOOP_OPEN_AGENT,
   isWorking,
   activeTurnInProgress,
   activeTurnId,
@@ -813,6 +809,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         onOpenTurnDiff,
         onCloseDiff: onCloseDiff ?? NOOP_CLOSE_DIFF,
         onOpenAgents,
+        onOpenAgent,
         onOpenMessageActions,
         providerDriverKind,
         ...(onInspectContextHandoff ? { onInspectContextHandoff } : {}),
@@ -839,6 +836,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onCloseDiff,
       onOpenAgents,
+      onOpenAgent,
       onOpenMessageActions,
       onInspectContextHandoff,
     ],
@@ -1773,100 +1771,34 @@ const WorkGroupSection = memo(function WorkGroupSection({
 });
 
 /**
- * Spawn CTA: one anchored row per workflow run (or per-turn direct-spawn
- * batch). Live status is derived from the shared agent panel model at render
- * time — the row itself never carries a roster; the Agents panel is the only
- * roster. Freezes to past tense when every member settles. Static dot, no
- * animation.
+ * Spawn row: one anchored row per workflow run (or per-turn direct-spawn
+ * batch), derived from the shared agent panel model at render time. Its
+ * expansion persists per thread like a tool row's.
  */
 const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: TimelineWorkEntry }) {
   const { workEntry } = props;
   const { agentPanelModel } = use(TimelineStreamingCtx);
-  const { onOpenAgents } = use(TimelineStableCtx);
-  const spawn = workEntry.agentSpawn;
-  if (!spawn) {
+  const { routeThreadKey, onOpenAgents, onOpenAgent } = use(TimelineStableCtx);
+  const expanded = useUiStateStore(
+    (store) => store.threadWorkEntryExpandedById[routeThreadKey]?.[workEntry.id] ?? false,
+  );
+  const setExpanded = useUiStateStore((store) => store.setThreadWorkEntryExpanded);
+  const onExpandedChange = useCallback(
+    (next: boolean) => setExpanded(routeThreadKey, workEntry.id, next),
+    [routeThreadKey, setExpanded, workEntry.id],
+  );
+  if (!workEntry.agentSpawn) {
     return null;
   }
-
-  const memberIds = new Set(spawn.agentTaskIds);
-  const workflowGroup = spawn.workflowId
-    ? agentPanelModel.workflows.find((group) => group.workflow.id === spawn.workflowId)
-    : undefined;
-  // The coordinator's own status is authoritative for workflows: dynamic
-  // spawns mean the member list can be momentarily all-settled while the
-  // run is still mid-flight (summarizeAgentWorkflow owns that rule).
-  const workflow = workflowGroup ? summarizeAgentWorkflow(workflowGroup) : null;
-  const batch = workflow
-    ? null
-    : agentPanelModel.directAgents.filter((agent) => memberIds.has(agent.id));
-  const agentCount = Math.max(
-    workflow?.memberCount ?? batch?.length ?? 0,
-    Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
-  );
-  // One steady in-flight presentation: waiting and stalled agents read as
-  // working; only settled states differentiate.
-  const working =
-    workflow?.workingCount ??
-    batch?.filter((agent) => isActiveSubagentStatus(agent.status)).length ??
-    0;
-  const failed =
-    workflow?.failedCount ?? batch?.filter((agent) => agent.status === "failed").length ?? 0;
-  const live = workflow?.live ?? working > 0;
-  // Same rule as the panel footer: providers may aggregate member usage into
-  // the coordinator, so count the coordinator only when no members exist.
-  const totalTokens =
-    workflow?.totalTokens ??
-    batch?.reduce((sum, agent) => sum + (agent.usage?.totalTokens ?? 0), 0) ??
-    0;
-  const workflowName = workflow?.name ?? null;
-
-  const dotClass = live ? "bg-info" : failed > 0 ? "bg-destructive" : "bg-success";
-  const lead = live
-    ? `Kicked off ${agentCount} subagent${agentCount === 1 ? "" : "s"}`
-    : `Ran ${agentCount} subagent${agentCount === 1 ? "" : "s"}`;
-  const status = agentWorkflowStatusText({
-    live,
-    livePhase: workflow?.livePhase ?? null,
-    workingCount: working,
-    failedCount: failed,
-  });
-
   return (
-    <button
-      type="button"
-      onClick={onOpenAgents}
-      aria-label={live ? "Open the Agents panel" : "View agents"}
-      className={cn(
-        glassSurfaceClassName("chip"),
-        "group/agent-cta grid min-h-[36px] w-full grid-cols-[1.25rem_minmax(0,1fr)_auto_1.25rem] items-center gap-x-2 rounded-lg border border-border/50 px-2 text-left transition-colors hover:border-border/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-      )}
-    >
-      <span className="flex size-5 items-center justify-center">
-        <BotIcon
-          aria-hidden
-          className="size-3.5 text-muted-foreground/70 transition-colors group-hover/agent-cta:text-foreground"
-        />
-      </span>
-      <span className="flex min-w-0 items-center gap-2">
-        <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", dotClass)} />
-        <span className="truncate text-[12px] leading-5">
-          <span className="font-medium text-foreground/90">{lead}</span>
-          {workflowName ? <span className="text-muted-foreground"> · {workflowName}</span> : null}
-        </span>
-      </span>
-      <span className="flex shrink-0 items-center gap-2 text-[11px] leading-5 text-muted-foreground">
-        <span>{status}</span>
-        {totalTokens > 0 ? (
-          <span className="tabular-nums">{formatSubagentTokenCount(totalTokens)} tok</span>
-        ) : null}
-      </span>
-      <span className="flex size-5 items-center justify-center">
-        <ChevronRightIcon
-          aria-hidden
-          className="size-3.5 text-muted-foreground/60 transition-[color,translate] group-hover/agent-cta:translate-x-0.5 group-hover/agent-cta:text-foreground"
-        />
-      </span>
-    </button>
+    <AgentSpawnRow
+      spawn={workEntry.agentSpawn}
+      model={agentPanelModel}
+      expanded={expanded}
+      onExpandedChange={onExpandedChange}
+      onOpenAgents={onOpenAgents}
+      onOpenAgent={onOpenAgent}
+    />
   );
 });
 

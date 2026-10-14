@@ -709,6 +709,53 @@ function mergeCollabAgentStates(
   }
 }
 
+interface TaskAgentAliases {
+  /** Launching tool-use id → the task id of the one agent it started. */
+  readonly byLaunchTool: ReadonlyMap<string, string>;
+  /** Canonical subagent id (e.g. "claude-task:<id>") → its task id. */
+  readonly bySubagentId: ReadonlyMap<string, string>;
+}
+
+/**
+ * Claude reports one subagent through three streams under different ids: the
+ * Agent tool call (its tool-use id), task.* rows (the task id) and subagent.*
+ * rows ("claude-task:<task id>" carrying providerTaskId). Without aliasing
+ * them to the task id, one agent became up to three roster rows. Only ids a
+ * task row proves are aliased; a launch tool claimed by several tasks is left
+ * alone, since it may be a multi-agent spawn.
+ */
+function deriveTaskAgentAliases(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): TaskAgentAliases {
+  const taskIds = new Set<string>();
+  const launchTools = new Map<string, string | null>();
+  for (const activity of activities) {
+    const payload = payloadFromActivity(activity);
+    if (!isTaskAgentActivity(activity, payload)) continue;
+    const taskId = asTrimmedString(payload?.taskId);
+    if (!taskId) continue;
+    taskIds.add(taskId);
+    const toolUseId = asTrimmedString(payload?.toolUseId);
+    if (!toolUseId) continue;
+    const claimed = launchTools.get(toolUseId);
+    launchTools.set(toolUseId, claimed === undefined || claimed === taskId ? taskId : null);
+  }
+  const byLaunchTool = new Map<string, string>();
+  for (const [toolUseId, taskId] of launchTools) {
+    if (taskId !== null) byLaunchTool.set(toolUseId, taskId);
+  }
+  const bySubagentId = new Map<string, string>();
+  for (const activity of activities) {
+    const subagent = canonicalSubagentFromPayload(payloadFromActivity(activity));
+    const subagentId = asTrimmedString(subagent?.subagentId);
+    const taskId = asTrimmedString(subagent?.providerTaskId);
+    if (subagentId && taskId && subagentId !== taskId && taskIds.has(taskId)) {
+      bySubagentId.set(subagentId, taskId);
+    }
+  }
+  return { byLaunchTool, bySubagentId };
+}
+
 export function deriveThreadSubagents(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   options?: {
@@ -720,6 +767,7 @@ export function deriveThreadSubagents(
   const coordinationActivityIds = new Set<string>();
   const subagentKeyByActivityId = new Map<string, string>();
   const orderedActivities = [...activities].toSorted(compareActivitiesByOrder);
+  const aliases = deriveTaskAgentAliases(orderedActivities);
 
   for (const activity of orderedActivities) {
     const payload = payloadFromActivity(activity);
@@ -743,7 +791,13 @@ export function deriveThreadSubagents(
         : extractSubagentDetail(payload, asTrimmedString(activity.summary));
     const name = extractSubagentName(payload, detail);
     const explicitRole = asTrimmedString(payload?.role);
-    const canonicalSubagentId = extractCanonicalSubagentId(payload);
+    const rawSubagentId = extractCanonicalSubagentId(payload);
+    const toolCallId = extractToolCallId(payload);
+    const launchedTaskId =
+      rawSubagentId === null && toolCallId ? aliases.byLaunchTool.get(toolCallId) : undefined;
+    const canonicalSubagentId = rawSubagentId
+      ? (aliases.bySubagentId.get(rawSubagentId) ?? rawSubagentId)
+      : (launchedTaskId ?? null);
     const providerThreadIds = extractProviderThreadIds(payload);
     const providerSessionIds = extractProviderSessionIds(payload);
     const origin = extractSubagentOrigin(payload);
@@ -753,13 +807,15 @@ export function deriveThreadSubagents(
     const tool = extractSubagentTool(payload);
     const key = subagentKey({
       canonicalSubagentId,
-      toolCallId: extractToolCallId(payload),
+      toolCallId,
       name,
       detail,
       fallbackId: activity.id,
     });
     const existing = subagents.get(key);
-    const status = statusFromActivity(activity, payload);
+    // The launch tool reports the launch, not the child (a background agent's
+    // completes at once): the task rows alone own that agent's lifecycle.
+    const status = launchedTaskId ? null : statusFromActivity(activity, payload);
     subagentKeyByActivityId.set(activity.id, key);
 
     if (existing) {
@@ -850,7 +906,10 @@ export function deriveThreadSubagents(
       existing.entries.push(entry);
       // A Codex spawn tool completes after launch, while the child remains
       // pending/running. Its embedded agentsStates drive lifecycle above.
-      if (!isSpawnCollabTool(existing.tool)) {
+      // A lifecycle row already applied its own status above; its work entry
+      // reads "finished" for any non-error row, which would settle a running
+      // child on its first progress update.
+      if (!lifecycleKey && !isSpawnCollabTool(existing.tool)) {
         existing.status = applyStatus(existing.status, status);
       }
       existing.updatedAt = entry.createdAt;

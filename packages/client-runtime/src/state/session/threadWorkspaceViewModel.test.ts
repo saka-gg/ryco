@@ -734,6 +734,105 @@ describe("deriveThreadSubagents", () => {
     expect(c7First).toEqual(c3First);
     expect(c3First["subagent:c3"]).not.toBe(c3First["subagent:c7"]);
   });
+
+  it("folds a Claude Agent launch, its task rows and its subagent rows into one live agent", () => {
+    const subagent = (status: string | undefined, label: string, description: string) => ({
+      itemType: "collab_agent_tool_call",
+      ...(status ? { status } : {}),
+      detail: description,
+      subagent: {
+        subagentId: "claude-task:task-1",
+        origin: "native",
+        label,
+        description,
+        providerTaskId: "task-1",
+      },
+    });
+    const activities = [
+      makeActivity({
+        id: "launch-start",
+        kind: "tool.started",
+        createdAt: "2026-06-04T10:00:00.000Z",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "inProgress",
+          providerItemId: "toolu-1",
+          detail: "Agent: {}",
+          data: { toolName: "Agent", input: {} },
+        },
+      }),
+      makeActivity({
+        id: "subagent-start",
+        kind: "subagent.started",
+        createdAt: "2026-06-04T10:00:01.000Z",
+        payload: subagent("running", "local_agent", "Trace the worktree flow"),
+      }),
+      makeActivity({
+        id: "task-start",
+        kind: "task.started",
+        createdAt: "2026-06-04T10:00:01.000Z",
+        payload: {
+          taskId: "task-1",
+          agentKind: "agent",
+          taskType: "local_agent",
+          title: "Trace the worktree flow",
+          role: "Explore",
+          toolUseId: "toolu-1",
+        },
+      }),
+      // A background agent's launch tool completes while the agent works on.
+      makeActivity({
+        id: "launch-done",
+        kind: "tool.completed",
+        createdAt: "2026-06-04T10:00:02.000Z",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: "completed",
+          providerItemId: "toolu-1",
+          detail: "Agent: Trace the worktree flow",
+        },
+      }),
+      makeActivity({
+        id: "subagent-progress",
+        kind: "subagent.updated",
+        createdAt: "2026-06-04T10:00:03.000Z",
+        payload: subagent("running", "Read", "Reading apps/web/src/ChatView.tsx"),
+      }),
+    ];
+
+    const subagents = deriveThreadSubagents(activities);
+
+    expect(subagents).toHaveLength(1);
+    expect(subagents[0]).toMatchObject({ key: "subagent:task-1", status: "running" });
+  });
+
+  it("keeps a launch tool shared by several tasks unaliased", () => {
+    const task = (id: string, taskId: string) =>
+      makeActivity({
+        id,
+        kind: "task.started",
+        payload: { taskId, agentKind: "agent", title: taskId, toolUseId: "toolu-shared" },
+      });
+    const activities = [
+      makeActivity({
+        id: "launch",
+        kind: "tool.started",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          providerItemId: "toolu-shared",
+          detail: "Agent: fan out",
+        },
+      }),
+      task("task-a-start", "task-a"),
+      task("task-b-start", "task-b"),
+    ];
+
+    const keys = deriveThreadSubagents(activities).map((subagent) => subagent.key);
+
+    expect(keys).toContain("subagent:task-a");
+    expect(keys).toContain("subagent:task-b");
+    expect(keys).toContain("subagent:toolu-shared");
+  });
 });
 
 describe("findThreadSubagent", () => {

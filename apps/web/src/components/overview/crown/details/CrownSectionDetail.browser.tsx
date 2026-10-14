@@ -122,7 +122,7 @@ describe("CrownSectionDetail interactions", () => {
     await expect.element(page.getByRole("list", { name: "Phases" })).toBeVisible();
     // Running dots share the running phase fill's agent sky.
     const runningDot = container.querySelector<HTMLElement>(
-      '[data-agent-id="wf-audit:card"] .rounded-full',
+      '[data-agent-id="wf-audit:card"] [data-slot="agent-status-badge"]',
     )!;
     const runningFill = container.querySelector<HTMLElement>(
       '[data-tone="running"] [data-slot="crown-workflow-phase-fill"]',

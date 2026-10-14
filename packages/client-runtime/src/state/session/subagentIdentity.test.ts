@@ -6,6 +6,7 @@ import {
   resolveSubagentDisplayLabel,
   resolveSubagentDisplayLabels,
   splitSubagentLabelScope,
+  subagentMonogramInitials,
   subagentRoleDuplicatesLabel,
 } from "./subagentIdentity.ts";
 
@@ -84,5 +85,23 @@ describe("subagent identity", () => {
       scope: null,
       name: "https://example.com",
     });
+  });
+});
+
+describe("subagentMonogramInitials", () => {
+  it("skips a leading task verb and filler words while two words remain", () => {
+    expect(subagentMonogramInitials("Trace Ryco worktree flow")).toBe("RW");
+    expect(subagentMonogramInitials("Find the bug in the parser")).toBe("BP");
+    expect(subagentMonogramInitials("Review composer")).toBe("RC");
+  });
+
+  it("drops a workflow scope and keeps numbering", () => {
+    expect(subagentMonogramInitials("verify:implementor")).toBe("I");
+    expect(subagentMonogramInitials("Explore 2")).toBe("E2");
+    expect(subagentMonogramInitials("codeReviewer")).toBe("CR");
+  });
+
+  it("falls back to a placeholder for a label without letters", () => {
+    expect(subagentMonogramInitials("  ")).toBe("?");
   });
 });

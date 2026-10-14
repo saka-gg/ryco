@@ -94,6 +94,12 @@ export interface RuntimeSubagent {
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** Earliest retained observation, used for deterministic roster order. */
   readonly firstSeenAt: string;
+  /**
+   * The turn that launched this agent: the first start or progress row's
+   * turn. Later rows can carry other turns (a background agent settles after
+   * its turn ends), so this never moves once set.
+   */
+  readonly spawnTurnId: string | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly updatedAt: string;
@@ -292,6 +298,7 @@ interface MutableAgent {
   runHandles: SubagentRunHandles | null;
   recentActivity: ReadonlyArray<SubagentActivityEntry>;
   firstSeenAt: string;
+  spawnTurnId: string | null;
   startedAt: string | null;
   completedAt: string | null;
   updatedAt: string;
@@ -349,6 +356,7 @@ function getOrCreate(
     runHandles: null,
     recentActivity: [],
     firstSeenAt: at,
+    spawnTurnId: null,
     startedAt: null,
     completedAt: null,
     updatedAt: at,
@@ -539,6 +547,7 @@ export function foldSubagentActivities(
         // not the Agents surface (a "Run 12s stall" shell is not a subagent).
         if (isBackgroundTaskActivity(payload)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
+        agent.spawnTurnId ??= activity.turnId ?? null;
         const startsNewAttempt = fillMetadata(agent, payload);
         // Order-robustness: a start row arriving after a terminal state is a
         // late/out-of-order delivery and only fills metadata — it must not
@@ -570,6 +579,7 @@ export function foldSubagentActivities(
         const existed = agents.has(taskId);
         if (!existed && isBackgroundTaskActivity(payload)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
+        agent.spawnTurnId ??= activity.turnId ?? null;
         const startsNewAttempt = fillMetadata(agent, payload);
         if (agent.activationCount === 0) agent.activationCount = 1;
         const explicitStatus = asRuntimeStatus(payload.status);
@@ -747,9 +757,17 @@ export interface AgentPanelWorkflowGroup {
   readonly unphasedMembers: ReadonlyArray<RuntimeSubagent>;
 }
 
+/** Direct spawns launched together: one turn's batch, in spawn order. */
+export interface AgentPanelDirectGroup {
+  readonly key: string;
+  readonly agents: ReadonlyArray<RuntimeSubagent>;
+}
+
 export interface AgentPanelModel {
   readonly workflows: ReadonlyArray<AgentPanelWorkflowGroup>;
   readonly directAgents: ReadonlyArray<RuntimeSubagent>;
+  /** directAgents batched by spawn turn, groups in spawn order. */
+  readonly directGroups: ReadonlyArray<AgentPanelDirectGroup>;
   readonly runningCount: number;
   readonly waitingCount: number;
   readonly idleCount: number;
@@ -762,6 +780,7 @@ export interface AgentPanelModel {
 const EMPTY_PANEL_MODEL: AgentPanelModel = {
   workflows: [],
   directAgents: [],
+  directGroups: [],
   runningCount: 0,
   waitingCount: 0,
   idleCount: 0,
@@ -833,6 +852,7 @@ function runtimeSubagentFromTranscript(
       summary: bounded(entry.detail ?? entry.output ?? entry.label),
     })),
     firstSeenAt: subagent.startedAt,
+    spawnTurnId: null,
     startedAt: subagent.startedAt,
     completedAt: terminal ? subagent.updatedAt : null,
     updatedAt: subagent.updatedAt,
@@ -993,12 +1013,14 @@ export function deriveAgentPanelModel({
     totalTokens += agent.usage?.totalTokens ?? 0;
   }
 
+  // Updates and retention ranking must never reshuffle visible rows.
+  const directAgents = direct.toSorted(
+    (a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id),
+  );
   return {
     workflows: workflowGroups,
-    // Updates and retention ranking must never reshuffle visible rows.
-    directAgents: direct.toSorted(
-      (a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id),
-    ),
+    directAgents,
+    directGroups: groupDirectAgentsBySpawnTurn(directAgents),
     runningCount,
     waitingCount,
     idleCount,
@@ -1007,6 +1029,36 @@ export function deriveAgentPanelModel({
     hasAgents: true,
     liveCount: runningCount + waitingCount,
   };
+}
+
+/**
+ * Batches direct spawns by the turn that launched them, mirroring the chat's
+ * per-turn spawn rows. An agent without a spawn turn (older history) joins the
+ * newest batch that was still running when it appeared, else starts its own:
+ * it belongs to the running fleet, but a settled fleet never absorbs it.
+ */
+function groupDirectAgentsBySpawnTurn(
+  agents: ReadonlyArray<RuntimeSubagent>,
+): AgentPanelDirectGroup[] {
+  const groups: Array<{ key: string; agents: RuntimeSubagent[] }> = [];
+  const byKey = new Map<string, { key: string; agents: RuntimeSubagent[] }>();
+  const stillRunningAt = (group: { agents: RuntimeSubagent[] }, at: string) =>
+    group.agents.some((member) => member.completedAt === null || member.completedAt > at);
+  for (const agent of agents) {
+    let group = agent.spawnTurnId ? byKey.get(`turn:${agent.spawnTurnId}`) : undefined;
+    if (!group && !agent.spawnTurnId) {
+      const newest = groups.at(-1);
+      if (newest && stillRunningAt(newest, agent.firstSeenAt)) group = newest;
+    }
+    if (!group) {
+      const key = agent.spawnTurnId ? `turn:${agent.spawnTurnId}` : `task:${agent.id}`;
+      group = { key, agents: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.agents.push(agent);
+  }
+  return groups;
 }
 
 /** Every member of a workflow run: phase members in phase order, then unphased ones. */

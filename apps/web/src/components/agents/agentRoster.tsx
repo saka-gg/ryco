@@ -7,18 +7,33 @@
  * derives identities for the whole panel model once, so same-labelled agents
  * stay numbered apart wherever a row renders.
  */
-import { createContext, use, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  createContext,
+  use,
+  useEffect,
+  useMemo,
+  useRef,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { cn } from "~/lib/utils";
+import { subagentAvatarColor } from "../sidebar/SubagentAvatar";
 import {
   buildAgentRosterIdentity,
   resolveAgentRowIdentity,
   splitSubagentLabelScope,
+  subagentMonogramInitials,
   type AgentPanelModel,
   type AgentRosterIdentity,
   type RuntimeSubagent,
 } from "../../threadWorkspaceViewModel";
-import { agentActivityText, elapsedBetween, settledDuration } from "./agentRoster.logic";
+import {
+  agentActivityText,
+  elapsedBetween,
+  monogramInkColor,
+  settledDuration,
+} from "./agentRoster.logic";
 
 /**
  * Provider phases remain distinct, including resumable idle agents. `word` is
@@ -102,6 +117,12 @@ export function useAgentRowIdentity(agent: RuntimeSubagent): {
   return resolveAgentRowIdentity(agent, roster);
 }
 
+/** Resolves row labels for any number of agents under the nearest provider. */
+export function useAgentRowLabel(): (agent: RuntimeSubagent) => string {
+  const roster = use(AgentRosterContext);
+  return (agent) => resolveAgentRowIdentity(agent, roster).label;
+}
+
 export function AgentStatusDot({
   status,
   className,
@@ -117,6 +138,95 @@ export function AgentStatusDot({
         AGENT_STATUS_VISUALS[status].dotClass,
         className,
       )}
+    />
+  );
+}
+
+/**
+ * An agent's monogram: initials from its row label on a color keyed by its
+ * name (the title, so a label renumbered by a later namesake keeps its
+ * color), with its status as a corner badge.
+ */
+export function AgentMonogram({
+  agent,
+  label,
+  className,
+  style,
+}: {
+  agent: RuntimeSubagent;
+  label: string;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const color = subagentAvatarColor(agent.title || agent.id);
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "relative inline-flex size-[18px] shrink-0 items-center justify-center rounded-full text-[8px] font-semibold tracking-[0.02em] select-none",
+        className,
+      )}
+      style={{ ...style, backgroundColor: color, color: monogramInkColor(color) }}
+    >
+      {subagentMonogramInitials(label)}
+      <span
+        data-slot="agent-status-badge"
+        className={cn(
+          "absolute -right-0.5 -bottom-0.5 size-[7px] rounded-full ring-[1.5px] ring-background",
+          AGENT_STATUS_VISUALS[agent.status].dotClass,
+        )}
+      />
+    </span>
+  );
+}
+
+/** Overlapping monograms for a batch of agents; past `max`, a `+N` count. */
+export function AgentMonogramStack({
+  agents,
+  max = 4,
+  className,
+}: {
+  agents: ReadonlyArray<RuntimeSubagent>;
+  max?: number;
+  className?: string;
+}) {
+  const shown = agents.slice(0, Math.max(0, max));
+  const overflow = agents.length - shown.length;
+  return (
+    <span aria-hidden className={cn("flex shrink-0 items-center", className)}>
+      {shown.map((agent, index) => (
+        // Earlier monograms sit on top, so each status badge stays visible
+        // over the next monogram instead of under it.
+        <StackedMonogram
+          key={agent.id}
+          agent={agent}
+          first={index === 0}
+          layer={shown.length - index}
+        />
+      ))}
+      {overflow > 0 ? (
+        <span className="ml-1 font-mono text-[10px] text-muted-foreground/75">+{overflow}</span>
+      ) : null}
+    </span>
+  );
+}
+
+function StackedMonogram({
+  agent,
+  first,
+  layer,
+}: {
+  agent: RuntimeSubagent;
+  first: boolean;
+  layer: number;
+}) {
+  const { label } = useAgentRowIdentity(agent);
+  return (
+    <AgentMonogram
+      agent={agent}
+      label={label}
+      className={cn("ring-[1.5px] ring-background", !first && "-ml-0.5")}
+      style={{ zIndex: layer }}
     />
   );
 }
@@ -225,16 +335,16 @@ export function PhaseMemberDots({
 
 /**
  * Row geometry per density; updates never change a row's height.
- * - panel: two lines (label + time, then activity + role/run), 40px.
- * - compact: one line (label, activity, status word + time), 30px.
+ * - panel: monogram, then two lines (label + time, then activity + role/run), 40px.
+ * - compact: one line (monogram, label, activity, status word + time), 30px.
  * - mini: compact without the activity, for columns too narrow to show it.
  */
 const AGENT_ROW_GRID_CLASS = {
   panel:
-    "grid h-10 w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
+    "grid h-10 w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] grid-rows-[1.125rem_1rem] content-center items-center gap-x-2.5 rounded-md px-2 text-left",
   compact:
-    "grid h-[30px] w-full grid-cols-[0.375rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
-  mini: "grid h-[30px] w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+    "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,max-content)_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
+  mini: "grid h-[30px] w-full grid-cols-[1.125rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-2 text-left",
 } as const;
 
 export type AgentRowDensity = keyof typeof AGENT_ROW_GRID_CLASS;
@@ -268,7 +378,7 @@ export function AgentRow({
     content = (
       <>
         <span className="flex">
-          <AgentStatusDot status={agent.status} />
+          <AgentMonogram agent={agent} label={label} />
         </span>
         <AgentLabel label={label} className="text-[12px]" />
         {density === "compact" ? (
@@ -292,8 +402,8 @@ export function AgentRow({
       .join(" · ");
     content = (
       <>
-        <span className="col-start-1 row-start-1 flex">
-          <AgentStatusDot status={agent.status} />
+        <span className="col-start-1 row-span-2 row-start-1 flex">
+          <AgentMonogram agent={agent} label={label} />
         </span>
         <AgentLabel label={label} className="col-start-2 row-start-1" />
         <span className="col-start-3 row-start-1 inline-flex items-center justify-end gap-1.5 text-right font-mono text-[10.5px] text-muted-foreground/70">
