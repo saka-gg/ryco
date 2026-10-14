@@ -43,9 +43,9 @@ function phaseDotMax(phaseCount: number): number {
 type PhaseTone = "succeeded" | "failed" | "stopped" | "running" | "pending" | "skipped";
 
 function phaseTone(phase: AgentWorkflowPhase): PhaseTone {
-  if (phase.members.length === 0) return phase.state === "done" ? "skipped" : "pending";
+  if (phase.memberCount === 0) return phase.state === "done" ? "skipped" : "pending";
   if (phase.state !== "done") return phase.state;
-  if (phase.members.some((member) => member.status === "failed")) return "failed";
+  if (phase.failedCount > 0) return "failed";
   return phase.members.every((member) => member.status === "completed" || member.status === "idle")
     ? "succeeded"
     : "stopped";
@@ -55,7 +55,7 @@ function phaseTone(phase: AgentWorkflowPhase): PhaseTone {
 function phaseFill(phase: AgentWorkflowPhase, tone: PhaseTone): number {
   if (tone === "pending" || tone === "skipped") return 0;
   if (tone !== "running") return 1;
-  return Math.max(phase.settledCount / phase.members.length, RUNNING_PHASE_MIN_FILL);
+  return Math.max(phase.settledCount / phase.memberCount, RUNNING_PHASE_MIN_FILL);
 }
 
 const PHASE_FILL_CLASS: Record<PhaseTone, string> = {
@@ -112,7 +112,7 @@ function WorkflowPhase({ phase, dotMax }: { phase: AgentWorkflowPhase; dotMax: n
           aria-hidden
           className="h-2.5 min-w-0 truncate font-mono text-[9.5px] leading-2.5 text-muted-foreground/70 tabular-nums"
         >
-          {phase.members.length > 0 ? phase.members.length : ""}
+          {phase.memberCount > 0 ? phase.memberCount : ""}
         </span>
       )}
     </li>
