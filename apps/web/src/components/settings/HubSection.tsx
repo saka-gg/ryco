@@ -120,6 +120,7 @@ export function HubSection({
       online: machine.online,
       connected: machine.connectionState === "connected",
       accountE2ee: desktopWorkspace.accountE2ee,
+      isThisDevice: machine.environmentId === desktopWorkspace.localEnvironmentId,
     });
   const [snapshot, setSnapshot] = useState<HubSnapshot | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
@@ -908,64 +909,69 @@ export function HubSection({
           }
         >
           <DataList>
-            {desktopWorkspace.machines.map((machine) => (
-              <DataListItem
-                key={`${machine.nodeId ?? "unknown"}:${machine.environmentId}`}
-                term={machine.label}
-                action={
-                  <div className="flex flex-wrap justify-end gap-1.5">
-                    {machine.nodeId && trust(machine).verifyAction !== null ? (
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        onClick={() => {
-                          void beginDesktopMachineVerification({
-                            nodeId: machine.nodeId!,
-                            environmentId: machine.environmentId,
-                          });
-                        }}
-                      >
-                        {trust(machine).verifyAction === "verify-independently"
-                          ? "Verify independently"
-                          : "Verify"}
-                      </Button>
-                    ) : null}
-                    {(machine.nativeTrust === "verified" ||
-                      machine.nativeTrust === "account-trusted") &&
-                    machine.online ? (
-                      machine.connectionState === "connected" ? (
-                        <>
+            {desktopWorkspace.machines.map((machine) => {
+              const presentation = trust(machine);
+              return (
+                <DataListItem
+                  key={`${machine.nodeId ?? "unknown"}:${machine.environmentId}`}
+                  term={machine.label}
+                  action={
+                    <div className="flex flex-wrap justify-end gap-1.5">
+                      {machine.nodeId && presentation.verifyAction !== null ? (
+                        <Button
+                          size="xs"
+                          variant={
+                            presentation.verifyAction === "verify-independently"
+                              ? "ghost"
+                              : "outline"
+                          }
+                          onClick={() => {
+                            void beginDesktopMachineVerification({
+                              nodeId: machine.nodeId!,
+                              environmentId: machine.environmentId,
+                            });
+                          }}
+                        >
+                          {presentation.verifyAction === "verify-independently"
+                            ? "Verify independently"
+                            : "Verify"}
+                        </Button>
+                      ) : null}
+                      {presentation.connectionActions ? (
+                        machine.connectionState === "connected" ? (
+                          <>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => openDesktopMachine(machine.environmentId)}
+                            >
+                              Open
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => disconnectDesktopMachine(machine.environmentId)}
+                            >
+                              Disconnect
+                            </Button>
+                          </>
+                        ) : (
                           <Button
                             size="xs"
                             variant="outline"
-                            onClick={() => openDesktopMachine(machine.environmentId)}
+                            onClick={() => connectDesktopMachine(machine.environmentId)}
                           >
-                            Open
+                            Connect
                           </Button>
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            onClick={() => disconnectDesktopMachine(machine.environmentId)}
-                          >
-                            Disconnect
-                          </Button>
-                        </>
-                      ) : (
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          onClick={() => connectDesktopMachine(machine.environmentId)}
-                        >
-                          Connect
-                        </Button>
-                      )
-                    ) : null}
-                  </div>
-                }
-              >
-                {trust(machine).label}
-              </DataListItem>
-            ))}
+                        )
+                      ) : null}
+                    </div>
+                  }
+                >
+                  {presentation.label}
+                </DataListItem>
+              );
+            })}
           </DataList>
           {verificationTarget ? (
             <div className="mt-3 flex flex-col gap-2 border-t border-border/60 py-3 sm:flex-row">

@@ -376,37 +376,60 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
   readonly online: boolean;
   readonly connected: boolean;
   readonly accountE2ee: DesktopWorkspaceStateProjection["accountE2ee"];
-}): { readonly label: string; readonly verifyAction: "verify" | "verify-independently" | null } {
+  /**
+   * The machine this Desktop runs on. Desktop already holds its node's direct
+   * local connection, so the row offers neither a relay connection to itself
+   * nor a verification of itself.
+   */
+  readonly isThisDevice?: boolean;
+}): {
+  readonly label: string;
+  readonly verifyAction: "verify" | "verify-independently" | null;
+  readonly connectionActions: boolean;
+} {
+  if (input.isThisDevice === true) {
+    return {
+      label:
+        input.nativeTrust === "verified"
+          ? "Encrypted · Verified locally · This device"
+          : "This device",
+      verifyAction: null,
+      connectionActions: false,
+    };
+  }
   const presence = input.online ? (input.connected ? "Connected" : "Online") : "Offline";
+  const row = (
+    label: string,
+    verifyAction: "verify" | "verify-independently" | null,
+  ): ReturnType<typeof desktopWorkspaceMachineTrustPresentation> => ({
+    label,
+    verifyAction,
+    connectionActions:
+      input.online && (input.nativeTrust === "verified" || input.nativeTrust === "account-trusted"),
+  });
   switch (input.nativeTrust) {
     case "verified":
-      return { label: `Encrypted · Verified locally · ${presence}`, verifyAction: null };
+      return row(`Encrypted · Verified locally · ${presence}`, null);
     case "account-trusted":
-      return {
-        label: `Encrypted · Account trusted · ${presence}`,
-        verifyAction: input.online ? "verify-independently" : null,
-      };
+      return row(
+        `Encrypted · Account trusted · ${presence}`,
+        input.online ? "verify-independently" : null,
+      );
     case "identity-conflict":
-      return { label: "Identity changed · Locked", verifyAction: null };
+      return row("Identity changed · Locked", null);
     case "unverified":
     case "unknown":
     case "not-required":
       break;
   }
   if (input.accountE2ee === "securing") {
-    return {
-      label: input.online ? "Securing this device…" : "Securing this device… · Offline",
-      verifyAction: null,
-    };
+    return row(input.online ? "Securing this device…" : "Securing this device… · Offline", null);
   }
   if (input.accountE2ee === "revoked") {
-    return {
-      label: "This device was revoked on the Hub · Sign in again",
-      verifyAction: null,
-    };
+    return row("This device was revoked on the Hub · Sign in again", null);
   }
-  return {
-    label: input.online ? "Needs verification" : "Needs verification · Offline",
-    verifyAction: input.online ? "verify" : null,
-  };
+  return row(
+    input.online ? "Needs verification" : "Needs verification · Offline",
+    input.online ? "verify" : null,
+  );
 }

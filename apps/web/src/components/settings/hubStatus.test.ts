@@ -284,26 +284,45 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
     expect(present({ nativeTrust: "account-trusted", connected: true })).toEqual({
       label: "Encrypted · Account trusted · Connected",
       verifyAction: "verify-independently",
+      connectionActions: true,
     });
     expect(present({ nativeTrust: "account-trusted", online: false })).toEqual({
       label: "Encrypted · Account trusted · Offline",
       verifyAction: null,
+      connectionActions: false,
     });
     expect(present({ nativeTrust: "verified" })).toEqual({
       label: "Encrypted · Verified locally · Online",
       verifyAction: null,
+      connectionActions: true,
     });
-    expect(present({ nativeTrust: "identity-conflict" }).verifyAction).toBeNull();
+    expect(present({ nativeTrust: "identity-conflict" })).toMatchObject({
+      verifyAction: null,
+      connectionActions: false,
+    });
+  });
+
+  it("offers this Desktop's own machine neither a relay connection nor a verification", () => {
+    expect(present({ nativeTrust: "verified", isThisDevice: true })).toEqual({
+      label: "Encrypted · Verified locally · This device",
+      verifyAction: null,
+      connectionActions: false,
+    });
+    expect(
+      present({ nativeTrust: "unknown", isThisDevice: true, accountE2ee: "securing" }),
+    ).toEqual({ label: "This device", verifyAction: null, connectionActions: false });
   });
 
   it("does not offer the manual ceremony while this device is still being secured", () => {
     expect(present({ accountE2ee: "securing" })).toEqual({
       label: "Securing this device…",
       verifyAction: null,
+      connectionActions: false,
     });
     expect(present({ nativeTrust: "unknown", accountE2ee: "securing", online: false })).toEqual({
       label: "Securing this device… · Offline",
       verifyAction: null,
+      connectionActions: false,
     });
   });
 
@@ -311,6 +330,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
     expect(present({ accountE2ee: "revoked" })).toEqual({
       label: "This device was revoked on the Hub · Sign in again",
       verifyAction: null,
+      connectionActions: false,
     });
   });
 
@@ -319,11 +339,13 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       expect(present({ accountE2ee })).toEqual({
         label: "Needs verification",
         verifyAction: "verify",
+        connectionActions: false,
       });
     }
     expect(present({ accountE2ee: "unavailable", online: false })).toEqual({
       label: "Needs verification · Offline",
       verifyAction: null,
+      connectionActions: false,
     });
   });
 });
