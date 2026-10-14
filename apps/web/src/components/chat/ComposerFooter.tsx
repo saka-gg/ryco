@@ -438,9 +438,6 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         claudeCache={props.claudeCacheObservation}
         account={props.contextWindowAccount}
       />
-      {props.isPreparingWorktree ? (
-        <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
-      ) : null}
       <ComposerPrimaryActions
         compact={props.compact}
         pendingAction={props.pendingAction}

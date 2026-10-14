@@ -1,5 +1,9 @@
 import { ProjectId } from "@ryco/contracts";
-import { projectScriptRuntimeEnv, setupProjectScript } from "@ryco/shared/projectScripts";
+import {
+  projectScriptRuntimeEnv,
+  projectSetupTerminalId,
+  setupProjectScript,
+} from "@ryco/shared/projectScripts";
 import { Effect, Layer, Option } from "effect";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -39,7 +43,7 @@ const makeProjectSetupScriptRunner = Effect.gen(function* () {
         } as const;
       }
 
-      const terminalId = input.preferredTerminalId ?? `setup-${script.id}`;
+      const terminalId = input.preferredTerminalId ?? projectSetupTerminalId(script.id);
       const cwd = input.worktreePath;
       const env = projectScriptRuntimeEnv({
         project: { cwd: project.workspaceRoot },

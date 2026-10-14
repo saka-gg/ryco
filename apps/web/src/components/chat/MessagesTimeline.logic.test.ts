@@ -2686,3 +2686,84 @@ describe("HTML renders in the timeline", () => {
     expect(after?.kind === "html-render" ? after.htmlRender.heights : null).toEqual([[760, 300]]);
   });
 });
+
+describe("first-send worktree launch rows", () => {
+  const userEntry = {
+    id: "user-entry",
+    kind: "message" as const,
+    createdAt: "2026-01-01T00:00:00Z",
+    message: {
+      id: "user-1" as never,
+      role: "user" as const,
+      text: "Set up the feature",
+      turnId: null,
+      createdAt: "2026-01-01T00:00:00Z",
+      streaming: false,
+    },
+  };
+
+  it("keeps the working row up to report a failed setup", () => {
+    const base = {
+      timelineEntries: [userEntry],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    };
+    expect(deriveMessagesTimelineRows(base).map((row) => row.kind)).toEqual(["message"]);
+    expect(
+      deriveMessagesTimelineRows({ ...base, showSetupRow: true }).map((row) => row.kind),
+    ).toEqual(["message", "working"]);
+  });
+
+  it("counts the launched turn from the send, through its setup", () => {
+    const turnId = TurnId.make("turn-1");
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry,
+        {
+          id: "assistant-thought-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:12Z",
+          message: {
+            id: "assistant-thought" as never,
+            role: "assistant",
+            text: "Looking around.",
+            turnId,
+            createdAt: "2026-01-01T00:00:12Z",
+            completedAt: "2026-01-01T00:00:13Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "assistant-final-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:20Z",
+          message: {
+            id: "assistant-final" as never,
+            role: "assistant",
+            text: "Done.",
+            turnId,
+            createdAt: "2026-01-01T00:00:20Z",
+            completedAt: "2026-01-01T00:00:30Z",
+            streaming: false,
+          },
+        },
+      ],
+      latestTurn: {
+        turnId,
+        state: "completed",
+        startedAt: "2026-01-01T00:00:10Z",
+        completedAt: "2026-01-01T00:00:30Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      launchTurnDurationStart: "2026-01-01T00:00:00Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    const fold = rows.find((row) => row.kind === "turn-fold");
+    expect(fold?.kind === "turn-fold" ? fold.durationStart : null).toBe("2026-01-01T00:00:00Z");
+    expect(fold?.kind === "turn-fold" ? fold.label : null).toBe("Worked for 30s");
+  });
+});

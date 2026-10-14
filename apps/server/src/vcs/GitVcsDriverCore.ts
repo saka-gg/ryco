@@ -694,12 +694,23 @@ const createTrace2Monitor = Effect.fn("createTrace2Monitor")(function* (
   };
 });
 
+const GIT_CHECKOUT_PROGRESS_LINE = /^Updating files:\s+(\d{1,3})%/;
+
+/** The percentage of a `git checkout` meter line (`Updating files:  78% (2104/2700)`). */
+export function parseGitCheckoutProgressPercent(line: string): number | null {
+  const match = GIT_CHECKOUT_PROGRESS_LINE.exec(line);
+  if (!match) return null;
+  const percent = Number(match[1]);
+  return Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
+}
+
 const collectOutput = Effect.fn("collectOutput")(function* <E>(
   input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
   stream: Stream.Stream<Uint8Array, E>,
   maxOutputBytes: number,
   truncateOutputAtMaxBytes: boolean,
   onLine: ((line: string) => Effect.Effect<void, never>) | undefined,
+  splitAtCarriageReturn = false,
 ): Effect.fn.Return<{ readonly text: string; readonly truncated: boolean }, GitCommandError> {
   const decoder = new TextDecoder();
   let bytes = 0;
@@ -707,15 +718,31 @@ const collectOutput = Effect.fn("collectOutput")(function* <E>(
   let lineBuffer = "";
   let truncated = false;
 
+  // The index that ends the next line. A bare `\r` ends one only when asked,
+  // and one at the end of the buffer waits: the next chunk may start with
+  // the `\n` that makes it a plain line break.
+  const nextLineBreak = (): number => {
+    if (!splitAtCarriageReturn) return lineBuffer.indexOf("\n");
+    for (let index = 0; index < lineBuffer.length; index += 1) {
+      const character = lineBuffer[index];
+      if (character === "\n") return index;
+      if (character === "\r") {
+        if (index + 1 === lineBuffer.length) return -1;
+        return lineBuffer[index + 1] === "\n" ? index + 1 : index;
+      }
+    }
+    return -1;
+  };
+
   const emitCompleteLines = Effect.fn("emitCompleteLines")(function* (flush: boolean) {
-    let newlineIndex = lineBuffer.indexOf("\n");
+    let newlineIndex = nextLineBreak();
     while (newlineIndex >= 0) {
       const line = lineBuffer.slice(0, newlineIndex).replace(/\r$/, "");
       lineBuffer = lineBuffer.slice(newlineIndex + 1);
       if (line.length > 0 && onLine) {
         yield* onLine(line);
       }
-      newlineIndex = lineBuffer.indexOf("\n");
+      newlineIndex = nextLineBreak();
     }
 
     if (flush) {
@@ -982,6 +1009,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               maxOutputBytes,
               truncateOutputAtMaxBytes,
               input.progress?.onStderrLine,
+              input.progress?.splitStderrAtCarriageReturn === true,
             ),
             child.exitCode.pipe(
               Effect.mapError(toGitCommandError(commandInput, "failed to report exit code.")),
@@ -2698,6 +2726,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // the critical path before the first turn exists. A prefetch of the same
       // base (the composer asks for one when it enters worktree mode) stands in
       // for it while running or recently finished; a failed one is retried here.
+      yield* input.progress?.onFetchStarted?.() ?? Effect.void;
       const prefetch = reusableWorktreeBasePrefetch(worktreeBaseKey(input.cwd, baseRef));
       const prefetched = prefetch
         ? yield* Fiber.join(prefetch.fiber).pipe(Effect.option)
@@ -2705,6 +2734,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const baseBranch = Option.isSome(prefetched)
         ? prefetched.value
         : yield* fetchWorktreeBase(input.cwd, baseRef);
+      yield* (
+        input.progress?.onFetchFinished?.({
+          reused: Option.isSome(prefetched),
+          branch: baseBranch,
+        }) ?? Effect.void
+      );
       // Fully qualified refs prevent a same-named local branch from winning.
       baseRef = `refs/remotes/origin/${baseBranch}`;
     }
@@ -2759,6 +2794,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const args = input.newRefName
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, baseRef]
       : ["worktree", "add", worktreePath, baseRef];
+    const onCheckoutProgress = input.progress?.onCheckoutProgress;
 
     return yield* Effect.scoped(
       Effect.gen(function* () {
@@ -2792,6 +2828,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }
               yield* recoverSetup(input.cwd, worktreePath);
               const repositoryPath = yield* worktreeRepositoryIdentity(input.cwd);
+              yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
               // Persist journal and mutation ownership before Git can register a
               // checkout. A cancelled child leaves an uncertain guard for inspection.
               yield* Effect.uninterruptibleMask((restore) =>
@@ -2801,6 +2838,22 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                     restore(
                       executeGit("GitVcsDriver.createWorktree", input.cwd, args, {
                         fallbackErrorMessage: "git worktree add failed",
+                        ...(onCheckoutProgress
+                          ? {
+                              // Git prints its checkout meter to a pipe only once
+                              // the delay passes; zero makes every update visible.
+                              env: { GIT_PROGRESS_DELAY: "0" },
+                              progress: {
+                                splitStderrAtCarriageReturn: true,
+                                onStderrLine: (line: string) => {
+                                  const percent = parseGitCheckoutProgressPercent(line);
+                                  return percent === null
+                                    ? Effect.void
+                                    : onCheckoutProgress(percent);
+                                },
+                              },
+                            }
+                          : {}),
                       }),
                     ),
                   ),

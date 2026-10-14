@@ -35,6 +35,7 @@ import {
   WorktreeId,
   DEVICE_WS_METHODS,
   WS_METHODS,
+  WORKTREE_SETUP_CANCELLED_MESSAGE,
   WsHostedRpcGroup,
   WsRpcGroup,
   EditorId,
@@ -42,10 +43,12 @@ import {
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
 import {
+  Cause,
   Deferred,
   DateTime,
   Duration,
   Effect,
+  Exit,
   Fiber,
   FileSystem,
   Layer,
@@ -7839,6 +7842,193 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         worktreePath: fixture.worktreePath,
       });
       assertTrue(dispatchedCommands.every((command) => command.type !== "thread.delete"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const bootstrapWorktreeTurnStart = (input: {
+    readonly threadId: ThreadId;
+    readonly projectCwd: string;
+    readonly createdAt: string;
+  }): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+    type: "thread.turn.start",
+    commandId: CommandId.make(`cmd-${input.threadId}`),
+    threadId: input.threadId,
+    message: {
+      messageId: MessageId.make(`msg-${input.threadId}`),
+      role: "user",
+      text: "hello",
+      attachments: [],
+    },
+    modelSelection: defaultModelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    bootstrap: {
+      createThread: {
+        projectId: defaultProjectId,
+        title: "Bootstrap Thread",
+        modelSelection: defaultModelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "main",
+        worktreePath: null,
+        createdAt: input.createdAt,
+      },
+      prepareWorktree: {
+        projectCwd: input.projectCwd,
+        baseBranch: "origin/main",
+        fetchOrigin: true,
+        branch: "ryco/bootstrap-refName",
+      },
+      runSetupScript: true,
+    },
+    createdAt: input.createdAt,
+  });
+
+  it.effect("publishes a first send's worktree setup stages to a subscriber", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
+      const threadId = ThreadId.make("thread-bootstrap-progress");
+      const createWorktree = vi.fn(
+        (input: Parameters<GitVcsDriver.GitVcsDriverShape["createWorktree"]>[0]) =>
+          Effect.gen(function* () {
+            yield* input.progress?.onFetchStarted?.() ?? Effect.void;
+            yield* (
+              input.progress?.onFetchFinished?.({ reused: true, branch: "main" }) ?? Effect.void
+            );
+            yield* input.progress?.onCheckoutStarted?.() ?? Effect.void;
+            yield* input.progress?.onCheckoutProgress?.(50) ?? Effect.void;
+            return {
+              worktree: { refName: "ryco/bootstrap-refName", path: fixture.worktreePath },
+            };
+          }),
+      );
+      yield* buildAppUnderTest({
+        config: fixture.config,
+        layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
+          gitVcsDriver: { createWorktree },
+          orchestrationEngine: {
+            dispatch: () => Effect.succeed({ sequence: 1 }),
+            readEvents: () => Stream.empty,
+          },
+          projectSetupScriptRunner: {
+            runForThread: () => Effect.succeed({ status: "no-script" as const }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const snapshots = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+              bootstrapWorktreeTurnStart({
+                threadId,
+                projectCwd: fixture.projectCwd,
+                createdAt: new Date().toISOString(),
+              }),
+            );
+            // A finished setup stays readable for a late subscriber (a client
+            // that reconnected): it gets the settled snapshot first.
+            return yield* client[WS_METHODS.subscribeWorktreeSetup]({ threadId }).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+            );
+          }),
+        ),
+      );
+
+      const final = snapshots.at(-1);
+      assert.equal(final?.status, "done");
+      assert.deepEqual(
+        final?.stages.map((stage) => [stage.id, stage.status, stage.detail ?? null]),
+        [
+          ["fetch", "done", "prefetched"],
+          ["checkout", "done", null],
+          ["setup-script", "skipped", null],
+          ["agent", "done", null],
+        ],
+      );
+      assert.equal(final?.stages[1]?.percent, 100);
+      assert.equal(final?.branch, "ryco/bootstrap-refName");
+      assert.equal(final?.worktreePath, fixture.worktreePath);
+      assert.equal(final?.baseRef, "origin/main");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cancels a first send's worktree setup and removes its checkout", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeAuthorizedBootstrapFixture();
+      const threadId = ThreadId.make("thread-bootstrap-cancel");
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const checkoutEntered = yield* Deferred.make<void>();
+      const checkoutRelease = yield* Deferred.make<void>();
+      const createWorktree = vi.fn(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(checkoutEntered, undefined);
+          yield* Deferred.await(checkoutRelease);
+          return {
+            worktree: { refName: "ryco/bootstrap-refName", path: fixture.worktreePath },
+          };
+        }),
+      );
+      const removeWorktree = vi.fn(
+        (_input: Parameters<GitVcsDriver.GitVcsDriverShape["removeWorktree"]>[0]) => Effect.void,
+      );
+      const deleteBranch = vi.fn(
+        (_input: Parameters<GitVcsDriver.GitVcsDriverShape["deleteBranch"]>[0]) => Effect.void,
+      );
+      yield* buildAppUnderTest({
+        config: fixture.config,
+        layers: {
+          projectionSnapshotQuery: fixture.projectionSnapshotQuery,
+          gitVcsDriver: { createWorktree, removeWorktree, deleteBranch },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const { exit, cancelResult, lateCancel } = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const send = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+              bootstrapWorktreeTurnStart({
+                threadId,
+                projectCwd: fixture.projectCwd,
+                createdAt: new Date().toISOString(),
+              }),
+            ).pipe(Effect.exit, Effect.forkScoped);
+            yield* Deferred.await(checkoutEntered);
+            const cancelResult = yield* client[WS_METHODS.vcsCancelWorktreeSetup]({ threadId });
+            yield* Deferred.succeed(checkoutRelease, undefined);
+            const exit = yield* Fiber.join(send);
+            const lateCancel = yield* client[WS_METHODS.vcsCancelWorktreeSetup]({ threadId });
+            return { exit, cancelResult, lateCancel };
+          }),
+        ),
+      );
+
+      assert.deepEqual(cancelResult, { cancelled: true });
+      assert.deepEqual(lateCancel, { cancelled: false });
+      assertTrue(Exit.isFailure(exit));
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause);
+        assert.equal(
+          error instanceof Error ? error.message : String(error),
+          WORKTREE_SETUP_CANCELLED_MESSAGE,
+        );
+      }
+      // Nothing was published: the draft keeps its message.
+      assert.deepEqual(dispatchedCommands, []);
+      assert.equal(removeWorktree.mock.calls[0]?.[0].path, fixture.worktreePath);
+      assert.equal(deleteBranch.mock.calls[0]?.[0].refName, "ryco/bootstrap-refName");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

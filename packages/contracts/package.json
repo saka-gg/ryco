@@ -166,6 +166,11 @@
       "import": "./src/worktree.ts",
       "require": "./src/worktree.ts"
     },
+    "./worktree-setup": {
+      "types": "./src/worktreeSetup.ts",
+      "import": "./src/worktreeSetup.ts",
+      "require": "./src/worktreeSetup.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts",

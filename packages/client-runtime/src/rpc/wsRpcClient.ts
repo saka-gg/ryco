@@ -4,6 +4,7 @@ import type {
   GitRunStackedActionResult,
   VcsStatusResult,
   VcsStatusStreamEvent,
+  WorktreeSetupSnapshot,
   LocalApi,
   OpinionatedPluginCheckInput,
   OpinionatedPluginInstallInput,
@@ -288,6 +289,12 @@ export interface WsRpcClient {
     ) => () => void;
     readonly listRefs: RpcUnaryMethod<typeof WS_METHODS.vcsListRefs>;
     readonly prefetchWorktreeBase: RpcUnaryMethod<typeof WS_METHODS.vcsPrefetchWorktreeBase>;
+    readonly onWorktreeSetup: (
+      input: RpcInput<typeof WS_METHODS.subscribeWorktreeSetup>,
+      listener: (snapshot: WorktreeSetupSnapshot) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    readonly cancelWorktreeSetup: RpcUnaryMethod<typeof WS_METHODS.vcsCancelWorktreeSetup>;
     readonly createWorktree: RpcUnaryMethod<typeof WS_METHODS.vcsCreateWorktree>;
     readonly removeWorktree: RpcUnaryMethod<typeof WS_METHODS.vcsRemoveWorktree>;
     readonly createRef: RpcUnaryMethod<typeof WS_METHODS.vcsCreateRef>;
@@ -795,6 +802,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       listRefs: (input) => transport.request((client) => client[WS_METHODS.vcsListRefs](input)),
       prefetchWorktreeBase: (input) =>
         transport.request((client) => client[WS_METHODS.vcsPrefetchWorktreeBase](input)),
+      onWorktreeSetup: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.subscribeWorktreeSetup](input),
+          listener,
+          { ...options, tag: WS_METHODS.subscribeWorktreeSetup },
+        ),
+      cancelWorktreeSetup: (input) =>
+        transport.request((client) => client[WS_METHODS.vcsCancelWorktreeSetup](input)),
       createWorktree: (input) =>
         transport.request((client) => client[WS_METHODS.vcsCreateWorktree](input)),
       removeWorktree: (input) =>

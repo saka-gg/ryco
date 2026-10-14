@@ -40,6 +40,14 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { truncate } from "@ryco/shared/String";
 import { webAttachmentCodec } from "../platform/attachmentCodec";
+import { readWorktreeLaunch } from "@ryco/client-runtime/state/worktree-setup";
+import {
+  beginWorktreeLaunch,
+  forgetWorktreeLaunch,
+  handOffWorktreeLaunch,
+  settleFailedWorktreeLaunch,
+  worktreeLaunchKey as worktreeLaunchKeyFor,
+} from "../components/chat/worktreeLaunch/worktreeLaunchSend";
 
 import type { ComposerImageAttachment, DraftId } from "../composerDraftStore";
 import type { ChatMessage } from "../types";
@@ -208,6 +216,11 @@ export interface ExecuteChatSendTurnInput {
   onSendError?: (error: unknown) => void;
   /** Stable client id; queued sends reuse the id assigned at enqueue time. */
   messageId?: MessageId;
+  /**
+   * Sends this message again under the same id, after its new worktree failed
+   * to set up. Without it a failed setup can only hand the message back.
+   */
+  resendFailedWorktreeLaunch?: (messageId: MessageId) => Promise<boolean>;
   composer: SendTurnComposerSnapshot;
   thread: SendTurnThreadContext;
   worktree: SendTurnWorktreePlan;
@@ -425,6 +438,32 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
   beginLocalDispatch({
     preparingWorktree: Boolean(worktree.baseBranchForWorktree),
   });
+  const messageIdForSend = input.messageId ?? newMessageId();
+  // A new message sent past a failed setup replaces the message it kept.
+  const failedLaunch = readWorktreeLaunch(
+    worktreeLaunchKeyFor(draft.environmentId, thread.threadId),
+  );
+  if (failedLaunch?.phase === "failed" && failedLaunch.messageId !== messageIdForSend) {
+    removeOptimisticUserMessage(setOptimisticUserMessages, failedLaunch.messageId);
+    forgetWorktreeLaunch(failedLaunch.key);
+  }
+  // A draft's first send into a new worktree: its setup is shown live, from
+  // this frame on, and survives the draft view being replaced by the thread's.
+  const worktreeLaunchKey =
+    thread.isLocalDraftThread &&
+    worktree.shouldCreateWorktree &&
+    !worktree.shouldMaterializeLegacyBranchWorktree &&
+    worktree.baseBranchForWorktree !== null &&
+    !input.prepareForDispatch
+      ? beginWorktreeLaunch({
+          api,
+          environmentId: draft.environmentId,
+          threadId: thread.threadId,
+          messageId: messageIdForSend,
+          baseRef: worktree.baseBranchForWorktree,
+          fetchOrigin: worktree.fetchOrigin ?? false,
+        })
+      : null;
 
   const imagesSnapshot = [...composer.images];
   const terminalContextsSnapshot = [...composer.sendableTerminalContexts];
@@ -436,7 +475,6 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     terminalContexts: refs.composerTerminalContextsRef.current,
   };
 
-  const messageIdForSend = input.messageId ?? newMessageId();
   const messageCreatedAt = new Date().toISOString();
   const outgoingMessageText = buildOutgoingMessageText({
     composer,
@@ -464,17 +502,22 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       previewUrl: image.previewUrl,
     }));
 
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        createdAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
+    setOptimisticUserMessages((existing) =>
+      // A retried launch resends the message its failure kept on screen.
+      existing.some((message) => message.id === messageIdForSend)
+        ? existing
+        : [
+            ...existing,
+            {
+              id: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+              createdAt: messageCreatedAt,
+              streaming: false,
+            },
+          ],
+    );
     scroll.scrollToEndAfterOptimistic();
 
     const consumeDraft =
@@ -679,6 +722,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
       persistThreadSettingsForNextTurn: persistSettingsDeps.persistThreadSettingsForNextTurn,
     });
     turnStartSucceeded = true;
+    if (worktreeLaunchKey) handOffWorktreeLaunch(worktreeLaunchKey);
     if (!composerCleared && !input.preserveComposerDraft) {
       // A prompt edit preserves the draft, but accepted uploads cannot be sent
       // under a new command. Keep additions and replacements made during prep.
@@ -697,21 +741,43 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     }
   } catch (err: unknown) {
     input.onSendError?.(err);
-    if (composerCleared) {
-      rollbackSendTurn({
-        refs,
-        composerHandle,
-        dispatch: { setOptimisticUserMessages },
-        draft,
-        messageId: messageIdForSend,
-        promptSnapshot: composer.promptForRestore ?? composer.prompt,
-        imagesSnapshot,
-        terminalContextsSnapshot,
+    const restoreComposer = () => {
+      // A resent launch never cleared the composer, but its message still
+      // belongs back there when the launch is given up.
+      if (composerCleared || worktreeLaunchKey) {
+        rollbackSendTurn({
+          refs,
+          composerHandle,
+          dispatch: { setOptimisticUserMessages },
+          draft,
+          messageId: messageIdForSend,
+          promptSnapshot: composer.promptForRestore ?? composer.prompt,
+          imagesSnapshot,
+          terminalContextsSnapshot,
+        });
+      }
+      // The rollback leaves a composer the user typed into meanwhile alone.
+      removeOptimisticUserMessage(setOptimisticUserMessages, messageIdForSend);
+    };
+    if (worktreeLaunchKey) {
+      // The setup's own row reports the failure (or a stop): no thread error.
+      const resend = input.resendFailedWorktreeLaunch;
+      settleFailedWorktreeLaunch({
+        key: worktreeLaunchKey,
+        error: err,
+        retry: {
+          messageId: messageIdForSend,
+          resend: resend ? () => resend(messageIdForSend) : async () => false,
+          restore: restoreComposer,
+        },
       });
     } else {
-      removeOptimisticUserMessage(setOptimisticUserMessages, messageIdForSend);
+      restoreComposer();
+      setThreadError(
+        thread.threadId,
+        err instanceof Error ? err.message : "Failed to send message.",
+      );
     }
-    setThreadError(thread.threadId, err instanceof Error ? err.message : "Failed to send message.");
   } finally {
     refs.sendInFlightRef.current = false;
     if (!turnStartSucceeded) resetLocalDispatch();

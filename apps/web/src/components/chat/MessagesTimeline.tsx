@@ -56,6 +56,7 @@ import {
   HammerIcon,
   type LucideIcon,
   PencilIcon,
+  RotateCcwIcon,
   SearchIcon,
   TerminalIcon,
   Undo2Icon,
@@ -64,6 +65,24 @@ import {
 } from "lucide-react";
 import { Button } from "../ui/button";
 import { MessageAttachments } from "./MessageAttachments";
+import {
+  isWorktreeLaunchSettingUp,
+  resolveWorktreeSetupScriptChip,
+  type WorktreeSetupScriptChip,
+} from "@ryco/client-runtime/state/worktree-setup";
+import { isReducedMotionEffective } from "~/themes/appearancePreferences";
+import { RollingText } from "./RollingText";
+import {
+  SetupDoneGlyph,
+  SetupFailedGlyph,
+  SetupRunningGlyph,
+  WorktreeSetupCard,
+} from "./worktreeLaunch/WorktreeSetupCard";
+import {
+  EnteringMessageIdCtx,
+  WorktreeSetupTimelineCtx,
+  type WorktreeSetupTimelineState,
+} from "./worktreeLaunch/WorktreeSetupTimelineContext";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { HtmlRenderCards } from "./HtmlRenderCards";
 import { HtmlRenderOpenerProvider } from "./HtmlRenderDialog";
@@ -275,6 +294,12 @@ interface MessagesTimelineProps {
   onForkFromMessage?: (request: TimelineForkRequest, trigger: HTMLButtonElement) => void;
   /** Driver of the thread's provider; its mark animates on the live turn header. */
   providerDriverKind?: ProviderDriverKind | null;
+  /** A first send's worktree setup, which the working row presents. */
+  worktreeSetup?: WorktreeSetupTimelineState | null;
+  /** See `deriveMessagesTimelineRows`' `launchTurnDurationStart`. */
+  launchTurnDurationStart?: string | null;
+  /** The user message a first send just placed; it rises in. */
+  enteringMessageId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +351,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onInspectContextHandoff,
   onForkFromMessage,
   providerDriverKind = null,
+  worktreeSetup = null,
+  launchTurnDurationStart = null,
+  enteringMessageId = null,
 }: MessagesTimelineProps) {
   usePerfMark("MessagesTimeline");
   // The frozen phone tier gets nothing new: no fork action, no fork divider.
@@ -372,7 +400,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         turnFoldExpandedById,
         workGroupExpandedById,
         isWorking,
+        showSetupRow: worktreeSetup?.launch.phase === "failed",
         activeTurnStartedAt,
+        launchTurnDurationStart,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId: revertTurnCountRef.current,
         undoTurnCountByTurnId: undoTurnCountRef.current,
@@ -393,7 +423,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       turnFoldExpandedById,
       workGroupExpandedById,
       isWorking,
+      worktreeSetup?.launch.phase,
       activeTurnStartedAt,
+      launchTurnDurationStart,
       turnDiffSummaryByAssistantMessageId,
     ],
   );
@@ -866,59 +898,63 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineStableProvider value={stableState}>
       <TimelineStreamingCtx.Provider value={streamingState}>
-        <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
-          <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
-            <LegendList<MessagesTimelineRow>
-              ref={listRef}
-              data={rows}
-              keyExtractor={keyExtractor}
-              getItemType={timelineRowItemType}
-              renderItem={renderItem}
-              estimatedItemSize={56}
-              recycleItems={false}
-              initialScrollAtEnd={initialScrollOffset === undefined}
-              {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
-              maintainScrollAtEnd={liveFollowEnabled}
-              maintainScrollAtEndThreshold={0.1}
-              maintainVisibleContentPosition
-              onScroll={handleScroll}
-              // The transcript scrolls without a visible scrollbar. Hiding it
-              // also removes the gutter entirely, so the content column no longer
-              // shifts when overflow appears — which is what `scrollbar-gutter:
-              // stable` used to reserve space for.
-              className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
-              ListHeaderComponent={listHeader}
-              ListFooterComponent={TIMELINE_LIST_FOOTER}
-            />
-            <TimelineMinimap
-              hasPersistentGutter={minimapHasPersistentGutter}
-              hitStripWidth={minimapHitStripWidth}
-              items={minimapItems}
-              stripMap={minimapStripMap}
-              onSelect={(item) => {
-                markManualScrollIntent();
-                onManualNavigation?.();
-                void listRef.current?.scrollToIndex({
-                  index: item.rowIndex,
-                  animated: true,
-                  viewOffset: 24,
-                });
-              }}
-            />
-          </div>
-          <MessageActionsSheet
-            target={messageActionsRequest}
-            onOpenChange={(open) => {
-              if (!open) setMessageActionsRequest(null);
-            }}
-            revertDisabled={isRevertingCheckpoint || isWorking}
-            onRevert={() => {
-              if (messageActionsRequest) {
-                onRevertUserMessage(messageActionsRequest.messageId);
-              }
-            }}
-          />
-        </HtmlRenderOpenerProvider>
+        <WorktreeSetupTimelineCtx.Provider value={worktreeSetup}>
+          <EnteringMessageIdCtx.Provider value={enteringMessageId}>
+            <HtmlRenderOpenerProvider onOpenInPanel={onOpenHtmlRender}>
+              <div ref={setTimelineViewportElement} className="relative h-full min-h-0">
+                <LegendList<MessagesTimelineRow>
+                  ref={listRef}
+                  data={rows}
+                  keyExtractor={keyExtractor}
+                  getItemType={timelineRowItemType}
+                  renderItem={renderItem}
+                  estimatedItemSize={56}
+                  recycleItems={false}
+                  initialScrollAtEnd={initialScrollOffset === undefined}
+                  {...(initialScrollOffset === undefined ? {} : { initialScrollOffset })}
+                  maintainScrollAtEnd={liveFollowEnabled}
+                  maintainScrollAtEndThreshold={0.1}
+                  maintainVisibleContentPosition
+                  onScroll={handleScroll}
+                  // The transcript scrolls without a visible scrollbar. Hiding it
+                  // also removes the gutter entirely, so the content column no longer
+                  // shifts when overflow appears — which is what `scrollbar-gutter:
+                  // stable` used to reserve space for.
+                  className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+                  ListHeaderComponent={listHeader}
+                  ListFooterComponent={TIMELINE_LIST_FOOTER}
+                />
+                <TimelineMinimap
+                  hasPersistentGutter={minimapHasPersistentGutter}
+                  hitStripWidth={minimapHitStripWidth}
+                  items={minimapItems}
+                  stripMap={minimapStripMap}
+                  onSelect={(item) => {
+                    markManualScrollIntent();
+                    onManualNavigation?.();
+                    void listRef.current?.scrollToIndex({
+                      index: item.rowIndex,
+                      animated: true,
+                      viewOffset: 24,
+                    });
+                  }}
+                />
+              </div>
+              <MessageActionsSheet
+                target={messageActionsRequest}
+                onOpenChange={(open) => {
+                  if (!open) setMessageActionsRequest(null);
+                }}
+                revertDisabled={isRevertingCheckpoint || isWorking}
+                onRevert={() => {
+                  if (messageActionsRequest) {
+                    onRevertUserMessage(messageActionsRequest.messageId);
+                  }
+                }}
+              />
+            </HtmlRenderOpenerProvider>
+          </EnteringMessageIdCtx.Provider>
+        </WorktreeSetupTimelineCtx.Provider>
       </TimelineStreamingCtx.Provider>
     </TimelineStableProvider>
   );
@@ -1190,6 +1226,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   // fields), so it re-renders on streaming transitions as before. The merged
   // object is local — it does not propagate through any context boundary.
   const ctx = { ...use(TimelineStableCtx), ...use(TimelineStreamingCtx) };
+  const enteringMessageId = use(EnteringMessageIdCtx);
   // Phone tier: long-press on a message bubble opens the message action
   // sheet with the same copy/revert actions as the desktop hover row.
   const isPhoneTier = usePresentationTier() === "phone";
@@ -1284,6 +1321,9 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         (row.kind === "message" && row.message.role === "assistant") ||
           (row.kind === "html-render" && row.forkFrom !== undefined)
           ? "group/assistant"
+          : null,
+        row.kind === "message" && row.message.id === enteringMessageId
+          ? "worktree-setup-enter"
           : null,
       )}
       data-timeline-row-id={row.id}
@@ -1620,6 +1660,8 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
  * "Thinking" line so an agent that has not emitted yet reads as busy.
  */
 function PendingWorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
+  const worktreeSetup = use(WorktreeSetupTimelineCtx);
+  if (worktreeSetup) return <WorktreeLaunchWorkingRow row={row} setup={worktreeSetup} />;
   return (
     <div className="pt-1 pb-2">
       <div className={cn(TURN_FOLD_LABEL_CLASS_NAME, "flex h-[30px] items-center gap-2")}>
@@ -1640,6 +1682,241 @@ function PendingWorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
         />
         <span className="shimmer thinking-status-shimmer">Thinking</span>
       </div>
+    </div>
+  );
+}
+
+// A thread view that mounts this soon after the hand-off (it replaces the
+// draft's view) plays the hand-off from the setup state instead of past it.
+const WORKTREE_HANDOFF_REPLAY_MS = 1_000;
+// The card unfolds on send; a view mounted later shows it as it is.
+const WORKTREE_SEND_UNFOLD_MS = 600;
+// A finished setup script's chip shows its outcome this long, then fades.
+const SETUP_SCRIPT_CHIP_HOLD_MS = 1_500;
+const SETUP_SCRIPT_CHIP_FADE_MS = 300;
+
+/** Holds the first state through one painted frame, so a transition can start from it. */
+function usePaintedOnce(): boolean {
+  const [painted, setPainted] = useState(false);
+  useEffect(() => {
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => setPainted(true));
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, []);
+  return painted;
+}
+
+function WorktreeForkGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="6" cy="5" r="2.2" />
+      <circle cx="18" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <path d="M6 7.2v9.6M18 7.2v2.3a3 3 0 0 1-3 3H9a3 3 0 0 0-3 3" />
+    </svg>
+  );
+}
+
+function SetupScriptChip({
+  chip,
+  onOpenTerminal,
+}: {
+  chip: WorktreeSetupScriptChip;
+  onOpenTerminal: ((terminalId: string) => void) | undefined;
+}) {
+  const finishedAtMs = chip.finishedAt === null ? null : Date.parse(chip.finishedAt);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (finishedAtMs === null) return;
+    const timers = [
+      SETUP_SCRIPT_CHIP_HOLD_MS,
+      SETUP_SCRIPT_CHIP_HOLD_MS + SETUP_SCRIPT_CHIP_FADE_MS,
+    ]
+      .map((at) => finishedAtMs + at - Date.now())
+      .filter((delay) => delay > 0)
+      .map((delay) => window.setTimeout(() => setNowMs(Date.now()), delay));
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [finishedAtMs]);
+  const sinceFinishedMs = finishedAtMs === null ? null : nowMs - finishedAtMs;
+  if (
+    sinceFinishedMs !== null &&
+    sinceFinishedMs >= SETUP_SCRIPT_CHIP_HOLD_MS + SETUP_SCRIPT_CHIP_FADE_MS
+  ) {
+    return null;
+  }
+  const terminalId = chip.terminalId;
+  return (
+    <button
+      type="button"
+      className="worktree-setup-chip ml-auto inline-flex cursor-pointer items-center gap-[5px] rounded-full border border-border bg-background px-2 py-0.5 text-[11.5px] text-muted-foreground hover:text-foreground disabled:cursor-default"
+      style={{
+        opacity: sinceFinishedMs !== null && sinceFinishedMs >= SETUP_SCRIPT_CHIP_HOLD_MS ? 0 : 1,
+      }}
+      disabled={terminalId === null || !onOpenTerminal}
+      onClick={terminalId ? () => onOpenTerminal?.(terminalId) : undefined}
+      aria-label={`Setup script ${chip.name}: ${chip.status}`}
+    >
+      <span key={chip.status} className="worktree-setup-pop grid place-items-center">
+        {chip.status === "running" ? (
+          <SetupRunningGlyph />
+        ) : chip.status === "failed" ? (
+          <span className="text-destructive">
+            <SetupFailedGlyph />
+          </span>
+        ) : (
+          <SetupDoneGlyph />
+        )}
+      </span>
+      <span>{chip.name}</span>
+    </button>
+  );
+}
+
+/**
+ * The working row of a first send that sets up a worktree. One header carries
+ * the whole wait: it reads "Setting up worktree…" above the stage card from the
+ * send on, then rolls in place to "Working" when the agent takes over while
+ * its timer keeps counting from the send. The card folds away, a setup script
+ * still running shrinks to a chip, and the reserved row below becomes
+ * "Thinking". Nothing above the reply moves.
+ */
+function WorktreeLaunchWorkingRow({
+  row,
+  setup,
+}: {
+  row: Extract<TimelineRow, { kind: "working" }>;
+  setup: WorktreeSetupTimelineState;
+}) {
+  const { launch, actions } = setup;
+  const settingUp = isWorktreeLaunchSettingUp(launch);
+  const failed = launch.phase === "failed";
+  const [motion] = useState(() => {
+    const nowMs = Date.now();
+    if (isReducedMotionEffective()) return "none" as const;
+    if (
+      launch.phase === "handed-off" &&
+      launch.handedOffAtMs !== null &&
+      nowMs - launch.handedOffAtMs < WORKTREE_HANDOFF_REPLAY_MS
+    ) {
+      return "replay-handoff" as const;
+    }
+    if (settingUp && nowMs - launch.startedAtMs < WORKTREE_SEND_UNFOLD_MS) return "unfold" as const;
+    return "none" as const;
+  });
+  const painted = usePaintedOnce();
+  const showsSetup = settingUp || (motion === "replay-handoff" && !painted);
+  const cardOpen = (showsSetup || failed) && !(motion === "unfold" && !painted);
+  // The row once showed the setup, so "Thinking" arrives as the hand-off.
+  const [hadSetup, setHadSetup] = useState(showsSetup);
+  if (showsSetup && !hadSetup) setHadSetup(true);
+
+  const label = failed
+    ? "Worktree setup failed"
+    : launch.phase === "cancelling"
+      ? "Cancelling setup…"
+      : showsSetup
+        ? "Setting up worktree…"
+        : "Working";
+  const mark = failed ? "failed" : showsSetup ? "fork" : "provider";
+  const chip = showsSetup ? null : resolveWorktreeSetupScriptChip(launch);
+
+  return (
+    <div
+      className="pt-1 pb-2"
+      data-testid="worktree-setup-row"
+      data-worktree-launch-phase={launch.phase}
+    >
+      <div
+        className={cn(
+          TURN_FOLD_LABEL_CLASS_NAME,
+          "flex h-[30px] items-center gap-2",
+          failed && "text-destructive",
+        )}
+      >
+        <span className="worktree-setup-mark relative grid size-4 shrink-0 place-items-center">
+          <span data-shown={mark === "fork"} className="absolute grid place-items-center">
+            <WorktreeForkGlyph />
+          </span>
+          <span data-shown={mark === "provider"} className="absolute grid place-items-center">
+            <TurnFoldMark running />
+          </span>
+          <span data-shown={mark === "failed"} className="absolute grid place-items-center">
+            <SetupFailedGlyph size={14} />
+          </span>
+        </span>
+        <span aria-live="polite" className="min-w-0">
+          <RollingText
+            text={label}
+            {...(failed ? {} : { itemClassName: "shimmer thinking-status-shimmer" })}
+          />
+          {!failed && row.createdAt ? (
+            <span className="ml-1.5 text-muted-foreground/50">
+              <WorkingTimer createdAt={row.createdAt} />
+            </span>
+          ) : null}
+        </span>
+        {chip ? <SetupScriptChip chip={chip} onOpenTerminal={actions.onOpenTerminal} /> : null}
+      </div>
+      {launch.feedUnavailable ? null : (
+        <div
+          className="worktree-setup-collapse"
+          data-open={cardOpen ? "true" : "false"}
+          inert={cardOpen ? undefined : true}
+        >
+          <div>
+            <WorktreeSetupCard launch={launch} actions={actions} />
+          </div>
+        </div>
+      )}
+      {failed ? (
+        <div className="worktree-setup-enter mt-1.5 ml-6 flex items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
+          <CircleAlertIcon className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">Worktree setup failed — your message is kept.</span>
+          <Button size="xs" variant="outline" onClick={actions.onWorkLocally}>
+            Work locally
+          </Button>
+          <Button size="xs" variant="outline" onClick={actions.onRetry}>
+            <RotateCcwIcon className="size-3" aria-hidden />
+            Retry
+          </Button>
+        </div>
+      ) : (
+        <div className="relative flex h-[30px] items-center pl-[26px] text-[13px] text-muted-foreground/70">
+          {showsSetup ? null : (
+            <span key="thinking" className="contents">
+              <span
+                aria-hidden
+                className="chapter-node-live absolute top-[10px] left-[2.5px] size-2.5 rounded-full bg-background shadow-[inset_0_0_0_1.5px_var(--color-foreground)]"
+              />
+              <span
+                className={cn(
+                  "shimmer thinking-status-shimmer",
+                  hadSetup && "worktree-setup-enter",
+                )}
+              >
+                Thinking
+              </span>
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

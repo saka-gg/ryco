@@ -1429,7 +1429,7 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
-  it("shows the send state once bootstrap dispatch is in flight", async () => {
+  it("keeps the worktree setup on screen while the bootstrap dispatch is in flight", async () => {
     useTerminalStateStore.setState({
       terminalStateByThreadKey: {},
     });
@@ -1490,8 +1490,15 @@ describe("ChatView Workspace (full app)", () => {
           expect(
             wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
           ).toBe(true);
-          expect(document.querySelector('button[aria-label="Sending"]')).toBeTruthy();
-          expect(document.querySelector('button[aria-label="Preparing worktree"]')).toBeNull();
+          // The node sets the worktree up inside this command: the setup row
+          // holds the wait, and the send's primary action stops it.
+          const setupRow = document.querySelector('[data-testid="worktree-setup-row"]');
+          expect(setupRow?.getAttribute("data-worktree-launch-phase")).toBe("preparing");
+          expect(setupRow?.textContent).toContain("Setting up worktree…");
+          // This node serves no setup feed, so there are no stages to list.
+          expect(document.querySelector('[data-testid="worktree-setup-card"]')).toBeNull();
+          expect(document.querySelector('button[aria-label="Stop generation"]')).toBeTruthy();
+          expect(document.querySelector('button[aria-label="Sending"]')).toBeNull();
         },
         { timeout: 8_000, interval: 16 },
       );

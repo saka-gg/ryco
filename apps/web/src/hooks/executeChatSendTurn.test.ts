@@ -8,8 +8,11 @@ import {
   ProviderInstanceId,
   type ServerConfig,
   ThreadId,
+  WORKTREE_SETUP_CANCELLED_MESSAGE,
 } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { useWorktreeLaunchStore } from "@ryco/client-runtime/state/worktree-setup";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { readWorktreeLaunchRetry } from "../components/chat/worktreeLaunch/worktreeLaunchSend";
 
 import { DraftId } from "../composerDraftStore";
 import {
@@ -1167,5 +1170,126 @@ describe("background send options", () => {
       input.thread.threadId,
       "Provider unavailable",
     );
+  });
+});
+
+describe("first send into a new worktree", () => {
+  const LAUNCH_KEY = "env-1:thread-launch";
+  const makeLaunchInput = () => {
+    const { input, dispatchCommand } = makeSendInput();
+    let messages: ChatMessage[] = [];
+    input.thread = {
+      ...input.thread,
+      threadId: ThreadId.make("thread-launch"),
+      isFirstMessage: true,
+      isServerThread: false,
+      isLocalDraftThread: true,
+      activeThreadBranch: "main",
+    };
+    input.worktree = {
+      shouldMaterializeLegacyBranchWorktree: false,
+      baseBranchForWorktree: "origin/main",
+      shouldCreateWorktree: true,
+      fetchOrigin: true,
+    };
+    input.refs.promptRef.current = "Continue with Claude";
+    const unsubscribe = vi.fn();
+    const onWorktreeSetup = vi.fn(() => unsubscribe);
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: {
+        getConfig: async () => ({ environment: { capabilities: {} } }) as ServerConfig,
+        getSettings: async () => ({ worktreeBranchPrefix: "ryco" }),
+      },
+      vcs: { onWorktreeSetup },
+    } as never;
+    input.dispatch.setOptimisticUserMessages = vi.fn((update) => {
+      messages = update(messages);
+    });
+    return { input, dispatchCommand, onWorktreeSetup, readMessages: () => messages };
+  };
+  const launch = () => useWorktreeLaunchStore.getState().launchesByKey[LAUNCH_KEY] ?? null;
+
+  afterEach(() => {
+    useWorktreeLaunchStore.getState().remove(LAUNCH_KEY);
+  });
+
+  it("shows the setup from the send and hands it to the turn the node started", async () => {
+    const { input, onWorktreeSetup } = makeLaunchInput();
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.dispatch.beginLocalDispatch).toHaveBeenCalledWith({ preparingWorktree: true });
+    expect(onWorktreeSetup).toHaveBeenCalledWith(
+      { threadId: ThreadId.make("thread-launch") },
+      expect.any(Function),
+      expect.any(Object),
+    );
+    expect(launch()).toMatchObject({
+      phase: "handed-off",
+      baseRef: "origin/main",
+      fetchOrigin: true,
+    });
+  });
+
+  it("keeps the message on a failed setup and sends it again under the same id", async () => {
+    const { input, dispatchCommand, readMessages } = makeLaunchInput();
+    dispatchCommand.mockRejectedValueOnce(
+      new OrchestrationDispatchCommandError({ message: "fatal: could not lock ref" }),
+    );
+    const resend = vi.fn(async () => true);
+    input.resendFailedWorktreeLaunch = resend;
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(launch()).toMatchObject({ phase: "failed", error: "fatal: could not lock ref" });
+    const [kept] = readMessages();
+    expect(kept?.text).toBe("Continue with Claude");
+    // The setup's own row reports it: no thread error toast.
+    expect(input.dispatch.setThreadError).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+    );
+
+    await readWorktreeLaunchRetry(LAUNCH_KEY)?.resend();
+    expect(resend).toHaveBeenCalledWith(kept?.id);
+
+    readWorktreeLaunchRetry(LAUNCH_KEY)?.restore();
+    expect(readMessages()).toEqual([]);
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+  });
+
+  it("returns the draft as it was when the user stopped the setup", async () => {
+    const { input, dispatchCommand, readMessages } = makeLaunchInput();
+    dispatchCommand.mockImplementationOnce(async () => {
+      useWorktreeLaunchStore.getState().requestCancel(LAUNCH_KEY);
+      throw new OrchestrationDispatchCommandError({ message: WORKTREE_SETUP_CANCELLED_MESSAGE });
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+    expect(launch()).toBeNull();
+    expect(readMessages()).toEqual([]);
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    expect(input.dispatch.setThreadError).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+    );
+  });
+
+  it("drops the failed message when a new one is sent instead", async () => {
+    const { input, dispatchCommand, readMessages } = makeLaunchInput();
+    dispatchCommand.mockRejectedValueOnce(new Error("fatal: could not lock ref"));
+    await executeChatSendTurn(input);
+    const failedMessageId = readMessages()[0]?.id;
+
+    input.refs.promptRef.current = "Try again, differently";
+    input.composer = { ...input.composer, prompt: "Try again, differently" };
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(readMessages().map((message) => message.id)).not.toContain(failedMessageId);
+    expect(readMessages()).toHaveLength(1);
+    expect(launch()?.phase).toBe("handed-off");
   });
 });

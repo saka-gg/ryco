@@ -397,7 +397,9 @@ async function commitSendTurnDispatchOnce(sendInput: CommitSendTurnDispatchInput
     await revalidateClaudeResumeBeforeCommit(input, reviewed.guard);
   }
   if (reviewed || input.bootstrap?.requireWorktree) input.assertMutationReady?.();
-  input.beginLocalDispatch({ preparingWorktree: false });
+  // A worktree bootstrap prepares the checkout inside the command itself, so
+  // the send stays "preparing" until the node answers.
+  input.beginLocalDispatch({ preparingWorktree: Boolean(input.bootstrap?.prepareWorktree) });
   input.onBeforeTurnStart?.();
   const startTurn = (bootstrap: SendTurnBootstrap, commandId: CommandId) =>
     dispatchTurnStart(input, reviewed?.guard, bootstrap, commandId);
