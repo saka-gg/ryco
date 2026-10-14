@@ -2,6 +2,7 @@ import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 
 import type { HostedHubApi } from "@ryco/client-runtime/authorization";
 import { HostedHubApiError } from "@ryco/client-runtime/authorization";
+import type { NativeE2eeEnrollmentRecovery } from "@ryco/client-runtime/authorization/e2ee";
 import type { NativeE2eePlatformService } from "@ryco/client-runtime/platform";
 import { derSignatureToRaw, encodeBase64Url } from "@ryco/client-runtime/relay";
 import {
@@ -34,6 +35,7 @@ function coordinator(input: {
   readonly nativeE2eePlatform?: NativeE2eePlatformService;
   readonly allowsBackgroundNodeClaim?: () => boolean;
   readonly beforeInteractiveNodeClaim?: () => void | Promise<void>;
+  readonly nativeE2eeRecovery?: NativeE2eeEnrollmentRecovery;
 }) {
   return new DesktopHostedIdentityCoordinator({
     origin: "https://hub.example.test",
@@ -59,7 +61,34 @@ function coordinator(input: {
     ...(input.nativeE2eePlatform === undefined
       ? {}
       : { nativeE2eePlatform: input.nativeE2eePlatform }),
+    ...(input.nativeE2eeRecovery === undefined
+      ? {}
+      : { nativeE2eeRecovery: input.nativeE2eeRecovery }),
   });
+}
+
+function activeEnrollmentSummary(
+  request: Parameters<HostedHubApi["upsertE2eeDeviceEnrollment"]>[0],
+): Awaited<ReturnType<HostedHubApi["upsertE2eeDeviceEnrollment"]>> {
+  return {
+    enrollmentId: request.enrollmentId,
+    enrollmentRevision: 1,
+    accountAuthEpoch: 1,
+    deviceAuthEpoch: 1,
+    platform: request.platform,
+    appVersion: request.appVersion,
+    reportedKeyBacking: request.reportedKeyBacking,
+    deviceLabel: request.deviceLabel,
+    identityFingerprint: request.identityFingerprint,
+    agreementFingerprint: request.agreementFingerprint,
+    clientPrekeyCertificateDigest: request.clientPrekeyCertificateDigest,
+    certificateExpiresAt: request.certificateExpiresAt,
+    status: "active",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    lastUsedAt: null,
+    revokedAt: null,
+  } as Awaited<ReturnType<HostedHubApi["upsertE2eeDeviceEnrollment"]>>;
 }
 
 function rawP256(key: KeyObject): Uint8Array {
@@ -337,6 +366,54 @@ describe("Desktop hosted identity coordinator", () => {
       status: "unavailable",
       errorCode: "enrollment_unavailable",
     });
+  });
+
+  it("retries a failed enrollment on its own and publishes the live account trust", async () => {
+    const accountId = `acct_${"a".repeat(22)}`;
+    const upsertE2eeDeviceEnrollment = vi
+      .fn<HostedHubApi["upsertE2eeDeviceEnrollment"]>()
+      .mockRejectedValueOnce(new HostedHubApiError("hub_unavailable", 503))
+      .mockImplementation(async (request) => activeEnrollmentSummary(request));
+    const scheduled: Array<() => void> = [];
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: accountId } }),
+        upsertE2eeDeviceEnrollment,
+        listNodes: vi.fn().mockResolvedValue([]),
+      },
+      setup: vi.fn().mockResolvedValue({ nodeId: "node-local", localNodeHandle: "local" }),
+      nativeE2eePlatform: enrollmentPlatform(vi.fn(async () => undefined)),
+      nativeE2eeRecovery: {
+        timers: {
+          setTimeout: (callback) => {
+            scheduled.push(callback);
+            return scheduled.length as unknown as ReturnType<typeof setTimeout>;
+          },
+          clearTimeout: () => undefined,
+        },
+        isForeground: () => true,
+        subscribeForeground: () => () => undefined,
+      },
+    });
+    const changes = vi.fn();
+    identity.subscribeNativeE2eeEnrollment(changes);
+
+    const status = await identity.resume();
+    expect(status).not.toHaveProperty("accountE2eeReady");
+    expect(identity.accountE2eeState(accountId)).toBe("unavailable");
+    expect(scheduled).toHaveLength(1);
+
+    scheduled[0]!();
+    expect(identity.accountE2eeState(accountId)).toBe("securing");
+    await vi.waitFor(() => expect(identity.accountE2eeState(accountId)).toBe("ready"));
+    expect(identity.accountE2eeState(`acct_${"b".repeat(22)}`)).toBe("securing");
+    expect(changes).toHaveBeenCalled();
+    // Owners manage their other machines' settings; the Hub caps this at the
+    // account's real role on each node.
+    expect(upsertE2eeDeviceEnrollment).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestedMaximumRole: "owner" }),
+    );
   });
 
   it("upgrades a concurrent background resume when the user chooses Connect", async () => {

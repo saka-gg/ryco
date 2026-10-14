@@ -94,6 +94,7 @@ export function projectDesktopWorkspaceState(
     ),
     queuedEnvironmentIds: state.queuedEnvironmentIds,
     activeConnectionCount: state.demand.connections.filter((entry) => entry.connected).length,
+    ...(state.accountE2ee === null ? {} : { accountE2ee: state.accountE2ee }),
   };
 }
 

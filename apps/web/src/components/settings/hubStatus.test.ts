@@ -6,7 +6,11 @@ import {
   type HubIdentitySummary,
 } from "@ryco/contracts";
 
-import { canEditHubOrigin, presentHubStatus } from "./hubStatus.ts";
+import {
+  canEditHubOrigin,
+  desktopWorkspaceMachineTrustPresentation,
+  presentHubStatus,
+} from "./hubStatus.ts";
 
 const NOW = Date.parse("2026-07-26T12:00:00.000Z");
 
@@ -261,5 +265,65 @@ describe("canEditHubOrigin", () => {
     // Fail-safe: an unreadable store may still hold an identity, and re-pointing
     // it would strand the node in a permanent origin mismatch.
     expect(canEditHubOrigin(identity("unknown"))).toBe(false);
+  });
+});
+
+describe("desktopWorkspaceMachineTrustPresentation", () => {
+  const present = (
+    input: Partial<Parameters<typeof desktopWorkspaceMachineTrustPresentation>[0]>,
+  ) =>
+    desktopWorkspaceMachineTrustPresentation({
+      nativeTrust: "unverified",
+      online: true,
+      connected: false,
+      accountE2ee: "ready",
+      ...input,
+    });
+
+  it("labels account and local trust with presence", () => {
+    expect(present({ nativeTrust: "account-trusted", connected: true })).toEqual({
+      label: "Encrypted · Account trusted · Connected",
+      verifyAction: "verify-independently",
+    });
+    expect(present({ nativeTrust: "account-trusted", online: false })).toEqual({
+      label: "Encrypted · Account trusted · Offline",
+      verifyAction: null,
+    });
+    expect(present({ nativeTrust: "verified" })).toEqual({
+      label: "Encrypted · Verified locally · Online",
+      verifyAction: null,
+    });
+    expect(present({ nativeTrust: "identity-conflict" }).verifyAction).toBeNull();
+  });
+
+  it("does not offer the manual ceremony while this device is still being secured", () => {
+    expect(present({ accountE2ee: "securing" })).toEqual({
+      label: "Securing this device…",
+      verifyAction: null,
+    });
+    expect(present({ nativeTrust: "unknown", accountE2ee: "securing", online: false })).toEqual({
+      label: "Securing this device… · Offline",
+      verifyAction: null,
+    });
+  });
+
+  it("points a revoked device at sign-in rather than at a pairing request", () => {
+    expect(present({ accountE2ee: "revoked" })).toEqual({
+      label: "This device was revoked on the Hub · Sign in again",
+      verifyAction: null,
+    });
+  });
+
+  it("keeps manual verification as the recovery path once enrollment failed", () => {
+    for (const accountE2ee of ["unavailable", undefined] as const) {
+      expect(present({ accountE2ee })).toEqual({
+        label: "Needs verification",
+        verifyAction: "verify",
+      });
+    }
+    expect(present({ accountE2ee: "unavailable", online: false })).toEqual({
+      label: "Needs verification · Offline",
+      verifyAction: null,
+    });
   });
 });

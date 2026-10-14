@@ -1,4 +1,6 @@
 import type {
+  DesktopWorkspaceMachineProjection,
+  DesktopWorkspaceStateProjection,
   HubConnectorStatus,
   HubConnectorFailureCode,
   HubIdentitySummary,
@@ -355,4 +357,56 @@ export function presentHubStatus(
  */
 export function canEditHubOrigin(identity: HubIdentitySummary): boolean {
   return identity.enrolled === "none";
+}
+
+/**
+ * How one Desktop workspace machine row reads, and whether it offers the
+ * manual verification ceremony.
+ *
+ * An unpinned remote machine is account-trusted once this installation's Hub
+ * enrollment is ready. Until then it is not "unverified" in any sense a person
+ * can act on: the enrollment is being secured or retried on its own, and
+ * offering Verify there would start a pairing request the node's owner then
+ * has to answer for nothing. Verify stays available as the explicit recovery
+ * path once enrollment has actually failed, and as the independent upgrade
+ * for an account-trusted machine.
+ */
+export function desktopWorkspaceMachineTrustPresentation(input: {
+  readonly nativeTrust: DesktopWorkspaceMachineProjection["nativeTrust"];
+  readonly online: boolean;
+  readonly connected: boolean;
+  readonly accountE2ee: DesktopWorkspaceStateProjection["accountE2ee"];
+}): { readonly label: string; readonly verifyAction: "verify" | "verify-independently" | null } {
+  const presence = input.online ? (input.connected ? "Connected" : "Online") : "Offline";
+  switch (input.nativeTrust) {
+    case "verified":
+      return { label: `Encrypted · Verified locally · ${presence}`, verifyAction: null };
+    case "account-trusted":
+      return {
+        label: `Encrypted · Account trusted · ${presence}`,
+        verifyAction: input.online ? "verify-independently" : null,
+      };
+    case "identity-conflict":
+      return { label: "Identity changed · Locked", verifyAction: null };
+    case "unverified":
+    case "unknown":
+    case "not-required":
+      break;
+  }
+  if (input.accountE2ee === "securing") {
+    return {
+      label: input.online ? "Securing this device…" : "Securing this device… · Offline",
+      verifyAction: null,
+    };
+  }
+  if (input.accountE2ee === "revoked") {
+    return {
+      label: "This device was revoked on the Hub · Sign in again",
+      verifyAction: null,
+    };
+  }
+  return {
+    label: input.online ? "Needs verification" : "Needs verification · Offline",
+    verifyAction: input.online ? "verify" : null,
+  };
 }

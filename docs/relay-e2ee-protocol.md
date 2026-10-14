@@ -6539,6 +6539,10 @@ all values are equal and the effective authority is the intersection of:
 3. the node's current policy;
 4. any matching local restriction or denial.
 
+A `pending` §13.6 record is an unanswered §13.2 request, not a restriction or denial: it grants
+nothing, and the node evaluates the grant exactly as for a client with no record. An `approved`
+record narrows the grant; a `revoked` record rejects it.
+
 No input widens another. Success creates an immutable in-memory `account-enrolled` lease for that
 single channel and enrollment revision. It performs no durable approval write. Ticket/grant expiry
 prevents a new channel but does not impose a mid-session timer; channel close, a newer matching

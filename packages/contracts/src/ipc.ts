@@ -551,6 +551,12 @@ export interface DesktopWorkspaceStateProjection {
   readonly snapshots: ReadonlyArray<DesktopWorkspaceMetadataProjection>;
   readonly queuedEnvironmentIds: ReadonlyArray<EnvironmentId>;
   readonly activeConnectionCount: number;
+  /**
+   * This installation's Hub account enrollment. `ready` is what makes remote
+   * machines without a locally verified pin account-trusted; `securing` covers
+   * the first enrollment and automatic retries after a transient failure.
+   */
+  readonly accountE2ee?: "ready" | "securing" | "unavailable" | "revoked";
 }
 
 export type DesktopWorkspaceScopeProjection =

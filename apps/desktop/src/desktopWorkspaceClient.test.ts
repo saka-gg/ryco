@@ -14,6 +14,7 @@ import {
 
 import {
   DesktopWorkspaceClient,
+  type DesktopWorkspaceAccountE2ee,
   type DesktopWorkspaceIdentityStatus,
 } from "./desktopWorkspaceClient.ts";
 
@@ -112,6 +113,7 @@ function fixture(
     readonly connect?: () => Promise<void>;
     readonly trustedNodeIds?: ReadonlySet<string>;
     readonly identityStatus?: DesktopWorkspaceIdentityStatus;
+    readonly accountE2ee?: (accountId: string) => DesktopWorkspaceAccountE2ee;
     readonly cache?: WorkspaceMetadataCache;
     readonly verification?: {
       readonly begin: (input: {
@@ -154,6 +156,7 @@ function fixture(
       disconnect,
       listNodes: vi.fn(async () => directory),
       renameNode,
+      ...(input.accountE2ee === undefined ? {} : { accountE2ee: input.accountE2ee }),
     },
     trust: {
       read: vi.fn(async (_origin, _account, nodeId) => {
@@ -284,6 +287,30 @@ describe("DesktopWorkspaceClient", () => {
       ["verified", true],
       ["account-trusted", true],
     ]);
+  });
+
+  it("follows the live enrollment, so a retry that succeeds after sign-in trusts remote nodes", async () => {
+    const nodes = [node(1), node(2)];
+    let accountE2ee: DesktopWorkspaceAccountE2ee = "securing";
+    const { client } = fixture({
+      nodes,
+      trustedNodeIds: new Set([nodes[0]!.id]),
+      // Sign-in ended before enrollment did; the one-time status says so.
+      accountE2ee: (accountId) => (accountId === "account-a" ? accountE2ee : "unavailable"),
+    });
+
+    const securing = await client.resume();
+    expect(securing.catalog.map((entry) => entry.nativeTrust)).toEqual(["verified", "unverified"]);
+    expect(securing.accountE2ee).toBe("securing");
+    expect(projectDesktopWorkspaceState(securing).accountE2ee).toBe("securing");
+
+    accountE2ee = "ready";
+    const ready = await client.refreshCatalog();
+    expect(ready.catalog.map((entry) => [entry.nativeTrust, entry.canConnect])).toEqual([
+      ["verified", true],
+      ["account-trusted", true],
+    ]);
+    expect(projectDesktopWorkspaceState(ready).accountE2ee).toBe("ready");
   });
 
   it("removes read and mutation readiness synchronously on account revocation", async () => {

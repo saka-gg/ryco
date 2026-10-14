@@ -53,7 +53,12 @@ import {
   savedChangeRelaunch,
   useDesktopRelaunchGuard,
 } from "./useDesktopRelaunchGuard";
-import { canEditHubOrigin, presentHubStatus, type HubAction } from "./hubStatus";
+import {
+  canEditHubOrigin,
+  desktopWorkspaceMachineTrustPresentation,
+  presentHubStatus,
+  type HubAction,
+} from "./hubStatus";
 import {
   clearHubEnrollmentIntent,
   consumeHubEnrollmentIntent,
@@ -109,6 +114,13 @@ export function HubSection({
 }) {
   const nowMs = useRelativeTimeTick(1_000);
   const desktopWorkspace = useDesktopWorkspaceState();
+  const trust = (machine: (typeof desktopWorkspace.machines)[number]) =>
+    desktopWorkspaceMachineTrustPresentation({
+      nativeTrust: machine.nativeTrust,
+      online: machine.online,
+      connected: machine.connectionState === "connected",
+      accountE2ee: desktopWorkspace.accountE2ee,
+    });
   const [snapshot, setSnapshot] = useState<HubSnapshot | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const interactiveWorkspaceReleasesRef = useRef(new Map<string, () => void>());
@@ -902,11 +914,7 @@ export function HubSection({
                 term={machine.label}
                 action={
                   <div className="flex flex-wrap justify-end gap-1.5">
-                    {machine.nodeId &&
-                    machine.online &&
-                    (machine.nativeTrust === "unverified" ||
-                      machine.nativeTrust === "unknown" ||
-                      machine.nativeTrust === "account-trusted") ? (
+                    {machine.nodeId && trust(machine).verifyAction !== null ? (
                       <Button
                         size="xs"
                         variant="outline"
@@ -917,7 +925,7 @@ export function HubSection({
                           });
                         }}
                       >
-                        {machine.nativeTrust === "account-trusted"
+                        {trust(machine).verifyAction === "verify-independently"
                           ? "Verify independently"
                           : "Verify"}
                       </Button>
@@ -955,19 +963,7 @@ export function HubSection({
                   </div>
                 }
               >
-                {machine.nativeTrust === "verified"
-                  ? machine.online
-                    ? `Encrypted · Verified locally · ${machine.connectionState === "connected" ? "Connected" : "Online"}`
-                    : "Encrypted · Verified locally · Offline"
-                  : machine.nativeTrust === "account-trusted"
-                    ? machine.online
-                      ? `Encrypted · Account trusted · ${machine.connectionState === "connected" ? "Connected" : "Online"}`
-                      : "Encrypted · Account trusted · Offline"
-                    : machine.nativeTrust === "identity-conflict"
-                      ? "Identity changed · Locked"
-                      : machine.online
-                        ? "Needs verification"
-                        : "Needs verification · Offline"}
+                {trust(machine).label}
               </DataListItem>
             ))}
           </DataList>

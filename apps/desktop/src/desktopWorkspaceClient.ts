@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, type DesktopWorkspaceStateProjection } from "@ryco/contracts";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import {
   buildUnifiedWorkspaceIndex,
@@ -33,12 +33,21 @@ export type DesktopWorkspaceIdentityStatus =
       readonly accountE2eeReady?: true;
     };
 
+export type DesktopWorkspaceAccountE2ee = NonNullable<
+  DesktopWorkspaceStateProjection["accountE2ee"]
+>;
+
 export interface DesktopWorkspaceIdentityPort {
   readonly resume: () => Promise<DesktopWorkspaceIdentityStatus>;
   readonly connect: () => Promise<DesktopWorkspaceIdentityStatus>;
   readonly disconnect: () => Promise<void>;
   readonly listNodes: () => Promise<ReadonlyArray<HostedHubNode>>;
   readonly renameNode?: (nodeId: string, label: string) => Promise<void>;
+  /**
+   * The live account enrollment for `accountId`. Preferred over the status's
+   * one-time `accountE2eeReady`, which only records how sign-in ended.
+   */
+  readonly accountE2ee?: (accountId: string) => DesktopWorkspaceAccountE2ee;
 }
 
 export interface DesktopWorkspaceTrustPort {
@@ -82,6 +91,8 @@ export interface DesktopWorkspaceClientSnapshot {
   readonly workspace: UnifiedWorkspaceIndex;
   readonly demand: WorkspaceConnectionDemandState;
   readonly queuedEnvironmentIds: ReadonlyArray<EnvironmentId>;
+  /** Null unless signed in. */
+  readonly accountE2ee: DesktopWorkspaceAccountE2ee | null;
 }
 
 const EMPTY_WORKSPACE: UnifiedWorkspaceIndex = {
@@ -154,7 +165,17 @@ export class DesktopWorkspaceClient {
       }),
       demand: this.#demand,
       queuedEnvironmentIds: this.#queued,
+      accountE2ee: ready === null ? null : this.#accountE2ee(ready),
     };
+  }
+
+  #accountE2ee(
+    identity: Extract<DesktopWorkspaceIdentityStatus, { readonly status: "ready" }>,
+  ): DesktopWorkspaceAccountE2ee {
+    return (
+      this.#identity.accountE2ee?.(identity.accountId) ??
+      (identity.accountE2eeReady === true ? "ready" : "unavailable")
+    );
   }
 
   subscribe(listener: (snapshot: DesktopWorkspaceClientSnapshot) => void): () => void {
@@ -216,6 +237,7 @@ export class DesktopWorkspaceClient {
   async refreshCatalog(): Promise<DesktopWorkspaceClientSnapshot> {
     if (this.#identityStatus.status !== "ready") return this.snapshot();
     const identity = this.#identityStatus;
+    const accountE2eeReady = this.#accountE2ee(identity) === "ready";
     let nodes: ReadonlyArray<HostedHubNode>;
     try {
       nodes = await this.#identity.listNodes();
@@ -231,7 +253,7 @@ export class DesktopWorkspaceClient {
           nativeTrust = nativeTrustForPin(
             await this.#trust.read(this.#hubOrigin, identity.accountId, node.id),
             node,
-            identity.accountE2eeReady === true,
+            accountE2eeReady,
           );
         } catch {
           nativeTrust = "unknown";

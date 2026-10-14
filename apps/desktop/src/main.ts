@@ -956,15 +956,73 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       records: context.records,
       trust: context.trust,
       nativeE2eePlatform: context.nativeE2eePlatform,
+      nativeE2eeRecovery: desktopNativeE2eeEnrollmentRecovery,
       relayDpopSigner: await createDesktopDpopSigner(context.security),
       allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
       beforeInteractiveNodeClaim: enableDesktopHubConnectorForAccountSetup,
       control: desktopHubControl,
     });
     desktopHostedIdentityCoordinator = coordinator;
+    coordinator.subscribeNativeE2eeEnrollment(onDesktopNativeE2eeEnrollmentChange);
     return coordinator;
   },
 );
+
+/**
+ * Desktop main is always "foreground" for enrollment recovery: a transient
+ * failure retries on the coordinator's capped backoff. A Hub revocation is
+ * re-checked when the machine wakes or unlocks, the closest Desktop analogue
+ * of a phone returning to the foreground.
+ */
+const desktopNativeE2eeEnrollmentRecovery = {
+  timers: {
+    setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
+  },
+  isForeground: () => true,
+  subscribeForeground: (listener: () => void) => {
+    let fired = false;
+    const once = () => {
+      if (fired) return;
+      fired = true;
+      unsubscribe();
+      listener();
+    };
+    const unsubscribe = () => {
+      powerMonitor.off("resume", once);
+      powerMonitor.off("unlock-screen", once);
+    };
+    powerMonitor.on("resume", once);
+    powerMonitor.on("unlock-screen", once);
+    return unsubscribe;
+  },
+};
+
+let lastLoggedDesktopNativeE2eeEnrollment: string | null = null;
+let lastPublishedDesktopAccountE2ee: string | null = null;
+
+/**
+ * Enrollment can settle long after sign-in (first enrollment, or a retry after
+ * a transient Hub failure). Remote machines become account-trusted only when
+ * it does, so re-project the catalog on every change of the published state,
+ * and log each settled outcome with its bounded reason code.
+ */
+function onDesktopNativeE2eeEnrollmentChange(): void {
+  const coordinator = desktopHostedIdentityCoordinator;
+  const state = coordinator?.nativeE2eeEnrollmentState;
+  if (!coordinator || !state) return;
+  const logged = `status=${state.status}${state.errorCode === null ? "" : ` error=${state.errorCode}`}`;
+  if (logged !== lastLoggedDesktopNativeE2eeEnrollment) {
+    lastLoggedDesktopNativeE2eeEnrollment = logged;
+    writeDesktopLogHeader(`native e2ee enrollment ${logged}`);
+  }
+  const identity = desktopHostedIdentityStatus;
+  if (identity.status !== "ready") return;
+  const published = coordinator.accountE2eeState(identity.accountId);
+  if (published === lastPublishedDesktopAccountE2ee) return;
+  lastPublishedDesktopAccountE2ee = published;
+  void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+}
 
 const ensureDesktopWorkspaceRelayManager = lazyAsyncResource(
   async (): Promise<DesktopWorkspaceRelayManager> => {
@@ -1062,6 +1120,8 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
         desktopHostedIdentityStatus = { status: "signed-out" };
       },
       listNodes: async () => desktopHostedIdentityCoordinator?.listNodes() ?? [],
+      accountE2ee: (accountId) =>
+        desktopHostedIdentityCoordinator?.accountE2eeState(accountId) ?? "unavailable",
       renameNode: async (nodeId, label) => {
         if (!desktopHostedIdentityCoordinator) throw new Error("Sign in to rename a device.");
         await desktopHostedIdentityCoordinator.renameNode(nodeId, label);

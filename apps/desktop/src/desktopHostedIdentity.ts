@@ -3,6 +3,7 @@ import * as Crypto from "node:crypto";
 import type {
   DesktopHostedIdentityActionResult,
   DesktopHostedIdentityState,
+  DesktopWorkspaceStateProjection,
 } from "@ryco/contracts";
 import {
   HostedHubApi,
@@ -13,6 +14,7 @@ import {
   createNativeE2eeEnrollmentCoordinator,
   createNativeE2eeTrustResolver,
   type NativeE2eeEnrollmentCoordinator,
+  type NativeE2eeEnrollmentRecovery,
   type NativeE2eeEnrollmentState,
   type ResolveNativeE2eeTrustInput,
 } from "@ryco/client-runtime/authorization/e2ee";
@@ -92,6 +94,8 @@ export async function createDesktopHostedHubApi(input: {
     nativeAuthorization: input.nativeAuthorization,
   });
 }
+
+export type DesktopAccountE2eeState = NonNullable<DesktopWorkspaceStateProjection["accountE2ee"]>;
 
 export type DesktopHostedIdentityStatus =
   | { readonly status: "signed-out" }
@@ -184,6 +188,12 @@ export class DesktopHostedIdentityCoordinator {
     readonly beforeInteractiveNodeClaim?: () => void | Promise<void>;
     readonly relayDpopSigner?: DpopSignerService;
     readonly nativeE2eePlatform?: NativeE2eePlatformService;
+    /**
+     * The lifecycle the shared coordinator retries a failed enrollment on.
+     * Without it, one transient Hub or keychain failure at sign-in leaves every
+     * remote machine unverified until the next launch.
+     */
+    readonly nativeE2eeRecovery?: NativeE2eeEnrollmentRecovery;
   }) {
     this.#origin = input.origin;
     this.#allowsBackgroundNodeClaim = input.allowsBackgroundNodeClaim ?? (() => false);
@@ -201,11 +211,15 @@ export class DesktopHostedIdentityCoordinator {
           platform: input.nativeE2eePlatform,
           api: input.api,
           hubOrigin: input.origin,
-          requestedMaximumRole: "operator",
+          // The Hub intersects this ceiling with the account's current node
+          // role, as on mobile: owners need settings RPCs on their other
+          // machines, and operator/viewer accounts keep their granted limits.
+          requestedMaximumRole: "owner",
           requestedCapabilities: ["ryco.rpc"],
           refreshDirectory: async () => {
             await input.api.listNodes();
           },
+          ...(input.nativeE2eeRecovery === undefined ? {} : { recovery: input.nativeE2eeRecovery }),
         })
       : undefined;
     this.#resolveNativeE2eeTrust = input.nativeE2eePlatform
@@ -353,6 +367,37 @@ export class DesktopHostedIdentityCoordinator {
 
   get nativeE2eeEnrollmentState(): NativeE2eeEnrollmentState | null {
     return this.#nativeE2eeEnrollment?.getState() ?? null;
+  }
+
+  /**
+   * This installation's account enrollment for `accountId`, read live: recovery
+   * can finish an enrollment long after the sign-in that started it, and the
+   * handshake gates on this same state. Only `ready` makes remote unpinned
+   * machines account-trusted.
+   */
+  accountE2eeState(accountId: string): DesktopAccountE2eeState {
+    const state = this.#nativeE2eeEnrollment?.getState();
+    if (state === undefined) return "unavailable";
+    switch (state.status) {
+      case "ready":
+        return state.ready !== null &&
+          state.ready.namespace.hubOrigin === this.#origin &&
+          state.ready.namespace.accountId === accountId
+          ? "ready"
+          : "securing";
+      case "idle":
+      case "securing":
+      case "retrying":
+        return "securing";
+      case "unavailable":
+        return "unavailable";
+      case "revoked":
+        return "revoked";
+    }
+  }
+
+  subscribeNativeE2eeEnrollment(listener: () => void): () => void {
+    return this.#nativeE2eeEnrollment?.subscribe(listener) ?? (() => undefined);
   }
 
   async resolveNativeE2eeTrust(input: ResolveNativeE2eeTrustInput) {
