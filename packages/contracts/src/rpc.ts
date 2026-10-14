@@ -101,7 +101,12 @@ import {
   AgentControlMcpInstallationListResult,
   AgentControlMcpInstallationMutationResult,
 } from "./agentControl.ts";
-import { AuthAccessStreamEvent, AuthRpcError } from "./auth.ts";
+import {
+  AuthAccessStreamEvent,
+  AuthIssueLinkedDirectAccessInput,
+  AuthLinkedDirectAccess,
+  AuthRpcError,
+} from "./auth.ts";
 import {
   DiagnosticsError,
   DiagnosticsSnapshot,
@@ -618,6 +623,7 @@ export const WS_METHODS = {
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
+  authIssueLinkedDirectAccess: "auth.issueLinkedDirectAccess",
 } as const;
 
 export const GitCreateWorktreeForProjectInput = Schema.Struct({
@@ -2199,6 +2205,12 @@ export const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServer
   stream: true,
 });
 
+export const WsAuthIssueLinkedDirectAccessRpc = Rpc.make(WS_METHODS.authIssueLinkedDirectAccess, {
+  payload: AuthIssueLinkedDirectAccessInput,
+  success: AuthLinkedDirectAccess,
+  error: AuthRpcError,
+});
+
 export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2364,6 +2376,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSessionImportRunRpc
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
+  | typeof WsAuthIssueLinkedDirectAccessRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
   | typeof WsServerGetStatisticsRpc
   | typeof WsServerGetUsageSummaryRpc
@@ -2574,6 +2587,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSessionImportRunRpc,
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
+  WsAuthIssueLinkedDirectAccessRpc,
   WsServerGetDiagnosticsMetricsRpc,
   WsServerGetStatisticsRpc,
   WsServerGetUsageSummaryRpc,

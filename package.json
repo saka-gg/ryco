@@ -44,6 +44,7 @@
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
     "start": "turbo run start --filter=ryco-cli",
     "start:desktop": "turbo run start --filter=@ryco/desktop",
+    "node:update": "node scripts/update-node-from-source.ts",
     "start:mock-update-server": "node scripts/mock-update-server.ts",
     "build": "turbo run build",
     "build:desktop": "turbo run build --filter=@ryco/desktop --filter=ryco-cli",

@@ -1,4 +1,5 @@
 import type { RelayCloseReason } from "@ryco/contracts/relay";
+import type { NativeE2eeTrustSource } from "@ryco/contracts/native-e2ee";
 import {
   E2EE_HANDSHAKE_RATE_BURST,
   E2EE_HANDSHAKE_RATE_REFILL,
@@ -287,6 +288,9 @@ export interface NodeE2eeChannelSessionSources {
         readonly suite: E2eeSuiteId;
         readonly establishedAt: number;
         readonly verificationCode: string | undefined;
+        readonly trustSource: NativeE2eeTrustSource;
+        /** §8.6 step 6's approved local record; IK suite `0x01` only. */
+        readonly admittedAuthority: E2eeAdmittedAuthoritySnapshot | undefined;
         readonly accountGrantAuthority: E2eeAccountGrantAuthoritySnapshot | undefined;
       }) => () => void)
     | undefined;
@@ -1050,6 +1054,8 @@ export function makeNodeE2eeChannelSession(
               suite: accept.suite,
               establishedAt: at,
               verificationCode,
+              trustSource: accept.trustSource,
+              admittedAuthority: accept.admittedAuthority,
               accountGrantAuthority: accept.accountGrantAuthority,
             });
           }

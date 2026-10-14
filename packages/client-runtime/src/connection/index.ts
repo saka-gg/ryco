@@ -2,6 +2,7 @@ export * from "./connection.ts";
 export * from "./connectivityRecovery.ts";
 export * from "./deviceFrameSource.ts";
 export * from "./catalog.ts";
+export * from "./hubLinkedDirectAccess.ts";
 export * from "./atomRpcClient.ts";
 export * from "./environmentStateSink.ts";
 export * from "./evictionPolicy.ts";

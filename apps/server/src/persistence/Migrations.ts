@@ -130,6 +130,7 @@ import Migration0088, {
   reprojectLegacyActivityPayloads,
 } from "./Migrations/088_LegacyActivityPayloads.ts";
 import Migration0089, { ensureLifecycleMarkersTable } from "./Migrations/089_RetireThreadTrash.ts";
+import Migration0090 from "./Migrations/090_AuthAccessLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -230,6 +231,7 @@ export const migrationEntries = [
   [87, "ProjectionThreadAnchorsAndStatisticsPartials", Migration0087],
   [88, "LegacyActivityPayloads", Migration0088],
   [89, "RetireThreadTrash", Migration0089],
+  [90, "AuthAccessLinks", Migration0090],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -462,6 +464,12 @@ export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRota
     yield* Migration0076;
   },
 );
+
+// Hub-linked direct access columns: run 090 again as a repair when another branch's
+// 090 (or a later id) was recorded first.
+export const repairAuthAccessLinkColumns = Effect.fn("repairAuthAccessLinkColumns")(function* () {
+  yield* Migration0090;
+});
 
 // Project kinds and the chat relocation journal: run 080 again as a repair when another
 // branch's 080 (or a later id) was recorded first.
@@ -742,6 +750,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 89) {
         yield* repairLifecycleMarkersTable();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 90) {
+        yield* repairAuthAccessLinkColumns();
       }
     }),
   );

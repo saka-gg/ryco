@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Duration, Effect, Layer } from "effect";
+import { Clock, Duration, Effect, Layer } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
@@ -336,6 +336,69 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       expect(current.expiresAt.epochMilliseconds).toBe(
         pairedAtMs + Duration.toMillis(Duration.days(365)),
       );
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("keeps a Hub-linked session within seven days and never renews it by rotation", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const link = {
+        trustSource: "account-enrolled",
+        enrollmentId: "enr_studio",
+        clientFingerprint: "fp-studio",
+        role: "owner",
+      } as const;
+      const linked = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        role: "client",
+        link,
+      });
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      expect(linked.expiresAt.epochMilliseconds).toBe(
+        issuedAtMs + Duration.toMillis(Duration.days(7)),
+      );
+      expect((yield* sessions.verify(linked.token)).link).toEqual(link);
+
+      // It renews only by asking the node again over the Hub relay.
+      yield* TestClock.adjust(Duration.days(2));
+      const refused = yield* Effect.flip(sessions.rotate(linked.sessionId));
+      expect(refused).toBeInstanceOf(SessionRotationError);
+      expect((refused as SessionRotationError).reason).toBe("renewal-limit");
+
+      yield* TestClock.adjust(Duration.days(5));
+      const expired = yield* Effect.flip(sessions.verify(linked.token));
+      expect(expired.message).toContain("expired");
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("revokes a device's Hub-linked sessions by enrollment or by client key", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issueLinked = (enrollmentId: string | null, clientFingerprint: string) =>
+        sessions.issue({
+          method: "bearer-session-token",
+          subject: "hub-linked",
+          link: {
+            trustSource: enrollmentId === null ? "locally-verified" : "account-enrolled",
+            enrollmentId,
+            clientFingerprint,
+            role: "operator",
+          },
+        });
+      const laptop = yield* issueLinked("enr_laptop", "fp-laptop");
+      const phone = yield* issueLinked("enr_phone", "fp-phone");
+      const desk = yield* issueLinked(null, "fp-desk");
+      const pasted = yield* sessions.issue({ method: "bearer-session-token", subject: "paired" });
+
+      expect(yield* sessions.revokeLinked({ enrollmentId: "enr_laptop" })).toBe(1);
+      expect(yield* sessions.revokeLinked({ clientFingerprint: "fp-desk" })).toBe(1);
+      expect(yield* sessions.revokeLinked({ enrollmentId: "enr_unknown" })).toBe(0);
+
+      expect((yield* Effect.flip(sessions.verify(laptop.token))).message).toContain("revoked");
+      expect((yield* Effect.flip(sessions.verify(desk.token))).message).toContain("revoked");
+      yield* sessions.verify(phone.token);
+      expect((yield* sessions.verify(pasted.token)).link).toBeNull();
     }).pipe(Effect.provide(withClock())),
   );
 

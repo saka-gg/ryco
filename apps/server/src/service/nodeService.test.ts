@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  bootstrapLaunchdService,
   DEFAULT_NODE_SERVICE_LABEL,
   isEphemeralCliInstall,
   nodeServiceDefinitionPath,
@@ -140,5 +141,83 @@ describe("node service definitions", () => {
     expect(nodeServiceUser({ USER: "ada", LOGNAME: "other" })).toBe("ada");
     expect(nodeServiceUser({ LOGNAME: "ada" })).toBe("ada");
     expect(nodeServiceUser({})).toBe("");
+  });
+});
+
+describe("bootstrapLaunchdService", () => {
+  const TARGET = "gui/501/space.ryco.node";
+  const PLIST = "/Users/me/Library/LaunchAgents/space.ryco.node.plist";
+
+  function launchd(input: { unloadAfterPrints: number; failFirstBootstrap?: boolean }) {
+    const calls: string[] = [];
+    let loaded = true;
+    let prints = 0;
+    let bootstraps = 0;
+    const result = (code: number) => ({
+      code,
+      stdout: "",
+      stderr: code === 0 ? "" : "5: I/O error",
+    });
+    const run = async (args: ReadonlyArray<string>, options?: { allowFailure?: boolean }) => {
+      calls.push(args[0]!);
+      switch (args[0]) {
+        case "print":
+          prints += 1;
+          if (prints > input.unloadAfterPrints) loaded = false;
+          return result(loaded ? 0 : 113);
+        case "bootout":
+          return result(0);
+        case "bootstrap": {
+          bootstraps += 1;
+          const ok = !loaded && !(input.failFirstBootstrap === true && bootstraps === 1);
+          if (!ok && options?.allowFailure !== true) throw new Error("bootstrap failed");
+          if (ok) loaded = true;
+          return result(ok ? 0 : 5);
+        }
+        default:
+          return result(0);
+      }
+    };
+    return { run: run as never, calls, sleeps: [] as number[] };
+  }
+
+  it("waits for a booted-out label to unload before bootstrapping its replacement", async () => {
+    const fake = launchd({ unloadAfterPrints: 3 });
+    await bootstrapLaunchdService({
+      domain: "gui/501",
+      target: TARGET,
+      definitionPath: PLIST,
+      replace: true,
+      run: fake.run,
+      sleep: async (ms) => void fake.sleeps.push(ms),
+    });
+    expect(fake.calls).toEqual(["bootout", "print", "print", "print", "print", "bootstrap"]);
+    expect(fake.sleeps).toHaveLength(3);
+  });
+
+  it("retries a bootstrap launchd refuses once after settling", async () => {
+    const fake = launchd({ unloadAfterPrints: 0, failFirstBootstrap: true });
+    await bootstrapLaunchdService({
+      domain: "gui/501",
+      target: TARGET,
+      definitionPath: PLIST,
+      replace: true,
+      run: fake.run,
+      sleep: async (ms) => void fake.sleeps.push(ms),
+    });
+    expect(fake.calls.filter((call) => call === "bootstrap")).toHaveLength(2);
+  });
+
+  it("leaves an already loaded service alone when only starting it", async () => {
+    const fake = launchd({ unloadAfterPrints: Number.POSITIVE_INFINITY });
+    await bootstrapLaunchdService({
+      domain: "gui/501",
+      target: TARGET,
+      definitionPath: PLIST,
+      replace: false,
+      run: fake.run,
+      sleep: async () => undefined,
+    });
+    expect(fake.calls).toEqual(["print"]);
   });
 });

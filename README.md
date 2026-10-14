@@ -132,6 +132,9 @@ bun run dev:desktop
 # Run just the web app
 bun run dev:web
 
+# Build this checkout's CLI and restart this machine's node service with it
+bun run node:update
+
 # Required checks before finishing changes
 bun fmt
 bun lint

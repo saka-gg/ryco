@@ -1,6 +1,6 @@
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
 
 import {
   toPersistenceDecodeError,
@@ -8,7 +8,7 @@ import {
   type AuthPairingLinkRepositoryError,
 } from "../Errors.ts";
 import {
-  AuthPairingLinkRecord,
+  type AuthPairingLinkRecord,
   AuthPairingLinkRepository,
   type AuthPairingLinkRepositoryShape,
   ConsumeAuthPairingLinkInput,
@@ -17,6 +17,47 @@ import {
   ListActiveAuthPairingLinksInput,
   RevokeAuthPairingLinkInput,
 } from "../Services/AuthPairingLinks.ts";
+
+const AuthPairingLinkDbRow = Schema.Struct({
+  id: Schema.String,
+  credential: Schema.String,
+  method: Schema.Literals(["desktop-bootstrap", "one-time-token"]),
+  role: Schema.Literals(["owner", "client"]),
+  subject: Schema.String,
+  label: Schema.NullOr(Schema.String),
+  createdAt: Schema.DateTimeUtcFromString,
+  expiresAt: Schema.DateTimeUtcFromString,
+  consumedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  linkTrustSource: Schema.NullOr(Schema.Literals(["account-enrolled", "locally-verified"])),
+  linkEnrollmentId: Schema.NullOr(Schema.String),
+  linkClientFingerprint: Schema.NullOr(Schema.String),
+  linkRole: Schema.NullOr(Schema.Literals(["viewer", "operator", "owner"])),
+});
+
+function toAuthPairingLinkRecord(row: typeof AuthPairingLinkDbRow.Type): AuthPairingLinkRecord {
+  return {
+    id: row.id,
+    credential: row.credential,
+    method: row.method,
+    role: row.role,
+    subject: row.subject,
+    label: row.label,
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+    consumedAt: row.consumedAt,
+    revokedAt: row.revokedAt,
+    link:
+      row.linkTrustSource !== null && row.linkClientFingerprint !== null && row.linkRole !== null
+        ? {
+            trustSource: row.linkTrustSource,
+            enrollmentId: row.linkEnrollmentId,
+            clientFingerprint: row.linkClientFingerprint,
+            role: row.linkRole,
+          }
+        : null,
+  };
+}
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): AuthPairingLinkRepositoryError =>
@@ -27,6 +68,23 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeAuthPairingLinkRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  const pairingLinkColumns = sql.literal(`
+    id AS "id",
+    credential AS "credential",
+    method AS "method",
+    role AS "role",
+    subject AS "subject",
+    label AS "label",
+    created_at AS "createdAt",
+    expires_at AS "expiresAt",
+    consumed_at AS "consumedAt",
+    revoked_at AS "revokedAt",
+    link_trust_source AS "linkTrustSource",
+    link_enrollment_id AS "linkEnrollmentId",
+    link_client_fingerprint AS "linkClientFingerprint",
+    link_role AS "linkRole"
+  `);
 
   const createPairingLinkRow = SqlSchema.void({
     Request: CreateAuthPairingLinkInput,
@@ -42,7 +100,11 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           created_at,
           expires_at,
           consumed_at,
-          revoked_at
+          revoked_at,
+          link_trust_source,
+          link_enrollment_id,
+          link_client_fingerprint,
+          link_role
         )
         VALUES (
           ${input.id},
@@ -54,14 +116,18 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           ${input.createdAt},
           ${input.expiresAt},
           NULL,
-          NULL
+          NULL,
+          ${input.link?.trustSource ?? null},
+          ${input.link?.enrollmentId ?? null},
+          ${input.link?.clientFingerprint ?? null},
+          ${input.link?.role ?? null}
         )
       `,
   });
 
   const consumeAvailablePairingLinkRow = SqlSchema.findOneOption({
     Request: ConsumeAuthPairingLinkInput,
-    Result: AuthPairingLinkRecord,
+    Result: AuthPairingLinkDbRow,
     execute: ({ credential, consumedAt, now }) =>
       sql`
         UPDATE auth_pairing_links
@@ -70,40 +136,22 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           AND revoked_at IS NULL
           AND consumed_at IS NULL
           AND expires_at > ${now}
-        RETURNING
-          id AS "id",
-          credential AS "credential",
-          method AS "method",
-          role AS "role",
-          subject AS "subject",
-          label AS "label",
-          created_at AS "createdAt",
-          expires_at AS "expiresAt",
-          consumed_at AS "consumedAt",
-          revoked_at AS "revokedAt"
+        RETURNING ${pairingLinkColumns}
       `,
   });
 
   const listActivePairingLinkRows = SqlSchema.findAll({
     Request: ListActiveAuthPairingLinksInput,
-    Result: AuthPairingLinkRecord,
+    Result: AuthPairingLinkDbRow,
     execute: ({ now }) =>
       sql`
         SELECT
-          id AS "id",
-          credential AS "credential",
-          method AS "method",
-          role AS "role",
-          subject AS "subject",
-          label AS "label",
-          created_at AS "createdAt",
-          expires_at AS "expiresAt",
-          consumed_at AS "consumedAt",
-          revoked_at AS "revokedAt"
+          ${pairingLinkColumns}
         FROM auth_pairing_links
         WHERE revoked_at IS NULL
           AND consumed_at IS NULL
           AND expires_at > ${now}
+          AND link_trust_source IS NULL
         ORDER BY created_at DESC, id DESC
       `,
   });
@@ -124,20 +172,11 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
 
   const getPairingLinkRowByCredential = SqlSchema.findOneOption({
     Request: GetAuthPairingLinkByCredentialInput,
-    Result: AuthPairingLinkRecord,
+    Result: AuthPairingLinkDbRow,
     execute: ({ credential }) =>
       sql`
         SELECT
-          id AS "id",
-          credential AS "credential",
-          method AS "method",
-          role AS "role",
-          subject AS "subject",
-          label AS "label",
-          created_at AS "createdAt",
-          expires_at AS "expiresAt",
-          consumed_at AS "consumedAt",
-          revoked_at AS "revokedAt"
+          ${pairingLinkColumns}
         FROM auth_pairing_links
         WHERE credential = ${credential}
       `,
@@ -161,6 +200,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           "AuthPairingLinkRepository.consumeAvailable:decodeRow",
         ),
       ),
+      Effect.map(Option.map(toAuthPairingLinkRecord)),
     );
 
   const listActive: AuthPairingLinkRepositoryShape["listActive"] = (input) =>
@@ -171,6 +211,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           "AuthPairingLinkRepository.listActive:decodeRows",
         ),
       ),
+      Effect.map((rows) => rows.map(toAuthPairingLinkRecord)),
     );
 
   const revoke: AuthPairingLinkRepositoryShape["revoke"] = (input) =>
@@ -192,6 +233,7 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           "AuthPairingLinkRepository.getByCredential:decodeRow",
         ),
       ),
+      Effect.map(Option.map(toAuthPairingLinkRecord)),
     );
 
   return {

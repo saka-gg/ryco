@@ -14,7 +14,12 @@ export type RpcMethod =
   | (typeof DEVICE_WS_METHODS)[keyof typeof DEVICE_WS_METHODS]
   | (typeof AGENT_CONTROL_WS_METHODS)[keyof typeof AGENT_CONTROL_WS_METHODS];
 
-export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner";
+/**
+ * `relay_native`: a Hub relay channel whose E2EE handshake authenticated a
+ * native device (account-enrolled or locally verified). The server decides
+ * from the channel; a client cannot see that, so it treats the class as viewer.
+ */
+export type RpcAccess = RelayEffectiveRole | "authenticated" | "direct_owner" | "relay_native";
 
 export const RPC_ACCESS_POLICY = {
   [WS_METHODS.serverGetProjectPreferences]: "viewer",
@@ -200,6 +205,7 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.sourceControlSearchIssues]: "operator",
   [WS_METHODS.sourceControlSearchRepositories]: "operator",
   [WS_METHODS.subscribeAuthAccess]: "direct_owner",
+  [WS_METHODS.authIssueLinkedDirectAccess]: "relay_native",
   [WS_METHODS.subscribeServerConfig]: "viewer",
   [WS_METHODS.subscribeServerLifecycle]: "viewer",
   [WS_METHODS.subscribeTerminalEvents]: "operator",
@@ -383,6 +389,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverCheckOpinionatedPlugins]: "read",
   [WS_METHODS.serverDiscoverSourceControl]: "read",
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",
+  // Repeating it only issues another short-lived single-use code.
+  [WS_METHODS.authIssueLinkedDirectAccess]: "read",
   [WS_METHODS.serverGetConfig]: "read",
   [WS_METHODS.serverGetDiagnosticsMetrics]: "read",
   [WS_METHODS.serverGetDiagnosticsSnapshot]: "read",
@@ -526,5 +534,6 @@ export function hostedRoleAllows(
   if (!role || !roleStateFresh) return false;
   const required = rpcAccessFor(method);
   if (required === "authenticated" || required === "direct_owner") return false;
+  if (required === "relay_native") return true;
   return ROLE_ORDER[role] >= ROLE_ORDER[required];
 }

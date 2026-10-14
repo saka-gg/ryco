@@ -119,6 +119,26 @@ describe("clientPersistence", () => {
     expect(readSavedEnvironmentRegistry(registryPath)).toEqual([savedRegistryRecord]);
   });
 
+  it("keeps a Hub link through metadata rewrites and secret writes", () => {
+    const registryPath = makeTempPath("saved-environments.json");
+    const linked: PersistedSavedEnvironmentRecord = {
+      ...savedRegistryRecord,
+      environmentId: EnvironmentId.make("environment-linked"),
+      hubLink: { hubEnvironmentId: "env_hub_m4", linkedAt: "2026-10-14T00:00:00.000Z" },
+    };
+
+    writeSavedEnvironmentRegistry(registryPath, [linked]);
+    writeSavedEnvironmentSecret({
+      registryPath,
+      environmentId: linked.environmentId,
+      secret: "bearer-token",
+      secretStorage: makeSecretStorage(true),
+    });
+    writeSavedEnvironmentRegistry(registryPath, [linked]);
+
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([linked]);
+  });
+
   it("persists encrypted saved environment secrets when encryption is available", () => {
     const registryPath = makeTempPath("saved-environments.json");
     const secretStorage = makeSecretStorage(true);

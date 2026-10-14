@@ -195,7 +195,9 @@ export const authWebSocketTokenRouteLayer = HttpRouter.add(
 /**
  * Renews a direct pairing's bearer by rotation. Bearer-only and served on the
  * node's own HTTP listener, which no relay path reaches: a relay or hosted
- * client can never mint or extend a direct credential through it.
+ * client can never extend a direct credential through it. The one relay path
+ * that mints one, `auth.issueLinkedDirectAccess`, issues a Hub-linked session
+ * this route will not carry past its seven days.
  */
 export const authBearerRotateRouteLayer = HttpRouter.add(
   "POST",

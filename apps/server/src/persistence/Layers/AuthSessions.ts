@@ -18,6 +18,7 @@ import {
   GetAuthSessionChainHeadInput,
   ListActiveAuthSessionsInput,
   RevokeAuthSessionInput,
+  RevokeLinkedAuthSessionsInput,
   RevokeOtherAuthSessionsInput,
   SetAuthSessionLastConnectedAtInput,
   SupersedeAuthSessionInput,
@@ -43,6 +44,10 @@ const AuthSessionDbRow = Schema.Struct({
   chainIssuedAt: Schema.DateTimeUtcFromString,
   supersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   predecessorSupersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  linkTrustSource: Schema.NullOr(Schema.Literals(["account-enrolled", "locally-verified"])),
+  linkEnrollmentId: Schema.NullOr(Schema.String),
+  linkClientFingerprint: Schema.NullOr(Schema.String),
+  linkRole: Schema.NullOr(Schema.Literals(["viewer", "operator", "owner"])),
 });
 
 function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): typeof AuthSessionRecord.Type {
@@ -68,6 +73,15 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): typeof AuthSess
     chainIssuedAt: row.chainIssuedAt,
     supersededAt: row.supersededAt,
     predecessorSupersededAt: row.predecessorSupersededAt,
+    link:
+      row.linkTrustSource !== null && row.linkClientFingerprint !== null && row.linkRole !== null
+        ? {
+            trustSource: row.linkTrustSource,
+            enrollmentId: row.linkEnrollmentId,
+            clientFingerprint: row.linkClientFingerprint,
+            role: row.linkRole,
+          }
+        : null,
   };
 }
 
@@ -102,7 +116,11 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     COALESCE(s.chain_id, s.session_id) AS "chainId",
     COALESCE(s.chain_issued_at, s.issued_at) AS "chainIssuedAt",
     s.superseded_at AS "supersededAt",
-    p.superseded_at AS "predecessorSupersededAt"
+    p.superseded_at AS "predecessorSupersededAt",
+    s.link_trust_source AS "linkTrustSource",
+    s.link_enrollment_id AS "linkEnrollmentId",
+    s.link_client_fingerprint AS "linkClientFingerprint",
+    s.link_role AS "linkRole"
   `);
   const sessionsWithPredecessor = sql.literal(`
     auth_sessions s
@@ -143,7 +161,11 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           last_connected_at,
           rotated_from,
           chain_id,
-          chain_issued_at
+          chain_issued_at,
+          link_trust_source,
+          link_enrollment_id,
+          link_client_fingerprint,
+          link_role
         )
         VALUES (
           ${input.sessionId},
@@ -162,7 +184,11 @@ const makeAuthSessionRepository = Effect.gen(function* () {
           ${input.rotation?.lastConnectedAt ?? null},
           ${input.rotation?.rotatedFrom ?? null},
           ${input.rotation?.chainId ?? input.sessionId},
-          ${input.rotation?.chainIssuedAt ?? input.issuedAt}
+          ${input.rotation?.chainIssuedAt ?? input.issuedAt},
+          ${input.link?.trustSource ?? null},
+          ${input.link?.enrollmentId ?? null},
+          ${input.link?.clientFingerprint ?? null},
+          ${input.link?.role ?? null}
         )
       `,
   });
@@ -286,6 +312,31 @@ const makeAuthSessionRepository = Effect.gen(function* () {
       `,
   });
 
+  const revokeLinkedSessionRows = SqlSchema.findAll({
+    Request: RevokeLinkedAuthSessionsInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId, chainId: AuthSessionId }),
+    execute: (input) =>
+      "enrollmentId" in input
+        ? sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${input.revokedAt}
+            WHERE link_enrollment_id = ${input.enrollmentId}
+              AND revoked_at IS NULL
+            RETURNING
+              session_id AS "sessionId",
+              COALESCE(chain_id, session_id) AS "chainId"
+          `
+        : sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${input.revokedAt}
+            WHERE link_client_fingerprint = ${input.clientFingerprint}
+              AND revoked_at IS NULL
+            RETURNING
+              session_id AS "sessionId",
+              COALESCE(chain_id, session_id) AS "chainId"
+          `,
+  });
+
   const create: AuthSessionRepositoryShape["create"] = (input) =>
     createSessionRow(input).pipe(
       Effect.mapError(
@@ -345,6 +396,17 @@ const makeAuthSessionRepository = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => ({ sessionId: row.sessionId, chainId: row.chainId }))),
     );
 
+  const revokeLinked: AuthSessionRepositoryShape["revokeLinked"] = (input) =>
+    revokeLinkedSessionRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.revokeLinked:query",
+          "AuthSessionRepository.revokeLinked:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map((row) => ({ sessionId: row.sessionId, chainId: row.chainId }))),
+    );
+
   const setLastConnectedAt: AuthSessionRepositoryShape["setLastConnectedAt"] = (input) =>
     setLastConnectedAtRow(input).pipe(
       Effect.mapError(
@@ -394,6 +456,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     listActive,
     revoke,
     revokeAllExcept,
+    revokeLinked,
     setLastConnectedAt,
     findPendingSuccessor,
     supersede,

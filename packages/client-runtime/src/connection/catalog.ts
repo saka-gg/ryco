@@ -6,6 +6,8 @@ import type {
   ServerConfig,
 } from "@ryco/contracts";
 
+import { persistedSavedEnvironmentRecordFields } from "@ryco/shared/savedEnvironmentRecord";
+
 import type { SecretKVService } from "../platform/index.ts";
 
 export interface SavedEnvironmentRecord {
@@ -16,6 +18,7 @@ export interface SavedEnvironmentRecord {
   readonly createdAt: string;
   readonly lastConnectedAt: string | null;
   readonly desktopSsh?: PersistedSavedEnvironmentRecord["desktopSsh"];
+  readonly hubLink?: PersistedSavedEnvironmentRecord["hubLink"];
 }
 
 export interface SavedEnvironmentKV {
@@ -93,15 +96,7 @@ const DEFAULT_RUNTIME_STATE: SavedEnvironmentRuntimeState = Object.freeze({
 export function toPersistedSavedEnvironmentRecord(
   record: SavedEnvironmentRecord,
 ): PersistedSavedEnvironmentRecord {
-  return {
-    environmentId: record.environmentId,
-    label: record.label,
-    httpBaseUrl: record.httpBaseUrl,
-    wsBaseUrl: record.wsBaseUrl,
-    createdAt: record.createdAt,
-    lastConnectedAt: record.lastConnectedAt,
-    ...(record.desktopSsh ? { desktopSsh: record.desktopSsh } : {}),
-  };
+  return persistedSavedEnvironmentRecordFields(record);
 }
 
 export function createSavedEnvironmentCatalog(input: {

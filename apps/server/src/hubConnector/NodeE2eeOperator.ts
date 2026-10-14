@@ -333,6 +333,14 @@ export function makeNodeE2eeOperator(options: {
   /** Republish the signed statement after any mutation of advertised material. */
   readonly onAdvertisementChanged?: () => Promise<void>;
   /**
+   * After a local client authorization was revoked, narrowed, or purged: its
+   * Hub-linked direct sessions were issued under the old authority, so they
+   * end too. Never rejects into the operator command it follows.
+   */
+  readonly onClientAuthorizationWithdrawn?: (
+    clientIdentityFingerprint: Uint8Array,
+  ) => Promise<void>;
+  /**
    * Run a command that changes durable E2EE state as the identity's owner, or
    * refuse it (`HubConnector.asIdentityOwner`).
    *
@@ -348,6 +356,11 @@ export function makeNodeE2eeOperator(options: {
   const now = options.now ?? Date.now;
   const identity = options.identity;
   const admin = () => identity.e2eeAuthorizationAdmin;
+  const withdrawLinked = async (clientIdentityFingerprint: Uint8Array) => {
+    await options
+      .onClientAuthorizationWithdrawn?.(clientIdentityFingerprint)
+      .catch(() => undefined);
+  };
   const liveUndersizedConnection = options.undersizedConnection ?? (() => undefined);
   const advertisementChanged = options.onAdvertisementChanged ?? (() => Promise.resolve());
   const owned: <A>(operation: () => Promise<A>) => Promise<A> =
@@ -388,6 +401,7 @@ export function makeNodeE2eeOperator(options: {
         ...(input.maxRole === undefined ? {} : { maxRole: input.maxRole }),
         ...(input.capabilitySet === undefined ? {} : { capabilitySet: input.capabilitySet }),
       });
+      await withdrawLinked(authorizationKey(input).clientIdentityFingerprint);
       const record = await admin().get(authorizationKey(input));
       return {
         ...changeView(result),
@@ -396,6 +410,7 @@ export function makeNodeE2eeOperator(options: {
     },
     revokeClient: async (key) => {
       const result = await admin().revoke(authorizationKey(key));
+      await withdrawLinked(authorizationKey(key).clientIdentityFingerprint);
       const record = await admin().get(authorizationKey(key));
       return {
         ...changeView(result),
@@ -405,7 +420,11 @@ export function makeNodeE2eeOperator(options: {
     // Purge removes the record, so there is nothing left to echo — and echoing a
     // stale copy of a record the owner just deleted would be the one answer an
     // operator could misread as "it is still there".
-    purgeClient: async (key) => changeView(await admin().purge(authorizationKey(key))),
+    purgeClient: async (key) => {
+      const result = await admin().purge(authorizationKey(key));
+      await withdrawLinked(authorizationKey(key).clientIdentityFingerprint);
+      return changeView(result);
+    },
     createClientApprovalQr: async (key) => {
       const parsed = authorizationKey(key);
       return identity.crossDeviceApproval.create({

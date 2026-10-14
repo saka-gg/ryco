@@ -2,6 +2,7 @@ import { Option, Schema, Context } from "effect";
 import type { Effect } from "effect";
 
 import type { AuthPairingLinkRepositoryError } from "../Errors.ts";
+import { AuthAccessLink } from "./AuthAccessLink.ts";
 
 export const AuthPairingLinkRecord = Schema.Struct({
   id: Schema.String,
@@ -14,6 +15,8 @@ export const AuthPairingLinkRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   consumedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** Set for a grant issued over a trusted relay channel; never listed to owners. */
+  link: Schema.NullOr(AuthAccessLink),
 });
 export type AuthPairingLinkRecord = typeof AuthPairingLinkRecord.Type;
 
@@ -26,6 +29,7 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   label: Schema.NullOr(Schema.String),
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  link: Schema.optionalKey(AuthAccessLink),
 });
 export type CreateAuthPairingLinkInput = typeof CreateAuthPairingLinkInput.Type;
 
@@ -59,6 +63,7 @@ export interface AuthPairingLinkRepositoryShape {
   readonly consumeAvailable: (
     input: ConsumeAuthPairingLinkInput,
   ) => Effect.Effect<Option.Option<AuthPairingLinkRecord>, AuthPairingLinkRepositoryError>;
+  /** Owner-visible pairing links only: grants issued over a relay channel are excluded. */
   readonly listActive: (
     input: ListActiveAuthPairingLinksInput,
   ) => Effect.Effect<ReadonlyArray<AuthPairingLinkRecord>, AuthPairingLinkRepositoryError>;

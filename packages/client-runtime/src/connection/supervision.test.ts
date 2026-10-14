@@ -33,6 +33,7 @@ function makeSupervisor(
     readonly stateSink?: unknown;
     readonly scheduleShellFrame?: (callback: () => void) => void;
     readonly threadWindowActivityPayloads?: "preview";
+    readonly disconnectSavedEnvironment?: (environmentId: EnvironmentId) => Promise<void>;
   } = {},
 ) {
   let resume: ((reason: string) => void) | null = null;
@@ -61,7 +62,7 @@ function makeSupervisor(
     connectSavedEnvironment: (record: Record, isCancelled: () => boolean, signal: AbortSignal) =>
       connect(record, isCancelled, signal),
     isSavedEnvironmentAwaitingRepair: overrides.isSavedEnvironmentAwaitingRepair,
-    disconnectSavedEnvironment: () => Promise.resolve(),
+    disconnectSavedEnvironment: overrides.disconnectSavedEnvironment ?? (() => Promise.resolve()),
     waitForPrimaryShellSnapshotApplied: () => Promise.resolve(),
     subscribeBrowserResume: (listener: (reason: string) => void) => {
       resume = listener;
@@ -181,6 +182,33 @@ describe("saved environment retry", () => {
     notifyRegistry();
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts.get(needsRepair)).toBe(1);
+    stop();
+  });
+
+  it("keeps Desktop Hub relay connections when the saved registry changes", async () => {
+    const relay = "env-hub-relay" as EnvironmentId;
+    const unlisted = "env-removed" as EnvironmentId;
+    const disconnected: EnvironmentId[] = [];
+    const { supervisor, notifyRegistry } = makeSupervisor(async (record) => connectionFor(record), {
+      records: [],
+      disconnectSavedEnvironment: async (environmentId) => void disconnected.push(environmentId),
+    });
+    const stop = supervisor.start();
+    supervisor.register({
+      environmentId: relay,
+      kind: "saved",
+      knownEnvironment: { source: "hub-hosted" },
+    } as unknown as EnvironmentConnection);
+    supervisor.register({
+      environmentId: unlisted,
+      kind: "saved",
+      knownEnvironment: { source: "manual" },
+    } as unknown as EnvironmentConnection);
+
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(disconnected).toContain(unlisted);
+    expect(disconnected).not.toContain(relay);
     stop();
   });
 

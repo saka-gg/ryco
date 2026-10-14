@@ -9,7 +9,10 @@ import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
-import { BootstrapCredentialError } from "../Services/BootstrapCredentialService.ts";
+import {
+  BootstrapCredentialError,
+  BootstrapCredentialService,
+} from "../Services/BootstrapCredentialService.ts";
 import { ServerAuth, type ServerAuthShape } from "../Services/ServerAuth.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive } from "./AuthControlPlane.ts";
@@ -18,6 +21,7 @@ import { makeServerAuth, ServerAuthLive, toBootstrapExchangeAuthError } from "./
 import { ServerAuthPolicyLive } from "./ServerAuthPolicy.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { makeSessionCredentialService } from "./SessionCredentialService.ts";
+import { directRpcPrincipal } from "../../ws/RpcPrincipal.ts";
 
 const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
   Layer.effect(
@@ -151,6 +155,52 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       expect(error.status).toBe(500);
       expect(error.message).toBe("Failed to validate bootstrap credential.");
     }),
+  );
+
+  it.effect("redeems a Hub-linked code only as a bearer that acts at its linked role", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* ServerAuth;
+      const bootstrap = yield* BootstrapCredentialService;
+      const link = {
+        trustSource: "account-enrolled",
+        enrollmentId: "enr_laptop",
+        clientFingerprint: "fp-laptop",
+        role: "operator",
+      } as const;
+      const issueLinked = () =>
+        bootstrap.issueOneTimeToken({
+          ttl: Duration.minutes(2),
+          subject: "hub-linked",
+          label: "Linked through Hub · Laptop",
+          link,
+        });
+
+      // Never listed to the owner as a pairing link.
+      const asBearer = yield* issueLinked();
+      expect(yield* serverAuth.listPairingLinks()).toEqual([]);
+
+      const bearer = yield* serverAuth.exchangeBootstrapCredentialForBearerSession(
+        asBearer.credential,
+        requestMetadata,
+      );
+      const session = yield* serverAuth.authenticateHttpRequest(
+        makeBearerRequest(bearer.sessionToken),
+      );
+      expect(session.role).toBe("client");
+      expect(session.link).toEqual(link);
+      expect(directRpcPrincipal(session)).toMatchObject({
+        transport: "direct",
+        role: "operator",
+        canManageLocalAccess: false,
+      });
+
+      // A browser cookie is never made from one.
+      const asCookie = yield* issueLinked();
+      const refused = yield* Effect.flip(
+        serverAuth.exchangeBootstrapCredential(asCookie.credential, requestMetadata),
+      );
+      expect(refused.status).toBe(401);
+    }).pipe(Effect.provide(makeServerAuthLayer())),
   );
 
   it.effect("issues client pairing credentials by default", () =>

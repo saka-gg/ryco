@@ -23,6 +23,8 @@ import {
 } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
+  type AuthIssueLinkedDirectAccessInput,
+  AuthRpcError,
   AuthSessionId,
   USAGE_CONTRACT_VERSION,
   CommandId,
@@ -38,6 +40,7 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { RpcGroup } from "effect/rpc";
+import { issueLinkedDirectAccess } from "../auth/linkedDirectAccess.ts";
 
 import { AgentControlProposalService } from "../agentControl/Services/AgentControlProposalService.ts";
 import { ChatAttachmentUploads } from "../attachmentUpload.ts";
@@ -162,7 +165,12 @@ function toDiagnosticsProviderProcess(provider: ServerProvider): DiagnosticsProv
 
 const guardedMethodAccess = (method: string): WsRpcAccess => {
   const access = rpcAccessFor(method);
-  if (access === "viewer" || access === "authenticated" || access === "direct_owner") {
+  if (
+    access === "viewer" ||
+    access === "authenticated" ||
+    access === "direct_owner" ||
+    access === "relay_native"
+  ) {
     throw new Error("RPC method uses the wrong authorization guard.");
   }
   return access;
@@ -1000,6 +1008,29 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
 
     const loadDiagnosticsMetrics = localDiagnosticsMetrics.snapshot;
     const loadAdvertisedEndpoints = advertisedEndpointRegistry.list;
+    // Hub-linked direct access: reads the channel's device at call time, after
+    // `relay_native` admitted the request.
+    const issueLinkedDirectAccessForChannel = (input: AuthIssueLinkedDirectAccessInput) =>
+      Effect.gen(function* () {
+        const [environment, endpoints] = yield* Effect.all([
+          serverEnvironment.getDescriptor,
+          advertisedEndpointRegistry.list,
+        ]);
+        const issued = yield* issueLinkedDirectAccess({
+          authority: principal.relayAuthority?.() ?? { trustSource: "none" },
+          deviceLabel: input.deviceLabel,
+          environment,
+          endpoints,
+          bootstrapCredentials,
+        }).pipe(Effect.orDie);
+        if (issued === null) {
+          return yield* new AuthRpcError({
+            message: "This channel no longer identifies a native device.",
+            status: 403,
+          });
+        }
+        return issued;
+      });
     const loadDiagnosticsSnapshot = Effect.gen(function* () {
       const [providers, terminals, localMetrics, metricSnapshots] = yield* Effect.all([
         providerRegistry.getProviders,
@@ -1267,6 +1298,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       loadServerConfig,
       streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,
+      issueLinkedDirectAccessForChannel,
       loadDiagnosticsMetrics,
       loadDiagnosticsSnapshot,
       recordThreadSnapshotDurationMs: localDiagnosticsMetrics.recordThreadSnapshotDurationMs,

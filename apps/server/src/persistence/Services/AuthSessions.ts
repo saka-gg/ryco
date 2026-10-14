@@ -3,6 +3,7 @@ import { Option, Schema, Context } from "effect";
 import type { Effect } from "effect";
 
 import type { AuthSessionRepositoryError } from "../Errors.ts";
+import { AuthAccessLink } from "./AuthAccessLink.ts";
 
 export const AuthSessionClientMetadataRecord = Schema.Struct({
   label: Schema.NullOr(Schema.String),
@@ -34,6 +35,8 @@ export const AuthSessionRecord = Schema.Struct({
   supersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   /** The predecessor's `supersededAt`: `null` while this successor is unused. */
   predecessorSupersededAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  /** Set for a session redeemed from a Hub-linked grant; rotation carries it. */
+  link: Schema.NullOr(AuthAccessLink),
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -45,6 +48,7 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  link: Schema.optionalKey(AuthAccessLink),
   /** Omitted for a new pairing, which starts its own chain. */
   rotation: Schema.optionalKey(
     Schema.Struct({
@@ -97,6 +101,17 @@ export const RevokeOtherAuthSessionsInput = Schema.Struct({
 });
 export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.Type;
 
+/**
+ * Linked sessions to end because their device lost its authorization: its Hub
+ * enrollment was revoked, or its local client authorization was withdrawn.
+ * Exactly one selector is set.
+ */
+export const RevokeLinkedAuthSessionsInput = Schema.Union([
+  Schema.Struct({ enrollmentId: Schema.String, revokedAt: Schema.DateTimeUtcFromString }),
+  Schema.Struct({ clientFingerprint: Schema.String, revokedAt: Schema.DateTimeUtcFromString }),
+]);
+export type RevokeLinkedAuthSessionsInput = typeof RevokeLinkedAuthSessionsInput.Type;
+
 export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
   sessionId: AuthSessionId,
   lastConnectedAt: Schema.DateTimeUtcFromString,
@@ -126,6 +141,10 @@ export interface AuthSessionRepositoryShape {
   /** Revokes every session outside the current session's rotation chain; returns each one revoked. */
   readonly revokeAllExcept: (
     input: RevokeOtherAuthSessionsInput,
+  ) => Effect.Effect<ReadonlyArray<RevokedAuthSession>, AuthSessionRepositoryError>;
+  /** Revokes every linked session of the selected device; returns each one revoked. */
+  readonly revokeLinked: (
+    input: RevokeLinkedAuthSessionsInput,
   ) => Effect.Effect<ReadonlyArray<RevokedAuthSession>, AuthSessionRepositoryError>;
   /** The unused successor a rotation already issued for this session, if any. */
   readonly findPendingSuccessor: (

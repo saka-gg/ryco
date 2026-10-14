@@ -382,10 +382,14 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
    * nor a verification of itself.
    */
   readonly isThisDevice?: boolean;
+  /** A direct connection to this machine was linked through the Hub. */
+  readonly directLinked?: boolean;
 }): {
   readonly label: string;
   readonly verifyAction: "verify" | "verify-independently" | null;
   readonly connectionActions: boolean;
+  /** Offer "Add direct access": a trusted, online machine with no direct link yet. */
+  readonly directAccessAction: boolean;
 } {
   if (input.isThisDevice === true) {
     return {
@@ -395,17 +399,19 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
           : "This device",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     };
   }
   const presence = input.online ? (input.connected ? "Connected" : "Online") : "Offline";
+  const trusted = input.nativeTrust === "verified" || input.nativeTrust === "account-trusted";
   const row = (
     label: string,
     verifyAction: "verify" | "verify-independently" | null,
   ): ReturnType<typeof desktopWorkspaceMachineTrustPresentation> => ({
-    label,
+    label: trusted && input.directLinked === true ? `${label} · Direct access ready` : label,
     verifyAction,
-    connectionActions:
-      input.online && (input.nativeTrust === "verified" || input.nativeTrust === "account-trusted"),
+    connectionActions: input.online && trusted,
+    directAccessAction: input.online && trusted && input.directLinked !== true,
   });
   switch (input.nativeTrust) {
     case "verified":
@@ -432,4 +438,26 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
     input.online ? "Needs verification" : "Needs verification · Offline",
     input.online ? "verify" : null,
   );
+}
+
+/**
+ * What "Add direct access" reports. `null` once linked: the row itself then
+ * reads "Direct access ready".
+ */
+export function desktopDirectAccessOutcomeMessage(
+  label: string,
+  outcome: "linked" | "already-paired" | "no-direct-endpoint" | "unreachable" | "failed",
+): string | null {
+  switch (outcome) {
+    case "linked":
+      return null;
+    case "already-paired":
+      return `${label} is already paired directly on this device.`;
+    case "no-direct-endpoint":
+      return `${label} only listens on its own loopback address, so no other device can reach it directly.`;
+    case "unreachable":
+      return `None of ${label}'s direct addresses answered from this network.`;
+    case "failed":
+      return `Direct access to ${label} could not be set up. Try again in a moment.`;
+  }
 }

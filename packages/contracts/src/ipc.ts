@@ -396,6 +396,17 @@ export interface DesktopSshPasswordPromptRequest {
   expiresAt: string;
 }
 
+/**
+ * A saved environment whose direct access was issued over a trusted Hub relay
+ * channel (Hub-linked direct access), rather than by a pasted pairing link.
+ */
+export interface SavedEnvironmentHubLink {
+  /** The node's Hub environment id: a different id from the direct one. */
+  hubEnvironmentId: string;
+  /** When the direct credential was last issued; it is renewed through the Hub. */
+  linkedAt: string;
+}
+
 export interface PersistedSavedEnvironmentRecord {
   environmentId: EnvironmentId;
   label: string;
@@ -404,6 +415,7 @@ export interface PersistedSavedEnvironmentRecord {
   createdAt: string;
   lastConnectedAt: string | null;
   desktopSsh?: DesktopSshEnvironmentTarget;
+  hubLink?: SavedEnvironmentHubLink;
 }
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";

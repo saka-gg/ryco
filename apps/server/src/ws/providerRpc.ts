@@ -71,6 +71,8 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
     loadDiagnosticsSnapshot,
     loadAuthAccessSnapshot,
     loadAdvertisedEndpoints,
+    issueLinkedDirectAccessForChannel,
+    withAccess,
     bootstrapCredentials,
     sessions,
     currentSessionId,
@@ -204,6 +206,16 @@ export const makeProviderHandlers = (ctx: WsRpcContext) => {
       observeRpcEffect(WS_METHODS.serverGetAdvertisedEndpoints, loadAdvertisedEndpoints, {
         "rpc.aggregate": "server",
       }),
+    [WS_METHODS.authIssueLinkedDirectAccess]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.authIssueLinkedDirectAccess,
+        withAccess(
+          "relay_native",
+          WS_METHODS.authIssueLinkedDirectAccess,
+          issueLinkedDirectAccessForChannel(input),
+        ),
+        { "rpc.aggregate": "auth" },
+      ),
     [WS_METHODS.serverGetDiagnosticsMetrics]: (_input) =>
       observeRpcEffect(
         WS_METHODS.serverGetDiagnosticsMetrics,

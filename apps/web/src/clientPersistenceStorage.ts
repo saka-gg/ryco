@@ -7,6 +7,7 @@ import {
   type PersistedSavedEnvironmentRecord,
 } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
+import { persistedSavedEnvironmentRecordFields } from "@ryco/shared/savedEnvironmentRecord";
 import {
   BROWSER_SAVED_ENVIRONMENT_BEARER_TOKEN_MAX_AGE_MS,
   computeBearerTokenExpiresAt,
@@ -36,6 +37,12 @@ const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
       port: Schema.NullOr(Schema.Number),
     }),
   ),
+  hubLink: Schema.optionalKey(
+    Schema.Struct({
+      hubEnvironmentId: Schema.String,
+      linkedAt: Schema.String,
+    }),
+  ),
   bearerToken: Schema.optionalKey(Schema.String),
   bearerTokenSavedAt: Schema.optionalKey(Schema.String),
   bearerTokenExpiresAt: Schema.optionalKey(Schema.String),
@@ -56,15 +63,7 @@ function hasWindow(): boolean {
 function toPersistedSavedEnvironmentRecord(
   record: PersistedSavedEnvironmentRecord,
 ): PersistedSavedEnvironmentRecord {
-  const nextRecord = {
-    environmentId: record.environmentId,
-    label: record.label,
-    httpBaseUrl: record.httpBaseUrl,
-    wsBaseUrl: record.wsBaseUrl,
-    createdAt: record.createdAt,
-    lastConnectedAt: record.lastConnectedAt,
-  };
-  return record.desktopSsh ? { ...nextRecord, desktopSsh: record.desktopSsh } : nextRecord;
+  return persistedSavedEnvironmentRecordFields(record);
 }
 
 function isRecordBearerTokenUsable(record: BrowserSavedEnvironmentRecord, nowMs: number): boolean {
@@ -193,18 +192,11 @@ export function writeBrowserSavedEnvironmentRegistry(
       const bearerTokenSavedAt = tokenFields.bearerTokenSavedAt ?? new Date(nowMs).toISOString();
       const bearerTokenExpiresAt =
         tokenFields.bearerTokenExpiresAt ?? computeBearerTokenExpiresAt(nowMs);
-      return {
-        environmentId: record.environmentId,
-        label: record.label,
-        httpBaseUrl: record.httpBaseUrl,
-        wsBaseUrl: record.wsBaseUrl,
-        createdAt: record.createdAt,
-        lastConnectedAt: record.lastConnectedAt,
-        ...(record.desktopSsh ? { desktopSsh: record.desktopSsh } : {}),
+      return Object.assign(persistedSavedEnvironmentRecordFields(record), {
         bearerToken,
         bearerTokenSavedAt,
         bearerTokenExpiresAt,
-      };
+      });
     }),
   );
 }
@@ -262,20 +254,11 @@ export function writeBrowserSavedEnvironmentSecret(
         return record;
       }
       found = true;
-      const nextRecord = {
-        environmentId: record.environmentId,
-        label: record.label,
-        httpBaseUrl: record.httpBaseUrl,
-        wsBaseUrl: record.wsBaseUrl,
-        createdAt: record.createdAt,
-        lastConnectedAt: record.lastConnectedAt,
+      return Object.assign(persistedSavedEnvironmentRecordFields(record), {
         bearerToken: trimmedSecret,
         bearerTokenSavedAt: new Date(nowMs).toISOString(),
         bearerTokenExpiresAt: computeBearerTokenExpiresAt(nowMs),
-      };
-      return record.desktopSsh
-        ? Object.assign(nextRecord, { desktopSsh: record.desktopSsh })
-        : nextRecord;
+      });
     }),
   });
   return found;

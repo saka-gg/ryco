@@ -285,20 +285,24 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       label: "Encrypted · Account trusted · Connected",
       verifyAction: "verify-independently",
       connectionActions: true,
+      directAccessAction: true,
     });
     expect(present({ nativeTrust: "account-trusted", online: false })).toEqual({
       label: "Encrypted · Account trusted · Offline",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
     expect(present({ nativeTrust: "verified" })).toEqual({
       label: "Encrypted · Verified locally · Online",
       verifyAction: null,
       connectionActions: true,
+      directAccessAction: true,
     });
     expect(present({ nativeTrust: "identity-conflict" })).toMatchObject({
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
   });
 
@@ -307,10 +311,25 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       label: "Encrypted · Verified locally · This device",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
     expect(
       present({ nativeTrust: "unknown", isThisDevice: true, accountE2ee: "securing" }),
-    ).toEqual({ label: "This device", verifyAction: null, connectionActions: false });
+    ).toEqual({
+      label: "This device",
+      verifyAction: null,
+      connectionActions: false,
+      directAccessAction: false,
+    });
+  });
+
+  it("offers direct access once per trusted machine and says when it is linked", () => {
+    expect(present({ nativeTrust: "account-trusted", directLinked: true })).toMatchObject({
+      label: "Encrypted · Account trusted · Online · Direct access ready",
+      directAccessAction: false,
+    });
+    // Never for a machine Desktop cannot yet reach through the Hub.
+    expect(present({ nativeTrust: "unverified" }).directAccessAction).toBe(false);
   });
 
   it("does not offer the manual ceremony while this device is still being secured", () => {
@@ -318,11 +337,13 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       label: "Securing this device…",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
     expect(present({ nativeTrust: "unknown", accountE2ee: "securing", online: false })).toEqual({
       label: "Securing this device… · Offline",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
   });
 
@@ -331,6 +352,7 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
       label: "This device was revoked on the Hub · Sign in again",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
   });
 
@@ -340,12 +362,14 @@ describe("desktopWorkspaceMachineTrustPresentation", () => {
         label: "Needs verification",
         verifyAction: "verify",
         connectionActions: false,
+        directAccessAction: false,
       });
     }
     expect(present({ accountE2ee: "unavailable", online: false })).toEqual({
       label: "Needs verification · Offline",
       verifyAction: null,
       connectionActions: false,
+      directAccessAction: false,
     });
   });
 });
