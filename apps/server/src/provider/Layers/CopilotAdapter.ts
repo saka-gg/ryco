@@ -73,6 +73,11 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
           stream: "native",
         })
       : undefined);
+  // Only a logger built here is closed here; an injected one (the shared
+  // `ProviderEventLoggers.native`) belongs to its owner.
+  if (options?.nativeEventLogger === undefined && nativeEventLogger !== undefined) {
+    yield* Effect.addFinalizer(() => nativeEventLogger.close());
+  }
   const sessions = new Map<ThreadId, ActiveCopilotSession>();
   const runtimeEventQueue = yield* Queue.bounded<ProviderRuntimeEvent>(2_048);
   const runtimeEventQueueMetrics = yield* makeServerQueueMetrics({
@@ -120,21 +125,20 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     );
   };
 
-  const logNativeEvent = Effect.fn("logCopilotNativeEvent")(function* (
-    threadId: ThreadId,
-    event: SessionEvent,
-  ) {
-    if (!nativeEventLogger) return;
-    yield* nativeEventLogger
-      .write(
-        {
-          observedAt: new Date().toISOString(),
-          event: redactAgentControlSecrets(event),
-        },
-        threadId,
-      )
-      .pipe(Effect.ignoreCause({ log: true }));
-  });
+  // Runs once per SDK event (every stream delta included): a plain function,
+  // not an `Effect.fn`, so it adds no span per event.
+  const logNativeEvent = (threadId: ThreadId, event: SessionEvent): Effect.Effect<void> =>
+    nativeEventLogger
+      ? nativeEventLogger
+          .write(
+            {
+              observedAt: new Date().toISOString(),
+              event: redactAgentControlSecrets(event),
+            },
+            threadId,
+          )
+          .pipe(Effect.ignoreCause({ log: true }))
+      : Effect.void;
 
   const makeSyntheticEvent = <TType extends ProviderRuntimeEvent["type"]>(
     threadId: ThreadId,
@@ -172,7 +176,8 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
 
   const mapEventDeps: MapEventDeps = { makeEventStamp, nextEventId };
 
-  const handleEvent = Effect.fn("handleCopilotEvent")(function* (
+  // Once per SDK event: untraced for the same reason as `logNativeEvent`.
+  const handleEvent = Effect.fnUntraced(function* (
     session: ActiveCopilotSession,
     event: SessionEvent,
   ) {

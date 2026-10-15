@@ -436,6 +436,145 @@ describe("EventNdjsonLogger", () => {
     }),
   );
 
+  it.effect("coalesces OpenCode part deltas and Copilot assistant deltas", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const basePath = path.join(tempDir, "events.log");
+      const openCodeThread = ThreadId.make("thread-opencode");
+      const copilotThread = ThreadId.make("thread-copilot");
+      const openCodeDelta = (partID: string, delta: string) => ({
+        observedAt: "2026-10-12T00:00:00.000Z",
+        event: {
+          provider: "opencode",
+          threadId: "thread-opencode",
+          providerThreadId: "ses-1",
+          type: "message.part.delta",
+          turnId: "turn-1",
+          payload: {
+            type: "message.part.delta",
+            properties: { sessionID: "ses-1", messageID: "msg-1", partID, field: "text", delta },
+          },
+        },
+      });
+      const copilotEvent = (type: string, data: Record<string, unknown>) => ({
+        observedAt: "2026-10-12T00:00:00.000Z",
+        event: { id: `evt-${type}`, timestamp: "t", parentId: null, ephemeral: true, type, data },
+      });
+
+      try {
+        const native = yield* makeEventNdjsonLogger(basePath, { stream: "native" });
+        if (!native) {
+          return assert.fail("expected logger");
+        }
+
+        for (const delta of ["he", "llo"]) {
+          yield* native.write(openCodeDelta("part-1", delta), openCodeThread);
+        }
+        for (const delta of ["wor", "ld"]) {
+          yield* native.write(openCodeDelta("part-2", delta), openCodeThread);
+        }
+        for (const delta of ["th", "ink"]) {
+          yield* native.write(
+            copilotEvent("assistant.reasoning_delta", { reasoningId: "r-1", deltaContent: delta }),
+            copilotThread,
+          );
+        }
+        for (const delta of ["a", "b", "c"]) {
+          yield* native.write(
+            copilotEvent("assistant.message_delta", { messageId: "msg-1", deltaContent: delta }),
+            copilotThread,
+          );
+        }
+        yield* native.write(
+          copilotEvent("assistant.message", { messageId: "msg-1", content: "abc" }),
+          copilotThread,
+        );
+        yield* native.close();
+
+        assert.deepEqual(
+          readRecords(path.join(tempDir, "thread-opencode.native.log")).map((record) => [
+            record.event.kind,
+            record.event.type,
+            record.event.partId,
+            record.event.count,
+            record.event.text,
+          ]),
+          [
+            ["delta-run", "message.part.delta", "part-1", 2, "hello"],
+            ["delta-run", "message.part.delta", "part-2", 2, "world"],
+          ],
+        );
+        assert.deepEqual(
+          readRecords(path.join(tempDir, "thread-copilot.native.log")).map((record) => [
+            record.event.kind ?? null,
+            record.event.type,
+            record.event.reasoningId ?? record.event.messageId,
+            record.event.text ?? null,
+          ]),
+          [
+            ["delta-run", "assistant.reasoning_delta", "r-1", "think"],
+            ["delta-run", "assistant.message_delta", "msg-1", "abc"],
+            [null, "assistant.message", undefined, null],
+          ],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("keeps canonical raw payloads the lifecycle native log does not hold", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
+      const threadId = ThreadId.make("thread-lifecycle-raw");
+
+      try {
+        const canonical = yield* makeEventNdjsonLogger(path.join(tempDir, "events.log"), {
+          stream: "canonical",
+          mode: () => "lifecycle",
+        });
+        if (!canonical) {
+          return assert.fail("expected logger");
+        }
+        yield* canonical.write(
+          {
+            type: "task.completed",
+            payload: { taskId: "task-1", status: "completed" },
+            raw: {
+              source: "claude.sdk.message",
+              method: "claude/system/task_notification",
+              payload: { uuid: "sdk-uuid", task_id: "task-1", output_file: "/tmp/out.txt" },
+            },
+          },
+          threadId,
+        );
+        yield* canonical.write(
+          {
+            type: "session.configured",
+            payload: {},
+            raw: {
+              source: "claude.sdk.message",
+              method: "claude/system/init",
+              payload: { uuid: "init-uuid", tools: ["Bash"] },
+            },
+          },
+          threadId,
+        );
+        yield* canonical.close();
+
+        const records = readRecords(path.join(tempDir, "thread-lifecycle-raw.log"));
+        assert.equal(records[0]?.raw.payload.output_file, "/tmp/out.txt");
+        assert.deepEqual(records[1]?.raw, {
+          source: "claude.sdk.message",
+          method: "claude/system/init",
+          nativeId: "init-uuid",
+        });
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.effect("applies the current detail level to every write", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));

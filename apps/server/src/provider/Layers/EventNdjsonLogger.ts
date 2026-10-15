@@ -355,9 +355,9 @@ export const makeEventNdjsonLogger = Effect.fn("makeEventNdjsonLogger")(function
     return undefined;
   };
 
-  const serialize = (record: unknown): string | undefined => {
+  const serialize = (record: unknown, mode: ProviderEventLogMode): string | undefined => {
     try {
-      return serializeProviderEventLogRecord(stream, record);
+      return serializeProviderEventLogRecord(stream, record, mode);
     } catch (error) {
       runDetached(logWarning("failed to serialize provider event log record", { error }));
       return undefined;
@@ -368,8 +368,9 @@ export const makeEventNdjsonLogger = Effect.fn("makeEventNdjsonLogger")(function
     writer: ThreadWriter,
     record: unknown,
     observedAtMs: number,
+    mode: ProviderEventLogMode,
   ): DropReason | undefined => {
-    const json = serialize(record);
+    const json = serialize(record, mode);
     return json === undefined
       ? undefined
       : enqueueLine(writer, formatProviderEventLogLine(streamLabel, observedAtMs, json));
@@ -392,6 +393,7 @@ export const makeEventNdjsonLogger = Effect.fn("makeEventNdjsonLogger")(function
         text: run.parts.join(""),
       }),
       run.firstAtMs,
+      getMode(),
     );
   };
 
@@ -451,7 +453,7 @@ export const makeEventNdjsonLogger = Effect.fn("makeEventNdjsonLogger")(function
       }
     }
     const droppedRun = closeRun(writer);
-    return enqueueRecord(writer, record, nowMs) ?? droppedRun;
+    return enqueueRecord(writer, record, nowMs, mode) ?? droppedRun;
   };
 
   const flushWriter = (writer: ThreadWriter, closing: boolean): Promise<void> => {

@@ -1900,6 +1900,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           stream: "native",
         })
       : undefined);
+  // Only a logger built here is closed here; an injected one (the shared
+  // `ProviderEventLoggers.native`) belongs to its owner.
+  const managedNativeEventLogger =
+    options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
 
   const readSessionMessages =
     options?.readSessionMessages ??
@@ -6650,6 +6654,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ).pipe(
       Effect.tap(() => runtimeEventQueueMetrics.reset),
       Effect.tap(() => Queue.shutdown(runtimeEventQueue)),
+      Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),
     ),
   );
 

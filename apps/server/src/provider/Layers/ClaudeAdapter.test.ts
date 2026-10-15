@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -6224,6 +6224,45 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("closes the native event logger it built when the adapter is released", () => {
+    const logDir = mkdtempSync(path.join(os.tmpdir(), "ryco-claude-native-log-"));
+    const harness = makeHarness({ nativeEventLogPath: path.join(logDir, "events.log") });
+    return Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-native-close"),
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        const turnCompletedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "turn.completed",
+        ).pipe(Stream.runHead, Effect.forkChild);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "sdk-session-native-close",
+          uuid: "result-native-close",
+        } as unknown as SDKMessage);
+        assert.equal((yield* Fiber.join(turnCompletedFiber))._tag, "Some");
+      }).pipe(Effect.provide(harness.layer));
+
+      // Released with the adapter, before its batch window elapsed: only the
+      // close can have written the record.
+      const nativeLog = readdirSync(logDir).find((name) => name.endsWith(".native.log"));
+      assert.isDefined(nativeLog);
+      assert.include(readFileSync(path.join(logDir, nativeLog!), "utf8"), "result-native-close");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.ensuring(Effect.sync(() => rmSync(logDir, { recursive: true, force: true }))),
     );
   });
 

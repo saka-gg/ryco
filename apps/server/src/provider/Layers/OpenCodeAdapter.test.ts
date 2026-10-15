@@ -16,6 +16,7 @@ import {
   Schema,
   Scope,
   Stream,
+  Tracer,
 } from "effect";
 import { beforeEach } from "vite-plus/test";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
@@ -1972,6 +1973,79 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       }
     }),
   );
+
+  it.effect("adds no span per streamed event", () => {
+    const spanNames: Array<string> = [];
+    const tracer = Tracer.make({
+      span: (options) => {
+        spanNames.push(options.name);
+        return new Tracer.NativeSpan(options);
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-untraced-events");
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      runtimeMock.state.subscribedEvents = [
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: rootSessionId,
+            info: {
+              id: "message-untraced",
+              role: "assistant",
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+          },
+        },
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: rootSessionId,
+            part: {
+              id: "text-untraced",
+              sessionID: rootSessionId,
+              messageID: "message-untraced",
+              type: "text",
+              text: "Hello",
+              time: { start: 1 },
+            },
+          },
+        },
+        {
+          type: "todo.updated",
+          properties: {
+            sessionID: rootSessionId,
+            todos: [{ id: "todo-1", content: "Inspect", status: "pending", priority: "high" }],
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.takeUntil((event) => event.type === "turn.plan.updated"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-untraced-events"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      assert.ok(events.some((event) => event.type === "turn.plan.updated"));
+      // The text part went through emitAssistantTextDelta.
+      assert.ok(
+        events.some((event) => event.type === "content.delta" && event.payload.delta === "Hello"),
+      );
+
+      // The session lifecycle is still traced; the per-event handlers are not.
+      assert.ok(spanNames.includes("startSession"));
+      assert.ok(!spanNames.includes("handleSubscribedEvent"));
+      assert.ok(!spanNames.includes("emitAssistantTextDelta"));
+    }).pipe(Effect.withTracer(tracer));
+  });
 
   it.effect("projects root-session todos, token usage, and permission resolutions", () =>
     Effect.gen(function* () {
