@@ -128,6 +128,7 @@ import {
 } from "../Services/ProjectionSnapshotQuery.ts";
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
+import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import {
   cwdRelocationHandoffReference,
   makeCwdRelocationRequestedActivity,
@@ -150,6 +151,8 @@ import {
 } from "../providerFailureActivity.ts";
 import {
   classifyTurnLiveness,
+  type SilentTurnHistoryChecks,
+  silentTurnHistoryCheckDue,
   TURN_LOST_DETAIL,
   turnLivenessApplies,
   type TurnLivenessVerdict,
@@ -449,6 +452,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const checkpointReactor = yield* Effect.serviceOption(CheckpointReactor);
   // Optional: without it every turn start starts its own session.
   const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
+  // Optional: without it a turn whose completion was lost on a live runtime waits for a reopen.
+  const runtimeIngestion = yield* Effect.serviceOption(ProviderRuntimeIngestionService);
+  const reactorScope = yield* Effect.scope;
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -885,6 +891,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       runtimeMode: desiredRuntimeMode,
       tokenMode: desiredTokenMode,
       customSystemPrompt: projectStartSystemPrompt(project),
+      // Staged by the turn start before this call: a Computer turn never adopts a prewarmed
+      // session that listed its tools without the Computer catalog.
+      computerTurn: computerTurnPlan(threadId) !== undefined,
     };
 
     // Fenced: a Stop cancels the start (pending or in flight). The start is
@@ -1825,6 +1834,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly fenceSequence: number;
     readonly thread: OrchestrationThreadShell;
     readonly messageText: string;
+    /** False when the pre-turn checkpoint baseline was late: noted on the accepted turn. */
+    readonly baselineConfirmed: boolean;
   }) {
     const { event, fenceSequence, thread } = input;
     const threadId = event.payload.threadId;
@@ -1852,6 +1863,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             guardStart: (effect) => laneControl.guardStart(turnFence, effect),
             onDispatchStarted: laneControl.beginTurnOwnership(threadId, fenceSequence),
             stopRequested: laneControl.stopRequestedSince(threadId, fenceSequence),
+            ...(input.baselineConfirmed
+              ? {}
+              : {
+                  onTurnAccepted: (turnId: TurnId) =>
+                    noteUnconfirmedPreTurnBaseline(threadId, turnId),
+                }),
           }),
         ),
       ),
@@ -1895,6 +1912,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly thread: OrchestrationThreadShell;
     readonly messageText: string;
     readonly relocation: CwdRelocationResumeUnavailableError;
+    readonly baselineConfirmed: boolean;
   }) {
     const { event, thread, relocation } = input;
     const reference = cwdRelocationHandoffReference(event);
@@ -1924,6 +1942,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       fenceSequence: input.fenceSequence,
       thread,
       messageText: input.messageText,
+      baselineConfirmed: input.baselineConfirmed,
     });
     // Best-effort: the outcome is already visible, and the next boot settles a
     // row this misses.
@@ -1950,19 +1969,37 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           .pipe(Effect.timeoutOption(preTurnBaselineWait), Effect.map(Option.isSome)),
     });
 
-  /** Joins the baseline before anything reaches the provider; a late one is said, not raced silently. */
+  /**
+   * Joins the baseline before anything reaches the provider. The join is a guarded start: a
+   * Stop noted while it waits cancels the turn start, as it would during the session start.
+   * Returns whether the baseline landed; a late one is noted on the turn once it is accepted.
+   */
   const joinPreTurnBaseline = Effect.fnUntraced(function* (
     baseline: Fiber.Fiber<boolean>,
     event: TurnStartRequestedEvent,
+    fenceSequence: number,
   ) {
-    if (yield* Fiber.join(baseline)) return;
     const threadId = event.payload.threadId;
-    yield* Effect.logWarning("provider command reactor started a turn before its checkpoint", {
-      threadId,
-      messageId: event.payload.messageId,
-    });
+    const confirmed = yield* laneControl.guardStart(
+      { threadId, fenceSequence, kind: "turn" },
+      Fiber.join(baseline),
+    );
+    if (!confirmed) {
+      yield* Effect.logWarning("provider command reactor started a turn before its checkpoint", {
+        threadId,
+        messageId: event.payload.messageId,
+      });
+    }
+    return confirmed;
+  });
+
+  /**
+   * Notes a late baseline on the turn the provider accepted. The work log shows only the latest
+   * turn's activities, so the notice carries that turn's id.
+   */
+  const noteUnconfirmedPreTurnBaseline = (threadId: ThreadId, turnId: TurnId) => {
     const createdAt = new Date().toISOString();
-    yield* orchestrationEngine
+    return orchestrationEngine
       .dispatch({
         type: "thread.activity.append",
         commandId: serverCommandId("checkpoint-baseline-unconfirmed"),
@@ -1976,22 +2013,23 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             detail:
               "The checkpoint taken before this turn was still being saved when the turn started, so this turn's changes may also show in the previous turn's diff and revert.",
           },
-          turnId: null,
+          turnId,
           createdAt,
         },
         createdAt,
       })
       .pipe(
+        Effect.asVoid,
         Effect.catchCause((cause) =>
           Cause.hasInterruptsOnly(cause)
-            ? Effect.failCause(cause)
+            ? Effect.interrupt
             : Effect.logWarning("provider command reactor could not note a late checkpoint", {
                 threadId,
                 cause: Cause.pretty(cause),
               }),
         ),
       );
-  });
+  };
 
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
@@ -2073,12 +2111,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const baseline = yield* Effect.forkScoped(awaitPreTurnBaseline(threadId));
 
     if (event.payload.contextHandoff !== undefined) {
-      yield* joinPreTurnBaseline(baseline, event);
+      const baselineConfirmed = yield* joinPreTurnBaseline(baseline, event, fenceSequence);
       return yield* runContextHandoffTurnStart({
         event,
         fenceSequence,
         thread,
         messageText: message.text,
+        baselineConfirmed,
       });
     }
 
@@ -2100,14 +2139,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }).pipe(
       Effect.map(Option.some),
       Effect.catchTag("CwdRelocationResumeUnavailableError", (relocation) =>
-        joinPreTurnBaseline(baseline, event).pipe(
-          Effect.andThen(
+        joinPreTurnBaseline(baseline, event, fenceSequence).pipe(
+          Effect.flatMap((baselineConfirmed) =>
             continueAfterCwdRelocation({
               event,
               fenceSequence,
               thread,
               messageText: message.text,
               relocation,
+              baselineConfirmed,
             }),
           ),
           Effect.as(Option.none()),
@@ -2153,10 +2193,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           })
         : Effect.void;
 
-    // A Stop that arrived while the session was prepared ends the turn here,
-    // before anything is submitted.
+    // A Stop that arrived while the session was prepared, or while the baseline
+    // is joined, ends the turn here, before anything is submitted.
     yield* laneControl.failIfCancelled(turnFence);
-    yield* joinPreTurnBaseline(baseline, event);
+    const baselineConfirmed = yield* joinPreTurnBaseline(baseline, event, fenceSequence);
 
     // Submission failures may follow this request's own turn.started, so they
     // reset a running session (preserveActiveTurn: false), as before. A turn the
@@ -2168,8 +2208,12 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       Effect.matchCauseEffect({
         onFailure: (cause) =>
           reportTurnStartFailure({ event, fenceSequence, cause, preserveActiveTurn: false }),
-        onSuccess: () =>
-          commitAcceptedModelSelection.pipe(
+        onSuccess: (accepted) =>
+          (baselineConfirmed
+            ? Effect.void
+            : noteUnconfirmedPreTurnBaseline(threadId, accepted.turnId)
+          ).pipe(
+            Effect.andThen(commitAcceptedModelSelection),
             Effect.catchCause((cause) =>
               Cause.hasInterruptsOnly(cause)
                 ? Effect.interrupt
@@ -2988,6 +3032,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   // thread, and the turn already reported unresponsive.
   const livenessSuspects = new Map<ThreadId, TurnLivenessVerdict>();
   const livenessWarned = new Map<ThreadId, TurnId>();
+  // Provider history checks for silent running turns, per thread (its current turn only).
+  const livenessHistoryChecks = new Map<ThreadId, SilentTurnHistoryChecks>();
 
   /**
    * Classifies one thread's turn. The live-runtime lookup runs only for a running
@@ -3008,6 +3054,16 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
     const { known, live } = yield* readLiveRuntime(input.threadId);
     if (!known) return { verdict: null, session };
+    const historyCheckDue = silentTurnHistoryCheckDue({
+      session,
+      backgroundLiveness: thread?.backgroundLiveness,
+      liveRuntimeSessionId: live?.runtimeSessionId ?? null,
+      liveTurnRunning: live?.status === "running" && live.activeTurnId === session?.activeTurnId,
+      activity,
+      previous: livenessHistoryChecks.get(input.threadId) ?? null,
+      nowMs,
+      sweepIntervalMs: livenessSweepIntervalMs,
+    });
     const verdict = classifyTurnLiveness({
       session,
       hasPendingRequest: Boolean(thread?.hasPendingApprovals || thread?.hasPendingUserInput),
@@ -3022,8 +3078,29 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       sweepIntervalMs: livenessSweepIntervalMs,
       unresponsiveAfterMs,
     });
-    return { verdict, session };
+    return { verdict, session, historyCheckDue };
   });
+
+  /**
+   * Asks provider history whether a silent running turn ended. A lost turn completion on a
+   * live runtime is otherwise never settled: nothing else emits a settling session. The read
+   * is coalesced and spaced by ingestion, and runs beside the sweep, never blocking it.
+   */
+  const requestSilentTurnHistoryCheck = (threadId: ThreadId, turnId: TurnId, nowMs: number) =>
+    Option.match(runtimeIngestion, {
+      onNone: () => Effect.void,
+      onSome: (ingestion) => {
+        const reconcile = ingestion.reconcileThread;
+        if (reconcile === undefined) return Effect.void;
+        const previous = livenessHistoryChecks.get(threadId);
+        livenessHistoryChecks.set(threadId, {
+          turnId,
+          count: previous?.turnId === turnId ? previous.count + 1 : 1,
+          lastCheckAtMs: nowMs,
+        });
+        return reconcile(threadId, "liveness").pipe(Effect.forkIn(reactorScope), Effect.asVoid);
+      },
+    });
 
   /** Runs in the thread's lifecycle lane: acts only if the verdict still holds. */
   const applyLivenessVerdict = Effect.fnUntraced(function* (
@@ -3369,13 +3446,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       seen.add(threadId);
       // A busy lane may be restarting or stopping the runtime right now.
       if (!(yield* lifecycleLanes.isIdle(threadId))) continue;
-      const { verdict } = yield* classifyThreadLiveness({
+      const { verdict, session, historyCheckDue } = yield* classifyThreadLiveness({
         threadId,
         activity,
         previous: livenessSuspects.get(threadId) ?? null,
       });
       // Unknown this sweep: keep the suspicion for the next one.
       if (verdict === null) continue;
+      if (historyCheckDue && session?.activeTurnId != null) {
+        yield* requestSilentTurnHistoryCheck(
+          threadId,
+          session.activeTurnId,
+          yield* Clock.currentTimeMillis,
+        );
+      }
       switch (verdict.kind) {
         case "suspect-lost":
           livenessSuspects.set(threadId, verdict);
@@ -3393,6 +3477,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     // for turns that are no longer active.
     for (const threadId of livenessSuspects.keys()) {
       if (!seen.has(threadId)) livenessSuspects.delete(threadId);
+    }
+    for (const threadId of livenessHistoryChecks.keys()) {
+      if (!seen.has(threadId)) livenessHistoryChecks.delete(threadId);
     }
     for (const [threadId, turnId] of livenessWarned) {
       const thread = yield* resolveThread(threadId);

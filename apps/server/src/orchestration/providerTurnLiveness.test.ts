@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   classifyTurnLiveness,
+  silentTurnHistoryCheckDue,
   type TurnLivenessVerdict,
   unresponsiveTurnDetail,
 } from "./providerTurnLiveness.ts";
@@ -137,5 +138,53 @@ describe("classifyTurnLiveness", () => {
       "No provider activity for 15 minutes. It may be running a long silent command, or it may be stuck. Stop the turn if it does not recover.",
     );
     expect(unresponsiveTurnDetail(10)).toContain("for 1 minute.");
+  });
+});
+
+describe("silentTurnHistoryCheckDue", () => {
+  const due = (overrides: Partial<Parameters<typeof silentTurnHistoryCheckDue>[0]>) =>
+    silentTurnHistoryCheckDue({
+      session: runningSession,
+      backgroundLiveness: null,
+      liveRuntimeSessionId: runtime,
+      liveTurnRunning: false,
+      activity: { threadId, runtimeSessionId: runtime, lastActivityAtMs: 0 },
+      previous: null,
+      nowMs: SWEEP,
+      sweepIntervalMs: SWEEP,
+      ...overrides,
+    });
+
+  it("checks a running turn silent on its own live runtime for a sweep interval", () => {
+    expect(due({})).toBe(true);
+    expect(due({ nowMs: SWEEP - 1 })).toBe(false);
+  });
+
+  it("leaves turns it cannot reason about, or that are busy, alone", () => {
+    expect(due({ session: { ...runningSession, status: "ready", activeTurnId: null } })).toBe(
+      false,
+    );
+    // No live runtime: the lost-turn rule owns it.
+    expect(due({ liveRuntimeSessionId: null })).toBe(false);
+    expect(due({ liveRuntimeSessionId: RuntimeSessionId.make("runtime-other") })).toBe(false);
+    expect(due({ backgroundLiveness: "working" })).toBe(false);
+    // Still running on the live session: a long silent command, not a lost completion.
+    expect(due({ liveTurnRunning: true })).toBe(false);
+    expect(due({ activity: null })).toBe(false);
+  });
+
+  it("spaces checks of one turn at doubling gaps, and starts over for a new turn", () => {
+    const after = (count: number, lastCheckAtMs: number, nowMs: number) =>
+      due({ previous: { turnId, count, lastCheckAtMs }, nowMs });
+    expect(after(1, SWEEP, 2 * SWEEP)).toBe(false);
+    expect(after(1, SWEEP, 3 * SWEEP)).toBe(true);
+    expect(after(2, 3 * SWEEP, 6 * SWEEP)).toBe(false);
+    expect(after(2, 3 * SWEEP, 7 * SWEEP)).toBe(true);
+    expect(
+      due({
+        previous: { turnId: TurnId.make("turn-0"), count: 5, lastCheckAtMs: SWEEP },
+        nowMs: SWEEP,
+      }),
+    ).toBe(true);
   });
 });

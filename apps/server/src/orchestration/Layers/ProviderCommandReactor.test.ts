@@ -4,6 +4,12 @@ import {
   type ProviderSessionPrewarmOptions,
 } from "./ProviderSessionPrewarm.ts";
 import { ProviderSessionPrewarm } from "../Services/ProviderSessionPrewarm.ts";
+import {
+  type HistoryRecoveryTrigger,
+  ProviderRuntimeIngestionService,
+  type ProviderRuntimeIngestionShape,
+} from "../Services/ProviderRuntimeIngestion.ts";
+import { computerTurnPlan, stageComputerTurn } from "../../computer/computerTurnLifecycle.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { canonicalStoragePath } from "../../storage/lifecycle.ts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -272,6 +278,8 @@ describe("ProviderCommandReactor", () => {
     ) => ProviderEffectIntentRepositoryShape;
     /** Runs the real session prewarm service with these options. */
     readonly prewarm?: ProviderSessionPrewarmOptions;
+    /** Provider history recovery as the reactor sees it; omitted, there is none. */
+    readonly reconcileThread?: ProviderRuntimeIngestionShape["reconcileThread"];
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "ryco-reactor-"));
@@ -651,8 +659,16 @@ describe("ProviderCommandReactor", () => {
     const prewarmLayer = input?.prewarm
       ? makeProviderSessionPrewarmLayer(input.prewarm)
       : Layer.empty;
+    const runtimeIngestionLayer = input?.reconcileThread
+      ? Layer.succeed(ProviderRuntimeIngestionService, {
+          reconcileThread: input.reconcileThread,
+          start: () => Effect.void,
+          drain: Effect.void,
+        })
+      : Layer.empty;
     const layer = reactorLayer.pipe(
       Layer.provideMerge(prewarmLayer),
+      Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(checkpointLayer),
       Layer.provideMerge(contextHandoffLayer),
       Layer.provideMerge(
@@ -4305,6 +4321,11 @@ describe("ProviderCommandReactor", () => {
         ),
       ),
     );
+    // On the accepted turn: the work log shows only the latest turn's activities.
+    const notice = (await readThread(harness))?.activities.find(
+      (activity) => activity.kind === "checkpoint.baseline.unconfirmed",
+    );
+    expect(notice?.turnId).toBe("turn-1");
     expect(await turnStartFailures(harness)).toHaveLength(0);
   });
 
@@ -5973,6 +5994,30 @@ describe("ProviderCommandReactor", () => {
       await waitFor(() => sendTurnThreads(harness).includes(T1));
     });
 
+    it("Stop while the turn waits for its checkpoint baseline cancels the start", async () => {
+      const baselineGate = Effect.runSync(Deferred.make<void>());
+      const harness = await createHarness({
+        ensurePreTurnBaseline: () => Deferred.await(baselineGate),
+      });
+      await startTurn(harness, { messageId: "cancel-during-baseline" });
+      await waitFor(() => harness.startSession.mock.calls.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await interrupt(harness, "cancel-during-baseline");
+      await waitFor(
+        async () => (await activitiesOf(harness, "provider.turn.start.cancelled")).length === 1,
+      );
+      await Effect.runPromise(Deferred.succeed(baselineGate, undefined));
+      await harness.drain();
+
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(await activitiesOf(harness, "provider.turn.start.failed")).toHaveLength(0);
+      expect(await activitiesOf(harness, "checkpoint.baseline.unconfirmed")).toHaveLength(0);
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "stopped",
+        activeTurnId: null,
+      });
+    });
+
     it("an approval on another thread is delivered while a session start hangs", async () => {
       const gate = Effect.runSync(Deferred.make<void>());
       const harness = await createHarness({
@@ -6474,6 +6519,65 @@ describe("ProviderCommandReactor", () => {
       });
       expect((await readThread(harness))?.session?.status).toBe("running");
       expect(harness.stopSession).not.toHaveBeenCalled();
+    });
+
+    const silentLiveTurn = async (live: { readonly status: "ready" | "running" }) => {
+      const checks: Array<[ThreadId, HistoryRecoveryTrigger | undefined]> = [];
+      const harness = await createHarness({
+        // Long enough that only the sweeps below run.
+        reactorOptions: { livenessSweepIntervalMs: 10 * 60_000 },
+        listRuntimeActivity: () =>
+          Effect.succeed([
+            {
+              threadId: T1,
+              runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+              lastActivityAtMs: 0,
+            },
+          ]),
+        getSession: () =>
+          Effect.succeed(
+            Option.some({
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              status: live.status,
+              runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+              runtimeMode: "approval-required" as const,
+              threadId: T1,
+              ...(live.status === "running" ? { activeTurnId: asTurnId("turn-1") } : {}),
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }),
+          ),
+        reconcileThread: (threadId, trigger) =>
+          Effect.sync(() => {
+            checks.push([threadId, trigger]);
+          }),
+      });
+      await setRunning(harness, `silent-live-${live.status}`);
+      return { harness, checks };
+    };
+
+    it("asks provider history whether a silent live turn ended, not on every sweep", async () => {
+      // The live session finished the turn; the projection never heard of it.
+      const { harness, checks } = await silentLiveTurn({ status: "ready" });
+      await harness.run(harness.reactor.sweepLiveness);
+      await waitFor(() => checks.length === 1);
+      expect(checks).toEqual([[T1, "liveness"]]);
+      // The next check for this turn waits twice the sweep interval.
+      await harness.run(harness.reactor.sweepLiveness);
+      await harness.drain();
+      expect(checks).toHaveLength(1);
+      expect((await readThread(harness))?.session?.status).toBe("running");
+    });
+
+    it("does not read history for a silent turn the live session still runs", async () => {
+      const { harness, checks } = await silentLiveTurn({ status: "running" });
+      await harness.run(harness.reactor.sweepLiveness);
+      await harness.drain();
+      await harness.run(harness.reactor.sweepLiveness);
+      await harness.drain();
+      expect(checks).toEqual([]);
+      expect((await readThread(harness))?.session?.status).toBe("running");
     });
 
     it("never reports a turn that waits on the user as quiet", async () => {
@@ -7677,6 +7781,37 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).toHaveBeenCalledTimes(2);
       const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
       expect(thread?.session?.runtimeSessionId).toBe("runtime-2");
+    });
+
+    // A prewarmed session listed the Agent Control tools before the Computer plan was staged,
+    // so it cannot offer the Computer tools to the turn that stages it.
+    it("never adopts a prewarmed session for a Computer turn", async () => {
+      const planStagedAtStart: Array<boolean> = [];
+      const harness = await prewarmHarness({
+        startSessionEffect: () => {
+          planStagedAtStart.push(computerTurnPlan(threadId) !== undefined);
+          return undefined;
+        },
+      });
+      try {
+        await harness.run(harness.prewarm!.prewarm({ threadId }));
+        await waitFor(() => harness.runtimeSessions.length === 1);
+        await Effect.runPromise(
+          harness.engine.dispatch(
+            turnStart("computer", { computerUse: { mode: "chat", generation: "g-1" } }),
+          ),
+        );
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(harness.stopSessionBinding).toHaveBeenCalledWith(
+          expect.objectContaining({ runtimeSessionId: "runtime-1" }),
+        );
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(planStagedAtStart).toEqual([false, true]);
+        const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+        expect(thread?.session?.runtimeSessionId).toBe("runtime-2");
+      } finally {
+        stageComputerTurn(threadId, undefined);
+      }
     });
 
     it("stops an unclaimed prewarmed session after the idle timeout", async () => {

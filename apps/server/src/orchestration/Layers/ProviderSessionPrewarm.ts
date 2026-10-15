@@ -14,6 +14,7 @@ import {
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { findThreadSession } from "../../provider/threadSessionLookup.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -227,6 +228,7 @@ export const makeProviderSessionPrewarm = Effect.fnUntraced(function* (
       runtimeMode,
       tokenMode: input.tokenMode ?? thread?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
       customSystemPrompt: projectStartSystemPrompt(project),
+      computerTurn: computerTurnPlan(input.threadId) !== undefined,
     };
     return { start, opensNativeConversation: target?.hasResumeCursor !== true };
   });

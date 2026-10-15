@@ -861,6 +861,7 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
       if (!accepted) {
         return yield* Effect.die("Context handoff acceptance could not be persisted.");
       }
+      if (input.control.onTurnAccepted) yield* input.control.onTurnAccepted(turn.turnId);
       yield* finalizeConsumed({
         thread: input.thread,
         record: {

@@ -72,6 +72,7 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ModelManifest } from "../provider/ModelManifest.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
+import { ThreadViewersService } from "../orchestration/ThreadViewers.ts";
 import * as ProviderMaintenanceRunner from "../provider/providerMaintenanceRunner.ts";
 import { ServerLifecycleEvents } from "../serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
@@ -247,6 +248,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // always has ProviderService in the runtime environment.
     const providerService = yield* Effect.serviceOption(ProviderService);
     const providerRuntimeIngestion = yield* Effect.serviceOption(ProviderRuntimeIngestionService);
+    // Optional for the route-test reason above: without it no thread counts as viewed.
+    const threadViewers = yield* Effect.serviceOption(ThreadViewersService);
     const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const config = yield* ServerConfig;
     const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -1373,6 +1376,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       modelManifest,
       providerService,
       providerRuntimeIngestion,
+      threadViewers,
       providerMaintenanceRunner,
       dailyRecapQuery,
       sessionPrewarm,

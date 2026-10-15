@@ -11,6 +11,13 @@
  *   least `unresponsiveAfterMs`. Reported once per turn, never acted on: long
  *   silent work (shell commands, ACP tools) looks exactly like this.
  *
+ * A running turn that is silent on its live runtime may also have finished
+ * with a completion event that was lost on its way to the projection (the
+ * runtime stays up, so nothing else settles it). `silentTurnHistoryCheckDue`
+ * schedules a read of the provider's own history for it once the live adapter
+ * session no longer runs the turn, which settles the turn only if the provider
+ * says it ended: after one sweep interval of silence, then at doubling gaps.
+ *
  * Pure module: no services, no I/O.
  *
  * @module providerTurnLiveness
@@ -115,6 +122,50 @@ export function classifyTurnLiveness(input: {
   }
   // 7.
   return HEALTHY;
+}
+
+/** The history checks already made for a thread's silent running turn. */
+export interface SilentTurnHistoryChecks {
+  readonly turnId: TurnId;
+  readonly count: number;
+  readonly lastCheckAtMs: number;
+}
+
+/**
+ * Whether a running turn on its live runtime has been silent long enough for a
+ * provider history check. Only a turn the live adapter session no longer runs
+ * qualifies: a genuinely long silent command or a pending approval is still
+ * running there, and costs no reads. Background work is not silence. Waiting on
+ * the user is checked too: a request whose turn ended keeps waiting until
+ * history clears it. Per turn, checks are spaced by the sweep interval, doubling
+ * after each one, so a lost completion costs a handful of reads at most.
+ */
+export function silentTurnHistoryCheckDue(input: {
+  readonly session: OrchestrationSession | null;
+  readonly backgroundLiveness: "working" | "monitoring" | null | undefined;
+  readonly liveRuntimeSessionId: RuntimeSessionId | null;
+  /** The live adapter session still reports the projected turn as running. */
+  readonly liveTurnRunning: boolean;
+  readonly activity: ProviderRuntimeActivity | null;
+  readonly previous: SilentTurnHistoryChecks | null;
+  readonly nowMs: number;
+  readonly sweepIntervalMs: number;
+}): boolean {
+  const { session, activity, previous } = input;
+  if (
+    !turnLivenessApplies(input) ||
+    session?.activeTurnId == null ||
+    activity === null ||
+    input.liveRuntimeSessionId === null ||
+    input.liveRuntimeSessionId !== session.runtimeSessionId ||
+    input.liveTurnRunning ||
+    input.backgroundLiveness != null ||
+    input.nowMs - activity.lastActivityAtMs < input.sweepIntervalMs
+  ) {
+    return false;
+  }
+  if (previous === null || previous.turnId !== session.activeTurnId) return true;
+  return input.nowMs - previous.lastCheckAtMs >= input.sweepIntervalMs * 2 ** previous.count;
 }
 
 export const TURN_LOST_DETAIL = "The provider session ended without finishing the turn.";

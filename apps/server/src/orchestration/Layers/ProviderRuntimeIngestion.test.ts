@@ -31,8 +31,19 @@ import {
   ThreadId,
   TurnId,
 } from "@ryco/contracts";
-import { Effect, Exit, Layer, ManagedRuntime, Option, PubSub, Scope, Stream } from "effect";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import {
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  ManagedRuntime,
+  Option,
+  PubSub,
+  Scope,
+  Stream,
+} from "effect";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -52,7 +63,11 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
-import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import {
+  type HistoryRecoveryTrigger,
+  ProviderRuntimeIngestionService,
+} from "../Services/ProviderRuntimeIngestion.ts";
+import { HISTORY_RECOVERY_SETTLED_SPACING_MS } from "../historyRecoveryPolicy.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
@@ -434,8 +449,10 @@ describe("ProviderRuntimeIngestion", () => {
       completionRepository,
       workspaceRoot,
       attachmentsDir: path.join(workspaceRoot, "userdata", "attachments"),
-      reconcileThread: (threadId: ThreadId, trigger?: "subscribe" | "session-settled") =>
+      reconcileThread: (threadId: ThreadId, trigger?: HistoryRecoveryTrigger) =>
         Effect.runPromise(ingestion.reconcileThread!(threadId, trigger)),
+      forkReconcileThread: (threadId: ThreadId, trigger?: HistoryRecoveryTrigger) =>
+        Effect.runFork(ingestion.reconcileThread!(threadId, trigger)),
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: () => Effect.runPromise(snapshotQuery.getShellSnapshot()),
@@ -1073,6 +1090,141 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.reconcileThread(threadId);
     await harness.reconcileThread(threadId, "session-settled");
     expect(reads).toBe(1);
+  });
+
+  it("defers a settle that a recent read spaces out to one trailing read", async () => {
+    let reads = 0;
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.sync(() => {
+          reads += 1;
+          return Option.none();
+        }),
+    });
+    const threadId = asThreadId("thread-1");
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+    try {
+      await harness.reconcileThread(threadId);
+      // The turn ends 10 s after the thread was opened, and then another one.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await harness.reconcileThread(threadId, "session-settled");
+      await harness.reconcileThread(threadId, "session-settled");
+      expect(reads).toBe(1);
+      await vi.advanceTimersByTimeAsync(HISTORY_RECOVERY_SETTLED_SPACING_MS - 10_000);
+      await vi.waitFor(() => expect(reads).toBe(2));
+      await vi.advanceTimersByTimeAsync(2 * HISTORY_RECOVERY_SETTLED_SPACING_MS);
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off the trailing read of a settle when the read in flight then fails", async () => {
+    let reads = 0;
+    const started = Effect.runSync(Deferred.make<void>());
+    const release = Effect.runSync(Deferred.make<void>());
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.suspend(() => {
+          reads += 1;
+          return reads === 1
+            ? Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: "codex",
+                      method: "thread/read",
+                      detail: "codex app-server could not start",
+                    }),
+                  ),
+                ),
+              )
+            : Effect.succeed(Option.none());
+        }),
+    });
+    const threadId = asThreadId("thread-1");
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+    try {
+      const fiber = harness.forkReconcileThread(threadId);
+      await Effect.runPromise(Deferred.await(started));
+      // The turn ends while the open's read is running: one trailing read is deferred.
+      await harness.reconcileThread(threadId, "session-settled");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Effect.runPromise(Deferred.succeed(release, undefined));
+      await Effect.runPromise(Fiber.join(fiber));
+      // The trailing read is due before the failure's backoff has passed.
+      await vi.advanceTimersByTimeAsync(HISTORY_RECOVERY_SETTLED_SPACING_MS);
+      await harness.drain();
+      expect(reads).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spaces the next read after a read its subscription interrupted", async () => {
+    let reads = 0;
+    const started = Effect.runSync(Deferred.make<void>());
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.sync(() => {
+          reads += 1;
+        }).pipe(Effect.andThen(Deferred.succeed(started, undefined)), Effect.andThen(Effect.never)),
+    });
+    const threadId = asThreadId("thread-1");
+    const fiber = harness.forkReconcileThread(threadId);
+    await Effect.runPromise(Deferred.await(started));
+    await Effect.runPromise(Fiber.interrupt(fiber));
+    await harness.reconcileThread(threadId);
+    expect(reads).toBe(1);
+  });
+
+  it("settles a running turn the provider says ended when a liveness check reads it", async () => {
+    const threadId = asThreadId("thread-1");
+    const instanceId = ProviderInstanceId.make("codex");
+    const runtimeSessionId = RuntimeSessionId.make("liveness-runtime");
+    const turnId = TurnId.make("liveness-turn");
+    const harness = await createHarness({
+      readThreadHistory: () =>
+        Effect.succeed(
+          Option.some({
+            binding: {
+              threadId,
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: instanceId,
+              runtimeSessionId,
+              resumeCursor: { threadId: "remote-thread" },
+            },
+            history: {
+              messages: [],
+              items: [],
+              completedTurnIds: [turnId],
+              failedTurnIds: [],
+            },
+          }),
+        ),
+    });
+    const before = (await harness.readModel()).threads[0]!;
+    const at = "2026-10-15T10:00:00.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        threadId,
+        commandId: CommandId.make("liveness-session"),
+        createdAt: at,
+        session: {
+          ...before.session!,
+          providerInstanceId: instanceId,
+          runtimeSessionId,
+          activeTurnId: turnId,
+          status: "running",
+          updatedAt: at,
+        },
+      }),
+    );
+
+    await harness.reconcileThread(threadId, "liveness");
+    expect((await harness.readModel()).threads[0]?.session?.activeTurnId).toBeNull();
   });
 
   // After "Turn into project…" the stopped binding still records the moved-away chat folder.

@@ -61,6 +61,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     serverSettings,
     providerService,
     providerRuntimeIngestion,
+    threadViewers,
     terminalManager,
     checkpointDiffQuery,
     orchestrationEngine,
@@ -92,6 +93,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       ? withThreadHistoryRecovery(threadId, stream, reconcile, {
           mode: mode ?? "active",
           register: historyRecoveryRegistry.register(threadId),
+          ...(Option.isSome(threadViewers) ? { viewers: threadViewers.value } : {}),
         })
       : stream;
   };

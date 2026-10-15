@@ -322,8 +322,9 @@ const ProjectAvatarStoreLayerLive = Layer.unwrap(
 
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
-  Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
+  // Below the command reactor: its liveness sweep asks ingestion for history checks.
+  Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderSessionPrewarmLive),
   Layer.provideMerge(ContextHandoffCoordinatorLive),
   Layer.provideMerge(ContextHandoffServiceLive),

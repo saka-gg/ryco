@@ -1456,42 +1456,48 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             2,
             'checkpoint-b',
             'ready',
-            '[]'
+            -- Never decoded for the context: no reader needs a checkpoint's file list.
+            'not a file list'
           )
       `;
 
-      const context = yield* snapshotQuery.getThreadCheckpointContext(
-        ThreadId.make("thread-context"),
+      yield* Effect.gen(function* () {
+        const context = yield* snapshotQuery.getThreadCheckpointContext(
+          ThreadId.make("thread-context"),
+        );
+        assert.equal(context._tag, "Some");
+        if (context._tag === "Some") {
+          assert.deepEqual(context.value, {
+            threadId: ThreadId.make("thread-context"),
+            projectId: asProjectId("project-context"),
+            workspaceRoot: "/tmp/context-workspace",
+            worktreePath: "/tmp/context-worktree",
+            checkpoints: [
+              {
+                turnId: asTurnId("turn-1"),
+                checkpointTurnCount: 1,
+                checkpointRef: asCheckpointRef("checkpoint-a"),
+                status: "ready",
+                assistantMessageId: null,
+                completedAt: "2026-03-02T00:00:04.000Z",
+              },
+              {
+                turnId: asTurnId("turn-2"),
+                checkpointTurnCount: 2,
+                checkpointRef: asCheckpointRef("checkpoint-b"),
+                status: "ready",
+                assistantMessageId: null,
+                completedAt: "2026-03-02T00:00:05.000Z",
+              },
+            ],
+          });
+        }
+      }).pipe(
+        // Later tests read every checkpoint, files included, so the bad row goes either way.
+        Effect.ensuring(
+          sql`DELETE FROM projection_turns WHERE thread_id = 'thread-context'`.pipe(Effect.orDie),
+        ),
       );
-      assert.equal(context._tag, "Some");
-      if (context._tag === "Some") {
-        assert.deepEqual(context.value, {
-          threadId: ThreadId.make("thread-context"),
-          projectId: asProjectId("project-context"),
-          workspaceRoot: "/tmp/context-workspace",
-          worktreePath: "/tmp/context-worktree",
-          checkpoints: [
-            {
-              turnId: asTurnId("turn-1"),
-              checkpointTurnCount: 1,
-              checkpointRef: asCheckpointRef("checkpoint-a"),
-              status: "ready",
-              files: [],
-              assistantMessageId: null,
-              completedAt: "2026-03-02T00:00:04.000Z",
-            },
-            {
-              turnId: asTurnId("turn-2"),
-              checkpointTurnCount: 2,
-              checkpointRef: asCheckpointRef("checkpoint-b"),
-              status: "ready",
-              files: [],
-              assistantMessageId: null,
-              completedAt: "2026-03-02T00:00:05.000Z",
-            },
-          ],
-        });
-      }
     }),
   );
 

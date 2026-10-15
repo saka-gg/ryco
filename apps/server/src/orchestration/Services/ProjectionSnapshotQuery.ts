@@ -139,12 +139,18 @@ export function scopeShellSnapshot(
   };
 }
 
+/**
+ * A checkpoint without its changed-file list. The list can be megabytes of JSON on a large
+ * checkpoint, and no reader of the checkpoint context needs it.
+ */
+export type ProjectionThreadCheckpointHead = Omit<OrchestrationCheckpointSummary, "files">;
+
 export interface ProjectionThreadCheckpointContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
-  readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+  readonly checkpoints: ReadonlyArray<ProjectionThreadCheckpointHead>;
 }
 
 /**
