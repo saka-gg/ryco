@@ -139,6 +139,32 @@ export function createBackendFailurePolicy(
   maxConsecutivePreReadyFailures = MAX_CONSECUTIVE_PRE_READY_BACKEND_FAILURES,
 ) {
   let consecutivePreReadyFailures = 0;
+  const recordExit = (input: {
+    readonly reachedReady: boolean;
+    readonly exitCode: number | null;
+    readonly fatal: boolean;
+  }): BackendExitDecision => {
+    if (input.fatal || input.exitCode === DESKTOP_BACKEND_FATAL_EXIT_CODE) {
+      consecutivePreReadyFailures += input.reachedReady ? 0 : 1;
+      return {
+        action: "halt",
+        reason: "fatal",
+        consecutiveFailures: consecutivePreReadyFailures,
+      };
+    }
+    if (input.reachedReady) {
+      consecutivePreReadyFailures = 0;
+      return { action: "restart" };
+    }
+    consecutivePreReadyFailures += 1;
+    return consecutivePreReadyFailures >= maxConsecutivePreReadyFailures
+      ? {
+          action: "halt",
+          reason: "crash-loop",
+          consecutiveFailures: consecutivePreReadyFailures,
+        }
+      : { action: "restart" };
+  };
   return {
     recordReady(): void {
       consecutivePreReadyFailures = 0;
@@ -146,32 +172,15 @@ export function createBackendFailurePolicy(
     reset(): void {
       consecutivePreReadyFailures = 0;
     },
-    recordExit(input: {
-      readonly reachedReady: boolean;
-      readonly exitCode: number | null;
-      readonly fatal: boolean;
-    }): BackendExitDecision {
-      if (input.fatal || input.exitCode === DESKTOP_BACKEND_FATAL_EXIT_CODE) {
-        consecutivePreReadyFailures += input.reachedReady ? 0 : 1;
-        return {
-          action: "halt",
-          reason: "fatal",
-          consecutiveFailures: consecutivePreReadyFailures,
-        };
-      }
-      if (input.reachedReady) {
-        consecutivePreReadyFailures = 0;
-        return { action: "restart" };
-      }
-      consecutivePreReadyFailures += 1;
-      return consecutivePreReadyFailures >= maxConsecutivePreReadyFailures
-        ? {
-            action: "halt",
-            reason: "crash-loop",
-            consecutiveFailures: consecutivePreReadyFailures,
-          }
-        : { action: "restart" };
+    /**
+     * The backend could not be started at all (its entry or bootstrap pipe is
+     * missing). Counted like an exit before readiness: a damaged installation
+     * must halt with an explanation, not retry behind the splash forever.
+     */
+    recordStartFailure(): BackendExitDecision {
+      return recordExit({ reachedReady: false, exitCode: null, fatal: false });
     },
+    recordExit,
   };
 }
 

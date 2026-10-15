@@ -54,6 +54,64 @@ export function hasPriorDesktopRendererState(userDataPath: string): boolean {
   return FS.existsSync(Path.join(userDataPath, "Local Storage"));
 }
 
+/**
+ * The renderer-origin record: the port whose origin holds this installation's
+ * renderer state. It lives in Electron's userData, beside that state, so the
+ * two cannot be reset independently (the desktop settings file lives under the
+ * Ryco home, which can be wiped or pointed elsewhere on its own).
+ */
+export const DESKTOP_RENDERER_ORIGIN_RECORD_FILE = "renderer-origin.json";
+const DESKTOP_RENDERER_ORIGIN_RECORD_VERSION = 1;
+
+/** The recorded renderer-origin port, or null when there is no usable record. */
+export function readDesktopRendererOriginPort(userDataPath: string): number | null {
+  try {
+    const parsed: unknown = JSON.parse(
+      FS.readFileSync(Path.join(userDataPath, DESKTOP_RENDERER_ORIGIN_RECORD_FILE), "utf8"),
+    );
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      (parsed as { readonly version?: unknown }).version !== DESKTOP_RENDERER_ORIGIN_RECORD_VERSION
+    ) {
+      return null;
+    }
+    return normalizeDesktopBackendPort((parsed as { readonly port?: unknown }).port);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the renderer-origin port, atomically and owner-only. Written right
+ * after the port is chosen, before any window loads that origin, so a launch
+ * that never reaches readiness still leaves the record its renderer state
+ * needs.
+ */
+export function writeDesktopRendererOriginPort(userDataPath: string, port: number): void {
+  const recordPath = Path.join(userDataPath, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
+  const tempPath = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
+  FS.mkdirSync(userDataPath, { recursive: true, mode: 0o700 });
+  FS.writeFileSync(
+    tempPath,
+    `${JSON.stringify({ version: DESKTOP_RENDERER_ORIGIN_RECORD_VERSION, port })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  FS.renameSync(tempPath, recordPath);
+}
+
+/**
+ * The port this installation's renderer state was last kept under: the
+ * renderer-origin record, else the port the desktop settings remember (written
+ * at readiness by builds before the record existed).
+ */
+export function resolveDesktopPersistedBackendPort(input: {
+  readonly recordedPort: number | null;
+  readonly settingsPort: number | null;
+}): number | null {
+  return input.recordedPort ?? input.settingsPort;
+}
+
 /** Where the upward scan starts: the last served port, else a per-install default. */
 export function resolveDesktopBackendStartPort(input: {
   readonly persistedPort: number | null;

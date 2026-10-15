@@ -627,6 +627,95 @@ describe("Desktop hosted identity coordinator", () => {
     expect(setup).toHaveBeenCalledOnce();
   });
 
+  it("starts the account-only resume work before the backend is ready, and only once", async () => {
+    const accountId = `acct_${"a".repeat(22)}`;
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const upsertE2eeDeviceEnrollment = vi.fn<HostedHubApi["upsertE2eeDeviceEnrollment"]>(
+      async (request) => activeEnrollmentSummary(request),
+    );
+    const getAccountSecurity = vi.fn().mockResolvedValue({
+      passwordConfigured: true,
+      totpEnrolled: false,
+      emailDeliveryConfigured: false,
+      email: null,
+      externalIdentities: [],
+    });
+    const getExternalIdentityConfiguration = vi.fn().mockResolvedValue({
+      version: 1,
+      providers: [{ provider: "github", login: true, signup: true, link: true }],
+    });
+    const setup = vi.fn().mockResolvedValue({ nodeId: "node-1", localNodeHandle: "local-1" });
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: accountId } }),
+        upsertE2eeDeviceEnrollment,
+        listNodes: vi.fn().mockResolvedValue([]),
+        getAccountSecurity,
+        getExternalIdentityConfiguration,
+      },
+      credentials: { flush },
+      setup,
+      nativeE2eePlatform: enrollmentPlatform(async () => undefined),
+    });
+
+    identity.prepareResume();
+    // Everything that needs only the account session runs while the backend
+    // starts; the node setup, which needs the backend, does not.
+    await vi.waitFor(() => {
+      expect(flush).toHaveBeenCalledOnce();
+      expect(upsertE2eeDeviceEnrollment).toHaveBeenCalledOnce();
+      expect(getAccountSecurity).toHaveBeenCalledOnce();
+    });
+    expect(setup).not.toHaveBeenCalled();
+
+    await expect(identity.resume()).resolves.toMatchObject({
+      status: "ready",
+      accountId,
+      nodeId: "node-1",
+      accountE2eeReady: true,
+      github: { linkAvailable: true, identity: null },
+    });
+    expect(setup).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(upsertE2eeDeviceEnrollment).toHaveBeenCalledOnce();
+    expect(getAccountSecurity).toHaveBeenCalledOnce();
+    expect(getExternalIdentityConfiguration).toHaveBeenCalledOnce();
+  });
+
+  it("drops prepared account work when the account is disconnected first", async () => {
+    let finishFlush!: () => void;
+    const flush = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishFlush = resolve;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    const api = {
+      hasSessionMaterial: true,
+      restoreSession: vi.fn().mockResolvedValue({ account: { id: "account-1" } }),
+      clearSessionMaterial: vi.fn(() => {
+        api.hasSessionMaterial = false;
+      }),
+    };
+    const clear = vi.fn().mockResolvedValue(undefined);
+    const identity = coordinator({ api, credentials: { flush, clear } });
+
+    identity.prepareResume();
+    await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
+    const disconnecting = identity.disconnect();
+    await Promise.resolve();
+    // The disconnect waits for the prepared work before it clears anything.
+    expect(clear).not.toHaveBeenCalled();
+    finishFlush();
+    await disconnecting;
+    expect(clear).toHaveBeenCalledOnce();
+    await expect(identity.resume()).resolves.toEqual({ status: "signed-out" });
+  });
+
   it("restores again when the prepared restore could not reach the Hub", async () => {
     const restoreSession = vi
       .fn()

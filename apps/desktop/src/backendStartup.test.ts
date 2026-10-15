@@ -117,6 +117,22 @@ describe("createBackendFailurePolicy", () => {
     }
   });
 
+  it("counts a backend that could not be started toward the same limit", () => {
+    // A missing server entry or bootstrap pipe does not fix itself.
+    const policy = createBackendFailurePolicy();
+    expect(policy.recordStartFailure()).toEqual({ action: "restart" });
+    expect(policy.recordExit({ reachedReady: false, exitCode: 1, fatal: false })).toEqual({
+      action: "restart",
+    });
+    expect(policy.recordStartFailure()).toEqual({
+      action: "halt",
+      reason: "crash-loop",
+      consecutiveFailures: 3,
+    });
+    policy.reset();
+    expect(policy.recordStartFailure()).toEqual({ action: "restart" });
+  });
+
   it("halts at once on a fatal frame or the configuration-error exit code", () => {
     expect(
       createBackendFailurePolicy().recordExit({ reachedReady: false, exitCode: 1, fatal: true }),

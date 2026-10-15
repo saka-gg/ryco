@@ -67,14 +67,26 @@ import {
 import type { RemoteRycoRunnerOptions } from "@ryco/ssh/tunnel";
 import {
   hasPriorDesktopRendererState,
+  readDesktopRendererOriginPort,
+  resolveDesktopPersistedBackendPort,
   resolveDesktopBackendPort,
   resolveDesktopBackendStartPort,
   shouldPersistDesktopBackendPort,
+  writeDesktopRendererOriginPort,
 } from "./backendPort.ts";
+import {
+  isCodeCachedAsset,
+  parseRendererCodeCacheMarker,
+  planRendererCodeCachePrune,
+  serializeRendererCodeCacheMarker,
+} from "./rendererCodeCachePrune.ts";
 import {
   type AppLoadRequest,
   type BackendAppWindowMoment,
+  EARLY_APP_LOAD_COMMIT_TIMEOUT_MS,
+  isAppLoadAwaitingCommit,
   isAppLoadRequestCurrent,
+  isEarlyAppLoadStalled,
   resolveBackendAppWindowAction,
 } from "./backendAppWindowLoad.ts";
 import {
@@ -201,7 +213,6 @@ import {
   resolveDesktopAuthorizationCallback,
   type DesktopAuthorizationVariant,
 } from "./nativeAuthorization.ts";
-import { createDesktopHubControlClient } from "./desktopHubControl.ts";
 import type {
   DesktopHostedGitHubActionResult,
   DesktopHostedIdentityCoordinator,
@@ -316,6 +327,9 @@ const LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
 // Parity with the provider logs: a crash-loop investigation needs the last few
 // files, not 200 MiB of history.
 const LOG_FILE_MAX_FILES = 3;
+// The backup depth before LOG_FILE_MAX_FILES dropped to 3: upgraded installs
+// may still hold backups up to this index, which every launch removes.
+const LEGACY_LOG_FILE_MAX_FILES = 10;
 const APP_RUN_ID = Crypto.randomBytes(6).toString("hex");
 const SERVER_SETTINGS_PATH = Path.join(STATE_DIR, "settings.json");
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
@@ -462,9 +476,14 @@ let backendBootstrapToken = "";
 let backendControlToken = "";
 let backendHttpUrl = "";
 // Main-only local control over the running backend child (per-child secret).
-const desktopHubControl = createDesktopHubControlClient({
-  baseUrl: () => backendHttpUrl,
-  controlToken: () => backendControlToken,
+// Loaded on first use: its node-claim schemas share a module with the Hub
+// identity schemas, which must not be evaluated before Electron is ready.
+const loadDesktopHubControl = lazyAsyncResource(async () => {
+  const { createDesktopHubControlClient } = await import("./desktopHubControl.ts");
+  return createDesktopHubControlClient({
+    baseUrl: () => backendHttpUrl,
+    controlToken: () => backendControlToken,
+  });
 });
 // Whether the running backend reports other devices can reach it through the
 // Hub. Main has no push channel from the child, so it asks; false until known.
@@ -960,7 +979,7 @@ const ensureDesktopHostedIdentityCoordinator = lazyAsyncResource(
       relayDpopSigner: await createDesktopDpopSigner(context.security),
       allowsBackgroundNodeClaim: () => desktopHubAllowsBackgroundNodeClaim(desktopSettings),
       beforeInteractiveNodeClaim: enableDesktopHubConnectorForAccountSetup,
-      control: desktopHubControl,
+      control: await loadDesktopHubControl(),
     });
     desktopHostedIdentityCoordinator = coordinator;
     coordinator.subscribeNativeE2eeEnrollment(onDesktopNativeE2eeEnrollmentChange);
@@ -1395,7 +1414,9 @@ function refreshDesktopHubReachability(): Promise<void> {
     const child = backendControlToken;
     const response =
       backendHubLaunch?.enabled === true
-        ? await desktopHubControl.hubReachability().catch(() => null)
+        ? await loadDesktopHubControl()
+            .then((control) => control.hubReachability())
+            .catch(() => null)
         : null;
     // An answer from a backend that has since been replaced says nothing.
     if (child !== backendControlToken) return;
@@ -1730,6 +1751,7 @@ function loadPackagedBackendAppWindow(
     backendHttpUrl,
     isBootUrl: isDesktopBootUrl,
     shellUsable: appShellUsableContents.has(contents),
+    rendererGone: contents.isCrashed(),
     loadRequestedFromThisBackend: isAppLoadRequestCurrent({
       request: appLoadRequestedFrom.get(contents),
       backend: child,
@@ -1755,7 +1777,58 @@ function loadPackagedBackendAppWindow(
     // replacement loads) or a later request took over.
     if (request !== null && appLoadRequestedFrom.get(contents) !== request) return;
     void window.loadURL(backendHttpUrl);
+    if (request !== null) {
+      request.navigationStartedAtMs = performance.now();
+      watchAppLoadCommit(window, request);
+    }
   });
+}
+
+/**
+ * The bind-time app load usually replaces the boot page before it commits, so
+ * until the app document commits the window shows nothing. When the backend's
+ * event loop stalls before it serves the document (a long migration), that
+ * would be a blank window for seconds: put the boot page back instead, and let
+ * readiness load the app. A load that is merely slow over a backend that
+ * already serves is left alone, and the window is revealed if nothing else
+ * revealed it.
+ */
+function watchAppLoadCommit(
+  window: BrowserWindow,
+  request: AppLoadRequest<ChildProcess.ChildProcess>,
+): void {
+  setTimeout(() => {
+    if (window.isDestroyed()) return;
+    const contents = window.webContents;
+    if (appLoadRequestedFrom.get(contents) !== request || !isAppLoadAwaitingCommit(request)) {
+      return;
+    }
+    const currentUrl = contents.getURL();
+    const readiness = backendReadiness;
+    if (
+      isEarlyAppLoadStalled({
+        request,
+        currentUrl,
+        backendStarting:
+          backendProcess === request.backend && readiness !== null && !readiness.settled,
+        nowMs: performance.now(),
+      })
+    ) {
+      markDesktopStartupPhase("desktop.window.app.early-load-stalled");
+      returnWindowToBootPage(window, "app document not served yet");
+      return;
+    }
+    if (!window.isVisible() && classifyDesktopWindowStartupUrl(currentUrl) === "blank") {
+      revealWindow(window);
+    }
+  }, EARLY_APP_LOAD_COMMIT_TIMEOUT_MS).unref();
+}
+
+/** Back to the boot page; the next readiness (or the failure dialog) takes over. */
+function returnWindowToBootPage(window: BrowserWindow, reason: string): void {
+  appLoadRequestedFrom.delete(window.webContents);
+  writeDesktopLogHeader(`window returns to the boot page reason=${reason}`);
+  loadDesktopBootPage(window);
 }
 
 /**
@@ -1786,9 +1859,7 @@ function returnEarlyLoadedWindowsToBootPage(child: ChildProcess.ChildProcess): v
     ) {
       continue;
     }
-    appLoadRequestedFrom.delete(contents);
-    writeDesktopLogHeader("backend stopped before serving; window returns to the boot page");
-    loadDesktopBootPage(window);
+    returnWindowToBootPage(window, "backend stopped before serving");
   }
 }
 
@@ -1798,6 +1869,11 @@ function ensureInitialBackendWindowOpen(): void {
   }
 
   ensurePackagedBootstrapWindowOpen("backend-bootstrap");
+  // No live child (it died before this call, or a restart is pending): there
+  // is nothing to wait for yet. The next startBackend waits on its own child's
+  // signals; probing HTTP now would poll from t=0 and never see that child's
+  // readiness frames.
+  if (backendReadiness === null) return;
 
   const nextOpen = waitForBackendWindowReady(backendHttpUrl)
     .then((source) => {
@@ -1891,11 +1967,13 @@ function initializePackagedLogging(): void {
       filePath: Path.join(LOG_DIR, "desktop-main.log"),
       maxBytes: LOG_FILE_MAX_BYTES,
       maxFiles: LOG_FILE_MAX_FILES,
+      pruneBackupsUpTo: LEGACY_LOG_FILE_MAX_FILES,
     });
     backendLogSink = new AsyncRotatingFileSink({
       filePath: Path.join(LOG_DIR, DESKTOP_BACKEND_LOG_FILE_NAME),
       maxBytes: LOG_FILE_MAX_BYTES,
       maxFiles: LOG_FILE_MAX_FILES,
+      pruneBackupsUpTo: LEGACY_LOG_FILE_MAX_FILES,
     });
     installStdIoCapture();
     writeDesktopLogHeader(`runtime log capture enabled logDir=${LOG_DIR}`);
@@ -2420,11 +2498,13 @@ function configureAppIdentity(): void {
 
 /**
  * The parts of the app identity that need `ready`: the name again (the macOS
- * menu bar picks it up only then) and the Dock icon, decoded once per launch.
+ * menu bar picks it up only then) and, in development, the Dock icon. A
+ * packaged build's bundle icon (icon.icns) already carries the same artwork,
+ * so it skips the synchronous decode on every launch.
  */
 function configureAppIdentityAfterReady(): void {
   app.setName(APP_DISPLAY_NAME);
-  if (process.platform === "darwin" && app.dock) {
+  if (process.platform === "darwin" && app.dock && !app.isPackaged) {
     const iconPath = resolveIconPath("png");
     if (iconPath) {
       app.dock.setIcon(iconPath);
@@ -2488,6 +2568,16 @@ function schedulePackagedBootReveal(window: BrowserWindow): void {
 
     const currentUrl = window.webContents.getURL();
     const urlKind = classifyDesktopWindowStartupUrl(currentUrl);
+    if (
+      urlKind === "blank" &&
+      isAppLoadAwaitingCommit(appLoadRequestedFrom.get(window.webContents))
+    ) {
+      // The app navigation replaced the boot page before it painted. Revealing
+      // now would show an empty window; its commit, or watchAppLoadCommit,
+      // reveals it instead.
+      markDesktopStartupPhase("desktop.window.boot.reveal-deferred", "awaiting=app-commit");
+      return;
+    }
     if (
       urlKind === "blank" ||
       urlKind === "boot" ||
@@ -3060,7 +3150,7 @@ function handleBackendFrame(
  * A deterministic start failure: stop restarting and say so in the boot
  * window instead of spinning the splash screen forever.
  */
-function haltBackendStartup(child: ChildProcess.ChildProcess, describe: () => string): void {
+function haltBackendStartup(child: ChildProcess.ChildProcess | null, describe: () => string): void {
   if (isQuitting || backendStartupHalted) return;
   backendStartupHalted = true;
   cancelBackendReadinessWait();
@@ -3076,8 +3166,42 @@ function haltBackendStartup(child: ChildProcess.ChildProcess, describe: () => st
     shown = true;
     void showBackendStartupFailure(describe());
   };
+  if (child === null) {
+    show();
+    return;
+  }
   child.once("close", show);
   setTimeout(show, 500).unref();
+}
+
+/**
+ * A backend that could not even be started (no server entry, no bootstrap
+ * pipe) counts toward the start-failure limit like one that exited before it
+ * was ready, so a damaged installation halts instead of retrying forever.
+ */
+function handleBackendStartFailure(
+  details: string,
+  stopped: ChildProcess.ChildProcess | null,
+): void {
+  if (isQuitting) return;
+  const decision = backendFailurePolicy.recordStartFailure();
+  if (decision.action === "restart") {
+    scheduleBackendRestart(details);
+    ensurePackagedBootstrapWindowOpen("backend-bootstrap");
+    return;
+  }
+  writeDesktopLogHeader(
+    `backend start halted reason=${decision.reason} consecutiveFailures=${decision.consecutiveFailures} ${details}`,
+  );
+  haltBackendStartup(stopped, () =>
+    describeBackendStartupFailure({
+      reason: decision.reason,
+      consecutiveFailures: decision.consecutiveFailures,
+      fatal: null,
+      exitDetails: details,
+      outputLines: [],
+    }),
+  );
 }
 
 async function showBackendStartupFailure(detail: string): Promise<void> {
@@ -3221,7 +3345,7 @@ function startBackend(): void {
   }
   const backendEntry = resolveBackendEntry();
   if (early === null && !FS.existsSync(backendEntry)) {
-    scheduleBackendRestart(`missing server entry at ${backendEntry}`);
+    handleBackendStartFailure(`missing server entry at ${backendEntry}`, null);
     return;
   }
 
@@ -3272,7 +3396,7 @@ function startBackend(): void {
     if (backendControlToken === childControlToken) backendControlToken = "";
     expectedBackendExitChildren.add(child);
     child.kill("SIGTERM");
-    scheduleBackendRestart("missing desktop bootstrap pipe");
+    handleBackendStartFailure("missing desktop bootstrap pipe", child);
     return;
   }
   backendReadiness = readiness;
@@ -4586,15 +4710,33 @@ function createWindow(): BrowserWindow {
           writeDesktopLogHeader(
             "packaged desktop protocol load failed; falling back to backend URL",
           );
-          void window.loadURL(backendHttpUrl);
+          void rendererCacheMaintenance.then(() => {
+            if (!window.isDestroyed()) void window.loadURL(backendHttpUrl);
+          });
         }
       },
     );
+    window.webContents.on("did-navigate", (_event, url) => {
+      // The early app document committed: its held requests start now, so
+      // its readiness hold is measured from here (EARLY_APP_LOAD_MAX_HOLD_MS).
+      const request = appLoadRequestedFrom.get(window.webContents);
+      if (
+        request !== undefined &&
+        request.committedAtMs === undefined &&
+        backendHttpUrl.length > 0 &&
+        url.startsWith(backendHttpUrl)
+      ) {
+        request.committedAtMs = performance.now();
+      }
+    });
     window.webContents.on("render-process-gone", () => {
       // A document loaded early is gone; readiness must load the app again
       // instead of treating the earlier request as still in progress.
       const request = appLoadRequestedFrom.get(window.webContents);
       if (request !== undefined) request.failed = true;
+      // A dead renderer cannot reconnect in place; a later backend crash
+      // restart must reload it instead of nudging it.
+      appShellUsableContents.delete(window.webContents);
     });
   }
 
@@ -4682,8 +4824,13 @@ async function selectDesktopBackendPort(
     writeDesktopLogHeader(`using configured backend port port=${configuredBackendPort}`);
     return { port: configuredBackendPort, persistable: false };
   }
-  const persistedPort = desktopSettings.backendPort;
-  const hasPriorRendererState = hasPriorDesktopRendererState(app.getPath("userData"));
+  const userDataPath = app.getPath("userData");
+  const recordedPort = readDesktopRendererOriginPort(userDataPath);
+  const persistedPort = resolveDesktopPersistedBackendPort({
+    recordedPort,
+    settingsPort: desktopSettings.backendPort,
+  });
+  const hasPriorRendererState = hasPriorDesktopRendererState(userDataPath);
   const startPort = resolveDesktopBackendStartPort({ persistedPort, hasPriorRendererState });
   const port = await resolveDesktopBackendPort({
     host: DESKTOP_LOOPBACK_HOST,
@@ -4699,6 +4846,17 @@ async function selectDesktopBackendPort(
     persistedPort,
     hasPriorRendererState,
   });
+  if (persistable && recordedPort !== port) {
+    // Before any window loads this origin: a launch that never reaches
+    // readiness must still leave the record its renderer state belongs to.
+    try {
+      writeDesktopRendererOriginPort(userDataPath, port);
+    } catch (error) {
+      writeDesktopLogHeader(
+        `renderer origin record write failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    }
+  }
   if (port !== startPort) {
     // The renderer origin follows the port: localStorage and caches of the
     // usual origin are not visible to this launch.
@@ -4747,27 +4905,63 @@ async function startDesktopComputerUse(): Promise<void> {
 }
 
 /**
- * Drop the renderer's V8 code cache when the app version changed, so entries
- * for chunks of earlier builds (and earlier origins) stop accumulating. With
- * `bypassHeatCheck` the next run of each script refills it at once. The HTTP
- * cache stays: unchanged content-hashed assets remain valid across versions,
- * and Chromium bounds its size itself.
+ * On a version change, drop the renderer's V8 code-cache entries the new
+ * version left stale, so entries for chunks of earlier builds stop
+ * accumulating. Chunks the update did not change (the byte-stable vendor
+ * groups) keep their entries; an Electron change clears everything (see
+ * {@link planRendererCodeCachePrune}). With `bypassHeatCheck` the next run of
+ * each changed script refills it at once. The HTTP cache stays: unchanged
+ * content-hashed assets remain valid across versions, and Chromium bounds its
+ * size itself.
  */
-async function pruneRendererCachesOnVersionChange(): Promise<void> {
+async function pruneRendererCachesOnVersionChange(origin: string): Promise<void> {
   const markerPath = Path.join(app.getPath("userData"), RENDERER_CACHE_VERSION_FILE);
-  const version = app.getVersion();
-  const previous = await FS.promises.readFile(markerPath, "utf8").catch(() => null);
-  if (previous?.trim() === version) return;
+  const [previousRaw, assets] = await Promise.all([
+    FS.promises.readFile(markerPath, "utf8").catch(() => null),
+    listRendererCodeCachedAssets(),
+  ]);
+  const previous = parseRendererCodeCacheMarker(previousRaw);
+  const plan = planRendererCodeCachePrune(previous, {
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    assets,
+    origin,
+  });
   try {
-    await session.defaultSession.clearCodeCaches({});
-    await FS.promises.writeFile(markerPath, `${version}\n`, "utf8");
-    writeDesktopLogHeader(
-      `renderer code cache cleared for version change from=${sanitizeLogValue(previous?.trim() ?? "unknown")} to=${version}`,
-    );
+    if (plan.prune.kind === "all") {
+      await session.defaultSession.clearCodeCaches({});
+    } else if (plan.prune.kind === "urls") {
+      await session.defaultSession.clearCodeCaches({ urls: [...plan.prune.urls] });
+    }
+    // Written only after a successful clear, so a failed one is retried.
+    if (plan.marker !== null) {
+      await FS.promises.writeFile(
+        markerPath,
+        serializeRendererCodeCacheMarker(plan.marker),
+        "utf8",
+      );
+    }
+    if (plan.prune.kind !== "none") {
+      writeDesktopLogHeader(
+        `renderer code cache pruned for version change from=${sanitizeLogValue(previous?.version ?? "unknown")} to=${app.getVersion()} scope=${plan.prune.kind === "all" ? "all" : `urls:${plan.prune.urls.length}`}`,
+      );
+    }
   } catch (error) {
     writeDesktopLogHeader(
       `renderer cache prune failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
     );
+  }
+}
+
+/** The content-hashed scripts this build serves, or null when they cannot be listed. */
+async function listRendererCodeCachedAssets(): Promise<string[] | null> {
+  const staticDir = resolveDesktopStaticDir();
+  if (staticDir === null) return null;
+  try {
+    const names = await FS.promises.readdir(Path.join(staticDir, "assets"));
+    return names.filter(isCodeCachedAsset);
+  } catch {
+    return null;
   }
 }
 
@@ -4810,18 +5004,12 @@ async function bootstrap(): Promise<void> {
     discardEarlyDesktopBackend();
     throw new Error("RYCO_PORT is required in desktop development.");
   }
-  if (app.isPackaged) {
-    rendererCacheMaintenance = boundedRendererCacheMaintenance(
-      pruneRendererCachesOnVersionChange(),
-    );
-  }
-
   // The backend is the critical path. Everything its bootstrap envelope needs
   // comes first, in parallel; windows, IPC and the rest follow its start.
-  const [selectedPort] = await Promise.all([
-    selectDesktopBackendPort(configuredBackendPort),
-    startDesktopComputerUse(),
-  ]);
+  // Computer use only feeds the envelope's bridge binding: it runs beside the
+  // port selection and the shell environment, and nothing else waits for it.
+  const computerUseStart = startDesktopComputerUse();
+  const selectedPort = await selectDesktopBackendPort(configuredBackendPort);
   backendPort = selectedPort.port;
   backendPortPersistable = selectedPort.persistable;
   backendBootstrapToken = Crypto.randomBytes(24).toString("hex");
@@ -4837,6 +5025,13 @@ async function bootstrap(): Promise<void> {
     },
   );
   writeDesktopLogHeader(`bootstrap resolved backend endpoint baseUrl=${backendHttpUrl}`);
+  if (app.isPackaged) {
+    // Keyed by the renderer origin, known from here on; every app load waits
+    // for it (bounded), and none can start before this point.
+    rendererCacheMaintenance = boundedRendererCacheMaintenance(
+      pruneRendererCachesOnVersionChange(new URL(backendHttpUrl).origin),
+    );
+  }
   if (serverExposureState.endpointUrl) {
     writeDesktopLogHeader(
       `bootstrap enabled network access endpointUrl=${serverExposureState.endpointUrl}`,
@@ -4854,7 +5049,7 @@ async function bootstrap(): Promise<void> {
     // window in the meantime.
     ensurePackagedBootstrapWindowOpen("pre-backend-bootstrap");
   }
-  await shellEnvironmentCapture;
+  await Promise.all([shellEnvironmentCapture, computerUseStart]);
   startBackend();
   prepareDesktopHostedIdentityResume();
   writeDesktopLogHeader("bootstrap backend start requested");
