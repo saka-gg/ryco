@@ -1,11 +1,16 @@
-import { ExternalLinkIcon, GitPullRequestIcon, LayersIcon } from "lucide-react";
+import { ExternalLinkIcon, GitPullRequestIcon, LayersIcon, LinkIcon } from "lucide-react";
+import { useState } from "react";
 
 import { handleInAppLinkClick } from "~/pullRequestsRoute";
 
 import { changeRequestStateKind, StateBadge } from "../../../projectExplorer/StateBadge";
 import { Button } from "../../../ui/button";
 import { OtherPullRequestRows, reviewsLabel } from "../../overviewSections";
-import type { OverviewPullRequestState } from "../../overviewTypes";
+import type { OverviewPullRequestLinking, OverviewPullRequestState } from "../../overviewTypes";
+import {
+  WorkspacePullRequestsPopover,
+  type WorkspacePullRequestsView,
+} from "../../../worktrees/WorkspacePullRequestsPopover";
 import {
   CROWN_PILL_BUTTON_CLASS,
   CrownDetailActions,
@@ -82,6 +87,55 @@ function OpenPullRequestAction({
   );
 }
 
+/**
+ * "Link pull request…" (or "Link another…" beside a shown one): opens the
+ * workspace's pull request popover on its link view, the same one the chat
+ * header's chip opens. The server's link event then updates the section.
+ */
+function LinkPullRequestAction({
+  linking,
+  hasPullRequest,
+}: {
+  linking: OverviewPullRequestLinking;
+  hasPullRequest: boolean;
+}) {
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<WorkspacePullRequestsView>("link");
+  return (
+    <>
+      <Button
+        ref={setAnchor}
+        variant="ghost"
+        size="sm"
+        className={CROWN_PILL_BUTTON_CLASS}
+        disabled={!linking.canEdit}
+        title={linking.canEdit ? undefined : "Reconnect to link pull requests"}
+        aria-expanded={open}
+        onClick={() => {
+          setView("link");
+          setOpen((current) => !current);
+        }}
+      >
+        <LinkIcon aria-hidden="true" className="size-3.5" />
+        {hasPullRequest ? "Link another…" : "Link pull request…"}
+      </Button>
+      <WorkspacePullRequestsPopover
+        {...linking}
+        showStack={false}
+        open={open}
+        onOpenChange={setOpen}
+        view={view}
+        onViewChange={setView}
+        anchor={anchor}
+        toggle={() => anchor}
+        side="bottom"
+        align="end"
+      />
+    </>
+  );
+}
+
 /** `≋ 2/3`: where the pull request sits in its host stack. */
 function StackMarker({ stack }: { stack: NonNullable<OverviewPullRequestState["stack"]> }) {
   return (
@@ -102,11 +156,18 @@ function StackMarker({ stack }: { stack: NonNullable<OverviewPullRequestState["s
 
 export function PullRequestDetail({ layout, variant }: CrownDetailViewProps) {
   const pullRequest = layout.pullRequest;
+  // The flyout is a read-only preview; the card hosts the link control.
+  const linking = variant === "card" ? layout.pullRequestLinking : undefined;
   if (!pullRequest || pullRequest.number == null) {
     return (
       <>
         <CrownDetailHeading section="pr" variant={variant} />
         <CrownDetailEmpty>No pull request for this branch yet</CrownDetailEmpty>
+        {linking ? (
+          <CrownDetailActions>
+            <LinkPullRequestAction linking={linking} hasPullRequest={false} />
+          </CrownDetailActions>
+        ) : null}
       </>
     );
   }
@@ -173,8 +234,11 @@ export function PullRequestDetail({ layout, variant }: CrownDetailViewProps) {
           />
         </div>
       ) : null}
-      {pullRequest.url || layout.onOpenPullRequestInApp ? (
-        <CrownDetailActions>{action}</CrownDetailActions>
+      {pullRequest.url || layout.onOpenPullRequestInApp || linking ? (
+        <CrownDetailActions>
+          {pullRequest.url || layout.onOpenPullRequestInApp ? action : null}
+          {linking ? <LinkPullRequestAction linking={linking} hasPullRequest /> : null}
+        </CrownDetailActions>
       ) : null}
     </>
   );

@@ -10,6 +10,7 @@ import type { AgentPanelModel, ThreadSubagentView } from "../../threadWorkspaceV
 import type { OverviewWorkflowCheckRow } from "../overviewPullRequestChecks.logic";
 import type { OverviewErrorInfo } from "./overviewErrors.logic";
 import type { PrCheckStatusView } from "../projectExplorer/prCheckStatus";
+import type { WorkspacePullRequestsPopoverProps } from "../worktrees/WorkspacePullRequestsPopover";
 
 export interface OverviewPanelItem {
   label: string;
@@ -30,6 +31,24 @@ export interface OverviewPanelItem {
 }
 
 export type OverviewPullRequestCheckRun = OverviewWorkflowCheckRow;
+
+/**
+ * The thread's workspace as the "Link pull request…" popover edits it, for a
+ * workspace whose links can change (`useWorkspacePullRequestEditing().supported`).
+ */
+export type OverviewPullRequestLinking = Pick<
+  WorkspacePullRequestsPopoverProps,
+  | "environmentId"
+  | "worktreeId"
+  | "cwd"
+  | "workspaceTitle"
+  | "workspaceBranch"
+  | "links"
+  | "storedNumbers"
+  | "shownNumber"
+  | "canEdit"
+  | "onOpenPullRequest"
+>;
 
 export interface OverviewPullRequestState {
   /**
@@ -129,6 +148,8 @@ export interface OverviewLayoutProps {
   /** The workspace's other pull requests (not the one shown), current first. */
   otherPullRequests?: ReadonlyArray<WorktreePullRequestLink> | undefined;
   onRefreshPullRequest?: (() => void) | undefined;
+  /** Links pull requests to the thread's workspace (desktop crown); absent where none can be. */
+  pullRequestLinking?: OverviewPullRequestLinking | undefined;
   /**
    * Opens a pull request in the workspace panel: the shown one without a
    * number, another one pinned. ⌘/Ctrl-click keeps the host link.

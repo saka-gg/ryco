@@ -59,6 +59,8 @@ export interface CrownRailItem {
   readonly requiresNotes: boolean;
   /** Only a "No project" chat this client can turn into a project offers it. */
   readonly requiresChat?: boolean;
+  /** Shown only while the thread has a plan to show. */
+  readonly requiresPlan?: boolean;
 }
 
 export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
@@ -101,6 +103,7 @@ export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
     group: "status",
     requiresGit: false,
     requiresNotes: false,
+    requiresPlan: true,
   },
   {
     key: "agents",
@@ -185,11 +188,14 @@ export function visibleCrownRailItems(input: {
   readonly notesAvailable: boolean;
   /** The thread is a "No project" chat this client can turn into a project. */
   readonly chatAvailable?: boolean;
+  /** The thread has a plan (steps, an explanation or a proposed plan). */
+  readonly hasPlan?: boolean;
 }): ReadonlyArray<CrownRailItem> {
   return CROWN_RAIL_ITEMS.filter(
     (item) =>
       (!item.requiresGit || input.isGitRepo) &&
       (!item.requiresNotes || input.notesAvailable) &&
-      (!item.requiresChat || input.chatAvailable === true),
+      (!item.requiresChat || input.chatAvailable === true) &&
+      (!item.requiresPlan || input.hasPlan === true),
   );
 }
