@@ -1,5 +1,6 @@
 import type { RelayEffectiveRole } from "@ryco/contracts";
 import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
+import { RELAY_PROTOCOL_MINOR } from "@ryco/contracts/relay";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
@@ -13,11 +14,22 @@ import type {
   HostedRelayFailure,
   HostedRelayTransportStatus,
   HostedRycoSessionStatus,
+  HostedServerAuthenticatedRelayInput,
 } from "../authorization/types.ts";
 import { HostedReconnectPolicy } from "./reconnectPolicy.ts";
 
+/**
+ * How long an attempt the Hub will authenticate itself stays usable between `nextUrl` and
+ * `createSocket` — the lifetime an HTTP ticket would have had, so neither kind of attempt
+ * outlives the other.
+ */
+const SERVER_AUTHENTICATED_ATTEMPT_TTL_MS = 60_000;
+
 interface PendingTicket {
-  readonly ticket: string;
+  /** The client-held ticket; null for an attempt the Hub authenticates itself. */
+  readonly ticket: string | null;
+  /** Set when the Hub mints and consumes the ticket over the account session instead. */
+  readonly serverAuthenticated: { readonly nodeId: string; readonly protocolMinor: 2 | 3 } | null;
   readonly expiresAt: number;
   readonly generation: number;
   readonly preparedSocketContext: unknown;
@@ -190,6 +202,21 @@ export interface HostedRelayAttemptBinding {
     };
     readonly preparedSocketContext: unknown;
   }) => unknown;
+  /**
+   * Whether the next attempt can be authenticated by the Hub itself over the account session
+   * (Hub session version 2), skipping the HTTP ticket. Consulted per attempt, after socket
+   * preparation; bindings without the account session omit it and always buy a ticket.
+   */
+  readonly serverAuthenticatedRelayAvailable?: () => boolean;
+  readonly createServerAuthenticatedRelaySocket?: (
+    input: HostedServerAuthenticatedRelayInput,
+  ) => unknown;
+  /**
+   * A server-authenticated channel was refused for its session: the counterpart of an HTTP ticket
+   * request answered 401. Hand the session to its lifecycle owner to revalidate, which expires it
+   * when the Hub no longer accepts it.
+   */
+  readonly revalidateSession?: () => void;
   readonly authorizeRequest: (info: {
     readonly tag: string;
     readonly stream: boolean;
@@ -240,6 +267,19 @@ function defaultBinding(): HostedRelayAttemptBinding {
     disposeSocketContext: (context) =>
       getHostedRuntimeConfiguration().disposeRelaySocketContext?.(context),
     openEarlyRelaySocket: () => getHostedRuntimeConfiguration().openEarlyRelaySocket?.(),
+    serverAuthenticatedRelayAvailable: () => {
+      const configuration = getHostedRuntimeConfiguration();
+      return (
+        configuration.createServerAuthenticatedRelaySocket !== undefined &&
+        configuration.serverAuthenticatedRelayAvailable?.() === true
+      );
+    },
+    createServerAuthenticatedRelaySocket: (input) => {
+      const create = getHostedRuntimeConfiguration().createServerAuthenticatedRelaySocket;
+      if (!create) throw new Error("Server-authenticated relay channels are unavailable.");
+      return create(input);
+    },
+    revalidateSession: () => void hostedHubController.revalidateSession(),
     authorizeRequest: admitHostedRequest,
     subscribeAdmissionChanges: hostedHubStore.subscribe,
     shouldReconnect: (generation) => {
@@ -345,11 +385,32 @@ export class HostedRelayAttemptFactory {
     this.#binding.transportStatus(generation, "requesting-ticket");
     this.#discardPendingTicket();
     let preparedSocketContext: unknown;
-    let earlySocket = this.#ticketStageFailed ? undefined : this.#openEarlySocket();
+    let earlySocket =
+      this.#ticketStageFailed || this.#serverAuthenticatedAvailable()
+        ? undefined
+        : this.#openEarlySocket();
     try {
       preparedSocketContext = await this.#binding.prepareSocketContext?.();
       if (!isCurrent()) {
         throw new Error("Hosted node selection changed.");
+      }
+      // Decided after preparation, which may have awaited a chunk load: the account session's
+      // state then is the one the channel opens on.
+      if (this.#serverAuthenticatedAvailable()) {
+        discardEarlySocket(earlySocket);
+        earlySocket = undefined;
+        this.#pendingTicket = {
+          ticket: null,
+          serverAuthenticated: { nodeId, protocolMinor: RELAY_PROTOCOL_MINOR },
+          expiresAt:
+            getHostedRuntimeConfiguration().timers.now() + SERVER_AUTHENTICATED_ATTEMPT_TTL_MS,
+          generation,
+          preparedSocketContext,
+          earlySocket: undefined,
+          used: false,
+        };
+        preparedSocketContext = undefined;
+        return this.#binding.relayUrl?.() ?? getHostedRuntimeConfiguration().relayUrl();
       }
       const issued = this.#binding.issueRelayAttempt
         ? await this.#binding.issueRelayAttempt({
@@ -369,6 +430,7 @@ export class HostedRelayAttemptFactory {
       this.#ticketStageFailed = false;
       this.#pendingTicket = {
         ticket: issued.ticket,
+        serverAuthenticated: null,
         expiresAt: issued.expiresAt,
         generation,
         preparedSocketContext: issued.preparedSocketContext,
@@ -426,6 +488,7 @@ export class HostedRelayAttemptFactory {
       this.#activeAttemptId === attemptId &&
       this.#binding.isCurrent(generation);
     const earlySocket = pending.earlySocket;
+    const serverAuthenticatedAttempt = pending.serverAuthenticated !== null;
     const callbacks = {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
@@ -451,21 +514,43 @@ export class HostedRelayAttemptFactory {
           this.#pendingRequests.clear();
         }
         this.#binding.failure(generation, failure);
+        // Over HTTP the Hub refuses a dead session with a 401 that expires it. On a channel the
+        // Hub authenticated itself the same refusal arrives as an authentication close, so it
+        // converges on the same owner instead of retrying until the account socket notices.
+        // Node-level refusals (offline, draining, rate) stay ordinary retryable failures.
+        if (serverAuthenticatedAttempt && isSessionRefusal(failure)) {
+          this.#binding.revalidateSession?.();
+        }
       },
     };
     this.#activeGeneration = generation;
     try {
-      const input = {
-        url,
-        ticket,
-        ticketExpiresAt,
-        callbacks,
-        preparedSocketContext: pending.preparedSocketContext,
-        ...(earlySocket === undefined ? {} : { earlySocket }),
-      };
-      const socket = this.#binding.createRelaySocket
-        ? this.#binding.createRelaySocket(input)
-        : getHostedRuntimeConfiguration().createRelaySocket(input);
+      const serverAuthenticated = pending.serverAuthenticated;
+      let socket: unknown;
+      if (serverAuthenticated !== null) {
+        const create = this.#binding.createServerAuthenticatedRelaySocket;
+        if (!create) throw new Error("Server-authenticated relay channels are unavailable.");
+        socket = create({
+          url,
+          nodeId: serverAuthenticated.nodeId,
+          protocolMinor: serverAuthenticated.protocolMinor,
+          callbacks,
+          preparedSocketContext: pending.preparedSocketContext,
+        });
+      } else {
+        if (ticket === null) throw new Error("A relay ticket is required for this attempt.");
+        const input = {
+          url,
+          ticket,
+          ticketExpiresAt,
+          callbacks,
+          preparedSocketContext: pending.preparedSocketContext,
+          ...(earlySocket === undefined ? {} : { earlySocket }),
+        };
+        socket = this.#binding.createRelaySocket
+          ? this.#binding.createRelaySocket(input)
+          : getHostedRuntimeConfiguration().createRelaySocket(input);
+      }
       if (isCurrentAttempt()) this.#activeSocket = socket;
       return socket;
     } catch (error) {
@@ -658,6 +743,16 @@ export class HostedRelayAttemptFactory {
     }
   }
 
+  #serverAuthenticatedAvailable(): boolean {
+    if (this.#binding.createServerAuthenticatedRelaySocket === undefined) return false;
+    try {
+      return this.#binding.serverAuthenticatedRelayAvailable?.() === true;
+    } catch {
+      // A broken probe never weakens the attempt: it falls back to an HTTP ticket.
+      return false;
+    }
+  }
+
   #openEarlySocket(): HostedEarlyRelaySocket | undefined {
     try {
       return this.#binding.openEarlyRelaySocket?.();
@@ -666,6 +761,15 @@ export class HostedRelayAttemptFactory {
       return undefined;
     }
   }
+}
+
+/** A relay refusal of the session that authenticated the channel, not of the node. */
+function isSessionRefusal(failure: HostedRelayFailure): boolean {
+  return (
+    failure.kind === "authentication" &&
+    (failure.closeReason === "authentication_failed" ||
+      failure.closeReason === "authentication_required")
+  );
 }
 
 function discardEarlySocket(socket: HostedEarlyRelaySocket | undefined): void {

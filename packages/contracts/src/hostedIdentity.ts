@@ -77,10 +77,12 @@ export const HubAccountId = Schema.String.check(
   Schema.isMaxLength(48),
 );
 export type HubAccountId = typeof HubAccountId.Type;
-const SessionId = Schema.String.check(
+export const HubBrowserSessionId = Schema.String.check(
   Schema.isPattern(/^sess_[A-Za-z0-9_-]{22,43}$/),
   Schema.isMaxLength(48),
 );
+export type HubBrowserSessionId = typeof HubBrowserSessionId.Type;
+const SessionId = HubBrowserSessionId;
 const BoundedDisplayName = Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(200));
 const BoundedSpaceDisplayName = Schema.Trim.check(
   Schema.isNonEmpty(),

@@ -61,6 +61,7 @@ import {
   hostedHubController,
   hostedHubStore,
   hostedRecoveryCodeDisplayStore,
+  HOSTED_SESSION_REVALIDATION_INTERVAL_MS,
   markHostedSessionReady,
 } from "./state.ts";
 
@@ -4342,5 +4343,91 @@ describe("directory publication", () => {
     expect(nodes[0]).toBe(first);
     expect(nodes[1]).toEqual(renamed);
     expect(nodes[1]).not.toBe(second);
+  });
+});
+
+describe("relay-triggered session revalidation", () => {
+  function authenticatedWithNode() {
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      session: sessionResponse.session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      generation: 7,
+    });
+  }
+
+  it("asks the Hub at most once per window and leaves an unchanged session alone", async () => {
+    vi.useFakeTimers();
+    authenticatedWithNode();
+    const restoreSession = vi
+      .spyOn(hostedHubApi, "restoreSession")
+      .mockResolvedValue(sessionResponse);
+    const resume = vi.spyOn(hostedHubController, "resumeBrowser");
+    // A burst of session refusals that are not really about the session.
+    for (let index = 0; index < 5; index += 1) await hostedHubController.revalidateSession();
+    expect(restoreSession).toHaveBeenCalledOnce();
+    // Unchanged: no new generation, no forced reconnect, no full resume.
+    expect(resume).not.toHaveBeenCalled();
+    expect(activateHostedNode).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      generation: 7,
+      browserStatus: "current",
+    });
+    await vi.advanceTimersByTimeAsync(HOSTED_SESSION_REVALIDATION_INTERVAL_MS - 1);
+    await hostedHubController.revalidateSession();
+    expect(restoreSession).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await hostedHubController.revalidateSession();
+    expect(restoreSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("expires a session the Hub no longer accepts, as a 401 on the HTTP ticket path does", async () => {
+    authenticatedWithNode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("session_invalid", 401),
+    );
+    await hostedHubController.revalidateSession();
+    expect(hostedHubStore.getState().accountStatus).toBe("session-expired");
+  });
+
+  it("expires a session whose cookie now belongs to another account", async () => {
+    authenticatedWithNode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue({
+      ...sessionResponse,
+      account: { ...sessionResponse.account, id: "acct_bbbbbbbbbbbbbbbbbbbbbb" },
+      session: {
+        ...sessionResponse.session,
+        id: "sess_bbbbbbbbbbbbbbbbbbbbbb",
+        accountId: "acct_bbbbbbbbbbbbbbbbbbbbbb",
+      },
+    });
+    await hostedHubController.revalidateSession();
+    expect(hostedHubStore.getState().accountStatus).toBe("session-expired");
+  });
+
+  it("runs the full resume for another session of the same account", async () => {
+    authenticatedWithNode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue({
+      ...sessionResponse,
+      session: { ...sessionResponse.session, id: "sess_cccccccccccccccccccccc" },
+    });
+    const resume = vi.spyOn(hostedHubController, "resumeBrowser").mockResolvedValue();
+    await hostedHubController.revalidateSession();
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a transient failure to the transport's backoff", async () => {
+    authenticatedWithNode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("unavailable", 0),
+    );
+    await hostedHubController.revalidateSession();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      generation: 7,
+    });
   });
 });

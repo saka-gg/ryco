@@ -92,6 +92,8 @@ const {
 } = await loadHostedWebTestModules();
 
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
+const ACCOUNT_ID = `acct_${"a".repeat(22)}`;
+const SESSION_ID = `sess_${"s".repeat(22)}`;
 const CHANNEL_ID = `ch_${"c".repeat(22)}` as RelayChannelId;
 const testGlobals = globalThis as unknown as {
   window?: unknown;
@@ -124,26 +126,68 @@ class PhysicalRelaySocket extends EventTarget {
   readonly activeStreams = new Set<number>();
   private streamId: number | null = null;
   private readonly registry: RelayChannelRegistry;
+  /**
+   * The session version this simulated Hub speaks. Version 1 is today's Hub: it ignores the
+   * client's subprotocol offer and answers version 1. Version 2 negotiates the offer.
+   */
+  readonly hubVersion: 1 | 2;
+  readonly negotiated: 1 | 2;
 
-  constructor(registry: RelayChannelRegistry) {
+  constructor(registry: RelayChannelRegistry, hubVersion: 1 | 2, protocols?: string | string[]) {
     super();
     this.registry = registry;
+    this.hubVersion = hubVersion;
+    const offered = [protocols ?? []].flat().includes("ryco.hub-session.v2");
+    this.negotiated = hubVersion === 2 && offered ? 2 : 1;
     physicalSockets.push(this);
   }
 
   open(): void {
     this.readyState = PhysicalRelaySocket.OPEN;
     this.dispatchEvent(new Event("open"));
-    this.deliverOuter({ type: "ready", protocolVersion: 1, maxChannels: 8 });
+    this.deliverOuter(
+      this.negotiated === 2
+        ? {
+            type: "ready",
+            protocolVersion: 2,
+            maxChannels: 8,
+            accountId: ACCOUNT_ID,
+            sessionId: SESSION_ID,
+          }
+        : { type: "ready", protocolVersion: 1, maxChannels: 8 },
+    );
+  }
+
+  /** What the Hub does once a stream's ticket is consumed: relay `ready`, then `channel.open`. */
+  private authenticateStream(): void {
+    this.deliver({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    const openFrame: RelayFrame = {
+      type: "channel.open",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+    };
+    this.deliver(openFrame);
+    void this.registry.handle(openFrame);
   }
 
   send(value: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-    const outer = decodeHubSessionFrame(toBytes(value));
+    // A version 1 Hub decodes with the version 1 codec: an `openNode` would fail closed here.
+    const outer = decodeHubSessionFrame(toBytes(value), { protocolVersion: this.negotiated });
     if (!outer.ok) throw new Error("Hosted client emitted an invalid Hub session envelope.");
     this.receivedOuterFrames.push(outer.value);
     if (outer.value.type === "open") {
       this.streamId = outer.value.streamId;
       this.activeStreams.add(outer.value.streamId);
+      return;
+    }
+    if (outer.value.type === "openNode") {
+      // The Hub minted and consumed the ticket for this session itself.
+      this.streamId = outer.value.streamId;
+      this.activeStreams.add(outer.value.streamId);
+      // A network answer: never inside the client's own `send`.
+      queueMicrotask(() => this.authenticateStream());
       return;
     }
     if (outer.value.type === "close") {
@@ -162,16 +206,7 @@ class PhysicalRelaySocket extends EventTarget {
     const frame = decoded.value;
     this.receivedFromClient.push(frame);
     if (frame.type === "auth") {
-      this.deliver({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
-      const openFrame: RelayFrame = {
-        type: "channel.open",
-        ...VERSION,
-        channelId: CHANNEL_ID,
-        capability: "ryco.rpc",
-        effectiveRole: "operator",
-      };
-      this.deliver(openFrame);
-      void this.registry.handle(openFrame);
+      this.authenticateStream();
       return;
     }
     void this.registry.handle(frame);
@@ -222,164 +257,192 @@ afterEach(() => {
 });
 
 describe("hosted relay session integration", () => {
-  it("streams the initial shell snapshot, acknowledges it, and receives a later event", async () => {
-    const snapshot = {
-      kind: "snapshot" as const,
-      snapshot: {
-        snapshotSequence: 0,
-        projects: [],
-        worktrees: [],
-        threads: [],
-        updatedAt: "2026-07-18T00:00:00.000Z",
-      },
-    };
-    const laterEvent = {
-      kind: "project-removed" as const,
-      sequence: 1,
-      projectId: ProjectId.make("project-public-test"),
-    };
-    const handlerLayer = WsRpcGroup.toLayer(
-      Effect.succeed(
-        WsRpcGroup.of({
-          [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
-            Stream.concat(
-              Stream.succeed(snapshot),
-              Stream.concat(
-                Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
-                Stream.never,
-              ),
-            ),
-        } as never),
-      ),
-    );
-    const sessionScopes: Scope.Closeable[] = [];
-    const relaySocket = {
-      bufferedAmount: 0,
-      send: (bytes: Uint8Array) => physicalSockets.at(-1)?.deliverBytes(bytes),
-    };
-    const sendQueue = new RelaySendQueue(relaySocket, RELAY_INITIAL_LIMITS);
-    const registry = new RelayChannelRegistry({
-      limits: RELAY_INITIAL_LIMITS,
-      protocol: VERSION,
-      sendQueue,
-      onOutboundReady: () => sendQueue.flush(),
-      factory: {
-        open: async ({ send }) => {
-          const scope = await Effect.runPromise(Scope.make("sequential"));
-          sessionScopes.push(scope);
-          const session = await Effect.runPromise(
-            makeRpcByteSession(
-              WsRpcGroup,
-              handlerLayer,
-              (bytes) =>
-                Effect.sync(() => {
-                  if (!send(bytes).accepted) throw new Error("Test relay output queue is full.");
-                }),
-              { queueCapacity: 8 },
-            ).pipe(Effect.provideService(Scope.Scope, scope)),
-          );
-          return {
-            receive: (bytes: Uint8Array) => Effect.runPromise(session.receive(bytes)),
-            queuedBytes: () => Effect.runPromise(session.queuedBytes),
-            supportsChunkedMessages: session.supportsChunkedMessages,
-            close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
-          };
+  // Version 1 is today's Hub: the new client still connects, over an HTTP ticket. Version 2
+  // authenticates the stream itself and the client requests no ticket at all.
+  it.each([1, 2] as const)(
+    "streams the initial shell snapshot, acknowledges it, and receives a later event (Hub session v%i)",
+    async (hubVersion) => {
+      const snapshot = {
+        kind: "snapshot" as const,
+        snapshot: {
+          snapshotSequence: 0,
+          projects: [],
+          worktrees: [],
+          threads: [],
+          updatedAt: "2026-07-18T00:00:00.000Z",
         },
-      },
-    });
-    testGlobals.WebSocket = class extends PhysicalRelaySocket {
-      constructor() {
-        super(registry);
-        queueMicrotask(() => this.open());
-      }
-    };
-    const selectedNode = {
-      id: "node_aaaaaaaaaaaaaaaaaaaaaa",
-      environmentId: EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa"),
-      label: "Public test node",
-      platformOs: "linux",
-      platformArch: "x64",
-      clientVersion: "0.1.8",
-      createdAt: 1,
-      updatedAt: 1,
-      lastAuthenticatedAt: 1,
-      revokedAt: null,
-      revocationReasonCode: null,
-      grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
-      effectiveRole: "operator",
-      presence: { online: true, lastHeartbeatAt: 1 },
-    };
-    // The outer socket is account-owned before any node ticket is consumed.
-    vi.spyOn(hostedHubController, "notifyDirectoryInvalidated").mockImplementation(() => undefined);
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account: {
-        id: "account-public-test",
-        displayName: "Test",
-        role: "owner",
+      };
+      const laterEvent = {
+        kind: "project-removed" as const,
+        sequence: 1,
+        projectId: ProjectId.make("project-public-test"),
+      };
+      const handlerLayer = WsRpcGroup.toLayer(
+        Effect.succeed(
+          WsRpcGroup.of({
+            [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+              Stream.concat(
+                Stream.succeed(snapshot),
+                Stream.concat(
+                  Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
+                  Stream.never,
+                ),
+              ),
+          } as never),
+        ),
+      );
+      const sessionScopes: Scope.Closeable[] = [];
+      const relaySocket = {
+        bufferedAmount: 0,
+        send: (bytes: Uint8Array) => physicalSockets.at(-1)?.deliverBytes(bytes),
+      };
+      const sendQueue = new RelaySendQueue(relaySocket, RELAY_INITIAL_LIMITS);
+      const registry = new RelayChannelRegistry({
+        limits: RELAY_INITIAL_LIMITS,
+        protocol: VERSION,
+        sendQueue,
+        onOutboundReady: () => sendQueue.flush(),
+        factory: {
+          open: async ({ send }) => {
+            const scope = await Effect.runPromise(Scope.make("sequential"));
+            sessionScopes.push(scope);
+            const session = await Effect.runPromise(
+              makeRpcByteSession(
+                WsRpcGroup,
+                handlerLayer,
+                (bytes) =>
+                  Effect.sync(() => {
+                    if (!send(bytes).accepted) throw new Error("Test relay output queue is full.");
+                  }),
+                { queueCapacity: 8 },
+              ).pipe(Effect.provideService(Scope.Scope, scope)),
+            );
+            return {
+              receive: (bytes: Uint8Array) => Effect.runPromise(session.receive(bytes)),
+              queuedBytes: () => Effect.runPromise(session.queuedBytes),
+              supportsChunkedMessages: session.supportsChunkedMessages,
+              close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
+            };
+          },
+        },
+      });
+      testGlobals.WebSocket = class extends PhysicalRelaySocket {
+        constructor(_url: string, protocols?: string | string[]) {
+          super(registry, hubVersion, protocols);
+          queueMicrotask(() => this.open());
+        }
+      };
+      const selectedNode = {
+        id: "node_aaaaaaaaaaaaaaaaaaaaaa",
+        environmentId: EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa"),
+        label: "Public test node",
+        platformOs: "linux",
+        platformArch: "x64",
+        clientVersion: "0.1.8",
         createdAt: 1,
-        disabledAt: null,
-      },
-      session: {
-        id: "session-public-test",
-        accountId: "account-public-test",
-        createdAt: 1,
-        expiresAt: Date.now() + 60_000,
-        lastSeenAt: 1,
+        updatedAt: 1,
+        lastAuthenticatedAt: 1,
         revokedAt: null,
         revocationReasonCode: null,
-      },
-      directoryStatus: "ready",
-      selectedNode,
-      selectionStatus: "online",
-      effectiveRole: "operator",
-      generation: 1,
-    });
-    stopWatchingSession = watchWebHostedHubSession();
-    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
-      ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
-      expiresAt: Date.now() + 60_000,
-    });
-    const attemptFactory = getHostedRelayAttemptFactory();
-    const transport = new WsTransport(
-      () => attemptFactory.nextUrl(),
-      attemptFactory.lifecycleHandlers(),
-    );
-    const client = createWsRpcClient(transport);
-    const received: unknown[] = [];
-    const unsubscribe = client.orchestration.subscribeShell((item) => received.push(item));
+        grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
+        effectiveRole: "operator",
+        presence: { online: true, lastHeartbeatAt: 1 },
+      };
+      // The outer socket is account-owned before any node ticket is consumed.
+      vi.spyOn(hostedHubController, "notifyDirectoryInvalidated").mockImplementation(
+        () => undefined,
+      );
+      useHostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: {
+          id: ACCOUNT_ID,
+          displayName: "Test",
+          role: "owner",
+          createdAt: 1,
+          disabledAt: null,
+        },
+        session: {
+          id: SESSION_ID,
+          accountId: ACCOUNT_ID,
+          createdAt: 1,
+          expiresAt: Date.now() + 60_000,
+          lastSeenAt: 1,
+          revokedAt: null,
+          revocationReasonCode: null,
+        },
+        directoryStatus: "ready",
+        selectedNode,
+        selectionStatus: "online",
+        effectiveRole: "operator",
+        generation: 1,
+      });
+      stopWatchingSession = watchWebHostedHubSession();
+      const issueRelayTicket = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+        ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
+        expiresAt: Date.now() + 60_000,
+      });
+      const attemptFactory = getHostedRelayAttemptFactory();
+      const transport = new WsTransport(
+        () => attemptFactory.nextUrl(),
+        attemptFactory.lifecycleHandlers(),
+      );
+      const client = createWsRpcClient(transport);
+      const received: unknown[] = [];
+      const unsubscribe = client.orchestration.subscribeShell((item) => received.push(item));
 
-    await vi.waitFor(() => expect(received).toEqual([snapshot, laterEvent]));
+      await vi.waitFor(() => expect(received).toEqual([snapshot, laterEvent]));
 
-    expect(useHostedHubStore.getState()).toMatchObject({
-      transportStatus: "online",
-      sessionStatus: "synchronizing",
-      effectiveRole: "operator",
-    });
-    const activePhysicalSocket = physicalSockets.at(-1);
-    if (!activePhysicalSocket) throw new Error("Expected the physical relay socket to open.");
-    expect(
-      activePhysicalSocket.receivedFromClient.filter(
-        (frame) => frame.type === "data" && frame.channelId === CHANNEL_ID,
-      ).length,
-    ).toBeGreaterThanOrEqual(2);
-    unsubscribe();
-    await client.dispose();
-    await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
-    expect(physicalSockets).toHaveLength(1);
-    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
-    expect(
-      activePhysicalSocket.receivedOuterFrames.filter((frame) => frame.type === "open"),
-    ).toHaveLength(1);
-    expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
-      true,
-    );
-    stopWatchingSession();
-    stopWatchingSession = undefined;
-    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
-    await registry.closeAll();
-    for (const scope of sessionScopes) {
-      await Effect.runPromise(Scope.close(scope, Exit.void));
-    }
-  });
+      expect(useHostedHubStore.getState()).toMatchObject({
+        transportStatus: "online",
+        sessionStatus: "synchronizing",
+        effectiveRole: "operator",
+      });
+      const activePhysicalSocket = physicalSockets.at(-1);
+      if (!activePhysicalSocket) throw new Error("Expected the physical relay socket to open.");
+      expect(
+        activePhysicalSocket.receivedFromClient.filter(
+          (frame) => frame.type === "data" && frame.channelId === CHANNEL_ID,
+        ).length,
+      ).toBeGreaterThanOrEqual(2);
+      unsubscribe();
+      await client.dispose();
+      await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
+      expect(physicalSockets).toHaveLength(1);
+      expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
+      expect(activePhysicalSocket.negotiated).toBe(hubVersion);
+      const opens = activePhysicalSocket.receivedOuterFrames.filter(
+        (frame) => frame.type === "open" || frame.type === "openNode",
+      );
+      expect(opens).toHaveLength(1);
+      if (hubVersion === 1) {
+        // Today's Hub: one HTTP ticket, presented in the stream's relay auth frame.
+        expect(issueRelayTicket).toHaveBeenCalledOnce();
+        expect(opens[0]!.type).toBe("open");
+        expect(
+          activePhysicalSocket.receivedFromClient.filter((f) => f.type === "auth"),
+        ).toHaveLength(1);
+      } else {
+        // One fewer POST /api/relay/tickets per connect, and no ticket on the client at all.
+        expect(issueRelayTicket).not.toHaveBeenCalled();
+        expect(opens[0]).toMatchObject({
+          type: "openNode",
+          nodeId: selectedNode.id,
+          capability: "ryco.rpc",
+          protocolMajor: 1,
+          protocolMinor: 3,
+        });
+        expect(activePhysicalSocket.receivedFromClient.some((f) => f.type === "auth")).toBe(false);
+      }
+      expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
+        true,
+      );
+      stopWatchingSession();
+      stopWatchingSession = undefined;
+      expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
+      await registry.closeAll();
+      for (const scope of sessionScopes) {
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+      }
+    },
+  );
 });

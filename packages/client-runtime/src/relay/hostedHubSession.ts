@@ -5,8 +5,12 @@ import {
   HUB_SESSION_MAX_CHANNELS,
   HUB_SESSION_MAX_QUEUED_BYTES,
   HUB_SESSION_MAX_QUEUED_FRAMES,
+  HUB_SESSION_PROTOCOL_VERSION,
+  hubSessionSubprotocol,
   type HubSessionFrame,
+  type HubSessionProtocolVersion,
 } from "@ryco/contracts/hub-session";
+import type { RelayNodeId } from "@ryco/contracts/relay";
 import { bytesEqual } from "@ryco/shared/bytesEqual";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import type { RelaySocket, RelayTimers } from "./relayEngine.ts";
@@ -19,8 +23,55 @@ export type HostedHubSessionInvalidation = {
   readonly threadCache: boolean;
 };
 export type HostedHubSessionStatus = "connecting" | "online" | "reconnecting" | "closed";
+/** Who the Hub authenticated the account socket as; carried by a version 2 `ready`. */
+export interface HostedHubSessionIdentity {
+  readonly accountId: string;
+  readonly sessionId: string;
+}
+/**
+ * A logical stream the Hub authenticates itself (session version 2 `openNode`): it mints and
+ * consumes the node ticket for this socket's session, so no ticket exists on the client.
+ */
+export interface HostedHubServerMintedOpen {
+  readonly nodeId: RelayNodeId;
+  readonly protocolMinor: 2 | 3;
+}
+/**
+ * The close reason of a server-minted stream whose replacement connection negotiated a version
+ * without `openNode`. Not a relay close reason, so the relay engine reports a retryable network
+ * failure and its owner's next attempt buys an HTTP ticket instead.
+ */
+export const HUB_SESSION_SERVER_MINTED_UNAVAILABLE_REASON = "server-minted open unavailable";
+/**
+ * The close reason of a server-minted stream whose connection was authenticated as an account or
+ * browser session other than the one the client restored (say, a sign-in in another tab replaced
+ * the cookie). Nothing is opened under the other identity; the owner revalidates the session.
+ */
+export const HUB_SESSION_IDENTITY_MISMATCH_REASON = "session identity mismatch";
+/**
+ * How long the session offers no version subprotocol once stripping is confirmed.
+ *
+ * A proxy that strips `Sec-WebSocket-Protocol` makes browsers fail every handshake that offered
+ * one, the version 1 path included. A browser cannot tell that apart from any other pre-open
+ * failure (a Hub restart, a draining 503, a rate-limited 429 all look the same), so one failure
+ * proves nothing. The rule is therefore: after a handshake offering the subprotocol fails before
+ * opening, retry once offering none. If that one opens, stripping is only suspected: that
+ * connection runs version 1, and the next reconnect offers again. Only if that offered handshake
+ * also fails while the next one offering none opens is stripping confirmed and this latch set. If
+ * a handshake offering none fails too, it was an outage, and every bit of evidence is dropped. A
+ * deploy or restart therefore costs at most one version 1 connection, never a latch.
+ */
+export const HUB_SESSION_SUBPROTOCOL_FALLBACK_MS = 10 * 60_000;
+/** The subprotocols the session offers: the highest version it decodes. */
+export const HUB_SESSION_SUBPROTOCOLS: readonly string[] = Object.freeze([
+  hubSessionSubprotocol(HUB_SESSION_PROTOCOL_VERSION),
+]);
 export interface HostedHubSessionOptions {
-  readonly createSocket: () => HubSessionSocket;
+  /**
+   * Open the physical socket offering `protocols` as its WebSocket subprotocols. They advertise
+   * the highest session version this client decodes; the version in `ready` is the negotiated one.
+   */
+  readonly createSocket: (protocols: readonly string[]) => HubSessionSocket;
   readonly timers: RelayTimers;
   readonly random?: () => number;
   readonly onStatus?: (status: HostedHubSessionStatus) => void;
@@ -29,12 +80,23 @@ export interface HostedHubSessionOptions {
     readonly retryable: boolean;
   }) => void;
   readonly onInvalidate?: (event: HostedHubSessionInvalidation) => void;
+  /**
+   * The account and browser session the owner restored and created this session for. A version
+   * 2 `ready` must name exactly these, or the connection offers no server-minted opens and
+   * {@link onIdentityMismatch} runs. Without it the session never offers server-minted opens:
+   * `openNode` must name the session it expects.
+   */
+  readonly expectedIdentity?: HostedHubSessionIdentity;
+  /** A version 2 `ready` named another identity; the owner should revalidate its session. */
+  readonly onIdentityMismatch?: () => void;
 }
 interface LogicalStream {
   readonly id: number;
   readonly createdAt: number;
   state: number;
   opened: boolean;
+  /** Opened with `openNode` rather than `open`; null for a stream that authenticates itself. */
+  readonly serverMinted: HostedHubServerMintedOpen | null;
   readonly open: Set<() => void>;
   readonly message: Set<(bytes: Uint8Array) => void>;
   readonly close: Set<(reason?: string) => void>;
@@ -65,7 +127,11 @@ export const HUB_SESSION_PROBE_TIMEOUT_MS = 5_000;
  */
 const PENDING_STREAM_MAX_WAIT_MS = READY_TIMEOUT_MS;
 
-/** One account-owned physical connection; logical relay tickets and E2EE remain per node. */
+/**
+ * One account-owned physical connection; logical relay authorization and E2EE remain per node.
+ * A stream authenticates with its own client-held ticket (`open`), or on a version 2 connection
+ * with a ticket the Hub mints and consumes for it (`openNode`).
+ */
 export class HostedHubSession {
   readonly #options: HostedHubSessionOptions;
   readonly #streams = new Map<number, LogicalStream>();
@@ -74,6 +140,18 @@ export class HostedHubSession {
   #disposed = false;
   #started = false;
   #ready = false;
+  /** What the current connection's `ready` negotiated; null until it arrives. */
+  #protocolVersion: HubSessionProtocolVersion | null = null;
+  #identity: HostedHubSessionIdentity | null = null;
+  /** The current connection offered the version subprotocol, and whether its socket opened. */
+  #offered = true;
+  #socketOpened = false;
+  /** The previous handshake offering the subprotocol failed before opening; try without it. */
+  #probingWithoutOffer = false;
+  /** A handshake offering none opened right after one offering it failed; confirm next time. */
+  #strippingSuspected = false;
+  /** Until when handshakes offer no subprotocol; see {@link HUB_SESSION_SUBPROTOCOL_FALLBACK_MS}. */
+  #noOfferUntil = 0;
   #nextStream = 0;
   #maxChannels = HUB_SESSION_MAX_CHANNELS;
   #failures = 0;
@@ -108,7 +186,43 @@ export class HostedHubSession {
     return () => this.#invalidations.delete(listener);
   }
 
-  createSocket(): RelaySocket {
+  /**
+   * Whether a logical stream created now could be opened with a server-minted ticket: the
+   * connection is ready, negotiated version 2, and is not under a suspicion probe. Only a hint
+   * for choosing how to authenticate: a stream created now that ends up on a replacement
+   * connection without version 2 is closed retryably rather than opened.
+   */
+  serverMintedOpenAvailable(): boolean {
+    return (
+      !this.#disposed &&
+      this.#ready &&
+      this.#serverMintedOpensHere() &&
+      this.#probeDeadline === undefined
+    );
+  }
+
+  /** This connection negotiated version 2 and was authenticated as the expected identity. */
+  #serverMintedOpensHere(): boolean {
+    const expected = this.#options.expectedIdentity;
+    return (
+      this.#protocolVersion !== null &&
+      this.#protocolVersion >= 2 &&
+      expected !== undefined &&
+      this.#identity !== null &&
+      this.#identity.accountId === expected.accountId &&
+      this.#identity.sessionId === expected.sessionId
+    );
+  }
+
+  /**
+   * The account and browser session the Hub authenticated the current connection as (version 2
+   * `ready`), or null before `ready`, on version 1, or after the connection is lost.
+   */
+  readyIdentity(): HostedHubSessionIdentity | null {
+    return this.#ready ? this.#identity : null;
+  }
+
+  createSocket(open?: { readonly serverMinted: HostedHubServerMintedOpen }): RelaySocket {
     if (this.#disposed) throw new Error("Hub session is closed.");
     if (this.#streams.size >= this.#maxChannels || this.#nextStream >= 0xffff_ffff)
       throw new Error("Hub session channel capacity reached.");
@@ -117,6 +231,7 @@ export class HostedHubSession {
       createdAt: this.#options.timers.now(),
       state: 0,
       opened: false,
+      serverMinted: open?.serverMinted ?? null,
       open: new Set(),
       message: new Set(),
       close: new Set(),
@@ -304,6 +419,8 @@ export class HostedHubSession {
     const socket = this.#socket;
     this.#socket = null;
     this.#ready = false;
+    this.#protocolVersion = null;
+    this.#identity = null;
     this.#discardQueue();
     for (const stream of Array.from(this.#streams.values()))
       this.#closeStream(stream, 1000, "session closed", false);
@@ -316,18 +433,39 @@ export class HostedHubSession {
     if (this.#disposed || this.#socket) return;
     this.#options.onStatus?.(this.#failures === 0 ? "connecting" : "reconnecting");
     let socket: HubSessionSocket;
+    const offer = !this.#probingWithoutOffer && this.#options.timers.now() >= this.#noOfferUntil;
+    this.#offered = offer;
+    this.#socketOpened = false;
     try {
-      socket = this.#options.createSocket();
+      socket = this.#options.createSocket(offer ? HUB_SESSION_SUBPROTOCOLS : []);
     } catch {
       this.#lost("network", true);
       return;
     }
     this.#socket = socket;
     this.#ready = false;
+    this.#protocolVersion = null;
+    this.#identity = null;
     this.#handedBytes = 0;
     const current = () => this.#socket === socket && !this.#disposed;
     socket.onOpen(() => {
-      /* READY, not the TCP upgrade, authenticates the session. */
+      // READY, not the TCP upgrade, authenticates the session. An open only shows the handshake
+      // itself works, which decides whether to keep offering the version subprotocol.
+      if (!current()) return;
+      this.#socketOpened = true;
+      if (this.#offered) {
+        // The offer works on this path: whatever failed before was not stripping.
+        this.#strippingSuspected = false;
+      } else if (this.#probingWithoutOffer) {
+        this.#probingWithoutOffer = false;
+        if (this.#strippingSuspected) {
+          // The same pattern twice running: the path strips the subprotocol.
+          this.#strippingSuspected = false;
+          this.#noOfferUntil = this.#options.timers.now() + HUB_SESSION_SUBPROTOCOL_FALLBACK_MS;
+        } else {
+          this.#strippingSuspected = true;
+        }
+      }
     });
     socket.onBinaryMessage((bytes) => {
       if (current()) this.#receive(bytes);
@@ -354,7 +492,11 @@ export class HostedHubSession {
     // The socket's buffer is this session's alone (see `RelaySocket`), and a
     // data payload is handed to its stream's engine, which decodes and zeroes
     // it in place: a copy would only leave the original behind, unzeroed.
-    const decoded = decodeHubSessionFrame(bytes, { borrowDataPayload: true });
+    // Before `ready` the session decodes what it advertised; after it, only what was negotiated.
+    const decoded = decodeHubSessionFrame(bytes, {
+      borrowDataPayload: true,
+      protocolVersion: this.#protocolVersion ?? HUB_SESSION_PROTOCOL_VERSION,
+    });
     if (!decoded.ok) {
       this.#lost("protocol", false);
       return;
@@ -366,11 +508,25 @@ export class HostedHubSession {
         return;
       }
       this.#ready = true;
+      this.#protocolVersion = frame.protocolVersion;
+      this.#identity =
+        frame.protocolVersion >= 2 && "accountId" in frame
+          ? { accountId: frame.accountId, sessionId: frame.sessionId }
+          : null;
+      const expected = this.#options.expectedIdentity;
+      const mismatch =
+        this.#identity !== null &&
+        expected !== undefined &&
+        (this.#identity.accountId !== expected.accountId ||
+          this.#identity.sessionId !== expected.sessionId);
       this.#maxChannels = frame.maxChannels;
       this.#lastReceived = this.#options.timers.now();
       this.#onlineAt = this.#lastReceived;
       this.#clearTimer("deadline");
       this.#options.onStatus?.("online");
+      // Another identity: nothing is opened under it (see #openStream); the owner revalidates.
+      if (mismatch) this.#options.onIdentityMismatch?.();
+      if (this.#disposed || !this.#ready) return;
       this.#notifyInvalidation({ directory: true, threadCache: true });
       let admitted = 0;
       for (const stream of Array.from(this.#streams.values())) {
@@ -444,8 +600,23 @@ export class HostedHubSession {
 
   #openStream(stream: LogicalStream): void {
     if (!this.#ready || this.#streams.get(stream.id) !== stream || stream.state !== 0) return;
+    const frame = this.#openFrame(stream);
+    if (frame === null) {
+      // This connection cannot mint for the expected session: nothing was sent for the stream.
+      // On version 1 its owner simply tries again over HTTP; under another identity it fails
+      // and the session owner revalidates.
+      this.#closeStream(
+        stream,
+        1012,
+        (this.#protocolVersion ?? 1) < 2
+          ? HUB_SESSION_SERVER_MINTED_UNAVAILABLE_REASON
+          : HUB_SESSION_IDENTITY_MISMATCH_REASON,
+        false,
+      );
+      return;
+    }
     try {
-      this.#send({ type: "open", streamId: stream.id });
+      this.#send(frame);
       if (!this.#ready || this.#streams.get(stream.id) !== stream) return;
       stream.opened = true;
       stream.state = 1;
@@ -453,6 +624,23 @@ export class HostedHubSession {
     } catch {
       this.#closeStream(stream, 4429, "channel unavailable", false);
     }
+  }
+
+  /** `open`, or `openNode` naming the expected session; null when this connection cannot mint. */
+  #openFrame(stream: LogicalStream): HubSessionFrame | null {
+    const serverMinted = stream.serverMinted;
+    if (serverMinted === null) return { type: "open", streamId: stream.id };
+    const expected = this.#options.expectedIdentity;
+    if (expected === undefined || !this.#serverMintedOpensHere()) return null;
+    return {
+      type: "openNode",
+      streamId: stream.id,
+      nodeId: serverMinted.nodeId,
+      sessionId: expected.sessionId,
+      capability: "ryco.rpc",
+      protocolMajor: 1,
+      protocolMinor: serverMinted.protocolMinor,
+    };
   }
 
   #closeStream(stream: LogicalStream, code: number, reason: string, notifyPeer: boolean): void {
@@ -587,9 +775,12 @@ export class HostedHubSession {
   #lost(kind: "network" | "protocol" | "authentication", retryable: boolean): void {
     if (this.#disposed) return;
     const socket = this.#socket;
+    if (socket !== null && !this.#socketOpened) this.#handshakeFailed();
     if (this.#ready && this.#options.timers.now() - this.#onlineAt >= 30_000) this.#failures = 0;
     this.#socket = null;
     this.#ready = false;
+    this.#protocolVersion = null;
+    this.#identity = null;
     this.#probe = null;
     this.#clearTimers();
     this.#discardQueue();
@@ -619,6 +810,22 @@ export class HostedHubSession {
       this.#retry = undefined;
       this.#connect();
     }, delay);
+  }
+
+  /**
+   * A handshake failed before its socket opened. One that offered the version subprotocol is
+   * retried offering none, in case something on the path strips it; one that offered none too is
+   * an ordinary outage, after which every bit of stripping evidence is dropped and offering
+   * resumes. See {@link HUB_SESSION_SUBPROTOCOL_FALLBACK_MS}.
+   */
+  #handshakeFailed(): void {
+    if (this.#offered) {
+      this.#probingWithoutOffer = true;
+      return;
+    }
+    this.#probingWithoutOffer = false;
+    this.#strippingSuspected = false;
+    this.#noOfferUntil = 0;
   }
 
   #discardQueue(): void {

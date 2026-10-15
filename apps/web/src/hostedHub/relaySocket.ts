@@ -13,10 +13,8 @@ import {
 import { HUB_SESSION_PATH } from "@ryco/contracts/hub-session";
 
 export type { HostedRelaySocketCallbacks };
-export interface HostedRelaySocketOptions {
+export interface HostedRelaySocketBaseOptions {
   readonly url: string;
-  readonly ticket: string;
-  readonly ticketExpiresAt: number;
   readonly callbacks: HostedRelaySocketCallbacks;
   readonly createSocket?: (url: string) => WebSocket;
   /** Logical channel supplied by the account-scoped Hub connection. */
@@ -33,6 +31,16 @@ export interface HostedRelaySocketOptions {
    */
   readonly e2ee?: RelayE2eeProvider | undefined;
 }
+/**
+ * A channel authenticates with the ticket it was issued over HTTP, or — only on a logical stream
+ * of the account session — is authenticated by the Hub itself (Hub session version 2), which
+ * never hands this tier a ticket at all.
+ */
+export type HostedRelaySocketOptions = HostedRelaySocketBaseOptions &
+  (
+    | { readonly ticket: string; readonly ticketExpiresAt: number }
+    | { readonly serverAuthenticated: true; readonly createRelaySocket: () => RelaySocket }
+  );
 export function hostedRelayWebSocketUrl(): string {
   const url = new URL(window.location.origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -72,10 +80,12 @@ function classifyInboundMessage(data: unknown): InboundMessage {
 /** Browser framing only; shared runtime owns session routing and reconnect policy. */
 export function createBrowserRelaySocket(
   url: string,
-  createSocket: (url: string) => WebSocket = (url) => new WebSocket(url),
+  createSocket: (url: string, protocols?: readonly string[]) => WebSocket = (url, protocols) =>
+    protocols === undefined ? new WebSocket(url) : new WebSocket(url, [...protocols]),
   onInvalidMessage?: (reason: "frame_too_large" | "protocol_invalid") => void,
+  protocols?: readonly string[],
 ): RelaySocket & { onClose(listener: (reason?: string, code?: number) => void): void } {
-  const ws = createSocket(url);
+  const ws = protocols === undefined ? createSocket(url) : createSocket(url, protocols);
   ws.binaryType = "arraybuffer";
   return {
     get bufferedAmount() {
@@ -172,8 +182,13 @@ export class BrowserHostedRelaySocket extends EventTarget {
     this.url = options.url;
     // Fail closed before opening a socket: the bearer ticket may only be sent
     // to the origin-pinned relay endpoint, and an expired attempt must never
-    // reach the wire.
-    if (options.url !== hostedRelayWebSocketUrl() || options.ticketExpiresAt <= Date.now()) {
+    // reach the wire. A server-authenticated channel exists only as a stream of
+    // the account session, which already passed the Hub's origin policy.
+    if (
+      "ticket" in options
+        ? options.url !== hostedRelayWebSocketUrl() || options.ticketExpiresAt <= Date.now()
+        : options.serverAuthenticated !== true || options.createRelaySocket === undefined
+    ) {
       throw new Error("Relay attempt is no longer valid.");
     }
     const socket =
@@ -183,8 +198,9 @@ export class BrowserHostedRelaySocket extends EventTarget {
       );
     try {
       this.#engine = new HostedRelayEngine({
-        ticket: options.ticket,
-        ticketExpiresAt: options.ticketExpiresAt,
+        ...("ticket" in options
+          ? { ticket: options.ticket, ticketExpiresAt: options.ticketExpiresAt }
+          : { serverAuthenticated: true as const }),
         socket,
         callbacks: options.callbacks,
         ...(options.e2ee === undefined ? {} : { e2ee: options.e2ee }),
