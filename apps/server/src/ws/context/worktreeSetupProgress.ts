@@ -34,9 +34,10 @@ export function worktreeCreationProgress(handle: WorktreeSetupHandle): GitWorktr
   };
 }
 
-// The terminal reports subprocess activity from a ~1s process-table poll, so a
-// script that ends sooner may never show as running. Quiet output that long
-// after launch counts as finished.
+// The terminal reports subprocess activity from a process-table poll that runs
+// about every second after input (the script's launch) and once output goes
+// quiet, so a script that ends sooner may never show as running. Quiet output
+// that long after launch counts as finished.
 const QUICK_SCRIPT_GRACE_MS = 2_500;
 const QUICK_SCRIPT_QUIET_MS = 1_500;
 // Past this the feed stops following the script; the terminal keeps running it.

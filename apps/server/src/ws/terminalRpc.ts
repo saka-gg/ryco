@@ -10,11 +10,12 @@ import {
 } from "@ryco/contracts";
 
 import {
-  approximateJsonBytes,
+  isServerPerfProfileEnabled,
   recordServerPerfPayload,
 } from "../observability/PerfInstrumentation.ts";
 import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
+import { makeCachedJsonBytes, observeArrays, rechunkByBudget, tapArray } from "./streamBatching.ts";
 
 const TERMINAL_SUBSCRIBER_CAPACITY = 256;
 /**
@@ -29,6 +30,26 @@ const TERMINAL_SUBSCRIBER_CAPACITY = 256;
  * the budget on every resubscribe, a deterministic resync loop.
  */
 const TERMINAL_SUBSCRIBER_MAX_BYTES = 4 * 1024 * 1024;
+/**
+ * Byte ceiling of one emitted stream array. A backlog drained from the
+ * subscriber queue travels as one `Chunk` frame (one `Ack` round trip) instead
+ * of one frame per output event, split so each frame stays far below the
+ * 4 MiB relay message cap.
+ */
+export const TERMINAL_STREAM_CHUNK_MAX_BYTES = 256 * 1024;
+
+/**
+ * Approximate encoded size of a terminal event, measured once: the manager
+ * hands the same event object to every subscriber, whose offer, release and
+ * chunk splitter all need it.
+ */
+export const terminalEventBytes = makeCachedJsonBytes<TerminalEvent>();
+
+const terminalStreamChunkBudget = {
+  maxItems: TERMINAL_SUBSCRIBER_CAPACITY,
+  maxBytes: TERMINAL_STREAM_CHUNK_MAX_BYTES,
+  sizeOf: terminalEventBytes,
+};
 
 const terminalSessionKey = (threadId: string, terminalId: string) =>
   JSON.stringify([threadId, terminalId]);
@@ -65,14 +86,22 @@ export interface TerminalSubscriberLedger {
   events?: number;
 }
 
+/** Returns the budgets of a batch of events the transport took from the queue. */
+export const releaseTerminalSubscriberEvents = (
+  ledger: TerminalSubscriberLedger,
+  events: ReadonlyArray<TerminalEvent>,
+): Effect.Effect<void> =>
+  Effect.sync(() => {
+    let bytes = 0;
+    for (const event of events) bytes += terminalEventBytes(event);
+    ledger.bytes = Math.max(0, ledger.bytes - bytes);
+    ledger.events = Math.max(0, (ledger.events ?? 0) - events.length);
+  });
+
 export const releaseTerminalSubscriberEvent = (
   ledger: TerminalSubscriberLedger,
   event: TerminalEvent,
-): Effect.Effect<void> =>
-  Effect.sync(() => {
-    ledger.bytes = Math.max(0, ledger.bytes - approximateJsonBytes(event));
-    ledger.events = Math.max(0, (ledger.events ?? 0) - 1);
-  });
+): Effect.Effect<void> => releaseTerminalSubscriberEvents(ledger, [event]);
 
 export function makeTerminalSubscriberOffer(
   queue: Queue.Queue<TerminalEvent, TerminalSubscriptionResyncError | Cause.Done<void>>,
@@ -97,7 +126,7 @@ export function makeTerminalSubscriberOffer(
     Effect.gen(function* () {
       if (overflowed) return;
       recordServerPerfPayload("server.ws.terminal.events", event);
-      const eventBytes = approximateJsonBytes(event);
+      const eventBytes = terminalEventBytes(event);
       if (ledger.bytes + eventBytes > byteBudget || (ledger.events ?? 0) >= capacity) {
         yield* failWithResync();
         return;
@@ -275,14 +304,22 @@ export const makeTerminalHandlers = (ctx: WsRpcContext) => {
               );
               // Snapshot-first ordering comes from the concat; only live events are
               // queued, so only they are charged against the subscriber budgets.
+              // Every stage is array-wise: the queue drains its whole backlog at
+              // once, and the budgets are returned per emitted array, when the
+              // transport pulls it, so the ledger still covers everything the
+              // client has not been sent.
               return Stream.concat(
                 Stream.fromIterable(initial).pipe(
-                  Stream.tap((event) =>
-                    Effect.sync(() => recordServerPerfPayload("server.ws.terminal.events", event)),
-                  ),
+                  rechunkByBudget(terminalStreamChunkBudget),
+                  observeArrays(isServerPerfProfileEnabled(), (events) => {
+                    for (const event of events) {
+                      recordServerPerfPayload("server.ws.terminal.events", event);
+                    }
+                  }),
                 ),
                 Stream.fromQueue(queue).pipe(
-                  Stream.tap((event) => releaseTerminalSubscriberEvent(ledger, event)),
+                  rechunkByBudget(terminalStreamChunkBudget),
+                  tapArray((events) => releaseTerminalSubscriberEvents(ledger, events)),
                   Stream.filter((event) => {
                     const cursor = cursors.get(
                       terminalSessionKey(event.threadId, event.terminalId),

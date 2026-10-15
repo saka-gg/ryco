@@ -1,5 +1,6 @@
 import type { TerminalCursor, TerminalEvent } from "@ryco/contracts";
 import { isTerminalReplayEvent } from "@ryco/client-runtime/state/terminal";
+import { MAX_TERMINALS_PER_GROUP } from "@ryco/client-runtime/state/threads";
 
 /**
  * Keeps recently closed terminal views (xterm instance, its DOM and parse
@@ -9,10 +10,12 @@ import { isTerminalReplayEvent } from "@ryco/client-runtime/state/terminal";
  * and re-parsing the whole scrollback (up to 2 MiB).
  *
  * Each view retains up to 5,000 scrollback lines plus DOM, so only a few stay
- * cached; the least recently detached one is disposed first.
+ * cached; the least recently detached one is disposed first. The bound covers a
+ * full split group, so closing and reopening a drawer showing one keeps every
+ * view.
  */
 
-export const MAX_CACHED_TERMINAL_VIEWS = 3;
+export const MAX_CACHED_TERMINAL_VIEWS = MAX_TERMINALS_PER_GROUP;
 
 export interface CachedTerminalView<Terminal extends { dispose(): void }, State> {
   readonly launchKey: string;
@@ -40,25 +43,41 @@ export function createTerminalViewCache<Terminal extends { dispose(): void }, St
   // Insertion-ordered: the first entry is the least recently detached view.
   const views = new Map<string, CachedTerminalView<Terminal, State>>();
 
+  let trimScheduled = false;
+
   const dispose = (view: CachedTerminalView<Terminal, State>) => {
     view.element.remove();
     view.terminal.dispose();
   };
 
+  const trim = () => {
+    trimScheduled = false;
+    while (views.size > maxEntries) {
+      const oldestKey = views.keys().next().value;
+      if (oldestKey === undefined) break;
+      const oldest = views.get(oldestKey);
+      views.delete(oldestKey);
+      if (oldest) dispose(oldest);
+    }
+  };
+
   return {
-    /** Detaches and keeps a view; evicts (disposes) the oldest beyond the bound. */
+    /**
+     * Detaches and keeps a view. The oldest views beyond the bound are disposed
+     * once the current task's synchronous work is done: React runs every
+     * effect cleanup of a commit before its mounts, so views swapped out and
+     * back in by one commit (a pane focus change, a split group remount) are
+     * taken before the bound applies.
+     */
     stash(key: string, view: CachedTerminalView<Terminal, State>): void {
       view.element.remove();
       const previous = views.get(key);
       if (previous && previous.terminal !== view.terminal) dispose(previous);
       views.delete(key);
       views.set(key, view);
-      while (views.size > maxEntries) {
-        const oldestKey = views.keys().next().value;
-        if (oldestKey === undefined) break;
-        const oldest = views.get(oldestKey);
-        views.delete(oldestKey);
-        if (oldest) dispose(oldest);
+      if (views.size > maxEntries && !trimScheduled) {
+        trimScheduled = true;
+        queueMicrotask(trim);
       }
     },
     /**

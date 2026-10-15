@@ -11,11 +11,8 @@ import { Deferred, Effect, Fiber, Option, PubSub, Stream } from "effect";
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ORCHESTRATION_STREAM_CHUNK_MAX_BYTES } from "./constants.ts";
-import {
-  orchestrationEventBytes,
-  rechunkByBudget,
-  splitByChunkBudget,
-} from "./orchestrationStreamBatching.ts";
+import { rechunkByBudget, splitByChunkBudget } from "../streamBatching.ts";
+import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { makeOrchestrationStreamHelpers } from "./orchestrationStreams.ts";
 
 const THREAD = ThreadId.make("thread-batching");

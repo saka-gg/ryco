@@ -47,7 +47,7 @@ import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
 } from "./context/constants.ts";
-import { observeArrays } from "./context/orchestrationStreamBatching.ts";
+import { observeArrays } from "./streamBatching.ts";
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
