@@ -2,8 +2,10 @@ import { useEffect, type ComponentType } from "react";
 
 import { BrowserPanelChunk } from "./browser/LazyBrowserPanel";
 import { preloadVscodeIconResolver } from "./hooks/useVscodeIconUrl";
-import { scheduleIdleTask } from "./lib/idleTask";
-import { allowsSpeculativePreload } from "./lib/shellIdlePreload";
+import {
+  scheduleAfterShellPaint,
+  SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+} from "./lib/shellIdlePreload";
 import {
   preloadableLazy,
   useLazyComponentReady,
@@ -158,26 +160,34 @@ export function preloadWorkspacePanelForIntent(): void {
 const IDLE_PRELOAD_TIMEOUT_MS = 4_000;
 
 /**
- * Fetches the panel code for `mode` once the page is idle, so the first open
- * in a session does not wait on the chunk waterfall. The download is
+ * Fetches the panel code for `mode` in an idle period after boot, so the first
+ * open in a session does not wait on the chunk waterfall. The download is
  * speculative, so it follows the shell's policy for those
- * (`allowsSpeculativePreload`): data saver and links slower than 4G load the
- * panel on intent or open instead. Returns a cancel function.
+ * (`scheduleAfterShellPaint`): data saver and links slower than 4G load the
+ * panel on intent or open instead, and nothing starts before the primary shell
+ * has painted, so the surface (the review closure is the largest) never shares
+ * the link with the relay connect or the shell snapshot. Without
+ * `requestIdleCallback` (Safari) an idle period is only a short timeout, so
+ * that gate is what keeps the download out of boot. The start cap is the long
+ * one: a thread view can render from a cached shell well before a slow relay
+ * delivers the live one, and a session that never paints a primary shell still
+ * loads the panel on intent or open. Returns a cancel function.
  */
 export function scheduleIdleWorkspacePanelPreload(mode: RightPanelMode | null): () => void {
-  if (!allowsSpeculativePreload()) {
-    return () => undefined;
-  }
-  return scheduleIdleTask(() => preloadWorkspacePanel(mode), IDLE_PRELOAD_TIMEOUT_MS);
+  return scheduleAfterShellPaint(() => preloadWorkspacePanel(mode), {
+    startCapMs: SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+    idleTimeoutMs: IDLE_PRELOAD_TIMEOUT_MS,
+  });
 }
 
 /**
  * The closed workspace panel's preloads, for every layout that presents it
  * (the inline column and the narrow-window sheet alike): `panelMode` is the
  * surface the panel reopens to, so hovering a control that opens it warms that
- * surface, and an idle preload fetches its code once per session so the first
- * open skips the chunk waterfall. Call it once per route view; `enabled` is
- * false where no panel opens (the frozen phone tier) or the view renders none.
+ * surface, and an idle preload (see {@link scheduleIdleWorkspacePanelPreload})
+ * fetches its code once the shell has painted, so the first open skips the
+ * chunk waterfall. Call it once per route view; `enabled` is false where no
+ * panel opens (the frozen phone tier) or the view renders none.
  */
 export function useWorkspacePanelPreloadScheduling(input: {
   readonly open: boolean;

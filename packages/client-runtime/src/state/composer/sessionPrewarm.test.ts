@@ -127,7 +127,15 @@ describe("resolveProviderSessionPrewarmRequest", () => {
         }),
       ),
     ).not.toBeNull();
-    for (const orchestrationStatus of ["ready", "running", "starting", "idle"] as const) {
+    // Anything but stopped counts as live, interrupted and errored sessions included.
+    for (const orchestrationStatus of [
+      "ready",
+      "running",
+      "starting",
+      "idle",
+      "interrupted",
+      "error",
+    ] as const) {
       expect(
         resolveProviderSessionPrewarmRequest(
           context({ thread: { id: threadId, projectId, session: { orchestrationStatus } } }),
@@ -140,6 +148,11 @@ describe("resolveProviderSessionPrewarmRequest", () => {
     expect(resolveProviderSessionPrewarmRequest(context({ thread: null }))).toBeNull();
     expect(resolveProviderSessionPrewarmRequest(context({ dispatchAllowed: false }))).toBeNull();
     expect(resolveProviderSessionPrewarmRequest(context({ hostedTargetPending: true }))).toBeNull();
+    expect(
+      resolveProviderSessionPrewarmRequest(
+        context({ isPendingChat: false, hostedTargetPending: false }),
+      ),
+    ).not.toBeNull();
   });
 
   it("skips sends that first create the directory they run in", () => {

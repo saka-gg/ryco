@@ -1,5 +1,5 @@
 import { useLazyComponentReady, type PreloadableModule } from "../../../lib/preloadableLazy";
-import { notifyChatSurfaceLoadFailure } from "../../chat/chatViewLazySurfaces";
+import { notifySurfaceLoadFailure } from "../../ui/surfaceLoadFailure";
 
 // Surfaces whose shared load failed together, with the retry of each, so one
 // failure shows one toast and its Retry brings every surface back.
@@ -20,7 +20,7 @@ export function reportPhoneThreadSurfaceLoadFailure(error: unknown, retry: () =>
   setTimeout(() => {
     failedLoads.delete(error);
   }, 0);
-  notifyChatSurfaceLoadFailure("phone controls", error, () => {
+  notifySurfaceLoadFailure("phone controls", error, () => {
     for (const retryLoad of pending) retryLoad();
   });
 }

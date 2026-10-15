@@ -30,7 +30,7 @@ function makeFakeCopilot(
   let aborted = 0;
   let stopped = 0;
   const clientFactory = (cwd: string, sideQuestion?: boolean) =>
-    ({
+    Effect.succeed({
       createSession: async (config: SessionConfig) => ({
         sendAndWait: async ({ prompt }: { prompt: string }) => {
           const call = { cwd, sideQuestion, config, prompt };
@@ -46,7 +46,7 @@ function makeFakeCopilot(
       stop: async () => {
         stopped++;
       },
-    }) as unknown as CopilotClient;
+    } as unknown as CopilotClient);
   return {
     clientFactory,
     calls,

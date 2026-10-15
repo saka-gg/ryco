@@ -31,8 +31,8 @@ function mockPhoneThreadSurfacesChunk(): void {
   });
 }
 
-const notifyChatSurfaceLoadFailure = vi.hoisted(() => vi.fn());
-vi.mock("../../chat/chatViewLazySurfaces", () => ({ notifyChatSurfaceLoadFailure }));
+const notifySurfaceLoadFailure = vi.hoisted(() => vi.fn());
+vi.mock("../../ui/surfaceLoadFailure", () => ({ notifySurfaceLoadFailure }));
 
 const VIEW = { ChatThreadRoute: () => null };
 
@@ -124,7 +124,7 @@ describe("reportPhoneThreadSurfaceLoadFailure", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers();
-    notifyChatSurfaceLoadFailure.mockClear();
+    notifySurfaceLoadFailure.mockClear();
   });
 
   afterEach(() => {
@@ -139,9 +139,9 @@ describe("reportPhoneThreadSurfaceLoadFailure", () => {
 
     reportPhoneThreadSurfaceLoadFailure(error, retryAppBar);
     reportPhoneThreadSurfaceLoadFailure(error, retryDock);
-    expect(notifyChatSurfaceLoadFailure).toHaveBeenCalledOnce();
+    expect(notifySurfaceLoadFailure).toHaveBeenCalledOnce();
 
-    const [, , retry] = notifyChatSurfaceLoadFailure.mock.calls[0]!;
+    const [, , retry] = notifySurfaceLoadFailure.mock.calls[0]!;
     (retry as () => void)();
     expect(retryAppBar).toHaveBeenCalledOnce();
     expect(retryDock).toHaveBeenCalledOnce();
@@ -149,6 +149,6 @@ describe("reportPhoneThreadSurfaceLoadFailure", () => {
     // A dismissed toast leaves nothing behind: a later report is a new failure.
     vi.runAllTimers();
     reportPhoneThreadSurfaceLoadFailure(error, vi.fn());
-    expect(notifyChatSurfaceLoadFailure).toHaveBeenCalledTimes(2);
+    expect(notifySurfaceLoadFailure).toHaveBeenCalledTimes(2);
   });
 });

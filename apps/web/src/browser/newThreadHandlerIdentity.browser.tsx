@@ -40,6 +40,7 @@ describe("useNewThreadHandler", () => {
     try {
       await expect.element(page.getByRole("button", { name: "render 0" })).toBeInTheDocument();
       const before = handlers.size;
+      const chatBefore = chatHandlers.size;
       for (let index = 1; index <= 3; index += 1) {
         await page.getByRole("button").click();
         await expect
@@ -48,7 +49,7 @@ describe("useNewThreadHandler", () => {
       }
       // Sidebar passes the handler to every memoized project row.
       expect(handlers.size).toBe(before);
-      expect(chatHandlers.size).toBe(before);
+      expect(chatHandlers.size).toBe(chatBefore);
     } finally {
       await mounted.unmount();
     }

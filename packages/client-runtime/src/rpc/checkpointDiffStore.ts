@@ -6,7 +6,7 @@ import {
 } from "@ryco/contracts/orchestration";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
 

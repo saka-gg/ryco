@@ -99,8 +99,11 @@ describe("chat route first-frame graph", () => {
     expect(lazyPhoneSurfaces).toContain("preloadableLazy(");
     expect(staticValueImports(lazyPhoneSurfaces, "./phoneThreadSurfaces")).toEqual([]);
     // The chat routes load the wrappers (boot), so they stay a bare loader:
-    // the mount hook and its toast live in `usePhoneThreadSurfaceReady`.
+    // the mount hook lives in `usePhoneThreadSurfaceReady`, and its toast in
+    // `ui/surfaceLoadFailure`.
     expect(staticValueImports(lazyPhoneSurfaces, "../../chat/chatViewLazySurfaces")).toEqual([]);
+    expect(staticValueImports(lazyPhoneSurfaces, "../../ui/surfaceLoadFailure")).toEqual([]);
+    expect(staticValueImports(lazyPhoneSurfaces, "../../ui/toast")).toEqual([]);
     // On the phone tier both chat routes wait for the surfaces with their view.
     for (const route of ["_chat.$environmentId.$threadId.tsx", "_chat.draft.$draftId.tsx"]) {
       expect(await readSource(`../routes/${route}`), route).toContain(

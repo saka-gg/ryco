@@ -51,6 +51,8 @@ export interface ShellIdlePreloadOptions {
   readonly allowed?: boolean;
   /** Starts the preloads after this even when the shell has not painted. */
   readonly startCapMs?: number;
+  /** How long each task may wait for an idle period once the preloads started. */
+  readonly idleTimeoutMs?: number;
   /**
    * Asked once the shell has painted: when true (the document opened on a
    * thread), the preloads also wait for that thread's first paint, so they
@@ -120,7 +122,7 @@ export function scheduleShellIdlePreloads(
       };
       settleTimer = globalThis.setTimeout(next, SHELL_IDLE_PRELOAD_TASK_SETTLE_CAP_MS);
       Promise.resolve(result).then(next, next);
-    }, SHELL_IDLE_PRELOAD_TASK_TIMEOUT_MS);
+    }, options.idleTimeoutMs ?? SHELL_IDLE_PRELOAD_TASK_TIMEOUT_MS);
   };
   let cancelThreadPaintWait: () => void = () => undefined;
   const start = () => {
@@ -163,4 +165,19 @@ export function scheduleShellIdlePreloads(
     if (settleTimer !== null) globalThis.clearTimeout(settleTimer);
     cancelIdleTask();
   };
+}
+
+/**
+ * Runs one speculative preload under the shell's policy for those (see
+ * {@link scheduleShellIdlePreloads}): skipped where speculative downloads are
+ * not allowed, and started in an idle period only once the primary shell has
+ * painted (and the routed thread, when `awaitsFirstThreadPaint` asks for it)
+ * or the start cap elapsed. Once the shell has painted in this document, only
+ * the idle period remains. Returns a cancel function.
+ */
+export function scheduleAfterShellPaint(
+  task: ShellIdlePreloadTask,
+  options?: ShellIdlePreloadOptions,
+): () => void {
+  return scheduleShellIdlePreloads([task], options);
 }

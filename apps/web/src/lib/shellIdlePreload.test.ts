@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { markStartupPhase, resetStartupPhasesForTests } from "../perf/startupInstrumentation";
 import {
   allowsSpeculativePreload,
+  scheduleAfterShellPaint,
   scheduleShellIdlePreloads,
   SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
   SHELL_IDLE_PRELOAD_START_CAP_MS,
@@ -218,5 +219,50 @@ describe("scheduleShellIdlePreloads", () => {
 
     expect(cancelledTask).not.toHaveBeenCalled();
     expect(disallowedTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("scheduleAfterShellPaint", () => {
+  beforeEach(() => {
+    resetStartupPhasesForTests();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("runs one task in an idle period after the painted shell, with its idle timeout", () => {
+    const idleCallbacks: Array<{ readonly run: () => void; readonly timeout: number }> = [];
+    vi.stubGlobal("requestIdleCallback", (run: () => void, options: { timeout: number }) => {
+      idleCallbacks.push({ run, timeout: options.timeout });
+      return idleCallbacks.length;
+    });
+    const task = vi.fn();
+    scheduleAfterShellPaint(task, { allowed: true, idleTimeoutMs: 4_000 });
+    expect(idleCallbacks).toHaveLength(0);
+
+    markStartupPhase("primary-shell-painted");
+    expect(idleCallbacks.map((callback) => callback.timeout)).toEqual([4_000]);
+    expect(task).not.toHaveBeenCalled();
+    idleCallbacks[0]?.run();
+    expect(task).toHaveBeenCalledOnce();
+  });
+
+  it("only waits for an idle period once the shell has painted", () => {
+    const requestIdleCallback = vi.fn(() => 1);
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    markStartupPhase("primary-shell-painted");
+
+    scheduleAfterShellPaint(vi.fn(), { allowed: true });
+    expect(requestIdleCallback).toHaveBeenCalledOnce();
+  });
+
+  it("runs nothing when speculative preloads are not allowed", () => {
+    const requestIdleCallback = vi.fn(() => 1);
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    markStartupPhase("primary-shell-painted");
+
+    scheduleAfterShellPaint(vi.fn(), { allowed: false });
+    expect(requestIdleCallback).not.toHaveBeenCalled();
   });
 });

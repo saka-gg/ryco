@@ -70,6 +70,16 @@ describe("refreshClaudeProviderUsage", () => {
     expect(result.slashCommands).toEqual(loginSnapshot.slashCommands);
   });
 
+  it("never starts reading a login's usage for a snapshot probed without limits", async () => {
+    // The probe attaches limits only when Claude Code reported its claude.ai login; a snapshot
+    // without them ran on another token source, so the local login is not this instance's.
+    const { rateLimits: _probedLimits, ...withoutLimits } = loginSnapshot;
+    const { result, reads } = await refresh(withoutLimits, {});
+
+    expect(reads).toHaveLength(0);
+    expect(result).toEqual(withoutLimits);
+  });
+
   it("drops stale limits when the snapshot has no subscription login", async () => {
     const { result, reads } = await refresh(
       { ...loginSnapshot, auth: { status: "authenticated", type: "apiKey" } },
