@@ -4,7 +4,11 @@ import type { DeviceEvent } from "@ryco/contracts";
 
 import type { BootOwnershipStore } from "./bootOwnership.ts";
 import { DeviceBackendError } from "./DeviceBackend.ts";
-import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "./DeviceManager.ts";
+import {
+  DEVICE_IDLE_SHUTDOWN_MS,
+  DEVICE_OPEN_PANE_REQUEST_HOLD_MS,
+  DeviceManager,
+} from "./DeviceManager.ts";
 import { FakeDeviceBackend } from "./FakeDeviceBackend.ts";
 
 const THREAD_A = "thread-a";
@@ -904,6 +908,49 @@ describe("DeviceManager lifecycle and agent activity", () => {
       udid: DEVICE_A,
       reason: "agent-launch",
     });
+  });
+
+  it("holds an open-pane request no client stream heard for the next client stream", () => {
+    let now = 1_000;
+    const manager = new DeviceManager({ backend: new FakeDeviceBackend(), now: () => now });
+
+    manager.requestOpenPane(THREAD_A, DEVICE_A, "agent-tool");
+    manager.requestOpenPane(THREAD_B, DEVICE_A, "agent-launch");
+    manager.requestOpenPane(THREAD_B, DEVICE_B, "agent-launch");
+
+    const first: DeviceEvent[] = [];
+    const unsubscribe = manager.onClientEvent((event) => first.push(event));
+    // Latest per thread, handed over as the stream starts.
+    expect(first).toEqual([
+      {
+        type: "device.open-pane-requested",
+        threadId: THREAD_A,
+        udid: DEVICE_A,
+        reason: "agent-tool",
+      },
+      {
+        type: "device.open-pane-requested",
+        threadId: THREAD_B,
+        udid: DEVICE_B,
+        reason: "agent-launch",
+      },
+    ]);
+    // A request a client stream hears live is not held.
+    manager.requestOpenPane(THREAD_A, DEVICE_B, "agent-tool");
+    expect(first).toHaveLength(3);
+    unsubscribe();
+
+    // Each request reaches one stream: a reconnect does not reopen the pane.
+    const second: DeviceEvent[] = [];
+    manager.onClientEvent((event) => second.push(event))();
+    expect(second).toEqual([]);
+
+    // A request nobody heard for the hold period is dropped.
+    manager.requestOpenPane(THREAD_A, DEVICE_A, "agent-tool");
+    now += DEVICE_OPEN_PANE_REQUEST_HOLD_MS;
+    const late: DeviceEvent[] = [];
+    manager.onClientEvent((event) => late.push(event));
+    expect(late).toEqual([]);
   });
 
   it("reports unavailability without listing devices", async () => {

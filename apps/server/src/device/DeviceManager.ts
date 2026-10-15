@@ -63,6 +63,13 @@ import {
 
 /** How long a Ryco-booted device stays up with no thread attached. */
 export const DEVICE_IDLE_SHUTDOWN_MS = 10 * 60 * 1000;
+/**
+ * How long an agent's request to open the device pane waits for a client to
+ * hear it. Clients stream device events only while a surface that can show the
+ * pane is mounted, so a request made while no client streams is held for the
+ * next client stream instead of being lost.
+ */
+export const DEVICE_OPEN_PANE_REQUEST_HOLD_MS = 10 * 60 * 1000;
 
 /**
  * How long to keep retrying a stream attach that keeps failing transiently.
@@ -183,6 +190,12 @@ export class DeviceManager {
   private readonly unsubscribeDisconnect: (() => void) | undefined;
   private readonly recording = new Set<string>();
   private readonly listeners = new Set<DeviceEventListener>();
+  private clientStreams = 0;
+  /** Open-pane requests no client stream heard, latest per thread. */
+  private readonly unheardOpenRequests = new Map<
+    string,
+    { readonly event: DeviceEvent; readonly requestedAt: number }
+  >();
   private disposed = false;
 
   constructor(options: DeviceManagerOptions) {
@@ -327,6 +340,34 @@ export class DeviceManager {
   onEvent(listener: DeviceEventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * A client's device event stream. Like {@link onEvent}, and it first hears the
+   * open-pane requests made while no client streamed — each one handed to this
+   * stream only, so a reconnect does not reopen a pane the user closed.
+   */
+  onClientEvent(listener: DeviceEventListener): () => void {
+    const unsubscribe = this.onEvent(listener);
+    this.clientStreams += 1;
+    const now = this.now();
+    const unheard = Array.from(this.unheardOpenRequests.values());
+    this.unheardOpenRequests.clear();
+    for (const { event, requestedAt } of unheard) {
+      if (now - requestedAt >= DEVICE_OPEN_PANE_REQUEST_HOLD_MS) continue;
+      try {
+        listener(event);
+      } catch {
+        // The stream is gone; the request goes with it, as a live one would.
+      }
+    }
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.clientStreams -= 1;
+      unsubscribe();
+    };
   }
 
   // ── Queries ────────────────────────────────────────────────────────
@@ -937,12 +978,22 @@ export class DeviceManager {
   /** Auto-open the pane when an agent puts an app on a device. */
   requestOpenPane(threadId: string, udid: string, reason: DeviceOpenPaneReason): void {
     this.threadState(threadId).paneSurfacedUdid = udid;
-    this.emit({
+    const event: DeviceEvent = {
       type: "device.open-pane-requested",
       threadId: ThreadId.make(threadId),
       udid,
       reason,
-    });
+    };
+    if (this.clientStreams === 0) {
+      const now = this.now();
+      for (const [heldThreadId, held] of this.unheardOpenRequests) {
+        if (now - held.requestedAt >= DEVICE_OPEN_PANE_REQUEST_HOLD_MS) {
+          this.unheardOpenRequests.delete(heldThreadId);
+        }
+      }
+      this.unheardOpenRequests.set(threadId, { event, requestedAt: now });
+    }
+    this.emit(event);
   }
 
   /**
@@ -1017,6 +1068,7 @@ export class DeviceManager {
     if (this.rycoBooted.size > 0) await this.recordBootOwnership();
     else await this.bootOwnership.clear().catch(() => undefined);
     this.listeners.clear();
+    this.unheardOpenRequests.clear();
     await this.backend.dispose().catch(() => undefined);
   }
 

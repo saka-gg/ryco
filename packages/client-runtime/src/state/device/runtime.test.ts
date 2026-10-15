@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { DeviceEvent, EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { DeviceRpcClient } from "../../rpc/deviceRpcClient.ts";
@@ -118,6 +118,91 @@ describe("ensureDeviceRuntime", () => {
     ensureDeviceRuntime(environmentId);
     expect(device.onEvent).toHaveBeenCalledTimes(2);
     registration.dispose();
+  });
+
+  it("keeps a delivered pane request across an idle stop, but not past the connection", () => {
+    vi.useFakeTimers();
+    const environmentId = "env-device-open-request" as EnvironmentId;
+    const threadId = "thread-device-open-request" as ThreadId;
+    let deliver: ((event: DeviceEvent) => void) | undefined;
+    const device = fakeDeviceClient();
+    device.onEvent.mockImplementation((listener: unknown) => {
+      deliver = listener as (event: DeviceEvent) => void;
+      return () => undefined;
+    });
+    const registration = registerDeviceConnection(environmentId, device.client);
+    const request = {
+      type: "device.open-pane-requested",
+      threadId,
+      udid: "SIM-1",
+      reason: "agent-tool",
+    } as const;
+
+    // A thread view of another thread keeps the stream; the agent asks for this one.
+    ensureDeviceRuntime(environmentId)();
+    deliver?.(request);
+    // The user stays away past the idle period: the stream stops, the request
+    // waits for the user to open its thread.
+    vi.advanceTimersByTime(DEVICE_RUNTIME_IDLE_MS);
+    expect(isDeviceRuntimeBound(environmentId)).toBe(false);
+    expect(useDeviceStateStore.getState().consumeOpenRequest(environmentId, threadId)).toEqual(
+      request,
+    );
+
+    // A disposed connection takes its requests with it.
+    const release = ensureDeviceRuntime(environmentId);
+    deliver?.(request);
+    registration.dispose();
+    release();
+    expect(useDeviceStateStore.getState().consumeOpenRequest(environmentId, threadId)).toBeNull();
+  });
+
+  it("drops pane requests kept across an idle stop once their connection ends", () => {
+    vi.useFakeTimers();
+    const environmentId = "env-device-idle-dispose" as EnvironmentId;
+    const threadId = "thread-device-idle-dispose" as ThreadId;
+    const request = {
+      type: "device.open-pane-requested",
+      threadId,
+      udid: "SIM-1",
+      reason: "agent-tool",
+    } as const;
+    const deliverOn = (device: ReturnType<typeof fakeDeviceClient>) => {
+      let deliver: ((event: DeviceEvent) => void) | undefined;
+      device.onEvent.mockImplementation((listener: unknown) => {
+        deliver = listener as (event: DeviceEvent) => void;
+        return () => undefined;
+      });
+      return (event: DeviceEvent) => deliver?.(event);
+    };
+    const older = fakeDeviceClient();
+    const olderRegistration = registerDeviceConnection(environmentId, older.client);
+    const first = fakeDeviceClient();
+    const deliverFirst = deliverOn(first);
+    const firstRegistration = registerDeviceConnection(environmentId, first.client);
+
+    ensureDeviceRuntime(environmentId)();
+    deliverFirst(request);
+    vi.advanceTimersByTime(DEVICE_RUNTIME_IDLE_MS);
+    expect(isDeviceRuntimeBound(environmentId)).toBe(false);
+    // An earlier connection ending does not take the current one's requests.
+    olderRegistration.dispose();
+    expect(useDeviceStateStore.getState().pendingOpenByThreadKey).not.toEqual({});
+    // The environment is removed while the stream is idle.
+    firstRegistration.dispose();
+    expect(useDeviceStateStore.getState().consumeOpenRequest(environmentId, threadId)).toBeNull();
+
+    // A replacing connection ends the idle one's requests the same way.
+    const second = fakeDeviceClient();
+    const deliverSecond = deliverOn(second);
+    const secondRegistration = registerDeviceConnection(environmentId, second.client);
+    ensureDeviceRuntime(environmentId)();
+    deliverSecond(request);
+    vi.advanceTimersByTime(DEVICE_RUNTIME_IDLE_MS);
+    const third = registerDeviceConnection(environmentId, fakeDeviceClient().client);
+    expect(useDeviceStateStore.getState().consumeOpenRequest(environmentId, threadId)).toBeNull();
+    third.dispose();
+    secondRegistration.dispose();
   });
 
   it("hands the stream back to a still-live connection when the newer one is disposed", () => {

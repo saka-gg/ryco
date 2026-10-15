@@ -41,8 +41,12 @@ interface LogicalStream {
   readonly error: Set<() => void>;
 }
 interface QueuedFrame {
-  readonly streamId: number;
+  readonly type: HubSessionFrame["type"];
   readonly bytes: Uint8Array;
+}
+/** Account-level frames that belong to no stream and may overtake stream frames. */
+function isControlFrame(type: HubSessionFrame["type"]): boolean {
+  return type === "ping" || type === "pong";
 }
 const SEND_HIGH_WATER_BYTES = 256 * 1_024;
 const CONTROL_RESERVE_BYTES = 4 * 1_024;
@@ -84,6 +88,10 @@ export class HostedHubSession {
   #onlineAt = 0;
   #probeSequence = 0;
   #probe: Uint8Array | null = null;
+  /** When the pending {@link #probe} ping left the queue; undefined while it waits in it. */
+  #probeSentAt: number | undefined;
+  /** Bytes handed to the current physical socket. */
+  #handedBytes = 0;
 
   constructor(options: HostedHubSessionOptions) {
     this.#options = options;
@@ -188,6 +196,11 @@ export class HostedHubSession {
    * treats the connection as lost through the ordinary path: `onFailure`,
    * then the bounded reconnect. A probe before `ready`, or while one is already
    * armed, does nothing; the connect deadline and the armed probe cover those.
+   *
+   * A congested uplink is not a dead one. The ping overtakes queued stream
+   * data, its wait counts from when it leaves the queue, and while a backlog
+   * of outbound bytes keeps leaving the socket the wait is extended — never
+   * past the liveness bound since the last frame received.
    */
   probe(timeoutMs = HUB_SESSION_PROBE_TIMEOUT_MS): void {
     const socket = this.#socket;
@@ -199,20 +212,83 @@ export class HostedHubSession {
       this.#lost("network", true);
       return;
     }
-    const sentAt = this.#options.timers.now();
+    const startedAt = this.#options.timers.now();
     // Reuse a pending heartbeat probe: its pong is the answer either way, and a
     // second nonce would make the first one's valid pong look forged.
     if (!this.#probe) {
-      this.#probe = new Uint8Array(8);
-      new DataView(this.#probe.buffer).setUint32(4, ++this.#probeSequence);
-      this.#sendControl({ type: "ping", nonce: this.#probe });
+      this.#sendPing();
       if (this.#socket !== socket || !this.#ready) return;
     }
+    this.#armProbeDeadline(socket, startedAt, timeoutMs, timeoutMs);
+  }
+
+  /**
+   * Any frame received clears this deadline. When it fires, the connection is
+   * lost unless the ping left the queue less than `timeoutMs` ago, or the
+   * uplink was backlogged at the last check and bytes have left the socket
+   * since: the path still moves data, it is only busy.
+   *
+   * Progress alone is no proof of life. A browser socket's buffer also drains
+   * on a dead path until the kernel's send buffer fills, so the probe's own
+   * ping, or a few small frames, would keep re-arming a dead connection up to
+   * the liveness bound. Only a backlog at least {@link SEND_HIGH_WATER_BYTES}
+   * deep, or a ping still waiting behind one, earns the extension.
+   *
+   * Progress is measured from `since`, the drained-bytes baseline of the last
+   * full wait. Finishing the ping's own window after it left the queue keeps
+   * that baseline: an uplink drains in bursts, often 50–100 ms apart, so a
+   * window of the few milliseconds since the ping left would see no progress
+   * on a live upload. The progress check therefore always spans at least
+   * `timeoutMs`.
+   */
+  #armProbeDeadline(
+    socket: HubSessionSocket,
+    startedAt: number,
+    timeoutMs: number,
+    delay: number,
+    since = this.#drainedBytes(socket),
+  ): void {
+    const backlogged =
+      this.#probeSentAt === undefined ||
+      this.#queueBytes + socket.bufferedAmount >= SEND_HIGH_WATER_BYTES;
     this.#probeDeadline = this.#options.timers.setTimeout(() => {
       this.#probeDeadline = undefined;
       if (this.#socket !== socket || !this.#ready || this.#disposed) return;
-      if (this.#lastReceived < sentAt) this.#lost("network", true);
-    }, timeoutMs);
+      if (this.#lastReceived >= startedAt) return;
+      const now = this.#options.timers.now();
+      const sentAt = this.#probeSentAt;
+      // The ping has not been out for a full wait yet: finish its window, still
+      // measuring progress from this wait's baseline.
+      const pingWindow = sentAt !== undefined && now - sentAt < timeoutMs;
+      const wait = pingWindow
+        ? timeoutMs - (now - sentAt)
+        : backlogged && this.#drainedBytes(socket) > since
+          ? timeoutMs
+          : undefined;
+      if (wait === undefined || this.#silentPastDeadBound()) {
+        this.#lost("network", true);
+        return;
+      }
+      this.#armProbeDeadline(
+        socket,
+        startedAt,
+        timeoutMs,
+        Math.min(wait, HUB_SESSION_DEAD_CONNECTION_TIMEOUT_MS - (now - this.#lastReceived)),
+        pingWindow ? since : undefined,
+      );
+    }, delay);
+  }
+
+  /** Outbound bytes that have left the socket's own buffer; only ever grows. */
+  #drainedBytes(socket: HubSessionSocket): number {
+    return this.#handedBytes - socket.bufferedAmount;
+  }
+
+  #sendPing(): void {
+    this.#probe = new Uint8Array(8);
+    new DataView(this.#probe.buffer).setUint32(4, ++this.#probeSequence);
+    this.#probeSentAt = undefined;
+    this.#sendControl({ type: "ping", nonce: this.#probe });
   }
 
   #silentPastDeadBound(): boolean {
@@ -248,6 +324,7 @@ export class HostedHubSession {
     }
     this.#socket = socket;
     this.#ready = false;
+    this.#handedBytes = 0;
     const current = () => this.#socket === socket && !this.#disposed;
     socket.onOpen(() => {
       /* READY, not the TCP upgrade, authenticates the session. */
@@ -424,15 +501,30 @@ export class HostedHubSession {
     }
     if (this.#queue.length === 0 && socket.bufferedAmount < SEND_HIGH_WATER_BYTES) {
       try {
-        socket.send(bytes);
+        this.#hand(socket, frame.type, bytes);
       } finally {
         bytes.fill(0);
       }
       return;
     }
-    this.#queue.push({ streamId: "streamId" in frame ? frame.streamId : 0, bytes });
+    const entry: QueuedFrame = { type: frame.type, bytes };
+    if (isControlFrame(frame.type)) {
+      // A ping or pong belongs to no stream, so it may overtake queued stream
+      // frames: a liveness answer must not wait behind megabytes of data.
+      // Control frames keep their order among themselves.
+      const index = this.#queue.findIndex((queued) => !isControlFrame(queued.type));
+      this.#queue.splice(index === -1 ? this.#queue.length : index, 0, entry);
+    } else {
+      this.#queue.push(entry);
+    }
     this.#queueBytes += bytes.byteLength;
     this.#scheduleDrain();
+  }
+
+  #hand(socket: HubSessionSocket, type: HubSessionFrame["type"], bytes: Uint8Array): void {
+    socket.send(bytes);
+    this.#handedBytes += bytes.byteLength;
+    if (type === "ping") this.#probeSentAt = this.#options.timers.now();
   }
 
   #sendControl(frame: HubSessionFrame): void {
@@ -453,7 +545,7 @@ export class HostedHubSession {
         const entry = this.#queue.shift()!;
         this.#queueBytes -= entry.bytes.byteLength;
         try {
-          socket.send(entry.bytes);
+          this.#hand(socket, entry.type, entry.bytes);
         } catch {
           this.#lost("network", true);
           return;
@@ -478,11 +570,7 @@ export class HostedHubSession {
           return;
         }
         // Do not overwrite a pending probe: delayed valid pongs must remain valid.
-        if (!this.#probe) {
-          this.#probe = new Uint8Array(8);
-          new DataView(this.#probe.buffer).setUint32(4, ++this.#probeSequence);
-          this.#sendControl({ type: "ping", nonce: this.#probe });
-        }
+        if (!this.#probe) this.#sendPing();
         if (this.#ready) this.#scheduleHeartbeat();
       },
       Math.min(

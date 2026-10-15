@@ -138,6 +138,10 @@
       "types": "./src/relayE2eeCorpusLiveness.ts",
       "import": "./src/relayE2eeCorpusLiveness.ts"
     },
+    "./relayE2eeCorpusNative": {
+      "types": "./src/relayE2eeCorpusNative.ts",
+      "import": "./src/relayE2eeCorpusNative.ts"
+    },
     "./model": {
       "types": "./src/model.ts",
       "import": "./src/model.ts"

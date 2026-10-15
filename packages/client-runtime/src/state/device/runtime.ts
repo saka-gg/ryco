@@ -8,6 +8,16 @@ export interface DeviceConnectionBinding {
   readonly dispose: () => void;
 }
 
+interface DeviceStreamBinding extends DeviceConnectionBinding {
+  /**
+   * Stop the stream because nothing retains it, while the connection lives on.
+   * Unlike {@link DeviceConnectionBinding.dispose}, the agent's pane requests
+   * this stream delivered for threads not opened yet are kept: the server hands
+   * each request to one stream only, so dropping them here would lose them.
+   */
+  readonly idle: () => void;
+}
+
 /**
  * Owns one environment's device event stream and its generation. Stream events
  * carry the generation current when they arrive, so a replaced connection can
@@ -22,7 +32,7 @@ export interface DeviceConnectionBinding {
 export function bindDeviceConnection(
   environmentId: EnvironmentId,
   client: DeviceRpcClient,
-): DeviceConnectionBinding {
+): DeviceStreamBinding {
   let active = true;
   let generation = useDeviceStateStore.getState().beginConnection(environmentId);
   const store = () => useDeviceStateStore.getState();
@@ -47,17 +57,19 @@ export function bindDeviceConnection(
       },
     },
   );
+  const stop = (keepOpenRequests: boolean) => {
+    if (!active) return;
+    active = false;
+    unsubscribe();
+    store().clearEnvironment(environmentId, generation, { keepOpenRequests });
+  };
   return {
     reconnecting: () => {
       if (!active) return;
       generation = store().beginConnection(environmentId);
     },
-    dispose: () => {
-      if (!active) return;
-      active = false;
-      unsubscribe();
-      store().clearEnvironment(environmentId, generation);
-    },
+    dispose: () => stop(false),
+    idle: () => stop(true),
   };
 }
 
@@ -69,7 +81,7 @@ export const DEVICE_RUNTIME_IDLE_MS = 60_000;
 
 interface DeviceRuntimeRegistration {
   readonly client: DeviceRpcClient;
-  binding: DeviceConnectionBinding | null;
+  binding: DeviceStreamBinding | null;
 }
 
 /** Live registrations per environment; the last one is the current connection's. */
@@ -95,10 +107,24 @@ function bindRegistration(
   registration.binding ??= bindDeviceConnection(environmentId, registration.client);
 }
 
-function unbindRegistration(registration: DeviceRuntimeRegistration): void {
+function unbindRegistration(registration: DeviceRuntimeRegistration, idle = false): void {
   const binding = registration.binding;
   registration.binding = null;
-  binding?.dispose();
+  if (idle) binding?.idle();
+  else binding?.dispose();
+}
+
+/**
+ * Ends the environment's current connection. A stream still bound clears the
+ * environment's device state; one already stopped for idleness kept the pane
+ * requests it delivered, and they end with the connection now.
+ */
+function endCurrentRegistration(
+  environmentId: EnvironmentId,
+  registration: DeviceRuntimeRegistration,
+): void {
+  if (registration.binding) unbindRegistration(registration);
+  else useDeviceStateStore.getState().clearOpenRequests(environmentId);
 }
 
 /**
@@ -116,7 +142,7 @@ export function registerDeviceConnection(
   const registration: DeviceRuntimeRegistration = { client, binding: null };
   const live = registrations.get(environmentId) ?? [];
   const previous = live.at(-1);
-  if (previous) unbindRegistration(previous);
+  if (previous) endCurrentRegistration(environmentId, previous);
   registrations.set(environmentId, [...live, registration]);
   if ((retainCounts.get(environmentId) ?? 0) > 0) bindRegistration(environmentId, registration);
   let disposed = false;
@@ -128,7 +154,8 @@ export function registerDeviceConnection(
       if (disposed) return;
       disposed = true;
       const wasCurrent = currentRegistration(environmentId) === registration;
-      unbindRegistration(registration);
+      if (wasCurrent) endCurrentRegistration(environmentId, registration);
+      else unbindRegistration(registration);
       const remaining = (registrations.get(environmentId) ?? []).filter(
         (entry) => entry !== registration,
       );
@@ -175,7 +202,7 @@ export function ensureDeviceRuntime(environmentId: EnvironmentId): () => void {
         idleTimers.delete(environmentId);
         if ((retainCounts.get(environmentId) ?? 0) > 0) return;
         const current = currentRegistration(environmentId);
-        if (current) unbindRegistration(current);
+        if (current) unbindRegistration(current, true);
       }, DEVICE_RUNTIME_IDLE_MS),
     );
   };

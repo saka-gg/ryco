@@ -51,7 +51,35 @@ export interface DeviceStateStore {
     environmentId: EnvironmentId,
     threadId: ThreadId,
   ) => DeviceOpenPaneRequestedEvent | null;
-  readonly clearEnvironment: (environmentId: EnvironmentId, generation: number) => void;
+  /**
+   * Forget an environment's device state. `keepOpenRequests` keeps the agent's
+   * pane requests for threads the user has not opened yet: the stream stops for
+   * idleness while the connection lives on, and the server hands each request
+   * to one stream only.
+   *
+   * A kept request lives as long as the connection, as one delivered to an
+   * always-bound stream did, not for the server's shorter hold of requests no
+   * stream heard: the client has already been told, and the request is still
+   * the agent's latest for that thread when the user opens it.
+   */
+  readonly clearEnvironment: (
+    environmentId: EnvironmentId,
+    generation: number,
+    options?: { readonly keepOpenRequests?: boolean },
+  ) => void;
+  /**
+   * Drop the pane requests kept for an environment whose stream already
+   * stopped for idleness, once its connection ends too.
+   */
+  readonly clearOpenRequests: (environmentId: EnvironmentId) => void;
+}
+
+function withoutEnvironment<T>(
+  byKey: Record<string, T>,
+  environmentId: EnvironmentId,
+): Record<string, T> {
+  const prefix = `${environmentId}:`;
+  return Object.fromEntries(Object.entries(byKey).filter(([key]) => !key.startsWith(prefix)));
 }
 
 const EMPTY_ENVIRONMENT_STATE: EnvironmentDeviceState = Object.freeze({
@@ -156,11 +184,10 @@ export const useDeviceStateStore = create<DeviceStateStore>((set, get) => ({
     });
     return request;
   },
-  clearEnvironment: (environmentId, generation) =>
+  clearEnvironment: (environmentId, generation, options) =>
     set((state) => {
       const current = state.environmentById[environmentId];
       if (!current || current.generation !== generation) return state;
-      const prefix = `${environmentId}:`;
       return {
         environmentById: {
           ...state.environmentById,
@@ -171,13 +198,22 @@ export const useDeviceStateStore = create<DeviceStateStore>((set, get) => ({
             generation,
           },
         },
-        threadByKey: Object.fromEntries(
-          Object.entries(state.threadByKey).filter(([key]) => !key.startsWith(prefix)),
-        ),
-        pendingOpenByThreadKey: Object.fromEntries(
-          Object.entries(state.pendingOpenByThreadKey).filter(([key]) => !key.startsWith(prefix)),
-        ),
+        threadByKey: withoutEnvironment(state.threadByKey, environmentId),
+        pendingOpenByThreadKey: options?.keepOpenRequests
+          ? state.pendingOpenByThreadKey
+          : withoutEnvironment(state.pendingOpenByThreadKey, environmentId),
       };
+    }),
+  clearOpenRequests: (environmentId) =>
+    set((state) => {
+      const pendingOpenByThreadKey = withoutEnvironment(
+        state.pendingOpenByThreadKey,
+        environmentId,
+      );
+      return Object.keys(pendingOpenByThreadKey).length ===
+        Object.keys(state.pendingOpenByThreadKey).length
+        ? state
+        : { pendingOpenByThreadKey };
     }),
 }));
 
