@@ -2,6 +2,7 @@ import "../../../../index.css";
 // The feature stylesheet loads with its page or dialog chunk in the app.
 import "../../overview.css";
 
+import { EnvironmentId, WorktreeId } from "@ryco/contracts";
 import { useState, type ReactNode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -296,6 +297,45 @@ describe("CrownSectionDetail interactions", () => {
     } finally {
       guard.dispose();
     }
+  });
+
+  it("offers linking a pull request in the card, with or without one shown", async () => {
+    const linking = {
+      environmentId: EnvironmentId.make("environment-local"),
+      worktreeId: WorktreeId.make("worktree-crown"),
+      cwd: "/repo/ryco",
+      workspaceTitle: "Crown",
+      workspaceBranch: "feature/crown",
+      links: [],
+      storedNumbers: new Set<number>(),
+      shownNumber: null,
+      canEdit: true,
+      onOpenPullRequest: vi.fn(),
+    };
+    const empty = await mountDetail({
+      section: "pr",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ pullRequest: null, pullRequestLinking: linking }),
+    });
+    await expect.element(empty.getByRole("button", { name: "Link pull request…" })).toBeEnabled();
+
+    const shown = await mountDetail({
+      section: "pr",
+      variant: "card",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ pullRequestLinking: { ...linking, canEdit: false } }),
+    });
+    await expect.element(shown.getByRole("button", { name: "Link another…" })).toBeDisabled();
+
+    // The hover preview stays read-only.
+    const preview = await mountDetail({
+      section: "pr",
+      variant: "flyout",
+      isGitRepo: true,
+      layout: crownLayoutFixture({ pullRequest: null, pullRequestLinking: linking }),
+    });
+    expect(preview.container.textContent).not.toContain("Link pull request");
   });
 
   it("opens a check in Ryco on a plain click and leaves modified clicks to the host link", async () => {

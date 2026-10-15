@@ -180,18 +180,23 @@ export function AgentMonogram({
   );
 }
 
-/** Overlapping monograms for a batch of agents; past `max`, a `+N` count. */
+/**
+ * Overlapping monograms for a batch of agents; past `max`, a `+N` count. With
+ * `total`, the count also covers agents of the batch not passed in.
+ */
 export function AgentMonogramStack({
   agents,
   max = 4,
+  total = agents.length,
   className,
 }: {
   agents: ReadonlyArray<RuntimeSubagent>;
   max?: number;
+  total?: number;
   className?: string;
 }) {
   const shown = agents.slice(0, Math.max(0, max));
-  const overflow = agents.length - shown.length;
+  const overflow = Math.max(total, agents.length) - shown.length;
   return (
     <span aria-hidden className={cn("flex shrink-0 items-center", className)}>
       {shown.map((agent, index) => (

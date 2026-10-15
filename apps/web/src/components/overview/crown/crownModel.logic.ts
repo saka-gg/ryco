@@ -173,6 +173,17 @@ export function crownPrState(
   return pullRequest.isDraft ? "draft" : "open";
 }
 
+/** The thread has a plan to show: steps, an explanation or a proposed plan. */
+export function crownHasPlan(
+  layout: Pick<OverviewLayoutProps, "activePlan" | "activeProposedPlan">,
+): boolean {
+  return (
+    (layout.activePlan?.steps.length ?? 0) > 0 ||
+    Boolean(layout.activePlan?.explanation) ||
+    Boolean(layout.activeProposedPlan?.planMarkdown)
+  );
+}
+
 /**
  * Commits a push would publish: the upstream ahead count, or for a branch that
  * was never pushed, its commits ahead of the default branch.

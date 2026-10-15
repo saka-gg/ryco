@@ -191,7 +191,7 @@ function PhaseSection({
     previousState.current = phase.state;
   }, [phase.state]);
 
-  if (phase.members.length === 0 && phase.state === "pending") {
+  if (phase.memberCount === 0 && phase.state === "pending") {
     return (
       <div
         data-workflow-pending-step
@@ -236,11 +236,20 @@ function PhaseSection({
         {!open ? <PhaseMemberDots members={phase.members} className="ml-auto" /> : null}
       </button>
       {open ? (
-        <AgentRowList>
-          {phase.members.map((member) => (
-            <AgentRow key={member.id} agent={member} />
-          ))}
-        </AgentRowList>
+        <>
+          <AgentRowList>
+            {phase.members.map((member) => (
+              <AgentRow key={member.id} agent={member} />
+            ))}
+          </AgentRowList>
+          {phase.memberCount > phase.members.length ? (
+            <p className="px-2 py-1 text-[11px] text-muted-foreground/70">
+              {phase.memberCount - phase.members.length} earlier{" "}
+              {phase.memberCount - phase.members.length === 1 ? "agent is" : "agents are"} counted
+              but no longer listed
+            </p>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

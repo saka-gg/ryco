@@ -28,9 +28,6 @@ import {
   type AgentSpawnSummary,
 } from "./agentSpawnRow.logic";
 
-/** Rows an expanded batch lists before deferring to the Agents panel. */
-const EXPANDED_AGENT_LIMIT = 8;
-
 export const AgentSpawnRow = memo(function AgentSpawnRow(props: {
   spawn: AgentSpawnRef;
   model: AgentPanelModel;
@@ -66,17 +63,23 @@ function AgentSpawnRowContent({
 }) {
   const labelOf = useAgentRowLabel();
   const listId = useId();
-  const { members, agentCount, live, workingCount, failedCount, latestWorking } = summary;
+  const { members, visibleMembers, agentCount, live, workingCount, failedCount, latestWorking } =
+    summary;
   const noun = `subagent${agentCount === 1 ? "" : "s"}`;
   const lead = live ? `Kicked off ${agentCount} ${noun}` : `Ran ${agentCount} ${noun}`;
-  const status = agentWorkflowStatusText({ live, livePhase: null, workingCount, failedCount });
+  const status = agentWorkflowStatusText({
+    live,
+    livePhase: summary.livePhase,
+    workingCount,
+    failedCount,
+  });
   // Live: who acted last and what they are doing. Settled: which agents ran.
-  const latestAction = latestWorking ? agentActivityText(latestWorking) : null;
   const detail = latestWorking
-    ? { name: labelOf(latestWorking), text: latestAction }
-    : { name: null, text: members.map(labelOf).join(", ") };
-  const shown = members.slice(0, EXPANDED_AGENT_LIMIT);
-  const hidden = members.length - shown.length;
+    ? { name: labelOf(latestWorking), text: agentActivityText(latestWorking) }
+    : summary.latestWorkflowActivity
+      ? { name: null, text: summary.latestWorkflowActivity }
+      : { name: null, text: visibleMembers.map(labelOf).join(", ") };
+  const hidden = Math.max(agentCount, members.length) - visibleMembers.length;
 
   return (
     <div data-agent-spawn-row>
@@ -90,7 +93,7 @@ function AgentSpawnRowContent({
           "group/agent-spawn grid min-h-[40px] w-full grid-cols-[auto_minmax(0,1fr)_auto_1rem] items-center gap-x-2.5 rounded-lg border border-border/50 px-2.5 py-1 text-left transition-colors hover:border-border/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
         )}
       >
-        <AgentMonogramStack agents={members} />
+        <AgentMonogramStack agents={visibleMembers} total={agentCount} />
         <span className="flex min-w-0 flex-col">
           <span className="truncate text-[12px] leading-[18px]">
             <span className="font-medium text-foreground/90">{lead}</span>
@@ -130,7 +133,7 @@ function AgentSpawnRowContent({
       {expanded ? (
         <div id={listId} className="mt-1 ml-[18px] border-l border-border/50 pl-2">
           <AgentRowList>
-            {shown.map((agent) => (
+            {visibleMembers.map((agent) => (
               <AgentRow key={agent.id} agent={agent} density="compact" />
             ))}
           </AgentRowList>

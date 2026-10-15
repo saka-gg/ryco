@@ -6499,6 +6499,89 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("emits members past the hundredth and tallies every phase", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const progressFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.progress"),
+        Stream.takeUntil(
+          (event) => (event.payload as { taskId?: string }).taskId === "wf-large:wf:149",
+        ),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-wf-large"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "run workflow",
+        attachments: [],
+      });
+
+      // 120 settled auditors, then 30 verifiers still running: the run the
+      // old lowest-100 cap cut off before its second phase.
+      const agents = Array.from({ length: 150 }, (_, index) => ({
+        type: "workflow_agent",
+        index,
+        state: index < 120 ? (index === 7 ? "error" : "done") : "running",
+        startedAt: "2026-10-14T21:00:00.000Z",
+        label: index < 120 ? `audit:${index}` : `verify:${index}`,
+        phaseIndex: index < 120 ? 1 : 2,
+      }));
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "wf-large",
+        description: "Audit, then verify",
+        workflow_progress: [
+          { type: "workflow_phase", index: 1, title: "Audit" },
+          { type: "workflow_phase", index: 2, title: "Verify" },
+          ...agents,
+        ],
+        uuid: "wf-large-tick",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(progressFiber));
+      const coordinator = events.find(
+        (event) => (event.payload as { taskId?: string }).taskId === "wf-large",
+      );
+      assert.deepEqual((coordinator?.payload as { phases?: unknown } | undefined)?.phases, [
+        {
+          index: 1,
+          title: "Audit",
+          memberCount: 120,
+          activeCount: 0,
+          settledCount: 120,
+          failedCount: 1,
+        },
+        {
+          index: 2,
+          title: "Verify",
+          memberCount: 30,
+          activeCount: 30,
+          settledCount: 0,
+          failedCount: 0,
+        },
+      ]);
+      const memberIds = new Set(
+        events
+          .map((event) => (event.payload as { taskId: string }).taskId)
+          .filter((taskId) => taskId.includes(":wf:")),
+      );
+      assert.equal(memberIds.size, 150);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("retains the complete workflow phase roster across sparse progress ticks", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
