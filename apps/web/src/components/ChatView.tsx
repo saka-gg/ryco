@@ -290,6 +290,7 @@ import {
   CROWN_RAIL_SLOT_WIDTH_PX,
 } from "./overview/crown/crownLayout";
 import type { WorktreeNotesTarget } from "./overview/notes/useWorktreeNotes";
+import type { OverviewPullRequestLinking } from "./overview/overviewTypes";
 import { useChatGlobalShortcuts } from "./chat/useChatGlobalShortcuts";
 import { useChatPendingUserInput } from "./chat/useChatPendingUserInput";
 import { useChatWorkspacePanels } from "./chat/useChatWorkspacePanels";
@@ -2674,6 +2675,42 @@ export default function ChatView(props: ChatViewProps) {
         }
       />
     ) : null;
+  // The crown's Pull request section links pull requests through the same popover.
+  const overviewPullRequestLinking = useMemo<OverviewPullRequestLinking | undefined>(
+    () =>
+      openPullRequestInApp && headerPullRequestsEditing.supported && activeWorktreeSummary
+        ? {
+            environmentId,
+            worktreeId: activeWorktreeSummary.id,
+            cwd: sourceControlCwd,
+            workspaceTitle:
+              activeWorktreeSummary.title ??
+              activeWorktreeSummary.branch ??
+              activeThread?.title ??
+              "",
+            workspaceBranch: activeWorktreeSummary.branch ?? activeThread?.branch ?? null,
+            links: headerPullRequests,
+            storedNumbers: headerStoredPullRequestNumbers,
+            shownNumber: headerPullRequestNumber,
+            canEdit: headerPullRequestsEditing.ready,
+            onOpenPullRequest: (number) =>
+              openPullRequestInApp(number === headerPullRequestNumber ? undefined : number),
+          }
+        : undefined,
+    [
+      activeThread?.branch,
+      activeThread?.title,
+      activeWorktreeSummary,
+      environmentId,
+      headerPullRequestNumber,
+      headerPullRequests,
+      headerPullRequestsEditing.ready,
+      headerPullRequestsEditing.supported,
+      headerStoredPullRequestNumbers,
+      openPullRequestInApp,
+      sourceControlCwd,
+    ],
+  );
   // On desktop the header's pull request opens in the workspace panel's PR tab;
   // elsewhere (and for issues and work items) it opens the linked-item dialog.
   const openHeaderLinkedItem = useCallback(
@@ -6330,6 +6367,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenReview={onOpenReviewPanel}
                 onOpenSubagent={onOpenSubagentPanel}
                 onOpenPullRequestInApp={openPullRequestInApp}
+                pullRequestLinking={overviewPullRequestLinking}
                 agentPanelModel={agentPanelModel}
                 onOpenAgent={onOpenRuntimeAgentPanel}
                 onOpenAgentsWorkflow={onOpenAgentsWorkflowPanel}
