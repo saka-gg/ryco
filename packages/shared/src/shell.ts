@@ -261,32 +261,70 @@ export function readEnvironmentFromWindowsShell(
     typeof optionsOrExecFile === "function"
       ? optionsOrExecFile
       : (maybeExecFile ?? (execFileSync as ExecFileSyncLike));
-  const command = buildWindowsEnvironmentCaptureCommand(names);
-  const args = [
-    "-NoLogo",
-    ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
-    "-NonInteractive",
-    "-Command",
-    command,
-  ];
+  const args = windowsEnvironmentCaptureArgs(names, options);
   for (const shell of WINDOWS_SHELL_CANDIDATES) {
     try {
       const output = execFile(shell, args, { encoding: "utf8", timeout: 5000 });
-
-      const environment: Partial<Record<string, string>> = {};
-      for (const name of names) {
-        const value = extractEnvironmentValue(output, name);
-        if (value !== undefined) {
-          environment[name] = value;
-        }
-      }
-      return environment;
+      return parseWindowsEnvironmentOutput(output, names);
     } catch {
       continue;
     }
   }
 
   return {};
+}
+
+/** Async executor for {@link readEnvironmentFromWindowsShellAsync}; rejects on failure. */
+export type ExecFileAsyncLike = (file: string, args: ReadonlyArray<string>) => Promise<string>;
+
+/**
+ * {@link readEnvironmentFromWindowsShell} without blocking the event loop: the same PowerShell
+ * candidates and arguments, run through `execFile` (which owns the timeout).
+ */
+export async function readEnvironmentFromWindowsShellAsync(
+  names: ReadonlyArray<string>,
+  options: WindowsEnvironmentProbeOptions,
+  execFile: ExecFileAsyncLike,
+): Promise<Partial<Record<string, string>>> {
+  if (names.length === 0) {
+    return {};
+  }
+  const args = windowsEnvironmentCaptureArgs(names, options);
+  for (const shell of WINDOWS_SHELL_CANDIDATES) {
+    try {
+      return parseWindowsEnvironmentOutput(await execFile(shell, args), names);
+    } catch {
+      continue;
+    }
+  }
+  return {};
+}
+
+function windowsEnvironmentCaptureArgs(
+  names: ReadonlyArray<string>,
+  options: WindowsEnvironmentProbeOptions,
+): ReadonlyArray<string> {
+  return [
+    "-NoLogo",
+    ...(options.loadProfile ? ([] as const) : (["-NoProfile"] as const)),
+    "-NonInteractive",
+    "-Command",
+    buildWindowsEnvironmentCaptureCommand(names),
+  ];
+}
+
+function parseWindowsEnvironmentOutput(
+  output: string,
+  names: ReadonlyArray<string>,
+): Partial<Record<string, string>> {
+  const environment: Partial<Record<string, string>> = {};
+  for (const name of names) {
+    const value = extractEnvironmentValue(output, name);
+    if (value !== undefined) {
+      environment[name] = value;
+    }
+  }
+  return environment;
 }
 
 function stripWrappingQuotes(value: string): string {
@@ -584,16 +622,15 @@ export interface WindowsEnvironmentResolverOptions {
   readonly commandAvailable?: typeof isCommandAvailable;
 }
 
-function readWindowsEnvironmentSafely(
-  readEnvironment: WindowsShellEnvironmentReader,
-  names: ReadonlyArray<string>,
-  options?: WindowsEnvironmentProbeOptions,
-): Partial<Record<string, string>> {
-  try {
-    return readEnvironment(names, options);
-  } catch {
-    return {};
-  }
+export interface WindowsEnvironmentAsyncResolverOptions {
+  readonly readEnvironment: (
+    names: ReadonlyArray<string>,
+    options: WindowsEnvironmentProbeOptions,
+  ) => Promise<Partial<Record<string, string>>>;
+  readonly commandAvailable?: (
+    command: string,
+    options: CommandAvailabilityOptions,
+  ) => Promise<boolean>;
 }
 
 function mergeWindowsEnv(
@@ -609,31 +646,51 @@ function mergeWindowsEnv(
   return nextEnv;
 }
 
-export function resolveWindowsEnvironment(
+type WindowsEnvironmentProbe =
+  | {
+      readonly kind: "read-environment";
+      readonly names: ReadonlyArray<string>;
+      readonly options: WindowsEnvironmentProbeOptions;
+    }
+  | {
+      readonly kind: "command-available";
+      readonly command: string;
+      readonly options: CommandAvailabilityOptions;
+    };
+
+/**
+ * The Windows resolution steps; drivers answer each probe. A failed environment read answers
+ * `{}`.
+ */
+function* windowsEnvironmentSteps(
   env: NodeJS.ProcessEnv,
-  options: WindowsEnvironmentResolverOptions = {},
-): Partial<NodeJS.ProcessEnv> {
-  const readEnvironment = options.readEnvironment ?? readEnvironmentFromWindowsShell;
-  const commandAvailable = options.commandAvailable ?? isCommandAvailable;
+): Generator<WindowsEnvironmentProbe, Partial<NodeJS.ProcessEnv>, unknown> {
   const inheritedPath = readEnvPath(env);
-  const shellPath = readWindowsEnvironmentSafely(readEnvironment, ["PATH"], {
-    loadProfile: false,
-  }).PATH;
-  const mergedPath = mergePathValues(shellPath, inheritedPath, "win32");
+  const shellEnvironment = (yield {
+    kind: "read-environment",
+    names: ["PATH"],
+    options: { loadProfile: false },
+  }) as Partial<Record<string, string>>;
+  const mergedPath = mergePathValues(shellEnvironment.PATH, inheritedPath, "win32");
   const knownCliPath = resolveKnownWindowsCliDirs(env).join(WINDOWS_PATH_DELIMITER);
   const baselinePath = mergePathValues(knownCliPath, mergedPath, "win32");
   const baselinePatch: Partial<NodeJS.ProcessEnv> = baselinePath ? { PATH: baselinePath } : {};
   const baselineEnv = mergeWindowsEnv(env, baselinePatch);
 
-  if (commandAvailable("node", { platform: "win32", env: baselineEnv })) {
+  const nodeAvailable = (yield {
+    kind: "command-available",
+    command: "node",
+    options: { platform: "win32", env: baselineEnv },
+  }) as boolean;
+  if (nodeAvailable) {
     return baselinePatch;
   }
 
-  const profiledEnvironment = readWindowsEnvironmentSafely(
-    readEnvironment,
-    ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"],
-    { loadProfile: true },
-  );
+  const profiledEnvironment = (yield {
+    kind: "read-environment",
+    names: ["PATH", "FNM_DIR", "FNM_MULTISHELL_PATH"],
+    options: { loadProfile: true },
+  }) as Partial<Record<string, string>>;
   const profiledPath = mergePathValues(profiledEnvironment.PATH, baselinePath, "win32");
   const profiledPatch: Partial<NodeJS.ProcessEnv> = {
     ...(profiledPath ? { PATH: profiledPath } : {}),
@@ -645,4 +702,66 @@ export function resolveWindowsEnvironment(
   return Object.keys(profiledPatch).length > 0
     ? { ...baselinePatch, ...profiledPatch }
     : baselinePatch;
+}
+
+export function resolveWindowsEnvironment(
+  env: NodeJS.ProcessEnv,
+  options: WindowsEnvironmentResolverOptions = {},
+): Partial<NodeJS.ProcessEnv> {
+  const readEnvironment = options.readEnvironment ?? readEnvironmentFromWindowsShell;
+  const commandAvailable = options.commandAvailable ?? isCommandAvailable;
+  const steps = windowsEnvironmentSteps(env);
+  let next = steps.next();
+  while (!next.done) {
+    const probe = next.value;
+    if (probe.kind === "command-available") {
+      next = steps.next(commandAvailable(probe.command, probe.options));
+      continue;
+    }
+    let environment: Partial<Record<string, string>>;
+    try {
+      environment = readEnvironment(probe.names, probe.options);
+    } catch {
+      environment = {};
+    }
+    next = steps.next(environment);
+  }
+  return next.value;
+}
+
+/**
+ * {@link resolveWindowsEnvironment} without blocking the event loop: PowerShell runs through the
+ * async reader and the `node` check uses {@link resolveCommandPathAsync}. Never rejects.
+ */
+export async function resolveWindowsEnvironmentAsync(
+  env: NodeJS.ProcessEnv,
+  options: WindowsEnvironmentAsyncResolverOptions,
+): Promise<Partial<NodeJS.ProcessEnv>> {
+  const commandAvailable =
+    options.commandAvailable ??
+    (async (command: string, commandOptions: CommandAvailabilityOptions) =>
+      (await resolveCommandPathAsync(command, commandOptions)) !== null);
+  const steps = windowsEnvironmentSteps(env);
+  let next = steps.next();
+  while (!next.done) {
+    const probe = next.value;
+    if (probe.kind === "command-available") {
+      let available = false;
+      try {
+        available = await commandAvailable(probe.command, probe.options);
+      } catch {
+        available = false;
+      }
+      next = steps.next(available);
+      continue;
+    }
+    let environment: Partial<Record<string, string>>;
+    try {
+      environment = await options.readEnvironment(probe.names, probe.options);
+    } catch {
+      environment = {};
+    }
+    next = steps.next(environment);
+  }
+  return next.value;
 }

@@ -36,7 +36,8 @@ they carry over. Run the same command again after every pull you want to deploy.
 - `bun run node:update -- --no-pull` builds what is checked out without pulling.
 - `bun run node:update -- --install-service` also installs the service when none exists yet; without
   it, a machine with no service is only built, and you start it with
-  `node apps/server/dist/bin.mjs serve`.
+  `node --max-semi-space-size=16 apps/server/dist/bin.mjs serve` (see
+  [Memory](#memory) for the flag).
 
 The build compiles the native resource monitor, so it needs [rustup](https://rustup.rs); the script
 installs the pinned Rust toolchain itself. Use the Bun version pinned in the root `package.json`.
@@ -110,6 +111,15 @@ Common options:
 - `--hub`: reach this node through the hosted Hub relay (`--hub-origin` selects another Hub)
 - `--prevent-sleep`: keep the machine from idle-sleeping while the server runs
 - `--log-websocket-events`: emit server-side WebSocket traffic logs for debugging
+
+### Memory
+
+The background service and Ryco Desktop run the server with V8's `--max-semi-space-size=16`, which
+keeps the young generation from growing to its 128 MiB default during boot and staying there (about
+50 MiB less idle memory on Node). A foreground `ryco`, `ryco serve` or `npx ryco-cli` cannot set it
+for itself without restarting the process, so pass it to Node when you run a long-lived server by
+hand, for example `node --max-semi-space-size=16 "$(command -v ryco)" serve`. Avoid
+`NODE_OPTIONS` for this: provider CLIs and terminals started by the server would inherit it.
 
 Useful commands:
 

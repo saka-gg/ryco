@@ -8,12 +8,11 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
-import { makeAgentControlExternalListener } from "../ExternalMcp/listener.ts";
 import {
   clearExternalRuntimeDescriptor,
   writeExternalRuntimeDescriptor,
 } from "../ExternalMcp/runtimeFiles.ts";
-import { makeExternalMcpTools } from "../ExternalMcp/tools.ts";
+import type { ExternalMcpTools } from "../ExternalMcp/tools.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
 import { AgentControlExternalTopologyService } from "../Services/AgentControlExternalTopology.ts";
 import { AgentControlExternalTaskService } from "../Services/AgentControlExternalTask.ts";
@@ -41,32 +40,44 @@ const makeAgentControlExternalMcpServer = Effect.gen(function* () {
   const files = yield* Effect.serviceOption(WorkspaceFileSystem);
   const workspaceAccess = yield* Effect.serviceOption(WorkspaceAccessPolicy);
   const topology = yield* AgentControlExternalTopologyService;
-  const tools = makeExternalMcpTools({
-    integrations,
-    tasks,
-    projections,
-    getProviders: providers.getProviders,
-    ...(Option.isSome(validator) ? { validator: validator.value } : {}),
-    ...(Option.isSome(automations) ? { automations: automations.value } : {}),
-    ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),
-    ...(Option.isSome(proposals) ? { proposals: proposals.value } : {}),
-    ...(Option.isSome(proposalEvents) ? { proposalEvents: proposalEvents.value } : {}),
-    ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
-    ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
-    ...(Option.isSome(files) ? { files: files.value } : {}),
-    ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
-  });
+  // The tools and the listener load with the first start: most nodes never enable the external
+  // integration, so their modules stay off the boot path.
+  let tools: ExternalMcpTools | null = null;
+  const loadTools = Effect.promise(() => import("../ExternalMcp/tools.ts")).pipe(
+    Effect.map(({ makeExternalMcpTools }) => {
+      tools ??= makeExternalMcpTools({
+        integrations,
+        tasks,
+        projections,
+        getProviders: providers.getProviders,
+        ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+        ...(Option.isSome(automations) ? { automations: automations.value } : {}),
+        ...(Option.isSome(diagnostics) ? { diagnostics: diagnostics.value } : {}),
+        ...(Option.isSome(proposals) ? { proposals: proposals.value } : {}),
+        ...(Option.isSome(proposalEvents) ? { proposalEvents: proposalEvents.value } : {}),
+        ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
+        ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
+        ...(Option.isSome(files) ? { files: files.value } : {}),
+        ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
+      });
+      return tools;
+    }),
+  );
   const transitions = yield* Semaphore.make(1);
   let listenerScope: Scope.Closeable | null = null;
   let shuttingDown = false;
 
   const start = Effect.gen(function* () {
     if (shuttingDown || listenerScope !== null || !topology.current().available) return;
+    const [{ makeAgentControlExternalListener }, externalTools] = yield* Effect.all([
+      Effect.promise(() => import("../ExternalMcp/listener.ts")),
+      loadTools,
+    ]);
     const scope = yield* Scope.make("sequential");
-    const started = yield* makeAgentControlExternalListener({ integrations, tools }).pipe(
-      Scope.provide(scope),
-      Effect.exit,
-    );
+    const started = yield* makeAgentControlExternalListener({
+      integrations,
+      tools: externalTools,
+    }).pipe(Scope.provide(scope), Effect.exit);
     if (Exit.isFailure(started)) {
       yield* Scope.close(scope, Exit.void);
       yield* Effect.logWarning("External Agent Control listener failed to start");

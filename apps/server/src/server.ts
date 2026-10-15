@@ -45,7 +45,7 @@ import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { fixPath } from "./os-jank.ts";
 import { deviceWebsocketRpcRouteLayer, websocketRpcRouteLayer } from "./ws.ts";
 import {
-  skipWebSocketCompressionForLoopbackPeers,
+  installWebSocketCompressionPolicy,
   WEBSOCKET_PER_MESSAGE_DEFLATE,
 } from "./webSocketCompression.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
@@ -55,7 +55,7 @@ import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
 import {
   HubConnectorDeferredLive,
-  HubConnectorStart,
+  startHubConnectorAfterServe,
 } from "./hubConnector/HubConnectorDeferred.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
@@ -121,7 +121,7 @@ import { UsageServiceLive } from "./usage/UsageService.ts";
 import { CliProxyServiceLive } from "./cliProxy/CliProxyService.ts";
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
-import { StartupStallMonitorLive } from "./startupStallMonitor.ts";
+import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
   authBearerRotateRouteLayer,
@@ -198,9 +198,11 @@ const PtyAdapterLive = Layer.unwrap(
 
 /**
  * How long HTTP shutdown waits for in-flight requests before it forces the
- * remaining connections closed. Well inside the desktop's 2 s SIGTERM→SIGKILL
- * grace, so the runtime finalizers sequenced after the HTTP stage (restart
- * hints, provider shutdown, SQLite close) still run.
+ * remaining connections closed (WebSocket clients that ignored the 1001 close
+ * included). Well inside the desktop's 3 s SIGTERM→SIGKILL grace
+ * (`DESKTOP_BACKEND_SIGTERM_GRACE_MS`), so the runtime finalizers sequenced
+ * after the HTTP stage (restart hints, provider shutdown, SQLite close) still
+ * run.
  */
 const HTTP_GRACEFUL_SHUTDOWN_TIMEOUT = Duration.millis(750);
 
@@ -253,8 +255,11 @@ const HttpServerLive = Layer.unwrap(
       const serverLayer = NodeHttpServer.layer(
         () => {
           const server = NodeHttp.createServer();
-          // The desktop renderer talks over loopback, where compression is pure CPU.
-          if (config.mode === "desktop") skipWebSocketCompressionForLoopbackPeers(server);
+          // The desktop renderer talks over loopback, where compression is pure CPU;
+          // device frames are H.264 and never negotiate it.
+          installWebSocketCompressionPolicy(server, {
+            skipDirectLoopback: config.mode === "desktop",
+          });
           startupGate = installHttpStartupGate(server);
           return server;
         },
@@ -485,7 +490,8 @@ const WorkspaceLayerLive = Layer.mergeAll(
   WorkspaceFileSystemLayerLive,
 );
 
-const AuthLayerLive = ServerAuthLive.pipe(
+// Named for startup attribution: auth keys and session state load before the router serves.
+const AuthLayerLive = trackStartupLayer("auth.layer.build", ServerAuthLive).pipe(
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provide(ServerSecretStoreLive),
 );
@@ -717,14 +723,13 @@ export const makeServerLayer = Layer.unwrap(
       Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
         const startup = yield* ServerRuntimeStartup;
-        const hubConnector = yield* HubConnectorStart;
         const port = boundTcpPort(server.address);
         if (port !== null) writeDesktopLifecycleFrame({ type: "http-serving", port });
         recordDesktopStartupPhase("http-serving");
         yield* startup.markHttpServing;
         // Process lock and key custody: built now that handlers are attached;
         // Hub routes wait for it rather than the whole server.
-        yield* hubConnector.start;
+        yield* startHubConnectorAfterServe(config.hubConnector);
       }),
     );
     const runtimeStateLayer = Layer.effectDiscard(

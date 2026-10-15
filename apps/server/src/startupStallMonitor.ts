@@ -13,7 +13,9 @@
  *     the threshold is reported immediately, so a long stall is visible while it happens.
  *
  * Phases are registered with {@link trackStartupPhase}. The registry is process-wide on purpose:
- * startup phases run in unrelated layers and fibers, and the monitor must see all of them.
+ * startup phases run in unrelated layers and fibers, and the monitor must see all of them. The
+ * durations of the boot-defining phases are also forwarded to the desktop shell (fd 4), so
+ * desktop-main.log attributes a slow launch without waiting for a stall warning.
  *
  * @module startupStallMonitor
  */
@@ -22,6 +24,8 @@ import * as NodeOS from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 
 import { Effect, Layer } from "effect";
+
+import { recordDesktopStartupPhaseDuration } from "./desktopLifecycle.ts";
 
 export interface StartupStallMonitorOptions {
   readonly windowMs: number;
@@ -47,8 +51,28 @@ export interface StartupStallReport {
 interface PhaseRecord {
   readonly name: string;
   readonly startedAtMs: number;
+  readonly startedAtPerfMs: number;
   endedAtMs: number | null;
 }
+
+/**
+ * Phases whose durations reach the desktop log. Provider probes (`provider.probe:*`) are left
+ * out: they also run on every refresh long after startup.
+ */
+const DESKTOP_FORWARDED_PHASE_PREFIXES = [
+  "persistence.",
+  "provider.instance.create:",
+  "provider.instances.",
+  "provider.settings.",
+  "provider.status-cache.",
+  "server.startup.",
+  "orchestration.",
+  "agent-control.",
+  "auth.",
+] as const;
+
+export const isDesktopForwardedStartupPhase = (name: string): boolean =>
+  DESKTOP_FORWARDED_PHASE_PREFIXES.some((prefix) => name.startsWith(prefix));
 
 const RECENT_PHASE_LIMIT = 64;
 const inFlightPhases = new Map<number, PhaseRecord>();
@@ -57,7 +81,12 @@ let nextPhaseId = 0;
 
 const beginPhase = (name: string): number => {
   const id = nextPhaseId++;
-  inFlightPhases.set(id, { name, startedAtMs: Date.now(), endedAtMs: null });
+  inFlightPhases.set(id, {
+    name,
+    startedAtMs: Date.now(),
+    startedAtPerfMs: performance.now(),
+    endedAtMs: null,
+  });
   return id;
 };
 
@@ -68,11 +97,14 @@ const endPhase = (id: number): void => {
   record.endedAtMs = Date.now();
   recentlyEndedPhases.push(record);
   if (recentlyEndedPhases.length > RECENT_PHASE_LIMIT) recentlyEndedPhases.shift();
+  if (isDesktopForwardedStartupPhase(record.name)) {
+    recordDesktopStartupPhaseDuration(record.name, record.startedAtPerfMs, performance.now());
+  }
 };
 
 /**
  * Mark `effect` as a named startup phase for stall attribution. Costs two map operations; safe to
- * use outside startup as well.
+ * use outside startup as well (desktop duration frames stop after the startup window).
  */
 export const trackStartupPhase = <A, E, R>(
   name: string,
@@ -82,6 +114,18 @@ export const trackStartupPhase = <A, E, R>(
     Effect.sync(() => beginPhase(name)),
     () => effect,
     (id) => Effect.sync(() => endPhase(id)),
+  );
+
+/**
+ * {@link trackStartupPhase} for a whole layer build. The wrapped layer keeps its memoization, so
+ * a shared dependency built elsewhere first is not counted again.
+ */
+export const trackStartupLayer = <ROut, E, RIn>(
+  name: string,
+  layer: Layer.Layer<ROut, E, RIn>,
+): Layer.Layer<ROut, E, RIn> =>
+  Layer.fromBuild((memoMap, scope) =>
+    trackStartupPhase(name, Layer.buildWithMemoMap(layer, memoMap, scope)),
   );
 
 /**

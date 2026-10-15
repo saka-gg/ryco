@@ -1,3 +1,5 @@
+import { PassThrough } from "node:stream";
+
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert, live } from "@effect/vitest";
@@ -54,6 +56,11 @@ import {
   selectProvidersByKind,
 } from "./ProviderRegistry.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  attachDesktopLifecycleChannel,
+  DESKTOP_STARTUP_PROVIDERS_READY_PHASE,
+  detachDesktopLifecycleChannelForTests,
+} from "../../desktopLifecycle.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
 import {
   readProviderStatusCache,
@@ -1707,7 +1714,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         }),
       );
 
-      it.effect("builds a configured driver on demand before the boot gate opens", () =>
+      it.effect("builds only the requested driver on demand before the boot gate opens", () =>
         Effect.gen(function* () {
           const serverSettings = yield* makeMutableServerSettingsService(
             Schema.decodeSync(ServerSettings)(
@@ -1747,6 +1754,179 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               yield* instanceRegistry.getInstance(ProviderInstanceId.make("ghost")),
               undefined,
             );
+            // Only the requested driver is built; the gate stays closed for the others.
+            for (let attempt = 0; attempt < 20; attempt += 1) yield* Effect.yieldNow;
+            assert.deepStrictEqual(
+              (yield* instanceRegistry.listInstances).map((instance) => instance.instanceId),
+              ["codex"],
+            );
+            const opencode = yield* instanceRegistry.getInstance(
+              ProviderInstanceId.make("opencode"),
+            );
+            assert.strictEqual(opencode?.instanceId, "opencode");
+            assert.deepStrictEqual(
+              (yield* instanceRegistry.listInstances)
+                .map((instance) => instance.instanceId)
+                .toSorted(),
+              ["codex", "opencode"],
+            );
+
+            // Opening the gate builds the rest and keeps the instances built on demand.
+            yield* openProviderBootGate;
+            assert.deepStrictEqual(
+              (yield* instanceRegistry.listInstances)
+                .map((instance) => instance.instanceId)
+                .toSorted(),
+              ["claudeAgent", "codex", "copilot", "cursor", "grok", "opencode"],
+            );
+            assert.strictEqual(
+              yield* instanceRegistry.getInstance(ProviderInstanceId.make("codex")),
+              codex,
+            );
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("keeps the persisted snapshots of instances not yet built on demand", () =>
+        Effect.gen(function* () {
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  codex: { enabled: false },
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                  opencode: { enabled: false },
+                  copilot: { enabled: false },
+                  grok: { enabled: false },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const base = yield* Layer.build(
+            ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-boot-partial-" }).pipe(
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+          const config = Context.get(base, ServerConfig);
+          const opencodeId = ProviderInstanceId.make("opencode");
+          const persistedOpencode: ServerProvider = {
+            instanceId: opencodeId,
+            driver: ProviderDriverKind.make("opencode"),
+            enabled: false,
+            installed: true,
+            version: "1.0.0",
+            status: "disabled",
+            auth: { status: "unknown" },
+            checkedAt: "2026-10-01T00:00:00.000Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+          };
+          yield* writeProviderStatusCache({
+            filePath: yield* resolveProviderStatusCachePath({
+              cacheDir: config.providerStatusCacheDir,
+              instanceId: opencodeId,
+            }),
+            provider: persistedOpencode,
+          }).pipe(Effect.provide(base));
+          const runtimeServices = yield* Layer.build(
+            ProviderRegistryLive.pipe(
+              Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
+              Layer.provideMerge(TestHttpClientLive),
+              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(OpenCodeRuntimeLive),
+              Layer.provideMerge(Layer.succeedContext(base)),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            const opencodeSnapshot = (providers: ReadonlyArray<ServerProvider>) =>
+              providers.find((provider) => provider.instanceId === opencodeId);
+            assert.strictEqual(
+              opencodeSnapshot(yield* (yield* ProviderRegistry).getProviders)?.checkedAt,
+              persistedOpencode.checkedAt,
+            );
+
+            // A pre-gate consumer builds codex alone; the registry adopts its arrival.
+            const codex = yield* instanceRegistry.getInstance(ProviderInstanceId.make("codex"));
+            assert.strictEqual(codex?.instanceId, "codex");
+            const providers = yield* pollProviders((current) =>
+              current.some((provider) => provider.instanceId === "codex"),
+            );
+            assert.isTrue(providers.some((provider) => provider.instanceId === "codex"));
+            assert.deepStrictEqual(
+              (yield* instanceRegistry.listInstances).map((instance) => instance.instanceId),
+              ["codex"],
+            );
+            // opencode is still waiting for the gate and keeps its persisted snapshot.
+            assert.strictEqual(opencodeSnapshot(providers)?.checkedAt, persistedOpencode.checkedAt);
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+      );
+
+      it.effect("reports the providers-ready milestone once the initial build settles", () =>
+        Effect.gen(function* () {
+          const channel = new PassThrough();
+          const chunks: Array<string> = [];
+          channel.on("data", (chunk: Buffer) => chunks.push(chunk.toString("utf8")));
+          detachDesktopLifecycleChannelForTests();
+          attachDesktopLifecycleChannel(channel);
+          yield* Effect.addFinalizer(() => Effect.sync(detachDesktopLifecycleChannelForTests));
+          const milestones = Effect.promise(
+            () => new Promise((resolve) => setImmediate(resolve)),
+          ).pipe(
+            Effect.map(() =>
+              chunks
+                .join("")
+                .split("\n")
+                .filter((line) => line.length > 0)
+                .map((line) => JSON.parse(line) as { name?: string; durationMs?: number })
+                .filter((frame) => frame.durationMs === undefined)
+                .map((frame) => frame.name),
+            ),
+          );
+          const serverSettings = yield* makeMutableServerSettingsService(
+            Schema.decodeSync(ServerSettings)(
+              deepMerge(DEFAULT_SERVER_SETTINGS, {
+                providers: {
+                  codex: { enabled: false },
+                  claudeAgent: { enabled: false },
+                  cursor: { enabled: false },
+                  opencode: { enabled: false },
+                  copilot: { enabled: false },
+                  grok: { enabled: false },
+                },
+              }),
+            ),
+          );
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const runtimeServices = yield* Layer.build(
+            ProviderInstanceRegistryHydrationLive.pipe(
+              Layer.provideMerge(Layer.succeed(ServerSettingsService, serverSettings)),
+              Layer.provideMerge(
+                ServerConfig.layerTest(process.cwd(), { prefix: "ryco-provider-boot-ready-" }),
+              ),
+              Layer.provideMerge(TestHttpClientLive),
+              Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+              Layer.provideMerge(OpenCodeRuntimeLive),
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const instanceRegistry = yield* ProviderInstanceRegistry;
+            // An on-demand build before the gate opens is not the initial build.
+            yield* instanceRegistry.getInstance(ProviderInstanceId.make("codex"));
+            assert.deepStrictEqual(yield* milestones, []);
+
+            yield* openProviderBootGate;
+            assert.deepStrictEqual(yield* milestones, [DESKTOP_STARTUP_PROVIDERS_READY_PHASE]);
           }).pipe(Effect.provide(runtimeServices));
         }),
       );

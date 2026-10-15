@@ -100,6 +100,22 @@ describe("private desktop telemetry protocol", () => {
     ).toEqual({ type: "startup-phase", name: "runtime", ms: 12.5 });
     expect(
       parseDesktopBackendLifecycleFrame({
+        type: "startup-phase",
+        name: "persistence.migrations",
+        ms: 900,
+        durationMs: 640,
+      }),
+    ).toEqual({ type: "startup-phase", name: "persistence.migrations", ms: 900, durationMs: 640 });
+    expect(
+      parseDesktopBackendLifecycleFrame({
+        type: "startup-phase",
+        name: "runtime",
+        ms: 12,
+        durationMs: -3,
+      }),
+    ).toEqual({ type: "startup-phase", name: "runtime", ms: 12 });
+    expect(
+      parseDesktopBackendLifecycleFrame({
         type: "fatal",
         code: "database-schema-newer",
         message: "x".repeat(10_000),

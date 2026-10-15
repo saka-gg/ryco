@@ -18,7 +18,7 @@ import packageJson from "../../../package.json" with { type: "json" };
 /**
  * Longest a shutdown waits for the final telemetry flush. Events still unsent
  * then are dropped: a slow or captive network must not hold up the process
- * exit (the desktop kills its backend 2 s after asking it to stop).
+ * exit (the desktop kills its backend 3 s after asking it to stop).
  */
 export const ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT = Duration.millis(300);
 

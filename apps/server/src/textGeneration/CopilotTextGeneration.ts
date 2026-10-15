@@ -128,14 +128,17 @@ function gitTextGenerationSelection(): ModelSelection {
 export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(function* (
   copilotSettings: CopilotSettings,
   environment: NodeJS.ProcessEnv = process.env,
-  clientFactory: (cwd: string, sideQuestion?: boolean) => CopilotClient = (cwd, sideQuestion) =>
-    new CopilotClient(
+  clientFactory: (cwd: string, sideQuestion?: boolean) => Effect.Effect<CopilotClient> = (
+    cwd,
+    sideQuestion,
+  ) =>
+    Effect.promise(() =>
       makeCopilotClientOptions(
         copilotSettings,
         sideQuestion ? sideQuestionEnvironment(environment) : environment,
         cwd,
       ),
-    ),
+    ).pipe(Effect.map((options) => new CopilotClient(options))),
 ) {
   const codexFallback = yield* makeCodexTextGeneration(
     Schema.decodeSync(CodexSettings)({}),
@@ -151,12 +154,10 @@ export const makeCopilotTextGeneration = Effect.fn("makeCopilotTextGeneration")(
 
   /** A client for one call, stopped when the call's scope closes (also on interruption). */
   const scopedClient = (cwd: string, sideQuestion?: boolean) =>
-    Effect.acquireRelease(
-      Effect.sync(() => clientFactory(cwd, sideQuestion)),
-      (client) =>
-        Effect.promise(() =>
-          stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
-        ),
+    Effect.acquireRelease(clientFactory(cwd, sideQuestion), (client) =>
+      Effect.promise(() =>
+        stopCopilotClient({ client, timeoutMs: COPILOT_CLIENT_STOP_TIMEOUT_MS }),
+      ),
     );
 
   const generateThreadTitle: TextGenerationShape["generateThreadTitle"] = (input) =>

@@ -16,7 +16,7 @@ import {
   type ThreadTokenUsageSnapshot,
 } from "@ryco/contracts";
 import type { HtmlRenderToolPresentation } from "@ryco/shared/htmlRenderToolPresentation";
-import { resolveCommandPath } from "@ryco/shared/shell";
+import { resolveCommandPathAsync } from "@ryco/shared/shell";
 import type {
   CopilotClient,
   CopilotClientOptions,
@@ -114,23 +114,29 @@ export interface CopilotAdapterLiveOptions {
   readonly agentControl?: AgentControlProviderBridge;
 }
 
-export function resolveCopilotCliPath(
+/**
+ * Resolves on the promise API with each PATH entry bounded, so a stalled network or File Provider
+ * mount on PATH cannot block the event loop during probes, session starts and text generation.
+ */
+export async function resolveCopilotCliPath(
   settings: { readonly binaryPath: string },
   environment: NodeJS.ProcessEnv | undefined,
-): string {
+): Promise<string> {
   const binaryPath =
     settings.binaryPath === DEFAULT_BINARY_PATH ? DEFAULT_BINARY_PATH : settings.binaryPath;
-  return resolveCommandPath(binaryPath, { env: environment ?? process.env }) ?? binaryPath;
+  return (
+    (await resolveCommandPathAsync(binaryPath, { env: environment ?? process.env })) ?? binaryPath
+  );
 }
 
-export function makeCopilotClientOptions(
+export async function makeCopilotClientOptions(
   settings: { readonly binaryPath: string },
   environment: NodeJS.ProcessEnv | undefined,
   workingDirectory?: string,
-): CopilotClientOptions {
+): Promise<CopilotClientOptions> {
   return {
     connection: RuntimeConnection.forStdio({
-      path: resolveCopilotCliPath(settings, environment),
+      path: await resolveCopilotCliPath(settings, environment),
     }),
     ...(workingDirectory ? { workingDirectory } : {}),
     ...(environment ? { env: environment } : {}),

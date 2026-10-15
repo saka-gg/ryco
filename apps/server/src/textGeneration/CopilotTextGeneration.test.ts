@@ -165,7 +165,7 @@ it.layer(CopilotTextGenerationTestLayer)("CopilotTextGeneration", (it) => {
       const sessionConfigs: SessionConfig[] = [];
       const prompts: string[] = [];
       const clientFactory = () =>
-        ({
+        Effect.succeed({
           createSession: async (config: SessionConfig) => {
             sessionConfigs.push(config);
             return {
@@ -190,7 +190,7 @@ it.layer(CopilotTextGenerationTestLayer)("CopilotTextGeneration", (it) => {
             };
           },
           stop: async () => undefined,
-        }) as unknown as CopilotClient;
+        } as unknown as CopilotClient);
 
       const settings = Schema.decodeSync(CopilotSettings)({});
       const textGeneration = yield* makeCopilotTextGeneration(settings, {}, clientFactory);

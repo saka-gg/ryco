@@ -9,11 +9,14 @@ import {
   captureShellEnvironment,
   createBoundedShellExecFile,
   createShellEnvironmentCacheRecord,
+  createShellEnvironmentProbeFailureRecord,
+  isShellEnvironmentCacheForAnotherShell,
   LOGIN_SHELL_ENVIRONMENT_NAMES,
   readShellEnvironmentCache,
   resolveShellEnvironmentAsync,
   applyShellEnvironment,
   resolveShellEnvironmentSync,
+  SHELL_ENVIRONMENT_PROBE_FAILED,
   type ShellEnvironmentSyncReaders,
   writeShellEnvironmentCache,
 } from "./shellEnvironment.ts";
@@ -38,6 +41,45 @@ function makeTempPath(fileName: string): string {
 }
 
 describe("shell environment cache", () => {
+  it("tells a record kept for another login shell or platform from an unusable one", () => {
+    const cachePath = makeTempPath("other-shell.json");
+    expect(isShellEnvironmentCacheForAnotherShell(readShellEnvironmentCache(cachePath))).toBe(
+      false,
+    );
+    writeShellEnvironmentCache(
+      cachePath,
+      createShellEnvironmentCacheRecord({
+        environment: { PATH: "/usr/local/bin:/usr/bin" },
+        shell: "/bin/zsh",
+        platform: "darwin",
+      }),
+    );
+    const read = (platform: NodeJS.Platform, currentShell: string) =>
+      readShellEnvironmentCache(cachePath, { platform, currentShell });
+
+    expect(isShellEnvironmentCacheForAnotherShell(read("darwin", "/bin/bash"))).toBe(true);
+    expect(isShellEnvironmentCacheForAnotherShell(read("linux", "/bin/zsh"))).toBe(true);
+    expect(isShellEnvironmentCacheForAnotherShell(read("darwin", "/bin/zsh"))).toBe(false);
+  });
+
+  it("reads a failed probe back as a miss that names it, for the same shell only", () => {
+    const cachePath = makeTempPath("probe-failed.json");
+    writeShellEnvironmentCache(
+      cachePath,
+      createShellEnvironmentProbeFailureRecord({ shell: "/bin/zsh", platform: "darwin" }),
+    );
+
+    expect(
+      readShellEnvironmentCache(cachePath, { platform: "darwin", currentShell: "/bin/zsh" }),
+    ).toEqual({ kind: "miss", reason: SHELL_ENVIRONMENT_PROBE_FAILED });
+    // Another login shell deserves its own blocking probe.
+    expect(
+      readShellEnvironmentCache(cachePath, { platform: "darwin", currentShell: "/bin/bash" }),
+    ).toEqual({ kind: "miss", reason: "shell" });
+    // Readers that predate the record see an empty environment: an ordinary miss, never a hit.
+    expect(JSON.parse(fs.readFileSync(cachePath, "utf8")).environment).toEqual({});
+  });
+
   it("writes and reads a valid cache record", () => {
     const cachePath = makeTempPath("shell-env.json");
     const record = createShellEnvironmentCacheRecord({
@@ -334,12 +376,44 @@ describe("resolveShellEnvironmentAsync", () => {
     );
   });
 
-  it("is not offered on Windows, where resolution must run in a worker", async () => {
+  it("resolves Windows through PowerShell without the POSIX login shell", async () => {
     const readEnvironment = vi.fn();
+    const readWindowsEnvironment = vi.fn(async () => ({ PATH: "C:\\Custom\\Bin" }));
+    const isWindowsCommandAvailable = vi.fn(async () => true);
+
     await expect(
-      resolveShellEnvironmentAsync({}, { platform: "win32", readEnvironment }),
-    ).resolves.toEqual({});
+      resolveShellEnvironmentAsync(
+        { PATH: "C:\\Windows\\System32" },
+        {
+          platform: "win32",
+          readEnvironment,
+          readWindowsEnvironment,
+          isWindowsCommandAvailable,
+        },
+      ),
+    ).resolves.toEqual({ PATH: "C:\\Custom\\Bin;C:\\Windows\\System32" });
     expect(readEnvironment).not.toHaveBeenCalled();
+    expect(readWindowsEnvironment).toHaveBeenCalledWith(["PATH"], { loadProfile: false });
+  });
+
+  it("reads the PowerShell profile on Windows when node is still missing", async () => {
+    const readWindowsEnvironment = vi.fn(async (_names, options: { loadProfile?: boolean }) =>
+      options.loadProfile
+        ? { PATH: "C:\\fnm\\node", FNM_DIR: "C:\\fnm" }
+        : { PATH: "C:\\Windows\\System32" },
+    );
+
+    await expect(
+      resolveShellEnvironmentAsync(
+        {},
+        {
+          platform: "win32",
+          readWindowsEnvironment,
+          isWindowsCommandAvailable: async () => false,
+        },
+      ),
+    ).resolves.toEqual({ PATH: "C:\\fnm\\node;C:\\Windows\\System32", FNM_DIR: "C:\\fnm" });
+    expect(readWindowsEnvironment).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -349,6 +423,16 @@ describe.skipIf(process.platform === "win32")("bounded shell executor", () => {
     const startedAt = Date.now();
     await expect(execute("/bin/sh", ["-c", "trap '' TERM; sleep 10"])).rejects.toThrow();
     expect(Date.now() - startedAt).toBeLessThan(4_000);
+  });
+
+  it("honours a longer bound for background refreshes", async () => {
+    const script = "sleep 2; echo done";
+    await expect(
+      createBoundedShellExecFile(process.env)("/bin/sh", ["-c", script]),
+    ).rejects.toThrow();
+    await expect(
+      createBoundedShellExecFile(process.env, 5_000)("/bin/sh", ["-c", script]),
+    ).resolves.toBe("done\n");
   });
 
   it("runs from the home directory with stdin closed", async () => {

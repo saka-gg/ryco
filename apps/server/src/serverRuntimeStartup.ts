@@ -45,7 +45,11 @@ import {
 
 import { ServerConfig } from "./config.ts";
 import { flushCompileCacheBestEffort } from "./compileCache.ts";
-import { recordDesktopStartupPhase, writeDesktopLifecycleFrame } from "./desktopLifecycle.ts";
+import {
+  DESKTOP_STARTUP_COMPLETE_PHASE,
+  recordDesktopStartupPhase,
+  writeDesktopLifecycleFrame,
+} from "./desktopLifecycle.ts";
 import { ProjectionProjectRepository } from "./persistence/Services/ProjectionProjects.ts";
 import { ProjectRelocationRepository } from "./persistence/Services/ProjectRelocations.ts";
 import { ThreadForkRepository } from "./persistence/Services/ThreadForks.ts";
@@ -1142,7 +1146,7 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
       yield* Effect.logInfo("startup phase complete", {
         durationMs: Date.now() - runtimeStartedAt,
       });
-      recordDesktopStartupPhase("complete");
+      recordDesktopStartupPhase(DESKTOP_STARTUP_COMPLETE_PHASE);
       // Persist the module compile cache now: a later shutdown may be killed.
       flushCompileCacheBestEffort();
     }),

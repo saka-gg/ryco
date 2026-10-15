@@ -66,6 +66,7 @@ import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { findThreadInArray } from "../threadIndex.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { trackStartupPhase } from "../../startupStallMonitor.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -598,8 +599,12 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
-  yield* projectionPipeline.bootstrap;
-  commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
+  // Named startup phases: projector catch-up and the read-model load both scale with history.
+  yield* trackStartupPhase("orchestration.projection.bootstrap", projectionPipeline.bootstrap);
+  commandReadModel = yield* trackStartupPhase(
+    "orchestration.read-model.load",
+    projectionSnapshotQuery.getCommandReadModel(),
+  );
   // Before the worker forks: everything at or below this was committed by an
   // earlier process, everything above by this one.
   const bootSequence = yield* eventStore.latestSequence;

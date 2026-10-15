@@ -126,12 +126,13 @@ function withTimeout<A>(promise: Promise<A>, timeoutMs: number, label: string): 
   });
 }
 
-function makeClient(
+const makeClient = (
   settings: Pick<CopilotSettings, "binaryPath">,
   environment: NodeJS.ProcessEnv | undefined,
-) {
-  return new CopilotClient(makeCopilotClientOptions(settings, environment));
-}
+) =>
+  Effect.promise(() => makeCopilotClientOptions(settings, environment)).pipe(
+    Effect.map((options) => new CopilotClient(options)),
+  );
 
 const withClient = <A>(
   settings: Pick<CopilotSettings, "binaryPath">,
@@ -139,7 +140,7 @@ const withClient = <A>(
   f: (client: CopilotClient) => Promise<A>,
 ): Effect.Effect<A, ProviderAdapterProcessError> =>
   Effect.acquireUseRelease(
-    Effect.sync(() => makeClient(settings, environment)),
+    makeClient(settings, environment),
     (client) =>
       Effect.tryPromise({
         try: () => f(client),

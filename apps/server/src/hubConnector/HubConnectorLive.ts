@@ -378,8 +378,9 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         allowFileFallback: config.hubConnector?.allowFileSecretStore ?? false,
         makeIdentityRuntime: dependencies.makeIdentityRuntime,
       });
-    // Identity custody is built before the router serves, so its cost — the
-    // key-store probe in particular — is traced phase by phase.
+    // Identity custody is built once the router serves (`HubConnectorDeferred`),
+    // and Hub routes wait for it, so its cost (the key-store probe in
+    // particular) is traced phase by phase.
     const identityPhases: Record<string, number> = {};
     const custody = config.hubConnector?.enabled
       ? yield* Effect.tryPromise({

@@ -2,7 +2,7 @@ import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
 
 /**
  * Budget for a graceful Copilot client stop wherever a stall would hold something else up:
- * server shutdown (the desktop SIGKILLs its backend 2 s after SIGTERM), provider probes and
+ * server shutdown (the desktop SIGKILLs its backend 3 s after SIGTERM), provider probes and
  * one-shot text generation. The SDK's own `stop()` waits up to 10 s for `runtime.shutdown` and
  * another 10 s for the CLI to exit after it is killed.
  */

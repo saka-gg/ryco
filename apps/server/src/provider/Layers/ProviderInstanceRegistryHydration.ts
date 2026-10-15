@@ -44,12 +44,17 @@ import {
   defaultInstanceIdForDriver,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
+  type ProviderInstanceId,
   ServerSettings,
 } from "@ryco/contracts";
 import { Cause, Context, Deferred, Effect, Layer, Ref, Stream } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import type { ServerConfig } from "../../config.ts";
+import {
+  DESKTOP_STARTUP_PROVIDERS_READY_PHASE,
+  recordDesktopStartupPhase,
+} from "../../desktopLifecycle.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { StartupStallMonitorLive, trackStartupPhase } from "../../startupStallMonitor.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
@@ -203,7 +208,17 @@ const makeHydratedProviderInstanceRegistry = Effect.gen(function* () {
     });
   }).pipe(
     logUnlessInterrupted("ProviderInstanceRegistry initial reconcile failed"),
-    Effect.ensuring(Deferred.succeed(initialReconcileSettled, undefined)),
+    // The initial build starts after the startup sequence's `complete` milestone, so the desktop
+    // keeps forwarding its phase durations until this milestone too. A shutdown before the gate
+    // opened built nothing and reports no milestone.
+    Effect.ensuring(
+      Effect.gen(function* () {
+        if (yield* Deferred.isDone(gateReleased)) {
+          recordDesktopStartupPhase(DESKTOP_STARTUP_PROVIDERS_READY_PHASE);
+        }
+        yield* Deferred.succeed(initialReconcileSettled, undefined);
+      }),
+    ),
     Effect.forkScoped,
   );
 
@@ -212,9 +227,42 @@ const makeHydratedProviderInstanceRegistry = Effect.gen(function* () {
     Effect.andThen(Deferred.await(initialReconcileSettled)),
   );
 
+  // Instances built on demand before the gate opens, from the boot read of the settings. Each
+  // on-demand reconcile passes all of them, so building one never removes another; the initial
+  // reconcile then keeps every entry whose config did not change.
+  let onDemandConfigMap = {} as ProviderInstanceConfigMap;
+  const awaitInitialInstance = (instanceId: ProviderInstanceId) =>
+    awaitInitialReconcile.pipe(Effect.andThen(registry.getInstance(instanceId)));
+  const buildOnDemand = (instanceId: ProviderInstanceId) =>
+    Effect.gen(function* () {
+      // Once the gate is open the initial reconcile builds everything; wait for it instead of
+      // queueing behind whatever reconcile (a settings change) holds the permit.
+      if (yield* Deferred.isDone(gateReleased)) return yield* awaitInitialInstance(instanceId);
+      const outcome = yield* reconcileSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          // The gate may have opened while this fiber waited for the permit.
+          if (yield* Deferred.isDone(gateReleased)) return "gate-open" as const;
+          if ((yield* registry.getInstance(instanceId)) !== undefined) return "built" as const;
+          const entry = initialConfigMap[instanceId];
+          if (entry === undefined) return "built" as const;
+          onDemandConfigMap = { ...onDemandConfigMap, [instanceId]: entry };
+          yield* trackStartupPhase(
+            `provider.instances.on-demand:${instanceId}`,
+            mutator.reconcile(onDemandConfigMap),
+          );
+          return "built" as const;
+        }),
+      );
+      return outcome === "built"
+        ? yield* registry.getInstance(instanceId)
+        : yield* awaitInitialInstance(instanceId);
+    });
+
   const hydratedRegistry: ProviderInstanceRegistryShape = {
-    // A consumer that needs a configured instance before the gate opens builds it now instead of
-    // failing with "unknown instance" (e.g. provider intent recovery during startup).
+    // A consumer that needs a configured instance before the gate opens (provider intent
+    // recovery, orphaned-session reconcile, the session reaper's first sweep) builds just that
+    // instance instead of failing with "unknown instance". The gate stays closed: the other
+    // drivers are still built only once the listener serves.
     getInstance: (instanceId) =>
       registry
         .getInstance(instanceId)
@@ -222,7 +270,7 @@ const makeHydratedProviderInstanceRegistry = Effect.gen(function* () {
           Effect.flatMap((instance) =>
             instance !== undefined || !configuredInstanceIds.has(instanceId)
               ? Effect.succeed(instance)
-              : awaitInitialReconcile.pipe(Effect.andThen(registry.getInstance(instanceId))),
+              : buildOnDemand(instanceId),
           ),
         ),
     listInstances: registry.listInstances,
@@ -253,8 +301,9 @@ const makeHydratedProviderInstanceRegistry = Effect.gen(function* () {
  *     `listConfigured`, so `ProviderRegistry` serves persisted snapshots
  *     immediately without constructing drivers;
  *   - builds the configured instances when `ProviderInstanceBootGate.release`
- *     runs (the server releases it once the HTTP listener serves), or as soon
- *     as a consumer asks `getInstance` for a configured instance;
+ *     runs (the server releases it once the HTTP listener serves); a consumer
+ *     that asks `getInstance` for a configured instance earlier gets only that
+ *     instance built;
  *   - reconciles every later settings emission, skipping the initial build
  *     when a newer emission already superseded it.
  *

@@ -4,10 +4,12 @@ import type { AddressInfo } from "node:net";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { describe, expect, it } from "vite-plus/test";
 
+import { DEVICE_FRAME_WS_PATH } from "@ryco/shared/deviceFrame";
+
 import {
+  installWebSocketCompressionPolicy,
   isDirectLoopbackUpgrade,
   isLoopbackRangeAddress,
-  skipWebSocketCompressionForLoopbackPeers,
   WEBSOCKET_PER_MESSAGE_DEFLATE,
 } from "./webSocketCompression.ts";
 
@@ -15,9 +17,10 @@ import {
 async function negotiatedExtensions(
   skipLoopback: boolean,
   headers: Record<string, string> = {},
+  path = "/ws",
 ): Promise<string> {
   const server = Http.createServer();
-  if (skipLoopback) skipWebSocketCompressionForLoopbackPeers(server);
+  installWebSocketCompressionPolicy(server, { skipDirectLoopback: skipLoopback });
   const wss = new NodeSocket.NodeWS.WebSocketServer({
     noServer: true,
     perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE,
@@ -29,7 +32,7 @@ async function negotiatedExtensions(
   const { port } = server.address() as AddressInfo;
   try {
     return await new Promise<string>((resolve, reject) => {
-      const client = new NodeSocket.NodeWS.WebSocket(`ws://127.0.0.1:${port}/ws`, {
+      const client = new NodeSocket.NodeWS.WebSocket(`ws://127.0.0.1:${port}${path}`, {
         perMessageDeflate: true,
         headers,
       });
@@ -79,5 +82,17 @@ describe("WebSocket compression policy", () => {
     expect(await negotiatedExtensions(true, { "x-forwarded-for": "100.101.102.103" })).toContain(
       "permessage-deflate",
     );
+  });
+
+  it("never negotiates permessage-deflate for device frames, in any mode", async () => {
+    const deviceFrames = `${DEVICE_FRAME_WS_PATH}?udid=SIM-1`;
+    expect(await negotiatedExtensions(false, {}, deviceFrames)).toBe("");
+    // Relayed remote viewers too.
+    expect(
+      await negotiatedExtensions(true, { "x-forwarded-for": "100.101.102.103" }, deviceFrames),
+    ).toBe("");
+    expect(
+      await negotiatedExtensions(false, { "x-forwarded-for": "100.101.102.103" }, "/ws/device"),
+    ).toContain("permessage-deflate");
   });
 });

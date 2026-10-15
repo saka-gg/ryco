@@ -3029,7 +3029,9 @@ function handleBackendFrame(
     case "startup-phase":
       markDesktopStartupPhase(
         `backend.${sanitizeStartupPhaseName(frame.name)}`,
-        `serverMs=${Math.round(frame.ms)}`,
+        frame.durationMs === undefined
+          ? `serverMs=${Math.round(frame.ms)}`
+          : `serverMs=${Math.round(frame.ms)} durationMs=${Math.round(frame.durationMs)}`,
       );
       return;
     case "http-bound":

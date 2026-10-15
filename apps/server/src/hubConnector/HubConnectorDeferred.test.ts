@@ -1,9 +1,17 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Context, Effect, Exit, Fiber, Layer, Scope } from "effect";
+import { HttpServerRespondable } from "effect/http";
+import { TestClock } from "effect/testing";
 
-import { HubConnectorStart, makeDeferredHubConnectorLive } from "./HubConnectorDeferred.ts";
+import {
+  HubConnectorStart,
+  makeDeferredHubConnectorLive,
+  startHubConnectorAfterServe,
+} from "./HubConnectorDeferred.ts";
 import {
   awaitHubConnector,
+  HUB_CONNECTOR_READY_TIMEOUT,
+  HubConnectorNotReadyError,
   HubConnectorReady,
   HubConnectorService,
   type HubConnectorServiceShape,
@@ -50,19 +58,16 @@ describe("makeDeferredHubConnectorLive", () => {
         }),
       );
 
-      // A Hub route that arrives before the server serves waits for custody.
-      let answered = false;
-      const waiting = yield* awaitHubConnector.pipe(
-        Effect.provideService(HubConnectorReady, ready),
-        Effect.tap(() => Effect.sync(() => (answered = true))),
-        Effect.forkChild,
-      );
       yield* Effect.sleep("20 millis");
       expect(loads).toBe(0);
       expect(events).toEqual([]);
-      expect(answered).toBe(false);
 
       yield* start;
+      // A Hub route that arrives while custody is being built waits for it.
+      const waiting = yield* awaitHubConnector.pipe(
+        Effect.provideService(HubConnectorReady, ready),
+        Effect.forkChild,
+      );
       yield* start;
       expect(yield* Fiber.join(waiting)).toBe(connector);
       expect(yield* ready.await).toBe(connector);
@@ -71,6 +76,35 @@ describe("makeDeferredHubConnectorLive", () => {
       expect(events).toEqual(["build:serve-context"]);
 
       // Its finalizers (lock release, connector stop) run with the server's scope.
+      yield* Scope.close(scope, Exit.void);
+      expect(events).toEqual(["build:serve-context", "release"]);
+    }),
+  );
+
+  it.live("builds on the first Hub route when the server never started it", () =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      let loads = 0;
+      const { scope, ready } = yield* buildDeferred(
+        makeDeferredHubConnectorLive(async () => {
+          loads += 1;
+          return recordingConnector(events);
+        }),
+      );
+
+      // A disabled connector is not started at boot; Settings asking about it builds it once.
+      const [first, second] = yield* Effect.all(
+        [
+          awaitHubConnector.pipe(Effect.provideService(HubConnectorReady, ready)),
+          awaitHubConnector.pipe(Effect.provideService(HubConnectorReady, ready)),
+        ],
+        { concurrency: "unbounded" },
+      );
+      expect(first).toBe(connector);
+      expect(second).toBe(connector);
+      expect(loads).toBe(1);
+      expect(events).toEqual(["build:serve-context"]);
+
       yield* Scope.close(scope, Exit.void);
       expect(events).toEqual(["build:serve-context", "release"]);
     }),
@@ -105,6 +139,61 @@ describe("makeDeferredHubConnectorLive", () => {
       yield* Scope.close(scope, Exit.void);
       const exit = yield* Fiber.await(waiting);
       expect(Exit.isFailure(exit) && Exit.hasInterrupts(exit)).toBe(true);
+    }),
+  );
+});
+
+describe("startHubConnectorAfterServe", () => {
+  const startAfterServe = (config: { readonly enabled: boolean; readonly standby?: true }) =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      let loads = 0;
+      const { scope, ready, start } = yield* buildDeferred(
+        makeDeferredHubConnectorLive(async () => {
+          loads += 1;
+          return recordingConnector(events);
+        }),
+      );
+      yield* startHubConnectorAfterServe(config).pipe(
+        Effect.provideService(HubConnectorStart, { start }),
+      );
+      if (loads > 0) yield* ready.await;
+      yield* Effect.sleep("20 millis");
+      const result = { loads, events: [...events] };
+      yield* Scope.close(scope, Exit.void);
+      return result;
+    });
+
+  it.live("leaves a disabled connector unloaded until a Hub route asks", () =>
+    Effect.gen(function* () {
+      expect(yield* startAfterServe({ enabled: false })).toEqual({ loads: 0, events: [] });
+    }),
+  );
+
+  it.live("builds an enabled or running standby connector once handlers are attached", () =>
+    Effect.gen(function* () {
+      const built = { loads: 1, events: ["build:serve-context"] };
+      expect(yield* startAfterServe({ enabled: true })).toEqual(built);
+      expect(yield* startAfterServe({ enabled: true, standby: true })).toEqual(built);
+    }),
+  );
+});
+
+describe("awaitHubConnector", () => {
+  it.effect("answers 503 with Retry-After when custody does not finish in time", () =>
+    Effect.gen(function* () {
+      const waiting = yield* awaitHubConnector.pipe(
+        Effect.provideService(HubConnectorReady, { await: Effect.never }),
+        Effect.flip,
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust(HUB_CONNECTOR_READY_TIMEOUT);
+      const error = yield* Fiber.join(waiting);
+      expect(error).toBeInstanceOf(HubConnectorNotReadyError);
+
+      const response = yield* HttpServerRespondable.toResponse(error);
+      expect(response.status).toBe(503);
+      expect(response.headers["retry-after"]).toBe("5");
     }),
   );
 });
