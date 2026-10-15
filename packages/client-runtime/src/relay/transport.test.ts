@@ -30,7 +30,11 @@ import {
   markHostedSessionReady,
   markHostedSessionReplaying,
 } from "../authorization/state.ts";
-import type { HostedHubNode, HostedRelayFailure } from "../authorization/types.ts";
+import type {
+  HostedHubNode,
+  HostedRelayFailure,
+  HostedServerAuthenticatedRelayInput,
+} from "../authorization/types.ts";
 import { RpcRequestRefusedError } from "../rpc/protocol.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 import { encodeBase64Url } from "./base64url.ts";
@@ -1402,5 +1406,269 @@ describe("HostedRelayAttemptFactory", () => {
       sessionStatus: "ready",
       transportStatus: "online",
     });
+  });
+});
+
+describe("server-authenticated relay attempts (Hub session version 2)", () => {
+  type Physical = HubSessionSocket & { receive(frame: HubSessionFrame): void; ready(): void };
+  function accountSession() {
+    const physical: Physical[] = [];
+    const session = new HostedHubSession({
+      expectedIdentity: {
+        accountId: `acct_${"a".repeat(22)}`,
+        sessionId: `sess_${"s".repeat(22)}`,
+      },
+      createSocket: () => {
+        const opens: (() => void)[] = [];
+        const messages: ((bytes: Uint8Array) => void)[] = [];
+        const socket: Physical = {
+          readyState: 0,
+          bufferedAmount: 0,
+          send: () => undefined,
+          close: () => undefined,
+          onOpen: (cb) => void opens.push(cb),
+          onBinaryMessage: (cb) => void messages.push(cb),
+          onClose: () => undefined,
+          onError: () => undefined,
+          receive(frame) {
+            const bytes = encodeHubSessionFrame(frame);
+            if (!bytes.ok) throw new Error("frame");
+            for (const cb of messages) cb(bytes.value);
+          },
+          ready() {
+            (socket as { readyState: number }).readyState = 1;
+            for (const cb of opens) cb();
+          },
+        };
+        physical.push(socket);
+        return socket;
+      },
+      timers: {
+        now: Date.now,
+        setTimeout,
+        clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+        queueMicrotask,
+      },
+      random: () => 0.5,
+    });
+    session.start();
+    const ready = (version: 1 | 2) => {
+      physical[0]!.ready();
+      physical[0]!.receive(
+        version === 1
+          ? { type: "ready", protocolVersion: 1, maxChannels: 8 }
+          : {
+              type: "ready",
+              protocolVersion: 2,
+              maxChannels: 8,
+              accountId: `acct_${"a".repeat(22)}`,
+              sessionId: `sess_${"s".repeat(22)}`,
+            },
+      );
+    };
+    return { session, physical, ready };
+  }
+
+  function configure(
+    session: HostedHubSession,
+    overrides: {
+      readonly [Key in keyof HostedRuntimeConfiguration]?:
+        | HostedRuntimeConfiguration[Key]
+        | undefined;
+    } = {},
+  ) {
+    const serverAuthenticated: { nodeId: string; protocolMinor: number }[] = [];
+    const serverSockets: MockRelaySocket[] = [];
+    const ticketSockets: MockRelaySocket[] = [];
+    const ticketed: unknown[] = [];
+    const runtime: Record<string, unknown> = {
+      ...fakeRuntime(),
+      createRelaySocket: (
+        input: Parameters<HostedRuntimeConfiguration["createRelaySocket"]>[0],
+      ) => {
+        ticketed.push(input);
+        const socket = new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
+        ticketSockets.push(socket);
+        return socket;
+      },
+      serverAuthenticatedRelayAvailable: () => session.serverMintedOpenAvailable(),
+      createServerAuthenticatedRelaySocket: (input: HostedServerAuthenticatedRelayInput) => {
+        serverAuthenticated.push({ nodeId: input.nodeId, protocolMinor: input.protocolMinor });
+        const socket = new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
+        serverSockets.push(socket);
+        return socket;
+      },
+      ...overrides,
+    };
+    // An override of `undefined` removes the hook, as a platform without it would.
+    for (const [key, value] of Object.entries(runtime))
+      if (value === undefined) delete runtime[key];
+    configureHostedRuntime(runtime as unknown as HostedRuntimeConfiguration, hostedHubApi);
+    const issue = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(5)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+    issue.mockClear();
+    return { serverAuthenticated, serverSockets, ticketSockets, ticketed, issue };
+  }
+
+  it("buys no HTTP ticket when the account session is version 2 and ready", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    const { serverAuthenticated, ticketed, issue } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    const url = await factory.nextUrl();
+    expect(url).toBe(RELAY_URL);
+    factory.createSocket(url);
+    expect(issue).not.toHaveBeenCalled();
+    expect(ticketed).toEqual([]);
+    expect(serverAuthenticated).toEqual([{ nodeId: selectedNode.id, protocolMinor: 3 }]);
+    // Still exactly one socket per attempt.
+    expect(() => factory.createSocket(url)).toThrow("fresh relay ticket");
+    expect(hostedHubStore.getState().transportStatus).toBe("connecting");
+    session.dispose();
+  });
+
+  it("buys an HTTP ticket when the account session negotiated version 1", async () => {
+    const { session, ready } = accountSession();
+    ready(1);
+    const { serverAuthenticated, ticketed, issue } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    expect(issue).toHaveBeenCalledOnce();
+    expect(ticketed).toHaveLength(1);
+    expect(serverAuthenticated).toEqual([]);
+    session.dispose();
+  });
+
+  it("buys an HTTP ticket before the account session is ready", async () => {
+    const { session } = accountSession();
+    const { serverAuthenticated, issue } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    expect(issue).toHaveBeenCalledOnce();
+    expect(serverAuthenticated).toEqual([]);
+    session.dispose();
+  });
+
+  it("buys an HTTP ticket while the account session is under a suspicion probe", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    session.probe();
+    const { serverAuthenticated, issue } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    expect(issue).toHaveBeenCalledOnce();
+    expect(serverAuthenticated).toEqual([]);
+    session.dispose();
+  });
+
+  it("decides after socket preparation, so a session lost meanwhile falls back to a ticket", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    const prepared = Promise.withResolvers<unknown>();
+    const { serverAuthenticated, issue } = configure(session, {
+      prepareRelaySocketContext: () => prepared.promise,
+    });
+    const factory = new HostedRelayAttemptFactory();
+    const url = factory.nextUrl();
+    session.dispose();
+    prepared.resolve(undefined);
+    factory.createSocket(await url);
+    expect(issue).toHaveBeenCalledOnce();
+    expect(serverAuthenticated).toEqual([]);
+  });
+
+  it("falls back to a ticket when the platform cannot open such a channel or its probe throws", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    const { issue } = configure(session, { createServerAuthenticatedRelaySocket: undefined });
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    expect(issue).toHaveBeenCalledOnce();
+
+    const throwing = configure(session, {
+      serverAuthenticatedRelayAvailable: () => {
+        throw new Error("broken");
+      },
+    });
+    const second = new HostedRelayAttemptFactory();
+    second.createSocket(await second.nextUrl());
+    expect(throwing.issue).toHaveBeenCalledOnce();
+    expect(throwing.serverAuthenticated).toEqual([]);
+    session.dispose();
+  });
+
+  it("hands a session refusal of a server-authenticated channel to the session owner", async () => {
+    const resume = vi.spyOn(hostedHubController, "revalidateSession").mockResolvedValue();
+    const { session, ready } = accountSession();
+    ready(2);
+    const { serverSockets } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    // A node-level refusal stays an ordinary retryable failure.
+    serverSockets[0]!.callbacks.onFailure({
+      kind: "offline",
+      retryable: true,
+      closeReason: "node_offline",
+    });
+    expect(resume).not.toHaveBeenCalled();
+    factory.createSocket(await factory.nextUrl());
+    // The counterpart of an HTTP 401: the session owner revalidates (and expires a dead session).
+    serverSockets[1]!.callbacks.onFailure({
+      kind: "authentication",
+      retryable: true,
+      closeReason: "authentication_failed",
+    });
+    expect(resume).toHaveBeenCalledOnce();
+    // The session owner is only asked; the transport still waits out its own backoff and keeps
+    // the generation, rather than reconnecting at once.
+    const lifecycle = factory.lifecycleHandlers();
+    expect(lifecycle.getReconnectDelayMs?.(0)).toBeGreaterThan(0);
+    expect(hostedHubStore.getState().generation).toBe(4);
+    session.dispose();
+  });
+
+  it("leaves an authentication failure of a ticketed channel to the existing path", async () => {
+    const resume = vi.spyOn(hostedHubController, "revalidateSession").mockResolvedValue();
+    const { session, ready } = accountSession();
+    ready(1);
+    const { ticketSockets } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    ticketSockets[0]!.callbacks.onFailure({
+      kind: "authentication",
+      retryable: true,
+      closeReason: "authentication_failed",
+    });
+    expect(resume).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it("opens nothing when the selection generation moves between nextUrl and createSocket", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    const { serverAuthenticated } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    const url = await factory.nextUrl();
+    hostedHubStore.setState({ generation: 5 });
+    expect(() => factory.createSocket(url)).toThrow("fresh relay ticket");
+    expect(serverAuthenticated).toEqual([]);
+    session.dispose();
+  });
+
+  it("opens nothing when the attempt outlives its lifetime before createSocket", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { session, ready } = accountSession();
+    ready(2);
+    const { serverAuthenticated } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    const url = await factory.nextUrl();
+    vi.setSystemTime(Date.now() + 60_000);
+    expect(() => factory.createSocket(url)).toThrow("fresh relay ticket");
+    expect(serverAuthenticated).toEqual([]);
+    session.dispose();
   });
 });

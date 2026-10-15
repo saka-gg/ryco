@@ -102,6 +102,7 @@ const standardHostedHubController: {
   expireSession: settled,
   suspendBrowser: ignore,
   resumeBrowser: settled,
+  revalidateSession: settled,
   clearAccount: settled,
   refreshDirectory: settled,
   notifyDirectoryInvalidated: ignore,

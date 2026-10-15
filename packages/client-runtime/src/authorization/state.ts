@@ -516,6 +516,12 @@ const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
  * if it arrives; see `#armAccessDecisionDeadline`.
  */
 export const HOSTED_ACCESS_CHECK_DEADLINE_MS = 8_000;
+/**
+ * At most one relay-triggered session revalidation per session in this window (see
+ * `HostedHubController.revalidateSession`). A refusal that keeps recurring under a session the
+ * Hub still accepts is then retried on the relay transport's own backoff, not at round-trip speed.
+ */
+export const HOSTED_SESSION_REVALIDATION_INTERVAL_MS = 30_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
 export const HOSTED_ACCOUNT_BUSY_MESSAGE = "Another account change is still in progress.";
 export const HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE = "Sign in to change your account settings.";
@@ -580,6 +586,12 @@ class HostedHubController {
   #browserResumePromise: Promise<void> | null = null;
   #browserSuspendPromise: Promise<void> | null = null;
   #browserLifecycleGeneration = 0;
+  /** The last relay-triggered session revalidation, for {@link HOSTED_SESSION_REVALIDATION_INTERVAL_MS}. */
+  #sessionRevalidation: {
+    readonly sessionId: string;
+    readonly until: number;
+    readonly promise: Promise<void>;
+  } | null = null;
   /**
    * The bounded, jittered (1s to 60s) backoff that retries a failed access
    * check on its own — see {@link HostedHubController.recoverAfterConnectivity}.
@@ -1968,6 +1980,7 @@ class HostedHubController {
     this.#browserResumePromise = null;
     this.#browserSuspendPromise = null;
     this.#browserLifecycleGeneration += 1;
+    this.#sessionRevalidation = null;
     this.#resetAccessRetry();
     this.#clearAccountSurface();
     // Leases are held by surfaces, not by the session, so only a full reset
@@ -2006,6 +2019,72 @@ class HostedHubController {
     await this.clearAccount("session-expired");
     if (error instanceof HostedHubApiError && error.reason !== null) {
       patchState(hostedErrorPatch(error));
+    }
+  }
+
+  /**
+   * A path the Hub authenticates itself refused this session, or named another identity for it:
+   * a server-authenticated relay channel closed with `authentication_failed` (the counterpart of
+   * an HTTP ticket request's 401), or the account socket's `ready` named another account or
+   * session.
+   *
+   * Asks the Hub who this cookie is, at most once per
+   * {@link HOSTED_SESSION_REVALIDATION_INTERVAL_MS} per session, so a refusal that is not really
+   * about the session cannot loop. A dead session expires, exactly as after a 401. A different
+   * account expires this one. A different session of the same account runs the full
+   * {@link resumeBrowser}. An unchanged session changes nothing: no new generation, no forced
+   * reconnect, so the relay transport keeps its own backoff. A transient failure is left to that
+   * backoff as well.
+   */
+  revalidateSession(): Promise<void> {
+    const state = hostedHubStore.getState();
+    if (state.accountStatus !== "authenticated" || !state.account || !state.session) {
+      return Promise.resolve();
+    }
+    const now = getHostedRuntimeConfiguration().timers.now();
+    const last = this.#sessionRevalidation;
+    if (last !== null && last.sessionId === state.session.id && now < last.until) {
+      return last.promise;
+    }
+    const promise = this.#revalidateSession(
+      state.account.id,
+      state.session.id,
+      this.#browserLifecycleGeneration,
+    );
+    this.#sessionRevalidation = {
+      sessionId: state.session.id,
+      until: now + HOSTED_SESSION_REVALIDATION_INTERVAL_MS,
+      promise,
+    };
+    return promise;
+  }
+
+  async #revalidateSession(
+    accountId: string,
+    sessionId: string,
+    browserGeneration: number,
+  ): Promise<void> {
+    const stillCurrent = () => {
+      const current = hostedHubStore.getState();
+      return (
+        this.#browserLifecycleGeneration === browserGeneration &&
+        current.accountStatus === "authenticated" &&
+        current.session?.id === sessionId
+      );
+    };
+    try {
+      const restored = await getHostedHubApi().restoreSession(
+        undefined,
+        this.#accessCheckOptions(),
+      );
+      if (!stillCurrent()) return;
+      if (restored.account.id !== accountId) {
+        await this.expireSession();
+        return;
+      }
+      if (restored.session.id !== sessionId) await this.resumeBrowser();
+    } catch (error) {
+      if (stillCurrent() && isSessionFailure(error)) await this.expireSession(error);
     }
   }
 

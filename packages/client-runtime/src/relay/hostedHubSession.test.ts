@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { HUB_SESSION_MAX_QUEUED_BYTES, type HubSessionFrame } from "@ryco/contracts/hub-session";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
-import { HostedHubSession, type HubSessionSocket } from "./hostedHubSession.ts";
+import type { RelayNodeId } from "@ryco/contracts/relay";
+import {
+  HUB_SESSION_IDENTITY_MISMATCH_REASON,
+  HUB_SESSION_SERVER_MINTED_UNAVAILABLE_REASON,
+  HUB_SESSION_SUBPROTOCOL_FALLBACK_MS,
+  HostedHubSession,
+  type HostedHubSessionOptions,
+  type HubSessionSocket,
+} from "./hostedHubSession.ts";
 
 class Socket implements HubSessionSocket {
   readyState = 0;
@@ -32,6 +40,17 @@ class Socket implements HubSessionSocket {
   onError(cb: () => void) {
     this.errors.push(cb);
   }
+  readyV2() {
+    this.readyState = 1;
+    for (const cb of this.openListeners) cb();
+    this.receive({
+      type: "ready",
+      protocolVersion: 2,
+      maxChannels: 8,
+      accountId: ACCOUNT_ID,
+      sessionId: SESSION_ID,
+    });
+  }
   receive(frame: HubSessionFrame) {
     const bytes = encodeHubSessionFrame(frame);
     if (!bytes.ok) throw new Error("frame");
@@ -44,7 +63,7 @@ class Socket implements HubSessionSocket {
   }
   frames() {
     return this.sent.map((bytes) => {
-      const decoded = decodeHubSessionFrame(bytes);
+      const decoded = decodeHubSessionFrame(bytes, { protocolVersion: 2 });
       if (!decoded.ok) throw new Error("decode");
       return decoded.value;
     });
@@ -77,12 +96,26 @@ class UplinkSocket extends Socket {
     this.bufferedAmount = Math.max(0, this.bufferedAmount - bytes);
   }
 }
-function harness(SocketType: new () => Socket = Socket) {
+const ACCOUNT_ID = `acct_${"a".repeat(22)}`;
+const SESSION_ID = `sess_${"s".repeat(22)}`;
+const NODE_ID = `node_${"n".repeat(22)}` as RelayNodeId;
+function harness(
+  SocketType: new () => Socket = Socket,
+  overrides: Partial<HostedHubSessionOptions> & { readonly withoutIdentity?: boolean } = {},
+) {
   const sockets: Socket[] = [];
+  const offers: (readonly string[])[] = [];
   const onFailure = vi.fn();
   const onInvalidate = vi.fn();
+  const onIdentityMismatch = vi.fn();
+  const { withoutIdentity, ...options } = overrides;
   const session = new HostedHubSession({
-    createSocket: () => {
+    ...(withoutIdentity === true
+      ? {}
+      : { expectedIdentity: { accountId: ACCOUNT_ID, sessionId: SESSION_ID } }),
+    onIdentityMismatch,
+    createSocket: (protocols) => {
+      offers.push(protocols);
       const socket = new SocketType();
       sockets.push(socket);
       return socket;
@@ -96,8 +129,9 @@ function harness(SocketType: new () => Socket = Socket) {
     random: () => 0.5,
     onFailure,
     onInvalidate,
+    ...options,
   });
-  return { session, sockets, onFailure, onInvalidate };
+  return { session, sockets, offers, onFailure, onInvalidate, onIdentityMismatch };
 }
 describe("persistent Hub session", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -632,5 +666,265 @@ describe("persistent Hub session", () => {
     sockets[0]!.receive({ type: "open", streamId: 1 });
     expect(onFailure).toHaveBeenCalledWith({ kind: "protocol", retryable: false });
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("Hub session protocol version 2", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  const serverMinted = { serverMinted: { nodeId: NODE_ID, protocolMinor: 3 as const } };
+  const openNode = (streamId: number) => ({
+    type: "openNode",
+    streamId,
+    nodeId: NODE_ID,
+    sessionId: SESSION_ID,
+    capability: "ryco.rpc",
+    protocolMajor: 1,
+    protocolMinor: 3,
+  });
+
+  it("advertises version 2 on every connection and offers no server-minted open on version 1", () => {
+    const { session, sockets, offers } = harness();
+    session.start();
+    expect(offers).toEqual([["ryco.hub-session.v2"]]);
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    sockets[0]!.ready();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    expect(session.readyIdentity()).toBeNull();
+    session.dispose();
+  });
+
+  it("records version 2 and its ids, and opens server-minted streams with openNode", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    expect(session.serverMintedOpenAvailable()).toBe(true);
+    expect(session.readyIdentity()).toEqual({ accountId: ACCOUNT_ID, sessionId: SESSION_ID });
+    const minted = session.createSocket(serverMinted);
+    session.createSocket();
+    const opened = vi.fn();
+    minted.onOpen(opened);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(opened).toHaveBeenCalledOnce();
+    // A ticket-holding stream still opens with `open` on a version 2 connection.
+    expect(sockets[0]!.frames()).toEqual([openNode(1), { type: "open", streamId: 2 }]);
+    session.dispose();
+    expect(session.readyIdentity()).toBeNull();
+  });
+
+  it("offers no server-minted open while a suspicion probe is armed", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    session.probe();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    sockets[0]!.receive({ type: "ping", nonce: new Uint8Array(8) });
+    expect(session.serverMintedOpenAvailable()).toBe(true);
+    session.dispose();
+  });
+
+  it("closes a pending server-minted stream retryably when the replacement negotiates version 1", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    const minted = session.createSocket(serverMinted);
+    const ticketed = session.createSocket();
+    const closed = vi.fn();
+    minted.onClose(closed);
+    // The probe finds the socket dead; both never-opened streams wait for the replacement.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sockets[0]!.closed).toBe(1);
+    expect(closed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    // A rolled-back Hub: version 1, which has no openNode.
+    sockets[1]!.ready();
+    expect(session.readyIdentity()).toBeNull();
+    expect(closed).toHaveBeenCalledWith(HUB_SESSION_SERVER_MINTED_UNAVAILABLE_REASON);
+    expect(minted.readyState).toBe(3);
+    // Nothing the version 1 Hub cannot decode was sent; the ticketed stream opened normally.
+    expect(sockets[1]!.frames()).toEqual([{ type: "open", streamId: 2 }]);
+    expect(ticketed.readyState).toBe(1);
+    expect(sockets[1]!.closed).toBe(0);
+    session.dispose();
+  });
+
+  it("carries a pending server-minted stream onto a version 2 replacement", async () => {
+    const { session, sockets } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    const minted = session.createSocket(serverMinted);
+    await vi.advanceTimersByTimeAsync(5_500);
+    sockets[1]!.readyV2();
+    expect(minted.readyState).toBe(1);
+    expect(sockets[1]!.frames()).toEqual([openNode(1)]);
+    session.dispose();
+  });
+
+  it("fails closed on a version 2 frame from a connection that negotiated version 1", () => {
+    const { session, sockets, onFailure } = harness();
+    session.start();
+    sockets[0]!.ready();
+    sockets[0]!.receive({
+      type: "ready",
+      protocolVersion: 2,
+      maxChannels: 8,
+      accountId: ACCOUNT_ID,
+      sessionId: SESSION_ID,
+    });
+    expect(onFailure).toHaveBeenCalledWith({ kind: "protocol", retryable: false });
+  });
+
+  const otherReady = (socket: Socket, accountId: string, sessionId: string) => {
+    socket.readyState = 1;
+    for (const cb of socket.openListeners) cb();
+    socket.receive({ type: "ready", protocolVersion: 2, maxChannels: 8, accountId, sessionId });
+  };
+
+  it("offers no server-minted open without an expected identity to bind it to", () => {
+    const { session, sockets } = harness(Socket, { withoutIdentity: true });
+    session.start();
+    sockets[0]!.readyV2();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    session.dispose();
+  });
+
+  it("opens nothing server-minted on a version 2 connection authenticated as another session", async () => {
+    const { session, sockets, onIdentityMismatch } = harness();
+    session.start();
+    // Same account, another browser session (say a sign-in in another tab replaced the cookie).
+    otherReady(sockets[0]!, ACCOUNT_ID, `sess_${"o".repeat(22)}`);
+    expect(onIdentityMismatch).toHaveBeenCalledOnce();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    // A fresh attempt that raced the check is closed unsent; a ticketed stream still opens (its
+    // ticket is bound to its own session, so the Hub fails it closed if it does not match).
+    const minted = session.createSocket(serverMinted);
+    const closed = vi.fn();
+    minted.onClose(closed);
+    const ticketed = session.createSocket();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(closed).toHaveBeenCalledWith(HUB_SESSION_IDENTITY_MISMATCH_REASON);
+    expect(ticketed.readyState).toBe(1);
+    expect(sockets[0]!.frames()).toEqual([{ type: "open", streamId: 2 }]);
+    session.dispose();
+  });
+
+  it("closes a pending server-minted stream when the replacement is another account", async () => {
+    const { session, sockets, onIdentityMismatch } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    const minted = session.createSocket(serverMinted);
+    const closed = vi.fn();
+    minted.onClose(closed);
+    await vi.advanceTimersByTimeAsync(5_500);
+    otherReady(sockets[1]!, `acct_${"o".repeat(22)}`, `sess_${"o".repeat(22)}`);
+    expect(onIdentityMismatch).toHaveBeenCalledOnce();
+    expect(closed).toHaveBeenCalledWith(HUB_SESSION_IDENTITY_MISMATCH_REASON);
+    expect(sockets[1]!.frames()).toEqual([]);
+    expect(session.readyIdentity()).toEqual({
+      accountId: `acct_${"o".repeat(22)}`,
+      sessionId: `sess_${"o".repeat(22)}`,
+    });
+    session.dispose();
+  });
+});
+
+/** A socket the network (or a stripping proxy) fails before it ever opens. */
+class DeadOnArrivalSocket extends Socket {
+  fail() {
+    for (const cb of this.errors) cb();
+  }
+}
+
+describe("Hub session subprotocol fallback", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  const V2 = ["ryco.hub-session.v2"];
+  /** Advance just until the backoff has created the next socket (never into its ready timeout). */
+  const nextSocket = async (sockets: Socket[]) => {
+    const count = sockets.length;
+    for (let waited = 0; sockets.length === count && waited < 15_000; waited += 50)
+      await vi.advanceTimersByTimeAsync(50);
+    expect(sockets.length).toBe(count + 1);
+  };
+  /** Fail the latest socket before it opens, then let the backoff create the next one. */
+  const failLatest = async (sockets: Socket[]) => {
+    (sockets.at(-1) as DeadOnArrivalSocket).fail();
+    await nextSocket(sockets);
+  };
+  /** Open the latest socket, then lose it after it was up (no handshake evidence either way). */
+  const openThenLose = async (sockets: Socket[]) => {
+    sockets.at(-1)!.ready();
+    sockets.at(-1)!.close(1006, "lost");
+    await nextSocket(sockets);
+  };
+
+  it("survives a deploy: one pre-open failure costs one version 1 connection, never a latch", async () => {
+    const { session, sockets, offers } = harness(DeadOnArrivalSocket);
+    session.start();
+    // The Hub restarts: the handshake offering the subprotocol fails (a 503 looks like this).
+    await failLatest(sockets);
+    expect(offers.slice(0, 2)).toEqual([V2, []]);
+    // The Hub is back by the retry, which offered nothing: version 1 for this connection only.
+    await openThenLose(sockets);
+    // The next reconnect offers again, and it works: the suspicion is dropped.
+    expect(offers[2]).toEqual(V2);
+    sockets[2]!.readyV2();
+    expect(session.serverMintedOpenAvailable()).toBe(true);
+    sockets[2]!.close(1006, "lost");
+    await nextSocket(sockets);
+    expect(offers[3]).toEqual(V2);
+    session.dispose();
+  });
+
+  it("latches only when the pattern repeats, and only for a bounded time", async () => {
+    const { session, sockets, offers } = harness(DeadOnArrivalSocket);
+    session.start();
+    await failLatest(sockets); // offered: fails
+    await openThenLose(sockets); // none: opens -> suspected
+    expect(offers[2]).toEqual(V2); // confirm with the offer again
+    await failLatest(sockets); // offered: fails again
+    expect(offers[3]).toEqual([]);
+    sockets[3]!.ready(); // none: opens again -> confirmed, latched
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    sockets[3]!.close(1006, "lost");
+    await nextSocket(sockets);
+    expect(offers[4]).toEqual([]); // inside the latch: no offer, no failed handshake first
+    await openThenLose(sockets);
+    expect(offers[5]).toEqual([]);
+    // Only the clock moves past the latch (no timers run, so no heartbeat loss interferes).
+    vi.setSystemTime(Date.now() + HUB_SESSION_SUBPROTOCOL_FALLBACK_MS);
+    await openThenLose(sockets);
+    expect(offers[6]).toEqual(V2); // expired: offering again
+    expect(offers).toHaveLength(7);
+    session.dispose();
+  });
+
+  it("treats a failure without the subprotocol too as an outage and drops all evidence", async () => {
+    const { session, sockets, offers } = harness(DeadOnArrivalSocket);
+    session.start();
+    await failLatest(sockets); // offered: fails
+    await openThenLose(sockets); // none: opens -> suspected
+    await failLatest(sockets); // offered: fails
+    await failLatest(sockets); // none: fails too -> an outage, not stripping
+    expect(offers.slice(0, 5)).toEqual([V2, [], V2, [], V2]);
+    sockets[4]!.readyV2();
+    expect(session.serverMintedOpenAvailable()).toBe(true);
+    session.dispose();
+  });
+
+  it("does not downgrade after a failure once the socket had opened", async () => {
+    const { session, sockets, offers } = harness();
+    session.start();
+    sockets[0]!.readyV2();
+    sockets[0]!.close(1006, "lost");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(offers).toEqual([V2, V2]);
+    session.dispose();
   });
 });

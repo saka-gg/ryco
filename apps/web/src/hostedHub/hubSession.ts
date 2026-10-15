@@ -5,7 +5,11 @@ import {
   type HostedHubSessionStatus,
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
+import { RelayNodeId } from "@ryco/contracts/relay";
+import * as Schema from "effect/Schema";
 import { createBrowserRelaySocket, hostedHubSessionWebSocketUrl } from "./relaySocket";
+
+const isRelayNodeId = Schema.is(RelayNodeId);
 
 let session: HostedHubSession | null = null;
 let authority: string | null = null;
@@ -71,7 +75,14 @@ export function watchWebHostedHubSession(): () => void {
     authority = nextAuthority;
     const current = () => session === next;
     const next = new HostedHubSession({
-      createSocket: () => createBrowserRelaySocket(hostedHubSessionWebSocketUrl()),
+      // Server-minted streams are bound to exactly the session this tab restored; a socket the
+      // Hub authenticated as anyone else opens none and sends the session back to its owner.
+      expectedIdentity: { accountId: state.account.id, sessionId: state.session.id },
+      onIdentityMismatch: () => {
+        if (current()) void hostedHubController.revalidateSession();
+      },
+      createSocket: (protocols) =>
+        createBrowserRelaySocket(hostedHubSessionWebSocketUrl(), undefined, undefined, protocols),
       timers: {
         now: () => Date.now(),
         setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -113,4 +124,29 @@ export function createWebHubRelaySocket(): RelaySocket {
     throw new Error("An authenticated Hub session is required.");
   }
   return session.createSocket();
+}
+
+/**
+ * Whether the next relay channel can be authenticated by the Hub itself over the account socket
+ * (Hub session version 2), skipping the HTTP ticket request.
+ */
+export function isWebHubServerAuthenticatedRelayAvailable(): boolean {
+  return (
+    session?.serverMintedOpenAvailable() === true &&
+    hostedHubStore.getState().accountStatus === "authenticated"
+  );
+}
+
+/** A logical stream the Hub authenticates with a ticket it mints and consumes itself. */
+export function createWebHubServerAuthenticatedRelaySocket(open: {
+  readonly nodeId: string;
+  readonly protocolMinor: 2 | 3;
+}): RelaySocket {
+  if (!session || hostedHubStore.getState().accountStatus !== "authenticated") {
+    throw new Error("An authenticated Hub session is required.");
+  }
+  if (!isRelayNodeId(open.nodeId)) throw new Error("Invalid hosted node id.");
+  return session.createSocket({
+    serverMinted: { nodeId: open.nodeId, protocolMinor: open.protocolMinor },
+  });
 }

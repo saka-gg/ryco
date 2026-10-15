@@ -4,6 +4,8 @@ import * as HostedIdentity from "@ryco/contracts/hosted-identity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   createWebHubRelaySocket,
+  createWebHubServerAuthenticatedRelaySocket,
+  isWebHubServerAuthenticatedRelayAvailable,
   isWebHubSessionOnline,
   subscribeWebHubInvalidation,
   watchWebHostedHubSession,
@@ -16,6 +18,7 @@ const created = vi.hoisted(
       start: ReturnType<typeof vi.fn>;
       dispose: ReturnType<typeof vi.fn>;
       createSocket: ReturnType<typeof vi.fn>;
+      serverMintedOpenAvailable: ReturnType<typeof vi.fn>;
     }>,
 );
 vi.mock("@ryco/client-runtime/relay", async (importOriginal) => ({
@@ -24,6 +27,7 @@ vi.mock("@ryco/client-runtime/relay", async (importOriginal) => ({
     start = vi.fn(() => this.options.onStatus?.("online"));
     dispose = vi.fn(() => this.options.onStatus?.("closed"));
     createSocket = vi.fn(() => ({}));
+    serverMintedOpenAvailable = vi.fn(() => true);
     constructor(readonly options: HostedHubSessionOptions) {
       created.push(this);
     }
@@ -159,5 +163,73 @@ describe("browser Hub connection ownership", () => {
     authenticate();
     expect(created).toHaveLength(1);
     expect(isWebHubSessionOnline()).toBe(false);
+  });
+
+  it("offers server-authenticated channels only from an authenticated version 2 session", () => {
+    stop = watchWebHostedHubSession();
+    expect(isWebHubServerAuthenticatedRelayAvailable()).toBe(false);
+    authenticate();
+    expect(isWebHubServerAuthenticatedRelayAvailable()).toBe(true);
+    created[0]!.serverMintedOpenAvailable.mockReturnValue(false);
+    expect(isWebHubServerAuthenticatedRelayAvailable()).toBe(false);
+    created[0]!.serverMintedOpenAvailable.mockReturnValue(true);
+    hostedHubStore.setState({ accountStatus: "signed-out", account: null, session: null });
+    expect(isWebHubServerAuthenticatedRelayAvailable()).toBe(false);
+  });
+
+  it("opens a server-minted stream for a valid node id and refuses anything else", () => {
+    authenticate();
+    stop = watchWebHostedHubSession();
+    const nodeId = `node_${"a".repeat(22)}`;
+    createWebHubServerAuthenticatedRelaySocket({ nodeId, protocolMinor: 3 });
+    expect(created[0]!.createSocket).toHaveBeenCalledExactlyOnceWith({
+      serverMinted: { nodeId, protocolMinor: 3 },
+    });
+    expect(() =>
+      createWebHubServerAuthenticatedRelaySocket({ nodeId: "node_bad", protocolMinor: 3 }),
+    ).toThrow("Invalid hosted node id");
+    expect(created[0]!.createSocket).toHaveBeenCalledOnce();
+  });
+
+  it("offers the session's subprotocols on the browser socket", () => {
+    const sockets: { url: string; protocols: unknown }[] = [];
+    vi.stubGlobal(
+      "WebSocket",
+      class {
+        binaryType = "blob";
+        constructor(url: string, protocols?: unknown) {
+          sockets.push({ url, protocols });
+        }
+        addEventListener() {}
+      },
+    );
+    vi.stubGlobal("window", { location: { origin: "https://hub.example.test" } });
+    try {
+      authenticate();
+      stop = watchWebHostedHubSession();
+      created[0]!.options.createSocket(["ryco.hub-session.v2"]);
+      expect(sockets).toEqual([
+        { url: "wss://hub.example.test/v1/relay/session", protocols: ["ryco.hub-session.v2"] },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("binds server-minted streams to the restored identity and revalidates on a mismatch", () => {
+    const resume = vi.spyOn(hostedHubController, "revalidateSession").mockResolvedValue();
+    authenticate();
+    stop = watchWebHostedHubSession();
+    expect(created[0]!.options.expectedIdentity).toEqual({
+      accountId: account.id,
+      sessionId: session.id,
+    });
+    created[0]!.options.onIdentityMismatch?.();
+    expect(resume).toHaveBeenCalledOnce();
+    // A superseded session's late mismatch reaches nobody.
+    hostedHubStore.setState({ session: { ...session, id: "session-b" } });
+    created[0]!.options.onIdentityMismatch?.();
+    expect(resume).toHaveBeenCalledOnce();
+    expect(created[1]!.options.expectedIdentity?.sessionId).toBe("session-b");
   });
 });
