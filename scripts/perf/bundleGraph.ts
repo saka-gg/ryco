@@ -64,14 +64,16 @@ export function readBundleGraph(assetsDir: string): BundleGraph {
 
 /** The hashed chunk emitted for `name` (`main` → `main-<hash>.js`). */
 export function findChunk(graph: BundleGraph, name: string): string | null {
+  return findChunks(graph, name)[0] ?? null;
+}
+
+/** Every emitted chunk named `name-<hash>.js`, in graph order. */
+export function findChunks(graph: BundleGraph, name: string): readonly string[] {
   const pattern = new RegExp(
     `^${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}-[\\w-]{6,}\\.js$`,
     "u",
   );
-  for (const file of graph.keys()) {
-    if (pattern.test(file)) return file;
-  }
-  return null;
+  return [...graph.keys()].filter((file) => pattern.test(file));
 }
 
 export function staticClosure(graph: BundleGraph, root: string): ReadonlySet<string> {

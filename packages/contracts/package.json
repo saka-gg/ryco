@@ -61,6 +61,11 @@
       "import": "./src/agentControl.ts",
       "require": "./src/agentControl.ts"
     },
+    "./agent-control-mcp": {
+      "types": "./src/agentControlMcp.ts",
+      "import": "./src/agentControlMcp.ts",
+      "require": "./src/agentControlMcp.ts"
+    },
     "./approval-responses": {
       "types": "./src/approvalResponses.ts",
       "import": "./src/approvalResponses.ts",

@@ -122,7 +122,9 @@ import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { describeRunningFollowUp, isFollowUpInvertModifier } from "./composerFollowUp";
-import { PhoneThreadDock, type PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
+import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
+import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import { cn, randomUUID } from "~/lib/utils";
 import { proposedPlanTitle } from "../../proposedPlan";
@@ -936,6 +938,10 @@ export const ChatComposer = memo(
     // landscape phones collapse consistently with the rest of the phone UI.
     const isMobileViewport = presentationTier === "phone";
     const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
+    const phoneThreadDockReady = usePhoneThreadSurfaceReady(
+      LazyPhoneThreadDock,
+      phoneThreadDock !== null,
+    );
     const pendingContextHandoff = useMemo(
       () =>
         derivePendingContextHandoff({
@@ -2903,9 +2909,9 @@ export const ChatComposer = memo(
                 The dock is laid out in normal flow above the prompt row and
                 never overlays the collapsed editor, so the editor still takes
                 the activating tap natively. */}
-            {phoneThreadDock ? (
+            {phoneThreadDock && phoneThreadDockReady ? (
               <div className="px-3 pt-2 sm:px-4" data-chat-composer-collapsed-controls="true">
-                <PhoneThreadDock {...phoneThreadDock} />
+                <LazyPhoneThreadDock {...phoneThreadDock} />
               </div>
             ) : null}
 

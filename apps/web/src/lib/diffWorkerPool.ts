@@ -8,7 +8,9 @@ import {
   type DiffThemeName,
 } from "./diffRendering";
 import {
+  canCompileWebAssembly,
   createDiffWorkerPoolOwner,
+  resolveDiffWorkerHighlighter,
   resolveDiffWorkerPoolSize,
   type DiffWorkerPoolLease,
 } from "./diffWorkerPoolOwner";
@@ -25,16 +27,29 @@ import {
 
 const DIFF_AST_CACHE_SIZE = 120;
 
-function supportsWasmHighlighter(): boolean {
-  return typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function";
+let webAssemblyCompiles: boolean | null = null;
+// Set once a WASM pool's workers fail to start (a CSP on the worker script
+// that the page's own probe could not see): later pools use the JS engine.
+let wasmPoolFailed = false;
+const wasmPools = new WeakSet<WorkerPoolManager>();
+
+function recordWasmPoolFailure(pool: WorkerPoolManager): void {
+  if (wasmPools.has(pool) && pool.getStats().workersFailed) wasmPoolFailed = true;
+}
+
+function terminateDiffWorkerPool(pool: WorkerPoolManager): void {
+  // The stat broadcast below waits for an animation frame, which a hidden tab
+  // never paints, and `terminate()` clears the failure: read it first.
+  recordWasmPoolFailure(pool);
+  pool.terminate();
 }
 
 function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
-  // Oniguruma (WASM) tokenizes about 25-30% faster than the JS regex engine in
-  // these workers (measured warm: 36 -> 27 ms per 200 TSX lines, 270 -> 205 ms
-  // per 1,600). Environments without WebAssembly (for example Lockdown Mode)
-  // keep the JS engine.
-  const preferredHighlighter = supportsWasmHighlighter() ? "shiki-wasm" : "shiki-js";
+  webAssemblyCompiles ??= canCompileWebAssembly();
+  const preferredHighlighter = resolveDiffWorkerHighlighter({
+    canCompileWebAssembly: webAssemblyCompiles,
+    wasmPoolFailed,
+  });
   if (preferredHighlighter === "shiki-wasm") {
     // The pool passes its engine to the main-thread highlighter too, which is a
     // page-wide singleton shared with chat markdown and fixed by its first
@@ -46,7 +61,7 @@ function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
       preferredHighlighter: "shiki-js",
     }).catch(() => undefined);
   }
-  return new WorkerPoolManager(
+  const pool = new WorkerPoolManager(
     {
       workerFactory: () => new DiffsWorker(),
       poolSize: resolveDiffWorkerPoolSize(
@@ -60,11 +75,20 @@ function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
       preferredHighlighter,
     },
   );
+  if (preferredHighlighter === "shiki-wasm") {
+    wasmPools.add(pool);
+    const unsubscribe = pool.subscribeToStatChanges((stats) => {
+      if (!stats.workersFailed) return;
+      wasmPoolFailed = true;
+      unsubscribe();
+    });
+  }
+  return pool;
 }
 
 const diffWorkerPoolOwner = createDiffWorkerPoolOwner<WorkerPoolManager>({
   create: createDiffWorkerPool,
-  terminate: (pool) => pool.terminate(),
+  terminate: terminateDiffWorkerPool,
   isDocumentHidden: () => typeof document !== "undefined" && document.visibilityState === "hidden",
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),

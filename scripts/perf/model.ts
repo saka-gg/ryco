@@ -195,12 +195,37 @@ export interface BundleClosureBudget {
   readonly chunk: string;
   readonly beyondBoot: boolean;
   readonly maxGzipBytes: number | null;
+  /**
+   * Most JS files the closure may load: each is a request, and the standard
+   * server speaks HTTP/1.1, so a phase's files queue on six connections.
+   */
+  readonly maxFiles?: number;
   readonly forbiddenSources: readonly ForbiddenBundleSource[];
+}
+
+/** Text one emitted chunk must not contain (matched against the built code). */
+export interface ForbiddenChunkContent {
+  readonly pattern: RegExp;
+  readonly reason: string;
+}
+
+/**
+ * A rule for one emitted chunk and its static imports rather than a closure
+ * budget: chunks that no closure reaches statically (workers) still cost every
+ * user who starts them. `chunk` is the hashed chunk's name prefix, as for
+ * closures, and must match exactly one emitted chunk.
+ */
+export interface BundleChunkRule {
+  readonly name: string;
+  readonly chunk: string;
+  readonly maxRawBytes: number | null;
+  readonly forbiddenContent: readonly ForbiddenChunkContent[];
 }
 
 export interface BundleBudgetPolicy {
   readonly bootChunk: string;
   readonly closures: readonly BundleClosureBudget[];
+  readonly chunks?: readonly BundleChunkRule[];
 }
 
 const KIB = 1024;
@@ -244,6 +269,59 @@ const DIFF_RENDERER_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/(?:shiki|@shikijs\/)/u, reason: "syntax highlighter" },
 ];
 
+/**
+ * Chat surfaces that load on demand (`chatViewLazySurfaces`,
+ * `lazyWorktreeDialogs`, `lazyPhoneThreadSurfaces`). A static edge from the
+ * thread route graph puts one back on every thread open; the closure's gzip
+ * budget alone would not notice the smaller ones.
+ */
+const CHAT_DEFERRED_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:chat\/ChatOverviewPanel|PlanSidebar|GitActionsControl|overview\/crown\/CrownOverview|overview\/overview(?:Layouts|Sections))\.tsx$/u,
+    reason: "overview panel (crown, plan sidebar, git actions)",
+  },
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:SideChatPanel|chat\/ContextHandoffInspectionPanel|chat\/ComputerBetaPreview|chat\/ExpandedImageDialog|PullRequestThreadDialog|agent-control\/AgentControlApprovals)\.tsx$/u,
+    reason: "on-demand chat surface",
+  },
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:worktrees\/(?:NewWorktreeDialog|LinkedWorktreeItemDialog)|projectExplorer\/WorkItemDetail)\.tsx$/u,
+    reason: "worktree dialog or work item detail",
+  },
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:shell\/phone\/(?:PhoneThreadAppBar|PhoneThreadDock|PhoneWorkSurface)|chat\/(?:PhoneSessionPolicySheet|PhoneModelSheet|MessageActionsSheet)|mobile\/MobileSelectSheet)\.tsx$/u,
+    reason: "frozen phone-tier thread surface",
+  },
+  { pattern: /^node_modules\/parse5\//u, reason: "HTML parser (rehype-raw)" },
+];
+
+/** Schemas only the server speaks (`@ryco/contracts/agent-control-mcp`). */
+const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/contracts\/src\/agentControlMcp\.ts$/u,
+    reason: "server-only Agent Control MCP schemas",
+  },
+];
+
+/** The thread routes (server thread and draft) share their chat graph. */
+const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
+  ...HOSTED_RUNTIME_SOURCES,
+  ...DIFF_RENDERER_SOURCES,
+  ...CHAT_DEFERRED_SOURCES,
+  ...SERVER_ONLY_SOURCES,
+];
+/**
+ * 709 KiB gzip and 142 files beyond boot on 2026-10-15 (813 KiB on 2026-10-12,
+ * 974 KiB before route-level splitting). Tight enough that the overview stack
+ * (78 KiB) returning to the static graph fails the budget, not only the rules.
+ */
+const CHAT_ROUTE_GZIP_BUDGET = 750 * KIB;
+const CHAT_ROUTE_MAX_FILES = 155;
+
 /** OTLP export loads when client tracing is configured, never at boot. */
 const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/effect\/dist\/observability\/Otlp/u, reason: "OTLP exporter" },
@@ -270,6 +348,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...MARKDOWN_SOURCES,
         ...DIFF_RENDERER_SOURCES,
         ...TRACING_EXPORTER_SOURCES,
+        ...SERVER_ONLY_SOURCES,
       ],
     },
     {
@@ -278,16 +357,31 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       // The boot code-splitting group keeps shell-only @base-ui and lucide
       // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
+      // 103 files on 2026-10-15.
       maxGzipBytes: 420 * KIB,
-      forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...MARKDOWN_SOURCES, ...DIFF_RENDERER_SOURCES],
+      maxFiles: 115,
+      forbiddenSources: [
+        ...HOSTED_RUNTIME_SOURCES,
+        ...MARKDOWN_SOURCES,
+        ...DIFF_RENDERER_SOURCES,
+        ...SERVER_ONLY_SOURCES,
+      ],
     },
     {
-      // 813 KiB on 2026-10-12, after route-level splitting (974 KiB before).
       name: "ChatThreadRouteView",
       chunk: "ChatThreadRouteView",
       beyondBoot: true,
-      maxGzipBytes: 880 * KIB,
-      forbiddenSources: HOSTED_RUNTIME_SOURCES,
+      maxGzipBytes: CHAT_ROUTE_GZIP_BUDGET,
+      maxFiles: CHAT_ROUTE_MAX_FILES,
+      forbiddenSources: CHAT_ROUTE_FORBIDDEN_SOURCES,
+    },
+    {
+      name: "DraftChatThreadRouteView",
+      chunk: "DraftChatThreadRouteView",
+      beyondBoot: true,
+      maxGzipBytes: CHAT_ROUTE_GZIP_BUDGET,
+      maxFiles: CHAT_ROUTE_MAX_FILES,
+      forbiddenSources: CHAT_ROUTE_FORBIDDEN_SOURCES,
     },
     {
       // Route-level splitting makes the route view the page's chunk entry.
@@ -304,6 +398,20 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       maxGzipBytes: null,
       forbiddenSources: HOSTED_RUNTIME_SOURCES,
+    },
+  ],
+  chunks: [
+    {
+      // The `@pierre/diffs` highlight worker (213 KiB on 2026-10-15). Built as
+      // an ES module it imports Shiki's Oniguruma engine (`wasm-*.js`, 608 KiB)
+      // only where WebAssembly may compile; an IIFE worker inlined it into
+      // every worker start, hosted and JS-engine users included.
+      name: "diff highlight worker",
+      chunk: "worker",
+      maxRawBytes: 400 * KIB,
+      forbiddenContent: [
+        { pattern: /AGFzbQ/u, reason: "an inlined WebAssembly binary (base64 `\\0asm` magic)" },
+      ],
     },
   ],
 };

@@ -46,11 +46,6 @@ export const LazyAgentControlApprovals = preloadableLazy(() =>
   import("../agent-control/AgentControlApprovals").then((module) => module.AgentControlApprovals),
 );
 
-/** The frozen phone tier's overview sheet; mounted on its first open and kept. */
-export const LazyPhoneOverviewSheet = preloadableLazy(() =>
-  import("../shell/phone/PhoneWorkSurface").then((module) => module.PhoneOverviewSheet),
-);
-
 // Annotated through the component type: its props interface is module-private.
 export const LazyPullRequestThreadDialog: PreloadableLazyComponent<
   ComponentProps<typeof PullRequestThreadDialog>

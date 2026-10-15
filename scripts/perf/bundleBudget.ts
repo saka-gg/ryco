@@ -1,15 +1,22 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
   closureSize,
   findChunk,
+  findChunks,
   readBundleGraph,
   readChunkSources,
   staticClosure,
+  type BundleGraph,
   type ClosureSize,
 } from "./bundleGraph.ts";
-import type { BundleBudgetPolicy, BundleClosureBudget, ForbiddenBundleSource } from "./model.ts";
+import type {
+  BundleBudgetPolicy,
+  BundleChunkRule,
+  BundleClosureBudget,
+  ForbiddenBundleSource,
+} from "./model.ts";
 import { checkPreloadCoverage } from "./preloadCoverage.ts";
 
 /**
@@ -102,6 +109,13 @@ export function checkBundleBudgets(
       });
     }
 
+    if (budget.maxFiles !== undefined && size.files > budget.maxFiles) {
+      violations.push({
+        closure: budget.name,
+        message: `${size.files} JS files${budget.beyondBoot ? " beyond boot" : ""} exceed the ${budget.maxFiles}-file budget; merge or defer the new chunks.`,
+      });
+    }
+
     if (budget.forbiddenSources.length === 0) continue;
     // One violation per rule: the first offending module names the edge to
     // cut, the count says how much came with it.
@@ -125,6 +139,9 @@ export function checkBundleBudgets(
       });
     }
   }
+  for (const rule of policy.chunks ?? []) {
+    violations.push(...checkChunkRule(graph, assetsDir, rule));
+  }
   // Every route, shell and dialog chunk must load in one round: its import()
   // preloads the whole static closure, so no level is discovered late.
   const preloadCoverage = checkPreloadCoverage(graph, assetsDir);
@@ -135,6 +152,12 @@ export function checkBundleBudgets(
         "The build has Vite preload maps but no import() the check can read; update scripts/perf/preloadCoverage.ts for the new output format.",
     });
   }
+  for (const unreadable of preloadCoverage.unreadable) {
+    violations.push({
+      closure: "preload depth",
+      message: `import() of ${unreadable.target} from ${unreadable.host} has no preload map the check can read; update scripts/perf/preloadCoverage.ts for the new wrapper shape.`,
+    });
+  }
   for (const uncovered of preloadCoverage.uncovered) {
     violations.push({
       closure: "preload depth",
@@ -142,6 +165,56 @@ export function checkBundleBudgets(
     });
   }
   return { closures, violations };
+}
+
+function checkChunkRule(
+  graph: BundleGraph,
+  assetsDir: string,
+  rule: BundleChunkRule,
+): BundleBudgetViolation[] {
+  const matches = findChunks(graph, rule.chunk);
+  if (matches.length === 0) {
+    return [
+      {
+        closure: rule.name,
+        message: `No '${rule.chunk}-*.js' chunk was emitted; update the bundle budget policy if it was renamed or merged.`,
+      },
+    ];
+  }
+  if (matches.length > 1) {
+    return [
+      {
+        closure: rule.name,
+        message: `${matches.length} chunks match '${rule.chunk}-*.js' (${matches.join(", ")}); give the rule's chunk a name only one of them carries.`,
+      },
+    ];
+  }
+  const chunk = matches[0]!;
+  // The chunk's static imports load with it, so a worker that imports a large
+  // shared chunk pays for it on every start just as if it were inlined.
+  const closure = [...staticClosure(graph, chunk)];
+  const violations: BundleBudgetViolation[] = [];
+  const { rawBytes } = closureSize(graph, closure);
+  if (rule.maxRawBytes !== null && rawBytes > rule.maxRawBytes) {
+    violations.push({
+      closure: rule.name,
+      message: `${chunk} loads ${formatKib(rawBytes)} raw with its static imports (${closure.length} files), over the ${formatKib(rule.maxRawBytes)} budget.`,
+    });
+  }
+  for (const content of rule.forbiddenContent) {
+    const carrier = closure.find((file) =>
+      content.pattern.test(readFileSync(path.join(assetsDir, file), "utf8")),
+    );
+    if (carrier === undefined) continue;
+    violations.push({
+      closure: rule.name,
+      message:
+        carrier === chunk
+          ? `${chunk} carries ${content.reason}.`
+          : `${chunk} statically imports ${carrier}, which carries ${content.reason}.`,
+    });
+  }
+  return violations;
 }
 
 function emptyReport(budget: BundleClosureBudget): BundleClosureReport {

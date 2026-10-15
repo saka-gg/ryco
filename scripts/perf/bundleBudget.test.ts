@@ -186,6 +186,106 @@ describe("bundle budgets", () => {
     );
   });
 
+  it("fails a closure that loads more files than its budget", () => {
+    withDist(
+      {
+        "main-AAAAAAAA.js": {
+          code: 'import"./a-BBBBBBBB.js";import"./b-CCCCCCCC.js";',
+          sources: ["../../src/main.tsx"],
+        },
+        "a-BBBBBBBB.js": { code: "export const a = 1;" },
+        "b-CCCCCCCC.js": { code: "export const b = 1;" },
+      },
+      (distDir) => {
+        const within = checkBundleBudgets(distDir, {
+          bootChunk: "main",
+          closures: [{ ...POLICY.closures[0]!, maxFiles: 3 }],
+        });
+        assert.deepStrictEqual(within.violations, []);
+        const over = checkBundleBudgets(distDir, {
+          bootChunk: "main",
+          closures: [{ ...POLICY.closures[0]!, maxFiles: 2 }],
+        });
+        assert.match(over.violations[0]!.message, /3 JS files exceed the 2-file budget/u);
+      },
+    );
+  });
+
+  it("keeps the WebAssembly engine out of the diff highlight worker", () => {
+    const [workerRule] = DEFAULT_BUNDLE_BUDGET_POLICY.chunks ?? [];
+    assert.isDefined(workerRule);
+    const policy: BundleBudgetPolicy = { bootChunk: "main", closures: [], chunks: [workerRule!] };
+    const main = { code: "export {};", sources: ["../../src/main.tsx"] };
+    withDist(
+      {
+        "main-AAAAAAAA.js": main,
+        // An ES module worker that loads the engine chunk on demand.
+        "worker-BBBBBBBB.js": { code: "const e=()=>import(`./wasm-CCCCCCCC.js`);" },
+        "wasm-CCCCCCCC.js": { code: "var e=Uint8Array.from(atob(`AGFzbQEAAAAB`));" },
+      },
+      (distDir) => {
+        assert.deepStrictEqual(checkBundleBudgets(distDir, policy).violations, []);
+      },
+    );
+    withDist(
+      {
+        "main-AAAAAAAA.js": main,
+        // An IIFE worker with the engine inlined.
+        "worker-BBBBBBBB.js": {
+          code: `(function(){var e=Uint8Array.from(atob(\`AGFzbQEAAAAB${"A".repeat(500 * 1024)}\`))})();`,
+        },
+      },
+      (distDir) => {
+        const messages = checkBundleBudgets(distDir, policy).violations.map(
+          (violation) => violation.message,
+        );
+        assert.strictEqual(messages.length, 2);
+        assert.match(messages[0]!, /over the 400\.0 KiB budget/u);
+        assert.match(messages[1]!, /inlined WebAssembly binary/u);
+      },
+    );
+    withDist(
+      {
+        "main-AAAAAAAA.js": main,
+        // An ES module worker that imports the engine chunk statically.
+        "worker-BBBBBBBB.js": { code: `import"./wasm-CCCCCCCC.js";` },
+        "wasm-CCCCCCCC.js": {
+          code: `var e=Uint8Array.from(atob(\`AGFzbQEAAAAB${"A".repeat(500 * 1024)}\`));`,
+        },
+      },
+      (distDir) => {
+        const messages = checkBundleBudgets(distDir, policy).violations.map(
+          (violation) => violation.message,
+        );
+        assert.strictEqual(messages.length, 2);
+        assert.match(messages[0]!, /with its static imports \(2 files\), over the 400\.0 KiB/u);
+        assert.match(
+          messages[1]!,
+          /statically imports wasm-CCCCCCCC\.js, which carries an inlined WebAssembly binary/u,
+        );
+      },
+    );
+    withDist(
+      {
+        "main-AAAAAAAA.js": main,
+        "worker-BBBBBBBB.js": { code: "export {};" },
+        "worker-DDDDDDDD.js": { code: "export {};" },
+      },
+      (distDir) => {
+        assert.match(
+          checkBundleBudgets(distDir, policy).violations[0]!.message,
+          /2 chunks match 'worker-\*\.js'/u,
+        );
+      },
+    );
+    withDist({ "main-AAAAAAAA.js": main }, (distDir) => {
+      assert.match(
+        checkBundleBudgets(distDir, policy).violations[0]!.message,
+        /No 'worker-\*\.js' chunk was emitted/u,
+      );
+    });
+  });
+
   it("refuses dists it cannot judge", () => {
     withDist({ "main-AAAAAAAA.js": { code: "export {};" } }, (distDir) => {
       assert.throws(() => checkBundleBudgets(distDir, POLICY), /no sourcemaps/u);
@@ -215,6 +315,38 @@ describe("bundle budgets", () => {
         ),
         `${closure.name}: nothing imports ${closure.chunk} dynamically`,
       );
+    }
+  });
+
+  it("forbids the chat route's deferred surfaces and server-only schemas statically", () => {
+    for (const name of ["ChatThreadRouteView", "DraftChatThreadRouteView"]) {
+      const closure = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find((entry) => entry.name === name)!;
+      const forbidden = (source: string) =>
+        closure.forbiddenSources.some((rule) => rule.pattern.test(source));
+      for (const source of [
+        "apps/web/src/components/chat/ChatOverviewPanel.tsx",
+        "apps/web/src/components/overview/crown/CrownOverview.tsx",
+        "apps/web/src/components/worktrees/LinkedWorktreeItemDialog.tsx",
+        "apps/web/src/components/shell/phone/PhoneThreadAppBar.tsx",
+        "apps/web/src/components/chat/MessageActionsSheet.tsx",
+        "node_modules/@pierre/diffs/dist/index.js",
+        "node_modules/shiki/dist/index.mjs",
+        "node_modules/parse5/dist/index.js",
+        "packages/contracts/src/agentControlMcp.ts",
+      ]) {
+        assert.isTrue(forbidden(source), `${name}: ${source}`);
+      }
+      for (const source of [
+        // Statically shared with the route: layout constants, the lazy
+        // wrappers themselves, and the chat markdown renderer.
+        "apps/web/src/components/overview/crown/crownLayout.ts",
+        "apps/web/src/components/shell/phone/lazyPhoneThreadSurfaces.ts",
+        "apps/web/src/components/worktrees/lazyWorktreeDialogs.ts",
+        "node_modules/react-markdown/lib/index.js",
+        "packages/contracts/src/agentControl.ts",
+      ]) {
+        assert.isFalse(forbidden(source), `${name}: ${source}`);
+      }
     }
   });
 

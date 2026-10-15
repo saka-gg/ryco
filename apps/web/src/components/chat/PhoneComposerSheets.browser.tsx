@@ -24,12 +24,16 @@ const capabilityState = {
   allowed: true,
   reason: null as string | null,
 };
+const mockedCapability = () => ({
+  hosted: !capabilityState.allowed,
+  allowed: capabilityState.allowed,
+  reason: capabilityState.reason,
+});
 vi.mock("../../hostedHub/capabilities", () => ({
-  useHostedRpcCapability: () => ({
-    hosted: !capabilityState.allowed,
-    allowed: capabilityState.allowed,
-    reason: capabilityState.reason,
-  }),
+  useHostedRpcCapability: () => mockedCapability(),
+  // The phone sheets load in one chunk with the thread dock, whose thread
+  // actions read the policy outside React.
+  readHostedRpcCapability: () => mockedCapability(),
 }));
 
 vi.mock("../../environments/runtime", () => {

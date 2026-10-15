@@ -43,7 +43,8 @@ import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
 import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
 import { RightPanelSheet } from "../RightPanelSheet";
-import { PhoneWorkSurfaceSheet } from "../shell/phone/PhoneWorkSurface";
+import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 
@@ -57,6 +58,10 @@ export function ChatThreadRouteView({
   usePerfMark("ChatThreadRouteView");
   const navigate = useNavigate();
   const presentationTier = usePresentationTier();
+  const phoneWorkSurfaceReady = usePhoneThreadSurfaceReady(
+    LazyPhoneWorkSurfaceSheet,
+    presentationTier === "phone",
+  );
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
   const routeEnvironmentId = threadRef?.environmentId ?? null;
   const routeThreadId = threadRef?.threadId ?? null;
@@ -276,18 +281,24 @@ export function ChatThreadRouteView({
             )}
           </ChatPanes>
         </SidebarInset>
-        <PhoneWorkSurfaceSheet label="Workspace" open={rightPanelOpen} onClose={closeRightPanel}>
-          {shouldRenderPhoneRightPanelContent ? (
-            <LazyRightPanel
-              mode="phone"
-              panelMode={mountedRightPanelMode}
-              openedPanelModes={openedPanelModes}
-              openedAgentKeys={openedAgentKeys}
-              openedRenderKey={openedRenderKey}
-              onClosePanelTab={closePanelTab}
-            />
-          ) : null}
-        </PhoneWorkSurfaceSheet>
+        {phoneWorkSurfaceReady ? (
+          <LazyPhoneWorkSurfaceSheet
+            label="Workspace"
+            open={rightPanelOpen}
+            onClose={closeRightPanel}
+          >
+            {shouldRenderPhoneRightPanelContent ? (
+              <LazyRightPanel
+                mode="phone"
+                panelMode={mountedRightPanelMode}
+                openedPanelModes={openedPanelModes}
+                openedAgentKeys={openedAgentKeys}
+                openedRenderKey={openedRenderKey}
+                onClosePanelTab={closePanelTab}
+              />
+            ) : null}
+          </LazyPhoneWorkSurfaceSheet>
+        ) : null}
       </>
     );
   }

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  canCompileWebAssembly,
   createDiffWorkerPoolOwner,
   DIFF_WORKER_POOL_HIDDEN_IDLE_TIMEOUT_MS,
   DIFF_WORKER_POOL_IDLE_TIMEOUT_MS,
+  resolveDiffWorkerHighlighter,
   resolveDiffWorkerPoolSize,
 } from "./diffWorkerPoolOwner";
 
@@ -120,5 +122,31 @@ describe("resolveDiffWorkerPoolSize", () => {
     expect(resolveDiffWorkerPoolSize(2)).toBe(1);
     expect(resolveDiffWorkerPoolSize(8)).toBe(2);
     expect(resolveDiffWorkerPoolSize(32)).toBe(2);
+  });
+});
+
+describe("diff worker highlighter engine", () => {
+  it("compiles a module to decide WASM support instead of trusting the global", () => {
+    expect(canCompileWebAssembly()).toBe(true);
+    expect(canCompileWebAssembly(null)).toBe(false);
+    // A CSP without 'wasm-unsafe-eval' keeps the API and makes compiles throw.
+    const BlockedModule = function BlockedModule() {
+      throw new WebAssembly.CompileError(
+        "WebAssembly.Module(): Compiling or instantiating WebAssembly module violates the following Content Security policy directive",
+      );
+    } as unknown as typeof WebAssembly.Module;
+    expect(canCompileWebAssembly({ Module: BlockedModule })).toBe(false);
+  });
+
+  it("uses the JS engine where WebAssembly is blocked or a WASM pool already failed", () => {
+    expect(
+      resolveDiffWorkerHighlighter({ canCompileWebAssembly: true, wasmPoolFailed: false }),
+    ).toBe("shiki-wasm");
+    expect(
+      resolveDiffWorkerHighlighter({ canCompileWebAssembly: false, wasmPoolFailed: false }),
+    ).toBe("shiki-js");
+    expect(
+      resolveDiffWorkerHighlighter({ canCompileWebAssembly: true, wasmPoolFailed: true }),
+    ).toBe("shiki-js");
   });
 });

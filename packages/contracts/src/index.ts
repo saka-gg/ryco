@@ -33,6 +33,7 @@ export * from "./threadGoal.ts";
 export * from "./threadPriority.ts";
 export * from "./orchestration.ts";
 export * from "./agentControl.ts";
+export * from "./agentControlMcp.ts";
 export * from "./editor.ts";
 export * from "./project.ts";
 export * from "./filesystem.ts";

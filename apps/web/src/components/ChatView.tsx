@@ -5,7 +5,7 @@ import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
-import type { ProviderOptionSelection, ServerConfig } from "@ryco/contracts";
+import type { ProviderOptionSelection } from "@ryco/contracts";
 import {
   rejectRetiredProjectMemory,
   hasRetiredProjectMemory,
@@ -18,6 +18,8 @@ import {
   appendSelectionQuote,
   checkpointRevertUnsupportedMessage,
   requestProviderSessionPrewarm,
+  resolveProviderSessionPrewarmRequest,
+  selectProviderSessionPrewarmSupported,
   type SubscribedClaudeReviewState,
 } from "@ryco/client-runtime/state/composer";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
@@ -236,8 +238,12 @@ import {
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import type { ChatProjectTarget } from "./chat/ChatProjectActions";
-import { PhoneThreadAppBar } from "./shell/phone/PhoneThreadAppBar";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
+import {
+  LazyPhoneOverviewSheet,
+  LazyPhoneThreadAppBar,
+} from "./shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "./shell/phone/usePhoneThreadSurfaceReady";
 import { useChatSessionTabsPrefetch } from "./chat/useChatSessionTabsPrefetch";
 import {
   createSessionTabsSelector,
@@ -274,7 +280,6 @@ import {
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
   LazyExpandedImageDialog,
-  LazyPhoneOverviewSheet,
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
 } from "./chat/chatViewLazySurfaces";
@@ -579,8 +584,6 @@ function shouldIgnoreThreadMessageSearchShortcut(
   return false;
 }
 
-const selectProviderSessionPrewarmSupported = (config: ServerConfig | null): boolean =>
-  config?.environment.capabilities.providerSessionPrewarm === true;
 /** How long the composer keeps focus on a thread before that focus prewarms its session. */
 const PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS = 400;
 
@@ -5268,9 +5271,10 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
   // Composer focus or the first keystroke starts the provider session the next send
   // would start (`provider.prewarmSession`), so the send does not wait for the provider
-  // to boot. Skipped where that send first creates a worktree or a chat folder: the
-  // session's directory does not exist yet. Ref indirection keeps the callback stable
-  // for the memoized composer.
+  // to boot. The gating is shared with the mobile composer
+  // (`resolveProviderSessionPrewarmRequest`): among others, it skips sends that first
+  // create a worktree or a chat folder, whose directory does not exist yet. Ref
+  // indirection keeps the callback stable for the memoized composer.
   const providerSessionPrewarmSupported = useEnvironmentServerConfigSelector(
     environmentId,
     selectProviderSessionPrewarmSupported,
@@ -5280,37 +5284,31 @@ export default function ChatView(props: ChatViewProps) {
   useLayoutEffect(() => {
     prewarmProviderSessionRef.current = (threadId) => {
       const thread = activeThread;
-      if (
-        !thread ||
-        // A dwell that outlived its thread (see onComposerIntent).
-        (threadId !== null && thread.id !== threadId) ||
-        isPendingChat ||
-        !dispatchCapability.allowed ||
-        hostedDraftTarget.pending !== null ||
-        (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
-      )
-        return;
-      const isFirstMessage = !isServerThread || thread.messages.length === 0;
-      const plan = resolveChatSendWorktreePlan({
+      // A dwell that outlived its thread (see onComposerIntent).
+      if (!thread || (threadId !== null && thread.id !== threadId)) return;
+      const request = resolveProviderSessionPrewarmRequest({
+        thread,
         isServerThread,
-        isFirstMessage,
-        threadWorktreePath: thread.worktreePath,
-        activeThreadBranch,
-        currentGitRefName: gitStatusQuery.data?.refName ?? null,
-        sendEnvMode,
+        isPendingChat,
+        dispatchAllowed: dispatchCapability.allowed,
+        hostedTargetPending: hostedDraftTarget.pending !== null,
+        worktreePlan: resolveChatSendWorktreePlan({
+          isServerThread,
+          isFirstMessage: !isServerThread || thread.messages.length === 0,
+          threadWorktreePath: thread.worktreePath,
+          activeThreadBranch,
+          currentGitRefName: gitStatusQuery.data?.refName ?? null,
+          sendEnvMode,
+        }),
+        modelSelection: readComposer()?.getSendContext().selectedModelSelection,
+        runtimeMode,
+        tokenMode,
       });
-      if (plan.shouldCreateWorktree || plan.shouldMaterializeLegacyBranchWorktree) return;
-      const modelSelection = readComposer()?.getSendContext().selectedModelSelection;
+      if (request === null) return;
       requestProviderSessionPrewarm({
         api: readEnvironmentApi(environmentId),
         supported: providerSessionPrewarmSupported,
-        request: {
-          threadId: thread.id,
-          ...(isServerThread ? {} : { projectId: thread.projectId }),
-          ...(modelSelection ? { modelSelection } : {}),
-          runtimeMode,
-          tokenMode,
-        },
+        request,
       });
     };
   });
@@ -5517,13 +5515,11 @@ export default function ChatView(props: ChatViewProps) {
         notifySurfaceLoadFailure("Agent Control approvals", error, retry),
     },
   );
-  const phoneOverviewSheetReady = useLazyComponentReady(
+  const phoneOverviewSheetReady = usePhoneThreadSurfaceReady(
     LazyPhoneOverviewSheet,
     isPhoneTier && showPhoneOverviewSheet,
-    {
-      onLoadError: (error, retry) => notifySurfaceLoadFailure("overview", error, retry),
-    },
   );
+  const phoneThreadAppBarReady = usePhoneThreadSurfaceReady(LazyPhoneThreadAppBar, isPhoneTier);
   const sideChatThreadKey = !isPhoneTier ? activeThreadKey : null;
   const hasSideChat = useSideChatStore((state) =>
     sideChatThreadKey ? state.chatsByThreadKey[sideChatThreadKey] !== undefined : false,
@@ -5791,11 +5787,13 @@ export default function ChatView(props: ChatViewProps) {
         )}
       >
         {presentationTier === "phone" ? (
-          <PhoneThreadAppBar
-            environmentId={activeThread.environmentId}
-            threadId={activeThread.id}
-            title={activeThread.title}
-          />
+          phoneThreadAppBarReady ? (
+            <LazyPhoneThreadAppBar
+              environmentId={activeThread.environmentId}
+              threadId={activeThread.id}
+              title={activeThread.title}
+            />
+          ) : null
         ) : (
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
