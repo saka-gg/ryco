@@ -211,6 +211,15 @@ const builtEntry = path.join(serverRoot, "dist/bin.mjs");
 // Only a bundle built from the current entry shim is meaningful here.
 const hasCurrentBuild =
   existsSync(builtEntry) && readFileSync(builtEntry, "utf8").includes("enableCompileCache");
+// CI's build job sets this after building the server: the built-bundle suites must run there
+// instead of skipping silently.
+const requireBuild = process.env.RYCO_REQUIRE_SERVER_BUILD === "1";
+
+describe.runIf(requireBuild)("built server bundle presence", () => {
+  it("finds a server bundle built from the current entry shim", () => {
+    expect(hasCurrentBuild).toBe(true);
+  });
+});
 
 describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
   it("keeps sharp, the @pierre/diffs root, provider SDKs and the Codex schema out of the boot chunks", () => {
@@ -257,6 +266,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/GitHubCli\.ts$/mu);
+      // Loaded when the external Agent Control integration first starts.
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
     }
   });
 });

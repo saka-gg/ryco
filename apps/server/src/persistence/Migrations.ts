@@ -131,6 +131,9 @@ import Migration0088, {
 } from "./Migrations/088_LegacyActivityPayloads.ts";
 import Migration0089, { ensureLifecycleMarkersTable } from "./Migrations/089_RetireThreadTrash.ts";
 import Migration0090 from "./Migrations/090_AuthAccessLinks.ts";
+import Migration0091, {
+  ensureGuardedLatestCompletedTurnTrigger,
+} from "./Migrations/091_GuardedLatestCompletedTurnTrigger.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -232,6 +235,7 @@ export const migrationEntries = [
   [88, "LegacyActivityPayloads", Migration0088],
   [89, "RetireThreadTrash", Migration0089],
   [90, "AuthAccessLinks", Migration0090],
+  [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -559,6 +563,17 @@ export const repairLifecycleMarkersTable = Effect.fn("repairLifecycleMarkersTabl
   }
 });
 
+// Guarded latest-completed turn trigger: run 091 again as a repair when a later id was recorded
+// first (parallel branches claim the same next id). It must run after the 087 repair, which
+// recreates the unguarded trigger when it is missing.
+export const repairGuardedLatestCompletedTurnTrigger = Effect.fn(
+  "repairGuardedLatestCompletedTurnTrigger",
+)(function* () {
+  if (yield* ensureGuardedLatestCompletedTurnTrigger) {
+    yield* Effect.log("Repaired guarded projection_turns latest-completed trigger");
+  }
+});
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -753,6 +768,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 90) {
         yield* repairAuthAccessLinkColumns();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 91) {
+        yield* repairGuardedLatestCompletedTurnTrigger();
       }
     }),
   );

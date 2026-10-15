@@ -347,6 +347,34 @@ describe("governed workspace preflight", () => {
     expect(page.workspaces).toHaveLength(1);
     expect(page.nextCursor).not.toBeNull();
   });
+  it("lists a page with one read of the project's repository facts", async () => {
+    const f = fixture();
+    f.git(
+      f.checkout,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "topic work",
+    );
+    const reads = await Promise.all([
+      f.run((s) => s.read(projectId, "main", callerId)),
+      f.run((s) => s.read(projectId, "topic", callerId)),
+    ]);
+    f.commands.length = 0;
+    const listed = await f.run((s) => s.list(projectId, callerId));
+    const gitCommands = f.commands.map((command) => command.args.slice(2).join(" "));
+    expect(gitCommands.filter((args) => args.startsWith("worktree list"))).toHaveLength(1);
+    expect(gitCommands.filter((args) => args.startsWith("rev-list"))).toHaveLength(0);
+    // The same states individual reads (and plan revalidation) produce.
+    expect(listed.workspaces).toEqual(
+      reads.toSorted((a, b) => a.workspaceId.localeCompare(b.workspaceId)),
+    );
+    expect(listed.workspaces.find((w) => w.workspaceId === "topic")?.unmerged).toBe(true);
+  });
   it("reads without a caller thread for standalone integrations, marking nothing current", async () => {
     const f = fixture();
     const main = await f.run((s) => s.read(projectId, "main", null));

@@ -14,7 +14,10 @@ import { ContextPickerTabs } from "./ContextPickerTabs";
 
 type TabId = "issues" | "prs";
 
-/** Same rows as the composer `#` picker, sliced from the shared open-list superset. */
+/**
+ * The composer `#` picker's lean rows (number, title, dates), sliced from its
+ * shared open-list superset: no checks, labels or stacks for a picker list.
+ */
 const CONTEXT_PICKER_LIST_LIMIT = 50;
 
 export function ContextPickerPopup(props: {
@@ -44,6 +47,7 @@ export function ContextPickerPopup(props: {
     cwd: props.cwd,
     state: "open",
     limit: CONTEXT_PICKER_LIST_LIMIT,
+    view: "picker",
   });
 
   // Client-side filter

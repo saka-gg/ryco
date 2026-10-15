@@ -34,6 +34,8 @@ interface ComposerPromptShellPendingPrimaryAction {
 
 export interface ComposerPromptShellProps {
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
+  /** Whose prompt the editor holds; its undo history never crosses to another. */
+  historyScope: string;
 
   isComposerCollapsedMobile: boolean;
   hasComposerHeader: boolean;
@@ -127,6 +129,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
 ) {
   const {
     editorRef,
+    historyScope,
     isComposerCollapsedMobile,
     hasComposerHeader,
     isComposerApprovalState,
@@ -297,6 +300,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
         <div className="min-w-0 flex-1">
           <ComposerPromptEditor
             ref={editorRef}
+            historyScope={historyScope}
             collapsed={isComposerCollapsedMobile}
             value={
               isComposerApprovalState

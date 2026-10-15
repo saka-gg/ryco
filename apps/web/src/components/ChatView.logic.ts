@@ -18,6 +18,7 @@ import {
   isPendingChatDraft,
 } from "../composerDraftStore";
 import { NEW_CHAT_DRAFT_TITLE } from "./sidebar/sidebarChats.logic";
+import { threadHasConversation } from "@ryco/shared/threadFork";
 import { DateTime, Schema } from "effect";
 import { selectThreadByRef, useStore } from "../store";
 import {
@@ -436,7 +437,9 @@ export function shouldShowNewThreadSurface(input: {
  * Whether an existing server thread's history is still on its way. The shell
  * lists a thread (with its latest turn and last user message time) before its
  * message window arrives, so a thread that has started but shows no messages
- * yet is loading, not new. Messages already at hand (a read cache) render.
+ * yet is loading, not new. A fresh fork has neither (its inherited prompts are
+ * not its own recency and it ran no turn yet) but holds a conversation through
+ * its lineage. Messages already at hand (a read cache) render.
  */
 export function isServerThreadHistoryPending(input: {
   readonly isServerThread: boolean;
@@ -444,13 +447,45 @@ export function isServerThreadHistoryPending(input: {
   readonly messageCount: number;
   readonly hasLatestTurn: boolean;
   readonly latestUserMessageAt: string | null;
+  readonly lineage: { readonly relationship: string } | null;
 }): boolean {
   return (
     input.isServerThread &&
     !input.detailLoaded &&
     input.messageCount === 0 &&
-    (input.hasLatestTurn || input.latestUserMessageAt !== null)
+    (input.hasLatestTurn ||
+      threadHasConversation({
+        latestUserMessageAt: input.latestUserMessageAt,
+        lineage: input.lineage,
+      }))
   );
+}
+
+/**
+ * Per-thread "a send is in flight" flags. ChatView follows thread navigation
+ * instead of remounting, so a send still running for one thread must neither
+ * block the thread the user moved on to nor be cleared by a send there.
+ */
+export function createThreadSendFlags() {
+  const threadKeys = new Set<string>();
+  return {
+    has(threadKey: string | null): boolean {
+      return threadKey !== null && threadKeys.has(threadKey);
+    },
+    /** One thread's flag, in the `{ current }` shape the send pipeline writes. */
+    ref(threadKey: string | null): { current: boolean } {
+      return {
+        get current() {
+          return threadKey !== null && threadKeys.has(threadKey);
+        },
+        set current(inFlight: boolean) {
+          if (threadKey === null) return;
+          if (inFlight) threadKeys.add(threadKey);
+          else threadKeys.delete(threadKey);
+        },
+      };
+    },
+  };
 }
 
 /**

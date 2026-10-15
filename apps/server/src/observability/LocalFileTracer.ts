@@ -87,6 +87,12 @@ class LocalFileSpan implements Tracer.Span {
     this.delegate.end(endTime, exit);
 
     if (this.sampled && this.keepsLocalRecord(endTime, exit)) {
+      // Normalized only here: most statement spans are dropped above, and
+      // their text never needs the rewrite.
+      const sql = this.attributes.get(DB_QUERY_TEXT_ATTRIBUTE);
+      if (typeof sql === "string") {
+        this.attributes.set(DB_QUERY_TEXT_ATTRIBUTE, normalizeSqlText(sql));
+      }
       this.push(spanToTraceRecord(this));
     }
   }
@@ -102,12 +108,7 @@ class LocalFileSpan implements Tracer.Span {
 
   attribute(key: string, value: unknown): void {
     const redacted = this.redactAttribute(key, value);
-    this.attributes.set(
-      key,
-      key === DB_QUERY_TEXT_ATTRIBUTE && typeof redacted === "string"
-        ? normalizeSqlText(redacted)
-        : redacted,
-    );
+    this.attributes.set(key, redacted);
     this.delegate.attribute(key, redacted);
   }
 

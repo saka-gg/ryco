@@ -1,6 +1,6 @@
 import { assert, beforeEach, it } from "vite-plus/test";
 import type { SourceControlDiscoveryResult } from "@ryco/contracts";
-import { AtomRegistry } from "effect/reactivity";
+import * as AtomRegistry from "effect/reactivity/AtomRegistry";
 
 import {
   EMPTY_SOURCE_CONTROL_DISCOVERY_STATE,

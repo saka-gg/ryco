@@ -3,7 +3,7 @@ import {
   projectIconRequestKey,
   readProjectIconSource,
 } from "@ryco/client-runtime/connection";
-import { readEnvironmentApi } from "../connection/environmentApi";
+import { useEnvironmentApi } from "../connection/useEnvironmentApi";
 import { useEnvironmentServerConfigs } from "../state/environmentServerConfigs";
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { SymbolView } from "./AppSymbol";
@@ -12,6 +12,20 @@ import { useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { useThemeColor } from "../lib/useThemeColor";
+
+interface LatchedArtwork {
+  readonly key: string;
+  readonly source: string | null;
+}
+
+/** Keeps the current object when nothing changed, so the latch never re-renders a row. */
+function latchArtwork(
+  current: LatchedArtwork | null,
+  key: string,
+  source: string | null,
+): LatchedArtwork {
+  return current?.key === key && current.source === source ? current : { key, source };
+}
 
 export function ProjectFavicon(props: {
   readonly environmentId: EnvironmentId;
@@ -26,9 +40,12 @@ export function ProjectFavicon(props: {
   const configs = useEnvironmentServerConfigs();
   const connectionPhase = useWsConnectionStatusForEnvironment(props.environmentId).phase;
   const config = configs.get(props.environmentId);
+  // Subscribed to the connection itself, so a replaced client is never read
+  // through an api cached from the previous one.
+  const environmentApi = useEnvironmentApi(props.environmentId);
   const api =
     connectionPhase === "connected" && config?.environment.capabilities.projectIcons
-      ? readEnvironmentApi(props.environmentId)
+      ? environmentApi
       : undefined;
   const projectId = props.projectId;
   const environmentId = props.environmentId;
@@ -39,25 +56,40 @@ export function ProjectFavicon(props: {
     () => projectIconRequestKey(environmentId, projectId, revision),
     [environmentId, projectId, revision],
   );
-  const [artwork, setArtwork] = useState<{ key: string; source: string | null } | null>(null);
-  const cached =
-    api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
+  // The artwork this row shows, latched into state as soon as it is known, so
+  // the icon never depends on the cache entry still being fresh at render time:
+  // once the TTL passes or the LRU drops the entry, the row keeps its icon.
+  const [artwork, setArtwork] = useState<LatchedArtwork | null>(() => {
+    const source =
+      api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
+    return source === undefined ? null : { key: requestKey, source };
+  });
   useEffect(() => {
     if (!api || !projectId) return;
-    if (peekProjectIconSource(environmentId, projectId, revision) !== undefined) return;
+    // Answered from the cache while its entry is fresh, without a request;
+    // otherwise read again, with the latched artwork on screen until the
+    // answer replaces it.
     let current = true;
     void readProjectIconSource(api, environmentId, projectId, revision)
       .then((source) => {
-        if (current) setArtwork({ key: requestKey, source });
+        if (current) setArtwork((latched) => latchArtwork(latched, requestKey, source));
       })
       .catch(() => {
-        if (current) setArtwork({ key: requestKey, source: null });
+        if (current) setArtwork((latched) => latchArtwork(latched, requestKey, null));
       });
     return () => {
       current = false;
     };
   }, [api, environmentId, projectId, requestKey, revision]);
-  const faviconUrl = api ? (artwork?.key === requestKey ? artwork.source : (cached ?? null)) : null;
+  // A row whose inputs just changed shows cached artwork for the new key on its
+  // first pass, before the effect latches it.
+  const faviconUrl = api
+    ? artwork?.key === requestKey
+      ? artwork.source
+      : projectId
+        ? (peekProjectIconSource(environmentId, projectId, revision) ?? null)
+        : null
+    : null;
 
   return (
     <ProjectFaviconImage

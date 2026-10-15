@@ -173,6 +173,8 @@ describe("worktree reconciliation reads", () => {
     readonly calls: string[];
     /** The process lane each `git` call ran in. */
     readonly lanes?: ProcessLane[];
+    /** What `git worktree list` answers for the nth call (default: the root alone). */
+    readonly listing?: (cwd: string, call: number) => ReadonlyArray<string>;
   }) =>
     makeWorktreeOperations({
       projectionSnapshotQuery: {
@@ -224,7 +226,8 @@ describe("worktree reconciliation reads", () => {
             Effect.sync(() => {
               input.calls.push(`git:${cwd}`);
               input.lanes?.push(lane);
-              return [cwd];
+              const call = input.calls.filter((entry) => entry.startsWith("git:")).length;
+              return input.listing?.(cwd, call) ?? [cwd];
             }),
           ),
       },
@@ -257,6 +260,25 @@ describe("worktree reconciliation reads", () => {
     await writeFile(path.join(root, ".git", "worktrees", "linked", "gitdir"), "/elsewhere/.git\n");
     await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
     expect(calls.filter((call) => call.startsWith("git:"))).toHaveLength(2);
+  });
+
+  it("never reuses an empty listing, which only means git could not answer", async () => {
+    const root = await realpath(await mkdtemp(path.join(tmpdir(), "ryco-reconcile-empty-")));
+    scratchDirectories.push(root);
+    execFileSync("git", ["init", "-q", root], { stdio: "ignore" });
+    const calls: string[] = [];
+    const project = projectAt("transient", root);
+    const operations = makeOperations({
+      projects: [project],
+      calls,
+      // A failed rev-parse (dubious ownership, broken HEAD) lists nothing; git then recovers.
+      listing: (cwd, call) => (call === 1 ? [] : [cwd]),
+    });
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    await Effect.runPromise(operations.reconcileProjectWorktrees(project.id));
+    // Asked again after the empty answer, then served from the cache once git answered.
+    expect(calls.filter((call) => call.startsWith("git:"))).toEqual([`git:${root}`, `git:${root}`]);
   });
 
   it("waits before sweeping, then reconciles each available non-chat project once", async () => {

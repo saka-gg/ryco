@@ -854,6 +854,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
+  const attachmentInstructionTracker = makeAttachmentInstructionTracker();
+
   const processRuntimeEvent = (
     source: {
       readonly instanceId: ProviderInstanceId;
@@ -880,6 +882,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             recordRuntimeActivity(canonicalEvent.threadId, canonicalEvent.runtimeSessionId!),
           ),
           Effect.andThen(resolveAcceptanceWaiters(canonicalEvent)),
+          Effect.andThen(
+            Effect.sync(() => {
+              // A provider-side compaction may have summarized away the first turn
+              // that carried the attachment instructions: deliver them again.
+              if (
+                canonicalEvent.type === "thread.state.changed" &&
+                canonicalEvent.payload.state === "compacted"
+              ) {
+                attachmentInstructionTracker.forget(canonicalEvent.threadId);
+              }
+            }),
+          ),
           Effect.andThen(publishRuntimeEvent(canonicalEvent)),
           Effect.andThen(
             canonicalEvent.type === "turn.completed"
@@ -901,7 +915,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const subscribedAdapters = yield* Ref.make(
     new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>(),
   );
-  const attachmentInstructionTracker = makeAttachmentInstructionTracker();
 
   const getAdapterEntries = Ref.get(subscribedAdapters).pipe(
     Effect.map((map) => Array.from(map.entries())),
@@ -1341,7 +1354,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
     );
 
-  const projectCommands = makeStaleWhileRevalidateCache<ProviderProjectCommands>({
+  // Only real reads are cached: a failed or timed-out read must never replace the last good
+  // list with an empty one.
+  const projectCommands = makeStaleWhileRevalidateCache<
+    ProviderProjectCommands,
+    ProviderAdapterError | ProviderUnsupportedError | Cause.TimeoutError
+  >({
     freshMs: PROJECT_COMMANDS_FRESH_MS,
     capacity: 128,
     scope: serviceScope,
@@ -1350,23 +1368,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     instanceId,
     cwd,
   ) =>
-    projectCommands.get(
-      `${instanceId}\u0000${cwd}`,
-      registry.getByInstance(instanceId).pipe(
-        Effect.flatMap((adapter) =>
-          adapter.readProjectCommands
-            ? adapter.readProjectCommands(cwd)
-            : Effect.succeed(EMPTY_PROJECT_COMMANDS),
+    projectCommands
+      .get(
+        `${instanceId}\u0000${cwd}`,
+        registry.getByInstance(instanceId).pipe(
+          Effect.flatMap((adapter) =>
+            adapter.readProjectCommands
+              ? adapter.readProjectCommands(cwd)
+              : Effect.succeed(EMPTY_PROJECT_COMMANDS),
+          ),
+          Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
+          Effect.tapCause((cause) =>
+            Effect.logDebug("provider.project-commands.read-failed", {
+              instanceId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
         ),
-        Effect.timeout(Duration.millis(PROJECT_COMMANDS_TIMEOUT_MS)),
-        Effect.catchCause((cause) =>
-          Effect.logDebug("provider.project-commands.read-failed", {
-            instanceId,
-            cause: Cause.pretty(cause),
-          }).pipe(Effect.as(EMPTY_PROJECT_COMMANDS)),
-        ),
-      ),
-    );
+      )
+      .pipe(
+        // Only a first read can fail here (a stale entry keeps its value): nothing to show yet.
+        Effect.catchCause(() => Effect.succeed(EMPTY_PROJECT_COMMANDS)),
+      );
 
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
     function* (threadId, rawInput, options) {

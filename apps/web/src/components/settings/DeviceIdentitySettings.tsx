@@ -3,7 +3,6 @@ import { useState } from "react";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useDesktopWorkspaceState } from "../../platform/desktopWorkspace";
 import { useHostedHubStore, hostedHubController } from "../../hostedHub/state";
-import { hostedHubApi } from "../../hostedHub/api";
 import { useSettingsTarget } from "../../settingsTarget";
 import { isElectron, isHostedHubMode } from "../../env";
 import { HostedNodeRenameDialog } from "../hostedHub/HostedNodeRenameDialog";
@@ -35,6 +34,9 @@ export function DeviceIdentitySettings() {
         label,
       });
     } else if (isHostedHubMode() && hostedNode) {
+      // Loaded on demand: the Hub API (and its E2EE crypto) must not ship with
+      // the Settings chunk of standard and desktop builds.
+      const { hostedHubApi } = await import("../../hostedHub/api");
       await hostedHubApi.renameNode(hostedNode.id, label);
       await hostedHubController.refreshDirectory();
     } else {

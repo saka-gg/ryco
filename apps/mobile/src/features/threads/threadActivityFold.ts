@@ -37,6 +37,11 @@ export interface ActivityRow {
   /** Command preview, already trimmed to one line. */
   readonly command: string | null;
   readonly output: string | null;
+  /**
+   * Set when the thread window sent this activity's payload as a preview:
+   * `output` is cut short, and the full payload is read when the row opens.
+   */
+  readonly outputPreviewActivityId: string | null;
   readonly exitCode: number | null;
   readonly changedFiles: ReadonlyArray<string>;
   readonly tone: ActivityTone;
@@ -94,6 +99,7 @@ function toRow(entry: WorkLogEntry): ActivityRow {
     detail: entry.detail?.trim() || null,
     command: firstLine(entry.command ?? entry.rawCommand),
     output: entry.output?.trim() || null,
+    outputPreviewActivityId: entry.outputPreviewActivityId ?? null,
     exitCode: entry.exitCode ?? null,
     changedFiles: entry.changedFiles ?? [],
     tone: entry.tone,

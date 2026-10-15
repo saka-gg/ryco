@@ -16,6 +16,7 @@ import {
   OrchestrationWorktreeShell,
   ProjectId,
   ThreadId,
+  type WorkspaceLifecycleSummary,
   WorktreeId,
 } from "@ryco/contracts";
 
@@ -1092,6 +1093,25 @@ describe("workspace listing reads", () => {
         expect(statusCalls(f.state.gitCalls, f.checkout)).toHaveLength(afterFirst + 1);
         const topic = third.find((summary) => summary.worktreeId === topicId);
         expect(topic?.changes?.modified ?? 0).toBeGreaterThan(0);
+      }),
+    );
+  });
+
+  it("tells diverged branches apart in one read for the whole listing", async () => {
+    const f = fixture();
+    await f.run((service) =>
+      Effect.gen(function* () {
+        const topic = (summaries: ReadonlyArray<WorkspaceLifecycleSummary>) =>
+          summaries.find((summary) => summary.worktreeId === topicId);
+        expect(topic(yield* service.list(projectId))?.unmerged).toBe(false);
+        f.commit(f.checkout, "unmerged work");
+        expect(topic(yield* service.list(projectId))?.unmerged).toBe(true);
+        expect(f.state.gitCalls.filter((call) => call.includes(" rev-list "))).toEqual([]);
+        // A preview still counts it on its own, from scratch, and agrees.
+        const preview = yield* service.preview({ worktreeId: topicId, action: "remove-checkout" });
+        expect(preview.blockers.join(" ")).toContain(
+          "commits that the project HEAD does not contain",
+        );
       }),
     );
   });

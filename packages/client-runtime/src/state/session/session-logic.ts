@@ -1822,16 +1822,35 @@ function extractCodexItemOutput(item: Record<string, unknown> | null): string | 
 }
 
 /**
- * The expanded-panel output and exit code of one activity payload: what the
- * work log derives for an entry, applied to a payload fetched in full after
- * the window sent a preview of it.
+ * The expanded-panel output, exit code and changed files of one activity
+ * payload: what the work log derives for an entry, applied to a payload fetched
+ * in full after the window sent a preview of it. A preview keeps only the first
+ * few changes of a large edit, so its entry lists only those files.
  */
 export function deriveActivityPayloadOutput(payload: unknown): {
   readonly output: string | null;
   readonly exitCode: number | null;
+  readonly changedFiles: ReadonlyArray<string>;
 } {
   const record = asRecord(payload);
-  return { output: extractToolFullOutput(record), exitCode: extractToolExitCode(record) };
+  return {
+    output: extractToolFullOutput(record),
+    exitCode: extractToolExitCode(record),
+    changedFiles: extractChangedFiles(record),
+  };
+}
+
+/**
+ * The changed files an expanded work entry lists once its full payload is
+ * loaded: the entry's own (possibly merged across lifecycle events, and cut
+ * short by a preview) followed by the payload's, without duplicates.
+ */
+export function mergeLoadedChangedFiles(
+  entryChangedFiles: ReadonlyArray<string>,
+  payloadChangedFiles: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  if (payloadChangedFiles.length === 0) return entryChangedFiles;
+  return mergeChangedFiles(entryChangedFiles, payloadChangedFiles);
 }
 
 function extractToolFullOutput(payload: Record<string, unknown> | null): string | null {

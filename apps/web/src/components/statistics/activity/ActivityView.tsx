@@ -23,7 +23,13 @@ import { cn } from "~/lib/utils";
 
 import { ActivityHeatmap } from "../../settings/statistics/ActivityHeatmap";
 import { CodeChangesChart, ProjectBars } from "../charts";
-import { Panel, StatePanel, StatCard, StatSkeleton } from "../../settings/statistics/parts";
+import {
+  Panel,
+  StaleSnapshotNotice,
+  StatePanel,
+  StatCard,
+  StatSkeleton,
+} from "../../settings/statistics/parts";
 import { StatFilters } from "../../settings/statistics/StatFilters";
 import {
   aggregateByProject,
@@ -108,6 +114,8 @@ export function ActivityView({
           {refreshing ? "Refreshing" : "Refresh"}
         </Button>
       </div>
+
+      {error ? <StaleSnapshotNotice generatedAt={snapshot.generatedAt} error={error} /> : null}
 
       <p className="max-w-4xl text-sm leading-relaxed text-muted-foreground">
         Activity includes work observed by Ryco on{" "}

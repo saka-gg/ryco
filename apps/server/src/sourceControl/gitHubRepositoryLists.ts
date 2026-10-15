@@ -453,10 +453,10 @@ export function isGitHubStackFieldUnsupportedDetail(detail: string): boolean {
   return /field '(?:stack|stackEntry)' doesn't exist on type/iu.test(detail);
 }
 
-// ── Pull request states by number ────────────────────────────────────
+// ── Pull request and issue states by number ──────────────────────────
 
-/** Pull requests one state query asks for (aliases per document). */
-export const GITHUB_PULL_REQUEST_STATES_BATCH_SIZE = 50;
+/** Pull requests and issues one state query asks for (aliases per document). */
+export const GITHUB_LINK_STATES_BATCH_SIZE = 50;
 
 export interface GitHubPullRequestStateRecord {
   readonly state: "open" | "closed" | "merged";
@@ -465,18 +465,34 @@ export interface GitHubPullRequestStateRecord {
   readonly mergedAt: string | null;
 }
 
+export interface GitHubLinkStateNumbers {
+  readonly pullRequests: ReadonlyArray<number>;
+  readonly issues: ReadonlyArray<number>;
+}
+
+export interface GitHubLinkStates {
+  readonly pullRequests: ReadonlyMap<number, GitHubPullRequestStateRecord>;
+  readonly issues: ReadonlyMap<number, "open" | "closed">;
+}
+
+const isLinkNumber = (number: number) => Number.isSafeInteger(number) && number > 0;
+
 /**
- * One document reading the state of several pull requests of a repository by number (an
- * alias per number), instead of one `gh pr view` process per pull request.
+ * One document reading the states of several pull requests and issues of a repository by
+ * number (an alias per number), instead of one `gh pr view` or `gh issue view` per link.
  */
-export function buildGitHubPullRequestStatesQuery(numbers: ReadonlyArray<number>): string {
-  const fields = numbers
-    .filter((number) => Number.isSafeInteger(number) && number > 0)
-    .map(
-      (number) =>
-        `p${number}: pullRequest(number: ${number}) { number state isDraft closedAt mergedAt }`,
-    )
-    .join("\n    ");
+export function buildGitHubLinkStatesQuery(numbers: GitHubLinkStateNumbers): string {
+  const fields = [
+    ...numbers.pullRequests
+      .filter(isLinkNumber)
+      .map(
+        (number) =>
+          `p${number}: pullRequest(number: ${number}) { number state isDraft closedAt mergedAt }`,
+      ),
+    ...numbers.issues
+      .filter(isLinkNumber)
+      .map((number) => `i${number}: issue(number: ${number}) { number state }`),
+  ].join("\n    ");
   return `query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     ${fields}
@@ -498,11 +514,10 @@ const decodePullRequestStatesResponse = decodeJsonResult(RawPullRequestStatesRes
 
 /**
  * States by number. A number GitHub cannot resolve (deleted, transferred, no access to that
- * one) is left out with its error; any other error fails the read.
+ * one, an issue number that is a pull request) is left out with its error; any other error
+ * fails the read.
  */
-export function decodeGitHubPullRequestStatesJson(
-  raw: string,
-): Result.Result<ReadonlyMap<number, GitHubPullRequestStateRecord>, string> {
+export function decodeGitHubLinkStatesJson(raw: string): Result.Result<GitHubLinkStates, string> {
   const decoded = decodePullRequestStatesResponse(raw);
   if (Result.isFailure(decoded)) {
     return Result.fail(`Invalid GitHub pull request states: ${formatSchemaError(decoded.failure)}`);
@@ -510,16 +525,22 @@ export function decodeGitHubPullRequestStatesJson(
   const fatal = (decoded.success.errors ?? []).flatMap((error) => {
     const path = error?.path ?? [];
     const alias = path[1];
-    return path[0] === "repository" && typeof alias === "string" && /^p\d+$/u.test(alias)
+    return path[0] === "repository" && typeof alias === "string" && /^[pi]\d+$/u.test(alias)
       ? []
       : [error?.message?.trim() || "GitHub GraphQL returned an error."];
   });
   if (fatal.length > 0) return Result.fail(`GitHub GraphQL returned errors: ${fatal.join("; ")}`);
   const repository = decoded.success.data?.repository;
   if (!repository) return Result.fail("GitHub returned no repository for the pull request states.");
-  const states = new Map<number, GitHubPullRequestStateRecord>();
-  for (const node of Object.values(repository)) {
+  const pullRequests = new Map<number, GitHubPullRequestStateRecord>();
+  const issues = new Map<number, "open" | "closed">();
+  for (const [alias, node] of Object.entries(repository)) {
     if (!isRecord(node) || typeof node.number !== "number") continue;
+    if (alias.startsWith("i")) {
+      const state = node.state === "OPEN" ? "open" : node.state === "CLOSED" ? "closed" : null;
+      if (state !== null) issues.set(node.number, state);
+      continue;
+    }
     const state =
       node.state === "OPEN"
         ? "open"
@@ -529,12 +550,12 @@ export function decodeGitHubPullRequestStatesJson(
             ? "merged"
             : null;
     if (state === null) continue;
-    states.set(node.number, {
+    pullRequests.set(node.number, {
       state,
       isDraft: node.isDraft === true,
       closedAt: typeof node.closedAt === "string" ? node.closedAt : null,
       mergedAt: typeof node.mergedAt === "string" ? node.mergedAt : null,
     });
   }
-  return Result.succeed(states);
+  return Result.succeed({ pullRequests, issues });
 }

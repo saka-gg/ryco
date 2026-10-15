@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -255,6 +259,69 @@ describe("Copilot adapter client teardown", () => {
       yield* Fiber.interrupt(start);
       assert.deepStrictEqual(fake.calls, { stop: 1, forceStop: 0 });
       assert.deepStrictEqual(yield* adapter.listSessions(), []);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("closes the native event logger it built when the adapter is released", () =>
+    Effect.gen(function* () {
+      const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-copilot-native-log-"));
+      let emit: ((event: unknown) => void) | undefined;
+      const session = {
+        sessionId: "copilot-session-native-log",
+        on: (handler: (event: unknown) => void) => {
+          emit = handler;
+          return () => {
+            emit = undefined;
+          };
+        },
+        disconnect: async () => {},
+        abort: async () => {},
+        send: async () => {},
+        setModel: async () => {},
+      };
+      const client = {
+        createSession: async () => session,
+        resumeSession: async () => session,
+        stop: async () => [],
+        forceStop: async () => {},
+      };
+      try {
+        yield* Effect.gen(function* () {
+          const adapter = yield* makeCopilotAdapter(
+            { binaryPath: "copilot" },
+            {
+              instanceId,
+              nativeEventLogPath: path.join(logDir, "events.log"),
+              clientFactory: () => client as never,
+            },
+          );
+          yield* adapter.startSession(
+            startInput(
+              ThreadId.make("thread-copilot-native-log"),
+              RuntimeSessionId.make("runtime-copilot-native-log"),
+            ),
+          );
+          assert.isDefined(emit);
+          emit!({
+            id: "evt-delta",
+            timestamp: new Date().toISOString(),
+            parentId: null,
+            ephemeral: true,
+            type: "assistant.message_delta",
+            data: { messageId: "msg-1", deltaContent: "hello" },
+          });
+          yield* Effect.sleep("10 millis");
+          yield* adapter.stopAll();
+        }).pipe(Effect.scoped);
+
+        // An open delta run is only written by a flush that closes it: the
+        // adapter's release.
+        const nativeLog = fs.readdirSync(logDir).find((name) => name.endsWith(".native.log"));
+        assert.isDefined(nativeLog);
+        assert.include(fs.readFileSync(path.join(logDir, nativeLog!), "utf8"), '"text":"hello"');
+      } finally {
+        fs.rmSync(logDir, { recursive: true, force: true });
+      }
     }).pipe(Effect.provide(testLayer)),
   );
 });

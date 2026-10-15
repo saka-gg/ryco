@@ -22,6 +22,7 @@ import { makeKeyedCoalescingWorker } from "@ryco/shared/KeyedCoalescingWorker";
 import { latestStateQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { bracketedTerminalSnippet } from "@ryco/shared/terminalPaste";
 import {
+  Clock,
   Effect,
   Deferred,
   Equal,
@@ -30,6 +31,7 @@ import {
   FileSystem,
   Layer,
   Option,
+  PlatformError,
   Ref,
   Schema,
   Scope,
@@ -66,8 +68,10 @@ import {
   type HistoryBufferLimits,
   type HistoryBufferState,
   appendTerminalHistoryChunk,
+  countNewlines,
   emptyHistoryBufferState,
   historyBufferStateFrom,
+  utf8ByteLength,
 } from "../historyBuffer.ts";
 import { TerminalHistoryCursorIndex } from "../historyCursorIndex.ts";
 import {
@@ -81,21 +85,34 @@ import {
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
 /**
- * Output persists at most once per window per session, writing the latest
- * history when the window ends. Each write rewrites the whole history file
- * (up to `DEFAULT_HISTORY_MAX_BYTES`), so a short window under continuous
- * output costs a full rewrite every few chunks. Lifecycle changes (clear,
- * restart, close, exit, shutdown) still write through immediately.
+ * Output persists at most once per window per session. A window appends the
+ * output it collected to the history file; lifecycle changes (clear, restart,
+ * close) and compaction rewrite the file with the retained history. Exit and
+ * shutdown flush the pending window immediately.
  */
 const DEFAULT_PERSIST_DEBOUNCE_MS = 1_000;
+/**
+ * The history file keeps growing by appends past the retained budgets, whose
+ * head the session already trimmed in memory. Once it holds this many times
+ * either budget, the next window rewrites it with the retained history, so
+ * rewrites cost O(output) amortized and a cold open reads a bounded file.
+ */
+const HISTORY_FILE_COMPACTION_FACTOR = 1.5;
 const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
 /**
- * Process-table cadence once no terminal has had input or output for this
- * long. Subprocesses start and stop around I/O (a command line, its output,
- * the next prompt), so recent I/O keeps the fast cadence; idle shells still
+ * Process-table cadence once no terminal has had input (or a start, or an
+ * activity change) for this long. Subprocesses start after a command line, so
+ * recent input keeps the fast cadence; idle shells and continuous output still
  * get a periodic check for silent changes such as background jobs ending.
  */
 const DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS = 5_000;
+/**
+ * Output alone does not keep the fast cadence: a command producing output
+ * already shows as running, and its end shows as output going quiet after the
+ * next prompt. One check runs on the first tick after output has been quiet
+ * this long (capped at a quarter of the tick interval).
+ */
+const DEFAULT_SUBPROCESS_OUTPUT_QUIET_MS = 250;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_MAX_PENDING_PROCESS_EVENTS = 2_048;
@@ -109,7 +126,7 @@ class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocess
   {
     message: Schema.String,
     cause: Schema.optional(Schema.Defect()),
-    command: Schema.Literals(["powershell", "ps"]),
+    command: Schema.Literals(["powershell", "ps", "procfs"]),
     exitCode: Schema.optional(Schema.NullOr(Schema.Number)),
     timedOut: Schema.optional(Schema.Boolean),
     stdoutTruncated: Schema.optional(Schema.Boolean),
@@ -125,12 +142,15 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   },
 ) {}
 
-interface TerminalProcessTableSnapshot {
+export interface TerminalProcessTableSnapshot {
   readonly childrenByParent: ReadonlyMap<number, ReadonlyArray<number>>;
 }
 
-interface TerminalProcessTableSnapshotter {
-  (): Effect.Effect<TerminalProcessTableSnapshot, TerminalSubprocessCheckError | Error>;
+export interface TerminalProcessTableSnapshotter {
+  /** `shellPids` are the running terminals' shells; a snapshot may cover only them. */
+  (
+    shellPids: ReadonlyArray<number>,
+  ): Effect.Effect<TerminalProcessTableSnapshot, TerminalSubprocessCheckError | Error>;
 }
 
 interface ShellCandidate {
@@ -177,10 +197,52 @@ interface TerminalSessionState {
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
   runtimeEnv: Record<string, string> | null;
+  /** History characters appended since the last persist was enqueued. */
+  unpersistedHistoryChars: number;
+  /** The history file as of the last enqueued persist; null forces a rewrite. */
+  persistedHistoryFile: PersistedHistoryFile | null;
 }
 
-interface PersistHistoryRequest {
-  history: string;
+/**
+ * One rewrite of a history file and the appends that extend it. When any of
+ * its writes fails, the file's content is unknown: its remaining appends are
+ * skipped and the session's next persist rewrites the file.
+ */
+interface HistoryFileEpoch {
+  failed: boolean;
+}
+
+interface PersistedHistoryFile {
+  readonly epoch: HistoryFileEpoch;
+  readonly bytes: number;
+  readonly newlines: number;
+}
+
+type PersistHistoryRequest =
+  | {
+      readonly type: "write";
+      readonly session: TerminalSessionState;
+      readonly epoch: HistoryFileEpoch;
+      readonly history: string;
+    }
+  | {
+      readonly type: "append";
+      readonly session: TerminalSessionState;
+      readonly epoch: HistoryFileEpoch;
+      readonly data: string;
+    };
+
+/**
+ * Coalesces queued persists of one file. Appends always extend the epoch of
+ * the write enqueued before them, so they concatenate onto it.
+ */
+function mergePersistHistoryRequests(
+  current: PersistHistoryRequest,
+  next: PersistHistoryRequest,
+): PersistHistoryRequest {
+  if (next.type === "write") return next;
+  if (current.type === "write") return { ...current, history: current.history + next.data };
+  return { ...current, data: current.data + next.data };
 }
 
 interface ScheduledHistoryPersist {
@@ -257,6 +319,9 @@ function openSnapshot(
 /** Replaces the retained history; cursors from before no longer resolve to a delta. */
 function replaceHistory(session: TerminalSessionState, state: HistoryBufferState): void {
   session.historyState = state;
+  // The file no longer extends to this history; the next persist rewrites it.
+  session.unpersistedHistoryChars = 0;
+  session.persistedHistoryFile = null;
   session.pendingHistoryControlSequence = "";
   session.historyIndex.reset(session.cursor.sequence + 1, state.history.length);
 }
@@ -700,6 +765,85 @@ const snapshotWindowsProcessTable = Effect.fn("terminal.snapshotWindowsProcessTa
   },
 );
 
+/**
+ * Reads the running shells' direct children from procfs
+ * (`/proc/<pid>/task/<tid>/children`, Linux 3.5+ with CONFIG_PROC_CHILDREN):
+ * the same answer as a process table, without spawning `ps` or enumerating
+ * every process on the host.
+ */
+export const makeProcfsProcessTableSnapshotter =
+  (fileSystem: FileSystem.FileSystem, procRoot = "/proc"): TerminalProcessTableSnapshotter =>
+  (shellPids) => {
+    // A shell or thread that exited between listing and reading has no children.
+    const orWhenGone = <A>(effect: Effect.Effect<A, PlatformError.PlatformError>, fallback: A) =>
+      effect.pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(fallback),
+        ),
+      );
+    const readChildren = (pid: number) =>
+      Effect.gen(function* () {
+        const taskDir = path.join(procRoot, String(pid), "task");
+        const tasks = yield* orWhenGone(fileSystem.readDirectory(taskDir), []);
+        const children: number[] = [];
+        for (const task of tasks) {
+          const text = yield* orWhenGone(
+            fileSystem.readFileString(path.join(taskDir, task, "children")),
+            "",
+          );
+          for (const token of text.split(/\s+/)) {
+            const child = Number(token);
+            if (token.length > 0 && Number.isInteger(child)) children.push(child);
+          }
+        }
+        return [pid, children] as const;
+      });
+    return Effect.forEach(shellPids, readChildren, { concurrency: "unbounded" }).pipe(
+      Effect.map((entries) => ({
+        childrenByParent: new Map(entries.filter(([, children]) => children.length > 0)),
+      })),
+      Effect.mapError(
+        (cause) =>
+          new TerminalSubprocessCheckError({
+            message: "Failed to read terminal subprocesses from procfs.",
+            cause,
+            command: "procfs",
+          }),
+      ),
+    );
+  };
+
+const procfsChildrenAvailable = (fileSystem: FileSystem.FileSystem) =>
+  fileSystem
+    .exists(`/proc/${process.pid}/task/${process.pid}/children`)
+    .pipe(Effect.orElseSucceed(() => false));
+
+/** Uses `primary` until it fails once, then `fallback` for good. */
+function withSnapshotterFallback(
+  primary: TerminalProcessTableSnapshotter,
+  fallback: TerminalProcessTableSnapshotter,
+): TerminalProcessTableSnapshotter {
+  let current = primary;
+  return (shellPids) =>
+    current === fallback
+      ? fallback(shellPids)
+      : primary(shellPids).pipe(
+          Effect.catch((reason) =>
+            Effect.logWarning("terminal subprocess polling falls back to the process table", {
+              reason,
+            }).pipe(
+              Effect.andThen(
+                Effect.suspend(() => {
+                  current = fallback;
+                  return fallback(shellPids);
+                }),
+              ),
+            ),
+          ),
+        );
+}
+
 function capHistory(history: string, maxLines: number): string {
   if (history.length === 0) return history;
   const hasTrailingNewline = history.endsWith("\n");
@@ -951,7 +1095,7 @@ interface TerminalManagerOptions {
   env?: NodeJS.ProcessEnv;
   processTableSnapshotter?: TerminalProcessTableSnapshotter;
   subprocessPollIntervalMs?: number;
-  /** Process-table cadence while no terminal has recent I/O; see the default's note. */
+  /** Process-table cadence while no terminal has recent input; see the default's note. */
   subprocessIdlePollIntervalMs?: number;
   /** Trailing window for persisting output history; see the default's note. */
   historyPersistDebounceMs?: number;
@@ -994,11 +1138,18 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       options.processTableSnapshotter === undefined && platform !== "win32"
         ? yield* resolvePosixPsCommand()
         : null;
-    const processTableSnapshotter =
+    const snapshotPosixTable: TerminalProcessTableSnapshotter = () =>
+      snapshotPosixProcessTable(posixPsCommand ?? "ps");
+    const processTableSnapshotter: TerminalProcessTableSnapshotter =
       options.processTableSnapshotter ??
       (platform === "win32"
-        ? snapshotWindowsProcessTable
-        : () => snapshotPosixProcessTable(posixPsCommand ?? "ps"));
+        ? () => snapshotWindowsProcessTable()
+        : platform === "linux" && (yield* procfsChildrenAvailable(fileSystem))
+          ? withSnapshotterFallback(
+              makeProcfsProcessTableSnapshotter(fileSystem),
+              snapshotPosixTable,
+            )
+          : snapshotPosixTable);
     const subprocessPollIntervalMs =
       options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
     const subprocessIdlePollTicks = Math.max(
@@ -1007,6 +1158,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         (options.subprocessIdlePollIntervalMs ?? DEFAULT_SUBPROCESS_IDLE_POLL_INTERVAL_MS) /
           Math.max(1, subprocessPollIntervalMs),
       ),
+    );
+    const subprocessOutputQuietMs = Math.min(
+      DEFAULT_SUBPROCESS_OUTPUT_QUIET_MS,
+      subprocessPollIntervalMs / 4,
     );
     const historyPersistDebounceMs = Math.max(
       0,
@@ -1044,11 +1199,17 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       session.cursor = nextCursor();
       return session.cursor;
     };
-    /** Bumped by PTY starts, input and output; drives the subprocess poll cadence. */
+    /**
+     * Bumped by PTY starts, input and subprocess activity changes, the moments
+     * a subprocess is likely to start or stop; drives the fast poll cadence.
+     */
     let terminalIoRevision = 0;
     const noteTerminalIo = () => {
       terminalIoRevision += 1;
     };
+    /** Bumped by output, which only arms one check once it goes quiet. */
+    let terminalOutputRevision = 0;
+    let lastTerminalOutputAtMs = 0;
     const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
     const workerScope = yield* Scope.make("sequential");
     yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
@@ -1254,28 +1415,92 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         component: "TerminalManager.persistHistory",
         capacity: 256,
       }),
-      merge: (_current, next) => next,
+      merge: mergePersistHistoryRequests,
       process: Effect.fn("terminal.persistHistoryWorker")(function* (sessionKey, request) {
         const [threadId, terminalId] = sessionKey.split("\u0000");
         if (!threadId || !terminalId) {
           return;
         }
+        // An earlier write of this epoch failed: appending would leave a gap.
+        if (request.epoch.failed) return;
 
-        yield* fileSystem.writeFileString(historyPath(threadId, terminalId), request.history).pipe(
+        const filePath = historyPath(threadId, terminalId);
+        yield* (
+          request.type === "write"
+            ? fileSystem.writeFileString(filePath, request.history)
+            : fileSystem.writeFileString(filePath, request.data, { flag: "a" })
+        ).pipe(
           Effect.catch((error) =>
-            Effect.logWarning("failed to persist terminal history", {
-              threadId,
-              terminalId,
-              error,
-            }),
+            Effect.sync(() => {
+              request.epoch.failed = true;
+              if (request.session.persistedHistoryFile?.epoch === request.epoch) {
+                request.session.persistedHistoryFile = null;
+              }
+            }).pipe(
+              Effect.andThen(
+                Effect.logWarning("failed to persist terminal history", {
+                  threadId,
+                  terminalId,
+                  error,
+                }),
+              ),
+            ),
           ),
         );
       }),
     });
 
+    const historyFileCompactionBytes = maxHistoryBytes * HISTORY_FILE_COMPACTION_FACTOR;
+    const historyFileCompactionLines = historyLineLimit * HISTORY_FILE_COMPACTION_FACTOR;
+
+    /** A rewrite of the file with the session's retained history. */
+    const historyRewriteRequest = (session: TerminalSessionState): PersistHistoryRequest => {
+      const history = session.historyState.history;
+      const epoch: HistoryFileEpoch = { failed: false };
+      session.unpersistedHistoryChars = 0;
+      session.persistedHistoryFile = {
+        epoch,
+        bytes: session.historyState.approxBytes,
+        newlines: session.historyState.newlineCount,
+      };
+      return { type: "write", session, epoch, history };
+    };
+
+    /**
+     * The write that brings the file up to the session's history: the output
+     * appended since the last persist, or a rewrite when the file's content is
+     * unknown, the appended text is no longer retained whole, or the file
+     * reached its compaction bound.
+     */
+    const historyPersistRequest = (session: TerminalSessionState): PersistHistoryRequest | null => {
+      const file = session.persistedHistoryFile;
+      const history = session.historyState.history;
+      const appendedChars = session.unpersistedHistoryChars;
+      if (file === null || file.epoch.failed || appendedChars > history.length) {
+        return historyRewriteRequest(session);
+      }
+      if (appendedChars === 0) return null;
+      const data = history.slice(history.length - appendedChars);
+      const bytes = file.bytes + utf8ByteLength(data);
+      const newlines = file.newlines + countNewlines(data);
+      if (bytes > historyFileCompactionBytes || newlines > historyFileCompactionLines) {
+        return historyRewriteRequest(session);
+      }
+      session.unpersistedHistoryChars = 0;
+      session.persistedHistoryFile = { epoch: file.epoch, bytes, newlines };
+      return { type: "append", session, epoch: file.epoch, data };
+    };
+
+    const enqueueHistoryPersist = (sessionKey: string, session: TerminalSessionState) =>
+      Effect.suspend(() => {
+        const request = historyPersistRequest(session);
+        return request === null ? Effect.void : persistWorker.enqueue(sessionKey, request);
+      });
+
     // The worker writes immediately; output batching happens here. One pending
-    // window per session reads the latest history when it ends, so the steady
-    // state is one full-file write per window rather than one per chunk.
+    // window per session appends what the session retained meanwhile when it
+    // ends, so the steady state is one append per window rather than one per
+    // chunk, and no window rewrites the whole history.
     const scheduledPersists = new Map<string, ScheduledHistoryPersist>();
 
     const queuePersist = Effect.fn("terminal.queuePersist")(function* (
@@ -1291,9 +1516,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             // Superseded by an immediate write (clear, restart, close, exit).
             if (scheduledPersists.get(sessionKey) !== scheduled) return Effect.void;
             scheduledPersists.delete(sessionKey);
-            return persistWorker.enqueue(sessionKey, {
-              history: scheduled.session.historyState.history,
-            });
+            return enqueueHistoryPersist(sessionKey, scheduled.session);
           }),
         ),
         Effect.forkIn(workerScope),
@@ -1306,9 +1529,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         const scheduled = scheduledPersists.get(sessionKey);
         if (!scheduled) return Effect.void;
         scheduledPersists.delete(sessionKey);
-        return persistWorker.enqueue(sessionKey, {
-          history: scheduled.session.historyState.history,
-        });
+        return enqueueHistoryPersist(sessionKey, scheduled.session);
       });
 
     const flushPersist = Effect.fn("terminal.flushPersist")(function* (
@@ -1320,14 +1541,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       yield* persistWorker.drainKey(sessionKey);
     });
 
+    /** Rewrites the session's history file now and waits for the write. */
     const persistHistory = Effect.fn("terminal.persistHistory")(function* (
-      threadId: string,
-      terminalId: string,
-      history: string,
+      session: TerminalSessionState,
     ) {
-      const sessionKey = toSessionKey(threadId, terminalId);
+      const sessionKey = toSessionKey(session.threadId, session.terminalId);
       scheduledPersists.delete(sessionKey);
-      yield* persistWorker.enqueue(sessionKey, { history });
+      yield* persistWorker.enqueue(sessionKey, historyRewriteRequest(session));
       yield* persistWorker.drainKey(sessionKey);
     });
 
@@ -1646,9 +1866,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               sanitized.visibleText,
               historyLimits,
             );
+            session.unpersistedHistoryChars += sanitized.visibleText.length;
           }
           session.updatedAt = new Date().toISOString();
-          noteTerminalIo();
+          terminalOutputRevision += 1;
           const cursor = advanceCursor(session);
           if (sanitized.visibleText.length > 0) {
             session.historyIndex.append(
@@ -1700,6 +1921,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       }
 
       if (action.type === "output") {
+        lastTerminalOutputAtMs = yield* Clock.currentTimeMillis;
         if (action.persistHistory) {
           yield* queuePersist(session);
         }
@@ -1990,7 +2212,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           }
         }
         yield* stopProcess(session.value);
-        yield* persistHistory(threadId, terminalId, session.value.historyState.history);
+        yield* persistHistory(session.value);
       }
 
       yield* flushPersist(threadId, terminalId);
@@ -2026,7 +2248,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       // One process-table enumeration serves every running terminal in this
       // tick. Spawning pgrep/ps per session scales with terminal count and can
       // create enough short-lived processes to exhaust host PID capacity.
-      const processTable = yield* processTableSnapshotter().pipe(
+      const processTable = yield* processTableSnapshotter(
+        runningSessions.map((session) => session.pid),
+      ).pipe(
         Effect.map(Option.some),
         Effect.catch((reason) => {
           // A persistent failure (e.g. a process table larger than the output
@@ -2096,12 +2320,18 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       return changed;
     });
 
-    // Ticks every `subprocessPollIntervalMs`, but spawns the process-table
-    // snapshot only while a terminal had I/O (or an activity change) within the
-    // idle interval, and otherwise once per idle interval.
+    // Ticks every `subprocessPollIntervalMs`, but snapshots the process table
+    // only: on every tick while a terminal had input (or a start, or an
+    // activity change) within the idle interval; once on the first tick after
+    // output went quiet, which is when a command that printed its way to the
+    // next prompt has ended; and otherwise once per idle interval. Continuous
+    // output (a dev server, a watcher) thus costs the idle cadence, not a
+    // snapshot per tick.
     let observedIoRevision = -1;
+    let observedOutputRevision = 0;
     let ticksSinceIo = 0;
     let ticksSincePoll = 0;
+    let outputSincePoll = false;
     const subprocessPollTick = Effect.gen(function* () {
       if (terminalIoRevision !== observedIoRevision) {
         observedIoRevision = terminalIoRevision;
@@ -2109,11 +2339,23 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       } else {
         ticksSinceIo += 1;
       }
+      if (terminalOutputRevision !== observedOutputRevision) {
+        observedOutputRevision = terminalOutputRevision;
+        outputSincePoll = true;
+      }
       ticksSincePoll += 1;
-      if (ticksSinceIo >= subprocessIdlePollTicks && ticksSincePoll < subprocessIdlePollTicks) {
+      const outputWentQuiet =
+        outputSincePoll &&
+        (yield* Clock.currentTimeMillis) - lastTerminalOutputAtMs >= subprocessOutputQuietMs;
+      if (
+        ticksSinceIo >= subprocessIdlePollTicks &&
+        ticksSincePoll < subprocessIdlePollTicks &&
+        !outputWentQuiet
+      ) {
         return;
       }
       ticksSincePoll = 0;
+      outputSincePoll = false;
       if (yield* pollSubprocessActivity()) noteTerminalIo();
     });
 
@@ -2196,6 +2438,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
               unsubscribeExit: null,
               hasRunningSubprocess: false,
               runtimeEnv: normalizedRuntimeEnv(input.env),
+              unpersistedHistoryChars: 0,
+              persistedHistoryFile: null,
             };
 
             // Once admitted, the start runs to its end: an interrupted one would leave the
@@ -2267,11 +2511,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 liveSession.runtimeEnv = nextRuntimeEnv;
                 replaceHistory(liveSession, emptyHistoryBufferState());
                 clearPendingProcessEvents(liveSession);
-                yield* persistHistory(
-                  liveSession.threadId,
-                  liveSession.terminalId,
-                  liveSession.historyState.history,
-                );
+                yield* persistHistory(liveSession);
               }
               yield* startSession(
                 liveSession,
@@ -2385,7 +2625,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           clearPendingProcessEvents(session);
           session.updatedAt = new Date().toISOString();
           const cursor = advanceCursor(session);
-          yield* persistHistory(input.threadId, terminalId, session.historyState.history);
+          yield* persistHistory(session);
           yield* publishEvent({
             type: "cleared",
             cursor,
@@ -2437,6 +2677,8 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                   unsubscribeExit: null,
                   hasRunningSubprocess: false,
                   runtimeEnv: normalizedRuntimeEnv(input.env),
+                  unpersistedHistoryChars: 0,
+                  persistedHistoryFile: null,
                 };
                 yield* admitPtyStart(session, target, true);
                 yield* evictInactiveSessionsIfNeeded();
@@ -2449,7 +2691,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
               replaceHistory(session, emptyHistoryBufferState());
               clearPendingProcessEvents(session);
-              yield* persistHistory(input.threadId, terminalId, session.historyState.history);
+              yield* persistHistory(session);
               yield* startSession(
                 session,
                 {

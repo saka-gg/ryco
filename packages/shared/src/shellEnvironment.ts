@@ -11,7 +11,9 @@
  *   never fire;
  * - cached: the last result is applied synchronously at the next start and
  *   refreshed afterwards (stale-while-revalidate), so only a launch with no
- *   cache at all waits for a shell;
+ *   cache at all waits for a shell. A probe that delivered no PATH is cached
+ *   too, so a shell slower than the bound is retried in the background (with
+ *   {@link SHELL_REFRESH_TIMEOUT_MS}) instead of blocking every start;
  * - additive: a failed or timed-out probe never removes a PATH entry that is
  *   already in effect.
  */
@@ -32,9 +34,12 @@ import {
   parseLoginShellEnvironmentOutput,
   readEnvironmentFromLoginShell,
   readEnvironmentFromWindowsShell,
+  readEnvironmentFromWindowsShellAsync,
   readPathFromLaunchctl,
   resolveWindowsEnvironment,
+  resolveWindowsEnvironmentAsync,
   type ShellEnvironmentReader,
+  type WindowsEnvironmentProbeOptions,
   type WindowsShellEnvironmentReader,
 } from "./shell.ts";
 
@@ -67,6 +72,12 @@ export type ShellEnvironment = Partial<Record<ShellEnvironmentName, string>>;
 
 /** Upper bound for one shell probe. Interactive zsh ignores SIGTERM, so SIGKILL. */
 export const SHELL_PROBE_TIMEOUT_MS = 1_500;
+
+/**
+ * Upper bound for one shell probe of a background refresh. It runs off the startup path, so a
+ * slow profile (nvm, conda) still gets to answer.
+ */
+export const SHELL_REFRESH_TIMEOUT_MS = 10_000;
 
 export function pickShellEnvironment(env: Readonly<Record<string, string | undefined>>) {
   const environment: ShellEnvironment = {};
@@ -135,6 +146,16 @@ export interface ShellEnvironmentAsyncReaders extends ShellEnvironmentResolveOpt
     names: ReadonlyArray<string>,
   ) => MaybePromise<Partial<Record<string, string>>>;
   readonly readLaunchctlPath?: () => MaybePromise<string | undefined>;
+  readonly readWindowsEnvironment?: (
+    names: ReadonlyArray<string>,
+    options: WindowsEnvironmentProbeOptions,
+  ) => Promise<Partial<Record<string, string>>>;
+  readonly isWindowsCommandAvailable?: (
+    command: string,
+    options: CommandAvailabilityOptions,
+  ) => Promise<boolean>;
+  /** Bound for each spawned probe; defaults to {@link SHELL_PROBE_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
 }
 
 function defaultLogWarning(message: string, error?: unknown): void {
@@ -232,18 +253,34 @@ export function resolveShellEnvironmentSync(
 }
 
 /**
- * Non-blocking POSIX resolution for refreshes on a live event loop. Windows
- * resolution runs PowerShell and executable discovery synchronously, so it
- * belongs in a worker (`captureShellEnvironment`) and is not offered here.
+ * Non-blocking resolution for refreshes on a live event loop: the login shell on
+ * POSIX, PowerShell and an async executable search on Windows. Never throws.
  */
 export async function resolveShellEnvironmentAsync(
   env: NodeJS.ProcessEnv,
   options: ShellEnvironmentAsyncReaders = {},
 ): Promise<ShellEnvironment> {
   const platform = options.platform ?? process.platform;
-  if (!isPosixShellPlatform(platform)) return {};
   const logWarning = options.logWarning ?? defaultLogWarning;
-  const execFileAsync = createBoundedShellExecFile(env);
+  const execFileAsync = createBoundedShellExecFile(env, options.timeoutMs);
+  if (platform === "win32") {
+    try {
+      const repaired = await resolveWindowsEnvironmentAsync(env, {
+        readEnvironment:
+          options.readWindowsEnvironment ??
+          ((names, probeOptions) =>
+            readEnvironmentFromWindowsShellAsync(names, probeOptions, execFileAsync)),
+        ...(options.isWindowsCommandAvailable
+          ? { commandAvailable: options.isWindowsCommandAvailable }
+          : {}),
+      });
+      return pickShellEnvironment(repaired);
+    } catch (error) {
+      logWarning("Failed to resolve the shell environment.", error);
+      return {};
+    }
+  }
+  if (!isPosixShellPlatform(platform)) return {};
   const readEnvironment =
     options.readEnvironment ??
     (async (shell: string, names: ReadonlyArray<string>) =>
@@ -286,12 +323,12 @@ export async function resolveShellEnvironmentAsync(
 
 // Run from the home directory so project hooks (direnv, asdf) never fire, and
 // SIGKILL on timeout because interactive zsh ignores SIGTERM.
-function boundedShellProbeOptions(env: NodeJS.ProcessEnv) {
+function boundedShellProbeOptions(env: NodeJS.ProcessEnv, timeoutMs = SHELL_PROBE_TIMEOUT_MS) {
   return {
     env,
     cwd: homedir(),
     encoding: "utf8" as const,
-    timeout: SHELL_PROBE_TIMEOUT_MS,
+    timeout: timeoutMs,
     killSignal: "SIGKILL" as const,
     windowsHide: true,
   };
@@ -308,16 +345,22 @@ export function createBoundedShellExecFileSync(env: NodeJS.ProcessEnv): ExecFile
 
 export function createBoundedShellExecFile(
   env: NodeJS.ProcessEnv,
+  timeoutMs: number = SHELL_PROBE_TIMEOUT_MS,
 ): (file: string, args: ReadonlyArray<string>) => Promise<string> {
   return (file, args) =>
     new Promise<string>((resolve, reject) => {
-      const child = execFile(file, args, boundedShellProbeOptions(env), (error, stdout) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(stdout);
-      });
+      const child = execFile(
+        file,
+        args,
+        boundedShellProbeOptions(env, timeoutMs),
+        (error, stdout) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(stdout);
+        },
+      );
       // A profile waiting on input sees end-of-file instead of hanging.
       child.stdin?.destroy();
     });
@@ -355,6 +398,20 @@ export interface ShellEnvironmentCacheRecord {
   readonly environment: ShellEnvironment;
 }
 
+/**
+ * A blocking probe that delivered no PATH (a profile slower than the bound, or a broken shell).
+ * The next start skips its own blocking probe and retries in the background instead. Readers
+ * that predate this record see an empty environment, which they already treat as a miss.
+ */
+export interface ShellEnvironmentProbeFailureRecord {
+  readonly version: typeof CACHE_VERSION;
+  readonly capturedAt: string;
+  readonly platform: NodeJS.Platform;
+  readonly shell: string | null;
+  readonly environment: Record<string, never>;
+  readonly probeFailed: true;
+}
+
 export type ShellEnvironmentCacheReadResult =
   | {
       readonly kind: "hit";
@@ -362,7 +419,13 @@ export type ShellEnvironmentCacheReadResult =
       /** How old the record is. Any age is usable; callers refresh it after start. */
       readonly ageMs: number;
     }
+  /**
+   * `reason` is {@link SHELL_ENVIRONMENT_PROBE_FAILED} when the last blocking probe delivered no
+   * PATH (see {@link ShellEnvironmentProbeFailureRecord}).
+   */
   | { readonly kind: "miss"; readonly reason: string };
+
+export const SHELL_ENVIRONMENT_PROBE_FAILED = "probe-failed";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -384,6 +447,21 @@ export function createShellEnvironmentCacheRecord(input: {
     platform: input.platform ?? process.platform,
     shell: normalizeShell(input.shell),
     environment: pickShellEnvironment(input.environment),
+  };
+}
+
+export function createShellEnvironmentProbeFailureRecord(input: {
+  readonly shell: string | null | undefined;
+  readonly platform?: NodeJS.Platform;
+  readonly now?: Date;
+}): ShellEnvironmentProbeFailureRecord {
+  return {
+    version: CACHE_VERSION,
+    capturedAt: (input.now ?? new Date()).toISOString(),
+    platform: input.platform ?? process.platform,
+    shell: normalizeShell(input.shell),
+    environment: {},
+    probeFailed: true,
   };
 }
 
@@ -425,17 +503,20 @@ export function readShellEnvironmentCache(
     return { kind: "miss", reason: "capturedAt" };
   }
 
+  const cachedShell = normalizeShell(parsed.shell);
+  const currentShell = normalizeShell(options.currentShell);
+  if (cachedShell !== null && currentShell !== null && cachedShell !== currentShell) {
+    return { kind: "miss", reason: "shell" };
+  }
+  if (parsed.probeFailed === true) {
+    return { kind: "miss", reason: SHELL_ENVIRONMENT_PROBE_FAILED };
+  }
+
   const environment = isRecord(parsed.environment)
     ? pickShellEnvironment(parsed.environment as Record<string, string | undefined>)
     : null;
   if (!environment || Object.keys(environment).length === 0) {
     return { kind: "miss", reason: "environment" };
-  }
-
-  const cachedShell = normalizeShell(parsed.shell);
-  const currentShell = normalizeShell(options.currentShell);
-  if (cachedShell !== null && currentShell !== null && cachedShell !== currentShell) {
-    return { kind: "miss", reason: "shell" };
   }
 
   return {
@@ -451,6 +532,17 @@ export function readShellEnvironmentCache(
   };
 }
 
+/**
+ * Whether a cache miss came from a record written for another login shell or platform (Ryco
+ * Desktop and a standalone server sharing one home, each with its own `SHELL`). That record is
+ * still good for whoever wrote it, so a failed probe here must not replace it.
+ */
+export function isShellEnvironmentCacheForAnotherShell(
+  result: ShellEnvironmentCacheReadResult,
+): boolean {
+  return result.kind === "miss" && (result.reason === "shell" || result.reason === "platform");
+}
+
 export function applyShellEnvironmentCache(
   env: NodeJS.ProcessEnv,
   record: ShellEnvironmentCacheRecord,
@@ -460,7 +552,7 @@ export function applyShellEnvironmentCache(
 
 export function writeShellEnvironmentCache(
   cachePath: string,
-  record: ShellEnvironmentCacheRecord,
+  record: ShellEnvironmentCacheRecord | ShellEnvironmentProbeFailureRecord,
 ): void {
   FS.mkdirSync(Path.dirname(cachePath), { recursive: true });
   const tempPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;

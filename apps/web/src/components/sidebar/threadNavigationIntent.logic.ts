@@ -61,12 +61,12 @@ interface IntentRetain {
  * navigation instead of starting from the thread view's mount.
  *
  * Every retain is released after `THREAD_NAVIGATION_INTENT_RETAIN_MS`, and
- * released immediately. The subscription is reference counted: when the
- * intent did navigate, the route's own retains (its navigation-time retain,
- * taken after the intent's and held as long, and the thread view's) still
- * hold it then, so it stays and later reaches the idle cache as usual. When
- * nothing took over (a dwell without a click, a press that only started a
- * scroll or a drag) it is disposed at once instead of idling as a live stream.
+ * released immediately. When the intent did navigate, the thread view retained
+ * the subscription meanwhile, so the supervisor keeps it: it stays while the
+ * view holds it and reaches the idle cache as usual once the view has left,
+ * even if the user left the thread before the intent's deadline. When nothing
+ * took over (a dwell without a click, a press that only started a scroll or a
+ * drag) it is disposed at once instead of idling as a live stream.
  */
 export function createThreadNavigationIntents(
   deps: ThreadNavigationIntentDeps,

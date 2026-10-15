@@ -62,7 +62,7 @@ describe("pageShellSnapshot", () => {
     assert.equal(begin.archivedThreadCount, 0);
   });
 
-  it("sends unarchived threads first and starts the archive in a new message", () => {
+  it("sends unarchived threads first, in one message while the shell fits the budget", () => {
     const threads = [
       thread("x1", true),
       thread("a1", false),
@@ -70,14 +70,21 @@ describe("pageShellSnapshot", () => {
       thread("a2", false),
     ];
     const messages = pageShellSnapshot(snapshotOf(threads));
-    assert.equal(messages.length, 2);
-    assert.deepEqual(threadIdsOf(messages[0]!), ["a1", "a2"]);
-    assert.deepEqual(threadIdsOf(messages[1]!), ["x1", "x2"]);
+    // Every message costs an ack round trip; the archive does not get one of its own.
+    assert.equal(messages.length, 1);
+    assert.deepEqual(threadIdsOf(messages[0]!), ["a1", "a2", "x1", "x2"]);
     const begin = messages[0]![0];
     assert(begin?.kind === "snapshot-begin");
     assert.equal(begin.threadCount, 4);
     assert.equal(begin.archivedThreadCount, 2);
-    assert.equal(messages[1]!.at(-1)?.kind, "snapshot-end");
+    assert.equal(messages[0]!.at(-1)?.kind, "snapshot-end");
+  });
+
+  it("spills the archive into the next message only when the budget is exceeded", () => {
+    const threads = [thread("a1", false, 300), thread("x1", true, 300), thread("x2", true, 300)];
+    const oneThread = Buffer.byteLength(JSON.stringify(threads[0]));
+    const messages = pageShellSnapshot(snapshotOf(threads), oneThread * 2 + 400);
+    assert.deepEqual(messages.map(threadIdsOf), [["a1", "x1"], ["x2"]]);
   });
 
   it("keeps every message within the byte budget", () => {

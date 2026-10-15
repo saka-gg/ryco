@@ -37,6 +37,14 @@ describe("prefetchStatisticsPage", () => {
     expect(mocks.prefetchUsageSummary).not.toHaveBeenCalled();
   });
 
+  it("starts no activity snapshot for the limits view", () => {
+    mocks.allowed.add(WS_METHODS.serverGetStatistics);
+    mocks.allowed.add(WS_METHODS.serverGetUsageSummary);
+    prefetchStatisticsPage({ view: "limits", range: "30d", environmentIds: undefined });
+    expect(mocks.prefetchStatistics).not.toHaveBeenCalled();
+    expect(mocks.prefetchUsageSummary).not.toHaveBeenCalled();
+  });
+
   it("asks nothing for a session the page would refuse", () => {
     prefetchStatisticsPage({ view: "usage", range: "30d", environmentIds: undefined });
     prefetchStatisticsPage({ view: "activity", range: "30d", environmentIds: undefined });

@@ -42,6 +42,7 @@ import { Effect, Option, Schema } from "effect";
 import type { CheckpointDiffQueryShape } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import {
   readScopedShellSnapshot,
+  readThreadKeyPage,
   type ProjectionSnapshotQueryShape,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
@@ -150,6 +151,56 @@ export const paginate = <T>(input: {
       : null;
   return { items, nextCursor };
 };
+
+/**
+ * Thread keys read per keyset batch of an unscoped listing: one page and its look-ahead row at
+ * least, more so hidden threads rarely cost another round.
+ */
+const THREAD_KEY_BATCH_MIN = 100;
+
+/**
+ * The live threads after `after` in `(createdAt, id)` order that `keep` accepts, up to `want`
+ * of them. Reads thread keys in keyset batches and summaries of those threads only, never the
+ * whole shell, so paging through every thread costs one bounded read per page.
+ */
+const collectThreadsInOrder = (
+  projections: ProjectionSnapshotQueryShape,
+  input: {
+    readonly after: ListCursorOrder | null;
+    readonly includeArchived: boolean;
+    readonly want: number;
+    readonly keep: (thread: OrchestrationThreadShell) => boolean;
+  },
+) =>
+  Effect.gen(function* () {
+    const batch = Math.max(input.want, THREAD_KEY_BATCH_MIN);
+    const rows: OrchestrationThreadShell[] = [];
+    let after =
+      input.after === null ? null : { createdAt: input.after.createdAt, threadId: input.after.id };
+    while (rows.length < input.want) {
+      const keys = yield* readThreadKeyPage(projections, {
+        after,
+        includeArchived: input.includeArchived,
+        limit: batch,
+      });
+      if (keys.length === 0) break;
+      const scoped = yield* readScopedShellSnapshot(projections, {
+        threadIds: keys.map((key) => key.threadId),
+      });
+      const byId = new Map(scoped.threads.map((thread) => [thread.id, thread] as const));
+      for (const key of keys) {
+        const thread = byId.get(key.threadId);
+        // Deleted or archived since its key was read: skipped like the shell would.
+        if (thread === undefined || !input.keep(thread)) continue;
+        if (!input.includeArchived && thread.archivedAt !== null) continue;
+        rows.push(thread);
+        if (rows.length >= input.want) break;
+      }
+      if (keys.length < batch) break;
+      after = keys.at(-1)!;
+    }
+    return rows;
+  });
 
 // ── Result mapping ────────────────────────────────────────────────────
 
@@ -264,13 +315,34 @@ export const listThreadsPage = (
       AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
       AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
     );
-    // A project-scoped listing reads that project's summaries only; an unscoped one pages
-    // over every live thread and needs them all.
-    const snapshot = yield* (
-      input.projectId === undefined
-        ? projections.getShellSnapshot()
-        : readScopedShellSnapshot(projections, { projectIds: [input.projectId] })
-    ).pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
+    // An unscoped listing pages over every live thread: keyset reads of one page (plus its
+    // look-ahead row), never the whole shell per page.
+    if (input.projectId === undefined) {
+      let after: ListCursorOrder | null = null;
+      if (input.cursor !== undefined) {
+        after = decodeListCursor("threads", input.cursor);
+        if (after === null) return yield* failTool("Invalid cursor.");
+      }
+      const rows = yield* collectThreadsInOrder(projections, {
+        after,
+        includeArchived: input.includeArchived === true,
+        want: limit + 1,
+        keep: visible,
+      }).pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
+      const items = rows.slice(0, limit);
+      const last = items.at(-1);
+      return Schema.encodeSync(AgentControlMcpListThreadsResult)({
+        threads: items.map(toThreadSummary),
+        nextCursor:
+          rows.length > limit && last !== undefined
+            ? encodeListCursor("threads", { createdAt: last.createdAt, id: last.id })
+            : null,
+      });
+    }
+    // A project-scoped listing reads that project's summaries only.
+    const snapshot = yield* readScopedShellSnapshot(projections, {
+      projectIds: [input.projectId],
+    }).pipe(Effect.mapError(() => new ToolFailure("Thread list read failed.")));
     const rows = snapshot.threads.filter(
       (thread) =>
         visible(thread) &&

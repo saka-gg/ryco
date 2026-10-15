@@ -39,11 +39,8 @@ import {
   orchestrationProgressFrameKey,
   orchestrationShellFrameKey,
 } from "./orchestrationEventCoalescing.ts";
-import {
-  orchestrationEventBytes,
-  rechunkByBudget,
-  tapArray,
-} from "./orchestrationStreamBatching.ts";
+import { rechunkByBudget, tapArray } from "../streamBatching.ts";
+import { orchestrationEventBytes } from "./orchestrationStreamBatching.ts";
 import { pageShellSnapshot } from "./shellSnapshotPages.ts";
 
 /**

@@ -142,6 +142,21 @@ type DesktopSessionRestore =
       readonly session: Awaited<ReturnType<HostedHubApi["restoreSession"]>>;
     };
 
+type DesktopGitHubState = NonNullable<DesktopHostedIdentityState["github"]>;
+
+/**
+ * The account-only work of a resume, started as soon as a prepared restore
+ * found a session; see {@link DesktopHostedIdentityCoordinator.prepareResume}.
+ */
+interface DesktopPreparedAccountWork {
+  readonly accountId: string;
+  readonly flushed: Promise<void>;
+  readonly github: Promise<DesktopGitHubState | undefined>;
+  readonly enrollment: Promise<unknown> | undefined;
+  /** Every part has settled; never rejects. */
+  readonly settled: Promise<void>;
+}
+
 export class DesktopHostedIdentityCoordinator {
   readonly #origin: string;
   readonly #installationId: string;
@@ -161,6 +176,8 @@ export class DesktopHostedIdentityCoordinator {
   #operationInteractive = false;
   /** A session restore started ahead of the backend; see {@link prepareResume}. */
   #preparedRestore: Promise<DesktopSessionRestore> | undefined;
+  /** The account-only work that restore started; see {@link prepareResume}. */
+  #preparedAccount: DesktopPreparedAccountWork | undefined;
 
   constructor(input: {
     readonly origin: string;
@@ -296,13 +313,47 @@ export class DesktopHostedIdentityCoordinator {
    * Start a background resume's credential hydrate and Hub session restore
    * now, while the backend is still starting, so the resume that follows its
    * readiness adopts the answer instead of paying that round trip after it.
-   * Only the node claim and local introduction need the backend, and they still
-   * run in the resume itself. Nothing is published here; a transient failure is
+   * Once the restore finds a session, the rest of the work that needs only
+   * that account session starts too: the credential flush, the account E2EE
+   * enrollment and the GitHub link read. Only the node claim and local
+   * introduction (`#setup`) need the backend, and they still run in the resume
+   * itself. Nothing is published to the workspace here; a transient failure is
    * simply restored again by the resume.
    */
   prepareResume(): void {
     if (this.#operation !== undefined || this.#preparedRestore !== undefined) return;
-    this.#preparedRestore = this.#restoreSession();
+    const prepared: Promise<DesktopSessionRestore> = this.#restoreSession().then((outcome) => {
+      if (outcome.kind === "session" && this.#preparedRestore === prepared) {
+        this.#preparedAccount = this.#startAccountWork(outcome.session.account.id);
+      }
+      return outcome;
+    });
+    this.#preparedRestore = prepared;
+  }
+
+  /** The resume steps that need only the account session, all started at once. */
+  #startAccountWork(accountId: string): DesktopPreparedAccountWork {
+    const flushed = this.#credentials.flush();
+    const github = this.#readGitHubState();
+    const enrollment = this.#nativeE2eeEnrollment?.ensure(accountId);
+    return {
+      accountId,
+      flushed,
+      github,
+      enrollment,
+      settled: Promise.allSettled([flushed, github, enrollment]).then(() => undefined),
+    };
+  }
+
+  /**
+   * The prepared account work for `accountId`, once. A second enrollment
+   * `ensure()` after the first settled would repeat its Hub upsert, so the
+   * resume must adopt this one rather than start its own.
+   */
+  #takePreparedAccount(accountId: string): DesktopPreparedAccountWork | undefined {
+    const prepared = this.#preparedAccount;
+    this.#preparedAccount = undefined;
+    return prepared?.accountId === accountId ? prepared : undefined;
   }
 
   /** Every in-flight account operation, including a prepared restore, has settled. */
@@ -311,6 +362,8 @@ export class DesktopHostedIdentityCoordinator {
       this.#operation?.catch(() => undefined),
       this.#preparedRestore?.catch(() => undefined),
     ]);
+    // Started by the prepared restore as it settled.
+    await this.#preparedAccount?.settled;
   }
 
   /**
@@ -343,6 +396,7 @@ export class DesktopHostedIdentityCoordinator {
     if (prepared === undefined) return undefined;
     const outcome = await prepared;
     if (this.#preparedRestore === prepared) this.#preparedRestore = undefined;
+    if (outcome.kind !== "session") this.#preparedAccount = undefined;
     return outcome.kind === "unavailable" ? undefined : outcome;
   }
 
@@ -358,8 +412,10 @@ export class DesktopHostedIdentityCoordinator {
   async disconnect(): Promise<void> {
     await this.#idle();
     // A prepared restore answered for the credentials this clears; the next
-    // resume must not adopt it as the signed-out installation's session.
+    // resume must not adopt it (or its account work) as the signed-out
+    // installation's session.
     this.#preparedRestore = undefined;
+    this.#preparedAccount = undefined;
     this.#api.clearSessionMaterial();
     await this.#credentials.clear();
     await this.#nativeE2eeEnrollment?.invalidate("signed-out");
@@ -553,10 +609,13 @@ export class DesktopHostedIdentityCoordinator {
       }
     }
 
+    // Started ahead of the backend by prepareResume when its restore found
+    // this account's session.
+    const prepared = this.#takePreparedAccount(session.account.id);
     try {
       // Restores may renew the native session too. A ready state must survive
       // the connector restart that completes desktop onboarding.
-      await this.#credentials.flush();
+      await (prepared?.flushed ?? this.#credentials.flush());
       // Account sign-in and the colocated trusted introduction remain useful
       // during a staged Hub rollout. Wait for both operations so a rejected
       // enrollment cannot leave the node claim mutating in the background,
@@ -566,10 +625,12 @@ export class DesktopHostedIdentityCoordinator {
       // downgrade.
       // The GitHub link state needs only the account session, so it is read
       // beside the setup and enrollment rather than after both.
-      const readingGitHub = this.#readGitHubState();
+      const readingGitHub = prepared?.github ?? this.#readGitHubState();
       const [setupResult, enrollmentResult] = await Promise.allSettled([
         this.#setup({ accountId: session.account.id, interactive }),
-        this.#nativeE2eeEnrollment?.ensure(session.account.id),
+        prepared === undefined
+          ? this.#nativeE2eeEnrollment?.ensure(session.account.id)
+          : prepared.enrollment,
       ]);
       // A local node can be offline or awaiting connector restart while this
       // device already has a valid account session. Remote trust still requires
@@ -591,7 +652,7 @@ export class DesktopHostedIdentityCoordinator {
     }
   }
 
-  async #readGitHubState(): Promise<NonNullable<DesktopHostedIdentityState["github"]> | undefined> {
+  async #readGitHubState(): Promise<DesktopGitHubState | undefined> {
     try {
       const [configuration, security] = await Promise.all([
         this.#api.getExternalIdentityConfiguration(),

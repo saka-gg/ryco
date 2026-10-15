@@ -1,14 +1,17 @@
 /**
  * historyRecoveryPolicy - When provider history recovery reads a thread.
  *
- * Recovery runs when a client opens a thread and when the watched thread's
- * session settles (a turn ended, the session stopped or failed), never on a
- * timer. Reads are spaced per thread, and a failing thread backs off.
+ * Recovery runs when a client opens a thread, when the watched thread's
+ * session settles (a turn ended, the session stopped or failed), and when the
+ * liveness sweep finds a running turn silent on its live runtime (a lost
+ * completion), never on a timer. Reads are spaced per thread, and a failing
+ * thread backs off. A settle that lands inside the spacing is deferred, not
+ * dropped: one trailing read runs once the spacing has passed.
  *
  * @module historyRecoveryPolicy
  */
 import type { OrchestrationEvent, ThreadId } from "@ryco/contracts";
-import { Effect, type Scope, Stream } from "effect";
+import { Effect, Scope, Stream } from "effect";
 
 import type { HistoryRecoveryTrigger } from "./Services/ProviderRuntimeIngestion.ts";
 
@@ -22,11 +25,13 @@ export const HISTORY_RECOVERY_FAILURE_BACKOFF_MAX_MS = 15 * 60_000;
 
 export interface HistoryRecoveryState {
   readonly attemptedAt: number;
+  /** When the attempt began (defaults to `attemptedAt`): what its read can have seen. */
+  readonly startedAt?: number;
   /** Consecutive failed attempts; 0 after a success. */
   readonly failures: number;
 }
 
-/** The gap a trigger must leave after the thread's last attempt. */
+/** The gap a trigger must leave after the thread's last attempt. A liveness check is spaced like a settle. */
 export function historyRecoverySpacingMs(
   state: HistoryRecoveryState,
   trigger: HistoryRecoveryTrigger,
@@ -40,6 +45,53 @@ export function historyRecoverySpacingMs(
   return trigger === "subscribe"
     ? HISTORY_RECOVERY_SUBSCRIBE_SPACING_MS
     : HISTORY_RECOVERY_SETTLED_SPACING_MS;
+}
+
+export type HistoryRecoveryDecision =
+  | { readonly kind: "read" }
+  /** One trailing read after `afterMs`: this trigger's turn end may not be in the last read. */
+  | { readonly kind: "trail"; readonly afterMs: number }
+  | { readonly kind: "skip" };
+
+const READ: HistoryRecoveryDecision = { kind: "read" };
+const SKIP: HistoryRecoveryDecision = { kind: "skip" };
+
+/**
+ * Whether a trigger reads now. A settle that a successful recent read (or one
+ * in flight, which may have started before the turn ended) spaces out is
+ * deferred to one trailing read; everything else that is spaced out, or backed
+ * off after a failure, is skipped.
+ *
+ * The trailing read itself (`trailingSinceMs`: when its settle was deferred)
+ * is skipped when a read in flight or a successful read begun since then has
+ * covered the settle, and while a failure backs the thread off.
+ */
+export function decideHistoryRecovery(input: {
+  readonly state: HistoryRecoveryState | undefined;
+  readonly trigger: HistoryRecoveryTrigger;
+  readonly inFlight: boolean;
+  readonly nowMs: number;
+  readonly trailingSinceMs?: number;
+}): HistoryRecoveryDecision {
+  const { state, trigger } = input;
+  if (input.trailingSinceMs !== undefined) {
+    if (input.inFlight) return SKIP;
+    if (state === undefined) return READ;
+    if (state.failures > 0) {
+      return input.nowMs - state.attemptedAt >= historyRecoverySpacingMs(state, trigger)
+        ? READ
+        : SKIP;
+    }
+    return (state.startedAt ?? state.attemptedAt) > input.trailingSinceMs ? SKIP : READ;
+  }
+  const trails = trigger === "session-settled";
+  if (input.inFlight) {
+    return trails ? { kind: "trail", afterMs: HISTORY_RECOVERY_SETTLED_SPACING_MS } : SKIP;
+  }
+  if (state === undefined) return READ;
+  const remainingMs = historyRecoverySpacingMs(state, trigger) - (input.nowMs - state.attemptedAt);
+  if (remainingMs <= 0) return READ;
+  return trails && state.failures === 0 ? { kind: "trail", afterMs: remainingMs } : SKIP;
 }
 
 /** A thread event saying its session stopped working: a turn ended, or it stopped or failed. */
@@ -138,6 +190,9 @@ export const makeThreadHistoryRecoveryRegistry = () => {
  * A passive subscription (a sidebar prewarm, a retained idle thread) reads
  * nothing until `register`'s control turns it active, which then reads as an
  * opening subscription would; turned passive again, it stops reading.
+ *
+ * An active subscription has a view attached, so while it is active it also
+ * holds a lease from `viewers` (released when it turns passive or ends).
  */
 export const withThreadHistoryRecovery = <A extends ThreadStreamItemLike, E, R>(
   threadId: ThreadId,
@@ -149,21 +204,44 @@ export const withThreadHistoryRecovery = <A extends ThreadStreamItemLike, E, R>(
     readonly register?: (
       control: ThreadHistoryRecoveryControl,
     ) => Effect.Effect<void, never, Scope.Scope>;
+    /** Counts this subscription as a viewer of the thread while it is active. */
+    readonly viewers?: {
+      readonly retain: (threadId: ThreadId) => Effect.Effect<Effect.Effect<void>>;
+    };
   } = {},
 ): Stream.Stream<A, E, R> =>
   Stream.unwrap(
     Effect.gen(function* () {
       const scope = yield* Effect.scope;
       let active = options.mode !== "passive";
+      let releaseViewer: Effect.Effect<void> | undefined;
+      const viewing = (on: boolean): Effect.Effect<void> => {
+        if (options.viewers === undefined) return Effect.void;
+        if (!on) {
+          const release = releaseViewer ?? Effect.void;
+          releaseViewer = undefined;
+          return release;
+        }
+        if (releaseViewer !== undefined) return Effect.void;
+        return options.viewers.retain(threadId).pipe(
+          Effect.map((release) => {
+            releaseViewer = release;
+          }),
+        );
+      };
+      yield* Scope.addFinalizer(
+        scope,
+        Effect.suspend(() => viewing(false)),
+      );
       const readOnOpen = Effect.forkIn(reconcile(threadId, "subscribe"), scope).pipe(Effect.asVoid);
-      if (active) yield* readOnOpen;
+      if (active) yield* Effect.andThen(viewing(true), readOnOpen);
       if (options.register !== undefined) {
         yield* options.register({
           setMode: (mode) =>
             Effect.suspend(() => {
               const turnedActive = mode === "active" && !active;
               active = mode === "active";
-              return turnedActive ? readOnOpen : Effect.void;
+              return Effect.andThen(viewing(active), turnedActive ? readOnOpen : Effect.void);
             }),
         });
       }

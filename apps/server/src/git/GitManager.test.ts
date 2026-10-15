@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 import type {
@@ -35,6 +35,7 @@ import {
 } from "../sourceControl/GitHubCli.ts";
 import { type TextGenerationShape, TextGeneration } from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -70,6 +71,8 @@ interface FakeGhScenario {
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
   failWith?: GitHubCliError;
+  /** Fails only repository-wide `pr list` calls (no `--head`). */
+  failRepositoryListWith?: GitHubCliError;
 }
 
 function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
@@ -436,6 +439,9 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         headSelectorIndex >= 0 && headSelectorIndex < args.length - 1
           ? args[headSelectorIndex + 1]
           : undefined;
+      if (headSelector === undefined && scenario.failRepositoryListWith) {
+        return Effect.fail(scenario.failRepositoryListWith);
+      }
       const mappedQueue =
         typeof headSelector === "string"
           ? prListQueueByHeadSelector.get(headSelector)?.shift()
@@ -571,7 +577,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
       listPullRequests: () => Effect.die("unused"),
-      getPullRequestStates: () => Effect.die("unused"),
+      getLinkStates: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>
         execute({
           cwd: input.cwd,
@@ -766,6 +772,11 @@ function makeManager(input?: {
   project?: OrchestrationProjectShell;
   /** Route through the production registry, which detects the provider from git remotes. */
   detectSourceControlFromRemotes?: boolean;
+  /** Wraps every git command the manager's driver runs (observe, delay or replace it). */
+  gitExecute?: (
+    input: GitVcsDriver.ExecuteGitInput,
+    execute: GitVcsDriver.GitVcsDriverShape["execute"],
+  ) => ReturnType<GitVcsDriver.GitVcsDriverShape["execute"]>;
 }) {
   const {
     service: gitHubCli,
@@ -817,7 +828,22 @@ function makeManager(input?: {
       }),
   });
 
-  const vcsDriverLayer = GitVcsDriver.layer.pipe(
+  const gitExecute = input?.gitExecute;
+  const vcsDriverLayer = (
+    gitExecute
+      ? Layer.effect(
+          GitVcsDriver.GitVcsDriver,
+          Effect.gen(function* () {
+            const base = yield* makeGitVcsDriverCore();
+            return GitVcsDriver.GitVcsDriver.of(
+              yield* makeGitVcsDriverCore({
+                executeOverride: (command) => gitExecute(command, base.execute),
+              }),
+            );
+          }),
+        )
+      : GitVcsDriver.layer
+  ).pipe(
     Layer.provideMerge(VcsProcess.layer),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerConfigLayer),
@@ -1460,6 +1486,109 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  /** A checkout tracking `feature/tracked` on a bare remote that another clone moved ahead. */
+  const makeRemoteAheadFixture = Effect.gen(function* () {
+    const repoDir = yield* makeTempDir("ryco-git-manager-");
+    yield* initRepo(repoDir);
+    yield* runGit(repoDir, ["checkout", "-b", "feature/tracked"]);
+    const remoteDir = yield* createBareRemote();
+    yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+    yield* runGit(repoDir, ["push", "-u", "origin", "feature/tracked"]);
+    const otherDir = yield* makeTempDir("ryco-git-manager-other-");
+    yield* runGit(otherDir, ["clone", "--branch", "feature/tracked", remoteDir, "."]);
+    yield* configureTestGitCommitIdentity(otherDir, runGit);
+    yield* runGit(otherDir, ["commit", "--allow-empty", "-m", "Moved ahead"]);
+    yield* runGit(otherDir, ["push", "origin", "feature/tracked"]);
+    return { repoDir: fs.realpathSync(repoDir) };
+  });
+  const commandsOf = (calls: ReadonlyArray<GitVcsDriver.ExecuteGitInput>) =>
+    calls.map((call) => call.args.join(" "));
+  const isWorkingTreeScan = (command: string) =>
+    command.startsWith("status ") || command.includes("diff HEAD");
+
+  it.effect("recomputes only the upstream counts for remote status after a fetch", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const calls: GitVcsDriver.ExecuteGitInput[] = [];
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) => {
+          calls.push(input);
+          return execute(input);
+        },
+      });
+
+      yield* manager.localStatus({ cwd: repoDir });
+      calls.length = 0;
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+
+      expect(remote?.behindCount).toBe(1);
+      const commands = commandsOf(calls);
+      expect(calls.some((call) => call.operation === "GitVcsDriver.fetchRemoteForStatus")).toBe(
+        true,
+      );
+      expect(commands).toContain("rev-list --left-right --count @{upstream}...HEAD");
+      expect(commands.filter(isWorkingTreeScan)).toEqual([]);
+    }),
+  );
+
+  it.effect("reuses local status details when the status fetch fails", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      yield* runGit(repoDir, ["remote", "set-url", "origin", path.join(repoDir, "missing")]);
+      const calls: GitVcsDriver.ExecuteGitInput[] = [];
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) => {
+          calls.push(input);
+          return execute(input);
+        },
+      });
+
+      yield* manager.localStatus({ cwd: repoDir });
+      calls.length = 0;
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+
+      // The fetch ran and failed: the tracking refs did not move.
+      expect(remote?.behindCount).toBe(0);
+      const commands = commandsOf(calls);
+      expect(calls.some((call) => call.operation === "GitVcsDriver.fetchRemoteForStatus")).toBe(
+        true,
+      );
+      expect(commands.filter((command) => command.startsWith("rev-list --left-right"))).toEqual([]);
+      expect(commands.filter(isWorkingTreeScan)).toEqual([]);
+    }),
+  );
+
+  it.effect("does not reuse a local status read that a fetch overtook", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const firstStatusDone = yield* Deferred.make<void>();
+      const releaseFirstStatus = yield* Deferred.make<void>();
+      let statusReads = 0;
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) =>
+          input.args[0] === "status" && ++statusReads === 1
+            ? // Read before the fetch, but finish after it.
+              execute(input).pipe(
+                Effect.tap(() => Deferred.succeed(firstStatusDone, undefined)),
+                Effect.tap(() => Deferred.await(releaseFirstStatus)),
+              )
+            : execute(input),
+      });
+
+      const localRead = yield* manager.localStatus({ cwd: repoDir }).pipe(Effect.forkScoped);
+      yield* Deferred.await(firstStatusDone);
+      const fetched = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+      expect(fetched?.behindCount).toBe(1);
+      yield* Deferred.succeed(releaseFirstStatus, undefined);
+      yield* Fiber.join(localRead);
+
+      // The remote half is recomputed without a fetch of its own.
+      yield* manager.invalidateRemoteStatus(repoDir);
+      const remote = yield* manager.remoteStatus({ cwd: repoDir });
+      expect(remote?.behindCount).toBe(1);
+    }),
+  );
+
   it.effect("skips pull request lookups for a provably unpublished branch", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("ryco-git-manager-");
@@ -1621,6 +1750,80 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const mainStatus = yield* manager.refSummary(repoDir);
       expect(mainStatus).toMatchObject({ refName: "main", isDefaultRef: true, pr: null });
       expect(ghCalls.slice(callsBefore).filter((call) => call.includes("--head"))).toEqual([]);
+    }),
+  );
+
+  it.effect("caches per-branch answers per repository until the index is invalidated", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/old"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/old"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const recent = Array.from({ length: 100 }, (_, index) =>
+        indexedPullRequest({ number: 200 + index, headRefName: `other/${index}`, state: "MERGED" }),
+      );
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify(recent),
+            JSON.stringify([]),
+            JSON.stringify(recent),
+            JSON.stringify([]),
+          ],
+          prListByHeadSelector: {
+            "feature/old": JSON.stringify([
+              indexedPullRequest({ number: 3, headRefName: "feature/old", state: "MERGED" }),
+            ]),
+          },
+        },
+      });
+      const headCalls = () => ghCalls.filter((call) => call.includes("pr list --head "));
+
+      // The full status and the sidebar summary keep separate result caches,
+      // but share the repository's index and its per-branch answers.
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 3 });
+      expect((yield* manager.refSummary(repoDir)).pr).toMatchObject({ number: 3 });
+      expect(headCalls()).toHaveLength(1);
+
+      // An explicit refresh drops the branch answers along with the index.
+      yield* manager.invalidateRemoteStatus(repoDir);
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 3 });
+      expect(headCalls()).toHaveLength(2);
+    }),
+  );
+
+  it.effect("does not fall back to per-branch queries when the index listing fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/offline"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/offline"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          failRepositoryListWith: new GitHubCliError({
+            operation: "execute",
+            detail: "host unreachable",
+          }),
+        },
+      });
+
+      const error = yield* manager.remoteStatus({ cwd: repoDir }).pipe(Effect.flip);
+      expect(String(error)).toContain("host unreachable");
+      const summary = yield* manager.refSummary(repoDir);
+      expect(summary).toMatchObject({ refName: "feature/offline", pr: null });
+      expect(ghCalls.filter((call) => call.includes("pr list --head "))).toEqual([]);
+      // The failed listing is remembered briefly instead of retried per read.
+      expect(ghCalls.filter((call) => call.startsWith("pr list --state all "))).toHaveLength(1);
     }),
   );
 

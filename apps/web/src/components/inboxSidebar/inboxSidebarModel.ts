@@ -822,6 +822,28 @@ export function buildInboxSidebarSections(
   return buildInboxSidebarModel(input).sections;
 }
 
+/**
+ * Whether two provider lists label models identically for the inbox. The inbox
+ * reads only each provider's instance id, driver and model catalog (see
+ * `modelDisplayName`); status-only provider pushes keep the catalog's identity,
+ * so treating them as equal skips rebuilding the whole inbox model.
+ */
+export function sameInboxProviderCatalogs(
+  left: ReadonlyArray<ServerProvider> | null,
+  right: ReadonlyArray<ServerProvider> | null,
+): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || left.length !== right.length) return false;
+  return left.every((provider, index) => {
+    const other = right[index]!;
+    return (
+      provider.instanceId === other.instanceId &&
+      provider.driver === other.driver &&
+      provider.models === other.models
+    );
+  });
+}
+
 /** Live config is node-owned; hosted directory descriptors intentionally start without capabilities. */
 export function applyInboxServerConfig(
   environment: InboxSidebarEnvironment,

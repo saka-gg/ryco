@@ -7,15 +7,18 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@ryco/shared/model";
 import { expect } from "vite-plus/test";
-import { GrokSettings, ProviderInstanceId } from "@ryco/contracts";
+import { GrokSettings, ProviderInstanceId, TextGenerationError } from "@ryco/contracts";
+import { TestClock } from "effect/testing";
 
 import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeGrokTextGeneration } from "./GrokTextGeneration.ts";
+import { waitForAcpPromptRequest } from "./acpMockAgentTestUtils.ts";
 import { makeThreadPriorityTestInput } from "../threadPriority/threadPriorityTestFixtures.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
@@ -81,6 +84,58 @@ function readJsonRpcRequests(
 }
 
 it.layer(GrokTextGenerationTestLayer)("GrokTextGeneration", (it) => {
+  it.effect("gives up on a hung thread title or branch name after the naming budget", () => {
+    const requestLogDir = mkdtempSync(path.join(os.tmpdir(), "ryco-grok-hang-log-"));
+    const modelSelection = { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" };
+    const expectTimedOut = (
+      requestLogPath: string,
+      generate: Effect.Effect<object, TextGenerationError>,
+    ) =>
+      Effect.gen(function* () {
+        const fiber = yield* generate.pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+        yield* waitForAcpPromptRequest(requestLogPath);
+        yield* TestClock.adjust("30 seconds");
+        const error = yield* Fiber.join(fiber);
+        expect(error).toBeInstanceOf(TextGenerationError);
+        expect(error.detail).toBe("Grok ACP request timed out.");
+      });
+
+    const titleLog = path.join(requestLogDir, "title.ndjson");
+    const branchLog = path.join(requestLogDir, "branch.ndjson");
+    return Effect.gen(function* () {
+      yield* withFakeAcpGrok(
+        { RYCO_ACP_HANG_PROMPT: "1", RYCO_ACP_REQUEST_LOG_PATH: titleLog },
+        (textGeneration) =>
+          expectTimedOut(
+            titleLog,
+            textGeneration.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Fix the reconnect spinner.",
+              modelSelection,
+            }),
+          ),
+      );
+      yield* withFakeAcpGrok(
+        { RYCO_ACP_HANG_PROMPT: "1", RYCO_ACP_REQUEST_LOG_PATH: branchLog },
+        (textGeneration) =>
+          expectTimedOut(
+            branchLog,
+            textGeneration.generateBranchName({
+              cwd: process.cwd(),
+              message: "Fix the reconnect spinner.",
+              modelSelection,
+            }),
+          ),
+      );
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          rmSync(requestLogDir, { recursive: true, force: true });
+        }),
+      ),
+    );
+  });
+
   it.effect("rejects side questions before starting an unsafe provider runtime", () =>
     Effect.scoped(
       Effect.gen(function* () {

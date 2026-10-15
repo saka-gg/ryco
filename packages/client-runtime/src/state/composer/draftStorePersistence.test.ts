@@ -17,9 +17,11 @@ function makeStorage(
     readonly scheduled?: boolean;
     readonly async?: boolean;
     readonly initial?: Record<string, string>;
+    /** Shared with another storage: two tabs over one localStorage. */
+    readonly values?: Map<string, string>;
   } = {},
 ) {
-  const values = new Map<string, string>(Object.entries(options.initial ?? {}));
+  const values = options.values ?? new Map<string, string>(Object.entries(options.initial ?? {}));
   let pendingFlush: (() => void) | null = null;
   const setItem = vi.fn((name: string, value: string) => {
     values.set(name, value);
@@ -301,5 +303,199 @@ describe("composer draft persistence", () => {
     expect(drafts["draft-one"]?.promotedTo?.threadId).toBe("thread-one");
     expect(drafts["draft-two"]?.promotedTo ?? null).toBeNull();
     expect(drafts["draft-three"]?.promotedTo?.threadId).toBe("thread-three");
+  });
+
+  it("keeps the draft object when there are no attachments to clear", () => {
+    const { storage } = makeStorage({ scheduled: true });
+    const { useComposerDraftStore } = makeStore(storage);
+    useComposerDraftStore.getState().setPrompt(threadRef, "no images");
+    const before = useComposerDraftStore.getState().getComposerDraft(threadRef);
+    useComposerDraftStore.getState().clearPersistedAttachments(threadRef);
+    expect(useComposerDraftStore.getState().getComposerDraft(threadRef)).toBe(before);
+
+    useComposerDraftStore.getState().syncPersistedAttachments(threadRef, [localImage("one")]);
+    useComposerDraftStore.getState().clearPersistedAttachments(threadRef);
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(threadRef)?.persistedAttachments,
+    ).toEqual([]);
+  });
+
+  describe("across tabs sharing one storage", () => {
+    const thirdThreadRef = scopeThreadRef(environmentId, ThreadId.make("third"));
+    const indexOf = (values: Map<string, string>) =>
+      JSON.parse(values.get(COMPOSER_DRAFT_INDEX_STORAGE_KEY) ?? "null");
+    const openTab = (values: Map<string, string>) => {
+      const tab = makeStorage({ scheduled: true, values });
+      const store = makeStore(tab.storage);
+      return { ...tab, state: () => store.useComposerDraftStore.getState() };
+    };
+    const seeded = () => {
+      const values = new Map<string, string>();
+      const seed = openTab(values);
+      seed.state().setPrompt(otherThreadRef, "shared");
+      seed.flush();
+      return values;
+    };
+
+    it("keeps a draft another tab created after this one booted", () => {
+      const values = seeded();
+      const tabA = openTab(values);
+      const tabB = openTab(values);
+      const projectId = ProjectId.make("project");
+      tabA.state().setPrompt(threadRef, "started in A");
+      tabA
+        .state()
+        .setLogicalProjectDraftThreadId(
+          "logical-a",
+          { environmentId, projectId },
+          DraftId.make("a"),
+          {
+            threadId: ThreadId.make("thread-a"),
+            createdAt: "2026-10-01T00:00:00.000Z",
+          },
+        );
+      tabA.flush();
+
+      // B never saw A's draft and writes its own index.
+      tabB.state().setPrompt(thirdThreadRef, "started in B");
+      tabB.flush();
+      // A keeps typing: only its draft entry changes.
+      tabA.state().setPrompt(threadRef, "started in A, edited");
+      tabA.flush();
+
+      const reloaded = openTab(values);
+      expect(reloaded.state().getComposerDraft(threadRef)?.prompt).toBe("started in A, edited");
+      expect(reloaded.state().getComposerDraft(thirdThreadRef)?.prompt).toBe("started in B");
+      expect(reloaded.state().getComposerDraft(otherThreadRef)?.prompt).toBe("shared");
+      expect(reloaded.state().draftThreadsByThreadKey["a"]?.threadId).toBe("thread-a");
+      expect(indexOf(values).state.logicalProjectDraftThreadKeyByLogicalProjectKey).toEqual({
+        "logical-a": "a",
+      });
+    });
+
+    it("respects another tab's delete of a draft this tab left alone", () => {
+      const values = seeded();
+      const tabA = openTab(values);
+      const tabB = openTab(values);
+      tabB.state().clearComposerContent(otherThreadRef);
+      tabB.flush();
+      expect(values.has(composerDraftEntryStorageKey(scopedThreadKey(otherThreadRef)))).toBe(false);
+
+      // A writes its index for an unrelated change, then again later.
+      tabA.state().setPrompt(threadRef, "unrelated");
+      tabA.flush();
+      tabA.state().setPrompt(thirdThreadRef, "also unrelated");
+      tabA.flush();
+
+      expect(indexOf(values).state.draftKeys).not.toContain(scopedThreadKey(otherThreadRef));
+      expect(values.has(composerDraftEntryStorageKey(scopedThreadKey(otherThreadRef)))).toBe(false);
+      expect(openTab(values).state().getComposerDraft(otherThreadRef)?.prompt ?? "").toBe("");
+    });
+
+    it("keeps this tab's edit over another tab's delete of the same draft", () => {
+      const values = seeded();
+      const tabA = openTab(values);
+      const tabB = openTab(values);
+      tabB.state().clearComposerContent(otherThreadRef);
+      tabB.flush();
+      tabA.state().setPrompt(otherThreadRef, "shared, edited in A");
+      tabA.flush();
+
+      expect(openTab(values).state().getComposerDraft(otherThreadRef)?.prompt).toBe(
+        "shared, edited in A",
+      );
+    });
+
+    it("writes a draft again once it is edited after another tab deleted it", () => {
+      const values = seeded();
+      const tabA = openTab(values);
+      const tabB = openTab(values);
+      tabB.state().clearComposerContent(otherThreadRef);
+      tabB.flush();
+      tabA.state().setPrompt(threadRef, "unrelated");
+      tabA.flush();
+      tabA.state().setPrompt(otherThreadRef, "shared, back again");
+      tabA.flush();
+
+      expect(openTab(values).state().getComposerDraft(otherThreadRef)?.prompt).toBe(
+        "shared, back again",
+      );
+    });
+
+    it("respects another tab's delete of a draft thread this tab left alone", () => {
+      const values = new Map<string, string>();
+      const seed = openTab(values);
+      seed
+        .state()
+        .setLogicalProjectDraftThreadId(
+          "logical-a",
+          { environmentId, projectId: ProjectId.make("project") },
+          DraftId.make("d1"),
+          { threadId: ThreadId.make("thread-d1"), createdAt: "2026-10-01T00:00:00.000Z" },
+        );
+      seed.state().setPrompt(otherThreadRef, "shared");
+      seed.flush();
+      const tabA = openTab(values);
+      const tabB = openTab(values);
+      tabB.state().clearDraftThread(DraftId.make("d1"));
+      tabB.flush();
+
+      // A's first index write since it booted, for an unrelated change.
+      tabA.state().setPrompt(threadRef, "unrelated");
+      tabA.flush();
+
+      const reloaded = openTab(values);
+      expect(reloaded.state().draftThreadsByThreadKey["d1"]).toBeUndefined();
+      expect(reloaded.state().logicalProjectDraftThreadKeyByLogicalProjectKey).toEqual({});
+      expect(reloaded.state().getComposerDraft(threadRef)?.prompt).toBe("unrelated");
+    });
+
+    it("writes its own index over one another tab stored in a different version", () => {
+      const values = seeded();
+      const tab = openTab(values);
+      const index = indexOf(values);
+      values.set(
+        COMPOSER_DRAFT_INDEX_STORAGE_KEY,
+        JSON.stringify({
+          version: COMPOSER_DRAFT_STORAGE_VERSION + 1,
+          state: {
+            ...index.state,
+            logicalProjectDraftThreadKeyByLogicalProjectKey: { "logical-z": "z" },
+          },
+        }),
+      );
+      tab.state().setPrompt(threadRef, "unrelated");
+      tab.flush();
+
+      expect(indexOf(values).version).toBe(COMPOSER_DRAFT_STORAGE_VERSION);
+      expect(indexOf(values).state.logicalProjectDraftThreadKeyByLogicalProjectKey).toEqual({});
+      expect(openTab(values).state().getComposerDraft(otherThreadRef)?.prompt).toBe("shared");
+    });
+
+    it("does not sweep an entry the index lists by the time this tab flushes", () => {
+      const values = seeded();
+      const lateKey = scopedThreadKey(threadRef);
+      // An entry no index lists yet when the tab boots...
+      values.set(
+        composerDraftEntryStorageKey(lateKey),
+        JSON.stringify({ prompt: "late", attachments: [] }),
+      );
+      const tab = openTab(values);
+      // ...which another tab then lists.
+      const index = indexOf(values);
+      values.set(
+        COMPOSER_DRAFT_INDEX_STORAGE_KEY,
+        JSON.stringify({
+          ...index,
+          state: { ...index.state, draftKeys: [...index.state.draftKeys, lateKey] },
+        }),
+      );
+      tab.state().setPrompt(thirdThreadRef, "unrelated");
+      tab.flush();
+
+      expect(values.has(composerDraftEntryStorageKey(lateKey))).toBe(true);
+      expect(indexOf(values).state.draftKeys).toContain(lateKey);
+      expect(openTab(values).state().getComposerDraft(threadRef)?.prompt).toBe("late");
+    });
   });
 });

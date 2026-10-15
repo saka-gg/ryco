@@ -222,6 +222,15 @@ export function buildServerProvider(input: {
   };
 }
 
+/** `snapshot` with `rateLimits` as its usage limits, or without any when there are none. */
+export function withProviderRateLimits(
+  snapshot: ServerProvider,
+  rateLimits: ServerProviderRateLimits | undefined,
+): ServerProvider {
+  const { rateLimits: _previous, ...rest } = snapshot;
+  return rateLimits ? { ...rest, rateLimits } : rest;
+}
+
 export const collectStreamAsString = <E>(
   stream: Stream.Stream<Uint8Array, E>,
 ): Effect.Effect<string, E> =>

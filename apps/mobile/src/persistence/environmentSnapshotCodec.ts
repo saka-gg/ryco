@@ -96,6 +96,40 @@ export function captureEnvironmentSnapshotRecord(
 }
 
 /**
+ * The order threads are dropped in to meet the per-environment bounds:
+ * archived first, then oldest. The sort is stable, so ties keep store order.
+ */
+function threadDropOrder<T extends StoredEnvironmentSnapshotThread>(
+  threads: ReadonlyArray<T>,
+): T[] {
+  return threads.toSorted((left, right) => {
+    const archivedDelta =
+      Number(right.shell.archivedAt !== null) - Number(left.shell.archivedAt !== null);
+    if (archivedDelta !== 0) return archivedDelta;
+    return threadRecency(left.summary) - threadRecency(right.summary);
+  });
+}
+
+/** Applies the thread-count cap, keeping the survivors in their original order. */
+function boundThreadCount<T extends StoredEnvironmentSnapshotThread>(
+  threads: ReadonlyArray<T>,
+  maxThreads: number,
+): ReadonlyArray<T> {
+  if (threads.length <= maxThreads) return threads;
+  const dropped = new Set(threadDropOrder(threads).slice(0, threads.length - maxThreads));
+  return threads.filter((thread) => !dropped.has(thread));
+}
+
+/** One byte-cap round: drops a quarter of the threads (at least one). */
+function dropByteCapRound<T extends StoredEnvironmentSnapshotThread>(
+  threads: ReadonlyArray<T>,
+): T[] {
+  const dropCount = Math.max(1, Math.ceil(threads.length / 4));
+  const dropped = new Set(threadDropOrder(threads).slice(0, dropCount));
+  return threads.filter((thread) => !dropped.has(thread));
+}
+
+/**
  * Enforce the per-environment bounds by dropping threads — archived first,
  * then oldest — while preserving the survivors' original order. The byte cap
  * re-serializes after each trim round; projects and worktrees are never
@@ -114,31 +148,127 @@ export function boundStoredEnvironmentSnapshot(
   readonly payload: string;
   readonly payloadBytes: number;
 } {
-  const dropOrder = (threads: ReadonlyArray<StoredEnvironmentSnapshotThread>) =>
-    threads.toSorted((left, right) => {
-      const archivedDelta =
-        Number(right.shell.archivedAt !== null) - Number(left.shell.archivedAt !== null);
-      if (archivedDelta !== 0) return archivedDelta;
-      return threadRecency(left.summary) - threadRecency(right.summary);
-    });
-
-  let threads = record.threads;
-  if (threads.length > caps.maxThreads) {
-    const dropped = new Set(dropOrder(threads).slice(0, threads.length - caps.maxThreads));
-    threads = threads.filter((thread) => !dropped.has(thread));
-  }
-
-  let bounded: StoredEnvironmentSnapshot = { ...record, threads };
-  let payload = JSON.stringify(bounded);
+  let threads = boundThreadCount(record.threads, caps.maxThreads);
+  let payload = JSON.stringify({ ...record, threads });
   let payloadBytes = payloadByteLength(payload);
-  while (payloadBytes > caps.maxPayloadBytes && bounded.threads.length > 0) {
-    const dropCount = Math.max(1, Math.ceil(bounded.threads.length / 4));
-    const dropped = new Set(dropOrder(bounded.threads).slice(0, dropCount));
-    bounded = { ...bounded, threads: bounded.threads.filter((thread) => !dropped.has(thread)) };
-    payload = JSON.stringify(bounded);
+  while (payloadBytes > caps.maxPayloadBytes && threads.length > 0) {
+    threads = dropByteCapRound(threads);
+    payload = JSON.stringify({ ...record, threads });
     payloadBytes = payloadByteLength(payload);
   }
-  return { record: bounded, payload, payloadBytes };
+  return { record: { ...record, threads }, payload, payloadBytes };
+}
+
+interface SerializedThreadFragment {
+  /** The store objects the fragment was serialized from. */
+  readonly shell: ThreadShell;
+  readonly summary: SidebarThreadSummary;
+  readonly json: string;
+  readonly bytes: number;
+}
+
+export interface EnvironmentSnapshotSerializer {
+  /**
+   * Captures and bounds one environment exactly like
+   * `boundStoredEnvironmentSnapshot(captureEnvironmentSnapshotRecord(...))`,
+   * with a byte-identical payload, but serializes and measures only threads
+   * whose shell or summary changed since the previous call.
+   */
+  readonly serialize: (
+    environmentState: EnvironmentState,
+    environmentId: EnvironmentId,
+    capturedAt: number,
+  ) => { readonly payload: string; readonly payloadBytes: number; readonly threads: number };
+  /** Threads serialized from scratch over this serializer's lifetime (tests). */
+  readonly serializedThreadCount: () => number;
+}
+
+/**
+ * Incremental serializer for one environment's snapshot. While an agent runs,
+ * the shell stream replaces the active thread's shell and summary (a fresh
+ * `updatedAt`) several times a second, so every capture used to stringify and
+ * measure the whole environment (up to the byte cap) for a change to one row.
+ * Each thread's JSON fragment and UTF-8 length are kept by identity of its
+ * store objects; a capture re-serializes only the rows that changed and joins
+ * the rest, and the byte cap is enforced on the summed fragment lengths.
+ */
+export function createEnvironmentSnapshotSerializer(
+  caps: { readonly maxThreads: number; readonly maxPayloadBytes: number } = {
+    maxThreads: MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT,
+    maxPayloadBytes: MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
+  },
+): EnvironmentSnapshotSerializer {
+  let fragments = new Map<string, SerializedThreadFragment>();
+  let serializedThreads = 0;
+
+  const fragmentFor = (shell: ThreadShell, summary: SidebarThreadSummary) => {
+    const cached = fragments.get(shell.id);
+    if (cached !== undefined && cached.shell === shell && cached.summary === summary) {
+      return cached;
+    }
+    const thread: StoredEnvironmentSnapshotThread = {
+      shell,
+      summary: { ...summary, session: null, backgroundLiveness: null },
+    };
+    const json = JSON.stringify(thread);
+    serializedThreads += 1;
+    return { shell, summary, json, bytes: payloadByteLength(json) };
+  };
+
+  const serialize: EnvironmentSnapshotSerializer["serialize"] = (
+    environmentState,
+    environmentId,
+    capturedAt,
+  ) => {
+    const record = captureEnvironmentSnapshotRecord(
+      { ...environmentState, threadIds: [] },
+      environmentId,
+      capturedAt,
+    );
+    const candidates: StoredEnvironmentSnapshotThread[] = [];
+    for (const threadId of environmentState.threadIds) {
+      const shell = environmentState.threadShellById[threadId];
+      const summary = environmentState.sidebarThreadSummaryById[threadId];
+      if (!shell || !summary) continue;
+      candidates.push({ shell, summary });
+    }
+    // The count cap needs only archive state and recency, so it runs before
+    // anything is serialized: threads beyond it are neither stringified nor
+    // retained. The drop order and rounds match `boundStoredEnvironmentSnapshot`.
+    const nextFragments = new Map<string, SerializedThreadFragment>();
+    let kept: SerializedThreadFragment[] = [];
+    for (const { shell, summary } of boundThreadCount(candidates, caps.maxThreads)) {
+      const fragment = fragmentFor(shell, summary);
+      nextFragments.set(shell.id, fragment);
+      kept.push(fragment);
+    }
+    // Threads that left the environment or the count cap drop their fragments.
+    fragments = nextFragments;
+
+    // `JSON.stringify` of the record with no threads ends in `"threads":[]}`;
+    // the fragments go between the brackets, so the assembled payload is the
+    // record's own serialization.
+    const envelope = JSON.stringify(record);
+    const prefix = envelope.slice(0, -2);
+    const suffix = envelope.slice(-2);
+    // Every join point is an ASCII character, so the UTF-8 length of the whole
+    // is the sum of its parts.
+    const envelopeBytes = payloadByteLength(envelope);
+    const payloadBytesOf = (candidates: ReadonlyArray<SerializedThreadFragment>) => {
+      let bytes = envelopeBytes + Math.max(0, candidates.length - 1);
+      for (const fragment of candidates) bytes += fragment.bytes;
+      return bytes;
+    };
+    let payloadBytes = payloadBytesOf(kept);
+    while (payloadBytes > caps.maxPayloadBytes && kept.length > 0) {
+      kept = dropByteCapRound(kept);
+      payloadBytes = payloadBytesOf(kept);
+    }
+    const payload = `${prefix}${kept.map((fragment) => fragment.json).join(",")}${suffix}`;
+    return { payload, payloadBytes, threads: kept.length };
+  };
+
+  return { serialize, serializedThreadCount: () => serializedThreads };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

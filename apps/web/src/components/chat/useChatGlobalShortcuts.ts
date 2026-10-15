@@ -19,6 +19,8 @@ export interface UseChatGlobalShortcutsInput {
   closeTerminal: (terminalId: string) => void;
   createNewTerminal: () => void;
   setTerminalOpen: (open: boolean) => void;
+  /** Whether the review surface is open, so `diff.toggle` preloads it only to open it. */
+  diffOpen: boolean;
   onToggleDiff: () => void;
   onOpenFilesPanel: () => void;
   onOpenReviewPanel: () => void;
@@ -47,6 +49,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     closeTerminal,
     createNewTerminal,
     setTerminalOpen,
+    diffOpen,
     onToggleDiff,
     onOpenFilesPanel,
     onOpenReviewPanel,
@@ -116,6 +119,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
       if (command === "diff.toggle") {
         event.preventDefault();
         event.stopPropagation();
+        if (!diffOpen) preloadWorkspacePanel("review", { intent: true });
         onToggleDiff();
         return;
       }
@@ -180,6 +184,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     runProjectScript,
     splitTerminal,
     keybindings,
+    diffOpen,
     onToggleDiff,
     onOpenFilesPanel,
     onOpenReviewPanel,

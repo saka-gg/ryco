@@ -42,6 +42,24 @@ describe("parseDynamicImportPreloads", () => {
       ],
     );
   });
+
+  it("reads named-export and destructuring wrappers the way Vite emits them", () => {
+    // Shapes copied from a production build: a `preloadableLazy` named export
+    // (`.then`), a destructured dynamic import (async block body), and an
+    // async body whose import also selects a namespace member.
+    const source = `${MAP_DEPS(["RootAppShell-a1B2c3D4.js", "dep-a1B2c3D4.js", "exporter-a1B2c3D4.js", "dist-a1B2c3D4.js"])}var or=I(()=>Me(()=>import(\`./RootAppShell-a1B2c3D4.js\`).then(e=>e.RootAppShell),__vite__mapDeps([0,1])));let{startClientTracingExporter:e}=await br(async()=>{let{startClientTracingExporter:e}=await import(\`./exporter-a1B2c3D4.js\`);return{startClientTracingExporter:e}},__vite__mapDeps([2]));let n=m(async()=>{let{getSharedHighlighter:e}=await import(\`./dist-a1B2c3D4.js\`).then(e=>e.t);return{getSharedHighlighter:e}},__vite__mapDeps([3,1])).then(({getSharedHighlighter:t})=>t({langs:[\`text\`]}));`;
+
+    const imports = parseDynamicImportPreloads("host-a1B2c3D4.js", source);
+
+    assert.deepStrictEqual(
+      imports.map((entry) => [entry.target, [...entry.preloaded]]),
+      [
+        ["RootAppShell-a1B2c3D4.js", ["RootAppShell-a1B2c3D4.js", "dep-a1B2c3D4.js"]],
+        ["exporter-a1B2c3D4.js", ["exporter-a1B2c3D4.js"]],
+        ["dist-a1B2c3D4.js", ["dist-a1B2c3D4.js", "dep-a1B2c3D4.js"]],
+      ],
+    );
+  });
 });
 
 describe("checkPreloadCoverage", () => {
@@ -83,6 +101,58 @@ describe("checkPreloadCoverage", () => {
       );
       assert.match(report.violations[0]!.message, /Other-a1B2c3D4\.js from main-a1B2c3D4\.js/u);
     });
+  });
+
+  it("reports a named-export import that misses a level", () => {
+    withAssets(
+      {
+        "main-a1B2c3D4.js": `${MAP_DEPS(["Page-a1B2c3D4.js", "level1-a1B2c3D4.js"])}export const go=()=>t(()=>import(\`./Page-a1B2c3D4.js\`).then(e=>e.Page),__vite__mapDeps([0,1]));`,
+        "Page-a1B2c3D4.js": `import"./level1-a1B2c3D4.js";export const Page=1;`,
+        "level1-a1B2c3D4.js": `import"./level2-a1B2c3D4.js";export const level1=1;`,
+        "level2-a1B2c3D4.js": "export const level2=1;",
+      },
+      (distDir) => {
+        const assetsDir = path.join(distDir, "assets");
+        const report = checkPreloadCoverage(readBundleGraph(assetsDir), assetsDir);
+        assert.strictEqual(report.checkedImports, 1);
+        assert.deepStrictEqual(report.uncovered, [
+          {
+            host: "main-a1B2c3D4.js",
+            target: "Page-a1B2c3D4.js",
+            missing: ["level2-a1B2c3D4.js"],
+          },
+        ]);
+      },
+    );
+  });
+
+  it("reports an import whose wrapper it cannot read in a chunk with preload maps", () => {
+    withAssets(
+      {
+        // A new wrapper shape: the map no longer follows the arrow function.
+        "main-a1B2c3D4.js": `${MAP_DEPS(["Page-a1B2c3D4.js", "Other-a1B2c3D4.js"])}export const go=()=>t(()=>import(\`./Page-a1B2c3D4.js\`),__vite__mapDeps([0]));export const other=()=>t(__vite__mapDeps([1]),()=>import(\`./Other-a1B2c3D4.js\`));`,
+        "Page-a1B2c3D4.js": "export const page=1;",
+        "Other-a1B2c3D4.js": "export const other=1;",
+      },
+      (distDir) => {
+        const assetsDir = path.join(distDir, "assets");
+        const coverage = checkPreloadCoverage(readBundleGraph(assetsDir), assetsDir);
+        assert.strictEqual(coverage.checkedImports, 1);
+        assert.deepStrictEqual(coverage.unreadable, [
+          { host: "main-a1B2c3D4.js", target: "Other-a1B2c3D4.js" },
+        ]);
+
+        const report = checkBundleBudgets(distDir, { bootChunk: "main", closures: [] });
+        assert.deepStrictEqual(
+          report.violations.map((violation) => violation.closure),
+          ["preload depth"],
+        );
+        assert.match(
+          report.violations[0]!.message,
+          /Other-a1B2c3D4\.js from main-a1B2c3D4\.js has no preload map/u,
+        );
+      },
+    );
   });
 
   it("fails instead of passing vacuously when the preload output format is unreadable", () => {

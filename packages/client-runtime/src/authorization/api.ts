@@ -817,6 +817,9 @@ interface PendingNativeExternalIdentityConnection {
   readonly expiresAt: number;
 }
 
+/** How long a Hub's refusal of minor-3 relay tickets is remembered. */
+const RELAY_TICKET_MINOR_FALLBACK_TTL_MS = 15 * 60_000;
+
 export class HostedHubApi {
   readonly #endpoint: EndpointService;
   readonly #httpClient: HttpClientService;
@@ -826,11 +829,13 @@ export class HostedHubApi {
   readonly #nativeAuthorization: NativeAuthorizationService | undefined;
   #pendingNativeExternalIdentityConnection: PendingNativeExternalIdentityConnection | null = null;
   /**
-   * The Hub refused a minor-3 relay ticket request for this session, so later
-   * tickets offer minor 2 directly. Cleared with the session material, so a
-   * new account or session re-negotiates.
+   * Until this time, relay tickets offer minor 2 directly: the Hub refused a
+   * minor-3 request for this session. The memo expires after
+   * {@link RELAY_TICKET_MINOR_FALLBACK_TTL_MS}, is dropped when the Hub turns
+   * out to require minor 3, and is cleared with the session material, so an
+   * upgraded Hub, a new account or a new session re-negotiates.
    */
-  #relayTicketMinorFallback = false;
+  #relayTicketMinorFallbackUntil = 0;
 
   constructor(dependencies: HostedHubApiDependencies) {
     this.#endpoint = dependencies.endpoint;
@@ -896,15 +901,19 @@ export class HostedHubApi {
 
   clearSessionMaterial(): void {
     this.#pendingNativeExternalIdentityConnection = null;
-    this.#relayTicketMinorFallback = false;
+    this.#relayTicketMinorFallbackUntil = 0;
     if (this.#isBearer) this.#writeBearerToken(null);
     else this.#sessionCredentials.writeCsrfToken(null);
   }
 
-  async getBootstrapAvailability(signal?: AbortSignal): Promise<boolean> {
+  async getBootstrapAvailability(
+    signal?: AbortSignal,
+    options?: HostedHubReadOptions,
+  ): Promise<boolean> {
     const result = await this.#request("/api/auth/bootstrap-status", {
       dpop: "mint",
       ...(signal ? { signal } : {}),
+      ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
     });
     if (Object.keys(result).length !== 1 || typeof result.available !== "boolean") {
       throw new HostedHubApiError("invalid_response", 502);
@@ -2689,26 +2698,34 @@ export class HostedHubApi {
         csrf: true,
         ...(signal ? { signal } : {}),
       });
-    // A Hub that has already refused minor 3 for this session is offered
+    // A Hub that has recently refused minor 3 for this session is offered
     // minor 2 directly, so every later attempt costs one request, not two.
-    let offeredMinor: 2 | 3 = this.#relayTicketMinorFallback ? 2 : 3;
+    let offeredMinor: 2 | 3 = Date.now() < this.#relayTicketMinorFallbackUntil ? 2 : 3;
     let result: Record<string, unknown>;
     try {
       result = await request(offeredMinor);
     } catch (error) {
-      // Older Hubs reject the newer request schema before issuing any ticket.
-      // Retry only that explicit rejection, never a failed/uncertain issuance.
-      if (
-        offeredMinor !== 3 ||
-        !(error instanceof HostedHubApiError) ||
-        error.status !== 400 ||
-        error.code !== "invalid_request"
+      if (!(error instanceof HostedHubApiError)) throw error;
+      // Both retries answer an explicit rejection the Hub makes before issuing
+      // any ticket; a failed or uncertain issuance is never retried.
+      if (offeredMinor === 3 && error.status === 400 && error.code === "invalid_request") {
+        // Older Hubs reject the newer request schema.
+        offeredMinor = 2;
+        result = await request(offeredMinor);
+        this.#relayTicketMinorFallbackUntil = Date.now() + RELAY_TICKET_MINOR_FALLBACK_TTL_MS;
+      } else if (
+        offeredMinor === 2 &&
+        error.status === 426 &&
+        error.code === "unsupported_version"
       ) {
+        // The Hub has been upgraded since it refused minor 3 and now requires
+        // it for this node.
+        this.#relayTicketMinorFallbackUntil = 0;
+        offeredMinor = 3;
+        result = await request(offeredMinor);
+      } else {
         throw error;
       }
-      offeredMinor = 2;
-      result = await request(offeredMinor);
-      this.#relayTicketMinorFallback = true;
     }
     if (
       Object.keys(result).length !== 4 ||

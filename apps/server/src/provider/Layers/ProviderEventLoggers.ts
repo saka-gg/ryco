@@ -30,8 +30,8 @@
  * `RYCO_PROVIDER_EVENT_LOGS`) is read on every write, so a settings change
  * applies without a restart. The layer also owns retention for the provider
  * and terminal log directories (age + total-size budget, at boot and hourly)
- * and drains both loggers when it is released, after the adapters that
- * write through it.
+ * and drains both loggers when it is released (after the adapters that write
+ * through it), giving up after a bounded time.
  *
  * @module provider/Layers/ProviderEventLoggers
  */
@@ -91,6 +91,12 @@ export const TERMINAL_LOG_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 export const TERMINAL_LOG_BUDGET_BYTES = 256 * 1024 * 1024;
 const TERMINAL_LOG_FILE_PATTERN = /\.log$/;
 const LOG_RETENTION_INTERVAL = Duration.hours(1);
+/**
+ * Longest the shutdown drain may take. The logs are best effort: a wedged
+ * write or backup compression must not hold up a graceful stop (desktop
+ * kills the backend 3 s after SIGTERM; a CLI stop would wait forever).
+ */
+export const PROVIDER_EVENT_LOGGERS_CLOSE_TIMEOUT = Duration.millis(1_500);
 
 /**
  * Effective detail level: the environment override, else the setting, else
@@ -200,7 +206,16 @@ export const ProviderEventLoggersLive = Layer.effect(
       Effect.all([native?.close() ?? Effect.void, canonical?.close() ?? Effect.void], {
         concurrency: "unbounded",
         discard: true,
-      }),
+      }).pipe(
+        Effect.timeoutOption(PROVIDER_EVENT_LOGGERS_CLOSE_TIMEOUT),
+        Effect.flatMap((drained) =>
+          Option.isNone(drained)
+            ? Effect.logWarning("provider event logs did not drain before shutdown", {
+                timeoutMs: Duration.toMillis(PROVIDER_EVENT_LOGGERS_CLOSE_TIMEOUT),
+              })
+            : Effect.void,
+        ),
+      ),
     );
     return {
       native,

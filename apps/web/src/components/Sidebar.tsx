@@ -1,5 +1,4 @@
 import { useAppKeybindings } from "../appKeybindings";
-import { applyInboxServerConfig } from "./inboxSidebar/inboxSidebarModel";
 import { useDeviceName } from "../deviceName";
 import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfigSelector } from "~/rpc/serverState";
@@ -43,7 +42,10 @@ import {
 } from "@ryco/client-runtime/scoped";
 import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
-import { selectCacheHydratedEnvironmentIds } from "@ryco/client-runtime/state/threads";
+import {
+  selectCacheHydratedEnvironmentIds,
+  selectThreadLiveDetailLoaded,
+} from "@ryco/client-runtime/state/threads";
 import { isWorkspaceMetadataSnapshot } from "@ryco/client-runtime/state/workspace";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { usePrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
@@ -105,7 +107,6 @@ import {
   shouldAutoAnimateSidebarThreadLists,
   shouldClearThreadSelectionOnMouseDown,
   shouldPrewarmSidebarThreads,
-  sortProjectsForSidebar,
   useThreadJumpHintVisibility,
 } from "./Sidebar.logic";
 import { SidebarProjectsContent, PROJECT_ROOT_DROP_ID } from "./sidebar/SidebarProjectList";
@@ -124,18 +125,21 @@ import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
+  applyInboxServerConfig,
   buildPrimaryInboxSidebarEnvironment,
   buildSavedInboxSidebarEnvironment,
+  sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
 import { useSettings, useUpdateSettings } from "~/hooks/useSettings";
 import { useLogicalProjectSnapshots } from "~/hooks/useLogicalProjectSnapshots";
+import { useProjectGroupingSettings } from "~/hooks/useProjectGroupingSettings";
 import { derivePhysicalProjectKey } from "../logicalProject";
 import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
-import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../types";
+import type { SidebarThreadSummary } from "../types";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildSidebarProjectFolderTree } from "../sidebarProjectFolders";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
@@ -145,8 +149,10 @@ import { useMessageQueueStore } from "../messageQueueStore";
 import { useSidebarThreadPrewarm } from "./sidebar/hooks/useSidebarThreadPrewarm";
 import { useSidebarListMotionReady } from "./sidebar/hooks/useSidebarListMotionReady";
 import {
+  collectSidebarVisibleThreadKeys,
   createSidebarProjectThreadKeysCache,
   groupByLogicalProjectKey,
+  sortSidebarProjects,
 } from "./sidebar/sidebarVisibleThreadKeys";
 import {
   createSidebarProjectTreeCache,
@@ -161,8 +167,6 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
 } as const;
 type SidebarAutoAnimateControllers = Map<HTMLElement, AnimationController>;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
-const EMPTY_SIDEBAR_THREADS: readonly SidebarThreadSummary[] = [];
-const EMPTY_SIDEBAR_WORKTREES: readonly SidebarWorktreeSummary[] = [];
 
 function pruneDisconnectedSidebarAutoAnimateControllers(
   controllers: SidebarAutoAnimateControllers,
@@ -240,10 +244,6 @@ function revealMovedSidebarRows(
 const selectSidebarThreadSortOrder = (settings: UnifiedSettings) => settings.sidebarThreadSortOrder;
 const selectSidebarProjectSortOrder = (settings: UnifiedSettings) =>
   settings.sidebarProjectSortOrder;
-const selectSidebarProjectGroupingMode = (settings: UnifiedSettings) =>
-  settings.sidebarProjectGroupingMode;
-const selectSidebarProjectGroupingOverrides = (settings: UnifiedSettings) =>
-  settings.sidebarProjectGroupingOverrides;
 const selectAiFocusEnabled = (settings: UnifiedSettings) => settings.aiFocusEnabled;
 const selectSidebarAutoSettleAfterDays = (settings: UnifiedSettings) =>
   settings.sidebarAutoSettleAfterDays;
@@ -311,6 +311,64 @@ function SidebarThreadJumpHintController(props: {
   return null;
 }
 
+const EMPTY_SIDEBAR_CHAT_ROWS: ReturnType<typeof buildSidebarChatRows> = [];
+const EMPTY_SIDEBAR_PROJECTS: ReturnType<typeof sortSidebarProjects> = [];
+const EMPTY_THREAD_KEYS: string[] = [];
+
+type ThreadJumpCommand = NonNullable<ReturnType<typeof threadJumpCommandForIndex>>;
+
+/** The first visible threads that have a jump command, in traversal order. */
+function buildThreadJumpCommandMap(
+  visibleThreadKeys: readonly string[],
+): Map<string, ThreadJumpCommand> {
+  const mapping = new Map<string, ThreadJumpCommand>();
+  for (const [visibleThreadIndex, threadKey] of visibleThreadKeys.entries()) {
+    const jumpCommand = threadJumpCommandForIndex(visibleThreadIndex);
+    if (!jumpCommand) {
+      return mapping;
+    }
+    mapping.set(threadKey, jumpCommand);
+  }
+  return mapping;
+}
+
+/**
+ * The traversal and jump order the projects pane would derive, built in one
+ * pass for the keyboard shortcuts while that pane has never been shown.
+ */
+function deriveShortcutThreadOrder(input: {
+  readonly projectOrderInput: Parameters<typeof sortSidebarProjects>[0];
+  readonly visibleThreadKeysInput: Omit<
+    Parameters<typeof collectSidebarVisibleThreadKeys>[0],
+    "projectTreeRows"
+  >;
+  readonly projectFoldersById: Parameters<
+    typeof buildSidebarProjectFolderTree
+  >[0]["projectFoldersById"];
+  readonly projectFolderOrder: Parameters<
+    typeof buildSidebarProjectFolderTree
+  >[0]["projectFolderOrder"];
+  readonly projectTreeOrder: Parameters<
+    typeof buildSidebarProjectFolderTree
+  >[0]["projectTreeOrder"];
+}): { readonly orderedThreadKeys: readonly string[]; readonly jumpThreadKeys: readonly string[] } {
+  const projectTreeRows = buildSidebarProjectFolderTree({
+    projects: sortSidebarProjects(input.projectOrderInput),
+    projectFoldersById: input.projectFoldersById,
+    projectFolderOrder: input.projectFolderOrder,
+    projectTreeOrder: input.projectTreeOrder,
+    projectSortOrder: input.projectOrderInput.sortOrder,
+  });
+  const orderedThreadKeys = collectSidebarVisibleThreadKeys({
+    ...input.visibleThreadKeysInput,
+    projectTreeRows,
+  });
+  return {
+    orderedThreadKeys,
+    jumpThreadKeys: [...buildThreadJumpCommandMap(orderedThreadKeys).keys()],
+  };
+}
+
 function buildThreadJumpLabelMap(input: {
   keybindings: ReturnType<typeof useAppKeybindings>;
   platform: string;
@@ -355,6 +413,24 @@ export default function Sidebar() {
     [cacheHydratedEnvironmentIdList],
   );
   const sidebarMode = useUiStateStore((store) => store.sidebarMode);
+  // Only the active pane renders. A pane is mounted the first time it is
+  // shown and then kept in a hidden <Activity>, which preserves its local
+  // state (expanded sections, scroll) while unmounting its effects (row
+  // observers, git-status and change-request subscriptions) and skipping its
+  // renders: its props are frozen at the last visible values.
+  const [mountedSidebarModes, setMountedSidebarModes] = useState<ReadonlySet<SidebarMode>>(
+    () => new Set([sidebarMode]),
+  );
+  if (!mountedSidebarModes.has(sidebarMode)) {
+    setMountedSidebarModes(new Set([...mountedSidebarModes, sidebarMode]));
+  }
+  const projectsPaneVisible = sidebarMode === "projects";
+  const inboxPaneVisible = sidebarMode === "inbox";
+  // The project tree's derivations (chat rows, project order, tree rows,
+  // traversal order) feed the projects pane. Until it is first shown (the
+  // inbox is the default), they are not built; thread traversal and jump
+  // shortcuts derive the same order on demand instead.
+  const projectTreeDerived = mountedSidebarModes.has("projects");
   const setSidebarMode = useUiStateStore((store) => store.setSidebarMode);
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectFoldersById = useUiStateStore((store) => store.projectFoldersById);
@@ -368,16 +444,11 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useSettings(selectSidebarThreadSortOrder);
   const sidebarProjectSortOrder = useSettings(selectSidebarProjectSortOrder);
-  const sidebarProjectGroupingMode = useSettings(selectSidebarProjectGroupingMode);
-  const sidebarProjectGroupingOverrides = useSettings(selectSidebarProjectGroupingOverrides);
   const aiFocusEnabled = useSettings(selectAiFocusEnabled);
   const sidebarAutoSettleAfterDays = useSettings(selectSidebarAutoSettleAfterDays);
-  // Select the fields separately: an object-returning selector is a new object
-  // every render and invalidated the whole project-tree derivation chain.
-  const projectGroupingSettings = useMemo(
-    () => ({ sidebarProjectGroupingMode, sidebarProjectGroupingOverrides }),
-    [sidebarProjectGroupingMode, sidebarProjectGroupingOverrides],
-  );
+  // Stable while the grouping settings are: it feeds the whole project-tree
+  // derivation chain.
+  const projectGroupingSettings = useProjectGroupingSettings();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewChat } = useNewThreadHandler();
   const { archiveThread, deleteThread, stopThreadSession, interruptThreadTurn } =
@@ -452,10 +523,14 @@ export default function Sidebar() {
     },
     [clearSelection, setOpen, setSidebarMode, sidebarMode],
   );
-  // Only the parts the inbox reads: settings-only config pushes do not
-  // rebuild the inbox environments (and with them the inbox model).
+  // Only the parts the inbox reads: settings-only and provider-status config
+  // pushes do not rebuild the inbox environments (and with them the inbox
+  // model); the provider list only matters for its model catalogs.
   const inboxServerEnvironment = useServerConfigSelector(selectServerEnvironment);
-  const inboxServerProviders = useServerConfigSelector(selectServerProviders);
+  const inboxServerProviders = useServerConfigSelector(
+    selectServerProviders,
+    sameInboxProviderCatalogs,
+  );
   const inboxServerConfig = useMemo(
     () =>
       inboxServerEnvironment && inboxServerProviders
@@ -668,14 +743,23 @@ export default function Sidebar() {
   const draftThreadsByThreadKey = useComposerDraftStore((store) => store.draftThreadsByThreadKey);
   const sidebarChatRows = useMemo(
     () =>
-      buildSidebarChatRows({
-        projects,
-        threads: sidebarThreads,
-        draftThreadsByThreadKey,
-        sortOrder: sidebarThreadSortOrder,
-        pinnedThreadKeys,
-      }),
-    [draftThreadsByThreadKey, pinnedThreadKeys, projects, sidebarThreadSortOrder, sidebarThreads],
+      projectTreeDerived
+        ? buildSidebarChatRows({
+            projects,
+            threads: sidebarThreads,
+            draftThreadsByThreadKey,
+            sortOrder: sidebarThreadSortOrder,
+            pinnedThreadKeys,
+          })
+        : EMPTY_SIDEBAR_CHAT_ROWS,
+    [
+      draftThreadsByThreadKey,
+      pinnedThreadKeys,
+      projectTreeDerived,
+      projects,
+      sidebarThreadSortOrder,
+      sidebarThreads,
+    ],
   );
   const chatEnvironmentId =
     selectedHostedEnvironmentId ?? newThreadTargetProject?.environmentId ?? primaryEnvironmentId;
@@ -842,37 +926,28 @@ export default function Sidebar() {
     () => sidebarThreads.filter((thread) => thread.archivedAt === null),
     [sidebarThreads],
   );
-  const sortedProjects = useMemo(() => {
-    const sortableProjects = sidebarProjects.map((project) => ({
-      ...project,
-      id: project.projectKey,
-    }));
-    const sortableThreads = visibleThreads.map((thread) => {
-      const physicalKey =
-        projectPhysicalKeyByScopedRef.get(
-          scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
-        ) ?? scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
-      return {
-        ...thread,
-        projectId: (physicalToLogicalKey.get(physicalKey) ?? physicalKey) as ProjectId,
-      };
-    });
-    return sortProjectsForSidebar(
-      sortableProjects,
-      sortableThreads,
+  const projectOrderInput = useMemo(
+    () => ({
+      sidebarProjects,
+      visibleThreads,
+      projectPhysicalKeyByScopedRef,
+      physicalToLogicalKey,
+      sidebarProjectByKey,
+      sortOrder: sidebarProjectSortOrder,
+    }),
+    [
+      physicalToLogicalKey,
+      projectPhysicalKeyByScopedRef,
+      sidebarProjectByKey,
       sidebarProjectSortOrder,
-    ).flatMap((project) => {
-      const resolvedProject = sidebarProjectByKey.get(project.id);
-      return resolvedProject ? [resolvedProject] : [];
-    });
-  }, [
-    sidebarProjectSortOrder,
-    physicalToLogicalKey,
-    projectPhysicalKeyByScopedRef,
-    sidebarProjectByKey,
-    sidebarProjects,
-    visibleThreads,
-  ]);
+      sidebarProjects,
+      visibleThreads,
+    ],
+  );
+  const sortedProjects = useMemo(
+    () => (projectTreeDerived ? sortSidebarProjects(projectOrderInput) : EMPTY_SIDEBAR_PROJECTS),
+    [projectOrderInput, projectTreeDerived],
+  );
   const projectTreeRows = useMemo(
     () =>
       buildSidebarProjectFolderTree({
@@ -1012,43 +1087,36 @@ export default function Sidebar() {
 
   // Keyboard traversal and jump-hint order. Memoized per project: a commit
   // that changes one project's threads re-derives only that project's tree.
-  const visibleSidebarThreadKeys = useMemo(
-    () =>
-      projectTreeRows.flatMap((row) => {
-        const projectsForRow =
-          row.kind === "project" ? [row.project] : row.folder.expanded ? row.projects : [];
-        return projectsForRow.flatMap((project) => {
-          const projectExpanded = projectExpandedById[project.projectKey] ?? true;
-          const activeThreadKey = projectExpanded ? null : routeThreadKey;
-          // A collapsed project without a routed thread shows nothing to traverse.
-          if (!projectExpanded && activeThreadKey === null) return [];
-          return projectThreadKeysCache.projectThreadKeys({
-            projectKey: project.projectKey,
-            structure: projectTreeCache.structure({
-              project,
-              threads: threadsByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_THREADS,
-              drafts: projectTreeCache.draftThreadsSelector(project)({ draftThreadsByThreadKey }),
-              worktrees: worktreesByProjectKey.get(project.projectKey) ?? EMPTY_SIDEBAR_WORKTREES,
-              sortOrder: sidebarThreadSortOrder,
-              pinnedThreadKeys,
-            }),
-            projectExpanded,
-            activeThreadKey,
-          });
-        });
-      }),
+  const visibleThreadKeysInput = useMemo(
+    () => ({
+      projectExpandedById,
+      routeThreadKey,
+      projectThreadKeysCache,
+      projectTreeCache,
+      threadsByProjectKey,
+      worktreesByProjectKey,
+      draftThreadsByThreadKey,
+      sortOrder: sidebarThreadSortOrder,
+      pinnedThreadKeys,
+    }),
     [
       draftThreadsByThreadKey,
-      sidebarThreadSortOrder,
       pinnedThreadKeys,
       projectExpandedById,
       projectThreadKeysCache,
       projectTreeCache,
-      projectTreeRows,
       routeThreadKey,
+      sidebarThreadSortOrder,
       threadsByProjectKey,
       worktreesByProjectKey,
     ],
+  );
+  const visibleSidebarThreadKeys = useMemo(
+    () =>
+      projectTreeDerived
+        ? collectSidebarVisibleThreadKeys({ ...visibleThreadKeysInput, projectTreeRows })
+        : EMPTY_THREAD_KEYS,
+    [projectTreeDerived, projectTreeRows, visibleThreadKeysInput],
   );
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
   // No list motion (project tree or inbox) while the lists populate at boot
@@ -1119,18 +1187,10 @@ export default function Sidebar() {
       shouldAnimateThreadLists,
     );
   }, [shouldAnimateThreadLists]);
-  const threadJumpCommandByKey = useMemo(() => {
-    const mapping = new Map<string, NonNullable<ReturnType<typeof threadJumpCommandForIndex>>>();
-    for (const [visibleThreadIndex, threadKey] of visibleSidebarThreadKeys.entries()) {
-      const jumpCommand = threadJumpCommandForIndex(visibleThreadIndex);
-      if (!jumpCommand) {
-        return mapping;
-      }
-      mapping.set(threadKey, jumpCommand);
-    }
-
-    return mapping;
-  }, [visibleSidebarThreadKeys]);
+  const threadJumpCommandByKey = useMemo(
+    () => buildThreadJumpCommandMap(visibleSidebarThreadKeys),
+    [visibleSidebarThreadKeys],
+  );
   const threadJumpThreadKeys = useMemo(
     () => [...threadJumpCommandByKey.keys()],
     [threadJumpCommandByKey],
@@ -1149,7 +1209,43 @@ export default function Sidebar() {
   const visibleThreadJumpLabelByKey = showThreadJumpHints
     ? threadJumpLabelByKey
     : EMPTY_THREAD_JUMP_LABELS;
-  const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
+  // The traversal and jump order for the keyboard shortcuts. Before the
+  // projects pane was first shown nothing above derived it: build it on the
+  // first shortcut and reuse it until an input changes.
+  const readShortcutThreadOrder = useMemo(() => {
+    if (projectTreeDerived) {
+      const order = {
+        orderedThreadKeys: visibleSidebarThreadKeys,
+        jumpThreadKeys: threadJumpThreadKeys,
+      };
+      return () => order;
+    }
+    let order: {
+      readonly orderedThreadKeys: readonly string[];
+      readonly jumpThreadKeys: readonly string[];
+    } | null = null;
+    return () => {
+      if (order === null) {
+        order = deriveShortcutThreadOrder({
+          projectOrderInput,
+          visibleThreadKeysInput,
+          projectFoldersById,
+          projectFolderOrder,
+          projectTreeOrder,
+        });
+      }
+      return order;
+    };
+  }, [
+    projectFolderOrder,
+    projectFoldersById,
+    projectOrderInput,
+    projectTreeDerived,
+    projectTreeOrder,
+    threadJumpThreadKeys,
+    visibleSidebarThreadKeys,
+    visibleThreadKeysInput,
+  ]);
   const prewarmedSidebarThreadKeys = useMemo(
     () => getSidebarThreadIdsToPrewarm(visibleSidebarThreadKeys),
     [visibleSidebarThreadKeys],
@@ -1163,9 +1259,17 @@ export default function Sidebar() {
     [prewarmedSidebarThreadKeys],
   );
 
+  // Prewarmed windows wait (a bounded time) for the routed thread's own live
+  // window, so they never compete with it; a draft or a route without a thread
+  // has none.
+  const routeThreadLiveDetailLoaded = useStore((store) =>
+    routeThreadRef ? selectThreadLiveDetailLoaded(store, routeThreadRef) : true,
+  );
   useSidebarThreadPrewarm(
     shouldPrewarmSidebarThreads({ isMobile, open, openMobile, sidebarMode }),
     prewarmedSidebarThreadRefs,
+    routeThreadLiveDetailLoaded,
+    routeThreadKey,
   );
 
   useEffect(() => {
@@ -1192,7 +1296,7 @@ export default function Sidebar() {
       const traversalDirection = threadTraversalDirectionFromCommand(command);
       if (traversalDirection !== null) {
         const targetThreadKey = resolveAdjacentThreadId({
-          threadIds: orderedSidebarThreadKeys,
+          threadIds: readShortcutThreadOrder().orderedThreadKeys,
           currentThreadId: routeThreadKey,
           direction: traversalDirection,
         });
@@ -1215,7 +1319,7 @@ export default function Sidebar() {
         return;
       }
 
-      const targetThreadKey = threadJumpThreadKeys[jumpIndex];
+      const targetThreadKey = readShortcutThreadOrder().jumpThreadKeys[jumpIndex];
       if (!targetThreadKey) {
         return;
       }
@@ -1239,11 +1343,10 @@ export default function Sidebar() {
     handleSidebarModeChange,
     keybindings,
     navigateToThread,
-    orderedSidebarThreadKeys,
     platform,
+    readShortcutThreadOrder,
     routeThreadKey,
     sidebarThreadByKey,
-    threadJumpThreadKeys,
   ]);
 
   useEffect(() => {
@@ -1459,20 +1562,6 @@ export default function Sidebar() {
     ],
   );
 
-  // Only the active pane renders. A pane is mounted the first time it is
-  // shown and then kept in a hidden <Activity>, which preserves its local
-  // state (expanded sections, scroll) while unmounting its effects (row
-  // observers, git-status and change-request subscriptions) and skipping its
-  // renders: its props are frozen at the last visible values.
-  const [mountedSidebarModes, setMountedSidebarModes] = useState<ReadonlySet<SidebarMode>>(
-    () => new Set([sidebarMode]),
-  );
-  if (!mountedSidebarModes.has(sidebarMode)) {
-    setMountedSidebarModes(new Set([...mountedSidebarModes, sidebarMode]));
-  }
-  const projectsPaneVisible = sidebarMode === "projects";
-  const inboxPaneVisible = sidebarMode === "inbox";
-
   return (
     <>
       <SidebarChromeHeader
@@ -1513,7 +1602,7 @@ export default function Sidebar() {
                   handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
                   projectSortOrder={sidebarProjectSortOrder}
                   threadSortOrder={sidebarThreadSortOrder}
-                  projectGroupingMode={sidebarProjectGroupingMode}
+                  projectGroupingMode={projectGroupingSettings.sidebarProjectGroupingMode}
                   updateSettings={updateSettings}
                   openAddProject={openAddProjectCommandPalette}
                   isManualProjectSorting={isManualProjectSorting}
@@ -1570,12 +1659,15 @@ export default function Sidebar() {
           ) : null}
         </SidebarProjectDialogProvider>
       </SidebarProjectTreeCacheContext.Provider>
-      <SidebarThreadJumpHintController
-        keybindings={keybindings}
-        platform={platform}
-        terminalOpen={routeTerminalOpen}
-        onVisibilityChange={updateThreadJumpHintsVisibility}
-      />
+      {/* Jump hint labels render only in the project tree. */}
+      {projectsPaneVisible ? (
+        <SidebarThreadJumpHintController
+          keybindings={keybindings}
+          platform={platform}
+          terminalOpen={routeTerminalOpen}
+          onVisibilityChange={updateThreadJumpHintsVisibility}
+        />
+      ) : null}
       <SidebarSeparator />
       <SidebarChromeFooter />
     </>

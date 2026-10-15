@@ -35,7 +35,8 @@ import { hostedHubController, hostedHubStore } from "../hostedHub/state";
 import { useStore, selectThreadByRef } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import { readHostedThreadScroll } from "../persistence/hostedReadViewState";
+import { readHostedThreadScroll, saveHostedThreadScroll } from "../persistence/hostedReadViewState";
+import { workspaceMetadataToCachedShellSnapshot } from "../workspaceMetadataProjection";
 import { resolveHostedRpcCapability } from "../hostedHub/capabilities";
 
 describe("hosted conversation cold start", () => {
@@ -127,6 +128,174 @@ describe("hosted conversation cold start", () => {
     await setHostedReadCacheEnabled(false);
     hostedHubController.resetForTests();
   });
+  it("rewrites only the environment whose own inputs changed", async () => {
+    hostedHubController.resetForTests();
+    await setHostedReadCacheEnabled(true);
+    const vault = getHostedReadVault();
+    const write = vi.spyOn(vault, "write");
+    const workspaces = (["a", "b"] as const).map((letter) => {
+      const environmentId = EnvironmentId.make(`env_${letter.repeat(22)}`);
+      const projectId = ProjectId.make(`project-${letter}`);
+      const threadId = ThreadId.make(`thread-${letter}`);
+      const metadata: WorkspaceMetadataSnapshot = {
+        schemaVersion: 1,
+        environmentId,
+        capturedAt: 1,
+        projects: [
+          {
+            environmentId,
+            id: projectId,
+            name: `Project ${letter}`,
+            cwd: `/${letter}`,
+            repositoryIdentity: null,
+            createdAt: null,
+            updatedAt: null,
+          },
+        ],
+        worktrees: [],
+        threads: [
+          {
+            environmentId,
+            id: threadId,
+            projectId,
+            worktreeId: null,
+            title: `Thread ${letter}`,
+            createdAt: "2026-10-01T00:00:00Z",
+            updatedAt: "2026-10-01T00:00:00Z",
+            archivedAt: null,
+            snoozedAt: null,
+            snoozedUntil: null,
+            modelSelection: null,
+            providerDriver: null,
+            branch: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+            deliveryUnknown: false,
+          },
+        ],
+      };
+      useStore
+        .getState()
+        .hydrateEnvironmentStateFromCache(
+          workspaceMetadataToCachedShellSnapshot(metadata),
+          environmentId,
+        );
+      // Live, as after the node's shell snapshot: the cache saves live state only.
+      useStore.setState((state) => ({
+        environmentStateById: {
+          ...state.environmentStateById,
+          [environmentId]: {
+            ...state.environmentStateById[environmentId]!,
+            bootstrapComplete: true,
+          },
+        },
+      }));
+      return {
+        environmentId,
+        ref: { environmentId, threadId },
+        node: {
+          id: `node_${letter.repeat(22)}`,
+          environmentId,
+          label: `Mac ${letter}`,
+          platformOs: "darwin" as const,
+          platformArch: "arm64" as const,
+          clientVersion: "1",
+          createdAt: 1,
+          updatedAt: 1,
+          lastAuthenticatedAt: 1,
+          revokedAt: null,
+          revocationReasonCode: null,
+          grant: { id: `grant-${letter}`, role: "operator" as const },
+          effectiveRole: "operator" as const,
+          presence: { online: true, lastHeartbeatAt: 1 },
+        },
+      };
+    });
+    const [first, second] = workspaces as [(typeof workspaces)[0], (typeof workspaces)[0]];
+    const recordWrites = (environmentId: EnvironmentId) =>
+      write.mock.calls.filter((call) => call[1] === environmentId).length;
+    await bootstrapWithHostedReadCache(async () => {
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: {
+          id: "two-node-account",
+          displayName: "Two nodes",
+          role: "operator",
+          createdAt: 1,
+          disabledAt: null,
+        },
+        nodes: workspaces.map((workspace) => workspace.node),
+        directoryStatus: "ready",
+      });
+    });
+    await vi.waitFor(
+      () => {
+        expect(recordWrites(first.environmentId)).toBe(1);
+        expect(recordWrites(second.environmentId)).toBe(1);
+      },
+      { timeout: 5_000 },
+    );
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 3_000));
+
+    // A scroll in one environment's thread rewrites that record alone.
+    saveHostedThreadScroll(scopedThreadKey(first.ref), 120);
+    await vi.waitFor(() => expect(recordWrites(first.environmentId)).toBe(2), {
+      timeout: 5_000,
+    });
+    await settle();
+    expect(recordWrites(second.environmentId)).toBe(1);
+
+    // The timeline re-reporting the same position (every streaming render)
+    // writes nothing.
+    saveHostedThreadScroll(scopedThreadKey(first.ref), 120);
+    await settle();
+    expect(recordWrites(first.environmentId)).toBe(2);
+
+    // A draft typed in one environment leaves the other's record alone.
+    useComposerDraftStore.getState().setPrompt(second.ref, "Typed on b");
+    await vi.waitFor(() => expect(recordWrites(second.environmentId)).toBe(2), {
+      timeout: 5_000,
+    });
+    await settle();
+    expect(recordWrites(first.environmentId)).toBe(2);
+
+    // Opening a thread (kept last when a record is trimmed) rewrites only the
+    // record it belongs to, and leaving it again only that one too. Any store
+    // change schedules the save.
+    const testPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    try {
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `/${first.environmentId}/${first.ref.threadId}`,
+      );
+      useStore.setState({});
+      await vi.waitFor(() => expect(recordWrites(first.environmentId)).toBe(3), {
+        timeout: 5_000,
+      });
+      await settle();
+      expect(recordWrites(second.environmentId)).toBe(2);
+    } finally {
+      window.history.replaceState(window.history.state, "", testPath);
+    }
+    useStore.setState({});
+    await vi.waitFor(() => expect(recordWrites(first.environmentId)).toBe(4), {
+      timeout: 5_000,
+    });
+    await settle();
+    expect(recordWrites(second.environmentId)).toBe(2);
+
+    write.mockRestore();
+    useComposerDraftStore.getState().setPrompt(second.ref, "");
+    hostedHubStore.setState({ accountStatus: "signing-out" });
+    await vi.waitFor(() => expect(readHostedReadCache().accountId).toBeNull());
+    for (const workspace of workspaces) {
+      useStore.getState().removeEnvironmentState(workspace.environmentId);
+    }
+    await setHostedReadCacheEnabled(false);
+    hostedHubController.resetForTests();
+  }, 30_000);
   it("renders saved text before auth, preserves offline reading, and purges on observed expiry", async () => {
     hostedHubController.resetForTests();
     const environmentId = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");

@@ -192,6 +192,7 @@ export async function sendQueuedMessageInBackground(
       addComposerDraftImages: noop,
       setComposerDraftTerminalContexts: noop,
       setDraftThreadContext: noop,
+      readComposerDraftContent: () => null,
     },
     dispatch: {
       api,

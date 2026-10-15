@@ -181,6 +181,31 @@ describe("serverState", () => {
     stop();
   });
 
+  it("shares one lifecycle and config subscription between holders of the same client", () => {
+    const stopEarly = startServerStateSync(serverApi);
+    const stopShell = startServerStateSync(serverApi);
+
+    expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
+    expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
+    expect(lifecycleListeners.size).toBe(1);
+    expect(configListeners.size).toBe(1);
+
+    // The first holder letting go (twice, even) leaves the other's streams open.
+    stopEarly();
+    stopEarly();
+    expect(lifecycleListeners.size).toBe(1);
+    expect(configListeners.size).toBe(1);
+
+    stopShell();
+    expect(lifecycleListeners.size).toBe(0);
+    expect(configListeners.size).toBe(0);
+
+    // A later holder opens fresh streams.
+    const stopAgain = startServerStateSync(serverApi);
+    expect(serverApi.subscribeConfig).toHaveBeenCalledTimes(2);
+    stopAgain();
+  });
+
   it("replays welcome events to late subscribers", async () => {
     const stop = startServerStateSync(serverApi);
 

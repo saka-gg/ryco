@@ -6,10 +6,11 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useState } from "react";
-import type { AuthSessionState } from "@ryco/contracts";
+import type { AuthSessionState, ServerLifecycleWelcomePayload } from "@ryco/contracts";
 
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppBootLoadingSurface } from "../components/AppBootLoadingSurface";
+import { warmBootstrapThread } from "../components/RootAppShell.logic";
 import { Button } from "../components/ui/button";
 import { markStartupPhase, measureStartupPhase } from "../perf/startupInstrumentation";
 import {
@@ -21,7 +22,7 @@ import {
 import { runHostedBootGate } from "../hostedHub/bootGate";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, type PreloadableModule } from "../lib/preloadableLazy";
-import { preloadMatchedRouteChunks } from "../lib/routeChunkPreload";
+import { preloadMatchedRouteChunks, preloadRouteChunk } from "../lib/routeChunkPreload";
 import { isPrimaryShellCacheEligible } from "../persistence/primaryShellCacheEligibility";
 import { hostedPwaLifecycle } from "../pwa/lifecycle";
 import { useHostedPwaSnapshot } from "../pwa/useHostedPwaSnapshot";
@@ -100,6 +101,15 @@ function isNativeAuthorizationPath(pathname: string): boolean {
 }
 
 /**
+ * Whether `pathname` renders a root surface at all: pairing and a native
+ * app's sign-in handoff render only their own route, so the boot neither
+ * downloads nor waits for the shell there.
+ */
+function rendersRootSurface(pathname: string): boolean {
+  return pathname !== "/pair" && !isNativeAuthorizationPath(pathname);
+}
+
+/**
  * The lazily loaded surface `RootRouteView` renders for a gate state, or null
  * when it renders only the route outlet (pairing, native authorization, and
  * every unauthenticated state).
@@ -108,7 +118,7 @@ function rootSurfaceFor(
   pathname: string,
   authGateState: RootAuthGateState,
 ): PreloadableModule | null {
-  if (pathname === "/pair" || isNativeAuthorizationPath(pathname)) return null;
+  if (!rendersRootSurface(pathname)) return null;
   switch (authGateState.status) {
     case "authenticated":
     case "hosted-static":
@@ -156,11 +166,14 @@ function resolveRootBeforeLoadContext(
     return pendingReadyRootContext;
   }
 
-  if (pathname !== "/pair" && !isNativeAuthorizationPath(pathname)) {
+  if (rendersRootSurface(pathname)) {
     // Start the shell and the deep-linked page chunks alongside the auth round
     // trips. Nothing here waits for them yet: an unauthenticated document is
     // redirected to /pair without ever awaiting the shell graph.
     void (isHostedHubMode() ? HostedHubRoot : RootAppShell).preload();
+    void preloadMatchedRouteChunks(pathname);
+  } else if (isHostedHubMode() && isNativeAuthorizationPath(pathname)) {
+    // The hosted consent page downloads while the access check is on the wire.
     void preloadMatchedRouteChunks(pathname);
   }
 
@@ -196,7 +209,15 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     // The same preloadable module `RootRouteView` renders, so the root match
     // commits the hosted root directly instead of suspending on it once.
     // `preload()` never rejects; a failed chunk surfaces from the render.
-    await runHostedBootGate({ pathname, hostedRoot: HostedHubRoot.preload() });
+    // Pairing and the native sign-in handoff render no hosted root: the gate
+    // waits for the access check alone there, not for either shell graph.
+    await runHostedBootGate({
+      pathname,
+      hostedRoot: rendersRootSurface(pathname) ? HostedHubRoot.preload() : null,
+      ...(isNativeAuthorizationPath(pathname)
+        ? { preloadSignIn: preloadNativeAuthorizationSignIn }
+        : {}),
+    });
     markStartupPhase("root-before-load-ready");
     return { authGateState: { status: "hosted-hub" } };
   }
@@ -230,11 +251,11 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     desktop: isElectron,
   });
   const primaryShellCache =
-    keepsLocalCaches && pathname !== "/pair" && !isNativeAuthorizationPath(pathname)
-      ? loadPrimaryShellCache()
-      : null;
+    keepsLocalCaches && rendersRootSurface(pathname) ? loadPrimaryShellCache() : null;
   // Provider catalogs this page already holds, so the config snapshot can
-  // leave them out (loaded here, ahead of the first config subscription).
+  // leave them out. The early config subscription waits for them (see
+  // `startPrimaryConnectionEarly`); the shell's own subscribes after its
+  // chunk commits, which is later still.
   const providerCatalogs = keepsLocalCaches ? attachProviderCatalogPersistence() : null;
   const {
     discardPrefetchedPrimaryWebSocketToken,
@@ -252,7 +273,10 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
     resolveInitialServerAuthGateState(),
   ]);
   if (authGateState.status === "authenticated" && connectsEarly) {
-    startPrimaryConnectionEarly();
+    startPrimaryConnectionEarly({
+      providerCatalogs,
+      syncsServerState: rendersRootSurface(pathname),
+    });
     if (primaryShellCache !== null) await restorePrimaryShellCache(primaryShellCache);
   } else {
     discardPrefetchedPrimaryWebSocketToken();
@@ -338,13 +362,53 @@ async function restorePrimaryShellCache(
  * only: hosted lifecycle recovery has a single owner and is never started from
  * here. The shell's `startEnvironmentConnectionService` stays the owner; the
  * supervisor's `connectPrimary` returns this same connection to it.
+ *
+ * Where the shell will mount, the welcome and config subscriptions start on it
+ * too (the shell's `ServerStateBootstrap` takes them over), so a welcome that
+ * names a bootstrap thread warms that thread's route chunk and detail stream
+ * while the shell is still loading. They wait for the persisted provider
+ * catalogs to attach, so the config snapshot still leaves those out. The
+ * shell's `EventRouter` stays the one that navigates.
  */
-function startPrimaryConnectionEarly(): void {
+function startPrimaryConnectionEarly(input: {
+  readonly providerCatalogs: Promise<unknown> | null;
+  readonly syncsServerState: boolean;
+}): void {
   void import("../environments/runtime")
     .then(({ connectPrimaryEnvironment }) => {
-      connectPrimaryEnvironment();
+      const connection = connectPrimaryEnvironment();
+      if (!connection || !input.syncsServerState) return;
+      return import("../rpc/earlyServerStateSync").then(({ startEarlyPrimaryServerStateSync }) =>
+        startEarlyPrimaryServerStateSync(connection.client.server, {
+          after: input.providerCatalogs,
+          onFirstWelcome: warmWelcomeBootstrapThread,
+        }),
+      );
     })
     .catch(() => undefined);
+}
+
+/** Warms the welcome's bootstrap thread; see `warmBootstrapThread`. */
+function warmWelcomeBootstrapThread(payload: ServerLifecycleWelcomePayload): void {
+  warmBootstrapThread(payload, {
+    pathname: window.location.pathname,
+    tier: getPresentationTier(),
+    preloadShell: () => RootAppShell.preload(),
+    preloadThreadRoute: () => preloadRouteChunk("/_chat/$environmentId/$threadId"),
+    prewarmThreadDetail: (environmentId, threadId) =>
+      import("../lib/threadDetailPrewarm")
+        .then(({ prewarmThreadDetailSubscription }) =>
+          prewarmThreadDetailSubscription(environmentId, threadId),
+        )
+        .catch(() => undefined),
+  });
+}
+
+/** The native handoff's sign-in chunk (code only), beside its route chunk. */
+function preloadNativeAuthorizationSignIn(): Promise<unknown> {
+  return import("../components/routeViews/NativeAuthorizationRouteView").then((module) =>
+    module.preloadNativeAuthorizationSignIn(),
+  );
 }
 
 function RootRoutePendingView() {
@@ -353,11 +417,9 @@ function RootRoutePendingView() {
 
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
-  const nativeAuthorizationRoute = isNativeAuthorizationPath(pathname);
   const { authGateState } = Route.useRouteContext();
   const canShowInterstitial =
-    pathname !== "/pair" &&
-    !nativeAuthorizationRoute &&
+    rendersRootSurface(pathname) &&
     (authGateState.status === "authenticated" ||
       authGateState.status === "hosted-static" ||
       authGateState.status === "hosted-hub");
@@ -402,7 +464,7 @@ function RootRouteView() {
     </Suspense>
   ) : null;
 
-  if (pathname === "/pair" || nativeAuthorizationRoute) {
+  if (!rendersRootSurface(pathname)) {
     return <Outlet />;
   }
 

@@ -131,4 +131,33 @@ describe("DiffParseCache", () => {
     expect(cache.get(key("t", "a", "1"))).toBeUndefined();
     expect(cache.get(key("t", "b", "2"))).toBeUndefined();
   });
+
+  it("evicts least-recently-used entries past the weight budget", () => {
+    const cache = new DiffParseCache<string>(10, 100);
+    cache.set(key("t", "*", "1"), "one", { weight: 40 });
+    cache.set(key("t", "*", "2"), "two", { weight: 40 });
+    expect(cache.get(key("t", "*", "1"))).toBe("one");
+    cache.set(key("t", "*", "3"), "three", { weight: 40 });
+
+    expect(cache.get(key("t", "*", "2"))).toBeUndefined();
+    expect(cache.get(key("t", "*", "1"))).toBe("one");
+    expect(cache.get(key("t", "*", "3"))).toBe("three");
+    expect(cache.retainedWeight).toBe(80);
+  });
+
+  it("replaces the previous entry of a slot", () => {
+    const cache = new DiffParseCache<string>(10);
+    cache.set(key("conversation:a", "*", "1"), "first", { slot: "thread-1" });
+    cache.set(key("turn:a", "*", "1"), "turn");
+    cache.set(key("conversation:a,b", "*", "2"), "second", { slot: "thread-1" });
+    cache.set(key("conversation:x", "*", "3"), "other thread", { slot: "thread-2" });
+
+    expect(cache.get(key("conversation:a", "*", "1"))).toBeUndefined();
+    expect(cache.get(key("conversation:a,b", "*", "2"))).toBe("second");
+    expect(cache.get(key("turn:a", "*", "1"))).toBe("turn");
+    expect(cache.get(key("conversation:x", "*", "3"))).toBe("other thread");
+    // Storing the slot's current entry again keeps it.
+    cache.set(key("conversation:a,b", "*", "2"), "second again", { slot: "thread-1" });
+    expect(cache.get(key("conversation:a,b", "*", "2"))).toBe("second again");
+  });
 });

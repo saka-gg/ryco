@@ -1,5 +1,7 @@
 import { realpathSync } from "node:fs";
 
+import { VcsProcessTimeoutError } from "@ryco/contracts";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { Duration, Effect, Fiber, FileSystem, Layer } from "effect";
@@ -350,3 +352,87 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     }).pipe(Effect.provide(RepositoryIdentityResolverLive)),
   );
 });
+
+/** A resolver over a scripted `git`: each probe answers with the next scripted outcome. */
+const scriptedResolver = (
+  outcomes: Array<
+    { readonly exitCode: number; readonly stdout?: string; readonly stderr?: string } | "timeout"
+  >,
+) => {
+  const calls: string[] = [];
+  const layer = Layer.effect(RepositoryIdentityResolver, makeRepositoryIdentityResolver()).pipe(
+    Layer.provide(
+      Layer.succeed(VcsProcess.VcsProcess, {
+        withProcess: () => Effect.die("unused"),
+        run: (input) =>
+          Effect.suspend(() => {
+            calls.push(input.args.join(" "));
+            const outcome = outcomes.shift() ?? "timeout";
+            return outcome === "timeout"
+              ? Effect.fail(
+                  new VcsProcessTimeoutError({
+                    operation: input.operation,
+                    command: input.command,
+                    cwd: input.cwd,
+                    timeoutMs: input.timeoutMs ?? 0,
+                  }),
+                )
+              : Effect.succeed({
+                  exitCode: outcome.exitCode as never,
+                  stdout: outcome.stdout ?? "",
+                  stderr: outcome.stderr ?? "",
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                });
+          }),
+      }),
+    ),
+  );
+  return { calls, layer };
+};
+
+it.effect("a probe git could not answer fails refresh and is never cached as no identity", () => {
+  const { calls, layer } = scriptedResolver([
+    "timeout",
+    "timeout",
+    { exitCode: 128, stderr: "fatal: detected dubious ownership in repository at '/repo'" },
+    { exitCode: 0, stdout: "/repo\n" },
+    { exitCode: 0, stdout: "origin\tgit@github.com:Ryco/ryco.git (fetch)\n" },
+  ]);
+  return Effect.gen(function* () {
+    const resolver = yield* RepositoryIdentityResolver;
+    const timedOut = yield* resolver.refresh!("/repo").pipe(Effect.flip);
+    expect(timedOut._tag).toBe("RepositoryIdentityProbeError");
+    // `resolve` still reads a failure as null, but does not cache it: the next call probes.
+    expect(yield* resolver.resolve("/repo")).toBeNull();
+    const refused = yield* resolver.refresh!("/repo").pipe(Effect.flip);
+    expect(refused.detail).toContain("dubious ownership");
+    expect((yield* resolver.resolve("/repo"))?.canonicalKey).toBe("github.com/ryco/ryco");
+    expect(calls).toEqual([
+      "rev-parse --show-toplevel",
+      "rev-parse --show-toplevel",
+      "rev-parse --show-toplevel",
+      "rev-parse --show-toplevel",
+      "remote -v",
+    ]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect(
+  "git answering 'not a repository' or listing no remote is no identity, not a failure",
+  () => {
+    const { layer } = scriptedResolver([
+      {
+        exitCode: 128,
+        stderr: "fatal: not a git repository (or any of the parent directories): .git",
+      },
+      { exitCode: 0, stdout: "/repo\n" },
+      { exitCode: 0, stdout: "" },
+    ]);
+    return Effect.gen(function* () {
+      const resolver = yield* RepositoryIdentityResolver;
+      expect(yield* resolver.refresh!("/plain")).toBeNull();
+      expect(yield* resolver.refresh!("/repo")).toBeNull();
+    }).pipe(Effect.provide(layer));
+  },
+);

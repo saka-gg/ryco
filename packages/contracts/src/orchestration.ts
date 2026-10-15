@@ -1267,8 +1267,8 @@ export type OrchestrationShellThreadPrioritiesItem =
  * pieces instead of one message: a `snapshot-begin` header, `snapshot-threads`
  * pages (every unarchived thread before any archived one), and `snapshot-end`.
  * The client applies the assembled snapshot at `snapshot-end`, so no message
- * outgrows a relayed connection however large the shell is, and a client can
- * show the unarchived threads before the archived ones have arrived.
+ * outgrows a relayed connection however large the shell is. Pages fill one
+ * byte budget regardless of archive state; a shell within it is one message.
  */
 export const OrchestrationShellSnapshotDelivery = Schema.Literal("paged");
 export type OrchestrationShellSnapshotDelivery = typeof OrchestrationShellSnapshotDelivery.Type;

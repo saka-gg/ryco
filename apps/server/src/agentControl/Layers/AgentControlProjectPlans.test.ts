@@ -54,6 +54,7 @@ const thread = Schema.decodeUnknownSync(OrchestrationThreadShell)({
 const makeLayer = (
   accessRoot: string,
   getSnapshot: () => Effect.Effect<OrchestrationShellSnapshot>,
+  resolveIdentityKey: () => string | null = () => null,
 ) =>
   AgentControlProjectPlansLive.pipe(
     Layer.provideMerge(
@@ -63,7 +64,21 @@ const makeLayer = (
     ),
     Layer.provideMerge(
       Layer.succeed(RepositoryIdentityResolver, {
-        resolve: () => Effect.succeed(null),
+        resolve: () =>
+          Effect.sync(() => {
+            const canonicalKey = resolveIdentityKey();
+            return canonicalKey === null
+              ? null
+              : {
+                  canonicalKey,
+                  locator: {
+                    source: "git-remote" as const,
+                    remoteName: "origin",
+                    remoteUrl: `https://example.test/${canonicalKey}.git`,
+                  },
+                  remotes: [],
+                };
+          }),
       }),
     ),
     Layer.provideMerge(WorkspaceAccessPolicyLayer(accessRoot)),
@@ -260,4 +275,78 @@ it.effect(
         }).pipe(Effect.provide(makeLayer(root, () => Effect.succeed(snapshot))));
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("binds approvals to the live repository identity, never the persisted one", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs
+        .makeTempDirectoryScoped({ prefix: "ryco-ac-identity-" })
+        .pipe(Effect.flatMap((path) => fs.realPath(path)));
+      // The persisted identity lags (remote changed) or is kept for a root git cannot read.
+      const persisted = Schema.decodeUnknownSync(OrchestrationProjectShell)({
+        ...Schema.encodeSync(OrchestrationProjectShell)(project(root)),
+        repositoryIdentity: {
+          canonicalKey: "persisted-key",
+          locator: {
+            source: "git-remote",
+            remoteName: "origin",
+            remoteUrl: "https://example.test/persisted-key.git",
+          },
+        },
+      });
+      const snapshot: OrchestrationShellSnapshot = {
+        snapshotSequence: 1,
+        projects: [persisted],
+        threads: [],
+        updatedAt: NOW,
+      };
+      let liveKey: string | null = "live-key";
+      yield* Effect.gen(function* () {
+        const plans = yield* AgentControlProjectPlans;
+        const prepareBoth = Effect.all({
+          update: plans.prepareUpdate({
+            projectId: ProjectId.make("project-1"),
+            expectedUpdatedAt: NOW,
+            title: "Renamed",
+          }),
+          remove: plans.prepareRemove({
+            projectId: ProjectId.make("project-1"),
+            expectedUpdatedAt: NOW,
+          }),
+        });
+
+        const lagging = yield* prepareBoth;
+        assert.strictEqual(lagging.update.before.repositoryIdentityKey, "live-key");
+        assert.strictEqual(lagging.remove.expected.repositoryIdentityKey, "live-key");
+        yield* plans.revalidate(lagging.update);
+        yield* plans.revalidate(lagging.remove);
+
+        liveKey = null;
+        const unreadable = yield* prepareBoth;
+        yield* plans.revalidate(unreadable.update);
+        yield* plans.revalidate(unreadable.remove);
+
+        // The identity the user approved is still re-checked live at execution.
+        liveKey = "another-key";
+        assert.strictEqual(
+          (yield* plans.revalidate(unreadable.remove).pipe(Effect.flip)).reason,
+          "project-stale",
+        );
+        assert.strictEqual(
+          (yield* plans.revalidate(lagging.update).pipe(Effect.flip)).reason,
+          "project-stale",
+        );
+      }).pipe(
+        Effect.provide(
+          makeLayer(
+            root,
+            () => Effect.succeed(snapshot),
+            () => liveKey,
+          ),
+        ),
+      );
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
 );

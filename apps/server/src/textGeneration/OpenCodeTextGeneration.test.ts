@@ -2,7 +2,7 @@ import { OpenCodeSettings, ProviderInstanceId, TextGenerationError } from "@ryco
 import type { ChatFileAttachment, ChatImageAttachment } from "@ryco/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Duration, Effect, Layer, Result, Schema } from "effect";
+import { Duration, Effect, Fiber, Layer, Result, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { NetService } from "@ryco/shared/Net";
 import { beforeEach, expect } from "vite-plus/test";
@@ -31,8 +31,15 @@ const runtimeMock = {
       | { data?: { info?: { error?: unknown }; parts?: Array<{ type: string; text?: string }> } }
       | undefined,
     promptParts: [] as Array<Array<{ type: string; text?: string }>>,
+    /** While set, session/prompt never answers: a hung server. */
+    hangPrompt: false,
+    promptSignals: [] as Array<AbortSignal | undefined>,
+    abortCalls: [] as string[],
   },
   reset() {
+    this.state.hangPrompt = false;
+    this.state.promptSignals.length = 0;
+    this.state.abortCalls.length = 0;
     this.state.startCalls.length = 0;
     this.state.promptUrls.length = 0;
     this.state.authHeaders.length = 0;
@@ -76,7 +83,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       },
       session: {
         create: async () => ({ data: { id: `${baseUrl}/session` } }),
-        prompt: async (input?: { parts?: Array<{ type: string; text?: string }> }) => {
+        abort: async ({ sessionID }: { sessionID: string }) => {
+          runtimeMock.state.abortCalls.push(sessionID);
+          return { data: true };
+        },
+        prompt: async (
+          input?: { parts?: Array<{ type: string; text?: string }> },
+          options?: { signal?: AbortSignal },
+        ) => {
+          runtimeMock.state.promptSignals.push(options?.signal);
+          if (runtimeMock.state.hangPrompt) {
+            return new Promise(() => {});
+          }
           runtimeMock.state.promptUrls.push(baseUrl);
           runtimeMock.state.promptParts.push(input?.parts ?? []);
           runtimeMock.state.authHeaders.push(
@@ -194,6 +212,48 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
         expect(runtimeMock.state.promptUrls).toEqual([]);
       }),
     ),
+  );
+
+  it.effect("gives up on a hung title or branch request after the naming budget", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.hangPrompt = true;
+        const expectTimedOut = (generate: Effect.Effect<object, TextGenerationError>) =>
+          Effect.gen(function* () {
+            const calls = runtimeMock.state.promptSignals.length;
+            const fiber = yield* generate.pipe(Effect.asVoid, Effect.flip, Effect.forkChild);
+            while (runtimeMock.state.promptSignals.length === calls) {
+              yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
+            }
+            yield* TestClock.adjust(Duration.seconds(30));
+            const error = yield* Fiber.join(fiber);
+            expect(error.detail).toBe("OpenCode request timed out.");
+            // The request is cancelled and the server stops working on it.
+            expect(runtimeMock.state.promptSignals.at(-1)?.aborted).toBe(true);
+          });
+
+        yield* expectTimedOut(
+          textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Fix the reconnect spinner.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+            includeBranch: true,
+          }),
+        );
+        yield* expectTimedOut(
+          textGeneration.generateBranchName({
+            cwd: process.cwd(),
+            message: "Fix the reconnect spinner.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          }),
+        );
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
+        expect(runtimeMock.state.abortCalls).toEqual([
+          "http://127.0.0.1:4301/session",
+          "http://127.0.0.1:4301/session",
+        ]);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("reuses a warm server across back-to-back requests and closes it after idling", () =>

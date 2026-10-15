@@ -28,6 +28,12 @@ export interface ThreadProviderStart {
   readonly tokenMode: AgentTokenMode;
   /** The project's custom system prompt, already trimmed (empty is absent). */
   readonly customSystemPrompt: string | undefined;
+  /**
+   * A Computer turn plan was staged for the thread. A session lists the Agent Control tools
+   * once, when it connects, and offers the Computer tools (OpenCode: installs its Computer lease)
+   * only while a plan is staged, so a session started without one cannot serve a Computer turn.
+   */
+  readonly computerTurn: boolean;
 }
 
 export function threadProviderStartInput(
@@ -84,5 +90,6 @@ export function threadProviderStartKey(start: ThreadProviderStart): string {
     runtimeMode: start.runtimeMode,
     tokenMode: start.tokenMode,
     customSystemPrompt: start.customSystemPrompt ?? null,
+    computerTurn: start.computerTurn,
   });
 }

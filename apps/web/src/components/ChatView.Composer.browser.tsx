@@ -6,6 +6,7 @@ import {
   type OrchestrationReadModel,
   ProviderInstanceId,
   type ServerConfig,
+  ThreadId,
   type TurnId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -34,6 +35,10 @@ import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import {
   setupChatViewBrowserSuite,
+  addThreadToSnapshot,
+  serverThreadPath,
+  threadKeyFor,
+  waitForURL,
   COMPACT_FOOTER_VIEWPORT,
   DEFAULT_VIEWPORT,
   LOCAL_ENVIRONMENT_ID,
@@ -1006,6 +1011,52 @@ describe("ChatView Composer (full app)", () => {
     }
   });
 
+  it("never undoes another thread's prompt into the thread opened after it", async () => {
+    const otherThreadId = ThreadId.make("thread-undo-other");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(
+        createSnapshotForTargetUser({
+          targetMessageId: "msg-user-undo-switch" as MessageId,
+          targetText: "undo across threads",
+        }),
+        otherThreadId,
+      ),
+    });
+
+    try {
+      await waitForComposerEditor();
+      await page.getByTestId("composer-editor").fill("draft for thread A");
+      await waitForComposerText("draft for thread A");
+
+      // The view (and its editor) is reused for the next thread.
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(otherThreadId),
+        "The other thread should open.",
+      );
+      await vi.waitFor(async () =>
+        expect((await waitForComposerEditor()).textContent ?? "").toBe(""),
+      );
+
+      await pressComposerUndo();
+      await waitForLayout();
+      const otherKey = threadKeyFor(otherThreadId);
+      expect(useComposerDraftStore.getState().draftsByThreadKey[otherKey]?.prompt ?? "").toBe("");
+      expect((await waitForComposerEditor()).textContent ?? "").toBe("");
+      // Thread A's draft is untouched.
+      expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt).toBe(
+        "draft for thread A",
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("surrounds text after a mention using the correct expanded offsets", async () => {
     useComposerDraftStore.getState().setPrompt(THREAD_REF, "hi @package.json there");
 
@@ -1549,6 +1600,64 @@ describe("ChatView Composer (full app)", () => {
         await page.getByTestId("composer-editor").fill("@");
         await waitForComposerMenuItem("path:directory:src");
         expect(searchQueries()).toContain("");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("drops the bare listing as soon as a character is typed", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-bare-mention-typed" as MessageId,
+          targetText: "bare mention typed",
+        }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            environment: {
+              ...nextFixture.serverConfig.environment,
+              capabilities: {
+                ...nextFixture.serverConfig.environment.capabilities,
+                projectSearchEmptyQuery: true,
+              },
+            },
+          };
+        },
+        // A truncated listing: typed queries cannot be narrowed from it locally.
+        resolveRpc: (body) =>
+          body._tag === WS_METHODS.projectsSearchEntries
+            ? body.query === ""
+              ? {
+                  entries: [
+                    { path: ".github", kind: "directory" },
+                    { path: "src", kind: "directory" },
+                  ],
+                  truncated: true,
+                }
+              : { entries: [{ path: "src/index.ts", kind: "file" }], truncated: false }
+            : undefined,
+      });
+
+      try {
+        await waitForServerConfigToApply();
+        await waitForComposerEditor();
+        await page.getByTestId("composer-editor").fill("@");
+        await waitForComposerMenuItem("path:directory:.github");
+
+        await page.getByTestId("composer-editor").fill("@s");
+        // Well inside the typed query's debounce: the unfiltered listing must not
+        // stand in for it (Enter would insert `.github`).
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[data-composer-item-id="path:directory:.github"]'),
+            ).toBeNull();
+          },
+          { timeout: 60, interval: 4 },
+        );
+        await waitForComposerMenuItem("path:file:src/index.ts");
+        expect(searchQueries()).toContain("s");
       } finally {
         await mounted.cleanup();
       }

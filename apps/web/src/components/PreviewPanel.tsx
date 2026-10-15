@@ -26,7 +26,11 @@ import {
 } from "react";
 
 import { parsePreviewRouteSearch } from "../previewRouteSearch";
-import { fnv1a32, resolveDiffThemeName } from "../lib/diffRendering";
+import {
+  fnv1a32,
+  resolveDiffThemeName,
+  SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
+} from "../lib/diffRendering";
 import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
@@ -593,7 +597,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
       theme: resolveDiffThemeName(resolvedTheme),
       themeType: resolvedTheme,
       unsafeCSS: PREVIEW_FILE_UNSAFE_CSS,
-      tokenizeMaxLineLength: 1_000,
+      tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
     }),
     [resolvedTheme, wrapPreviewLines],
   );

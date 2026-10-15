@@ -252,10 +252,11 @@ function sourceControlClient(environmentId: EnvironmentId) {
 // the client. The composer `#` picker, the context picker, the overview, the
 // explorer tabs and the pull request page therefore share one cache entry,
 // one poll timer and one provider call instead of one per distinct limit.
-// List reads use the server's default row shape, except the `picker` view (lean
-// rows for the composer's `#` menu). A request option other than the fixed
-// superset limit (a view or field set, a query) changes the payload and must be
-// part of `buildKey`, or callers would share rows of different shapes.
+// List reads use the server's default row shape, except the `picker` view:
+// lean change request rows the two pickers share. A request option other than
+// the fixed superset limit (a view or field set, a query) changes the payload
+// and must be part of `buildKey`, or callers would share rows of different
+// shapes.
 // ---------------------------------------------------------------------------
 
 /** Every list surface asks for at most this many rows (100 is also one provider page). */
@@ -569,10 +570,18 @@ export interface SourceControlChangeRequestDetailInput {
   readonly cwd: string | null;
   readonly reference: string | null;
   readonly fullContent?: boolean;
+  /**
+   * `row`: a passive per-row glyph read (inbox rows other than the focused
+   * one). The server queues it behind focused work and may share a read a few
+   * seconds old across rows. It is part of the key: an entry's read always
+   * runs with its first watcher's input, so a row read must never stand in
+   * for a focused surface (the active row, a popover) of the same request.
+   */
+  readonly view?: "row";
   readonly enabled?: boolean;
 }
 
-export const changeRequestDetailBinding = defineQuery<
+const changeRequestDetailQuery = defineQuery<
   SourceControlChangeRequestDetailInput,
   SourceControlChangeRequestDetail
 >({
@@ -584,11 +593,48 @@ export const changeRequestDetailBinding = defineQuery<
     input.cwd !== null &&
     input.reference !== null,
   buildKey: (input) =>
-    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.fullContent ?? false}`,
+    `${input.environmentId}${KEY_SEP}${input.cwd}${KEY_SEP}${input.reference}${KEY_SEP}${input.fullContent ?? false}${input.view === "row" ? `${KEY_SEP}row` : ""}`,
   resolveEnvironmentId: (input) => input.environmentId as EnvironmentId,
   resolveCwd: (input) => input.cwd as string,
   run: (input) => readChangeRequestDetail(input),
 });
+
+/**
+ * The capped detail under the other read mode (row ↔ focused) of the same
+ * checkout and request: a row that becomes the focused one (or stops being
+ * it) moves to the other key and would otherwise drop its enrichment until
+ * that key's first read lands.
+ */
+function changeRequestDetailSiblingInput(
+  input: SourceControlChangeRequestDetailInput,
+): SourceControlChangeRequestDetailInput | null {
+  if (input.fullContent) return null;
+  const { view: _view, ...rest } = input;
+  return input.view === "row" ? rest : { ...rest, view: "row" };
+}
+
+export const changeRequestDetailBinding: QueryBinding<
+  SourceControlChangeRequestDetailInput,
+  SourceControlChangeRequestDetail
+> = {
+  ...changeRequestDetailQuery,
+  watch: (input, options) => {
+    const compositeKey = changeRequestDetailQuery.targetKey(input);
+    const sibling = changeRequestDetailSiblingInput(input);
+    const siblingKey = sibling === null ? null : changeRequestDetailQuery.targetKey(sibling);
+    // A new entry shows its sibling's detail while its own first read runs
+    // (it still reads: the entry has no data of its own yet).
+    if (compositeKey !== null && siblingKey !== null && !controllers.has(compositeKey)) {
+      const siblingData = controllers.get(siblingKey)?.hasData
+        ? changeRequestDetailState(siblingKey).data
+        : null;
+      if (siblingData !== null) {
+        changeRequestDetailQuery.updateData(input, (current) => current ?? siblingData);
+      }
+    }
+    return changeRequestDetailQuery.watch(input, options);
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Change request detail sharing
@@ -703,6 +749,7 @@ function readChangeRequestDetail(
       cwd: input.cwd as string,
       reference: input.reference as string,
       ...(input.fullContent ? { fullContent: true } : {}),
+      ...(input.view !== undefined ? { view: input.view } : {}),
     })
     .then((detail) => {
       // Only uncapped reads may stand in for other keys.
@@ -1472,12 +1519,17 @@ function requireChangeRequestTarget(
   return resolved;
 }
 
+/** Every cached variant of one request's detail: full first, then the capped ones. */
 function changeRequestDetailInputs(
   target: ResolvedChangeRequestTarget,
-): readonly [SourceControlChangeRequestDetailInput, SourceControlChangeRequestDetailInput] {
+): readonly [
+  SourceControlChangeRequestDetailInput,
+  ...ReadonlyArray<SourceControlChangeRequestDetailInput>,
+] {
   return [
     { ...target, fullContent: true },
     { ...target, fullContent: false },
+    { ...target, fullContent: false, view: "row" },
   ];
 }
 
@@ -1510,8 +1562,8 @@ function refreshAfterChangeRequestMutation(
 
 /**
  * Writes a fresh, uncapped detail the host returned. The target's full
- * variant always takes it, its capped variant when something already holds
- * it, and every other cached detail of the same request (an inbox row or the
+ * variant always takes it, its capped variants (focused and row) when
+ * something already holds them, and every other cached detail of the same request (an inbox row or the
  * overview reading through a worktree) through detail sharing.
  */
 export function writeChangeRequestDetail(
@@ -1520,19 +1572,23 @@ export function writeChangeRequestDetail(
 ): void {
   const resolved = resolveTarget(target);
   if (resolved === null) return;
-  const [fullInput, summaryInput] = changeRequestDetailInputs(resolved);
+  const [fullInput, ...cappedInputs] = changeRequestDetailInputs(resolved);
   changeRequestDetailBinding.updateData(fullInput, () => detail);
-  if (changeRequestDetailBinding.snapshotFor(summaryInput).data !== null) {
-    changeRequestDetailBinding.updateData(summaryInput, () => detail);
+  const cappedKeys = new Set<string>();
+  for (const input of cappedInputs) {
+    if (changeRequestDetailBinding.snapshotFor(input).data !== null) {
+      changeRequestDetailBinding.updateData(input, () => detail);
+    }
+    const key = changeRequestDetailBinding.targetKey(input);
+    if (key !== null) cappedKeys.add(key);
   }
   const fullKey = changeRequestDetailBinding.targetKey(fullInput);
-  const summaryKey = changeRequestDetailBinding.targetKey(summaryInput);
   if (fullKey === null) return;
   const now = Date.now();
   shareChangeRequestDetail(
     resolved.environmentId,
     { sourceKey: fullKey, startedAt: now, fetchedAt: now, detail },
-    new Set(summaryKey === null ? [] : [summaryKey]),
+    cappedKeys,
   );
 }
 
@@ -1676,8 +1732,9 @@ export async function updateChangeRequest(
   const resolved = requireChangeRequestTarget(target, "Updating pull requests is unavailable.");
   const inputs = changeRequestDetailInputs(resolved);
   const before =
-    changeRequestDetailBinding.snapshotFor(inputs[0]).data ??
-    changeRequestDetailBinding.snapshotFor(inputs[1]).data;
+    inputs
+      .map((input) => changeRequestDetailBinding.snapshotFor(input).data)
+      .find((data) => data !== null) ?? null;
   const optimistic = inputs.flatMap((input) => {
     const previous = changeRequestDetailBinding.snapshotFor(input).data;
     if (previous === null) return [];

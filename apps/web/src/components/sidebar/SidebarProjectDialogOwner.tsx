@@ -8,27 +8,23 @@ import type {
   SidebarProjectSnapshot,
 } from "../../sidebarProjectGrouping";
 import type { useUpdateSettings } from "~/hooks/useSettings";
-import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import { useLazyComponentReady } from "../../lib/preloadableLazy";
 import { buildProjectsPageLocation } from "../../projectsRoute";
+import { LazyNewWorktreeDialog } from "../worktrees/lazyWorktreeDialogs";
 import type { NewWorktreeDialogTab } from "../worktrees/NewWorktreeDialog";
 import { SidebarProjectGroupingDialog } from "./SidebarProjectGroupingDialog";
 import { SidebarProjectRenameDialog } from "./SidebarProjectRenameDialog";
 import { useSidebarProjectGroupingDialog } from "./hooks/useSidebarProjectGroupingDialog";
 import { useSidebarProjectRenameDialog } from "./hooks/useSidebarProjectRenameDialog";
 
-/**
+/*
  * The new-workspace dialog (branch, pull request, issue, and Jira pickers) is
- * its own chunk; nothing in it renders while the sidebar boots. Pointing at or
- * focusing a project's "New workspace" button starts the load
- * (`preloadNewWorktreeDialog`), so a click usually finds it ready.
+ * its own chunk, shared with the chat; nothing in it renders while the sidebar
+ * boots. Pointing at or focusing a project's "New workspace" button starts the
+ * load (`preloadNewWorktreeDialog`), so a click usually finds it ready.
  */
-const NewWorktreeDialog = preloadableLazy(() =>
-  import("../worktrees/NewWorktreeDialog").then((module) => module.NewWorktreeDialog),
-);
-
-export function preloadNewWorktreeDialog(): void {
-  void NewWorktreeDialog.preload();
-}
+export { preloadNewWorktreeDialog } from "../worktrees/lazyWorktreeDialogs";
 
 /**
  * Project actions the desktop sidebar offers. Overview and settings live on
@@ -79,9 +75,23 @@ export function SidebarProjectDialogProvider(props: {
   const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
   // Mounting only once the chunk resolved keeps the first open free of a
   // committed Suspense fallback and React's fallback-reveal throttle.
+  // A failed chunk closes the request and offers a Retry that reopens it, so
+  // the mount never throws to the root error view.
   const newWorktreeDialogReady = useLazyComponentReady(
-    NewWorktreeDialog,
+    LazyNewWorktreeDialog,
     newWorktreeTarget !== null,
+    {
+      onLoadError: (error) => {
+        const target = newWorktreeTarget;
+        setNewWorktreeOpen(false);
+        setNewWorktreeTarget(null);
+        notifySurfaceLoadFailure("new workspace dialog", error, () => {
+          if (!target) return;
+          setNewWorktreeTarget(target);
+          setNewWorktreeOpen(true);
+        });
+      },
+    },
   );
   const navigate = useNavigate();
   const renameDialog = useSidebarProjectRenameDialog();
@@ -134,7 +144,7 @@ export function SidebarProjectDialogProvider(props: {
       {props.children}
 
       {newWorktreeTarget && newWorktreeDialogReady ? (
-        <NewWorktreeDialog
+        <LazyNewWorktreeDialog
           open={newWorktreeOpen}
           environmentId={newWorktreeTarget.project.environmentId}
           projectId={newWorktreeTarget.project.id}

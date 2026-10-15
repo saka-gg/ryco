@@ -12,7 +12,10 @@
  *     inline base64 (attachments, images) is replaced by its size and digest.
  *   - Canonical records keep `raw` as a reference (`source`, `method`,
  *     `messageType`, `nativeId`) instead of a second copy of the native
- *     message, which the native log already holds.
+ *     message whenever the native log holds that message at the current
+ *     detail level; a provider message only the canonical record has (one
+ *     the `lifecycle` native filter drops) and a small adapter-made payload
+ *     stay inline.
  *
  * @module provider/providerEventLogRecords
  */
@@ -146,7 +149,10 @@ export function isLifecycleProviderEventRecord(
   if (typeof envelope.kind === "string" && NATIVE_LIFECYCLE_KINDS.has(envelope.kind)) {
     return true;
   }
-  const name = nativeRecordName(envelope);
+  return isLifecycleNativeName(nativeRecordName(envelope));
+}
+
+function isLifecycleNativeName(name: string | undefined): boolean {
   return (
     name !== undefined && NATIVE_LIFECYCLE_NAME.test(name) && !NATIVE_STREAMING_NAME.test(name)
   );
@@ -186,11 +192,18 @@ export interface ProviderEventDelta {
 
 const CLAUDE_CONTENT_DELTA_METHOD = "claude/stream_event/content_block_delta";
 const CODEX_DELTA_METHOD = /(?:\/delta|Delta)$/;
+const OPENCODE_PART_DELTA_TYPE = "message.part.delta";
+const COPILOT_DELTA_TYPES: ReadonlySet<string> = new Set([
+  "assistant.message_delta",
+  "assistant.reasoning_delta",
+]);
 
 /**
  * Recognises a streaming-delta record: canonical `*.delta` events with a
- * string `payload.delta`, Claude `content_block_delta` stream events and
- * Codex `…/delta` / `…Delta` notifications. Anything else is `undefined`.
+ * string `payload.delta`, Claude `content_block_delta` stream events, Codex
+ * `…/delta` / `…Delta` notifications, OpenCode `message.part.delta` events
+ * and Copilot assistant message / reasoning deltas. Anything else is
+ * `undefined`.
  */
 export function extractProviderEventDelta(
   stream: EventNdjsonStream,
@@ -220,7 +233,11 @@ export function extractProviderEventDelta(
 
   const envelope = nativeEnvelope(record);
   const method = envelope.method;
-  if (typeof method !== "string") return undefined;
+  if (typeof method !== "string") {
+    return typeof envelope.type === "string"
+      ? extractNativeEventTypeDelta(envelope, envelope.type)
+      : undefined;
+  }
   const payload = asRecord(envelope.payload);
   if (method.startsWith(CLAUDE_CONTENT_DELTA_METHOD)) {
     const streamEvent = asRecord(payload?.event);
@@ -244,6 +261,43 @@ export function extractProviderEventDelta(
         payload?.summaryIndex,
       ),
       text,
+    };
+  }
+  return undefined;
+}
+
+/** Native envelopes named by event `type` rather than a method (OpenCode, Copilot). */
+function extractNativeEventTypeDelta(
+  envelope: Record<string, unknown>,
+  type: string,
+): ProviderEventDelta | undefined {
+  if (type === OPENCODE_PART_DELTA_TYPE) {
+    const properties = asRecord(asRecord(envelope.payload)?.properties);
+    if (typeof properties?.delta !== "string") return undefined;
+    return {
+      key: deltaKey(
+        type,
+        envelope.turnId,
+        properties.sessionID,
+        properties.messageID,
+        properties.partID,
+        properties.field,
+      ),
+      text: properties.delta,
+    };
+  }
+  if (COPILOT_DELTA_TYPES.has(type)) {
+    const data = asRecord(envelope.data);
+    if (typeof data?.deltaContent !== "string") return undefined;
+    return {
+      key: deltaKey(
+        type,
+        envelope.agentId,
+        data.messageId,
+        data.reasoningId,
+        data.parentToolCallId,
+      ),
+      text: data.deltaContent,
     };
   }
   return undefined;
@@ -291,12 +345,16 @@ export function providerEventDeltaRunRecord(
 
   const envelope = nativeEnvelope(first);
   const payload = asRecord(envelope.payload);
+  // OpenCode part deltas and Copilot assistant deltas identify their stream here.
+  const properties = asRecord(payload?.properties);
+  const data = asRecord(envelope.data);
   return {
     observedAt: summary.firstAt,
     event: {
       ...summary,
       provider: envelope.provider,
       method: envelope.method,
+      type: envelope.type,
       threadId: envelope.threadId,
       turnId: envelope.turnId,
       itemId: envelope.itemId ?? payload?.itemId,
@@ -304,6 +362,13 @@ export function providerEventDeltaRunRecord(
       contentIndex: payload?.contentIndex,
       summaryIndex: payload?.summaryIndex,
       parentToolUseId: payload?.parent_tool_use_id,
+      agentId: envelope.agentId,
+      sessionId: properties?.sessionID,
+      messageId: properties?.messageID ?? data?.messageId,
+      partId: properties?.partID,
+      field: properties?.field,
+      reasoningId: data?.reasoningId,
+      parentToolCallId: data?.parentToolCallId,
       text: run.text,
     },
   };
@@ -320,25 +385,35 @@ const DATA_URL_PREFIX = /^data:([^;,]*)(?:;[^;,]*)*;base64,/;
 const BASE64_SAMPLE = /^[A-Za-z0-9+/_-]+={0,2}$/;
 
 /**
- * Serializes one record for `stream` (see the module notes). Returns
- * `undefined` for values JSON cannot represent; throws like `JSON.stringify`
- * on cycles and BigInts.
+ * Serializes one record for `stream`, written at detail level `mode` (see the
+ * module notes). Returns `undefined` for values JSON cannot represent; throws
+ * like `JSON.stringify` on cycles and BigInts.
  */
 export function serializeProviderEventLogRecord(
   stream: EventNdjsonStream,
   record: unknown,
+  mode: ProviderEventLogMode,
 ): string | undefined {
-  const value = stream === "native" ? record : withRawReference(record);
+  const value = stream === "native" ? record : withRawReference(record, mode);
+  // A record that visibly holds an over-cap string (a large item, an inline
+  // image) goes straight to the capping serialization: stringifying it in
+  // full first would copy megabytes only to throw them away.
+  const scan = scanForOverCapString(value);
+  if (scan === "found") {
+    return JSON.stringify(value, capLogValue) as string | undefined;
+  }
   // Fast path: without the token marker there is nothing to redact, and a
   // record with no over-cap string needs no capping, so the plain
   // (replacer-free, several times faster) serialization is already final. A
-  // short record cannot hold an over-cap string; a long one (large workflow
-  // progress, Codex items) is checked with an allocation-free walk.
+  // short record cannot hold an over-cap string; a long one the bounded scan
+  // could not finish (large workflow progress) is checked with a full walk.
   const plain = JSON.stringify(value) as string | undefined;
   if (
     plain === undefined ||
     (!plain.includes(AGENT_CONTROL_SECRET_MARKER) &&
-      (plain.length <= PROVIDER_EVENT_LOG_STRING_CAP || !containsOverCapString(value, 0)))
+      (scan === "none" ||
+        plain.length <= PROVIDER_EVENT_LOG_STRING_CAP ||
+        !containsOverCapString(value, 0)))
   ) {
     return plain;
   }
@@ -347,6 +422,59 @@ export function serializeProviderEventLogRecord(
 
 /** Nesting past which the walk stops looking and lets the replacer decide. */
 const OVER_CAP_WALK_MAX_DEPTH = 64;
+/**
+ * Values (objects, arrays, strings and other primitives alike) the
+ * pre-serialization scan visits before giving up. Typical records finish well
+ * inside it, so the scan costs little next to the serialization it saves;
+ * huge ones fall back to the post-serialization walk.
+ */
+const OVER_CAP_SCAN_MAX_NODES = 1_024;
+
+// State of the running `scanForOverCapString` (synchronous, so never shared).
+let scanBudget = 0;
+let scanComplete = true;
+
+/**
+ * Bounded look for an over-cap string before serializing: `found` when one is
+ * reachable, `none` when the whole value was seen without one, `unknown` when
+ * the value is too large or deep, or serializes through `toJSON`.
+ */
+function scanForOverCapString(value: unknown): "found" | "none" | "unknown" {
+  scanBudget = OVER_CAP_SCAN_MAX_NODES;
+  scanComplete = true;
+  if (scanValue(value, 0)) return "found";
+  return scanComplete ? "none" : "unknown";
+}
+
+function scanValue(value: unknown, depth: number): boolean {
+  scanBudget -= 1;
+  if (scanBudget < 0) {
+    scanComplete = false;
+    return false;
+  }
+  if (typeof value === "string") return value.length > PROVIDER_EVENT_LOG_STRING_CAP;
+  if (typeof value !== "object" || value === null) return false;
+  if (
+    depth >= OVER_CAP_WALK_MAX_DEPTH ||
+    typeof (value as { toJSON?: unknown }).toJSON === "function"
+  ) {
+    scanComplete = false;
+    return false;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (scanValue(entry, depth + 1)) return true;
+      if (scanBudget < 0) return false;
+    }
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key in record) {
+    if (Object.hasOwn(record, key) && scanValue(record[key], depth + 1)) return true;
+    if (scanBudget < 0) return false;
+  }
+  return false;
+}
 
 /**
  * Whether any string reachable in `value` exceeds the cap. Only called after
@@ -407,24 +535,112 @@ function summarizeInlineBase64(value: string): string | undefined {
 }
 
 /**
- * Canonical `raw.payload` is the full provider message the native log already
- * holds (and, for Claude task progress, the same message on every fan-out
- * event). Keep only what finds it there.
+ * Canonical `raw.payload` is usually the full provider message the native log
+ * already holds (and, for Claude task progress, the same message on every
+ * fan-out event). Keep only what finds it there, unless the native log does
+ * not hold it: a provider message the `lifecycle` native filter drops, or a
+ * small adapter-made payload with no native message to point at. Larger
+ * adapter-made payloads (permission callbacks, Copilot synthetic events)
+ * repeat the canonical payload and are referenced at every level.
  */
-function withRawReference(record: unknown): unknown {
+function withRawReference(record: unknown, mode: ProviderEventLogMode): unknown {
   if (!isRecord(record)) return record;
   const raw = asRecord(record.raw);
   if (!raw || raw.payload === undefined) return record;
   const payload = asRecord(raw.payload);
+  if (
+    mode === "lifecycle" &&
+    isNativeRawSource(raw.source) &&
+    !lifecycleNativeLogKeepsRaw(raw, payload)
+  ) {
+    return record;
+  }
+  const nativeId = firstString(payload?.uuid, payload?.id);
+  if (nativeId === undefined && isSmallFlatRecord(payload)) return record;
   return {
     ...record,
     raw: {
       source: raw.source,
       method: raw.method,
       messageType: raw.messageType,
-      nativeId: firstString(payload?.uuid, payload?.id),
+      nativeId,
     },
   };
+}
+
+/**
+ * Raw sources whose payload is a provider message the native log records
+ * (ACP sources are all `acp.*`). The rest (`claude.sdk.permission`,
+ * `copilot.sdk.synthetic`) are built by the adapter and have no native copy.
+ */
+const NATIVE_RAW_SOURCES: ReadonlySet<string> = new Set([
+  "claude.sdk.message",
+  "codex.app-server.notification",
+  "codex.app-server.request",
+  "copilot.sdk.session-event",
+  "opencode.sdk.event",
+]);
+const ACP_RAW_SOURCE_PREFIX = "acp.";
+
+function isNativeRawSource(source: unknown): boolean {
+  return (
+    typeof source === "string" &&
+    (NATIVE_RAW_SOURCES.has(source) || source.startsWith(ACP_RAW_SOURCE_PREFIX))
+  );
+}
+
+/** Codex requests are native `request` envelopes, which `lifecycle` always keeps. */
+const CODEX_REQUEST_RAW_SOURCE = "codex.app-server.request";
+/** Codex `session/*` notifications come from native `session` envelopes, kept likewise. */
+const CODEX_NOTIFICATION_RAW_SOURCE = "codex.app-server.notification";
+const CODEX_SESSION_METHOD_PREFIX = "session/";
+
+/**
+ * Whether the native log keeps, at `lifecycle`, the provider message a
+ * canonical `raw` came from. Mirrors `isLifecycleProviderEventRecord`: the
+ * native envelope kind is implied by the Codex source, and the native name is
+ * the `raw.method` adapters record or, for OpenCode, the event `type`.
+ */
+function lifecycleNativeLogKeepsRaw(
+  raw: Record<string, unknown>,
+  payload: Record<string, unknown> | undefined,
+): boolean {
+  if (raw.source === CODEX_REQUEST_RAW_SOURCE) return true;
+  const name = firstString(raw.method, payload?.type);
+  if (
+    raw.source === CODEX_NOTIFICATION_RAW_SOURCE &&
+    name?.startsWith(CODEX_SESSION_METHOD_PREFIX)
+  ) {
+    return true;
+  }
+  return isLifecycleNativeName(name);
+}
+
+const INLINE_RAW_MAX_KEYS = 4;
+const INLINE_RAW_MAX_STRING_CHARS = 256;
+
+/** A few short primitive fields (e.g. Claude's synthetic turn start `{ openedBy }`). */
+function isSmallFlatRecord(value: Record<string, unknown> | undefined): boolean {
+  if (value === undefined) return false;
+  let keys = 0;
+  for (const key in value) {
+    if (!Object.hasOwn(value, key)) continue;
+    keys += 1;
+    if (keys > INLINE_RAW_MAX_KEYS) return false;
+    const entry = value[key];
+    switch (typeof entry) {
+      case "string":
+        if (entry.length > INLINE_RAW_MAX_STRING_CHARS) return false;
+        break;
+      case "number":
+      case "boolean":
+      case "undefined":
+        break;
+      default:
+        if (entry !== null) return false;
+    }
+  }
+  return true;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

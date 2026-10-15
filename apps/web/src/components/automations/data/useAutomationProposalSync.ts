@@ -28,9 +28,10 @@ import {
  * server with the feature disabled refuses it — so nothing renders and no
  * policy is decided client-side.
  */
-function bindEnvironmentProposalSync(environmentId: EnvironmentId): () => void {
+function bindEnvironmentProposalSync(environmentId: EnvironmentId): ProposalSyncBinding {
   let currentClient: unknown = null;
   let stopSync: (() => void) | null = null;
+  const binding: ProposalSyncBinding = { refused: false, stop: () => {} };
 
   const syncSubscription = () => {
     const client = readEnvironmentConnection(environmentId)?.client ?? null;
@@ -38,6 +39,7 @@ function bindEnvironmentProposalSync(environmentId: EnvironmentId): () => void {
     stopSync?.();
     stopSync = null;
     currentClient = client;
+    binding.refused = false;
     const source = client
       ? readEnvironmentApiForConnection(environmentId, client)?.agentControl
       : undefined;
@@ -58,20 +60,33 @@ function bindEnvironmentProposalSync(environmentId: EnvironmentId): () => void {
           clearScheduleProposalHistory(id);
         },
       },
+      // The server refused (feature off, not authorized) and the transport
+      // does not retry: the next retain binds again instead of sharing a dead
+      // subscription, so turning the feature on reopens the stream.
+      onError: () => {
+        binding.refused = true;
+      },
     });
   };
 
   const unsubscribeRegistry = subscribeEnvironmentConnections(syncSubscription);
   syncSubscription();
-  return () => {
+  binding.stop = () => {
     unsubscribeRegistry();
     stopSync?.();
   };
+  return binding;
+}
+
+interface ProposalSyncBinding {
+  /** The server refused the subscription; nothing will arrive on it. */
+  refused: boolean;
+  stop: () => void;
 }
 
 interface RetainedSync {
   count: number;
-  stop: () => void;
+  binding: ProposalSyncBinding;
   /** A release left the sync unused; it stops at the end of the task unless retained again. */
   teardownScheduled: boolean;
 }
@@ -90,10 +105,13 @@ export function retainAgentControlProposalSync(environmentId: EnvironmentId): ()
   if (!entry) {
     entry = {
       count: 0,
-      stop: bindEnvironmentProposalSync(environmentId),
+      binding: bindEnvironmentProposalSync(environmentId),
       teardownScheduled: false,
     };
     retainedSyncs.set(environmentId, entry);
+  } else if (entry.binding.refused) {
+    entry.binding.stop();
+    entry.binding = bindEnvironmentProposalSync(environmentId);
   }
   entry.count += 1;
   const retained = entry;
@@ -108,7 +126,7 @@ export function retainAgentControlProposalSync(environmentId: EnvironmentId): ()
       retained.teardownScheduled = false;
       if (retained.count > 0 || retainedSyncs.get(environmentId) !== retained) return;
       retainedSyncs.delete(environmentId);
-      retained.stop();
+      retained.binding.stop();
     });
   };
 }

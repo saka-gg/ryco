@@ -12,6 +12,39 @@ const EFFECT_ROOT_IMPORT = {
 };
 
 /**
+ * Each of `effect`'s directory indexes re-exports every module beneath it the
+ * same way: `effect/reactivity` alone pulls in AtomHttpApi and the HTTP client
+ * and server stack. Import the module itself (e.g. effect/reactivity/Atom).
+ * `paths` match exactly, so the deep module paths stay allowed.
+ */
+const EFFECT_SUBBARREL_IMPORTS = [
+  "ai",
+  "cli",
+  "cluster",
+  "devtools",
+  "encoding",
+  "eventlog",
+  "http",
+  "http-api",
+  "index",
+  "net",
+  "observability",
+  "persistence",
+  "process",
+  "reactivity",
+  "rpc",
+  "schema",
+  "socket",
+  "sql",
+  "testing",
+  "workers",
+  "workflow",
+].map((directory) => ({
+  name: `effect/${directory}`,
+  message: `Import the module you use (e.g. effect/${directory}/<Module>); the effect/${directory} index pulls every module beneath it into the startup graph.`,
+}));
+
+/**
  * The same holds for the `@ryco/contracts` root: it re-exports every schema
  * module. Values come from the module's subpath (e.g. @ryco/contracts/orchestration);
  * types may stay on the root, since they are erased.
@@ -122,7 +155,7 @@ const rootConfig = {
           "no-restricted-imports": [
             "error",
             {
-              paths: [EFFECT_ROOT_IMPORT, CONTRACTS_ROOT_IMPORT],
+              paths: [EFFECT_ROOT_IMPORT, ...EFFECT_SUBBARREL_IMPORTS, CONTRACTS_ROOT_IMPORT],
               patterns: CLIENT_RUNTIME_RESTRICTED_PATTERNS,
             },
           ],
@@ -134,7 +167,7 @@ const rootConfig = {
         rules: {
           "no-restricted-imports": [
             "error",
-            { paths: [EFFECT_ROOT_IMPORT, CONTRACTS_ROOT_IMPORT] },
+            { paths: [EFFECT_ROOT_IMPORT, ...EFFECT_SUBBARREL_IMPORTS, CONTRACTS_ROOT_IMPORT] },
           ],
         },
       },
@@ -165,6 +198,7 @@ const rootConfig = {
                   allowTypeImports: true,
                 },
                 EFFECT_ROOT_IMPORT,
+                ...EFFECT_SUBBARREL_IMPORTS,
                 CONTRACTS_ROOT_IMPORT,
               ],
             },
@@ -186,6 +220,7 @@ const rootConfig = {
                   allowTypeImports: true,
                 },
                 EFFECT_ROOT_IMPORT,
+                ...EFFECT_SUBBARREL_IMPORTS,
               ],
             },
           ],

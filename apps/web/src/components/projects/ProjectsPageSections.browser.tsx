@@ -116,6 +116,8 @@ const lifecycle = {
   /** What `summarizeChanges` answers; a promise holds the answer back. */
   workSummary: null as string | null | Promise<string | null>,
   summarizeRequests: [] as string[],
+  /** Cleanup suggestions never answer (they inspect every project's checkouts). */
+  suggestionsPending: false,
   reset() {
     this.summaries = [
       workspaceSummary({
@@ -142,6 +144,7 @@ const lifecycle = {
     this.diskRequests = [];
     this.workSummary = null;
     this.summarizeRequests = [];
+    this.suggestionsPending = false;
   },
 };
 
@@ -165,7 +168,10 @@ function installDispatch() {
     orchestration: { dispatchCommand },
     lifecycle: {
       listWorkspaces: async () => lifecycle.summaries,
-      suggestions: async () => ({ generatedAt: FIXTURE_NOW_ISO, threads: [], checkouts: [] }),
+      suggestions: () =>
+        lifecycle.suggestionsPending
+          ? new Promise<never>(() => {})
+          : Promise.resolve({ generatedAt: FIXTURE_NOW_ISO, threads: [], checkouts: [] }),
       previewWorkspace: async (request: WorkspaceLifecycleRequest) => {
         lifecycle.previews.push(request);
         const workspace = lifecycle.summaries.find(
@@ -411,6 +417,13 @@ describe("Project page sections", () => {
       const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL, section: "danger" });
       await expect.element(screen.getByText("Remove from this device")).toBeVisible();
       await expect.poll(() => scrollRegion()?.scrollTop ?? 0).toBeGreaterThan(0);
+    });
+
+    it("shows the inspected workspaces without waiting for cleanup suggestions", async () => {
+      lifecycle.suggestionsPending = true;
+      lifecycle.summaries[1] = workspaceSummary({ unmerged: true });
+      const screen = await renderPage({ env: LOCAL_ENV, project: RYCO_LOCAL });
+      await expect.element(screen.getByText(/1 needs care/)).toBeVisible();
     });
 
     it("folds away on a narrow detail", async () => {

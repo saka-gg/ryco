@@ -405,7 +405,7 @@ describe("AgentControlOperation", () => {
 describe("Agent Control MCP contracts", () => {
   it("catalogs the internal reads and proposal-backed mutation tools", async () => {
     const { AGENT_CONTROL_MCP_TOOLS, AGENT_CONTROL_MCP_TOOL_NAMES } =
-      await import("./agentControl.ts");
+      await import("./agentControlMcp.ts");
     expect([...AGENT_CONTROL_MCP_TOOL_NAMES].toSorted()).toEqual(
       [
         "ryco_context",
@@ -469,7 +469,7 @@ describe("Agent Control MCP contracts", () => {
       AgentControlMcpProposeProjectUpdateInput,
       AgentControlMcpProposeProjectRemoveInput,
       AgentControlMcpProposeSettingsChangeInput,
-    } = await import("./agentControl.ts");
+    } = await import("./agentControlMcp.ts");
 
     expect(
       Schema.decodeUnknownSync(AgentControlMcpCreateThreadsInput)({
@@ -579,7 +579,7 @@ describe("Agent Control MCP contracts", () => {
       AgentControlMcpListThreadsInput,
       AgentControlMcpReadThreadInput,
       AgentControlMcpWaitForControlRequestInput,
-    } = await import("./agentControl.ts");
+    } = await import("./agentControlMcp.ts");
     const decodeListThreads = Schema.decodeUnknownSync(AgentControlMcpListThreadsInput);
     const decodeReadThread = Schema.decodeUnknownSync(AgentControlMcpReadThreadInput);
     const decodeWait = Schema.decodeUnknownSync(AgentControlMcpWaitForControlRequestInput);
@@ -597,7 +597,7 @@ describe("Agent Control MCP contracts", () => {
   });
 
   it("bounds the wait/read control-request result to the receipt shape", async () => {
-    const { AgentControlMcpControlRequestResult } = await import("./agentControl.ts");
+    const { AgentControlMcpControlRequestResult } = await import("./agentControlMcp.ts");
     const decoded = Schema.decodeUnknownSync(AgentControlMcpControlRequestResult)({
       receipt: {
         proposalId: "proposal-1",
@@ -621,7 +621,7 @@ describe("Agent Control MCP contracts", () => {
   });
 
   it("decodes capability summaries keyed by provider instance id", async () => {
-    const { AgentControlMcpCapabilitiesResult } = await import("./agentControl.ts");
+    const { AgentControlMcpCapabilitiesResult } = await import("./agentControlMcp.ts");
     const decoded = Schema.decodeUnknownSync(AgentControlMcpCapabilitiesResult)({
       enabled: true,
       readOnly: true,
@@ -681,7 +681,7 @@ describe("AgentControl external MCP", () => {
   });
 
   it("publishes the scoped task, automation, activity, diagnostics, read, and control tools", async () => {
-    const { AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES } = await import("./agentControl.ts");
+    const { AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES } = await import("./agentControlMcp.ts");
     expect([...AGENT_CONTROL_EXTERNAL_MCP_TOOL_NAMES]).toEqual([
       "ryco_overview",
       "ryco_capabilities",
@@ -720,7 +720,7 @@ describe("AgentControl external MCP", () => {
   });
 
   it("requires stable task targeting and defaults no elevated policy on the wire", async () => {
-    const { AgentControlExternalCreateTaskInput } = await import("./agentControl.ts");
+    const { AgentControlExternalCreateTaskInput } = await import("./agentControlMcp.ts");
     const decode = Schema.decodeUnknownSync(AgentControlExternalCreateTaskInput);
     const value = decode({
       requestId: "request-1",

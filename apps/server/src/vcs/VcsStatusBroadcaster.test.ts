@@ -21,6 +21,8 @@ import type {
   VcsStatusStreamEvent,
 } from "@ryco/contracts";
 
+import { type LogOnceEveryDecision, LogOnceEveryLimiter } from "@ryco/shared/logOnceEvery";
+
 import * as VcsStatusBroadcaster from "./VcsStatusBroadcaster.ts";
 import type { VcsRefSummary } from "../git/GitManager.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -104,6 +106,32 @@ describe("VcsStatusBroadcaster", () => {
         VcsStatusBroadcaster.remoteRefreshFailureDelay(10_000, Duration.seconds(5)),
       ),
       Duration.toMillis(Duration.minutes(15)),
+    );
+  });
+
+  it("logs a steadily failing remote refresh in full once, then as hourly summaries", () => {
+    const limiter = new LogOnceEveryLimiter();
+    const decisions: Array<LogOnceEveryDecision["kind"]> = [];
+    let nowMs = 0;
+    for (let failures = 1; failures <= 40; failures += 1) {
+      const nextDelay = VcsStatusBroadcaster.remoteRefreshFailureDelay(
+        failures,
+        Duration.seconds(30),
+      );
+      const window = VcsStatusBroadcaster.remoteRefreshFailureLogWindow(nextDelay);
+      decisions.push(
+        limiter.admit("vcs.remoteStatusRefresh:/repo", Duration.toMillis(window), nowMs).kind,
+      );
+      nowMs += Duration.toMillis(nextDelay);
+    }
+    // About nine hours of 15-minute retries.
+    assert.deepStrictEqual(
+      decisions.filter((kind) => kind === "log"),
+      ["log"],
+    );
+    assert.isAtMost(
+      decisions.filter((kind) => kind === "summary").length,
+      Math.ceil(nowMs / Duration.toMillis(Duration.hours(1))),
     );
   });
 
@@ -1185,6 +1213,187 @@ describe("VcsStatusBroadcaster", () => {
           yield* Deferred.await(behind);
         }).pipe(Effect.provide(testLayer));
       }),
+  );
+
+  /** A workflow whose fetch (either way it is asked for) waits for `releaseFetch`. */
+  const makeBlockedFetchLayer = (input: {
+    readonly fetchStarted: Deferred.Deferred<void>;
+    readonly releaseFetch: Deferred.Deferred<void>;
+    readonly remote: () => VcsStatusRemoteResult;
+    readonly afterFetch?: () => void;
+    readonly fetchExit?: Deferred.Deferred<Exit.Exit<boolean>>;
+  }) => {
+    const fetch = Effect.gen(function* () {
+      yield* Deferred.succeed(input.fetchStarted, undefined);
+      yield* Deferred.await(input.releaseFetch);
+      input.afterFetch?.();
+      return true;
+    }).pipe(
+      Effect.onExit((exit) =>
+        input.fetchExit ? Deferred.succeed(input.fetchExit, exit) : Effect.void,
+      ),
+    );
+    return VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          remoteStatus: (_input, options) =>
+            options?.fetch === true
+              ? fetch.pipe(Effect.map(input.remote))
+              : Effect.sync(input.remote),
+          refreshRemoteTrackingRefs: () => fetch,
+          invalidateLocalStatus: () => Effect.void,
+          invalidateRemoteStatus: () => Effect.void,
+        }),
+      ),
+    );
+  };
+
+  it.effect("serves a polled stream's first remote status before the poller's fetch", () =>
+    Effect.gen(function* () {
+      let remote: VcsStatusRemoteResult = baseRemoteStatus;
+      const fetchStarted = yield* Deferred.make<void>();
+      const releaseFetch = yield* Deferred.make<void>();
+      const testLayer = makeBlockedFetchLayer({
+        fetchStarted,
+        releaseFetch,
+        remote: () => remote,
+        afterFetch: () => {
+          remote = { ...baseRemoteStatus, behindCount: 3 };
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const firstRemote = yield* Deferred.make<void>();
+        const behind = yield* Deferred.make<void>();
+        yield* broadcaster
+          .streamStatus(
+            { cwd: "/repo" },
+            { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(60)) },
+          )
+          .pipe(
+            Stream.runForEach((event) => {
+              const eventRemote = event._tag === "localUpdated" ? null : event.remote;
+              if (eventRemote?.behindCount === 0) return Deferred.succeed(firstRemote, undefined);
+              if (eventRemote?.behindCount === 3) return Deferred.succeed(behind, undefined);
+              return Effect.void;
+            }),
+            Effect.forkScoped,
+          );
+
+        yield* Deferred.await(fetchStarted);
+        // The poller is still fetching; the stream already has its remote status.
+        yield* Deferred.await(firstRemote);
+        assert.isTrue(Option.isNone(yield* Deferred.poll(releaseFetch)));
+
+        yield* Deferred.succeed(releaseFetch, undefined);
+        yield* Deferred.await(behind);
+      }).pipe(Effect.provide(testLayer));
+    }),
+  );
+
+  it.effect("lets a released poller's in-flight fetch finish instead of interrupting it", () =>
+    Effect.gen(function* () {
+      const fetchStarted = yield* Deferred.make<void>();
+      const releaseFetch = yield* Deferred.make<void>();
+      const fetchExit = yield* Deferred.make<Exit.Exit<boolean>>();
+      const testLayer = makeBlockedFetchLayer({
+        fetchStarted,
+        releaseFetch,
+        fetchExit,
+        remote: () => baseRemoteStatus,
+      });
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const stream = yield* broadcaster
+          .streamStatus(
+            { cwd: "/repo" },
+            { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(60)) },
+          )
+          .pipe(Stream.runDrain, Effect.forkChild);
+
+        yield* Deferred.await(fetchStarted);
+        // The last stream ends mid-fetch, which releases (interrupts) the poller.
+        yield* Fiber.interrupt(stream);
+        assert.isTrue(Option.isNone(yield* Deferred.poll(fetchExit)));
+
+        // A killed `git fetch` can leave ref lockfiles behind: it must finish.
+        yield* Deferred.succeed(releaseFetch, undefined);
+        const exit = yield* Deferred.await(fetchExit);
+        assert.isTrue(Exit.isSuccess(exit));
+      }).pipe(Effect.provide(testLayer));
+    }),
+  );
+
+  it.effect("serves a stale remote status at once to a stream joining a retained poller", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus as VcsStatusRemoteResult | null,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      const pollInterval = { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(60)) };
+      const hydrated = yield* Deferred.make<void>();
+      yield* broadcaster.streamStatus({ cwd: "/repo" }, pollInterval).pipe(
+        Stream.runForEach((event) =>
+          event._tag !== "localUpdated" && event.remote !== null
+            ? Deferred.succeed(hydrated, undefined)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(hydrated);
+
+      // The cached remote status goes stale well before the poller's next tick.
+      yield* TestClock.adjust(Duration.seconds(31));
+      const remoteCallsBefore = state.remoteStatusCalls;
+      state.currentRemoteStatus = { ...baseRemoteStatus, behindCount: 4 };
+
+      const events = yield* broadcaster
+        .streamStatus({ cwd: "/repo" }, pollInterval)
+        .pipe(Stream.take(2), Stream.runCollect);
+      assert.deepStrictEqual(Array.from(events), [
+        { _tag: "snapshot", local: baseLocalStatus, remote: null },
+        { _tag: "remoteUpdated", remote: state.currentRemoteStatus },
+      ]);
+      assert.equal(state.remoteStatusCalls, remoteCallsBefore + 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+
+  it.effect("loads remote status for a new stream while a refresh is fetching", () =>
+    Effect.gen(function* () {
+      const fetchStarted = yield* Deferred.make<void>();
+      const releaseFetch = yield* Deferred.make<void>();
+      const testLayer = makeBlockedFetchLayer({
+        fetchStarted,
+        releaseFetch,
+        remote: () => baseRemoteStatus,
+      });
+
+      yield* Effect.gen(function* () {
+        const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+        const refresh = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+        yield* Deferred.await(fetchStarted);
+
+        const events = yield* broadcaster
+          .streamStatus({ cwd: "/repo" })
+          .pipe(Stream.take(2), Stream.runCollect);
+        assert.deepStrictEqual(Array.from(events), [
+          { _tag: "snapshot", local: baseLocalStatus, remote: null },
+          { _tag: "remoteUpdated", remote: baseRemoteStatus },
+        ]);
+        assert.isTrue(Option.isNone(yield* Deferred.poll(releaseFetch)));
+
+        yield* Deferred.succeed(releaseFetch, undefined);
+        assert.deepStrictEqual(yield* Fiber.join(refresh), baseStatus);
+      }).pipe(Effect.provide(testLayer));
+    }),
   );
 
   it.effect("starts no further background fetch for a stream served from a fresh remote", () =>

@@ -24,7 +24,6 @@ import { ContextPickerButton } from "./ContextPickerButton";
 import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
-import { PhoneSessionPolicyControl } from "./PhoneSessionPolicySheet";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import type { ModelTuningSummary } from "./modelTuning.logic";
@@ -45,6 +44,8 @@ import type { ContextWindowUsage } from "../../lib/contextWindow";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { AppModelOption } from "../../modelSelection";
 import { useUiStateStore } from "../../uiStateStore";
+import { LazyPhoneSessionPolicyControl } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { tokenModeOptions, tokenModePresentation } from "../../tokenModePresentation";
 
 const SELECT_OPEN_SUPPRESSION_MS = 300;
@@ -561,6 +562,10 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
   const mutationsBlocked = !mutationCapability.allowed;
   const mutationsBlockedReason = mutationCapability.reason;
   const isPhoneTier = usePresentationTier() === "phone";
+  const phoneSessionPolicyReady = usePhoneThreadSurfaceReady(
+    LazyPhoneSessionPolicyControl,
+    isPhoneTier,
+  );
   return (
     <div
       data-chat-composer-footer="true"
@@ -629,22 +634,24 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
             {/* Session policy gets its own control on the phone tier: mode,
                 access, and token budget are not model options, and full access
                 must not be buried under a model list. */}
-            <PhoneSessionPolicyControl
-              interactionMode={props.interactionMode}
-              runtimeMode={props.runtimeMode}
-              tokenMode={props.tokenMode}
-              showInteractionModeToggle={props.showInteractionModeToggle}
-              askModeSupported={props.askModeSupported}
-              showPlanToggle={props.showPlanSidebarToggle}
-              planSidebarLabel={props.planSidebarLabel}
-              planSidebarOpen={props.planSidebarOpen}
-              disabled={mutationsBlocked}
-              {...(mutationsBlockedReason ? { disabledReason: mutationsBlockedReason } : {})}
-              onInteractionModeChange={props.onInteractionModeChange}
-              onRuntimeModeChange={props.onRuntimeModeChange}
-              onTokenModeChange={props.onTokenModeChange}
-              onTogglePlanSidebar={props.onTogglePlanSidebar}
-            />
+            {phoneSessionPolicyReady ? (
+              <LazyPhoneSessionPolicyControl
+                interactionMode={props.interactionMode}
+                runtimeMode={props.runtimeMode}
+                tokenMode={props.tokenMode}
+                showInteractionModeToggle={props.showInteractionModeToggle}
+                askModeSupported={props.askModeSupported}
+                showPlanToggle={props.showPlanSidebarToggle}
+                planSidebarLabel={props.planSidebarLabel}
+                planSidebarOpen={props.planSidebarOpen}
+                disabled={mutationsBlocked}
+                {...(mutationsBlockedReason ? { disabledReason: mutationsBlockedReason } : {})}
+                onInteractionModeChange={props.onInteractionModeChange}
+                onRuntimeModeChange={props.onRuntimeModeChange}
+                onTokenModeChange={props.onTokenModeChange}
+                onTogglePlanSidebar={props.onTogglePlanSidebar}
+              />
+            ) : null}
             {/* The overflow survives only to carry provider traits, which the
                 policy sheet does not own. Without traits it would be empty. */}
             {props.providerTraitsMenuContent ? (

@@ -1,4 +1,3 @@
-import type { UnifiedSettings } from "@ryco/contracts/settings";
 import { useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -17,12 +16,7 @@ import {
 import { selectProjectsAcrossEnvironments, useStore } from "../store";
 import type { Project } from "../types";
 import { useUiStateStore } from "../uiStateStore";
-import { useSettings } from "./useSettings";
-
-const selectProjectGroupingMode = (settings: UnifiedSettings) =>
-  settings.sidebarProjectGroupingMode;
-const selectProjectGroupingOverrides = (settings: UnifiedSettings) =>
-  settings.sidebarProjectGroupingOverrides;
+import { useProjectGroupingSettings } from "./useProjectGroupingSettings";
 
 export interface LogicalProjectSnapshots {
   /**
@@ -43,15 +37,9 @@ export interface LogicalProjectSnapshots {
 export function useLogicalProjectSnapshots(): LogicalProjectSnapshots {
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  // Select the two fields separately: an object-returning selector is a new
-  // object every render, which would rebuild every snapshot (and re-render
-  // every consumer) on each render.
-  const sidebarProjectGroupingMode = useSettings(selectProjectGroupingMode);
-  const sidebarProjectGroupingOverrides = useSettings(selectProjectGroupingOverrides);
-  const projectGroupingSettings = useMemo(
-    () => ({ sidebarProjectGroupingMode, sidebarProjectGroupingOverrides }),
-    [sidebarProjectGroupingMode, sidebarProjectGroupingOverrides],
-  );
+  // Stable while the grouping settings are: a new object would rebuild every
+  // snapshot (and re-render every consumer) on each render.
+  const projectGroupingSettings = useProjectGroupingSettings();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((s) => s.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);

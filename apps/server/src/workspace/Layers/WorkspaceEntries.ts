@@ -51,15 +51,17 @@ import { WorkspaceAccessPolicy } from "../Services/WorkspaceAccessPolicy.ts";
 const WORKSPACE_INDEX_REVALIDATE_AFTER_MS = 15_000;
 /**
  * An invalidated root read within this window rebuilds in the background so
- * the next `@` is warm; colder roots just drop their index.
+ * the next `@` is warm. Colder roots keep their index, flagged as superseded,
+ * and rebuild on their next read: no git work for checkouts nobody reads, and
+ * no cold build for the first `@` after a long turn.
  */
 const WORKSPACE_INDEX_HOT_WINDOW_MS = 10 * 60_000;
 /** Collapses bursts of invalidations (checkpoint capture, file writes) into one rebuild. */
 const WORKSPACE_INDEX_REBUILD_DEBOUNCE_MS = 250;
 /**
  * A cold read waits this long for the full build, then gets a tracked-files
- * index (one fast `ls-files -c`) while the full build finishes in the
- * background.
+ * index (one fast `ls-files -c` index read; its ignore filter gets a short
+ * budget) while the full build finishes in the background.
  */
 const WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS = 4_000;
 /** A failed build is reported to readers this long before it is retried. */
@@ -173,30 +175,35 @@ function addDirectoryAncestors(directories: Set<string>, filePath: string): void
 /**
  * Keeps the shallowest files (listing order breaks ties, so tracked files
  * precede untracked ones) until files plus their directories reach `budget`.
+ * Only reached past the index cap, so both passes yield between chunks.
  */
-function selectShallowestFiles(
+const selectShallowestFiles = Effect.fn("WorkspaceEntries.selectShallowestFiles")(function* (
   filePaths: ReadonlyArray<string>,
   budget: number,
-): { readonly files: string[]; readonly directories: Set<string> } {
+) {
   const byDepth: string[][] = [];
+  let visited = 0;
   for (const filePath of filePaths) {
+    if (++visited % WORKSPACE_INDEX_BUILD_CHUNK === 0) yield* Effect.yieldNow;
     const depth = workspaceEntryDepth(filePath);
     (byDepth[depth] ??= []).push(filePath);
   }
   const files: string[] = [];
   const directories = new Set<string>();
+  visited = 0;
   for (const bucket of byDepth) {
     if (bucket === undefined) continue;
     for (const filePath of bucket) {
       if (files.length + directories.size >= budget) {
         return { files, directories };
       }
+      if (++visited % WORKSPACE_INDEX_BUILD_CHUNK === 0) yield* Effect.yieldNow;
       files.push(filePath);
       addDirectoryAncestors(directories, filePath);
     }
   }
   return { files, directories };
-}
+});
 
 function selectShallowestEntries(
   entries: ReadonlyArray<IndexedWorkspaceEntry>,
@@ -503,7 +510,7 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
 
     let partial = listingPartial;
     if (filePaths.length + directories.size > WORKSPACE_INDEX_MAX_ENTRIES) {
-      ({ files: filePaths, directories } = selectShallowestFiles(
+      ({ files: filePaths, directories } = yield* selectShallowestFiles(
         filePaths,
         WORKSPACE_INDEX_MAX_ENTRIES,
       ));
@@ -512,9 +519,15 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
 
     const entries: IndexedWorkspaceEntry[] = [];
     for (const directoryPath of directories) {
+      if (entries.length > 0 && entries.length % WORKSPACE_INDEX_BUILD_CHUNK === 0) {
+        yield* Effect.yieldNow;
+      }
       entries.push(toIndexedEntry(directoryPath, "directory"));
     }
     for (const filePath of filePaths) {
+      if (entries.length > 0 && entries.length % WORKSPACE_INDEX_BUILD_CHUNK === 0) {
+        yield* Effect.yieldNow;
+      }
       entries.push(toIndexedEntry(filePath, "file"));
     }
     return {
@@ -997,7 +1010,12 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     return matched;
   });
 
-  /** Marks the root changed: rebuilt shortly in the background while in use, else dropped. */
+  /**
+   * Marks the root changed: rebuilt shortly in the background while in use.
+   * A colder root keeps its index (and any file-write patches) and serves it
+   * as superseded until its next read revalidates it; the entry budget, not
+   * invalidation, bounds memory.
+   */
   const markRootChanged = Effect.fn("WorkspaceEntries.markRootChanged")(function* (
     slot: WorkspaceIndexSlot,
   ) {
@@ -1009,8 +1027,6 @@ export const makeWorkspaceEntries = Effect.gen(function* () {
     }
     if (isHot(slot, yield* Clock.currentTimeMillis)) {
       yield* scheduleRebuild(slot);
-    } else if (!slot.refreshing) {
-      slots.delete(slot.cwd);
     }
   });
 

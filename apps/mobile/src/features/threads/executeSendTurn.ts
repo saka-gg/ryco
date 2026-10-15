@@ -1,4 +1,7 @@
-import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
+import type {
+  ClaudeCacheReviewPresentation,
+  SubscribedClaudeReviewState,
+} from "@ryco/client-runtime/state/composer";
 import type {
   AgentTokenMode,
   ProviderDriverKind,
@@ -34,6 +37,12 @@ import { isDraftComposerFileAttachment } from "../../lib/composerFiles";
 export interface ExecuteSendTurnInput {
   readonly api: EnvironmentApi;
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation;
+  /**
+   * What the live thread subscription holds for the Claude resume review, read
+   * from the store when the review runs. A send it clears skips the
+   * `getThreadWindow` round trip; one it flags is re-read from the server.
+   */
+  readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
   readonly providerDriver?: ProviderDriverKind | null;
   readonly sourceProviderDriver?: ProviderDriverKind | null;
   readonly assertMutationReady?: () => void;
@@ -150,6 +159,9 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
 
     await commitSendTurnDispatch({
       ...(input.claudeCacheReview ? { claudeCacheReview: input.claudeCacheReview } : {}),
+      ...(input.readSubscribedClaudeReviewState
+        ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
+        : {}),
       providerDriver: input.providerDriver,
       sourceProviderDriver: input.sourceProviderDriver,
       ...(input.assertMutationReady ? { assertMutationReady: input.assertMutationReady } : {}),

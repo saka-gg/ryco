@@ -4,7 +4,11 @@ import { initialDraftModelSelection } from "@ryco/client-runtime/state/settings"
 import { ensureEnvironmentApi } from "../environmentApi";
 import { isHostedHubMode } from "../env";
 import { preloadRouteChunk } from "../lib/routeChunkPreload";
-import { readNewDraftDefaults } from "./newDraftDefaults";
+import {
+  readNewDraftDefaults,
+  sameSeededDraftDefaults,
+  seededDraftDefaultsOf,
+} from "./newDraftDefaults";
 import { readEnvironmentServerConfig } from "./useChatsAvailability";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
@@ -42,7 +46,7 @@ import { selectProjectsAcrossEnvironments, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
-import { useSettings } from "./useSettings";
+import { useProjectGroupingSettings } from "./useProjectGroupingSettings";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import {
   resolveWorkspaceDefaultProjectRef,
@@ -93,10 +97,7 @@ function useNewThreadState() {
     >(),
   );
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
-  const projectGroupingSettings = useSettings((settings) => ({
-    sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
-    sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
-  }));
+  const projectGroupingSettings = useProjectGroupingSettings();
   const router = useRouter();
   const adoptHostedTarget = useCallback((environmentId: ScopedProjectRef["environmentId"]) => {
     adoptHostedEnvironmentRoute(environmentId);
@@ -185,25 +186,26 @@ function useNewThreadState() {
               }),
             );
           const seeded = useComposerDraftStore.getState();
-          return {
-            composer: seeded.getComposerDraft(input.draftId),
-            session: seeded.draftThreadsByThreadKey[input.draftId],
-          };
+          return seededDraftDefaultsOf(
+            seeded.getComposerDraft(input.draftId),
+            seeded.draftThreadsByThreadKey[input.draftId],
+          );
         };
         const seeded = seed(effective);
         if (fresh) {
           // Opened with this session's last answer for the project. The node's
-          // current one replaces it only if it differs and the draft is exactly
-          // as seeded: a choice the user already made is never overwritten.
+          // current one replaces it only if it differs and the seeded defaults
+          // are still as seeded: a choice the user already made is never
+          // overwritten, while typing or the composer mounting does not count.
           void fresh
             .then((current) => {
               if (current === null || samePreferences(current, effective)) return;
               const state = useComposerDraftStore.getState();
-              if (
-                state.getComposerDraft(input.draftId) !== seeded.composer ||
-                state.draftThreadsByThreadKey[input.draftId] !== seeded.session
-              )
-                return;
+              const now = seededDraftDefaultsOf(
+                state.getComposerDraft(input.draftId),
+                state.draftThreadsByThreadKey[input.draftId],
+              );
+              if (!sameSeededDraftDefaults(now, seeded)) return;
               seed(current);
             })
             .catch(() => undefined);
@@ -225,191 +227,204 @@ function useNewThreadState() {
     [adoptHostedTarget, router],
   );
 
-  const handleNewThread: (
-    projectRef: ScopedProjectRef,
-    options?: NewThreadOptions,
-  ) => Promise<void> = useCallback(
-    function handleNewThread(
-      projectRef: ScopedProjectRef,
-      options?: NewThreadOptions,
-    ): Promise<void> {
-      const leaseWait = pendingHostedLease(projectRef.environmentId);
-      if (leaseWait) {
-        return leaseWait.then((ready) => {
-          if (!ready) {
-            if (options?.freshDraft)
-              throw new Error("The workspace is unavailable. Your selection draft is preserved.");
-            return;
-          }
-          return handleNewThread(projectRef, options);
-        });
-      }
-      const {
-        getDraftSessionByLogicalProjectKey,
-        getDraftSession,
-        getDraftThread,
-        setDraftThreadContext,
-        setLogicalProjectDraftThreadId,
-      } = useComposerDraftStore.getState();
-      const currentRouteTarget = getCurrentRouteTarget();
-      const project = projects.find(
-        (candidate) =>
-          candidate.id === projectRef.projectId &&
-          candidate.environmentId === projectRef.environmentId,
-      );
-      const logicalProjectKey = project
-        ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
-        : scopedProjectKey(projectRef);
-      if (options?.freshDraft) {
-        const fresh = options.freshDraft;
-        if (!fresh.isCurrent())
-          throw new Error("The source chat changed. Your selection draft was not sent.");
-        const drafts = useComposerDraftStore.getState();
-        const assertOwnership = () => {
-          const state = useComposerDraftStore.getState();
-          const previous = seededDrafts.current.get(fresh.draftId);
-          if (
-            state.draftThreadsByThreadKey[fresh.draftId] &&
-            (!previous ||
-              state.getComposerDraft(fresh.draftId) !== previous.composer ||
-              state.draftThreadsByThreadKey[fresh.draftId] !== previous.session)
-          ) {
-            throw new Error(
-              "The destination draft changed elsewhere. Both drafts are preserved; open the destination to continue.",
+  const handleNewThread = useCallback(
+    (projectRef: ScopedProjectRef, options?: NewThreadOptions): Promise<void> => {
+      // Retries recurse through this local: a self-referencing named function
+      // expression makes the React Compiler skip the whole hook, which then
+      // hands its callers a new handler on every render.
+      const openNewThread = (
+        projectRef: ScopedProjectRef,
+        options?: NewThreadOptions,
+      ): Promise<void> => {
+        const leaseWait = pendingHostedLease(projectRef.environmentId);
+        if (leaseWait) {
+          return leaseWait.then((ready) => {
+            if (!ready) {
+              if (options?.freshDraft)
+                throw new Error("The workspace is unavailable. Your selection draft is preserved.");
+              return;
+            }
+            return openNewThread(projectRef, options);
+          });
+        }
+        const {
+          getDraftSessionByLogicalProjectKey,
+          getDraftSession,
+          getDraftThread,
+          setDraftThreadContext,
+          setLogicalProjectDraftThreadId,
+        } = useComposerDraftStore.getState();
+        const currentRouteTarget = getCurrentRouteTarget();
+        const project = projects.find(
+          (candidate) =>
+            candidate.id === projectRef.projectId &&
+            candidate.environmentId === projectRef.environmentId,
+        );
+        const logicalProjectKey = project
+          ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
+          : scopedProjectKey(projectRef);
+        if (options?.freshDraft) {
+          const fresh = options.freshDraft;
+          if (!fresh.isCurrent())
+            throw new Error("The source chat changed. Your selection draft was not sent.");
+          const drafts = useComposerDraftStore.getState();
+          const assertOwnership = () => {
+            const state = useComposerDraftStore.getState();
+            const previous = seededDrafts.current.get(fresh.draftId);
+            if (
+              state.draftThreadsByThreadKey[fresh.draftId] &&
+              (!previous ||
+                state.getComposerDraft(fresh.draftId) !== previous.composer ||
+                state.draftThreadsByThreadKey[fresh.draftId] !== previous.session)
+            ) {
+              throw new Error(
+                "The destination draft changed elsewhere. Both drafts are preserved; open the destination to continue.",
+              );
+            }
+          };
+          assertOwnership();
+          drafts.createDetachedDraftSession(logicalProjectKey, projectRef, fresh.draftId, {
+            threadId: fresh.threadId,
+            branch: options.branch ?? null,
+            worktreePath: options.worktreePath ?? null,
+            envMode: options.envMode ?? "local",
+            runtimeMode: fresh.runtimeMode,
+            tokenMode: fresh.tokenMode,
+          });
+          drafts.setPrompt(fresh.draftId, fresh.prompt);
+          drafts.setModelSelection(fresh.draftId, fresh.modelSelection);
+          drafts.setRuntimeMode(fresh.draftId, fresh.runtimeMode);
+          drafts.setTokenMode(fresh.draftId, fresh.tokenMode);
+          drafts.setDraftThreadContext(fresh.draftId, {
+            branch: options.branch ?? null,
+            envMode: options.envMode ?? "local",
+          });
+          seededDrafts.current.clear();
+          seededDrafts.current.set(fresh.draftId, {
+            composer: drafts.getComposerDraft(fresh.draftId),
+            session: useComposerDraftStore.getState().draftThreadsByThreadKey[fresh.draftId],
+          });
+          return (async () => {
+            await router.navigate({ to: "/draft/$draftId", params: { draftId: fresh.draftId } });
+            // The destination composer may initialize non-content defaults on mount.
+            // Only user content changes cancel the already-authorized handoff here;
+            // retries above still require ownership of the complete draft state.
+            const current = useComposerDraftStore.getState().getComposerDraft(fresh.draftId);
+            const seeded = seededDrafts.current.get(fresh.draftId)?.composer;
+            if (
+              current?.prompt !== fresh.prompt ||
+              current?.images !== seeded?.images ||
+              current?.terminalContexts !== seeded?.terminalContexts ||
+              current?.sourceControlContexts !== seeded?.sourceControlContexts
+            ) {
+              throw new Error(
+                "The destination draft changed. Send from the full composer to keep your edits.",
+              );
+            }
+            const target = getCurrentRouteTarget();
+            if (target?.kind !== "draft" || target.draftId !== fresh.draftId) {
+              throw new Error("Navigation was cancelled. Your selection draft is preserved.");
+            }
+          })();
+        }
+        const hasBranchOption = options?.branch !== undefined;
+        const hasWorktreePathOption = options?.worktreePath !== undefined;
+        const hasEnvModeOption = options?.envMode !== undefined;
+        const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
+        const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
+          ? currentRouteTarget.kind === "server"
+            ? getDraftThread(currentRouteTarget.threadRef)
+            : getDraftSession(currentRouteTarget.draftId)
+          : null;
+        if (storedDraftThread) {
+          return (async () => {
+            if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
+              setDraftThreadContext(storedDraftThread.draftId, {
+                ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
+                ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
+                ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
+              });
+            }
+            setLogicalProjectDraftThreadId(
+              logicalProjectKey,
+              projectRef,
+              storedDraftThread.draftId,
+              {
+                threadId: storedDraftThread.threadId,
+              },
             );
-          }
-        };
-        assertOwnership();
-        drafts.createDetachedDraftSession(logicalProjectKey, projectRef, fresh.draftId, {
-          threadId: fresh.threadId,
-          branch: options.branch ?? null,
-          worktreePath: options.worktreePath ?? null,
-          envMode: options.envMode ?? "local",
-          runtimeMode: fresh.runtimeMode,
-          tokenMode: fresh.tokenMode,
-        });
-        drafts.setPrompt(fresh.draftId, fresh.prompt);
-        drafts.setModelSelection(fresh.draftId, fresh.modelSelection);
-        drafts.setRuntimeMode(fresh.draftId, fresh.runtimeMode);
-        drafts.setTokenMode(fresh.draftId, fresh.tokenMode);
-        drafts.setDraftThreadContext(fresh.draftId, {
-          branch: options.branch ?? null,
-          envMode: options.envMode ?? "local",
-        });
-        seededDrafts.current.clear();
-        seededDrafts.current.set(fresh.draftId, {
-          composer: drafts.getComposerDraft(fresh.draftId),
-          session: useComposerDraftStore.getState().draftThreadsByThreadKey[fresh.draftId],
-        });
-        return (async () => {
-          await router.navigate({ to: "/draft/$draftId", params: { draftId: fresh.draftId } });
-          // The destination composer may initialize non-content defaults on mount.
-          // Only user content changes cancel the already-authorized handoff here;
-          // retries above still require ownership of the complete draft state.
-          const current = useComposerDraftStore.getState().getComposerDraft(fresh.draftId);
-          const seeded = seededDrafts.current.get(fresh.draftId)?.composer;
-          if (
-            current?.prompt !== fresh.prompt ||
-            current?.images !== seeded?.images ||
-            current?.terminalContexts !== seeded?.terminalContexts ||
-            current?.sourceControlContexts !== seeded?.sourceControlContexts
-          ) {
-            throw new Error(
-              "The destination draft changed. Send from the full composer to keep your edits.",
-            );
-          }
-          const target = getCurrentRouteTarget();
-          if (target?.kind !== "draft" || target.draftId !== fresh.draftId) {
-            throw new Error("Navigation was cancelled. Your selection draft is preserved.");
-          }
-        })();
-      }
-      const hasBranchOption = options?.branch !== undefined;
-      const hasWorktreePathOption = options?.worktreePath !== undefined;
-      const hasEnvModeOption = options?.envMode !== undefined;
-      const storedDraftThread = getDraftSessionByLogicalProjectKey(logicalProjectKey);
-      const latestActiveDraftThread: DraftThreadState | null = currentRouteTarget
-        ? currentRouteTarget.kind === "server"
-          ? getDraftThread(currentRouteTarget.threadRef)
-          : getDraftSession(currentRouteTarget.draftId)
-        : null;
-      if (storedDraftThread) {
-        return (async () => {
+            if (
+              currentRouteTarget?.kind === "draft" &&
+              currentRouteTarget.draftId === storedDraftThread.draftId
+            ) {
+              return;
+            }
+            adoptHostedTarget(projectRef.environmentId);
+            await router.navigate({
+              to: "/draft/$draftId",
+              params: { draftId: storedDraftThread.draftId },
+            });
+          })();
+        }
+
+        if (
+          latestActiveDraftThread &&
+          currentRouteTarget?.kind === "draft" &&
+          latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
+          latestActiveDraftThread.promotedTo == null
+        ) {
           if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
-            setDraftThreadContext(storedDraftThread.draftId, {
+            setDraftThreadContext(currentRouteTarget.draftId, {
               ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
               ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
               ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
             });
           }
-          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, storedDraftThread.draftId, {
-            threadId: storedDraftThread.threadId,
-          });
-          if (
-            currentRouteTarget?.kind === "draft" &&
-            currentRouteTarget.draftId === storedDraftThread.draftId
-          ) {
-            return;
-          }
-          adoptHostedTarget(projectRef.environmentId);
-          await router.navigate({
-            to: "/draft/$draftId",
-            params: { draftId: storedDraftThread.draftId },
-          });
-        })();
-      }
-
-      if (
-        latestActiveDraftThread &&
-        currentRouteTarget?.kind === "draft" &&
-        latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
-        latestActiveDraftThread.promotedTo == null
-      ) {
-        if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
-          setDraftThreadContext(currentRouteTarget.draftId, {
-            ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-            ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-            ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-          });
+          setLogicalProjectDraftThreadId(
+            logicalProjectKey,
+            projectRef,
+            currentRouteTarget.draftId,
+            {
+              threadId: latestActiveDraftThread.threadId,
+              createdAt: latestActiveDraftThread.createdAt,
+              runtimeMode: latestActiveDraftThread.runtimeMode,
+              interactionMode: latestActiveDraftThread.interactionMode,
+              tokenMode: latestActiveDraftThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+              ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
+              ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
+              ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
+            },
+          );
+          return Promise.resolve();
         }
-        setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
-          threadId: latestActiveDraftThread.threadId,
-          createdAt: latestActiveDraftThread.createdAt,
-          runtimeMode: latestActiveDraftThread.runtimeMode,
-          interactionMode: latestActiveDraftThread.interactionMode,
-          tokenMode: latestActiveDraftThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-          ...(hasBranchOption ? { branch: options?.branch ?? null } : {}),
-          ...(hasWorktreePathOption ? { worktreePath: options?.worktreePath ?? null } : {}),
-          ...(hasEnvModeOption ? { envMode: options?.envMode } : {}),
-        });
-        return Promise.resolve();
-      }
 
-      const draftId = newDraftId();
-      const threadId = newThreadId();
-      const createdAt = new Date().toISOString();
-      return createAndOpenDraft({
-        environmentId: projectRef.environmentId,
-        draftId,
-        preferencesProjectId: projectRef.projectId,
-        explicitModelSelection: options?.modelSelection,
-        superseded: () => getDraftSessionByLogicalProjectKey(logicalProjectKey) !== null,
-        resume: () => handleNewThread(projectRef, options),
-        register: (config, effective) =>
-          setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
-            threadId,
-            createdAt,
-            branch: options?.branch ?? null,
-            worktreePath: options?.worktreePath ?? null,
-            envMode:
-              options?.envMode ??
-              effective?.defaultThreadEnvMode.value ??
-              config.settings.defaultThreadEnvMode,
-            runtimeMode: DEFAULT_RUNTIME_MODE,
-            tokenMode: config.settings.defaultAgentTokenMode,
-          }),
-        failureTitle: "Could not create a draft",
-      });
+        const draftId = newDraftId();
+        const threadId = newThreadId();
+        const createdAt = new Date().toISOString();
+        return createAndOpenDraft({
+          environmentId: projectRef.environmentId,
+          draftId,
+          preferencesProjectId: projectRef.projectId,
+          explicitModelSelection: options?.modelSelection,
+          superseded: () => getDraftSessionByLogicalProjectKey(logicalProjectKey) !== null,
+          resume: () => openNewThread(projectRef, options),
+          register: (config, effective) =>
+            setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, draftId, {
+              threadId,
+              createdAt,
+              branch: options?.branch ?? null,
+              worktreePath: options?.worktreePath ?? null,
+              envMode:
+                options?.envMode ??
+                effective?.defaultThreadEnvMode.value ??
+                config.settings.defaultThreadEnvMode,
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              tokenMode: config.settings.defaultAgentTokenMode,
+            }),
+          failureTitle: "Could not create a draft",
+        });
+      };
+      return openNewThread(projectRef, options);
     },
     [
       adoptHostedTarget,
@@ -428,50 +443,61 @@ function useNewThreadState() {
    * client-generated project id that the first send asks the server to create.
    */
   const handleNewChat = useCallback(
-    function handleNewChat(environmentId: EnvironmentId): Promise<void> {
-      const leaseWait = pendingHostedLease(environmentId);
-      if (leaseWait) {
-        return leaseWait.then((ready) => (ready ? handleNewChat(environmentId) : undefined));
-      }
-      const existing = useComposerDraftStore.getState().getPendingChatDraftSession(environmentId);
-      if (existing) {
-        const currentRouteTarget = getCurrentRouteTarget();
-        if (currentRouteTarget?.kind === "draft" && currentRouteTarget.draftId === existing.draftId)
-          return Promise.resolve();
-        adoptHostedTarget(environmentId);
-        return router
-          .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
-          .then(() => undefined);
-      }
-      const draftId = newDraftId();
-      const threadId = newThreadId();
-      const target = buildChatDraftTarget(environmentId, newProjectId());
-      const createdAt = new Date().toISOString();
-      return createAndOpenDraft({
-        environmentId,
-        draftId,
-        // The chat project does not exist yet; the node's defaults apply.
-        preferencesProjectId: undefined,
-        explicitModelSelection: undefined,
-        superseded: () =>
-          useComposerDraftStore.getState().getPendingChatDraftSession(environmentId) !== null,
-        resume: () => handleNewChat(environmentId),
-        register: (config) => {
-          const availability = resolveChatsAvailability(config);
-          if (!availability.available) throw new Error(availability.message);
-          useComposerDraftStore
-            .getState()
-            .setLogicalProjectDraftThreadId(target.logicalProjectKey, target.projectRef, draftId, {
-              threadId,
-              createdAt,
-              envMode: "local",
-              runtimeMode: DEFAULT_RUNTIME_MODE,
-              tokenMode: config.settings.defaultAgentTokenMode,
-              pendingChat: true,
-            });
-        },
-        failureTitle: "Could not start a chat",
-      });
+    (environmentId: EnvironmentId): Promise<void> => {
+      const openNewChat = (environmentId: EnvironmentId): Promise<void> => {
+        const leaseWait = pendingHostedLease(environmentId);
+        if (leaseWait) {
+          return leaseWait.then((ready) => (ready ? openNewChat(environmentId) : undefined));
+        }
+        const existing = useComposerDraftStore.getState().getPendingChatDraftSession(environmentId);
+        if (existing) {
+          const currentRouteTarget = getCurrentRouteTarget();
+          if (
+            currentRouteTarget?.kind === "draft" &&
+            currentRouteTarget.draftId === existing.draftId
+          )
+            return Promise.resolve();
+          adoptHostedTarget(environmentId);
+          return router
+            .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
+            .then(() => undefined);
+        }
+        const draftId = newDraftId();
+        const threadId = newThreadId();
+        const target = buildChatDraftTarget(environmentId, newProjectId());
+        const createdAt = new Date().toISOString();
+        return createAndOpenDraft({
+          environmentId,
+          draftId,
+          // The chat project does not exist yet; the node's defaults apply.
+          preferencesProjectId: undefined,
+          explicitModelSelection: undefined,
+          superseded: () =>
+            useComposerDraftStore.getState().getPendingChatDraftSession(environmentId) !== null,
+          resume: () => openNewChat(environmentId),
+          register: (config) => {
+            const availability = resolveChatsAvailability(config);
+            if (!availability.available) throw new Error(availability.message);
+            useComposerDraftStore
+              .getState()
+              .setLogicalProjectDraftThreadId(
+                target.logicalProjectKey,
+                target.projectRef,
+                draftId,
+                {
+                  threadId,
+                  createdAt,
+                  envMode: "local",
+                  runtimeMode: DEFAULT_RUNTIME_MODE,
+                  tokenMode: config.settings.defaultAgentTokenMode,
+                  pendingChat: true,
+                },
+              );
+          },
+          failureTitle: "Could not start a chat",
+        });
+      };
+      return openNewChat(environmentId);
     },
     [adoptHostedTarget, createAndOpenDraft, getCurrentRouteTarget, pendingHostedLease, router],
   );
@@ -489,10 +515,7 @@ export function useNewThreadHandler() {
 
 export function useHandleNewThread() {
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const projectGroupingSettings = useSettings((settings) => ({
-    sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
-    sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
-  }));
+  const projectGroupingSettings = useProjectGroupingSettings();
   const routeTarget = useParams({
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),

@@ -7,7 +7,8 @@
  *
  * @module hubConnector/HubConnectorService
  */
-import { Context, Effect, Layer } from "effect";
+import { Context, Data, Duration, Effect, Layer } from "effect";
+import { HttpServerRespondable, HttpServerResponse } from "effect/http";
 import type { NodeE2eeAdmissionPolicy } from "@ryco/contracts/native-e2ee";
 
 import type { HubConnector } from "./HubConnector.ts";
@@ -154,8 +155,8 @@ export class HubConnectorService extends Context.Service<
  * Access to the connector once its key custody is built.
  *
  * The server builds the connector after the router serves (`HubConnectorDeferred`),
- * so a Hub route that arrives first waits here — the way the startup gate held it
- * before — and nothing uses the identity before custody has completed.
+ * so a Hub route that arrives first waits here, and nothing uses the identity
+ * before custody has completed. The wait is bounded ({@link awaitHubConnector}).
  */
 export interface HubConnectorReadyShape {
   readonly await: Effect.Effect<HubConnectorServiceShape>;
@@ -165,12 +166,49 @@ export class HubConnectorReady extends Context.Service<HubConnectorReady, HubCon
   "ryco/hubConnector/HubConnectorReady",
 ) {}
 
-/** The connector, waiting for its construction if it is still under way. */
-export const awaitHubConnector: Effect.Effect<HubConnectorServiceShape, never, HubConnectorReady> =
-  Effect.gen(function* () {
-    const ready = yield* HubConnectorReady;
-    return yield* ready.await;
-  });
+/**
+ * How long a Hub route waits for key custody. Custody normally completes within a second of
+ * the router serving; past this (an unanswered OS credential prompt, a stuck key store) the
+ * route answers 503 with `Retry-After` instead of holding the request open.
+ */
+export const HUB_CONNECTOR_READY_TIMEOUT = Duration.seconds(30);
+export const HUB_CONNECTOR_RETRY_AFTER_SECONDS = 5;
+
+/** The connector is still being built; answered as 503 with `Retry-After`. */
+export class HubConnectorNotReadyError extends Data.TaggedError("HubConnectorNotReadyError")<{}> {
+  [HttpServerRespondable.symbol]() {
+    return Effect.succeed(
+      HttpServerResponse.jsonUnsafe(
+        { error: "The Hub connector is still starting. Try again shortly." },
+        {
+          status: 503,
+          headers: {
+            "cache-control": "no-store",
+            "retry-after": String(HUB_CONNECTOR_RETRY_AFTER_SECONDS),
+          },
+        },
+      ),
+    );
+  }
+}
+
+/**
+ * The connector, waiting (bounded by {@link HUB_CONNECTOR_READY_TIMEOUT}) for its construction
+ * if it is still under way.
+ */
+export const awaitHubConnector: Effect.Effect<
+  HubConnectorServiceShape,
+  HubConnectorNotReadyError,
+  HubConnectorReady
+> = Effect.gen(function* () {
+  const ready = yield* HubConnectorReady;
+  return yield* ready.await.pipe(
+    Effect.timeoutOrElse({
+      duration: HUB_CONNECTOR_READY_TIMEOUT,
+      orElse: () => Effect.fail(new HubConnectorNotReadyError()),
+    }),
+  );
+});
 
 /** Access to a connector that already exists (tests, and composition around a built one). */
 export const hubConnectorReadyLayer = (service: HubConnectorServiceShape) =>

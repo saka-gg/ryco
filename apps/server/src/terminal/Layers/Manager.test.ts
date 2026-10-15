@@ -43,7 +43,7 @@ import {
 import { createWorkspaceCommitFence } from "../../orchestration/workspaceCommitFence.ts";
 import { storageLifecycleLock } from "../../storage/lifecycle.ts";
 import { createEmptyReadModel } from "../../orchestration/projector.ts";
-import { makeTerminalManagerWithOptions } from "./Manager.ts";
+import { makeProcfsProcessTableSnapshotter, makeTerminalManagerWithOptions } from "./Manager.ts";
 import {
   makeTerminalSubscriberOffer,
   releaseTerminalSubscriberEvent,
@@ -1459,6 +1459,138 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       }
       expect(snapshots - activeStart).toBe(5);
     }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("checks once when output goes quiet instead of on every tick of output", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: () =>
+          Effect.sync(() => {
+            snapshots += 1;
+            return { childrenByParent: new Map<number, number[]>() };
+          }),
+        subprocessPollIntervalMs: 1_000,
+        subprocessIdlePollIntervalMs: 5_000,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const settle = Effect.gen(function* () {
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+      });
+      const tick = (output?: string) =>
+        Effect.gen(function* () {
+          yield* TestClock.adjust("900 millis");
+          // Output right before the tick, as a chatty process produces it.
+          if (output !== undefined) process.emitData(output);
+          yield* settle;
+          yield* TestClock.adjust("100 millis");
+          yield* settle;
+        });
+      // Let the start-up window lapse.
+      for (let index = 0; index < 6; index += 1) yield* tick();
+
+      const busyStart = snapshots;
+      for (let index = 0; index < 10; index += 1) yield* tick(`line ${index}\n`);
+      // Only the idle sweep runs while output keeps flowing.
+      expect(snapshots - busyStart).toBe(2);
+
+      // The first tick after the output stopped checks once.
+      const quietStart = snapshots;
+      yield* tick();
+      expect(snapshots - quietStart).toBe(1);
+      yield* tick();
+      yield* tick();
+      expect(snapshots - quietStart).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("reads terminal subprocesses from procfs without a process table", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const procRoot = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-procfs-" });
+      const writeChildren = (pid: number, tid: number, children: string) =>
+        Effect.gen(function* () {
+          const taskDir = path.join(procRoot, String(pid), "task", String(tid));
+          yield* fs.makeDirectory(taskDir, { recursive: true });
+          yield* fs.writeFileString(path.join(taskDir, "children"), children);
+        });
+      yield* writeChildren(100, 100, "200 201 ");
+      yield* writeChildren(100, 101, "202");
+      yield* writeChildren(300, 300, "");
+
+      const snapshot = yield* makeProcfsProcessTableSnapshotter(fs, procRoot)([100, 300, 400]);
+      // 300 has no children; 400 already exited.
+      expect([...snapshot.childrenByParent.entries()]).toEqual([[100, [200, 201, 202]]]);
+    }),
+  );
+
+  it.effect("appends each window's output to the history file instead of rewriting it", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(100);
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const filePath = historyLogPath(logsDir);
+
+      process.emitData("first\n");
+      yield* waitFor(Effect.map(readFileString(filePath), (text) => text === "first\n"));
+      // A rewrite would drop this marker; an append keeps it.
+      yield* writeFileString(filePath, "marker\nfirst\n");
+      process.emitData("second\n");
+      yield* waitFor(
+        Effect.map(readFileString(filePath), (text) => text === "marker\nfirst\nsecond\n"),
+      );
+    }),
+  );
+
+  it.effect("compacts the history file to the retained history past its bound", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(4);
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const filePath = historyLogPath(logsDir);
+      const fileIs = (expected: string) =>
+        waitFor(
+          Effect.map(readFileString(filePath), (text) => text === expected),
+          "2 seconds",
+        );
+
+      process.emitData("1\n2\n");
+      yield* fileIs("1\n2\n");
+      // Past the 4-line budget but within the file's 6-line bound: appended.
+      process.emitData("3\n4\n5\n");
+      yield* fileIs("1\n2\n3\n4\n5\n");
+      // Past the file's bound: rewritten with the retained 4 lines.
+      process.emitData("6\n7\n");
+      yield* fileIs("4\n5\n6\n7\n");
+    }),
+  );
+
+  it.effect("rewrites the history file after a failed append instead of leaving a gap", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(100);
+      const fs = yield* FileSystem.FileSystem;
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const filePath = historyLogPath(logsDir);
+
+      process.emitData("a\n");
+      yield* waitFor(Effect.map(readFileString(filePath), (text) => text === "a\n"));
+      // A directory in the file's place fails the next append.
+      yield* fs.remove(filePath);
+      yield* fs.makeDirectory(filePath);
+      process.emitData("b\n");
+      yield* Effect.sleep("200 millis");
+      yield* fs.remove(filePath, { recursive: true });
+
+      process.emitData("c\n");
+      yield* waitFor(
+        Effect.map(
+          readFileString(filePath).pipe(Effect.orElseSucceed(() => "")),
+          (text) => text === "a\nb\nc\n",
+        ),
+      );
+    }),
   );
 
   it.effect("bounds retained history by bytes, trimming from the head", () =>

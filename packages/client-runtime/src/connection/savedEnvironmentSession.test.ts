@@ -98,6 +98,21 @@ describe("awaitSavedEnvironmentConfig", () => {
     expect(readConfig).toHaveBeenCalledTimes(1);
   });
 
+  it("waits out a slow link's snapshot instead of loading the config beside it", async () => {
+    vi.useFakeTimers();
+    let deliver: (value: string) => void = () => undefined;
+    const snapshot = new Promise<string>((resolve) => {
+      deliver = resolve;
+    });
+    const readConfig = vi.fn(async () => "read");
+    const result = awaitSavedEnvironmentConfig({ snapshot, readConfig });
+    // About what a throttled link takes for the ws-token, upgrade and snapshot.
+    await vi.advanceTimersByTimeAsync(1_500);
+    deliver("slow snapshot");
+    await expect(result).resolves.toBe("slow snapshot");
+    expect(readConfig).not.toHaveBeenCalled();
+  });
+
   it("takes a late snapshot that beats the fallback read", async () => {
     vi.useFakeTimers();
     let deliver: (value: string) => void = () => undefined;
@@ -129,5 +144,21 @@ describe("awaitSavedEnvironmentConfig", () => {
     const settled = expect(result).rejects.toBeInstanceOf(SavedEnvironmentTimeoutError);
     await vi.advanceTimersByTimeAsync(5_000);
     await settled;
+  });
+
+  it("times out without a read when the snapshot wait spends the whole bound", async () => {
+    vi.useFakeTimers();
+    const readConfig = vi.fn(() => never<string>());
+    const result = awaitSavedEnvironmentConfig({
+      snapshot: never<string>(),
+      readConfig,
+      waitMs: 5_000,
+      timeoutMs: 3_000,
+    });
+    const settled = expect(result).rejects.toBeInstanceOf(SavedEnvironmentTimeoutError);
+    // The wait is capped at the bound, not the longer `waitMs`.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await settled;
+    expect(readConfig).not.toHaveBeenCalled();
   });
 });

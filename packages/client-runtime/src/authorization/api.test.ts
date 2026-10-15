@@ -451,6 +451,89 @@ describe("HostedHubApi", () => {
     expect(JSON.parse(String(fresh.mock.calls[0]?.[1]?.body)).protocolMinor).toBe(3);
   });
 
+  it("re-offers minor 3 once a remembered minor-3 refusal is stale", async () => {
+    const api = createApi();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+    const ticket = (protocolMinor: 2 | 3) =>
+      response(
+        { ticket: "ticket", expiresAt: Date.now() + 60_000, protocolMajor: 1, protocolMinor },
+        201,
+      );
+    const offered = (fetch: ReturnType<typeof vi.fn>) =>
+      fetch.mock.calls.map((call) => JSON.parse(String(call[1]?.body)).protocolMinor);
+
+    // The Hub was upgraded after it refused minor 3, and now requires minor 3
+    // for this node: one retry with minor 3, and the memo is gone.
+    const upgraded = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+      .mockResolvedValueOnce(ticket(2))
+      .mockResolvedValueOnce(response({ error: "unsupported_version" }, 426))
+      .mockResolvedValueOnce(ticket(3))
+      .mockResolvedValueOnce(ticket(3));
+    globalThis.fetch = upgraded;
+    await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).resolves.toMatchObject({
+      protocolMinor: 3,
+    });
+    await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+    expect(offered(upgraded)).toEqual([3, 2, 2, 3, 3]);
+
+    // An unremembered minor-3 request refused as unsupported is not retried.
+    const unsupported = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "unsupported_version" }, 426));
+    globalThis.fetch = unsupported;
+    await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+      code: "unsupported_version",
+    });
+    expect(unsupported).toHaveBeenCalledOnce();
+
+    // A remembered minor-2 request refused for any other reason is not retried.
+    const remember = vi
+      .fn()
+      .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+      .mockResolvedValueOnce(ticket(2));
+    globalThis.fetch = remember;
+    await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+    for (const [status, code] of [
+      [400, "invalid_request"],
+      [403, "forbidden"],
+    ] as const) {
+      const refused = vi.fn().mockResolvedValueOnce(response({ error: code }, status));
+      globalThis.fetch = refused;
+      await expect(api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa")).rejects.toMatchObject({
+        status,
+        code,
+      });
+      expect(offered(refused)).toEqual([2]);
+    }
+    api.clearSessionMaterial();
+    globalThis.fetch = vi.fn(async () => response(session));
+    await api.restoreSession();
+
+    // The memo expires: a long-lived session re-negotiates on its own.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const expiring = vi
+        .fn()
+        .mockResolvedValueOnce(response({ error: "invalid_request" }, 400))
+        .mockResolvedValueOnce(ticket(2))
+        .mockResolvedValueOnce(ticket(2))
+        .mockResolvedValueOnce(ticket(3));
+      globalThis.fetch = expiring;
+      await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+      vi.setSystemTime(Date.now() + 15 * 60_000 - 1);
+      await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+      vi.setSystemTime(Date.now() + 1);
+      await api.issueRelayTicket("node_aaaaaaaaaaaaaaaaaaaaaa");
+      expect(offered(expiring)).toEqual([3, 2, 2, 3]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([0, 1, 4, "3"])(
     "rejects an unsupported selected relay minor %s",
     async (protocolMinor) => {
@@ -1000,6 +1083,20 @@ describe("HostedHubApi", () => {
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       await rejection;
+      // The signed-out branch's bootstrap probe takes the same bound.
+      let availabilitySettled = false;
+      const availability = api
+        .getBootstrapAvailability(undefined, { deadlineMs: 8_000 })
+        .finally(() => {
+          availabilitySettled = true;
+        });
+      const availabilityRejection = expect(availability).rejects.toMatchObject({
+        code: "timeout",
+      });
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(availabilitySettled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await availabilityRejection;
       // A deadline longer than the default never extends it.
       const nodes = api.listNodes(undefined, { deadlineMs: 120_000 });
       const nodesRejection = expect(nodes).rejects.toMatchObject({ code: "timeout" });

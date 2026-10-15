@@ -31,7 +31,8 @@ export const emptyHistoryBufferState = (): HistoryBufferState => ({
   newlineCount: 0,
 });
 
-const utf8ByteLength = (text: string): number => {
+/** The module's UTF-8 byte estimate (see the module note), for callers sizing history text. */
+export const utf8ByteLength = (text: string): number => {
   let bytes = 0;
   for (let index = 0; index < text.length; index += 1) {
     const codeUnit = text.charCodeAt(index);
@@ -50,7 +51,7 @@ const utf8ByteLength = (text: string): number => {
   return bytes;
 };
 
-const countNewlines = (text: string): number => {
+export const countNewlines = (text: string): number => {
   let count = 0;
   for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
     count += 1;

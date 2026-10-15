@@ -11,8 +11,11 @@ import { LRUCache } from "./lruCache";
  * `(turnId, filePath, blobSha)`.
  *
  * Eviction (least-recently-used) is delegated to the shared {@link LRUCache};
- * this layer only adds composite-key building and an entry-count bound. Do not
- * store `null`/`undefined` values — those are reserved to signal a cache miss.
+ * this layer adds composite-key building, an entry-count bound, an optional
+ * weight budget (callers weigh an entry by its source size) and slots: an
+ * entry stored under a slot replaces the slot's previous entry, for payloads
+ * that supersede each other and are never revisited. Do not store
+ * `null`/`undefined` values — those are reserved to signal a cache miss.
  */
 
 export interface DiffParseCacheKey {
@@ -36,10 +39,17 @@ export const DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES = 50;
 
 const KEY_SEPARATOR = "\u0000";
 
-// This cache bounds purely by entry count, so the shared cache's memory budget
-// is disabled and every entry contributes a uniform weight.
-const UNBOUNDED_MEMORY_BYTES = Number.POSITIVE_INFINITY;
+// Without a weight budget the cache bounds purely by entry count, and every
+// entry contributes a uniform weight.
+const UNBOUNDED_WEIGHT = Number.POSITIVE_INFINITY;
 const UNIT_ENTRY_WEIGHT = 1;
+
+export interface DiffParseCacheSetOptions {
+  /** The entry's share of the weight budget (e.g. its source length). */
+  readonly weight?: number;
+  /** A slot the entry replaces the previous entry of. */
+  readonly slot?: string;
+}
 
 /**
  * Builds a collision-resistant string key from a {@link DiffParseCacheKey}.
@@ -53,15 +63,29 @@ export function buildDiffParseCacheKey(key: DiffParseCacheKey): string {
 export class DiffParseCache<V> {
   readonly #cache: LRUCache<V>;
   readonly #maxEntries: number;
+  readonly #keyBySlot = new Map<string, string>();
 
-  constructor(maxEntries: number = DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES) {
+  constructor(
+    maxEntries: number = DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES,
+    maxWeight: number = UNBOUNDED_WEIGHT,
+  ) {
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
       throw new RangeError(
         `DiffParseCache maxEntries must be a positive integer, received ${String(maxEntries)}`,
       );
     }
+    if (!(maxWeight > 0)) {
+      throw new RangeError(
+        `DiffParseCache maxWeight must be positive, received ${String(maxWeight)}`,
+      );
+    }
     this.#maxEntries = maxEntries;
-    this.#cache = new LRUCache<V>(maxEntries, UNBOUNDED_MEMORY_BYTES);
+    this.#cache = new LRUCache<V>(maxEntries, maxWeight);
+  }
+
+  /** Total weight of the cached entries. */
+  get retainedWeight(): number {
+    return this.#cache.retainedBytes;
   }
 
   get maxEntries(): number {
@@ -74,8 +98,14 @@ export class DiffParseCache<V> {
   }
 
   /** Stores a value, marking it most-recently-used and evicting LRU overflow. */
-  set(key: DiffParseCacheKey, value: V): void {
-    this.#cache.set(buildDiffParseCacheKey(key), value, UNIT_ENTRY_WEIGHT);
+  set(key: DiffParseCacheKey, value: V, options: DiffParseCacheSetOptions = {}): void {
+    const cacheKey = buildDiffParseCacheKey(key);
+    if (options.slot !== undefined) {
+      const previous = this.#keyBySlot.get(options.slot);
+      if (previous !== undefined && previous !== cacheKey) this.#cache.delete(previous);
+      this.#keyBySlot.set(options.slot, cacheKey);
+    }
+    this.#cache.set(cacheKey, value, Math.max(UNIT_ENTRY_WEIGHT, options.weight ?? 0));
   }
 
   /** Returns the cached value, computing and storing it on a cache miss. */
@@ -91,5 +121,6 @@ export class DiffParseCache<V> {
 
   clear(): void {
     this.#cache.clear();
+    this.#keyBySlot.clear();
   }
 }

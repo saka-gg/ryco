@@ -62,6 +62,18 @@ export function preloadMatchedRouteChunks(pathname: string): Promise<void> {
   return loadRouteChunks(router, matched);
 }
 
+/** Whether `pathname` matches `routeId` (false before a router registered). */
+export function pathnameMatchesRoute(pathname: string, routeId: AppRouteId): boolean {
+  const router = registeredRouter;
+  if (!router) return false;
+  try {
+    const [matched] = router.getMatchedRoutes(pathname);
+    return matched.some((route) => route.id === routeId);
+  } catch {
+    return false;
+  }
+}
+
 export function resetRouteChunkPreloadForTests(): void {
   registeredRouter = null;
 }

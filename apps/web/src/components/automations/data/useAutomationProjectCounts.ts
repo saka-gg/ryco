@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { readEnvironmentApi } from "../../../environmentApi";
+import { useAgentControlSyncEnvironmentIds } from "../../agent-control/agentControlSyncGate";
 import { useEvent } from "../../../hooks/useEvent";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
 import {
@@ -62,7 +63,15 @@ export function useAutomationProjectCounts(
   const state = useSyncExternalStore(loader.subscribe, loader.getState, loader.getState);
   useEffect(() => () => loader.cancel(), [loader]);
 
-  const request = useEvent(() => loader.request(checkoutsOf(snapshots)));
+  // A device whose Agent Control is off refuses the read: never ask it.
+  const allCheckouts = useMemo(() => checkoutsOf(snapshots), [snapshots]);
+  const readableEnvironmentIds = useAgentControlSyncEnvironmentIds(
+    useMemo(() => allCheckouts.map((checkout) => checkout.environmentId), [allCheckouts]),
+  );
+  const request = useEvent(() => {
+    const readable = new Set(readableEnvironmentIds);
+    loader.request(allCheckouts.filter((checkout) => readable.has(checkout.environmentId)));
+  });
   const cancel = useCallback(() => loader.cancel(), [loader]);
   const counts = useMemo(() => {
     const byProject = new Map<string, AutomationProjectCounts>();

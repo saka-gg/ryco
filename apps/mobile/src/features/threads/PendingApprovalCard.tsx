@@ -6,6 +6,7 @@ import type { PendingApproval } from "@ryco/client-runtime/state/session";
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { runThenSettle } from "../../lib/runWhileBusy";
 import { respondToThreadApproval } from "./sessionActions";
 
 const REQUEST_KIND_LABEL: Record<PendingApproval["requestKind"], string> = {
@@ -27,23 +28,26 @@ export function PendingApprovalCard(props: {
   const respond = async (decision: ProviderApprovalDecision) => {
     setPending(decision);
     setError(null);
-    try {
-      await respondToThreadApproval({
-        api: ensureEnvironmentApi(props.environmentId),
-        threadId: props.threadId,
-        requestId: props.approval.requestId,
-        decision,
-        approvalIdentity: props.approval.approvalIdentity,
-      });
-    } catch {
-      // `ensureEnvironmentApi` throws synchronously without a connection, and
-      // the RPC itself can reject; without this catch the `void respond(...)`
-      // press handler turned both into a silent unhandled rejection. Bounded
-      // copy: the raw message is an internal string the user cannot act on.
-      setError("The decision could not be delivered. Reconnect and try again.");
-    } finally {
-      setPending(null);
-    }
+    await runThenSettle(
+      async () => {
+        try {
+          await respondToThreadApproval({
+            api: ensureEnvironmentApi(props.environmentId),
+            threadId: props.threadId,
+            requestId: props.approval.requestId,
+            decision,
+            approvalIdentity: props.approval.approvalIdentity,
+          });
+        } catch {
+          // `ensureEnvironmentApi` throws synchronously without a connection, and
+          // the RPC itself can reject; without this catch the `void respond(...)`
+          // press handler turned both into a silent unhandled rejection. Bounded
+          // copy: the raw message is an internal string the user cannot act on.
+          setError("The decision could not be delivered. Reconnect and try again.");
+        }
+      },
+      () => setPending(null),
+    );
   };
 
   return (

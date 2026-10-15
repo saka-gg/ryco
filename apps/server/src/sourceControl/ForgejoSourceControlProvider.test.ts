@@ -315,6 +315,34 @@ describe("pull request page", () => {
     }),
   );
 
+  it.effect("asks for row readiness only on full page lists", () =>
+    Effect.gen(function* () {
+      const received: Array<boolean | undefined> = [];
+      const provider = yield* makeProvider({
+        listPullRequests: (input) => {
+          received.push(input.readiness);
+          return Effect.succeed([]);
+        },
+      });
+      yield* provider.listChangeRequests({ cwd: "/repo", headSelector: "", state: "open" });
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "all",
+        limit: 100,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+      yield* provider.listChangeRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "open",
+        fields: "summary",
+      });
+      assert.deepStrictEqual(received, [true, false, false]);
+    }),
+  );
+
   it.effect(
     "passes single-commit and head-checked diffs and drafts through the option guards",
     () =>

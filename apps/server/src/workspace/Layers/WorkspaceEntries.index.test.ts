@@ -233,6 +233,66 @@ describe("WorkspaceEntries index store", () => {
     },
   );
 
+  it.effect("keeps a cold root's index on invalidation and revalidates it on the next read", () => {
+    let paths = ["src/old.ts"];
+    let calls = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "old");
+      expect(calls).toBe(1);
+
+      // A turn that ends long after the last `@` read of this checkout.
+      yield* TestClock.adjust(10 * 60_000 + 1);
+      paths = ["src/old.ts", "src/new.ts"];
+      yield* workspaceEntries.invalidate(cwd);
+      yield* TestClock.adjust(250);
+      yield* settle;
+      // Nobody reads the root, so nothing rebuilds it yet.
+      expect(calls).toBe(1);
+
+      // The next `@` answers at once from the kept index, flagged as not final.
+      const stale = yield* search(cwd, "old");
+      expect(stale.entries.map((entry) => entry.path)).toContain("src/old.ts");
+      expect(stale.refreshing).toBe(true);
+      yield* settle;
+      expect(calls).toBe(2);
+
+      const fresh = yield* search(cwd, "new");
+      expect(fresh.entries.map((entry) => entry.path)).toContain("src/new.ts");
+      expect(fresh.refreshing).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.sync(() => {
+            calls += 1;
+            return listing(paths);
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("keeps a file written into a cold root visible before any rebuild", () =>
+    Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      const workspaceEntries = yield* WorkspaceEntries;
+      yield* search(cwd, "x");
+
+      yield* TestClock.adjust(10 * 60_000 + 1);
+      yield* workspaceEntries.recordFileWrite(cwd, "docs/new-plan.md");
+      const result = yield* search(cwd, "new-plan");
+      expect(result.entries.map((entry) => entry.path)).toEqual(["docs/new-plan.md"]);
+      expect(result.refreshing).toBe(true);
+    }).pipe(
+      Effect.provide(
+        // Rebuilds do not list the file yet (an editor still holds it open, say),
+        // so only the kept, patched index can surface it.
+        makeLayer(() => Effect.succeed(listing(["src/existing.ts"]))),
+      ),
+    ),
+  );
+
   it.effect("collapses a burst of invalidations into one background rebuild", () => {
     let calls = 0;
     return Effect.gen(function* () {
@@ -507,6 +567,62 @@ describe("WorkspaceEntries index store", () => {
                 detail: "boom",
               }),
             );
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.effect("keeps the shallowest files past the entry cap without blocking the event loop", () => {
+    // 1k top-level files plus 210k files two levels down: over the 200k cap.
+    const topLevel = Array.from({ length: 1_000 }, (_, index) => `top-${index}.ts`);
+    const nested = Array.from(
+      { length: 210_000 },
+      (_, index) => `pkg${index % 50}/src${index % 7}/file-${index}.ts`,
+    );
+    let building = false;
+    let ticksWhileBuilding = 0;
+    return Effect.gen(function* () {
+      const cwd = yield* makeTempDir();
+      // Counts the turns other fibers get while the listing is indexed.
+      const ticker = yield* Effect.forkChild(
+        Effect.forever(
+          Effect.yieldNow.pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                if (building) ticksWhileBuilding += 1;
+              }),
+            ),
+          ),
+        ),
+      );
+      const result = yield* search(cwd, "", 300_000);
+      building = false;
+      yield* Fiber.interrupt(ticker);
+
+      expect(result.partial).toBe(true);
+      expect(result.entries.length).toBeLessThanOrEqual(200_000);
+      const indexed = new Set(result.entries.map((entry) => entry.path));
+      expect(topLevel.filter((filePath) => !indexed.has(filePath))).toEqual([]);
+      const packages = Array.from({ length: 50 }, (_, pkg) => `pkg${pkg}`);
+      expect(packages.filter((directoryPath) => !indexed.has(directoryPath))).toEqual([]);
+      // Every kept file comes with its ancestor directories.
+      const orphans = result.entries.filter(
+        (entry) =>
+          entry.parentPath !== undefined &&
+          (!indexed.has(entry.parentPath) || !indexed.has(entry.parentPath.split("/")[0] ?? "")),
+      );
+      expect(orphans).toEqual([]);
+      // The per-path pass, the over-cap selection and the entry construction
+      // each yield between chunks, not only the per-path pass (which alone
+      // gives the ticker about 5 turns here).
+      expect(ticksWhileBuilding).toBeGreaterThanOrEqual(12);
+    }).pipe(
+      Effect.provide(
+        makeLayer(() =>
+          Effect.sync(() => {
+            building = true;
+            return listing([...topLevel, ...nested]);
           }),
         ),
       ),

@@ -637,16 +637,6 @@ class HostedHubController {
   }
 
   /**
-   * Start or join {@link bootstrap}, but settle as soon as its access check has
-   * published an answer — the account `authenticated`, signed out, or
-   * `unavailable` — rather than after the directory read that follows.
-   *
-   * For a boot gate: the directory has its own `loading` and `stale` states, so
-   * a gate that waited for it held the whole app on a loading surface for as
-   * long as `/api/nodes` took (or stalled). The read itself is unchanged and
-   * still owned here.
-   */
-  /**
    * Whether a {@link bootstrap} access check is in flight and has not answered
    * yet. Display-only readers use it to send a read beside the check and hold
    * the answer until the session validates. A credential adoption is not such
@@ -656,6 +646,16 @@ class HostedHubController {
     return this.#accessCheckOperation !== null && !this.#accessCheckOperation.signal.aborted;
   }
 
+  /**
+   * Start or join {@link bootstrap}, but settle as soon as its access check has
+   * published an answer — the account `authenticated`, signed out, or
+   * `unavailable` — rather than after the directory read that follows.
+   *
+   * For a boot gate: the directory has its own `loading` and `stale` states, so
+   * a gate that waited for it held the whole app on a loading surface for as
+   * long as `/api/nodes` took (or stalled). The read itself is unchanged and
+   * still owned here.
+   */
   bootstrapAccess(): Promise<void> {
     const settled = this.bootstrap();
     return this.#bootstrapAccessPromise ?? settled;
@@ -780,8 +780,19 @@ class HostedHubController {
         if (isSessionFailure(error)) {
           // Only the Hub's own answer that this session is gone ends it.
           getHostedHubApi().clearSessionMaterial();
+          // A boot gate waits for this answer too, so it gets the access
+          // check's short bound — in bearer mode as well, whose decision
+          // deadline the session answer just cancelled — and a stalled probe
+          // falls back to sign-in. A link that has already timed out once gets
+          // the full deadline, as the access check itself does, so an unclaimed
+          // Hub on a slow link still offers its owner bootstrap.
           return getHostedHubApi()
-            .getBootstrapAvailability(operation.signal)
+            .getBootstrapAvailability(
+              operation.signal,
+              this.#accessCheckTimedOut
+                ? undefined
+                : { deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS },
+            )
             .catch(() => false)
             .then((bootstrapAvailable) => {
               if (!operation.signal.aborted) patchState({ ...initialState, bootstrapAvailable });

@@ -29,6 +29,12 @@ export interface AsyncRotatingFileSinkOptions extends RotatingFileSinkOptions {
    * path. Leave off for files whose backups are read back as text.
    */
   readonly compressRotatedFiles?: boolean;
+  /**
+   * The deepest backup index an earlier configuration of this file may have
+   * left behind (its old `maxFiles`). Backups up to here are removed when the
+   * sink starts; the default probes only a few indices past `maxFiles`.
+   */
+  readonly pruneBackupsUpTo?: number;
 }
 
 export class RotatingFileSink {
@@ -153,6 +159,7 @@ export class AsyncRotatingFileSink {
   private readonly maxFiles: number;
   private readonly throwOnError: boolean;
   private readonly compressRotatedFiles: boolean;
+  private readonly pruneBackupsUpTo: number;
   private currentSize = 0;
   private handle: FileHandle | undefined;
   private compression: Promise<void> | undefined;
@@ -171,6 +178,10 @@ export class AsyncRotatingFileSink {
     this.maxFiles = options.maxFiles;
     this.throwOnError = options.throwOnError ?? false;
     this.compressRotatedFiles = options.compressRotatedFiles ?? false;
+    this.pruneBackupsUpTo = Math.max(
+      this.maxFiles + OVERFLOW_BACKUP_PROBE_COUNT,
+      options.pruneBackupsUpTo ?? 0,
+    );
     this.writeTail = this.initialize();
   }
 
@@ -321,16 +332,12 @@ export class AsyncRotatingFileSink {
 
   /**
    * Removes backups a deeper rotation (an earlier, larger `maxFiles`) left
-   * behind. Probing a bounded range of exact paths keeps sink creation
-   * independent of how many files share the directory.
+   * behind, up to `pruneBackupsUpTo`. Probing a bounded range of exact paths
+   * keeps sink creation independent of how many files share the directory.
    */
   private async pruneOverflowBackups(): Promise<void> {
     try {
-      for (
-        let index = this.maxFiles + 1;
-        index <= this.maxFiles + OVERFLOW_BACKUP_PROBE_COUNT;
-        index += 1
-      ) {
+      for (let index = this.maxFiles + 1; index <= this.pruneBackupsUpTo; index += 1) {
         await this.removeBackup(index);
       }
     } catch {

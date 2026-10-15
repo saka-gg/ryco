@@ -203,6 +203,15 @@ jobs:
           RYCO_WEB_SOURCEMAP: hidden
         run: bun run build ${{ inputs['affected-base'] != '' && '--affected' || '' }}
 
+      # Boot-chunk budget, lazy-boundary and bundled-dependency checks on the
+      # built server (apps/server/src/serverBundleBoundaries.test.ts). The unit
+      # test shards never build the server, so these suites only run here.
+      - name: Server bundle boundaries
+        if: ${{ hashFiles('apps/server/dist/bin.mjs') != '' }}
+        env:
+          RYCO_REQUIRE_SERVER_BUILD: "1"
+        run: bun run --cwd apps/server test src/serverBundleBoundaries.test.ts
+
       # Per-closure budgets and forbidden-module rules for the standard web
       # build (scripts/perf/bundleBudget.ts). Runs whenever the web app was
       # built, i.e. whenever web or one of its workspace dependencies changed.

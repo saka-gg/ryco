@@ -15,6 +15,7 @@ import { useConnectionRegistry } from "../../providers/ConnectionRegistryProvide
 import { RootStack } from "../../Stack";
 import { ServerStateBootstrap } from "../../state/serverStateSync";
 import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
+import { watchDirectCredentialAccess } from "./directCredentialAccess";
 import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
 import { ThreadPriorityRefreshBridge } from "../../components/ThreadPriorityRefreshBridge";
 
@@ -81,36 +82,14 @@ export function AppAccessGate(props: {
     };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    let generation = 0;
-    const evaluate = async () => {
-      const issued = ++generation;
-      await catalog.waitForHydration();
-      let readable = false;
-      for (const environment of catalog.list()) {
-        try {
-          const token = await catalog.readBearerToken(environment.environmentId);
-          if (typeof token === "string" && token.length > 0) {
-            readable = true;
-            break;
-          }
-        } catch {
-          // An unreadable credential is not authority.
-        }
-      }
-      if (!active || issued !== generation) return;
-      setDirectCredentialReadable(readable);
-      setDirectHydrated(true);
-    };
-    const unsubscribe = catalog.registryStore.subscribe(() => void evaluate());
-    void evaluate();
-    return () => {
-      active = false;
-      generation += 1;
-      unsubscribe();
-    };
-  }, [catalog]);
+  useEffect(
+    () =>
+      watchDirectCredentialAccess(catalog, (readable) => {
+        setDirectCredentialReadable(readable);
+        setDirectHydrated(true);
+      }),
+    [catalog],
+  );
 
   const access = deriveAppAccess({
     hostedHydrated,

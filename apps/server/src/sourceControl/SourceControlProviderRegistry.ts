@@ -35,6 +35,8 @@ const PROVIDER_DETECTION_CACHE_TTL = Duration.seconds(5);
 interface LazyProviderOptions {
   readonly searchRepositories?: boolean;
   readonly cloneAuthentication?: boolean;
+  /** The loaded provider reads link states in batches (`getLinkStates`). */
+  readonly linkStates?: boolean;
 }
 
 export interface SourceControlProviderRegistration {
@@ -329,6 +331,17 @@ export const makeLazyProvider = Effect.fn("makeLazySourceControlProvider")(funct
       provider.pipe(Effect.flatMap((loaded) => loaded.getPullRequestState(input))),
     getIssueState: (input) =>
       provider.pipe(Effect.flatMap((loaded) => loaded.getIssueState(input))),
+    ...(options.linkStates
+      ? {
+          getLinkStates: (input) =>
+            provider.pipe(
+              Effect.flatMap((loaded) => {
+                const method = loaded.getLinkStates;
+                return method ? method(input) : unsupportedProviderOperation(kind, "getLinkStates");
+              }),
+            ),
+        }
+      : {}),
     listWorkflowRuns: (input) =>
       provider.pipe(
         Effect.flatMap((loaded) => {
@@ -591,6 +604,9 @@ export function bindProviderContext(
         ...input,
         context: input.context ?? context,
       }),
+    ...(provider.getLinkStates
+      ? { getLinkStates: withProviderContext(provider.getLinkStates, context) }
+      : {}),
     ...(provider.listWorkflowRuns
       ? {
           listWorkflowRuns: (input) => {
@@ -774,6 +790,7 @@ export const makeWithClients = Effect.fn("makeSourceControlProviderRegistry")(fu
           Effect.provideService(FileSystem.FileSystem, fileSystem),
         );
     }),
+    { linkStates: true },
   );
 
   const gitlab = yield* makeLazyProvider(

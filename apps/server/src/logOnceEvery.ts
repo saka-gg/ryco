@@ -20,7 +20,11 @@ export interface LogOnceEveryOptions {
   readonly message: string;
   /** Default `Warn`. */
   readonly level?: LogOnceEveryLevel | undefined;
-  /** Minimum spacing between lines for `key`. Default 5 minutes. */
+  /**
+   * Minimum spacing between lines for `key`. Default 5 minutes. A loop must
+   * pass a window longer than its own retry spacing (backoff included): a key
+   * quiet for a whole window starts a new burst, logged in full again.
+   */
   readonly window?: Duration.Input | undefined;
   /** Context written on every line, summaries included. */
   readonly fields?: Readonly<Record<string, unknown>> | undefined;

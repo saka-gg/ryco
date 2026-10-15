@@ -5,7 +5,9 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   createShellEnvironmentCacheRecord,
+  createShellEnvironmentProbeFailureRecord,
   readShellEnvironmentCache,
+  SHELL_ENVIRONMENT_PROBE_FAILED,
   writeShellEnvironmentCache,
 } from "@ryco/shared/shellEnvironment";
 
@@ -312,6 +314,159 @@ describe("fixPath", () => {
       currentShell: "/bin/bash",
     });
     expect(cached.kind).toBe("hit");
+  });
+
+  it("retries a login shell slower than the startup bound in the background", async () => {
+    const cachePath = makeCachePath();
+    const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
+    // The blocking probe is killed at its bound; the background retry gets the answer.
+    const readEnvironment = vi
+      .fn<(shell: string, names: ReadonlyArray<string>) => Partial<Record<string, string>>>()
+      .mockImplementationOnce(() => {
+        throw new Error("spawnSync /bin/zsh ETIMEDOUT");
+      })
+      .mockImplementation(() => ({ PATH: "/Users/me/.nvm/bin:/usr/bin" }));
+    let refresh: (() => Promise<void>) | null = null;
+
+    fixPath({
+      env,
+      platform: "darwin",
+      readEnvironment,
+      readLaunchctlPath: () => undefined,
+      userShell: "/bin/zsh",
+      logWarning: () => undefined,
+      cachePath,
+      scheduleRefresh: (run) => {
+        refresh = run;
+      },
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(readShellEnvironmentCache(cachePath, { platform: "darwin" })).toEqual({
+      kind: "miss",
+      reason: SHELL_ENVIRONMENT_PROBE_FAILED,
+    });
+    expect(refresh).not.toBeNull();
+
+    await refresh!();
+
+    expect(env.PATH).toBe("/Users/me/.nvm/bin:/usr/bin");
+    const cached = readShellEnvironmentCache(cachePath, { platform: "darwin" });
+    expect(cached.kind === "hit" && cached.record.environment.PATH).toBe(
+      "/Users/me/.nvm/bin:/usr/bin",
+    );
+  });
+
+  it("does not block a start on a login shell that failed the previous blocking probe", async () => {
+    const cachePath = makeCachePath();
+    writeShellEnvironmentCache(
+      cachePath,
+      createShellEnvironmentProbeFailureRecord({ shell: "/bin/zsh", platform: "darwin" }),
+    );
+    const env: NodeJS.ProcessEnv = { SHELL: "/bin/zsh", PATH: "/usr/bin" };
+    const readEnvironment = vi.fn(() => {
+      throw new Error("still too slow");
+    });
+    let refresh: (() => Promise<void>) | null = null;
+
+    fixPath({
+      env,
+      platform: "darwin",
+      readEnvironment,
+      readLaunchctlPath: () => undefined,
+      userShell: "/bin/zsh",
+      logWarning: () => undefined,
+      cachePath,
+      scheduleRefresh: (run) => {
+        refresh = run;
+      },
+    });
+
+    expect(readEnvironment).not.toHaveBeenCalled();
+    expect(env.PATH).toBe("/usr/bin");
+
+    // A refresh that fails again keeps the record and the PATH already in effect.
+    await refresh!();
+    expect(readEnvironment).toHaveBeenCalled();
+    expect(env.PATH).toBe("/usr/bin");
+    expect(readShellEnvironmentCache(cachePath, { platform: "darwin" })).toEqual({
+      kind: "miss",
+      reason: SHELL_ENVIRONMENT_PROBE_FAILED,
+    });
+  });
+
+  it("keeps another login shell's record when its own blocking probe fails", () => {
+    const cachePath = makeCachePath();
+    // Ryco Desktop wrote this for its login shell; a standalone server shares the home.
+    writeShellEnvironmentCache(
+      cachePath,
+      createShellEnvironmentCacheRecord({
+        environment: { PATH: "/Users/me/.nvm/bin:/usr/bin" },
+        shell: "/bin/zsh",
+        platform: "darwin",
+      }),
+    );
+    const env: NodeJS.ProcessEnv = { SHELL: "/bin/bash", PATH: "/usr/bin" };
+
+    fixPath({
+      env,
+      platform: "darwin",
+      readEnvironment: () => {
+        throw new Error("spawnSync /bin/bash ETIMEDOUT");
+      },
+      readLaunchctlPath: () => undefined,
+      userShell: "/bin/bash",
+      logWarning: () => undefined,
+      cachePath,
+      scheduleRefresh: () => undefined,
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    const cached = readShellEnvironmentCache(cachePath, {
+      platform: "darwin",
+      currentShell: "/bin/zsh",
+    });
+    expect(cached.kind === "hit" && cached.record.environment.PATH).toBe(
+      "/Users/me/.nvm/bin:/usr/bin",
+    );
+  });
+
+  it("applies a cached Windows PATH without running PowerShell before serving", async () => {
+    const cachePath = makeCachePath();
+    writeShellEnvironmentCache(
+      cachePath,
+      createShellEnvironmentCacheRecord({
+        environment: { PATH: "C:\\Cached\\Bin" },
+        shell: null,
+        platform: "win32",
+      }),
+    );
+    const env: NodeJS.ProcessEnv = { PATH: "C:\\Windows\\System32" };
+    const readWindowsEnvironment = vi.fn(() => ({ PATH: "C:\\Fresh\\Bin" }));
+    let refresh: (() => Promise<void>) | null = null;
+
+    fixPath({
+      env,
+      platform: "win32",
+      readWindowsEnvironment,
+      isWindowsCommandAvailable: () => true,
+      cachePath,
+      scheduleRefresh: (run) => {
+        refresh = run;
+      },
+    });
+
+    expect(readWindowsEnvironment).not.toHaveBeenCalled();
+    expect(env.PATH).toBe("C:\\Cached\\Bin;C:\\Windows\\System32");
+
+    await refresh!();
+
+    expect(readWindowsEnvironment).toHaveBeenCalledWith(["PATH"], { loadProfile: false });
+    expect(env.PATH?.split(";")).toContain("C:\\Fresh\\Bin");
+    const cached = readShellEnvironmentCache(cachePath, { platform: "win32" });
+    expect(cached.kind === "hit" && cached.record.environment.PATH?.split(";")).toContain(
+      "C:\\Fresh\\Bin",
+    );
   });
 
   it("keeps the cache under RYCO_HOME, independent of the working directory", () => {

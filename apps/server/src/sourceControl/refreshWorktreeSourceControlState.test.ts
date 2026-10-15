@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -10,7 +10,9 @@ import {
   type OrchestrationEvent,
 } from "@ryco/contracts";
 import { assert, beforeEach, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import { DateTime, Effect, Option, PubSub, Ref, Stream } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -19,12 +21,18 @@ import type {
   ProjectionWorktreeRepositoryShape,
 } from "../persistence/Services/ProjectionWorktrees.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { canonicalStoragePath } from "../storage/lifecycle.ts";
 import type { SourceControlProviderShape } from "./SourceControlProvider.ts";
 import type { SourceControlProviderRegistryShape } from "./SourceControlProviderRegistry.ts";
 import { SourceControlProviderRegistry } from "./SourceControlProviderRegistry.ts";
 import {
+  isWorktreeLinkRefreshDue,
+  LIFECYCLE_OWNED_CHECKOUT_RETRY_MS,
+  makeSweepLinkStates,
   refreshWorktreeSourceControlState,
   resetWorktreePullRequestDiscoveryForTests,
+  type BatchedLinkStates,
   type DiscoveredPullRequest,
   type KnownPullRequestState,
 } from "./refreshWorktreeSourceControlState.ts";
@@ -642,23 +650,172 @@ describe("checkouts missing on disk", () => {
 
   it.effect("leaves a checkout alone when its parent is missing too (an unmounted volume)", () =>
     Effect.gen(function* () {
+      const volume = path.join(
+        mkdtempSync(path.join(os.tmpdir(), "ryco-unmounted-")),
+        "ryco-no-such-volume",
+      );
+      const checkout = path.join(volume, "workspace");
       const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
-      const exit = yield* refreshWorktreeSourceControlState({ worktreeId }).pipe(
+      let resolves = 0;
+      const registry = failingRegistry(makeProvider({}));
+      const run = refreshWorktreeSourceControlState({ worktreeId }).pipe(
         Effect.provideService(
           ProjectionWorktreeRepository,
-          makeWorktreeRepo({
-            ...baseWorktree,
-            worktreePath: path.join(os.tmpdir(), "ryco-no-such-volume", "workspace"),
-          }),
+          makeWorktreeRepo({ ...baseWorktree, worktreePath: checkout }),
         ),
-        Effect.provideService(SourceControlProviderRegistry, failingRegistry(makeProvider({}))),
+        Effect.provideService(SourceControlProviderRegistry, {
+          ...registry,
+          resolve: () => Effect.suspend(() => (resolves++, registry.resolve())),
+        }),
         Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
         Effect.exit,
       );
 
-      assert.isTrue(exit._tag === "Failure");
+      // Not a failure (no stack per sweep), never recorded as deleted, and
+      // not re-resolved while it stays unavailable.
+      assert.isTrue((yield* run)._tag === "Success");
+      assert.isTrue((yield* run)._tag === "Success");
+      assert.equal(resolves, 1);
       assert.equal((yield* Ref.get(dispatchRef)).length, 0);
+
+      // Back (the volume is mounted again): refreshed at once.
+      mkdirSync(checkout, { recursive: true });
+      yield* run;
+      assert.equal(resolves, 2);
+      rmSync(path.dirname(volume), { recursive: true, force: true });
     }),
+  );
+
+  it.effect("retries a missing-checkout record that failed", () =>
+    Effect.gen(function* () {
+      const parent = mkdtempSync(path.join(os.tmpdir(), "ryco-missing-checkout-"));
+      const checkout = path.join(parent, "deleted-workspace");
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      let attempts = 0;
+      const engine = makeEngine(dispatchRef);
+      const run = refreshWorktreeSourceControlState({ worktreeId }).pipe(
+        Effect.provideService(
+          ProjectionWorktreeRepository,
+          makeWorktreeRepo({ ...baseWorktree, worktreePath: checkout }),
+        ),
+        Effect.provideService(SourceControlProviderRegistry, failingRegistry(makeProvider({}))),
+        Effect.provideService(OrchestrationEngineService, {
+          ...engine,
+          dispatch: (command) =>
+            Effect.suspend(() =>
+              ++attempts === 1 ? Effect.die("dispatch unavailable") : engine.dispatch(command),
+            ),
+        }),
+      );
+
+      yield* run;
+      yield* run;
+      yield* run;
+      assert.equal(attempts, 2);
+      const removals = (yield* Ref.get(dispatchRef)).filter(
+        (command) => command.type === "worktree.checkout.remove",
+      );
+      assert.equal(removals.length, 1);
+      rmSync(parent, { recursive: true, force: true });
+    }),
+  );
+
+  const lifecycleOwnedRun = (
+    checkout: string,
+    dispatchRef: Ref.Ref<ReadonlyArray<OrchestrationCommand>>,
+    resolved: { count: number },
+  ) => {
+    const registry = failingRegistry(makeProvider({}));
+    return refreshWorktreeSourceControlState({ worktreeId }).pipe(
+      Effect.provideService(
+        ProjectionWorktreeRepository,
+        makeWorktreeRepo({ ...baseWorktree, worktreePath: checkout }),
+      ),
+      Effect.provideService(SourceControlProviderRegistry, {
+        ...registry,
+        resolve: () => Effect.suspend(() => (resolved.count++, registry.resolve())),
+      }),
+      Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+    );
+  };
+  const insertTombstone = (checkout: string, parent: string, state: "removing" | "removed") =>
+    Effect.gen(function* () {
+      const canonical = yield* Effect.promise(() => canonicalStoragePath(checkout));
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO storage_owned_entries (id, path, repository_path, project_id, category, identity_json, created_at, state)
+        VALUES ('fence-1', ${canonical}, ${parent}, ${projectId}, 'worktree', '{}', '2026-10-15T00:00:00.000Z', ${state})`;
+    });
+
+  it.effect("leaves a checkout Ryco's own removal is fencing to that removal", () =>
+    Effect.gen(function* () {
+      const parent = mkdtempSync(path.join(os.tmpdir(), "ryco-missing-checkout-"));
+      const checkout = path.join(parent, "removing-workspace");
+      yield* insertTombstone(checkout, parent, "removing");
+      const sql = yield* SqlClient.SqlClient;
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const resolved = { count: 0 };
+      const run = lifecycleOwnedRun(checkout, dispatchRef, resolved);
+      const startMs = Date.now();
+      const now = vi.spyOn(Date, "now");
+      try {
+        now.mockReturnValue(startMs);
+        yield* run;
+        // Not re-resolved on every sweep while the lifecycle owns it.
+        yield* run;
+        assert.equal(resolved.count, 1);
+        assert.equal((yield* Ref.get(dispatchRef)).length, 0);
+
+        // The removal gave the path back without recording it: now it is ours to record.
+        yield* sql`DELETE FROM storage_owned_entries WHERE id = 'fence-1'`;
+        now.mockReturnValue(startMs + LIFECYCLE_OWNED_CHECKOUT_RETRY_MS);
+        yield* run;
+        assert.equal(resolved.count, 2);
+        assert.deepEqual(
+          (yield* Ref.get(dispatchRef)).map((command) => command.type),
+          ["worktree.checkout.remove"],
+        );
+      } finally {
+        now.mockRestore();
+        rmSync(parent, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
+  );
+
+  it.effect("records a checkout a removed tombstone kept owning once its record is overdue", () =>
+    Effect.gen(function* () {
+      const parent = mkdtempSync(path.join(os.tmpdir(), "ryco-missing-checkout-"));
+      const checkout = path.join(parent, "partially-removed-workspace");
+      // A cleanup removed the checkout, but its workspace record never landed.
+      yield* insertTombstone(checkout, parent, "removed");
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const resolved = { count: 0 };
+      const run = lifecycleOwnedRun(checkout, dispatchRef, resolved);
+      const startMs = Date.now();
+      const now = vi.spyOn(Date, "now");
+      try {
+        now.mockReturnValue(startMs);
+        // Within the window the lifecycle's own record is still expected.
+        yield* run;
+        now.mockReturnValue(startMs + LIFECYCLE_OWNED_CHECKOUT_RETRY_MS - 1);
+        yield* run;
+        assert.equal(resolved.count, 1);
+        assert.equal((yield* Ref.get(dispatchRef)).length, 0);
+
+        now.mockReturnValue(startMs + LIFECYCLE_OWNED_CHECKOUT_RETRY_MS);
+        yield* run;
+        const removals = (yield* Ref.get(dispatchRef)).filter(
+          (command) => command.type === "worktree.checkout.remove",
+        );
+        assert.equal(removals.length, 1);
+        assert.equal(
+          removals[0]?.type === "worktree.checkout.remove" ? removals[0].reason : null,
+          "missing",
+        );
+      } finally {
+        now.mockRestore();
+        rmSync(parent, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
 });
 
@@ -764,6 +921,131 @@ describe("link refreshes", () => {
       yield* run;
       yield* run;
       assert.equal(reads, 1);
+    }),
+  );
+
+  it.effect("takes a known issue state instead of reading the issue", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      let issueReads = 0;
+      const provider = makeProvider({
+        getPullRequestState: () => Effect.succeed({ state: "open" as const, isDraft: false }),
+        getIssueState: () =>
+          Effect.sync(() => {
+            issueReads += 1;
+            return { state: "open" as const };
+          }),
+      });
+      yield* refreshWorktreeSourceControlState({
+        worktreeId,
+        knownPullRequestStates: () =>
+          Effect.succeed(new Map([[10, { state: "open", isDraft: false }]])),
+        knownIssueStates: () => Effect.succeed(new Map([[5, "closed" as const]])),
+      }).pipe(
+        Effect.provideService(
+          ProjectionWorktreeRepository,
+          makeWorktreeRepo({ ...openLinkedWorktree, issueNumber: 5, issueState: "open" }),
+        ),
+        Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+        Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+      );
+      assert.equal(issueReads, 0);
+      const [command] = linkCommands(yield* Ref.get(dispatchRef));
+      assert.equal(command?.issueState, "closed");
+    }),
+  );
+});
+
+describe("sweep link states", () => {
+  const SWEEP_INTERVAL_MS = 5 * 60_000;
+  const linked = (id: string, prNumber: number, issueNumber: number | null) =>
+    ({
+      ...baseWorktree,
+      worktreeId: WorktreeId.make(id),
+      prNumber,
+      prState: "open",
+      prIsDraft: false,
+      issueNumber,
+    }) satisfies ProjectionWorktree;
+  const worktrees = [linked("wt-a", 10, 5), linked("wt-b", 11, null), linked("wt-c", 12, 6)];
+
+  const plan = (input: {
+    readonly known?: ReadonlyMap<number, KnownPullRequestState>;
+    readonly knownIssues?: ReadonlyMap<number, "open" | "closed">;
+  }) =>
+    Effect.gen(function* () {
+      const batches: Array<{ pullRequests: number[]; issues: number[] }> = [];
+      const states = yield* makeSweepLinkStates({
+        worktrees,
+        linkRefreshIntervalMs: SWEEP_INTERVAL_MS,
+        knownPullRequestStates: () => Effect.succeed(input.known ?? new Map()),
+        knownIssues: input.knownIssues ?? new Map(),
+        readLinkStates: (numbers) =>
+          Effect.sync((): BatchedLinkStates => {
+            batches.push({
+              pullRequests: [...numbers.pullRequestNumbers],
+              issues: [...numbers.issueNumbers],
+            });
+            return {
+              pullRequests: new Map([
+                [10, { state: "merged", isDraft: false, reported: { terminalAt: null } }],
+              ]),
+              issues: new Map([[6, "closed"]]),
+            };
+          }),
+        cwd: "/repo",
+      });
+      return { states, batches };
+    });
+
+  it.effect("asks once, only for links and issues the known states cannot answer", () =>
+    Effect.gen(function* () {
+      const { states, batches } = yield* plan({
+        known: new Map([[11, { state: "open", isDraft: false }]]),
+        knownIssues: new Map([[5, "open"]]),
+      });
+      assert.deepStrictEqual(batches, []);
+      const [pullRequests, issues] = yield* Effect.all(
+        [states.knownPullRequestStates("/repo/wt-a"), states.knownIssueStates("/repo/wt-c")],
+        { concurrency: "unbounded" },
+      );
+      yield* states.knownPullRequestStates("/repo/wt-b");
+      assert.deepStrictEqual(batches, [{ pullRequests: [10, 12], issues: [6] }]);
+      assert.equal(pullRequests.get(10)?.state, "merged");
+      assert.equal(pullRequests.get(11)?.state, "open");
+      assert.deepStrictEqual(
+        [...issues],
+        [
+          [5, "open"],
+          [6, "closed"],
+        ],
+      );
+    }),
+  );
+
+  it.effect("makes no forge call while no workspace is due for a link refresh", () =>
+    Effect.gen(function* () {
+      const dispatchRef = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
+      const provider = makeProvider({
+        getPullRequestState: () => Effect.succeed({ state: "open" as const, isDraft: false }),
+        getIssueState: () => Effect.succeed({ state: "open" as const }),
+      });
+      // Every workspace just refreshed its links.
+      for (const worktree of worktrees) {
+        yield* refreshWorktreeSourceControlState({
+          worktreeId: worktree.worktreeId,
+          linkRefreshIntervalMs: SWEEP_INTERVAL_MS,
+        }).pipe(
+          Effect.provideService(ProjectionWorktreeRepository, makeWorktreeRepo(worktree)),
+          Effect.provideService(SourceControlProviderRegistry, makeRegistry(provider)),
+          Effect.provideService(OrchestrationEngineService, makeEngine(dispatchRef)),
+        );
+        assert.isFalse(isWorktreeLinkRefreshDue(worktree.worktreeId, SWEEP_INTERVAL_MS));
+      }
+      const { states, batches } = yield* plan({});
+      yield* states.knownPullRequestStates("/repo/wt-a");
+      yield* states.knownIssueStates("/repo/wt-a");
+      assert.deepStrictEqual(batches, []);
     }),
   );
 });

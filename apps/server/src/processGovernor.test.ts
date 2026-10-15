@@ -1,13 +1,21 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber } from "effect";
+import { Deferred, Effect, Fiber, Metric } from "effect";
 
 import {
   ProcessPool,
   governChildProcess,
+  governChildProcessPromise,
   inBackgroundProcessLane,
+  processGovernorMetricNames,
   processGovernorStats,
   processPoolForCommand,
 } from "./processGovernor.ts";
+
+const forgeGauge = (snapshots: ReadonlyArray<Metric.Metric.Snapshot>, id: string) => {
+  const snapshot = snapshots.find((item) => item.id === id && item.attributes?.pool === "forge");
+  const state = snapshot?.state as { readonly value?: unknown } | undefined;
+  return typeof state?.value === "number" ? state.value : undefined;
+};
 
 describe("processPoolForCommand", () => {
   it("governs git and forge CLIs by executable name", () => {
@@ -102,6 +110,55 @@ describe("governChildProcess", () => {
           queued: 0,
         },
       );
+    }),
+  );
+
+  it.effect("publishes the pool's in-flight and queued counts as gauges", () =>
+    Effect.gen(function* () {
+      const limit = processGovernorStats().find((stats) => stats.pool === "forge")?.limit ?? 4;
+      const release = yield* Deferred.make<void>();
+      const holders = yield* Effect.forEach(Array.from({ length: limit }), () =>
+        governChildProcess("gh", Deferred.await(release)).pipe(Effect.forkChild),
+      );
+      yield* Effect.yieldNow;
+      const queued = yield* governChildProcess("gh", Effect.void).pipe(
+        inBackgroundProcessLane,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+
+      const busy = yield* Metric.snapshot;
+      assert.strictEqual(forgeGauge(busy, processGovernorMetricNames.inFlight), limit);
+      assert.strictEqual(forgeGauge(busy, processGovernorMetricNames.queued), 1);
+
+      yield* Deferred.succeed(release, undefined);
+      yield* Effect.forEach(holders, Fiber.join);
+      yield* Fiber.join(queued);
+      const idle = yield* Metric.snapshot;
+      assert.strictEqual(forgeGauge(idle, processGovernorMetricNames.inFlight), 0);
+      assert.strictEqual(forgeGauge(idle, processGovernorMetricNames.queued), 0);
+    }),
+  );
+
+  it.effect("publishes the counts the Promise path changes too", () =>
+    Effect.gen(function* () {
+      const gauges = Effect.map(Metric.snapshot, (snapshots) => [
+        forgeGauge(snapshots, processGovernorMetricNames.inFlight),
+        forgeGauge(snapshots, processGovernorMetricNames.queued),
+      ]);
+      const before = processGovernorStats().find((stats) => stats.pool === "forge")!;
+      assert.strictEqual(before.inFlight, 0);
+      let finish: () => void = () => undefined;
+      const child = governChildProcessPromise(
+        "gh",
+        "interactive",
+        () => new Promise<void>((resolve) => (finish = resolve)),
+      );
+      yield* Effect.yieldNow;
+      assert.deepStrictEqual(yield* gauges, [1, 0]);
+      finish();
+      yield* Effect.promise(() => child);
+      assert.deepStrictEqual(yield* gauges, [0, 0]);
     }),
   );
 

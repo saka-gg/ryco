@@ -4,6 +4,7 @@ import { Effect, Path } from "effect";
 import type {
   CommandAvailabilityOptions,
   ShellEnvironmentReader,
+  WindowsEnvironmentProbeOptions,
   WindowsShellEnvironmentReader,
 } from "@ryco/shared/shell";
 import {
@@ -11,10 +12,14 @@ import {
   applyShellEnvironmentCache,
   boundedShellEnvironmentReaders,
   createShellEnvironmentCacheRecord,
+  createShellEnvironmentProbeFailureRecord,
+  isShellEnvironmentCacheForAnotherShell,
   readShellEnvironmentCache,
   resolveShellEnvironmentAsync,
   resolveShellEnvironmentSync,
   SHELL_ENVIRONMENT_CACHE_FILE_NAME,
+  SHELL_ENVIRONMENT_PROBE_FAILED,
+  SHELL_REFRESH_TIMEOUT_MS,
   type ShellEnvironment,
   writeShellEnvironmentCache,
 } from "@ryco/shared/shellEnvironment";
@@ -54,13 +59,17 @@ function scheduleShellEnvironmentRefresh(refresh: () => Promise<void>): void {
 }
 
 /**
- * Give a web, CLI or service server the user's login-shell PATH.
+ * Give a web, CLI or service server the user's login-shell PATH (PowerShell's on
+ * Windows).
  *
  * A cached result from an earlier start is applied synchronously (well under a
- * millisecond) and refreshed in the background once the server is up. Only the
- * very first start runs the shell before serving, and that probe is bounded:
- * SIGKILL after 1.5 s, stdin closed, run from the home directory. A failed or
- * slow refresh keeps the cached PATH in effect.
+ * millisecond) and refreshed in the background once the server is up. Only a
+ * start with no usable cache runs the shell before serving, and that probe is
+ * bounded: SIGKILL after 1.5 s, stdin closed, run from the home directory. When
+ * it delivers no PATH (a profile slower than the bound), that is remembered:
+ * later starts skip the blocking probe, and every start retries in the
+ * background with a longer bound until the shell answers. A failed or slow
+ * refresh keeps the PATH already in effect.
  */
 export function fixPath(
   options: {
@@ -82,6 +91,7 @@ export function fixPath(
   // second time can block the backend and repeat OS permission requests.
   if (options.inheritedFromDesktop) return;
   const platform = options.platform ?? process.platform;
+  if (platform !== "darwin" && platform !== "linux" && platform !== "win32") return;
   const env = options.env ?? process.env;
   const logWarning = options.logWarning ?? logPathHydrationWarning;
   // Probes read the inherited environment so a refreshed cache never carries
@@ -105,26 +115,53 @@ export function fixPath(
       : {}),
     ...injectedReaders,
   };
-
-  if (platform === "win32") {
-    applyShellEnvironment(env, resolveShellEnvironmentSync(inheritedEnv, syncReaders), platform);
-    return;
-  }
-  if (platform !== "darwin" && platform !== "linux") return;
+  const { readWindowsEnvironment, isWindowsCommandAvailable } = options;
+  const asyncReaders = {
+    ...injectedReaders,
+    ...(readWindowsEnvironment
+      ? {
+          readWindowsEnvironment: async (
+            names: ReadonlyArray<string>,
+            probeOptions: WindowsEnvironmentProbeOptions,
+          ) => readWindowsEnvironment(names, probeOptions),
+        }
+      : {}),
+    ...(isWindowsCommandAvailable
+      ? {
+          isWindowsCommandAvailable: async (
+            command: string,
+            commandOptions: CommandAvailabilityOptions,
+          ) => isWindowsCommandAvailable(command, commandOptions),
+        }
+      : {}),
+    timeoutMs: SHELL_REFRESH_TIMEOUT_MS,
+  };
 
   const cachePath =
     options.cachePath === undefined ? resolveShellEnvironmentCachePath(env) : options.cachePath;
-  const remember = (environment: ShellEnvironment) => {
-    if (cachePath === null || Object.keys(environment).length === 0) return;
+  const writeCache = (record: Parameters<typeof writeShellEnvironmentCache>[1]) => {
+    if (cachePath === null) return;
     try {
-      writeShellEnvironmentCache(
-        cachePath,
-        createShellEnvironmentCacheRecord({ environment, shell: inheritedEnv.SHELL, platform }),
-      );
+      writeShellEnvironmentCache(cachePath, record);
     } catch (error) {
       logWarning("Failed to write the shell environment cache.", error);
     }
   };
+  const remember = (environment: ShellEnvironment) => {
+    if (Object.keys(environment).length === 0) return;
+    writeCache(
+      createShellEnvironmentCacheRecord({ environment, shell: inheritedEnv.SHELL, platform }),
+    );
+  };
+  // Off the startup path, so the slower bound applies; nothing is applied or
+  // written unless the shell answered.
+  const refresh = async () => {
+    const environment = await resolveShellEnvironmentAsync(inheritedEnv, asyncReaders);
+    if (Object.keys(environment).length === 0) return;
+    applyShellEnvironment(env, environment, platform);
+    remember(environment);
+  };
+  const scheduleRefresh = options.scheduleRefresh ?? scheduleShellEnvironmentRefresh;
 
   const cached =
     cachePath === null
@@ -132,19 +169,24 @@ export function fixPath(
       : readShellEnvironmentCache(cachePath, { platform, currentShell: env.SHELL ?? null });
   if (cached?.kind === "hit") {
     applyShellEnvironmentCache(env, cached.record);
-    (options.scheduleRefresh ?? scheduleShellEnvironmentRefresh)(async () => {
-      const environment = await resolveShellEnvironmentAsync(inheritedEnv, injectedReaders);
-      if (Object.keys(environment).length === 0) return;
-      applyShellEnvironment(env, environment, platform);
-      remember(environment);
-    });
+    scheduleRefresh(refresh);
+    return;
+  }
+  if (cached?.kind === "miss" && cached.reason === SHELL_ENVIRONMENT_PROBE_FAILED) {
+    // The last blocking probe got nothing in time; do not block this start on it again.
+    scheduleRefresh(refresh);
     return;
   }
 
   try {
     const environment = resolveShellEnvironmentSync(inheritedEnv, syncReaders);
     applyShellEnvironment(env, environment, platform);
-    remember(environment);
+    if (Object.keys(environment).length > 0) {
+      remember(environment);
+    } else if (cached === null || !isShellEnvironmentCacheForAnotherShell(cached)) {
+      writeCache(createShellEnvironmentProbeFailureRecord({ shell: inheritedEnv.SHELL, platform }));
+    }
+    if (!environment.PATH) scheduleRefresh(refresh);
   } catch (error) {
     logWarning("Failed to hydrate PATH from the user environment.", error);
   }

@@ -39,6 +39,11 @@ vi.mock("./hooks/useVscodeIconUrl", () => ({
 }));
 
 import {
+  SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+  SHELL_IDLE_PRELOAD_START_CAP_MS,
+} from "./lib/shellIdlePreload";
+import { markStartupPhase, resetStartupPhasesForTests } from "./perf/startupInstrumentation";
+import {
   LazyDiffPanel,
   LazyThreadTerminalDrawer,
   loadDiffPanel,
@@ -51,8 +56,10 @@ import {
 } from "./workspacePanelPreload";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   setWorkspacePanelPreloadHint(null);
+  resetStartupPhasesForTests();
 });
 
 describe("workspace panel loaders", () => {
@@ -114,17 +121,69 @@ describe("preloadWorkspacePanel", () => {
     vi.stubGlobal("navigator", { connection: { saveData: true } });
     const requestIdleCallback = vi.fn();
     vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    markStartupPhase("primary-shell-painted");
     scheduleIdleWorkspacePanelPreload("simulator");
     expect(requestIdleCallback).not.toHaveBeenCalled();
     expect(loaded.modules).not.toContain("SimulatorPanel");
   });
 
-  it("preloads on idle otherwise", async () => {
+  it("skips idle preloads on a link slower than 4G, like the shell's speculative preloads", () => {
+    vi.stubGlobal("navigator", { connection: { effectiveType: "3g" } });
+    const requestIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    markStartupPhase("primary-shell-painted");
+    scheduleIdleWorkspacePanelPreload("simulator");
+    expect(requestIdleCallback).not.toHaveBeenCalled();
+    expect(loaded.modules).not.toContain("SimulatorPanel");
+  });
+
+  it("schedules nothing before the primary shell has painted", () => {
+    const requestIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    const cancel = scheduleIdleWorkspacePanelPreload("files");
+    expect(requestIdleCallback).not.toHaveBeenCalled();
+
+    markStartupPhase("primary-shell-painted");
+    expect(requestIdleCallback).toHaveBeenCalledOnce();
+    cancel();
+  });
+
+  it("keeps the idle preload out of boot without requestIdleCallback (Safari)", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("requestIdleCallback", undefined);
+    vi.stubGlobal("cancelIdleCallback", undefined);
+    loaded.iconResolver.mockClear();
+    scheduleIdleWorkspacePanelPreload("files");
+
+    // The idle fallback is a short timeout; the shell's paint gates it.
+    vi.advanceTimersByTime(SHELL_IDLE_PRELOAD_START_CAP_MS);
+    expect(loaded.iconResolver).not.toHaveBeenCalled();
+
+    markStartupPhase("primary-shell-painted");
+    vi.advanceTimersToNextTimer();
+    expect(loaded.iconResolver).toHaveBeenCalledOnce();
+  });
+
+  it("starts at the long start cap when the shell never paints", () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("requestIdleCallback", undefined);
+    vi.stubGlobal("cancelIdleCallback", undefined);
+    loaded.iconResolver.mockClear();
+    scheduleIdleWorkspacePanelPreload("files");
+
+    vi.advanceTimersByTime(SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS - 1);
+    expect(loaded.iconResolver).not.toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(loaded.iconResolver).toHaveBeenCalledOnce();
+  });
+
+  it("preloads on idle once the shell has painted", async () => {
     const requestIdleCallback = vi.fn((callback: () => void) => {
       callback();
       return 1;
     });
     vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    markStartupPhase("primary-shell-painted");
     scheduleIdleWorkspacePanelPreload("pullRequest");
     expect(requestIdleCallback).toHaveBeenCalledWith(expect.any(Function), { timeout: 4_000 });
     await vi.waitFor(() => {

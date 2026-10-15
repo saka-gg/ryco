@@ -1,7 +1,11 @@
 import { useEffect, type ComponentType } from "react";
 
+import { BrowserPanelChunk } from "./browser/LazyBrowserPanel";
 import { preloadVscodeIconResolver } from "./hooks/useVscodeIconUrl";
-import { scheduleIdleTask } from "./lib/idleTask";
+import {
+  scheduleAfterShellPaint,
+  SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+} from "./lib/shellIdlePreload";
 import {
   preloadableLazy,
   useLazyComponentReady,
@@ -74,6 +78,7 @@ export const loadPreviewPanel = preloadOf(LazyPreviewPanel);
 export const loadThreadTerminalDrawer = preloadOf(LazyThreadTerminalDrawer);
 export const loadSimulatorPanel = preloadOf(LazySimulatorPanel);
 export const loadWorkspacePullRequestPanel = preloadOf(LazyWorkspacePullRequestPanel);
+export const loadBrowserPanel = preloadOf(BrowserPanelChunk);
 
 const SURFACE_LOADERS: Partial<Record<RightPanelMode, PanelChunkPreload>> = {
   review: loadDiffPanel,
@@ -81,6 +86,7 @@ const SURFACE_LOADERS: Partial<Record<RightPanelMode, PanelChunkPreload>> = {
   terminal: loadThreadTerminalDrawer,
   simulator: loadSimulatorPanel,
   pullRequest: loadWorkspacePullRequestPanel,
+  browser: loadBrowserPanel,
 };
 
 const LOADING_LABELS: Record<RightPanelMode, string> = {
@@ -151,24 +157,57 @@ export function preloadWorkspacePanelForIntent(): void {
   preloadWorkspacePanel(workspacePanelModeHint, { intent: true });
 }
 
-function prefersReducedData(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const connection = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection;
-  return connection?.saveData === true;
-}
-
 const IDLE_PRELOAD_TIMEOUT_MS = 4_000;
 
 /**
- * Fetches the panel code for `mode` once the page is idle, so the first open
- * in a session does not wait on the chunk waterfall. Skipped when the user
- * asked the browser to save data. Returns a cancel function.
+ * Fetches the panel code for `mode` in an idle period after boot, so the first
+ * open in a session does not wait on the chunk waterfall. The download is
+ * speculative, so it follows the shell's policy for those
+ * (`scheduleAfterShellPaint`): data saver and links slower than 4G load the
+ * panel on intent or open instead, and nothing starts before the primary shell
+ * has painted, so the surface (the review closure is the largest) never shares
+ * the link with the relay connect or the shell snapshot. Without
+ * `requestIdleCallback` (Safari) an idle period is only a short timeout, so
+ * that gate is what keeps the download out of boot. The start cap is the long
+ * one: a thread view can render from a cached shell well before a slow relay
+ * delivers the live one, and a session that never paints a primary shell still
+ * loads the panel on intent or open. Returns a cancel function.
  */
 export function scheduleIdleWorkspacePanelPreload(mode: RightPanelMode | null): () => void {
-  if (prefersReducedData()) {
-    return () => undefined;
-  }
-  return scheduleIdleTask(() => preloadWorkspacePanel(mode), IDLE_PRELOAD_TIMEOUT_MS);
+  return scheduleAfterShellPaint(() => preloadWorkspacePanel(mode), {
+    startCapMs: SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+    idleTimeoutMs: IDLE_PRELOAD_TIMEOUT_MS,
+  });
+}
+
+/**
+ * The closed workspace panel's preloads, for every layout that presents it
+ * (the inline column and the narrow-window sheet alike): `panelMode` is the
+ * surface the panel reopens to, so hovering a control that opens it warms that
+ * surface, and an idle preload (see {@link scheduleIdleWorkspacePanelPreload})
+ * fetches its code once the shell has painted, so the first open skips the
+ * chunk waterfall. Call it once per route view; `enabled` is false where no
+ * panel opens (the frozen phone tier) or the view renders none.
+ */
+export function useWorkspacePanelPreloadScheduling(input: {
+  readonly open: boolean;
+  readonly panelMode: RightPanelMode | null;
+  readonly enabled: boolean;
+}): void {
+  const { enabled, open, panelMode } = input;
+  useEffect(() => {
+    if (!enabled) return;
+    setWorkspacePanelPreloadHint(panelMode);
+    return () => {
+      // A later view may already have set its own hint.
+      if (workspacePanelModeHint === panelMode) setWorkspacePanelPreloadHint(null);
+    };
+  }, [enabled, panelMode]);
+  const idlePreloadMode = enabled && !open ? panelMode : null;
+  useEffect(() => {
+    if (idlePreloadMode === null) return;
+    return scheduleIdleWorkspacePanelPreload(idlePreloadMode);
+  }, [idlePreloadMode]);
 }
 
 /**

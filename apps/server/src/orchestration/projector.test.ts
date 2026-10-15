@@ -15,6 +15,12 @@ import {
 import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
+import { isCheckpointRevertPending } from "./checkpointRevertPolicy.ts";
+import { hasActionableContextHandoff } from "./commandInvariants.ts";
+import {
+  COMMAND_READ_MODEL_ACTIVITY_KINDS,
+  isCommandModelActivityKind,
+} from "./commandReadModelShape.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 import { latestUserMessage } from "./userMessageOrder.ts";
 
@@ -44,6 +50,184 @@ function makeEvent(input: {
     payload: input.payload as never,
   } as OrchestrationEvent;
 }
+
+describe("command read model activities and checkpoints", () => {
+  const createdAt = "2026-10-01T10:00:00.000Z";
+  let sequence = 1;
+  const threadCreated = () =>
+    makeEvent({
+      sequence: sequence++,
+      type: "thread.created",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt: createdAt,
+      commandId: "cmd-create",
+      payload: {
+        threadId: "thread-1",
+        projectId: "project-1",
+        title: "demo",
+        modelSelection: { provider: ProviderDriverKind.make("codex"), model: "gpt-5.3-codex" },
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+        updatedAt: createdAt,
+      },
+    });
+  const appended = (
+    id: string,
+    kind: string,
+    payload: unknown,
+    occurredAt: string,
+    tone = "info",
+  ) =>
+    makeEvent({
+      sequence: sequence++,
+      type: "thread.activity-appended",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      occurredAt,
+      commandId: null,
+      payload: {
+        threadId: "thread-1",
+        activity: { id, tone, kind, summary: kind, payload, turnId: null, createdAt: occurredAt },
+      },
+    });
+  const project = async (events: ReadonlyArray<OrchestrationEvent>) => {
+    let model = createEmptyReadModel(createdAt);
+    for (const event of events) model = await Effect.runPromise(projectEvent(model, event));
+    return model.threads[0]!;
+  };
+
+  it("keeps only the kinds a command-model reader looks at, but advances updatedAt", async () => {
+    const thread = await project([
+      threadCreated(),
+      appended(
+        "tool",
+        "tool.completed",
+        { detail: "x".repeat(10_000) },
+        "2026-10-01T10:00:01.000Z",
+        "tool",
+      ),
+      appended("reasoning", "reasoning", { text: "thinking" }, "2026-10-01T10:00:02.000Z"),
+      appended("subagent", "subagent.updated", { status: "running" }, "2026-10-01T10:00:03.000Z"),
+      appended(
+        "approval",
+        "approval.requested",
+        { requestId: "approval-1" },
+        "2026-10-01T10:00:04.000Z",
+        "approval",
+      ),
+      appended("compaction", "context-compaction", {}, "2026-10-01T10:00:05.000Z"),
+    ]);
+    expect(thread.activities.map((activity) => activity.id)).toEqual(["approval"]);
+    expect(thread.updatedAt).toBe("2026-10-01T10:00:05.000Z");
+  });
+
+  it("keeps every allowlisted kind", async () => {
+    const thread = await project([
+      threadCreated(),
+      ...COMMAND_READ_MODEL_ACTIVITY_KINDS.map((kind, index) =>
+        appended(`activity-${index}`, kind, {}, `2026-10-01T10:00:${String(10 + index)}.000Z`),
+      ),
+    ]);
+    expect(thread.activities.map((activity) => activity.kind).toSorted()).toEqual(
+      [...COMMAND_READ_MODEL_ACTIVITY_KINDS].toSorted(),
+    );
+  });
+
+  it("covers every kind the decider and command invariants read", () => {
+    for (const kind of [
+      // derivePendingThreadRequests and the open-request invariants
+      "approval.requested",
+      "approval.resolved",
+      "provider.approval.respond.failed",
+      "user-input.requested",
+      "user-input.resolved",
+      "provider.user-input.respond.failed",
+      // hasActionableContextHandoff and forkContextHandoffPending
+      "context-handoff",
+      "thread.forked",
+      "provider.turn.start.failed",
+      "provider.turn.start.cancelled",
+      // isCheckpointRevertPending
+      "checkpoint.revert",
+    ]) {
+      expect(isCommandModelActivityKind(kind), kind).toBe(true);
+    }
+  });
+
+  it("lets a live failed turn start end a preparing handoff, as in the full history", async () => {
+    const handoff = {
+      schemaVersion: 1,
+      handoffId: "handoff-1",
+      mode: "full-context-fresh-session",
+      status: "preparing",
+      targetMessageId: "message-target",
+      sourceSelection: { instanceId: "codex_work", model: "gpt-5.6" },
+      targetSelection: { instanceId: "claude_work", model: "claude-fable-5" },
+    };
+    const preparing = await project([
+      threadCreated(),
+      appended("handoff-1", "context-handoff", handoff, "2026-10-01T10:00:01.000Z"),
+    ]);
+    expect(hasActionableContextHandoff(preparing)).toBe(true);
+    const ended = await project([
+      threadCreated(),
+      appended("handoff-1", "context-handoff", handoff, "2026-10-01T10:00:01.000Z"),
+      appended(
+        "start-failed",
+        "provider.turn.start.failed",
+        { messageId: "message-target", detail: "failed" },
+        "2026-10-01T10:00:02.000Z",
+        "error",
+      ),
+    ]);
+    expect(hasActionableContextHandoff(ended)).toBe(false);
+  });
+
+  it("keeps a live pending checkpoint revert, which blocks turn starts", async () => {
+    const thread = await project([
+      threadCreated(),
+      appended(
+        "checkpoint-revert:revert-1",
+        "checkpoint.revert",
+        { schemaVersion: 1, revertRequestId: "revert-1", turnCount: 1, status: "rolling-back" },
+        "2026-10-01T10:00:01.000Z",
+      ),
+    ]);
+    expect(
+      isCheckpointRevertPending(thread.activities, Date.parse("2026-10-01T10:01:00.000Z")),
+    ).toBe(true);
+  });
+
+  it("keeps checkpoint summaries without their changed files", async () => {
+    const thread = await project([
+      threadCreated(),
+      makeEvent({
+        sequence: sequence++,
+        type: "thread.turn-diff-completed",
+        aggregateKind: "thread",
+        aggregateId: "thread-1",
+        occurredAt: "2026-10-01T10:00:01.000Z",
+        commandId: null,
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          checkpointTurnCount: 1,
+          checkpointRef: "refs/ryco/checkpoints/thread-1/turn/1",
+          status: "ready",
+          files: [{ path: "README.md", kind: "modified", additions: 1, deletions: 0 }],
+          assistantMessageId: null,
+          completedAt: "2026-10-01T10:00:01.000Z",
+        },
+      }),
+    ]);
+    expect(thread.checkpoints).toMatchObject([
+      { turnId: "turn-1", checkpointTurnCount: 1, status: "ready", files: [] },
+    ]);
+  });
+});
 
 describe("orchestration projector", () => {
   it("applies thread.created events", async () => {
@@ -759,10 +943,10 @@ describe("orchestration projector", () => {
           threadId: "thread-1",
           activity: {
             id: "activity-1",
-            tone: "tool",
-            kind: "tool.started",
-            summary: "Edit file started",
-            payload: { toolKind: "command" },
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Edit file requested",
+            payload: { requestId: "approval-1" },
             turnId: "turn-1",
             createdAt: "2026-02-23T10:00:02.750Z",
           },
@@ -833,10 +1017,10 @@ describe("orchestration projector", () => {
           threadId: "thread-1",
           activity: {
             id: "activity-2",
-            tone: "tool",
-            kind: "tool.completed",
-            summary: "Edit file complete",
-            payload: { toolKind: "command" },
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Edit file requested",
+            payload: { requestId: "approval-2" },
             turnId: "turn-2",
             createdAt: "2026-02-23T10:00:04.750Z",
           },

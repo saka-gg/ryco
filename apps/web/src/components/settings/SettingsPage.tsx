@@ -250,8 +250,10 @@ const LazyAiFocusSettings = preloadableLazy(() =>
 const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
   import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
 );
+// Resolves with its desktop Computer Use subsection (its own chunk) loaded, so
+// the section's first commit includes it.
 const LazyIntegrationsSettings = preloadableLazy(() =>
-  import("./IntegrationsSettingsPanel").then((module) => module.IntegrationsSettingsPanel),
+  import("./IntegrationsSettingsPanel").then((module) => module.loadIntegrationsSettingsPanel()),
 );
 const LazyMcpServersSettings = preloadableLazy(() =>
   import("./McpServersSettings").then((module) => module.McpServersSettings),

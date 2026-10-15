@@ -7,10 +7,13 @@ import type {
 } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type { ComposerThreadDraftState, DraftThreadState } from "../composerDraftStore";
 import {
   readNewDraftDefaults,
   readRememberedProjectPreferences,
   resetNewDraftDefaultsCacheForTests,
+  sameSeededDraftDefaults,
+  seededDraftDefaultsOf,
 } from "./newDraftDefaults";
 
 const ENVIRONMENT_ID = "environment-1" as EnvironmentId;
@@ -19,9 +22,10 @@ afterEach(() => {
   resetNewDraftDefaultsCacheForTests();
 });
 
-function config(projectPreferences: boolean, label = "node"): ServerConfig {
+function config(projectPreferences: boolean, label = "node", settings?: object): ServerConfig {
   return {
     environment: { label, capabilities: { projectPreferences } },
+    ...(settings ? { settings } : {}),
   } as unknown as ServerConfig;
 }
 
@@ -182,7 +186,7 @@ describe("readNewDraftDefaults", () => {
       requireFreshConfig: false,
       projectId: PROJECT_ID,
     });
-    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID)).toBe(EFFECTIVE);
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID, cached)).toBe(EFFECTIVE);
 
     const NEWER = { marker: "newer" } as unknown as EffectiveProjectPreferences;
     let answer!: (value: EffectiveProjectPreferences) => void;
@@ -203,7 +207,7 @@ describe("readNewDraftDefaults", () => {
     expect(defaults.effective).toBe(EFFECTIVE);
     answer(NEWER);
     await expect(defaults.fresh).resolves.toBe(NEWER);
-    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID)).toBe(NEWER);
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID, cached)).toBe(NEWER);
   });
 
   it("never lets a remembered answer decide support", async () => {
@@ -224,5 +228,96 @@ describe("readNewDraftDefaults", () => {
         projectId: PROJECT_ID,
       }),
     ).resolves.toEqual({ config: config(false), effective: null });
+  });
+
+  it("waits for the node once its settings changed since the remembered answer", async () => {
+    const before = config(true, "node", {
+      projectPreferences: { a: { worktreeBranchPrefix: "x" } },
+    });
+    await readNewDraftDefaults({
+      api: api({}).api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: before,
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+    // An equal settings object (a reconnect snapshot) keeps the answer.
+    const reconnected = config(true, "node", {
+      projectPreferences: { a: { worktreeBranchPrefix: "x" } },
+    });
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID, reconnected)).toBe(
+      EFFECTIVE,
+    );
+
+    // The project defaults were saved: the next draft reads the node's answer.
+    const NEWER = { marker: "newer" } as unknown as EffectiveProjectPreferences;
+    const saved = config(true, "node", {
+      projectPreferences: { a: { worktreeBranchPrefix: "y" } },
+    });
+    const target = api({ getProjectPreferences: () => Promise.resolve(NEWER) });
+    const defaults = await readNewDraftDefaults({
+      api: target.api,
+      environmentId: ENVIRONMENT_ID,
+      cachedConfig: saved,
+      requireFreshConfig: false,
+      projectId: PROJECT_ID,
+    });
+    expect(defaults).toEqual({ config: saved, effective: NEWER });
+    expect(target.getProjectPreferences).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("seededDraftDefaultsOf", () => {
+  const composer = {
+    prompt: "",
+    images: [],
+    persistedAttachments: [],
+    nonPersistedImageIds: [],
+    modelSelectionByProvider: { codex: { instanceId: "codex", model: "seeded" } },
+    activeProvider: "codex",
+    runtimeMode: null,
+    interactionMode: null,
+  } as unknown as ComposerThreadDraftState;
+  const session = {
+    environmentId: ENVIRONMENT_ID,
+    projectId: PROJECT_ID,
+    envMode: "worktree",
+    branch: null,
+    worktreePath: null,
+  } as unknown as DraftThreadState;
+  const seeded = seededDraftDefaultsOf(composer, session);
+
+  it("ignores writes that are not choices about the defaults", () => {
+    const typed = { ...composer, prompt: "typing", persistedAttachments: [] };
+    expect(sameSeededDraftDefaults(seededDraftDefaultsOf(typed, { ...session }), seeded)).toBe(
+      true,
+    );
+  });
+
+  it("counts a changed model, mode or work location as the user's choice", () => {
+    const picked = {
+      ...composer,
+      modelSelectionByProvider: { codex: { instanceId: "codex", model: "picked" } },
+    } as unknown as ComposerThreadDraftState;
+    expect(sameSeededDraftDefaults(seededDraftDefaultsOf(picked, session), seeded)).toBe(false);
+    expect(
+      sameSeededDraftDefaults(
+        seededDraftDefaultsOf(composer, { ...session, envMode: "local" }),
+        seeded,
+      ),
+    ).toBe(false);
+  });
+
+  it("never matches a removed or promoted draft", () => {
+    expect(sameSeededDraftDefaults(seededDraftDefaultsOf(composer, undefined), seeded)).toBe(false);
+    expect(
+      sameSeededDraftDefaults(
+        seededDraftDefaultsOf(composer, {
+          ...session,
+          promotedTo: { environmentId: ENVIRONMENT_ID, threadId: "thread-1" },
+        } as unknown as DraftThreadState),
+        seeded,
+      ),
+    ).toBe(false);
   });
 });

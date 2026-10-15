@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { EnvironmentId } from "@ryco/contracts";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
@@ -8,6 +8,8 @@ import {
   useSettings,
   useUpdateSettings,
 } from "../../hooks/useSettings";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { useServerConfig } from "../../rpc/serverState";
 import { useWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState";
 import { selectEnvironmentState, useStore } from "../../store";
@@ -20,8 +22,10 @@ import {
   useOnboardingReplayStore,
 } from "./onboardingState";
 
-const OnboardingDialog = lazy(() =>
-  import("./OnboardingDialog").then((module) => ({ default: module.OnboardingDialog })),
+// Loads when the gate first shows it and mounts once loaded, so it never
+// commits a Suspense fallback or waits on React's 300 ms reveal throttle.
+const OnboardingDialog = preloadableLazy(() =>
+  import("./OnboardingDialog").then((module) => module.OnboardingDialog),
 );
 
 export function OnboardingCoordinator() {
@@ -60,6 +64,9 @@ function LocalOnboardingSession({ environmentId }: { environmentId: EnvironmentI
   }, [environmentId, updateSettings]);
   const ready =
     settingsHydrated && config !== null && shellReady && connection.phase === "connected";
+  const dialogReady = useLazyComponentReady(OnboardingDialog, active, {
+    onLoadError: (error, retry) => notifySurfaceLoadFailure("setup guide", error, retry),
+  });
 
   useEffect(() => {
     if (active) {
@@ -84,21 +91,19 @@ function LocalOnboardingSession({ environmentId }: { environmentId: EnvironmentI
     if (gate === "show") setActive(true);
   }, [active, complete, completedEnvironments, environmentId, projectCount, ready, replayRequest]);
 
-  if (!active || !config) return null;
+  if (!active || !config || !dialogReady) return null;
   return (
-    <Suspense fallback={null}>
-      <OnboardingDialog
-        environmentId={environmentId}
-        providers={config.providers}
-        projectCount={projectCount}
-        ready={ready}
-        connectionGeneration={connection.connectedAt}
-        open={!settingsOpen && !paletteOpen}
-        onComplete={() => {
-          complete();
-          setActive(false);
-        }}
-      />
-    </Suspense>
+    <OnboardingDialog
+      environmentId={environmentId}
+      providers={config.providers}
+      projectCount={projectCount}
+      ready={ready}
+      connectionGeneration={connection.connectedAt}
+      open={!settingsOpen && !paletteOpen}
+      onComplete={() => {
+        complete();
+        setActive(false);
+      }}
+    />
   );
 }

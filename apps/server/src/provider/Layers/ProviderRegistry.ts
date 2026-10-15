@@ -234,6 +234,7 @@ const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource
   refresh: instance.snapshot.refresh,
   streamChanges: instance.snapshot.streamChanges,
   ...(instance.snapshot.isFresh ? { isFresh: instance.snapshot.isFresh } : {}),
+  ...(instance.snapshot.isProbeFresh ? { isProbeFresh: instance.snapshot.isProbeFresh } : {}),
   ...(instance.snapshot.probeFingerprint
     ? { probeFingerprint: instance.snapshot.probeFingerprint }
     : {}),
@@ -560,10 +561,14 @@ export const ProviderRegistryLive = Layer.effect(
     const isSourceFresh = (providerSource: ProviderSnapshotSource) =>
       providerSource.isFresh ?? Effect.succeed(false);
 
+    // A usage-only re-read is no probe: it must not move the persisted probe record forward.
+    const isSourceProbeFresh = (providerSource: ProviderSnapshotSource) =>
+      providerSource.isProbeFresh ?? isSourceFresh(providerSource);
+
     const revalidateOneSource = Effect.fn("revalidateOneSource")(function* (
       providerSource: ProviderSnapshotSource,
     ) {
-      const revalidated = (yield* isSourceFresh(providerSource))
+      const revalidated = (yield* isSourceProbeFresh(providerSource))
         ? providerSource.revalidate
         : probeSource(providerSource, providerSource.revalidate);
       return yield* revalidated.pipe(

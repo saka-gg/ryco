@@ -1,3 +1,5 @@
+import { resolveActivityChangedFiles } from "@ryco/client-runtime/state/session";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SFSymbol } from "expo-symbols";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
@@ -6,6 +8,7 @@ import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { useActivityPayloadOutput } from "../../rpc/useActivityPayloadOutput";
 import type { ActivityFold, ActivityRow, ActivityTone } from "./threadActivityFold";
 
 const TONE_ICON: Readonly<Record<ActivityTone, SFSymbol>> = {
@@ -22,13 +25,29 @@ const TONE_TEXT: Readonly<Record<ActivityTone, string>> = {
   error: "text-danger-foreground",
 };
 
-function ToolRow(props: { readonly row: ActivityRow }) {
+function ToolRow(props: {
+  readonly row: ActivityRow;
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}) {
   const [open, setOpen] = useState(false);
   const iconColor = useThemeColor("--color-icon-muted");
   const { row } = props;
+  // The window sent a preview of this payload: read the full one while open.
+  const fullOutput = useActivityPayloadOutput({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    activityId: open ? row.outputPreviewActivityId : null,
+  });
+  const output =
+    fullOutput.status === "loaded" ? fullOutput.output?.trim() || row.output : row.output;
+  const exitCode =
+    fullOutput.status === "loaded" ? (fullOutput.exitCode ?? row.exitCode) : row.exitCode;
+  // A preview of a large edit lists only its first few files: the full payload completes them.
+  const changedFiles = resolveActivityChangedFiles(row.changedFiles, fullOutput);
   const expandable = row.output !== null || row.changedFiles.length > 0;
   // Exit code 0 is falsy but meaningful — only a non-zero code is a failure.
-  const failed = row.exitCode !== null && row.exitCode !== 0;
+  const failed = exitCode !== null && exitCode !== 0;
 
   return (
     <View className="gap-1">
@@ -62,7 +81,7 @@ function ToolRow(props: { readonly row: ActivityRow }) {
               <Text className="text-2xs font-ryco-medium text-accent-strong">running</Text>
             ) : failed ? (
               <Text className="text-2xs font-ryco-bold text-danger-foreground">
-                exit {row.exitCode}
+                exit {exitCode}
               </Text>
             ) : null}
           </View>
@@ -86,16 +105,34 @@ function ToolRow(props: { readonly row: ActivityRow }) {
         ) : null}
       </Pressable>
 
-      {open && row.output ? (
-        <View className="ml-5 rounded-lg bg-subtle px-2.5 py-2">
+      {open && output ? (
+        <View className="ml-5 gap-1 rounded-lg bg-subtle px-2.5 py-2">
           <Text className="font-mono text-2xs text-foreground-muted" selectable>
-            {row.output}
+            {output}
           </Text>
+          {fullOutput.status === "loading" ? (
+            <Text className="text-2xs text-foreground-tertiary">Loading full output…</Text>
+          ) : fullOutput.status === "error" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading the full output"
+              onPress={fullOutput.retry}
+              className="active:opacity-70"
+            >
+              <Text className="text-2xs text-danger-foreground">
+                Couldn't load the full output. Tap to retry.
+              </Text>
+            </Pressable>
+          ) : fullOutput.truncated ? (
+            <Text className="text-2xs text-foreground-tertiary">
+              Output is too large to show in full.
+            </Text>
+          ) : null}
         </View>
       ) : null}
-      {open && row.changedFiles.length > 0 ? (
+      {open && changedFiles.length > 0 ? (
         <View className="ml-5 gap-0.5">
-          {row.changedFiles.map((file) => (
+          {changedFiles.map((file) => (
             <Text
               key={file}
               className="font-mono text-2xs text-foreground-tertiary"
@@ -112,6 +149,8 @@ function ToolRow(props: { readonly row: ActivityRow }) {
 
 export function ThreadActivityFoldRow(props: {
   readonly fold: ActivityFold;
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
   readonly onToggle: () => void;
 }) {
   const iconColor = useThemeColor("--color-icon-muted");
@@ -142,7 +181,12 @@ export function ThreadActivityFoldRow(props: {
       {fold.expanded ? (
         <View className="mt-0.5 gap-0.5 border-l border-border pl-3 ml-2">
           {fold.rows.map((row) => (
-            <ToolRow key={row.id} row={row} />
+            <ToolRow
+              key={row.id}
+              row={row}
+              environmentId={props.environmentId}
+              threadId={props.threadId}
+            />
           ))}
         </View>
       ) : null}

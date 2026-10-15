@@ -3,6 +3,7 @@ import { Effect, Stream } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  decideHistoryRecovery,
   HISTORY_RECOVERY_FAILURE_BACKOFF_MAX_MS,
   HISTORY_RECOVERY_SETTLED_SPACING_MS,
   HISTORY_RECOVERY_SUBSCRIBE_SPACING_MS,
@@ -14,6 +15,7 @@ import {
   withThreadHistoryRecovery,
 } from "./historyRecoveryPolicy.ts";
 import type { HistoryRecoveryTrigger } from "./Services/ProviderRuntimeIngestion.ts";
+import { make as makeThreadViewers } from "./ThreadViewers.ts";
 
 const sessionSet = (
   status: "running" | "ready" | "stopped" | "error",
@@ -62,6 +64,75 @@ describe("historyRecoverySpacingMs", () => {
     expect(spacing(3)).toBe(120_000);
     expect(spacing(20)).toBe(HISTORY_RECOVERY_FAILURE_BACKOFF_MAX_MS);
     expect(historyRecoverySpacingMs({ attemptedAt: 0, failures: 1 }, "subscribe")).toBe(30_000);
+  });
+});
+
+describe("decideHistoryRecovery", () => {
+  const decide = (
+    trigger: HistoryRecoveryTrigger,
+    state: { attemptedAt: number; failures: number } | undefined,
+    nowMs: number,
+    inFlight = false,
+  ) => decideHistoryRecovery({ state, trigger, inFlight, nowMs });
+
+  it("reads a thread it never read, and once its spacing has passed", () => {
+    expect(decide("subscribe", undefined, 0)).toEqual({ kind: "read" });
+    expect(decide("liveness", undefined, 0)).toEqual({ kind: "read" });
+    const settled = { attemptedAt: 0, failures: 0 };
+    expect(decide("session-settled", settled, HISTORY_RECOVERY_SETTLED_SPACING_MS)).toEqual({
+      kind: "read",
+    });
+    expect(decide("liveness", settled, HISTORY_RECOVERY_SETTLED_SPACING_MS)).toEqual({
+      kind: "read",
+    });
+  });
+
+  it("defers a settle inside the spacing to one trailing read, never dropping it", () => {
+    expect(decide("session-settled", { attemptedAt: 0, failures: 0 }, 10_000)).toEqual({
+      kind: "trail",
+      afterMs: HISTORY_RECOVERY_SETTLED_SPACING_MS - 10_000,
+    });
+    // A read in flight may have started before the turn ended.
+    expect(decide("session-settled", undefined, 0, true)).toEqual({
+      kind: "trail",
+      afterMs: HISTORY_RECOVERY_SETTLED_SPACING_MS,
+    });
+  });
+
+  it("lets a trailing read skip a settle a later read covered, and a backed-off thread", () => {
+    const trail = (
+      state: { attemptedAt: number; startedAt?: number; failures: number } | undefined,
+      nowMs: number,
+      inFlight = false,
+    ) =>
+      decideHistoryRecovery({
+        state,
+        trigger: "session-settled",
+        inFlight,
+        nowMs,
+        trailingSinceMs: 10,
+      });
+    expect(trail(undefined, 40)).toEqual({ kind: "read" });
+    expect(trail({ attemptedAt: 0, failures: 0 }, 40, true)).toEqual({ kind: "skip" });
+    // A read that began after the settle was deferred saw it.
+    expect(trail({ attemptedAt: 15, startedAt: 12, failures: 0 }, 40)).toEqual({ kind: "skip" });
+    // One that was already running when the turn ended may not have, even if it ended later.
+    expect(trail({ attemptedAt: 15, startedAt: 5, failures: 0 }, 40)).toEqual({ kind: "read" });
+    // A failure in the meantime backs off the trailing read too.
+    const failed = { attemptedAt: 15, startedAt: 5, failures: 1 };
+    expect(trail(failed, 15 + HISTORY_RECOVERY_SETTLED_SPACING_MS - 1)).toEqual({ kind: "skip" });
+    expect(trail(failed, 15 + HISTORY_RECOVERY_SETTLED_SPACING_MS)).toEqual({ kind: "read" });
+  });
+
+  it("skips spaced-out opens and liveness checks, and anything a failure backs off", () => {
+    expect(decide("subscribe", { attemptedAt: 0, failures: 0 }, 10_000)).toEqual({
+      kind: "skip",
+    });
+    expect(decide("liveness", { attemptedAt: 0, failures: 0 }, 10_000)).toEqual({ kind: "skip" });
+    expect(decide("subscribe", undefined, 0, true)).toEqual({ kind: "skip" });
+    expect(decide("session-settled", { attemptedAt: 0, failures: 1 }, 10_000)).toEqual({
+      kind: "skip",
+    });
   });
 });
 
@@ -157,6 +228,72 @@ describe("withThreadHistoryRecovery", () => {
     expect(observed).toEqual([[], ["subscribe"], ["subscribe", "session-settled"]]);
     // Turned passive again, the last settled session reads nothing.
     expect(triggers).toEqual(["subscribe", "session-settled"]);
+  });
+});
+
+describe("withThreadHistoryRecovery viewers", () => {
+  it("counts a subscription as a viewer only while it is active, and never after it ends", async () => {
+    const viewers = makeThreadViewers();
+    const threadId = ThreadId.make("thread-1");
+    let control: ThreadHistoryRecoveryControl | null = null;
+    const observed: Array<boolean> = [];
+    const source = Stream.fromArrays([{ kind: "snapshot" } as ThreadStreamItemLike]).pipe(
+      Stream.concat(
+        Stream.fromEffect(
+          Effect.gen(function* () {
+            observed.push(viewers.isViewed(threadId));
+            yield* control!.setMode("active");
+            yield* control!.setMode("active");
+            observed.push(viewers.isViewed(threadId));
+            yield* control!.setMode("passive");
+            observed.push(viewers.isViewed(threadId));
+            yield* control!.setMode("active");
+            observed.push(viewers.isViewed(threadId));
+            return { kind: "snapshot" } as ThreadStreamItemLike;
+          }),
+        ),
+      ),
+    );
+
+    await Effect.runPromise(
+      withThreadHistoryRecovery(threadId, source, () => Effect.void, {
+        mode: "passive",
+        viewers,
+        register: (next) =>
+          Effect.sync(() => {
+            control = next;
+          }),
+      }).pipe(Stream.runDrain),
+    );
+
+    expect(observed).toEqual([false, true, false, true]);
+    expect(viewers.isViewed(threadId)).toBe(false);
+  });
+
+  it("keeps a thread viewed while any of its active subscriptions is open", async () => {
+    const viewers = makeThreadViewers();
+    const threadId = ThreadId.make("thread-1");
+    const observed: Array<boolean> = [];
+    const inner = withThreadHistoryRecovery(
+      threadId,
+      Stream.fromEffect(Effect.sync(() => ({ kind: "snapshot" }) as ThreadStreamItemLike)),
+      () => Effect.void,
+      { viewers },
+    );
+    const outer = withThreadHistoryRecovery(
+      threadId,
+      inner.pipe(
+        Stream.runDrain,
+        Effect.andThen(Effect.sync(() => observed.push(viewers.isViewed(threadId)))),
+        Effect.as({ kind: "snapshot" } as ThreadStreamItemLike),
+        Stream.fromEffect,
+      ),
+      () => Effect.void,
+      { viewers },
+    );
+    await Effect.runPromise(Stream.runDrain(outer));
+    expect(observed).toEqual([true]);
+    expect(viewers.isViewed(threadId)).toBe(false);
   });
 });
 

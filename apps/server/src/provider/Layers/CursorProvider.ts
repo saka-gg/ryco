@@ -38,6 +38,7 @@ import { ServerSettingsService, type ServerSettingsShape } from "../../serverSet
 import { AcpSessionRuntime } from "../acp/AcpSessionRuntime.ts";
 import {
   cursorAcpPhaseTimeoutHints,
+  DEFAULT_CURSOR_AGENT_COMMAND,
   resolveCursorAgentCommand,
 } from "../acp/CursorAgentCommand.ts";
 import { CursorListAvailableModelsResponse } from "../acp/CursorAcpExtension.ts";
@@ -760,6 +761,8 @@ const readCursorCliConfigChannel = Effect.fn("readCursorCliConfigChannel")(funct
 export function getCursorParameterizedModelPickerUnsupportedMessage(input: {
   readonly version: string | null | undefined;
   readonly channel: string | null | undefined;
+  /** The command that runs the Cursor Agent CLI here (`resolveCursorAgentCommand`). */
+  readonly command?: string;
 }): string | undefined {
   const reasons: Array<string> = [];
   const versionDate = parseCursorVersionDate(input.version);
@@ -787,7 +790,8 @@ export function getCursorParameterizedModelPickerUnsupportedMessage(input: {
     return undefined;
   }
 
-  return `${reasons.join(". ")}. Run \`agent set-channel lab && agent update\` and use Cursor Agent CLI 2026.04.08 or newer.`;
+  const command = input.command ?? DEFAULT_CURSOR_AGENT_COMMAND;
+  return `${reasons.join(". ")}. Run \`${command} set-channel lab && ${command} update\` and use Cursor Agent CLI 2026.04.08 or newer.`;
 }
 
 /**
@@ -809,8 +813,15 @@ export function getCursorParameterizedModelPickerUnsupportedMessage(input: {
  * CLI Version         2026.03.20-44cb435
  * User Email          Not logged in
  * ```
+ *
+ * `command` is the resolved Cursor binary; user-facing hints name it so a
+ * different `agent` earlier on PATH is never suggested.
  */
-export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult {
+export function parseCursorAboutOutput(
+  result: CommandResult,
+  command: string = DEFAULT_CURSOR_AGENT_COMMAND,
+): CursorAboutResult {
+  const unauthenticatedMessage = `Cursor Agent is not authenticated. Run \`${command} login\` and try again.`;
   const jsonPayload = parseCursorAboutJsonPayload(result.stdout);
   if (jsonPayload) {
     const version =
@@ -829,7 +840,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
         version,
         status: "error",
         auth: { status: "unauthenticated" },
-        message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+        message: unauthenticatedMessage,
       };
     }
 
@@ -862,7 +873,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
         version,
         status: "error",
         auth: { status: "unauthenticated" },
-        message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+        message: unauthenticatedMessage,
       };
     }
 
@@ -885,7 +896,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
       version: null,
       status: "warning",
       auth: { status: "unknown" },
-      message: "The `agent about` command is unavailable in this version of the Cursor Agent CLI.",
+      message: `The \`${command} about\` command is unavailable in this version of the Cursor Agent CLI.`,
     };
   }
 
@@ -917,7 +928,7 @@ export function parseCursorAboutOutput(result: CommandResult): CursorAboutResult
       version,
       status: "error",
       auth: { status: "unauthenticated" },
-      message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
+      message: unauthenticatedMessage,
     };
   }
 
@@ -1030,7 +1041,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Cursor Agent CLI (`agent`) is not installed or not on PATH."
+          ? `Cursor Agent CLI (\`${agentCommand.command}\`) is not installed or not on PATH.`
           : `Failed to execute Cursor Agent CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
       },
     });
@@ -1068,12 +1079,13 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
     });
   }
 
-  const parsed = parseCursorAboutOutput(aboutProbe.success.value);
+  const parsed = parseCursorAboutOutput(aboutProbe.success.value, agentCommand.command);
   const cursorCliConfigChannel = yield* readCursorCliConfigChannel();
   const parameterizedModelPickerUnsupportedMessage =
     getCursorParameterizedModelPickerUnsupportedMessage({
       version: parsed.version,
       channel: cursorCliConfigChannel,
+      command: agentCommand.command,
     });
   if (parameterizedModelPickerUnsupportedMessage) {
     return buildServerProvider({

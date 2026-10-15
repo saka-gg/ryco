@@ -28,6 +28,8 @@ export interface RepositoryListCache {
     readonly repository: string;
     readonly key: string;
     readonly load: Effect.Effect<A, E, R>;
+    /** Overrides the cache's TTL for this entry. */
+    readonly ttlMs?: number;
   }) => Effect.Effect<A, E, R>;
   readonly invalidate: (repository: string) => Effect.Effect<void>;
 }
@@ -44,6 +46,7 @@ export function makeRepositoryListCache(options?: {
     readonly repository: string;
     readonly key: string;
     readonly load: Effect.Effect<A, E, R>;
+    readonly ttlMs?: number;
   }): Effect.Effect<A, E, R> =>
     Effect.suspend(() => {
       const id = `${input.repository}\u0000${input.key}`;
@@ -78,7 +81,7 @@ export function makeRepositoryListCache(options?: {
         Effect.onExit((exit) =>
           Exit.isSuccess(exit)
             ? Effect.sync(() => {
-                entry.expiresAtMs = nowMs() + ttlMs;
+                entry.expiresAtMs = nowMs() + (input.ttlMs ?? ttlMs);
               }).pipe(Effect.andThen(publish(exit)))
             : forget.pipe(Effect.andThen(publish(exit))),
         ),

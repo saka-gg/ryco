@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Cause, Effect, Exit, Fiber, Option, Queue, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Option, Queue, Stream } from "effect";
 import {
   type DiagnosticsTerminalProcess,
   type TerminalEvent,
@@ -13,6 +13,9 @@ import {
   makeTerminalHandlers,
   makeTerminalSubscriberOffer,
   releaseTerminalSubscriberEvent,
+  releaseTerminalSubscriberEvents,
+  TERMINAL_STREAM_CHUNK_MAX_BYTES,
+  terminalEventBytes,
 } from "./terminalRpc.ts";
 import type { WsRpcContext } from "./context.ts";
 
@@ -362,6 +365,110 @@ describe("terminal subscription bootstrap", () => {
   );
 });
 
+describe("terminal subscription batching", () => {
+  // Effect RPC sends one Chunk frame per emitted array and waits for its Ack
+  // before pulling the next, so the array sizes are the round-trip count.
+  const liveFixture = () => {
+    let listener: (event: TerminalEvent) => Effect.Effect<void> = () => Effect.void;
+    const handlers = makeTerminalHandlers({
+      ownerStream: (_method: string, stream: Stream.Stream<TerminalEvent>) => stream,
+      terminalManager: {
+        subscribe: (next: typeof listener) =>
+          Effect.sync(() => {
+            listener = next;
+            return () => undefined;
+          }),
+        listSessions: Effect.succeed([snapshot]),
+        listDiagnostics: Effect.succeed([]),
+      },
+    } as unknown as WsRpcContext);
+    return {
+      stream: handlers[WS_METHODS.subscribeTerminalEvents]({ replay: "metadata" }),
+      emit: (next: TerminalEvent) => listener(next),
+    };
+  };
+
+  /** Consumes arrays like the RPC server, holding the first one until `release`. */
+  const consumeArrays = (stream: Stream.Stream<TerminalEvent, unknown>) =>
+    Effect.gen(function* () {
+      const firstPulled = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const arrays: Array<ReadonlyArray<TerminalEvent>> = [];
+      const received = () => arrays.reduce((sum, items) => sum + items.length, 0);
+      const fiber = yield* stream.pipe(
+        Stream.runForEachArray((items) =>
+          Effect.gen(function* () {
+            arrays.push(items);
+            if (arrays.length === 1) {
+              yield* Deferred.succeed(firstPulled, undefined);
+              yield* Deferred.await(release);
+            }
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      return {
+        arrays,
+        firstPulled: Deferred.await(firstPulled),
+        release: Deferred.succeed(release, undefined),
+        fiber,
+        /** Waits until `count` events arrived, or the stream ended early. */
+        receivedAtLeast: (count: number) =>
+          Effect.gen(function* () {
+            while (received() < count && fiber.pollUnsafe() === undefined) yield* Effect.yieldNow;
+            assert.equal(received(), count);
+          }),
+      };
+    });
+
+  it.effect("delivers a live backlog queued during one held ack as a few arrays", () =>
+    Effect.gen(function* () {
+      const { stream, emit } = liveFixture();
+      const consumer = yield* consumeArrays(stream);
+      yield* consumer.firstPulled;
+      for (let i = 0; i < 200; i++) yield* emit(event(`line ${i}\r\n`));
+      yield* consumer.release;
+      yield* consumer.receivedAtLeast(201);
+
+      // Bootstrap, then the whole backlog instead of 200 single-event frames.
+      assert.deepEqual(
+        consumer.arrays.map((items) => items.length),
+        [1, 200],
+      );
+      assert.deepEqual(
+        consumer.arrays[1]?.map((next) => (next.type === "output" ? next.data : null)),
+        Array.from({ length: 200 }, (_, i) => `line ${i}\r\n`),
+      );
+
+      // The drained backlog returned its budgets: another burst past the
+      // 256-event capacity in total does not trip a resync.
+      for (let i = 0; i < 200; i++) yield* emit(event(`more ${i}\r\n`));
+      yield* consumer.receivedAtLeast(401);
+      assert.isUndefined(consumer.fiber.pollUnsafe());
+    }),
+  );
+
+  it.effect("splits a large backlog so no array exceeds the chunk byte budget", () =>
+    Effect.gen(function* () {
+      const { stream, emit } = liveFixture();
+      const consumer = yield* consumeArrays(stream);
+      yield* consumer.firstPulled;
+      const payload = "x".repeat(100 * 1024);
+      for (let i = 0; i < 12; i++) yield* emit(event(payload));
+      yield* consumer.release;
+      yield* consumer.receivedAtLeast(13);
+
+      const live = consumer.arrays.slice(1);
+      assert.isAtMost(live.length, 6);
+      assert.isAbove(live.length, 1);
+      for (const items of live) {
+        const bytes = items.reduce((sum, next) => sum + terminalEventBytes(next), 0);
+        assert.isTrue(items.length === 1 || bytes <= TERMINAL_STREAM_CHUNK_MAX_BYTES);
+      }
+    }),
+  );
+});
+
 const event = (data: string): Extract<TerminalEvent, { type: "output" }> => ({
   type: "output",
   threadId: "thread-1",
@@ -390,6 +497,21 @@ describe("makeTerminalSubscriberOffer", () => {
         yield* Effect.yieldNow;
       }
       yield* Fiber.join(consumer);
+      assert.deepEqual(ledger, { bytes: 0, events: 0 });
+    }),
+  );
+  it.effect("releases a whole drained batch at once", () =>
+    Effect.gen(function* () {
+      const queue = yield* Queue.dropping<
+        TerminalEvent,
+        TerminalSubscriptionResyncError | Cause.Done<void>
+      >(256);
+      const ledger = { bytes: 0, events: 0 };
+      const offer = makeTerminalSubscriberOffer(queue, 256, ledger);
+      for (let i = 0; i < 50; i++) yield* offer(event(`chunk ${i}`));
+      assert.equal(ledger.events, 50);
+      const drained = yield* Queue.takeAll(queue);
+      yield* releaseTerminalSubscriberEvents(ledger, drained);
       assert.deepEqual(ledger, { bytes: 0, events: 0 });
     }),
   );

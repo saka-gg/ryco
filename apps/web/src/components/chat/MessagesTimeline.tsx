@@ -112,7 +112,8 @@ import {
   TIMELINE_MINIMAP_MIN_ITEMS,
   timelineRowItemType,
 } from "./MessagesTimeline.logic";
-import { MessageActionsSheet } from "./MessageActionsSheet";
+import { LazyMessageActionsSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
@@ -355,6 +356,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // The frozen phone tier gets nothing new: no fork action, no fork divider.
   const isPhoneTier = usePresentationTier() === "phone";
   const offerFork = onForkFromMessage !== undefined && !isPhoneTier;
+  // Messages open their action sheet on a phone long-press only.
+  const messageActionsSheetReady = usePhoneThreadSurfaceReady(LazyMessageActionsSheet, isPhoneTier);
   const initialScrollOffset = useMemo(
     () => readHostedThreadScroll(routeThreadKey),
     [routeThreadKey],
@@ -938,18 +941,20 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   }}
                 />
               </div>
-              <MessageActionsSheet
-                target={messageActionsRequest}
-                onOpenChange={(open) => {
-                  if (!open) setMessageActionsRequest(null);
-                }}
-                revertDisabled={isRevertingCheckpoint || isWorking}
-                onRevert={() => {
-                  if (messageActionsRequest) {
-                    onRevertUserMessage(messageActionsRequest.messageId);
-                  }
-                }}
-              />
+              {messageActionsSheetReady ? (
+                <LazyMessageActionsSheet
+                  target={messageActionsRequest}
+                  onOpenChange={(open) => {
+                    if (!open) setMessageActionsRequest(null);
+                  }}
+                  revertDisabled={isRevertingCheckpoint || isWorking}
+                  onRevert={() => {
+                    if (messageActionsRequest) {
+                      onRevertUserMessage(messageActionsRequest.messageId);
+                    }
+                  }}
+                />
+              ) : null}
             </HtmlRenderOpenerProvider>
           </EnteringMessageIdCtx.Provider>
         </WorktreeSetupTimelineCtx.Provider>

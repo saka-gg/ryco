@@ -5,15 +5,18 @@
  * custody (state stores, the OS credential store probe). Built inside the serve
  * layer, all of that sat between the port bind and request handler attachment,
  * and the connector's whole module graph (relay, E2EE, noble) was evaluated on
- * every boot. Here the routes get {@link HubConnectorReady} at once; the server
- * calls `start` once handlers are attached, which loads the connector module and
- * builds it in the server's scope. Hub routes wait for that construction, so
- * nothing uses the identity before custody has completed, exactly as before.
+ * every boot. Here the routes get {@link HubConnectorReady} at once. A server
+ * whose connector is enabled calls `start` once handlers are attached, which
+ * loads the connector module and builds it in the server's scope; a disabled
+ * connector (no lock, no custody, no relay) is built only when a Hub route first
+ * asks for it, so most boots never load that graph. Hub routes wait for the
+ * construction, so nothing uses the identity before custody has completed.
  *
  * @module hubConnector/HubConnectorDeferred
  */
 import { Cause, Context, Deferred, Effect, Exit, Layer } from "effect";
 
+import type { HubConnectorConfig } from "../config.ts";
 import {
   HubConnectorReady,
   HubConnectorService,
@@ -75,11 +78,26 @@ export const makeDeferredHubConnectorLive = <E, R>(
         return Effect.asVoid(Effect.forkIn(build, scope));
       });
 
-      return Context.make(HubConnectorReady, { await: Deferred.await(built) }).pipe(
-        Context.add(HubConnectorStart, { start }),
-      );
+      return Context.make(HubConnectorReady, {
+        await: start.pipe(Effect.andThen(Deferred.await(built))),
+      }).pipe(Context.add(HubConnectorStart, { start }));
     }),
   );
+
+/**
+ * Run once request handlers are attached. A Hub-enabled node (a running Desktop standby
+ * included) starts the connector now, so the process lock and key custody are held before the
+ * first Hub request. A disabled connector takes neither, so it is left to the first Hub route
+ * and most boots never load its module graph.
+ */
+export const startHubConnectorAfterServe = (
+  config: Pick<HubConnectorConfig, "enabled"> | undefined,
+): Effect.Effect<void, never, HubConnectorStart> =>
+  Effect.gen(function* () {
+    if (config?.enabled !== true) return;
+    const { start } = yield* HubConnectorStart;
+    yield* start;
+  });
 
 /** The connector of this process, loaded and built once the router serves. */
 export const HubConnectorDeferredLive = makeDeferredHubConnectorLive(async () => {

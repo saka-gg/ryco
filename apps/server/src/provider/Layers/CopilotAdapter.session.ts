@@ -202,10 +202,8 @@ export const makeStartSession =
         } satisfies ProviderSession;
       }
 
-      const clientOptions: CopilotClientOptions = makeCopilotClientOptions(
-        deps.copilotSettings,
-        deps.environment,
-        input.cwd,
+      const clientOptions: CopilotClientOptions = yield* Effect.promise(() =>
+        makeCopilotClientOptions(deps.copilotSettings, deps.environment, input.cwd),
       );
       const client =
         deps.options?.clientFactory?.(clientOptions) ?? new CopilotClient(clientOptions);

@@ -590,6 +590,49 @@ describe("parseCursorAboutOutput", () => {
       message: "Cursor Agent is not authenticated. Run `agent login` and try again.",
     });
   });
+
+  it("names the resolved Cursor command in json login hints", () => {
+    const parsed = parseCursorAboutOutput(
+      {
+        code: 0,
+        stdout: JSON.stringify({ cliVersion: "2026.04.09-f2b0fcd", userEmail: null }),
+        stderr: "",
+      },
+      "cursor-agent",
+    );
+    expect(parsed.message).toBe(
+      "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
+    );
+    expect(parsed.message).not.toContain("`agent ");
+  });
+
+  it("names the resolved Cursor command in plain-text login hints", () => {
+    const parsed = parseCursorAboutOutput(
+      {
+        code: 0,
+        stdout:
+          "About Cursor CLI\n\nCLI Version         2026.03.20-44cb435\nUser Email          Not logged in\n",
+        stderr: "",
+      },
+      "cursor-agent",
+    );
+    expect(parsed.auth.status).toBe("unauthenticated");
+    expect(parsed.message).toBe(
+      "Cursor Agent is not authenticated. Run `cursor-agent login` and try again.",
+    );
+    expect(parsed.message).not.toContain("`agent ");
+  });
+
+  it("names the resolved Cursor command when `about` is unsupported", () => {
+    const parsed = parseCursorAboutOutput(
+      { code: 1, stdout: "", stderr: "error: unknown command 'about'" },
+      "/opt/cursor/bin/cursor-agent",
+    );
+    expect(parsed.message).toBe(
+      "The `/opt/cursor/bin/cursor-agent about` command is unavailable in this version of the Cursor Agent CLI.",
+    );
+    expect(parsed.message).not.toContain("`agent ");
+  });
 });
 
 describe("Cursor parameterized model picker preview gating", () => {
@@ -631,6 +674,16 @@ describe("Cursor parameterized model picker preview gating", () => {
         channel: "stable",
       }),
     ).toContain("lab channel");
+  });
+
+  it("tells the user to run the Cursor command this machine resolves", () => {
+    const message = getCursorParameterizedModelPickerUnsupportedMessage({
+      version: "2026.04.08-c4e73a3",
+      channel: "stable",
+      command: "cursor-agent",
+    });
+    expect(message).toContain("`cursor-agent set-channel lab && cursor-agent update`");
+    expect(message).not.toContain("`agent ");
   });
 });
 

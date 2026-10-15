@@ -5,8 +5,9 @@ import { WS_METHODS } from "@ryco/contracts";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ChevronDownIcon, KeyRoundIcon } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { useState } from "react";
 
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -20,9 +21,23 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 
-const ComputerUseSettings = lazy(() =>
-  import("./ComputerUseSettings").then((module) => ({ default: module.ComputerUseSettings })),
+// Renders synchronously once loaded (a `React.lazy` boundary held its fallback
+// for React's 300 ms Suspense reveal throttle). The section's own preload
+// starts it on desktops that offer Computer Use.
+const ComputerUseSettings = preloadableLazy(() =>
+  import("./ComputerUseSettings").then((module) => module.ComputerUseSettings),
 );
+
+/**
+ * The section body for the settings page's code-split loader. On desktops that
+ * offer Computer Use it resolves only once that subsection's chunk has loaded
+ * too, so the section's first commit renders it instead of its loading state.
+ * A failed subsection load still resolves: the subsection reports it itself.
+ */
+export async function loadIntegrationsSettingsPanel(): Promise<typeof IntegrationsSettingsPanel> {
+  if (window.desktopBridge?.computerUse) await ComputerUseSettings.preload();
+  return IntegrationsSettingsPanel;
+}
 
 export function IntegrationsSettingsPanel() {
   const scope = useSettingsEditingScope();
@@ -42,20 +57,22 @@ export function IntegrationsSettingsPanel() {
           {null}
         </SettingsSection>
       )}
-      {canUseNativeControls && (
-        <Suspense
-          fallback={
-            <SettingsSection title="Computer Use">
-              <SettingsBlock className="text-xs text-muted-foreground">
-                Loading device integrations…
-              </SettingsBlock>
-            </SettingsSection>
-          }
-        >
-          <ComputerUseSettings />
-        </Suspense>
-      )}
+      {canUseNativeControls && <ComputerUseSection />}
     </SettingsPageContainer>
+  );
+}
+
+function ComputerUseSection() {
+  // Loading renders as an ordinary commit; a failed load mounts the section,
+  // which reports the error.
+  const ready = useLazyComponentReady(ComputerUseSettings, true);
+  if (ready) return <ComputerUseSettings />;
+  return (
+    <SettingsSection title="Computer Use">
+      <SettingsBlock className="text-xs text-muted-foreground">
+        Loading device integrations…
+      </SettingsBlock>
+    </SettingsSection>
   );
 }
 

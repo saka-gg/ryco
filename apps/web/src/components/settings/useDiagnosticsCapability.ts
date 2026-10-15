@@ -1,7 +1,7 @@
 import {
   hostedSessionAdmits,
   resolveHostedRpcCapability,
-} from "@ryco/client-runtime/authorization";
+} from "@ryco/client-runtime/authorization/capabilities";
 import { isHostedHubMode } from "../../env";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";

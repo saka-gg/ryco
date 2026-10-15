@@ -7,7 +7,8 @@
  * answers every branch of every checkout of that repository instead. The index
  * holds the most recent change requests in any state and, only when that list
  * is full, every open one; a branch it cannot answer for falls back to a
- * per-branch query.
+ * per-branch query, cached here too: in a busy repository the same old or
+ * PR-less branches miss the recent window on every read.
  */
 import { Cache, Duration, Effect, Exit } from "effect";
 import type {
@@ -23,6 +24,17 @@ const PULL_REQUEST_INDEX_TTL = Duration.seconds(60);
 /** A failed listing (offline, no auth) is retried after a short pause, not on every read. */
 const PULL_REQUEST_INDEX_FAILURE_TTL = Duration.seconds(10);
 const PULL_REQUEST_INDEX_CAPACITY = 256;
+
+export const BRANCH_CHANGE_REQUEST_LIMIT = 20;
+/**
+ * Per-branch answers only matter for branches the recent window misses, and a
+ * new change request on such a branch enters that window first, so they can
+ * live longer than the index itself. An open one still changes state soon.
+ */
+const BRANCH_OPEN_TTL = Duration.seconds(60);
+const BRANCH_FINISHED_TTL = Duration.minutes(15);
+const BRANCH_NONE_TTL = Duration.minutes(3);
+const BRANCH_CAPACITY = 2048;
 
 export type PullRequestIndexScope = "all" | "open";
 
@@ -52,6 +64,17 @@ export interface PullRequestIndex {
     readonly cwd: string;
     readonly provider: SourceControlProviderShape;
   }) => Effect.Effect<PullRequestIndexListing, SourceControlProviderError>;
+  /**
+   * Change requests whose head matches one selector, for a branch the index
+   * cannot answer for. Cached per repository and selector; dropped with the
+   * index on `invalidate`.
+   */
+  readonly readBranch: (input: {
+    readonly repository: string;
+    readonly headSelector: string;
+    readonly cwd: string;
+    readonly provider: SourceControlProviderShape;
+  }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
   /** Already-loaded listings only; never asks the forge. */
   readonly peek: (
     repository: string,
@@ -99,16 +122,66 @@ export const makePullRequestIndex = Effect.gen(function* () {
       Exit.isSuccess(exit) ? PULL_REQUEST_INDEX_TTL : PULL_REQUEST_INDEX_FAILURE_TTL,
   });
 
+  // Invalidation bumps the repository's generation, which every branch key
+  // carries, so a refresh drops all of its branch answers at once; the old
+  // entries age out of the bounded cache.
+  const generations = new Map<string, number>();
+  let nextGeneration = 0;
+  const generationOf = (repository: string) => generations.get(repository) ?? 0;
+  const branchKey = (repository: string, headSelector: string) =>
+    `${generationOf(repository)}\u0000${headSelector}\u0000${repository}`;
+
+  const listBranch = (key: string) =>
+    Effect.suspend(() => {
+      const first = key.indexOf("\u0000");
+      const second = key.indexOf("\u0000", first + 1);
+      const headSelector = key.slice(first + 1, second);
+      const lookup = lookups.get(key.slice(second + 1));
+      if (!lookup) return Effect.die(new Error("Change request branch read without a checkout."));
+      return lookup.provider.listChangeRequests({
+        cwd: lookup.cwd,
+        headSelector,
+        state: "all",
+        limit: BRANCH_CHANGE_REQUEST_LIMIT,
+        includeStackSummary: false,
+        fields: "summary",
+      });
+    });
+
+  const branchCache = yield* Cache.makeWith(listBranch, {
+    capacity: BRANCH_CAPACITY,
+    timeToLive: (exit) => {
+      if (!Exit.isSuccess(exit)) return PULL_REQUEST_INDEX_FAILURE_TTL;
+      if (exit.value.length === 0) return BRANCH_NONE_TTL;
+      return exit.value.some((item) => item.state === "open")
+        ? BRANCH_OPEN_TTL
+        : BRANCH_FINISHED_TTL;
+    },
+  });
+
+  const rememberLookup = (input: {
+    readonly repository: string;
+    readonly cwd: string;
+    readonly provider: SourceControlProviderShape;
+  }) => {
+    lookups.delete(input.repository);
+    lookups.set(input.repository, { cwd: input.cwd, provider: input.provider });
+    for (const oldest of lookups.keys()) {
+      if (lookups.size <= PULL_REQUEST_INDEX_CAPACITY) break;
+      lookups.delete(oldest);
+    }
+  };
+
   return {
     read: (input) =>
       Effect.suspend(() => {
-        lookups.delete(input.repository);
-        lookups.set(input.repository, { cwd: input.cwd, provider: input.provider });
-        for (const oldest of lookups.keys()) {
-          if (lookups.size <= PULL_REQUEST_INDEX_CAPACITY) break;
-          lookups.delete(oldest);
-        }
+        rememberLookup(input);
         return Cache.get(cache, indexKey(input.repository, input.scope));
+      }),
+    readBranch: (input) =>
+      Effect.suspend(() => {
+        rememberLookup(input);
+        return Cache.get(branchCache, branchKey(input.repository, input.headSelector));
       }),
     peek: (repository) =>
       Effect.forEach(["all", "open"] as const, (scope) =>
@@ -119,13 +192,21 @@ export const makePullRequestIndex = Effect.gen(function* () {
         ),
       ),
     invalidate: (repository) =>
-      Effect.all(
-        [
-          Cache.invalidate(cache, indexKey(repository, "all")),
-          Cache.invalidate(cache, indexKey(repository, "open")),
-        ],
-        { discard: true },
-      ),
+      Effect.suspend(() => {
+        generations.delete(repository);
+        generations.set(repository, ++nextGeneration);
+        for (const oldest of generations.keys()) {
+          if (generations.size <= BRANCH_CAPACITY) break;
+          generations.delete(oldest);
+        }
+        return Effect.all(
+          [
+            Cache.invalidate(cache, indexKey(repository, "all")),
+            Cache.invalidate(cache, indexKey(repository, "open")),
+          ],
+          { discard: true },
+        );
+      }),
   } satisfies PullRequestIndex;
 });
 
@@ -156,14 +237,14 @@ export type IndexedChangeRequestLookup<T> =
  * An open match is final. Otherwise the answer is final only when the
  * listings prove nothing newer exists: the recent list is complete, or the
  * open list is complete and either a finished match was found or only open
- * change requests matter (`openOnly`, the default branch).
+ * change requests matter (`openOnly`, the default branch). A failed listing
+ * fails the lookup: a per-branch query would ask the same unreachable forge.
  */
 export const lookupIndexedChangeRequest = Effect.fn("lookupIndexedChangeRequest")(function* <
   T extends { readonly state: string },
+  E,
 >(input: {
-  readonly readListing: (
-    scope: PullRequestIndexScope,
-  ) => Effect.Effect<PullRequestIndexListing | null>;
+  readonly readListing: (scope: PullRequestIndexScope) => Effect.Effect<PullRequestIndexListing, E>;
   readonly matches: (item: ChangeRequest) => T | null;
   readonly updatedAtMs: (item: T) => number | null;
   readonly openOnly: boolean;
@@ -178,14 +259,12 @@ export const lookupIndexedChangeRequest = Effect.fn("lookupIndexedChangeRequest"
     );
 
   const recent = yield* input.readListing("all");
-  if (recent === null) return { resolved: false } as IndexedChangeRequestLookup<T>;
   const recentMatch = select(recent);
   if (recentMatch?.state === "open" || recent.complete) {
     return { resolved: true, match: recentMatch } as IndexedChangeRequestLookup<T>;
   }
 
   const open = yield* input.readListing("open");
-  if (open === null) return { resolved: false } as IndexedChangeRequestLookup<T>;
   const openMatch = select(open);
   if (openMatch !== null) {
     return { resolved: true, match: openMatch } as IndexedChangeRequestLookup<T>;

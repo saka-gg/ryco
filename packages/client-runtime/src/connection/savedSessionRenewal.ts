@@ -102,6 +102,12 @@ export interface SavedSessionRenewal {
   readonly keepRenewed: (
     request: Omit<SavedSessionRenewalRequest, "bearerToken"> & {
       readonly isCurrent: () => boolean;
+      /**
+       * The node's latest answer for the stored bearer, each time a check falls
+       * due and again after a renewal, for state remembered between launches
+       * (a session hint). Not called once stopped.
+       */
+      readonly onSession?: (session: AuthSessionState) => void;
     },
   ) => () => void;
 }
@@ -233,6 +239,9 @@ export function createSavedSessionRenewal(input: {
       if (dueAtMs === null) stop();
       else after(dueAtMs - now());
     };
+    const report = (session: AuthSessionState) => {
+      if (!stopped && request.isCurrent()) request.onSession?.(session);
+    };
     const ask = async (bearerToken: string) =>
       checkSavedEnvironmentSession({
         fetchSessionState: () => request.fetchSessionState(bearerToken),
@@ -246,14 +255,19 @@ export function createSavedSessionRenewal(input: {
       }
       // A rejected pairing surfaces on the socket's next attempt; nothing renews it.
       if (answer.status !== "authenticated") return stop();
-      if (!shouldRenewSavedSession(answer.session, now())) return arm(answer.session);
+      if (!shouldRenewSavedSession(answer.session, now())) {
+        report(answer.session);
+        return arm(answer.session);
+      }
       const renewed = await renew({ ...request, session: answer.session, bearerToken });
       if (renewed.bearerToken === bearerToken) {
+        report(answer.session);
         // Declined (a year old, say) for good, or the node was out of reach.
         if (declined.has(bearerToken)) stop();
         else after(SAVED_SESSION_RENEWAL_RETRY_MS);
         return;
       }
+      report(renewed.session);
       arm(renewed.session);
     };
     arm(request.session);

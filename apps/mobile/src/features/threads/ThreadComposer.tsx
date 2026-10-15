@@ -16,6 +16,7 @@ import { GlassSurface } from "../../components/GlassSurface";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
+import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
 import type { PendingComposerHandoff } from "./contextHandoffModel";
@@ -62,6 +63,11 @@ export function ThreadComposer(props: {
   readonly onOpenSideChat?: () => void;
   /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
   readonly pendingHandoff?: PendingComposerHandoff | null;
+  /**
+   * Editor focus or the first keystroke into an empty composer: the user is about
+   * to send, so the owner may prewarm the provider session the send would start.
+   */
+  readonly onComposerIntent?: () => void;
 }) {
   const policyModel = props.policyModel;
   const modelPicker = props.modelPicker;
@@ -99,16 +105,13 @@ export function ThreadComposer(props: {
   const send = async () => {
     if (!canSend) return;
     const value = text;
-    setSending(true);
-    try {
+    await runWhileBusy(setSending, async () => {
       const result = await props.onSend(value, props.attachments);
       // Keep the complete draft on an explicit failure; clear on success/enqueue.
       if (result !== false) {
         setText("");
       }
-    } finally {
-      setSending(false);
-    }
+    });
   };
 
   const pasteImages = async (uris: ReadonlyArray<string>) => {
@@ -228,7 +231,11 @@ export function ThreadComposer(props: {
             <ComposerEditor
               ref={editorRef}
               value={text}
-              onChangeText={setText}
+              onChangeText={(nextText) => {
+                if (text.length === 0 && nextText.length > 0) props.onComposerIntent?.();
+                setText(nextText);
+              }}
+              onFocus={props.onComposerIntent}
               placeholder="Message"
               multiline
               editable={!props.disabled && !sending}

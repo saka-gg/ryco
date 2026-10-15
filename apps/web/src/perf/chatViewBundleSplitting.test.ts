@@ -42,7 +42,6 @@ describe("chat route first-frame graph", () => {
     expect(lazySurfaces).toContain('import("../PullRequestThreadDialog")');
     expect(lazySurfaces).toContain('import("./ExpandedImageDialog")');
     expect(lazySurfaces).toContain('import("../agent-control/AgentControlApprovals")');
-    expect(lazySurfaces).toContain('import("../shell/phone/PhoneWorkSurface")');
     // The worktree dialogs are split once for the chat and the sidebar.
     const worktreeDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
     expect(worktreeDialogs).toContain('import("./LinkedWorktreeItemDialog")');
@@ -62,6 +61,55 @@ describe("chat route first-frame graph", () => {
     // `preloadableLazy` (`useLazyComponentReady`).
     expect(lazySurfaces).toContain("preloadableLazy(");
     expect(chatView).toContain("useLazyComponentReady(");
+  });
+
+  it("keeps the frozen phone tier's thread surfaces out of the chat route graph", async () => {
+    // Specifier of each phone surface, relative to the components directory.
+    const phoneSurfaces = [
+      "shell/phone/PhoneThreadAppBar",
+      "shell/phone/PhoneThreadDock",
+      "shell/phone/PhoneWorkSurface",
+      "chat/PhoneSessionPolicySheet",
+      "chat/PhoneModelSheet",
+      "chat/MessageActionsSheet",
+      "mobile/MobileSelectSheet",
+    ];
+    const importers = [
+      "ChatView.tsx",
+      "chat/ChatComposer.tsx",
+      "chat/ComposerFooter.tsx",
+      "chat/ProviderModelPicker.tsx",
+      "chat/MessagesTimeline.tsx",
+      "routeViews/ChatThreadRouteView.tsx",
+      "routeViews/DraftChatThreadRouteView.tsx",
+    ];
+    for (const importer of importers) {
+      const source = await readSource(`../components/${importer}`);
+      const depth = importer.split("/").length - 1;
+      const prefix = depth === 0 ? "./" : "../".repeat(depth);
+      for (const surface of phoneSurfaces) {
+        expect(staticValueImports(source, `${prefix}${surface}`), importer).toEqual([]);
+      }
+    }
+    // One chunk carries them all, reached only through the lazy wrappers.
+    const lazyPhoneSurfaces = await readSource(
+      "../components/shell/phone/lazyPhoneThreadSurfaces.ts",
+    );
+    expect(lazyPhoneSurfaces).toContain('import("./phoneThreadSurfaces")');
+    expect(lazyPhoneSurfaces).toContain("preloadableLazy(");
+    expect(staticValueImports(lazyPhoneSurfaces, "./phoneThreadSurfaces")).toEqual([]);
+    // The chat routes load the wrappers (boot), so they stay a bare loader:
+    // the mount hook lives in `usePhoneThreadSurfaceReady`, and its toast in
+    // `ui/surfaceLoadFailure`.
+    expect(staticValueImports(lazyPhoneSurfaces, "../../chat/chatViewLazySurfaces")).toEqual([]);
+    expect(staticValueImports(lazyPhoneSurfaces, "../../ui/surfaceLoadFailure")).toEqual([]);
+    expect(staticValueImports(lazyPhoneSurfaces, "../../ui/toast")).toEqual([]);
+    // On the phone tier both chat routes wait for the surfaces with their view.
+    for (const route of ["_chat.$environmentId.$threadId.tsx", "_chat.draft.$draftId.tsx"]) {
+      expect(await readSource(`../routes/${route}`), route).toContain(
+        "loadChatRouteView(() => import(",
+      );
+    }
   });
 
   it("loads the Shiki highlighter on the first code block, not with the route", async () => {

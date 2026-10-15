@@ -24,6 +24,8 @@ import {
   CheckoutInspectionError,
   checkoutHasBlockingChanges,
   inspectCheckout,
+  inspectProjectGitFacts,
+  type ProjectGitFacts,
 } from "../workspace/checkoutInspection.ts";
 
 const fail = (detail: string) =>
@@ -204,6 +206,8 @@ export const AgentControlWorkspacesLive = Layer.effect(
         directory: string;
         row: NonNullable<OrchestrationShellSnapshot["worktrees"]>[number] | undefined;
       },
+      /** The project's repository facts, read once for a whole listing. */
+      projectFacts?: ProjectGitFacts,
     ) =>
       Effect.gen(function* () {
         const { snapshot, caller, project } = context;
@@ -275,6 +279,7 @@ export const AgentControlWorkspacesLive = Layer.effect(
               rowWorktreeId: row?.worktreeId ?? null,
               branch: row?.branch ?? null,
               operation: "Agent Control workspace inspection",
+              projectFacts,
             },
           ).pipe(
             Effect.map(({ status, ...facts }) => ({
@@ -313,9 +318,24 @@ export const AgentControlWorkspacesLive = Layer.effect(
             .toSorted((a, b) => a.id.localeCompare(b.id))
             .filter((g) => after === undefined || g.id.localeCompare(after) > 0);
           const selected = groups.slice(0, Math.min(50, Math.max(1, limit)));
-          const workspaces = yield* Effect.forEach(selected, (g) => inspect(context, g), {
-            concurrency: 2,
-          });
+          // Repository metadata, worktree registrations and branch heads once for the page,
+          // not once per workspace. On failure each inspection reads (and reports) them.
+          const projectFacts =
+            selected.length > 1
+              ? yield* inspectProjectGitFacts(
+                  { policy, git },
+                  {
+                    project: context.project,
+                    operation: "Agent Control workspace inspection",
+                    withUnmergedBranches: true,
+                  },
+                ).pipe(Effect.orElseSucceed(() => undefined))
+              : undefined;
+          const workspaces = yield* Effect.forEach(
+            selected,
+            (g) => inspect(context, g, projectFacts),
+            { concurrency: 2 },
+          );
           return {
             workspaces,
             nextCursor: groups.length > selected.length ? selected.at(-1)!.id : null,

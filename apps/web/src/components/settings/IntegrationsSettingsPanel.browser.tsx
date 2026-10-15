@@ -12,6 +12,8 @@ const harness = vi.hoisted(() => ({
   updateSettings: vi.fn(),
   settingsAllowed: true,
   settingsReason: null as string | null,
+  // Holds the Computer Use chunk's first load while a test keeps it pending.
+  computerUseChunk: Promise.resolve() as Promise<void>,
 }));
 
 vi.mock("../../env", async (importOriginal) => ({
@@ -44,15 +46,57 @@ vi.mock("./AgentControlMcpInstallations", () => ({
   ),
 }));
 
-vi.mock("./ComputerUseSettings", () => ({
-  ComputerUseSettings: () => <div data-testid="computer-use">Computer Use and Browser Use</div>,
-}));
+vi.mock("./ComputerUseSettings", async () => {
+  await harness.computerUseChunk;
+  return {
+    ComputerUseSettings: () => <div data-testid="computer-use">Computer Use and Browser Use</div>,
+  };
+});
 
 vi.mock("./McpServersSettings", () => ({
   McpServersSettings: () => <div data-testid="mcp-servers">MCP servers</div>,
 }));
 
-import { IntegrationsSettingsPanel } from "./IntegrationsSettingsPanel";
+import {
+  IntegrationsSettingsPanel,
+  loadIntegrationsSettingsPanel,
+} from "./IntegrationsSettingsPanel";
+
+// Runs before anything else in this file loads the Computer Use chunk: the
+// panel keeps it once loaded.
+describe("loadIntegrationsSettingsPanel", () => {
+  afterEach(() => {
+    delete window.desktopBridge;
+  });
+
+  it("resolves with the desktop Computer Use subsection loaded, so it renders in the first commit", async () => {
+    let releaseChunk = () => undefined as void;
+    harness.computerUseChunk = new Promise<void>((resolve) => {
+      releaseChunk = resolve;
+    });
+    Object.defineProperty(window, "desktopBridge", {
+      configurable: true,
+      value: { computerUse: {} },
+    });
+
+    let settled = false;
+    const loading = loadIntegrationsSettingsPanel().then((panel) => {
+      settled = true;
+      return panel;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+
+    releaseChunk();
+    const Panel = await loading;
+    expect(Panel).toBe(IntegrationsSettingsPanel);
+    const mounted = await render(<Panel />);
+    // Synchronously after the first commit: no loading state in between.
+    expect(mounted.container.querySelector('[data-testid="computer-use"]')).not.toBeNull();
+    expect(mounted.container.textContent).not.toContain("Loading device integrations");
+    await mounted.unmount();
+  });
+});
 
 describe("IntegrationsSettingsPanel", () => {
   beforeEach(() => {

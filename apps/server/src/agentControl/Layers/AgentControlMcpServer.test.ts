@@ -41,6 +41,7 @@ import { CompletionReturnRepositoryLive } from "../../persistence/Layers/AgentCo
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import { describeStartupPhasesOverlapping } from "../../startupStallMonitor.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { HtmlRender } from "../../htmlRender/HtmlRender.ts";
 import {
@@ -634,6 +635,21 @@ it.live("enabled mode starts a loopback listener and publishes its endpoint", ()
       // The listener is really up: an unauthenticated probe gets 401.
       const probe = yield* post(url, { body: "{}" });
       assert.strictEqual(probe.status, 401);
+    }),
+  ),
+);
+
+it.live("attributes the initial listener start as a named startup phase", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* Layer.build(
+        makeMcpServerLayer(ServerSettingsService.layerTest({ agentControl: { enabled: true } })),
+      );
+      assert.isTrue(
+        describeStartupPhasesOverlapping(Date.now(), 60_000).some((phase) =>
+          phase.startsWith("agent-control.listener.start ("),
+        ),
+      );
     }),
   ),
 );

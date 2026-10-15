@@ -368,7 +368,15 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     indexedChangeRequests: gitManager.indexedChangeRequests,
     cachedRepositoryList: gitManager.cachedRepositoryList,
     invalidateRepositoryLists: gitManager.invalidateRepositoryLists,
-    refreshRemoteTrackingRefs: gitManager.refreshRemoteTrackingRefs,
+    // Gated like the status reads: a folder that is not a Git repository
+    // (cached detection) refreshes nothing and spawns no git.
+    refreshRemoteTrackingRefs: (cwd) =>
+      detectGitRepositoryForStatus("GitWorkflowService.refreshRemoteTrackingRefs", cwd).pipe(
+        Effect.flatMap((isGitRepository) =>
+          isGitRepository ? gitManager.refreshRemoteTrackingRefs(cwd) : Effect.succeed(false),
+        ),
+        Effect.catch(() => Effect.succeed(false)),
+      ),
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
     invalidateStatus: gitManager.invalidateStatus,

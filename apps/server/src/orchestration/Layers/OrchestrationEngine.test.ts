@@ -74,6 +74,7 @@ import { threadSettlementInput } from "../threadSettlementInput.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { metricNames } from "../../observability/Metrics.ts";
 import { hasMetricSnapshot } from "../../observability/testMetricSnapshots.ts";
+import { describeStartupPhasesOverlapping } from "../../startupStallMonitor.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -123,6 +124,61 @@ function now() {
 }
 
 describe("OrchestrationEngine", () => {
+  it("attributes projection bootstrap and the read-model load as named startup phases", async () => {
+    const inFlightPhaseNames = () =>
+      describeStartupPhasesOverlapping(Date.now(), 0)
+        .filter((phase) => phase.endsWith(", in flight)"))
+        .map((phase) => phase.slice(0, phase.indexOf(" (")));
+    let duringBootstrap: ReadonlyArray<string> = [];
+    let duringReadModelLoad: ReadonlyArray<string> = [];
+    const layer = OrchestrationEngineLive.pipe(
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(
+        Layer.succeed(OrchestrationProjectionPipeline, {
+          bootstrap: Effect.sync(() => {
+            duringBootstrap = inFlightPhaseNames();
+          }),
+          projectEvent: () => Effect.void,
+          projectEventInTransaction: () => Effect.succeed(Effect.void),
+        } satisfies OrchestrationProjectionPipelineShape),
+      ),
+      Layer.provide(
+        Layer.effect(
+          ProjectionSnapshotQuery,
+          Effect.gen(function* () {
+            const snapshotQuery = yield* ProjectionSnapshotQuery;
+            return {
+              ...snapshotQuery,
+              getCommandReadModel: () =>
+                Effect.sync(() => {
+                  duringReadModelLoad = inFlightPhaseNames();
+                }).pipe(Effect.andThen(snapshotQuery.getCommandReadModel())),
+            };
+          }),
+        ).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive)),
+      ),
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(MockProjectAvatarStoreLive),
+      Layer.provide(OrchestrationEventStoreLive),
+      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "ryco-orchestration-engine-test-" }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const runtime = ManagedRuntime.make(layer);
+    try {
+      await runtime.runPromise(Effect.service(OrchestrationEngineService));
+      expect(duringBootstrap).toContain("orchestration.projection.bootstrap");
+      expect(duringReadModelLoad).toContain("orchestration.read-model.load");
+      expect(duringReadModelLoad).not.toContain("orchestration.projection.bootstrap");
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("refuses queued turn activation beneath a checkout claimed by cleanup", async () => {
     const root = await fs.realpath(
       await fs.mkdtemp(path.join(os.tmpdir(), "ryco-storage-admission-")),

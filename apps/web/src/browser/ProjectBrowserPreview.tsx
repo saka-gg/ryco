@@ -2,7 +2,7 @@ import { useState } from "react";
 import { GlobeIcon } from "lucide-react";
 import { Popover, PopoverPopup, PopoverTrigger } from "../components/ui/popover";
 import type { BrowserProject } from "./BrowserPanel";
-import { LazyBrowserPanel } from "./LazyBrowserPanel";
+import { LazyBrowserPanel, preloadBrowserPanel } from "./LazyBrowserPanel";
 
 /** Mounted only on demand; the popup and workspace reuse the same project tabs. */
 export function ProjectBrowserPreview(props: BrowserProject) {
@@ -10,7 +10,11 @@ export function ProjectBrowserPreview(props: BrowserProject) {
   return (
     <div className="phone:hidden">
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
+        <PopoverTrigger
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          onPointerEnter={preloadBrowserPanel}
+          onFocus={preloadBrowserPanel}
+        >
           <GlobeIcon className="size-3.5" />
           Live preview
         </PopoverTrigger>

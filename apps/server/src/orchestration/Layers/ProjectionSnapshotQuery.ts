@@ -37,7 +37,6 @@ import {
   type OrchestrationActivityPayloadMode,
   EventId,
   OrchestrationThreadShell,
-  THREAD_FORKED_ACTIVITY_KIND,
   ThreadPriorityProjectedRanking,
   OrchestrationWorktreeShell,
   ModelSelection,
@@ -74,9 +73,13 @@ import { decodePersistedRepositoryIdentity } from "../../project/repositoryIdent
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { readClientFor, SqliteReadClient } from "../../persistence/SqliteReadClient.ts";
 import { pruneStaleContextWindowActivities } from "../contextWindowActivities.ts";
 import { previewActivityPayload } from "../activityPayloadPreview.ts";
-import { COMMAND_MODEL_OMITTED_PLAN_MARKDOWN } from "../projector.ts";
+import {
+  COMMAND_MODEL_OMITTED_PLAN_MARKDOWN,
+  COMMAND_READ_MODEL_ACTIVITY_KINDS,
+} from "../commandReadModelShape.ts";
 import { projectionThreadLineage, withThreadLineage } from "../threadLineage.ts";
 import {
   isPendingCheckpointRevertStatus,
@@ -93,6 +96,7 @@ import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotCounts,
   type ProjectionThreadCheckpointContext,
+  type ProjectionThreadCheckpointHead,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
@@ -156,6 +160,16 @@ const ProjectThreadWorkspaceRowSchema = Schema.Struct({
 const PendingGoalSyncThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
   goal: Schema.fromJsonString(ThreadGoal),
+});
+const ThreadKeyPageRequestSchema = Schema.Struct({
+  afterCreatedAt: Schema.NullOr(Schema.String),
+  afterThreadId: Schema.NullOr(Schema.String),
+  includeArchived: Schema.Boolean,
+  limit: NonNegativeInt,
+});
+const ThreadOrderKeyRowSchema = Schema.Struct({
+  createdAt: Schema.String,
+  threadId: ThreadId,
 });
 interface ShellScope {
   readonly projectIds?: ReadonlyArray<string> | undefined;
@@ -276,6 +290,8 @@ const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
   }),
 );
+/** Checkpoint rows without `checkpoint_files_json`: nothing is decoded that no one reads. */
+const ProjectionCheckpointHeadDbRowSchema = ProjectionCheckpoint.mapFields(Struct.omit(["files"]));
 type ProjectionThreadRow = Schema.Schema.Type<typeof ProjectionThreadDbRowSchema>;
 type ProjectionMessageRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
 type ProjectionPlanRow = Schema.Schema.Type<typeof ProjectionThreadProposedPlanDbRowSchema>;
@@ -363,26 +379,7 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
 });
 
-/**
- * The activity kinds the command read model hydrates: approval and user-input lifecycle pairs,
- * context handoffs, which can block an idle-only command after a restart, and fork records. The
- * query reads
- * them through `idx_projection_thread_activities_kind_order` (migration 085; plan-guarded).
- */
-export const COMMAND_READ_MODEL_ACTIVITY_KINDS = [
-  "approval.requested",
-  "approval.resolved",
-  "provider.approval.respond.failed",
-  "user-input.requested",
-  "user-input.response.submitted",
-  "approval.response.submitted",
-  "user-input.resolved",
-  "provider.user-input.respond.failed",
-  "context-handoff",
-  THREAD_FORKED_ACTIVITY_KIND,
-] as const;
-
-/** The lifecycle kinds `derivePendingThreadRequests` reads (a subset of the kinds above). */
+/** The lifecycle kinds `derivePendingThreadRequests` reads (a subset of COMMAND_READ_MODEL_ACTIVITY_KINDS). */
 const PENDING_REQUEST_ACTIVITY_KINDS = [
   "approval.requested",
   "approval.resolved",
@@ -706,9 +703,11 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
       : toPersistenceSqlError(sqlOperation)(cause);
 }
 
-const makeProjectionSnapshotQuery = Effect.gen(function* () {
+/** Every projection read, issued on `sql` (the main connection or the read worker). */
+const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")(function* (
+  sql: SqlClient.SqlClient,
+) {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
-  const sql = yield* SqlClient.SqlClient;
   // Kept by triggers (migration 087) under the rule this used to evaluate per row: the latest
   // completed, non-inherited turn that is not the session's active turn, so prior completion
   // stays stable while the current turn emits commentary or tool updates.
@@ -885,6 +884,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE deleted_at IS NULL
           ${scopedThreadFilter(scope, "projection_threads")}
         ORDER BY created_at ASC, thread_id ASC
+      `,
+  });
+
+  // One keyset page of live threads in the shell's order, so paging over every thread never
+  // builds a whole shell per page.
+  const listThreadKeyPageRows = SqlSchema.findAll({
+    Request: ThreadKeyPageRequestSchema,
+    Result: ThreadOrderKeyRowSchema,
+    execute: (input) =>
+      sql`
+        SELECT created_at AS "createdAt", thread_id AS "threadId"
+        FROM projection_threads
+        WHERE deleted_at IS NULL
+          ${input.includeArchived ? sql`` : sql`AND archived_at IS NULL`}
+          ${
+            input.afterCreatedAt === null || input.afterThreadId === null
+              ? sql``
+              : sql`AND (
+                  created_at > ${input.afterCreatedAt}
+                  OR (created_at = ${input.afterCreatedAt} AND thread_id > ${input.afterThreadId})
+                )`
+          }
+        ORDER BY created_at ASC, thread_id ASC
+        LIMIT ${input.limit}
       `,
   });
 
@@ -1243,7 +1266,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // Idle-only command invariants need the lifecycle pairs that can block a
   // handoff even after restart, and a fork's provenance decides whether its next
   // turn hands off. Keep this intentionally narrow instead of hydrating
-  // arbitrary activity history into the command read model.
+  // arbitrary activity history into the command read model: the kinds are the ones the live
+  // projector keeps (commandReadModelShape.ts), so both models hold the same activities.
   const listActionableThreadActivityRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadActivityDbRowSchema,
@@ -1817,6 +1841,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           checkpoint_ref AS "checkpointRef",
           checkpoint_status AS "status",
           checkpoint_files_json AS "files",
+          assistant_message_id AS "assistantMessageId",
+          completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND checkpoint_turn_count IS NOT NULL
+        ORDER BY checkpoint_turn_count ASC
+      `,
+  });
+
+  const listCheckpointHeadRowsByThread = SqlSchema.findAll({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionCheckpointHeadDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          checkpoint_turn_count AS "checkpointTurnCount",
+          checkpoint_ref AS "checkpointRef",
+          checkpoint_status AS "status",
           assistant_message_id AS "assistantMessageId",
           completed_at AS "completedAt"
         FROM projection_turns
@@ -3276,6 +3320,23 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  const listThreadKeyPage: NonNullable<ProjectionSnapshotQueryShape["listThreadKeyPage"]> = (
+    input,
+  ) =>
+    listThreadKeyPageRows({
+      afterCreatedAt: input.after?.createdAt ?? null,
+      afterThreadId: input.after?.threadId ?? null,
+      includeArchived: input.includeArchived,
+      limit: input.limit,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadKeyPage:query",
+          "ProjectionSnapshotQuery.listThreadKeyPage:decodeRows",
+        ),
+      ),
+    );
+
   const listPendingGoalSyncThreads: NonNullable<
     ProjectionSnapshotQueryShape["listPendingGoalSyncThreads"]
   > = () =>
@@ -3416,7 +3477,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<ProjectionThreadCheckpointContext>();
       }
 
-      const checkpointRows = yield* listCheckpointRowsByThread({
+      const checkpointRows = yield* listCheckpointHeadRowsByThread({
         threadId,
       }).pipe(
         Effect.mapError(
@@ -3432,12 +3493,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         workspaceRoot: threadRow.value.workspaceRoot,
         worktreePath: threadRow.value.worktreePath,
-        checkpoints: checkpointRows.map((row): OrchestrationCheckpointSummary => ({
+        checkpoints: checkpointRows.map((row): ProjectionThreadCheckpointHead => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,
           checkpointRef: row.checkpointRef,
           status: row.status,
-          files: row.files,
           assistantMessageId: row.assistantMessageId,
           completedAt: row.completedAt,
         })),
@@ -4526,6 +4586,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     listProjectShells,
     getWorkspacePlacement,
     listPendingGoalSyncThreads,
+    listThreadKeyPage,
     getSnapshotSequence,
     getCounts,
     getActiveProjectByWorkspaceRoot,
@@ -4550,6 +4611,55 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     listPendingCheckpointReverts,
     getLatestCheckpointRevert,
     searchThreadMessages,
+  } satisfies ProjectionSnapshotQueryShape;
+});
+
+/**
+ * Which connection a projection read runs on.
+ *
+ * The main connection is the single writer: one synchronous `node:sqlite` handle behind a
+ * semaphore, so every read on it blocks the event loop for its SQL and queues behind (and in
+ * front of) every write. Reads move to the read-only worker connection (SqliteReadClient) when
+ * all of these hold:
+ * - they are heavy or unbounded enough to matter (whole read models, full-text search, history
+ *   pages), and run on behalf of a reader (an RPC, an MCP tool), not the engine;
+ * - they need no read-your-writes beyond committed data: the worker sees every commit that
+ *   precedes the read, and a caller inside a main-connection transaction keeps reading there
+ *   (`readClientFor`), where its uncommitted rows are visible;
+ * - they do not order themselves against the live event stream (event replay keeps reading on
+ *   the main connection, which serializes it behind in-flight commits).
+ * Engine hydration (`getCommandReadModel`), shell builds and the small lookups the decider and
+ * reactors issue stay on the main connection.
+ */
+const READ_WORKER_METHODS = [
+  "getSnapshot",
+  "getThreadHistoryPage",
+  "searchThreadMessages",
+] as const satisfies ReadonlyArray<keyof ProjectionSnapshotQueryShape>;
+
+const makeProjectionSnapshotQuery = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const main = yield* makeProjectionSnapshotQueryOn(sql);
+  const reader = yield* Effect.serviceOption(SqliteReadClient);
+  if (Option.isNone(reader) || reader.value === sql) return main;
+  const onReader = yield* makeProjectionSnapshotQueryOn(reader.value);
+  type AnyRead = (...args: Array<never>) => Effect.Effect<unknown, ProjectionRepositoryError>;
+  const routed = <K extends (typeof READ_WORKER_METHODS)[number]>(
+    method: K,
+  ): NonNullable<ProjectionSnapshotQueryShape[K]> => {
+    const onMain = main[method] as AnyRead;
+    const offMain = onReader[method] as AnyRead;
+    const read = (...args: Array<never>) =>
+      Effect.flatMap(readClientFor(sql), (client) =>
+        client === sql ? onMain(...args) : offMain(...args),
+      );
+    return read as unknown as NonNullable<ProjectionSnapshotQueryShape[K]>;
+  };
+  return {
+    ...main,
+    getSnapshot: routed("getSnapshot"),
+    getThreadHistoryPage: routed("getThreadHistoryPage"),
+    searchThreadMessages: routed("searchThreadMessages"),
   } satisfies ProjectionSnapshotQueryShape;
 });
 

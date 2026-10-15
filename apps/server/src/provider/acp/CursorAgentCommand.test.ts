@@ -4,8 +4,18 @@ import path from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
+import { vi } from "vitest";
 
 import { cursorAgentCommandCandidates, resolveCursorAgentCommand } from "./CursorAgentCommand.ts";
+
+// Probes and session spawns must not search PATH synchronously: a stalled mount on PATH would
+// block the event loop.
+vi.mock("@ryco/shared/shell", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@ryco/shared/shell")>()),
+  resolveCommandPath: () => {
+    throw new Error("synchronous PATH search");
+  },
+}));
 
 const makeBinDir = (commands: ReadonlyArray<string>) => {
   const binDir = path.join(os.tmpdir(), `ryco-cursor-command-${crypto.randomUUID()}`);

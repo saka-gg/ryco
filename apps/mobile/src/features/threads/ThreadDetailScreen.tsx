@@ -1,6 +1,7 @@
 import { sidebarUndo } from "../../state/sidebarUndo";
 import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
+import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
 import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
@@ -55,6 +56,7 @@ import {
 } from "@ryco/client-runtime/state/message-queue";
 import {
   buildThreadInbox,
+  type BuildThreadInboxInput,
   createThreadForkAttemptController,
   defaultThreadForkBaseRef,
   deriveForkableReplyMessageIds,
@@ -76,11 +78,7 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SymbolView } from "../../components/AppSymbol";
-import {
-  ensureEnvironmentApi,
-  readEnvironmentApi,
-  readRpcClient,
-} from "../../connection/environmentApi";
+import { ensureEnvironmentApi, readRpcClient } from "../../connection/environmentApi";
 import { getMobileHostedConnectionCoordinator } from "../../connection/hostedConnectionCoordinator";
 import { useMobileHostedConnectionsStore } from "../../hostedHub/state";
 import {
@@ -88,6 +86,7 @@ import {
   loadThreadMessagesAround,
   retainThreadDetailSubscription,
 } from "../../connection/threadDetail";
+import { useEnvironmentApi } from "../../connection/useEnvironmentApi";
 import { useThreadConnectionRetarget } from "../../connection/useThreadConnectionRetarget";
 import type { DraftComposerAttachment, DraftComposerFileAttachment } from "../../lib/composerFiles";
 import {
@@ -97,6 +96,7 @@ import {
 } from "../../lib/composerFiles";
 import { convertPastedImagesToAttachments } from "../../lib/composerImages";
 import { newCommandId, newMessageId } from "../../lib/ids";
+import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   selectAgentControlProposalsForThread,
@@ -133,6 +133,7 @@ import {
   selectEnvironmentHydratedFromCacheAt,
   selectProjectByRef,
   selectSidebarThreadSummaryByRef,
+  selectSubscribedClaudeReviewState,
   selectThreadByRef,
   useStore,
 } from "../../state/threadsRuntime";
@@ -202,6 +203,20 @@ import {
 const NO_FORKABLE_MESSAGES: ReadonlySet<MessageId> = new Set();
 /** How long the message a link opened the thread at stays highlighted. */
 const MESSAGE_ANCHOR_HIGHLIGHT_MS = 2_500;
+
+/**
+ * The thread's settlement model, evaluated at the current time but never
+ * before `notBeforeMs` (the last scheduled evaluation). The clock is read here
+ * rather than in the component: React Compiler would cache a render-time
+ * `Date.now()` once per screen instance, so every input change would evaluate
+ * settle, snooze and auto-settle against the time the screen opened.
+ */
+function buildThreadSettlementModel(
+  input: Omit<BuildThreadInboxInput, "nowMs">,
+  notBeforeMs: number,
+) {
+  return buildThreadInbox({ ...input, nowMs: Math.max(notBeforeMs, Date.now()) });
+}
 
 function TimelineRow(props: {
   readonly environmentId: EnvironmentId;
@@ -545,24 +560,26 @@ export function ThreadDetailScreen(props: {
   const nodeLabel = environmentRow?.label ?? null;
   const settlementModel = useMemo(() => {
     if (!sidebarThread || !environmentRow) return null;
-    return buildThreadInbox({
-      projects: project ? [project] : [],
-      worktrees,
-      threads: [sidebarThread],
-      environments: [
-        {
-          environmentId,
-          label: environmentRow.label,
-          threadSettlementSupported: environmentRow.threadSettlementSupported ?? false,
-          connected: environmentRow.connectionState === "connected",
-          mutationReady: environmentRow.mutationReady ?? false,
-          shellCurrent: environmentRow.shellCurrent ?? false,
-        },
-      ],
-      localQueuedThreadKeys: getQueuedThreadKeys(queuesByThreadKey),
-      autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
-      nowMs: Math.max(settlementNowMs, Date.now()),
-    });
+    return buildThreadSettlementModel(
+      {
+        projects: project ? [project] : [],
+        worktrees,
+        threads: [sidebarThread],
+        environments: [
+          {
+            environmentId,
+            label: environmentRow.label,
+            threadSettlementSupported: environmentRow.threadSettlementSupported ?? false,
+            connected: environmentRow.connectionState === "connected",
+            mutationReady: environmentRow.mutationReady ?? false,
+            shellCurrent: environmentRow.shellCurrent ?? false,
+          },
+        ],
+        localQueuedThreadKeys: getQueuedThreadKeys(queuesByThreadKey),
+        autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
+      },
+      settlementNowMs,
+    );
   }, [
     environmentId,
     environmentRow,
@@ -785,11 +802,14 @@ export function ThreadDetailScreen(props: {
   // right now. Capability and chats availability come from THIS environment's config, not the
   // active-environment atom, which nulls on switch.
   const environmentServerConfig = useEnvironmentServerConfigs().get(environmentId) ?? null;
+  // Subscribed, not read in render: a screen opened before its node connected
+  // offers the fork as soon as the connection registers.
+  const environmentApi = useEnvironmentApi(environmentId);
   const forkOffered = isThreadForkOffered({
     mutationReady: environmentRow?.mutationReady,
     actionsDisabled: cachedView.actionsDisabled,
     serverCapability: environmentServerConfig?.environment.capabilities.threadFork,
-    forkApiAvailable: readThreadForkApi(readEnvironmentApi(environmentId)) !== null,
+    forkApiAvailable: readThreadForkApi(environmentApi) !== null,
   });
   const threadMessages = thread?.messages;
   const threadLatestTurn = thread?.latestTurn;
@@ -989,6 +1009,8 @@ export function ThreadDetailScreen(props: {
       markThreadOutboxSteering(message.messageId, attempt);
       steerAttemptsRef.current = new Map(steerAttemptsRef.current).set(message.messageId, attempt);
       setSteerAttempts((current) => new Map(current).set(message.messageId, attempt));
+      // Outside the try: React Compiler cannot lower a `||` inside a try/catch.
+      const steerText = message.text.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
       try {
         const attachments = await buildQueuedThreadMessageAttachments(message);
         const requestedAt = new Date().toISOString();
@@ -998,7 +1020,7 @@ export function ThreadDetailScreen(props: {
             threadId,
             expectedTurnId: eligibility.expectedTurnId,
             messageId: MessageId.make(message.messageId),
-            text: message.text.trim() || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+            text: steerText,
             attachments,
             createdAt: message.createdAt,
             requestedAt,
@@ -1035,20 +1057,19 @@ export function ThreadDetailScreen(props: {
     if (failed) setSendError(failed.error);
   }, [endSteerAttempt, steerAttempts, thread]);
 
-  const applyPolicy = useCallback(async (apply: () => Promise<void>) => {
-    setPolicyBusy(true);
+  const applyPolicy = useCallback((apply: () => Promise<void>) => {
     setSendError(null);
-    try {
-      await apply();
-    } catch (error) {
-      // Never fail silently: a policy change that did not land would otherwise
-      // leave the pill showing a setting the node never received.
-      setSendError(
-        error instanceof Error ? error.message : "The session policy change did not apply.",
-      );
-    } finally {
-      setPolicyBusy(false);
-    }
+    return runWhileBusy(setPolicyBusy, async () => {
+      try {
+        await apply();
+      } catch (error) {
+        // Never fail silently: a policy change that did not land would otherwise
+        // leave the pill showing a setting the node never received.
+        setSendError(
+          error instanceof Error ? error.message : "The session policy change did not apply.",
+        );
+      }
+    });
   }, []);
 
   const stageModelSelection = useCallback(
@@ -1325,8 +1346,7 @@ export function ThreadDetailScreen(props: {
       selectEnvironmentHydratedFromCacheAt(useStore.getState(), environmentId) === null;
     const connected = connectionUiState === "connected" && deliveryReconciled;
 
-    setSendBusy(true);
-    try {
+    return runWhileBusy(setSendBusy, async () => {
       const sent = await sendThreadTurn(
         {
           environmentId,
@@ -1350,6 +1370,13 @@ export function ThreadDetailScreen(props: {
               providerDriver: threadProviderDriver,
               sourceProviderDriver: currentThread.session?.provider ?? null,
               claudeCacheReview: mobileClaudeCacheReview,
+              // The retained detail subscription already holds what the Claude
+              // resume review reads; a send it clears skips the window read.
+              readSubscribedClaudeReviewState: () =>
+                selectSubscribedClaudeReviewState(
+                  useStore.getState(),
+                  scopeThreadRef(environmentId, threadId),
+                ),
               assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
                 createMobileConnectionRegistry().driver.supervisor.read(environmentId),
               ),
@@ -1393,22 +1420,19 @@ export function ThreadDetailScreen(props: {
         setAttachmentError(null);
       }
       return sent;
-    } finally {
-      setSendBusy(false);
-    }
+    });
   };
 
-  const runAction = async (action: () => Promise<void>, closeAfter = true) => {
-    setActionBusy(true);
+  const runAction = (action: () => Promise<void>, closeAfter = true) => {
     setActionError(null);
-    try {
-      await action();
-      if (closeAfter) setActionsVisible(false);
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "The task action failed.");
-    } finally {
-      setActionBusy(false);
-    }
+    return runWhileBusy(setActionBusy, async () => {
+      try {
+        await action();
+        if (closeAfter) setActionsVisible(false);
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : "The task action failed.");
+      }
+    });
   };
 
   const runSidebarAction = (action: () => Promise<void>) => {
@@ -1524,6 +1548,8 @@ export function ThreadDetailScreen(props: {
     item.kind === "activity-fold" ? (
       <ThreadActivityFoldRow
         fold={item}
+        environmentId={environmentId}
+        threadId={threadId}
         onToggle={() => setExpandedFoldIds((current) => toggleFold(current, item))}
       />
     ) : (
@@ -1776,6 +1802,14 @@ export function ThreadDetailScreen(props: {
             );
         }}
         pendingHandoff={pendingHandoff}
+        onComposerIntent={() =>
+          void prewarmThreadProviderSession({
+            environmentId,
+            threadId,
+            modelSelection: selectedModelSelection,
+            mutationReady: environmentRow?.mutationReady ?? false,
+          })
+        }
       />
 
       {headerModel ? (

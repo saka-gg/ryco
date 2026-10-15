@@ -129,7 +129,15 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
             }),
         ),
       );
-    yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
+    // Only a child still running at scope close (timeout, interruption) is
+    // killed. An exited one is left alone: on Windows every kill is an awaited
+    // `taskkill /T /F`, which cannot find an exited tree and could hit a reused PID.
+    yield* Effect.addFinalizer(() =>
+      child.isRunning.pipe(
+        Effect.flatMap((running) => (running ? child.kill() : Effect.void)),
+        Effect.ignore,
+      ),
+    );
 
     const mapStreamError = (streamName: "stdout" | "stderr") =>
       Stream.mapError((cause: PlatformError.PlatformError) =>

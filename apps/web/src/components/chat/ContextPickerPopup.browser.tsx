@@ -64,6 +64,7 @@ vi.mock("~/rpc/useSourceControl", () => ({
 // ---------------------------------------------------------------------------
 
 import { ContextPickerPopup } from "./ContextPickerPopup";
+import { useSourceControlChangeRequestList } from "~/rpc/useSourceControl";
 
 const TEST_ENVIRONMENT_ID = "environment-local" as unknown as EnvironmentId;
 const TEST_CWD = "/repo/project";
@@ -111,6 +112,20 @@ describe("ContextPickerPopup", () => {
   afterEach(() => {
     document.body.innerHTML = "";
     vi.restoreAllMocks();
+  });
+
+  it("reads the lean picker rows the composer # picker shares", async () => {
+    const { cleanup } = await mountPopup();
+
+    try {
+      await vi.waitFor(() => {
+        expect(vi.mocked(useSourceControlChangeRequestList)).toHaveBeenCalledWith(
+          expect.objectContaining({ state: "open", view: "picker" }),
+        );
+      });
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders GH Issues tab by default and shows issue list", async () => {

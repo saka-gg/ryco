@@ -21,7 +21,9 @@ export type WorkspaceInspection =
       readonly refreshing: boolean;
     };
 
-type Settled = Exclude<WorkspaceInspection, { readonly status: "unavailable" | "loading" }>;
+type Settled =
+  | Exclude<WorkspaceInspection, { readonly status: "unavailable" | "loading" | "ready" }>
+  | Omit<Extract<WorkspaceInspection, { readonly status: "ready" }>, "suggestions">;
 
 const errorMessage = (reason: unknown, fallback: string) =>
   reason instanceof Error && reason.message ? reason.message : fallback;
@@ -31,7 +33,9 @@ const errorMessage = (reason: unknown, fallback: string) =>
  * which lifecycle actions are allowed) and the device's cleanup suggestions.
  * Inspection runs Git per workspace, so it re-runs only when the workspace set
  * changes (`signature`), after any lifecycle action, or when asked; earlier
- * results stay on screen meanwhile.
+ * results stay on screen meanwhile. The workspaces show as soon as they are
+ * inspected: suggestions inspect every project's checkouts and fill in when
+ * they arrive.
  */
 export function useProjectWorkspaceInspection(input: {
   readonly environmentId: EnvironmentId;
@@ -53,32 +57,46 @@ export function useProjectWorkspaceInspection(input: {
     readonly requestKey: string;
     readonly value: Settled;
   } | null>(null);
+  const [settledSuggestions, setSettledSuggestions] = useState<{
+    readonly scopeKey: string;
+    /** Null when suggestions failed on their own. */
+    readonly value: LifecycleSuggestions | null;
+  } | null>(null);
 
   useEffect(() => {
     if (!lifecycle) return;
     let cancelled = false;
-    void Promise.allSettled([
-      lifecycle.listWorkspaces({ projectId: ProjectId.make(projectId) }),
-      suggestionsEnabled ? lifecycle.suggestions({}) : Promise.resolve(null),
-    ]).then(([listed, suggested]) => {
-      if (cancelled) return;
-      setSettled({
-        scopeKey,
-        requestKey,
-        value:
-          listed.status === "fulfilled"
-            ? {
-                status: "ready",
-                summaries: listed.value,
-                suggestions: suggested.status === "fulfilled" ? suggested.value : null,
-                refreshing: false,
-              }
-            : {
-                status: "error",
-                message: errorMessage(listed.reason, "The workspaces could not be inspected."),
-              },
-      });
-    });
+    void lifecycle.listWorkspaces({ projectId: ProjectId.make(projectId) }).then(
+      (summaries) => {
+        if (cancelled) return;
+        setSettled({
+          scopeKey,
+          requestKey,
+          value: { status: "ready", summaries, refreshing: false },
+        });
+      },
+      (reason: unknown) => {
+        if (cancelled) return;
+        setSettled({
+          scopeKey,
+          requestKey,
+          value: {
+            status: "error",
+            message: errorMessage(reason, "The workspaces could not be inspected."),
+          },
+        });
+      },
+    );
+    if (suggestionsEnabled) {
+      void lifecycle.suggestions({}).then(
+        (value) => {
+          if (!cancelled) setSettledSuggestions({ scopeKey, value });
+        },
+        () => {
+          if (!cancelled) setSettledSuggestions({ scopeKey, value: null });
+        },
+      );
+    }
     return () => {
       cancelled = true;
     };
@@ -86,11 +104,21 @@ export function useProjectWorkspaceInspection(input: {
 
   const reinspect = useCallback(() => setNonce((value) => value + 1), []);
 
+  // The latest suggestions of this scope (earlier ones while newer are read).
+  const suggestions =
+    suggestionsEnabled && settledSuggestions?.scopeKey === scopeKey
+      ? settledSuggestions.value
+      : null;
   let inspection: WorkspaceInspection;
   if (!lifecycle) inspection = { status: "unavailable" };
   else if (!settled || settled.scopeKey !== scopeKey) inspection = { status: "loading" };
-  else if (settled.requestKey === requestKey) inspection = settled.value;
-  else if (settled.value.status === "ready") inspection = { ...settled.value, refreshing: true };
-  else inspection = { status: "loading" };
+  else if (settled.value.status !== "ready")
+    inspection = settled.requestKey === requestKey ? settled.value : { status: "loading" };
+  else
+    inspection = {
+      ...settled.value,
+      suggestions,
+      refreshing: settled.requestKey !== requestKey,
+    };
   return { inspection, reinspect };
 }

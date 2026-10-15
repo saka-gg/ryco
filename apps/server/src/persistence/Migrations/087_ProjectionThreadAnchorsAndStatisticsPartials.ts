@@ -49,7 +49,8 @@ const latestUserMessageId = (thread: string) => `(
   LIMIT 1
 )`;
 
-const latestCompletedTurnAt = (thread: string) => `(
+/** Frozen rule; 091 reuses it so its guarded trigger stays byte-identical in effect. */
+export const latestCompletedTurnAt = (thread: string) => `(
   SELECT turns.completed_at FROM projection_turns AS turns
   WHERE turns.thread_id = ${thread}
     AND turns.state = 'completed'

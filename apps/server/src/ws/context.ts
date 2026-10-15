@@ -30,6 +30,7 @@ import {
   CommandId,
   type DiagnosticsProviderProcess,
   type GitRunStackedActionInput,
+  type IssueState,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   ProjectId,
@@ -72,6 +73,7 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ModelManifest } from "../provider/ModelManifest.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion.ts";
+import { ThreadViewersService } from "../orchestration/ThreadViewers.ts";
 import * as ProviderMaintenanceRunner from "../provider/providerMaintenanceRunner.ts";
 import { ServerLifecycleEvents } from "../serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
@@ -109,16 +111,15 @@ import { ProjectRelocationRepository } from "../persistence/Services/ProjectRelo
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { ProjectionWorktreeRepository } from "../persistence/Services/ProjectionWorktrees.ts";
 import {
+  type BatchedLinkStates,
   type KnownPullRequestState,
+  makeSweepLinkStates,
   refreshWorktreeSourceControlState,
   WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS,
   WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS,
 } from "../sourceControl/refreshWorktreeSourceControlState.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
-import {
-  readWorktreePullRequestLinks,
-  selectCurrentPullRequestLink,
-} from "@ryco/shared/worktreePullRequests";
+import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import * as SourceControlDiscoveryLayer from "../sourceControl/SourceControlDiscovery.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import {
@@ -247,6 +248,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // always has ProviderService in the runtime environment.
     const providerService = yield* Effect.serviceOption(ProviderService);
     const providerRuntimeIngestion = yield* Effect.serviceOption(ProviderRuntimeIngestionService);
+    // Optional for the route-test reason above: without it no thread counts as viewed.
+    const threadViewers = yield* Effect.serviceOption(ThreadViewersService);
     const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
     const config = yield* ServerConfig;
     const lifecycleEvents = yield* ServerLifecycleEvents;
@@ -333,6 +336,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       readonly state: KnownPullRequestState["state"];
       readonly isDraft?: boolean | undefined;
     };
+    type KnownIssueRow = {
+      readonly number: number;
+      readonly state: IssueState;
+    };
 
     const authorize = (access: WsRpcAccess, method: string) =>
       authorizeRpcPrincipal(principal, access, method);
@@ -391,51 +398,44 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         );
 
     /**
-     * One forge request for the states of every pull request a sweep would re-read one by
-     * one (`gh pr view` each), where the host can batch them. Empty when it cannot or fails:
-     * the refreshes then read as before.
+     * One forge request for the states of several pull requests and issues of `cwd`'s
+     * repository (instead of a `gh pr view` / `gh issue view` each), where the host can
+     * batch them. Null when it cannot or fails: the refreshes then read as before.
      */
-    const batchedPullRequestStates = (
-      cwd: string,
-      worktrees: ReadonlyArray<Parameters<typeof readWorktreePullRequestLinks>[0]>,
-    ) =>
-      Effect.gen(function* () {
-        const numbers = new Set<number>();
-        for (const worktree of worktrees) {
-          const links = readWorktreePullRequestLinks(worktree);
-          const current = selectCurrentPullRequestLink(links);
-          for (const link of links) {
-            if (link.dismissedAt) continue;
-            const finished = link.state === "merged" || link.state === "closed";
-            if (finished && link.number !== current?.number) continue;
-            numbers.add(link.number);
-          }
-        }
-        if (numbers.size < 2) return new Map<number, KnownPullRequestState>();
-        const provider = yield* sourceControlRegistry.resolve({ cwd });
-        if (!provider.getPullRequestStates) return new Map<number, KnownPullRequestState>();
-        const states = yield* provider.getPullRequestStates({ cwd, numbers: [...numbers] });
-        return new Map<number, KnownPullRequestState>(
-          [...states].map(([number, state]) => [
-            number,
-            {
-              state: state.state,
-              isDraft: state.isDraft,
-              reported: {
-                terminalAt: state.terminalAt ? DateTime.formatIso(state.terminalAt) : null,
-              },
-            },
-          ]),
+    const readBatchedLinkStates =
+      (cwd: string) =>
+      (numbers: {
+        readonly pullRequestNumbers: ReadonlyArray<number>;
+        readonly issueNumbers: ReadonlyArray<number>;
+      }) =>
+        Effect.gen(function* () {
+          const provider = yield* sourceControlRegistry.resolve({ cwd });
+          if (!provider.getLinkStates) return null;
+          const states = yield* provider.getLinkStates({ cwd, ...numbers });
+          return {
+            pullRequests: new Map<number, KnownPullRequestState>(
+              [...states.pullRequests].map(([number, state]) => [
+                number,
+                {
+                  state: state.state,
+                  isDraft: state.isDraft,
+                  reported: {
+                    terminalAt: state.terminalAt ? DateTime.formatIso(state.terminalAt) : null,
+                  },
+                },
+              ]),
+            ),
+            issues: states.issues,
+          } satisfies BatchedLinkStates;
+        }).pipe(
+          Effect.catchCause((cause) =>
+            logOnceEvery({
+              key: `sourceControl.pullRequestStates:${cwd}`,
+              message: "Batched pull request state read failed",
+              cause,
+            }).pipe(Effect.as(null)),
+          ),
         );
-      }).pipe(
-        Effect.catchCause((cause) =>
-          logOnceEvery({
-            key: `sourceControl.pullRequestStates:${cwd}`,
-            message: "Batched pull request state read failed",
-            cause,
-          }).pipe(Effect.as(new Map<number, KnownPullRequestState>())),
-        ),
-      );
 
     const refreshLinkedWorktreeSourceControlStates = (input: {
       readonly cwd: string;
@@ -449,6 +449,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       readonly lifecycle?: { readonly pullRequestNumber: number | null } | undefined;
       /** Change requests the triggering read just returned for this repository. */
       readonly knownPullRequests?: ReadonlyArray<KnownPullRequestRow> | undefined;
+      /** Issues the triggering read just returned for this repository. */
+      readonly knownIssues?: ReadonlyArray<KnownIssueRow> | undefined;
     }) => {
       const sweep = Effect.gen(function* () {
         const scope = yield* resolveSourceControlRefreshScope(input.cwd);
@@ -491,15 +493,24 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           : scope.checkout
             ? WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS
             : WORKTREE_PULL_REQUEST_SWEEP_DISCOVERY_INTERVAL_MS;
-        // A project-wide sweep reads the states its links need in one request.
-        const batched =
+        const knownIssueRows = new Map<number, IssueState>(
+          (input.knownIssues ?? []).map((row) => [row.number, row.state]),
+        );
+        // A project-wide sweep reads the states its due links need in one request.
+        const known =
           input.lifecycle || scope.checkout || refreshIds.length === 0
-            ? new Map<number, KnownPullRequestState>()
-            : yield* batchedPullRequestStates(input.cwd, refreshed);
-        const knownStates = (cwd: string) =>
-          knownPullRequestStatesFor(input.knownPullRequests)(cwd).pipe(
-            Effect.map((known) => (batched.size === 0 ? known : new Map([...known, ...batched]))),
-          );
+            ? {
+                knownPullRequestStates: knownPullRequestStatesFor(input.knownPullRequests),
+                knownIssueStates: () => Effect.succeed(knownIssueRows),
+              }
+            : yield* makeSweepLinkStates({
+                worktrees: refreshed,
+                linkRefreshIntervalMs: intervalMs,
+                knownPullRequestStates: knownPullRequestStatesFor(input.knownPullRequests),
+                knownIssues: knownIssueRows,
+                readLinkStates: readBatchedLinkStates(input.cwd),
+                cwd: input.cwd,
+              });
         const refresh = (worktreeId: WorktreeId) =>
           refreshWorktreeSourceControlState({
             worktreeId,
@@ -507,7 +518,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
             discoveryIntervalMs: intervalMs,
             linkRefreshIntervalMs: intervalMs,
             // A lifecycle action reads live; otherwise states in hand spare forge calls.
-            ...(input.lifecycle ? {} : { knownPullRequestStates: knownStates }),
+            ...(input.lifecycle ? {} : known),
             actedOnPullRequestNumber: input.lifecycle?.pullRequestNumber ?? undefined,
           }).pipe(ignoreCauseLogOnceEvery(sourceControlRefreshFailureLog(worktreeId)));
         if (input.lifecycle && scope.checkout) {
@@ -1373,6 +1384,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       modelManifest,
       providerService,
       providerRuntimeIngestion,
+      threadViewers,
       providerMaintenanceRunner,
       dailyRecapQuery,
       sessionPrewarm,

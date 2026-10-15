@@ -92,6 +92,14 @@ export function getRenderablePatch(
   }
 }
 
+/**
+ * Content keys by the object a patch arrived in (a checkpoint-diff result). The
+ * fetched result lives exactly as long as its client cache entry, so a panel
+ * that remounts over a cached result finds the key without retaining the text
+ * any longer than that cache does.
+ */
+const identifiedPatchByOwner = new WeakMap<object, { source: string; key: string }>();
+
 /** Per-mounted-panel cache. Only the active source reference is retained, never a
  * history of source strings; all active files are eligible for reuse regardless
  * of the whole-payload LRU's entry count. Cache mutation affects reuse only.
@@ -102,15 +110,22 @@ export class ActiveDiffParser {
 
   /**
    * The content key of `source` (`buildPatchCacheKey`). Hashing walks every
-   * character twice, so the key of the source this panel identified last is
-   * reused when the same text arrives again: a refetch, a remount, or any
-   * re-render that re-delivers an unchanged patch costs one string comparison.
+   * character twice, so it runs once per distinct text: the key of the source
+   * this panel identified last is reused when the same text arrives again (a
+   * refetch, any re-render), and with `owner` (the object `source` was
+   * delivered in) so is the key of any patch identified before, including by an
+   * earlier mount of the panel. A hit costs a string comparison.
    */
-  identify(source: string): string {
-    if (this.#identified?.source === source) return this.#identified.key;
-    const key = buildPatchCacheKey(source);
-    this.#identified = { source, key };
-    return key;
+  identify(source: string, owner?: object): string {
+    let identified = this.#identified?.source === source ? this.#identified : undefined;
+    if (identified === undefined && owner !== undefined) {
+      const known = identifiedPatchByOwner.get(owner);
+      if (known?.source === source) identified = known;
+    }
+    identified ??= { source, key: buildPatchCacheKey(source) };
+    if (owner !== undefined) identifiedPatchByOwner.set(owner, identified);
+    this.#identified = identified;
+    return identified.key;
   }
 
   parse(source: string, scope: string, cached?: RenderablePatch | null): RenderablePatch | null {

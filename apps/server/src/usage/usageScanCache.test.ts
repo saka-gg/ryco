@@ -238,3 +238,29 @@ it("decodes every file of a large cache and evicts the least recently modified f
   expect([...decoded.keys()].toSorted()).toEqual(["file-2", "file-3"]);
   expect(capUsageScanCache(decoded, 200_000)).toBe(0);
 });
+
+it("caps the cache by the rows it keeps resident, not by the responses it folded", () => {
+  // Keyless (Codex) responses of one quarter hour fold into a single slot.
+  const folded = (count: number) =>
+    Array.from({ length: count }, (_, index) =>
+      record({ provider: "codex", timestampMs: index, dedupeKey: null }),
+    );
+  const keyed = (count: number, file: string) =>
+    Array.from({ length: count }, (_, index) =>
+      record({ timestampMs: index, dedupeKey: `${file}:message-${index}:request` }),
+    );
+  const cache: UsageScanCache = new Map([
+    ["codex-old", entryOf(folded(150_000), { mtimeMs: 1000 })],
+    ["claude-old", entryOf(keyed(60_000, "claude-old"), { mtimeMs: 2000 })],
+    ["claude-new", entryOf(keyed(60_000, "claude-new"), { mtimeMs: 3000 })],
+  ]);
+  expect(cache.get("codex-old")?.aggregate.recordCount).toBe(150_000);
+  expect(cache.get("codex-old")?.aggregate.slots).toHaveLength(1);
+  // 270k folded responses, but only 1 + 2 * (60k keys + 1 slot) resident rows.
+  expect(capUsageScanCache(cache, 150_000)).toBe(0);
+  expect(cache.size).toBe(3);
+  // Above the bound, the least recently modified files go first by resident rows:
+  // dropping the folded Codex file frees one row, so the older keyed file follows.
+  expect(capUsageScanCache(cache, 100_000)).toBe(2);
+  expect([...cache.keys()]).toEqual(["claude-new"]);
+});

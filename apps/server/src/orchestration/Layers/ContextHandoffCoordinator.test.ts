@@ -1048,6 +1048,35 @@ describe("ContextHandoffCoordinator lane control", () => {
     expect(harness.repository.get()?.status).toBe("consumed");
   });
 
+  it("hands the accepted target turn to the lane after the send", async () => {
+    const harness = makeHarness();
+    const accepted: Array<string> = [];
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(
+          turnStartEvent(),
+          recordingControl(harness.deliveryOrder, {
+            onTurnAccepted: (turnId) =>
+              Effect.sync(() => {
+                harness.deliveryOrder.push("accepted");
+                accepted.push(turnId);
+              }),
+          }),
+        );
+      }),
+    );
+    expect(harness.deliveryOrder).toEqual([
+      "persist",
+      "start",
+      "dispatch-started",
+      "send",
+      "accepted",
+    ]);
+    expect(accepted).toEqual([targetTurnId]);
+    expect(harness.repository.get()?.status).toBe("consumed");
+  });
+
   it("does not announce dispatch when the target session fails to start", async () => {
     const harness = makeHarness({
       startFreshSessionFailure: new ProviderAdapterRequestError({

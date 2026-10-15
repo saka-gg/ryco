@@ -53,6 +53,12 @@ interface CachedDetection {
   readonly handle: VcsDriverHandle | null;
   /** Identity of `<root>/.git` when detected; null when absent or not a repository. */
   readonly gitPathIdentity: string | null;
+  /**
+   * Identity of `<cwd>/.git` read before detecting, null when absent. A later
+   * change (a nested `git init`) means another repository may own the folder;
+   * an unchanged one — even one Git skips as invalid — keeps the answer.
+   */
+  readonly cwdGitPathIdentity: string | null;
 }
 
 /** Device, inode and kind of the checkout's `.git`, or null when it cannot be read. */
@@ -137,15 +143,15 @@ export const make = Effect.fn("makeVcsDriverRegistry")(function* () {
 
   const detectionCache = yield* Cache.makeWith<string, CachedDetection, VcsError>(
     (key) =>
-      detectResolvedKind(parseDetectionCacheKey(key)).pipe(
-        Effect.flatMap((handle): Effect.Effect<CachedDetection> =>
-          handle === null
-            ? Effect.succeed({ handle, gitPathIdentity: null })
-            : readGitPathIdentity(handle.repository.rootPath).pipe(
-                Effect.map((gitPathIdentity) => ({ handle, gitPathIdentity })),
-              ),
-        ),
-      ),
+      Effect.gen(function* () {
+        const input = parseDetectionCacheKey(key);
+        // Read first: a `.git` created during detection then counts as a change.
+        const cwdGitPathIdentity = yield* readGitPathIdentity(input.cwd);
+        const handle = yield* detectResolvedKind(input);
+        const gitPathIdentity =
+          handle === null ? null : yield* readGitPathIdentity(handle.repository.rootPath);
+        return { handle, gitPathIdentity, cwdGitPathIdentity } satisfies CachedDetection;
+      }),
     {
       capacity: DETECTION_CACHE_CAPACITY,
       timeToLive: (exit) =>
@@ -167,15 +173,12 @@ export const make = Effect.fn("makeVcsDriverRegistry")(function* () {
       }
       const rootPath = cached.handle.repository.rootPath;
       const currentIdentity = yield* readGitPathIdentity(rootPath);
-      // A folder below the root that gained its own `.git` (a nested `git init`)
-      // is a different repository now.
-      const nestedIdentity =
-        currentIdentity === cached.gitPathIdentity && nodePath.resolve(input.cwd) !== rootPath
-          ? yield* readGitPathIdentity(input.cwd)
-          : null;
+      // A folder below the root whose own `.git` changed (a nested `git init`)
+      // may be a different repository now.
       if (
         currentIdentity === cached.gitPathIdentity &&
-        (nestedIdentity === null || nestedIdentity === currentIdentity)
+        (nodePath.resolve(input.cwd) === rootPath ||
+          (yield* readGitPathIdentity(input.cwd)) === cached.cwdGitPathIdentity)
       ) {
         return cached.handle;
       }

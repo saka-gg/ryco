@@ -64,7 +64,9 @@ pair of files per thread: `<threadId>.native.log` (provider protocol messages) a
   `RYCO_PROVIDER_EVENT_LOGS=off` disables the writers entirely.
 - size: strings over 8 KiB keep a head and tail, inline base64 is replaced by its size and digest,
   consecutive streaming deltas become one `delta-run` record, and canonical records reference the
-  native message (`raw.nativeId`) instead of copying it.
+  native message (`raw.nativeId`) when the native log holds it at the current detail level.
+  Otherwise they keep the (capped) payload: a provider message the `lifecycle` native filter drops,
+  or a small adapter-made payload with no native message.
 - retention: each file rotates at 10 MiB with 3 gzipped backups (`.1.gz` …); files untouched for 30
   days are removed and the directory is kept under 512 MiB (oldest first), at boot and hourly.
   Terminal histories in `logs/terminals/` get the same sweep (90 days, 256 MiB).

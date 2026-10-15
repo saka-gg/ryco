@@ -4,13 +4,15 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { DEFAULT_SERVER_SETTINGS, type ServerSettings, ThreadId } from "@ryco/contracts";
-import { assert, describe, it } from "@effect/vitest";
+import { AsyncRotatingFileSink } from "@ryco/shared/logging";
+import { assert, describe, it, vi } from "@effect/vitest";
 import {
   ConfigProvider,
   Context,
   Effect,
   Exit,
   Layer,
+  Option,
   PubSub,
   Queue,
   Ref,
@@ -114,6 +116,46 @@ describe("resolveProviderEventLogMode", () => {
       "lifecycle",
     );
   });
+});
+
+describe("ProviderEventLoggersLive shutdown", () => {
+  it.live("bounds the shutdown drain when a log file never finishes closing", () =>
+    Effect.gen(function* () {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-loggers-"));
+      // Every sink close hangs until the end of the test, like a wedged fs write.
+      let release!: () => void;
+      const wedged = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalClose = AsyncRotatingFileSink.prototype.close;
+      const close = vi.spyOn(AsyncRotatingFileSink.prototype, "close").mockImplementation(function (
+        this: AsyncRotatingFileSink,
+      ) {
+        return wedged.then(() => originalClose.call(this));
+      });
+      try {
+        const settings = makeSettingsLayer({ providerEventLogs: "full" });
+        const { scope, loggers } = yield* buildLoggers({ baseDir, settings: settings.layer });
+        yield* loggers.native!.write(
+          { kind: "session", method: "thread/started" },
+          ThreadId.make("thread-wedged"),
+        );
+        const startedAt = Date.now();
+        const closed = yield* Scope.close(scope, Exit.void).pipe(
+          Effect.timeoutOption("10 seconds"),
+        );
+        assert.isTrue(Option.isSome(closed), "scope close did not finish");
+        assert.isAtLeast(close.mock.calls.length, 1);
+        assert.isBelow(Date.now() - startedAt, 5_000);
+      } finally {
+        close.mockRestore();
+        // Let the abandoned closes finish so no file handle outlives the test.
+        release();
+        yield* sleep(50);
+        fs.rmSync(baseDir, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 it.layer(NodeServices.layer)("ProviderEventLoggersLive", (it) => {

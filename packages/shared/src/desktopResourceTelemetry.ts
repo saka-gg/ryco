@@ -112,7 +112,8 @@ export function parseDesktopResourceTelemetry(
  *   may already serve the static shell.
  * - `http-serving`: the router's request handlers are attached.
  * - `startup-ready`: the startup command gate opened.
- * - `startup-phase`: a coarse startup phase finished after `ms` milliseconds.
+ * - `startup-phase`: a startup phase finished `ms` milliseconds after process
+ *   start; `durationMs`, when present, is how long the phase itself ran.
  * - `fatal`: a non-retryable startup error; the backend exits with
  *   {@link DESKTOP_BACKEND_FATAL_EXIT_CODE} right after writing it.
  */
@@ -120,7 +121,12 @@ export type DesktopBackendLifecycleFrame =
   | { readonly type: "http-bound"; readonly port: number }
   | { readonly type: "http-serving"; readonly port: number }
   | { readonly type: "startup-ready" }
-  | { readonly type: "startup-phase"; readonly name: string; readonly ms: number }
+  | {
+      readonly type: "startup-phase";
+      readonly name: string;
+      readonly ms: number;
+      readonly durationMs?: number;
+    }
   | { readonly type: "fatal"; readonly code: string; readonly message: string };
 
 /** EX_CONFIG: the backend failed deterministically; restarting cannot help. */
@@ -143,9 +149,11 @@ export function parseDesktopBackendLifecycleFrame(
     case "startup-ready":
       return { type: "startup-ready" };
     case "startup-phase":
-      return boundedText(value.name) && counter(value.ms)
-        ? { type: "startup-phase", name: value.name, ms: value.ms }
-        : null;
+      if (!boundedText(value.name) || !counter(value.ms)) return null;
+      // Older backends send no duration; a malformed one drops only the duration.
+      return counter(value.durationMs)
+        ? { type: "startup-phase", name: value.name, ms: value.ms, durationMs: value.durationMs }
+        : { type: "startup-phase", name: value.name, ms: value.ms };
     case "fatal":
       return boundedText(value.code) && typeof value.message === "string"
         ? {

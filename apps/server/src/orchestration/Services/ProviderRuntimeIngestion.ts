@@ -14,10 +14,11 @@ import type { ThreadId } from "@ryco/contracts";
  * ProviderRuntimeIngestionShape - Service API for runtime ingestion lifecycle.
  */
 /**
- * Why a thread's provider history is read: a client opened the thread, or its
- * session settled (a turn ended, the session stopped) while one watched it.
+ * Why a thread's provider history is read: a client opened the thread, its
+ * session settled (a turn ended, the session stopped) while one watched it, or
+ * a running turn on a live runtime went silent and may have lost its completion.
  */
-export type HistoryRecoveryTrigger = "subscribe" | "session-settled";
+export type HistoryRecoveryTrigger = "subscribe" | "session-settled" | "liveness";
 
 export interface ProviderRuntimeIngestionShape {
   /**

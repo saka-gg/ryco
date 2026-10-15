@@ -21,6 +21,7 @@ import { type RightPanelSearchUpdate, useRightPanelTabs } from "../../hooks/useR
 import { useThreadRightPanelRouteState } from "../../hooks/useThreadRightPanelRouteState";
 import { useSettings } from "../../hooks/useSettings";
 import { releaseThreadDetailPrewarm } from "../../lib/threadDetailPrewarm";
+import { markStartupPhaseAfterPaint } from "../../perf/startupInstrumentation";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
 import { retainDesktopWorkspaceThreadScope } from "../../platform/desktopWorkspace";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
@@ -37,11 +38,13 @@ import {
 } from "../../storeSelectors";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
+import { useWorkspacePanelPreloadScheduling } from "../../workspacePanelPreload";
 import ChatView from "../ChatView";
 import { threadHasStarted } from "../ChatView.logic";
 import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
 import { RightPanelSheet } from "../RightPanelSheet";
-import { PhoneWorkSurfaceSheet } from "../shell/phone/PhoneWorkSurface";
+import { LazyPhoneWorkSurfaceSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { cn } from "~/lib/utils";
 
@@ -55,6 +58,10 @@ export function ChatThreadRouteView({
   usePerfMark("ChatThreadRouteView");
   const navigate = useNavigate();
   const presentationTier = usePresentationTier();
+  const phoneWorkSurfaceReady = usePhoneThreadSurfaceReady(
+    LazyPhoneWorkSurfaceSheet,
+    presentationTier === "phone",
+  );
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
   const routeEnvironmentId = threadRef?.environmentId ?? null;
   const routeThreadId = threadRef?.threadId ?? null;
@@ -154,6 +161,11 @@ export function ChatThreadRouteView({
     if (!canRenderRouteThread || !routeEnvironmentId || !routeThreadId) return;
     releaseThreadDetailPrewarm(routeEnvironmentId, routeThreadId);
   }, [canRenderRouteThread, routeEnvironmentId, routeThreadId]);
+  // The shell's speculative chunk preloads wait for this on a thread boot, so
+  // they never share the link with the thread's own chunk and detail stream.
+  useEffect(() => {
+    if (canRenderRouteThread) markStartupPhaseAfterPaint("first-thread-painted");
+  }, [canRenderRouteThread]);
   useEffect(() => {
     if (!threadRef || !pendingDeviceOpenRequest || presentationTier === "phone") return;
     consumeDeviceOpenRequest(threadRef.environmentId, threadRef.threadId);
@@ -231,13 +243,18 @@ export function ChatThreadRouteView({
     finalizePromotedDraftThreadByRef(threadRef);
   }, [draftThread?.promotedTo, serverThreadStarted, threadRef]);
 
-  if (!threadRef || !canRenderRouteThread) {
-    return null;
-  }
-
   const mountedRightPanelMode: RightPanelMode | null = rightPanelOpen
     ? rightPanelMode
     : lastOpenedRightPanelMode;
+  useWorkspacePanelPreloadScheduling({
+    open: rightPanelOpen,
+    panelMode: mountedRightPanelMode,
+    enabled: presentationTier !== "phone" && threadRef !== null && canRenderRouteThread,
+  });
+
+  if (!threadRef || !canRenderRouteThread) {
+    return null;
+  }
 
   // Phone tier: the same URL-driven panel state renders as a full-screen
   // pushed surface over the thread instead of an inline panel or right sheet.
@@ -264,18 +281,24 @@ export function ChatThreadRouteView({
             )}
           </ChatPanes>
         </SidebarInset>
-        <PhoneWorkSurfaceSheet label="Workspace" open={rightPanelOpen} onClose={closeRightPanel}>
-          {shouldRenderPhoneRightPanelContent ? (
-            <LazyRightPanel
-              mode="phone"
-              panelMode={mountedRightPanelMode}
-              openedPanelModes={openedPanelModes}
-              openedAgentKeys={openedAgentKeys}
-              openedRenderKey={openedRenderKey}
-              onClosePanelTab={closePanelTab}
-            />
-          ) : null}
-        </PhoneWorkSurfaceSheet>
+        {phoneWorkSurfaceReady ? (
+          <LazyPhoneWorkSurfaceSheet
+            label="Workspace"
+            open={rightPanelOpen}
+            onClose={closeRightPanel}
+          >
+            {shouldRenderPhoneRightPanelContent ? (
+              <LazyRightPanel
+                mode="phone"
+                panelMode={mountedRightPanelMode}
+                openedPanelModes={openedPanelModes}
+                openedAgentKeys={openedAgentKeys}
+                openedRenderKey={openedRenderKey}
+                onClosePanelTab={closePanelTab}
+              />
+            ) : null}
+          </LazyPhoneWorkSurfaceSheet>
+        ) : null}
       </>
     );
   }

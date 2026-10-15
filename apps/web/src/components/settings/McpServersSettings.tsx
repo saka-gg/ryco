@@ -867,18 +867,23 @@ export function McpServersSettings() {
     setSelectedWorkspaceId(workspaceId);
   }, []);
   // Only the latest server listing (or mutation result) for the selected workspace applies.
-  const serversGenerationRef = useRef(0);
+  const snapshotGenerationRef = useRef(0);
+  // Only the latest listing owns the refreshing flag. Kept apart from the
+  // snapshot generation: a mutation result that supersedes an in-flight
+  // listing must not leave that listing unable to clear the flag.
+  const loadGenerationRef = useRef(0);
   const applyServersResult = useCallback((workspaceId: string, result: McpListServersResult) => {
     if (selectedWorkspaceIdRef.current !== workspaceId) return;
-    serversGenerationRef.current += 1;
+    snapshotGenerationRef.current += 1;
     setSnapshot(result);
   }, []);
 
   const loadServers = useCallback(
     async (workspaceId: string, options?: { quiet?: boolean }) => {
-      const generation = ++serversGenerationRef.current;
+      const loadGeneration = ++loadGenerationRef.current;
+      const snapshotGeneration = ++snapshotGenerationRef.current;
       const isCurrent = () =>
-        generation === serversGenerationRef.current &&
+        snapshotGeneration === snapshotGenerationRef.current &&
         selectedWorkspaceIdRef.current === workspaceId;
       if (!options?.quiet) setRefreshing(true);
       setError(null);
@@ -893,7 +898,7 @@ export function McpServersSettings() {
         setError(cause instanceof Error ? cause.message : "Failed to load MCP servers.");
         showErrorToast("Failed to load MCP servers", cause);
       } finally {
-        if (isCurrent()) setRefreshing(false);
+        if (loadGeneration === loadGenerationRef.current) setRefreshing(false);
       }
     },
     [mcpApi],

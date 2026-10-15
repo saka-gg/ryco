@@ -3,7 +3,13 @@ import {
   projectIconCacheBytes,
   readProjectIconSource,
 } from "@ryco/client-runtime/connection";
-import { EnvironmentId, ProjectId, type EnvironmentApi } from "@ryco/contracts";
+import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
+import {
+  EnvironmentId,
+  ProjectId,
+  type EnvironmentApi,
+  type StatisticsSnapshot,
+} from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -26,6 +32,18 @@ const environmentId = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");
 const iconProjectId = ProjectId.make("iconProject");
 const ICON_SOURCE = "data:image/png;base64,aWNvbg==";
 
+const otherEnvironmentId = EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb");
+
+function cacheStatistics(target: EnvironmentId): Promise<StatisticsSnapshot> {
+  return statisticsSnapshotCache.load(
+    target,
+    async () =>
+      ({
+        generatedAt: `statistics-${target}`,
+      }) as StatisticsSnapshot,
+  );
+}
+
 function cacheProjectIcon(): Promise<string | null> {
   const api = {
     projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
@@ -36,6 +54,8 @@ function cacheProjectIcon(): Promise<string | null> {
 describe("clearWebHostedNodeScopedState", () => {
   it("demotes only transport projections and preserves cross-node UI state", async () => {
     await cacheProjectIcon();
+    await cacheStatistics(environmentId);
+    await cacheStatistics(otherEnvironmentId);
     useStore.setState({ activeEnvironmentId: environmentId });
     useComposerDraftStore.getState().setPrompt(DraftId.make("sensitiveThread"), "sensitive prompt");
     useTerminalStateStore.setState({
@@ -69,10 +89,16 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(useSettingsDialogStore.getState().open).toBe(true);
     // Project artwork is keyed by node and survives a node switch.
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBe(ICON_SOURCE);
+    // Owner-only statistics of the node being left are not repainted; other nodes keep theirs.
+    expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
+    expect(statisticsSnapshotCache.peek(otherEnvironmentId)?.generatedAt).toBe(
+      `statistics-${otherEnvironmentId}`,
+    );
   });
 
   it("clears preserved cross-node state at the account-session boundary", async () => {
     await cacheProjectIcon();
+    await cacheStatistics(environmentId);
     useComposerDraftStore.getState().setPrompt(DraftId.make("accountDraft"), "private prompt");
     useUiStateStore.setState({ pinnedThreadKeys: { accountThread: true } });
     useCommandPaletteStore.getState().openAddProject();
@@ -103,5 +129,6 @@ describe("clearWebHostedNodeScopedState", () => {
     });
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBeUndefined();
     expect(projectIconCacheBytes(environmentId)).toBe(0);
+    expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
   });
 });

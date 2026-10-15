@@ -34,6 +34,8 @@ import DiffPanel, { DiffWorkerPoolProvider } from "./DiffPanel";
 
 const fixture = vi.hoisted(() => ({
   patch: "",
+  /** The fetched result, kept while the patch is unchanged like the client cache keeps it. */
+  checkpointData: null as { diff: string } | null,
   wholePatchHashes: 0,
   workerParses: 0,
   heldParses: [] as Array<() => void>,
@@ -157,7 +159,10 @@ vi.mock("~/lib/gitStatusState", () => ({
 
 vi.mock("~/rpc/useProvider", () => ({
   useCheckpointDiff: () => ({
-    data: { diff: fixture.patch },
+    data:
+      fixture.checkpointData?.diff === fixture.patch
+        ? fixture.checkpointData
+        : (fixture.checkpointData = { diff: fixture.patch }),
     error: null,
     isLoading: false,
   }),
@@ -404,11 +409,22 @@ describe("real Pierre file identity and panel navigation", () => {
     expect(fixture.largeInlineParses).toBe(0);
     expect(fixture.wholePatchHashes).toBe(1);
 
-    // The same text delivered again (a refetch builds a new string) is not re-hashed.
+    // The same text delivered again (a refetch builds a new string and result) is not re-hashed.
     fixture.patch = paths.map((path) => patchFor(path)).join("");
+    fixture.checkpointData = null;
     await screen.rerender(<App />);
     await screen.rerender(<App />);
     expect(fixture.wholePatchHashes).toBe(1);
     await screen.unmount();
+
+    // Reopening the review tab mounts a new panel over the cached result: no
+    // re-hash and no re-parse.
+    const reopened = await render(<App />);
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll("[data-diff-file-path]").length).toBeGreaterThan(0),
+    );
+    expect(fixture.wholePatchHashes).toBe(1);
+    expect(fixture.workerParses).toBe(1);
+    await reopened.unmount();
   });
 });

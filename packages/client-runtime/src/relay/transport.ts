@@ -203,8 +203,13 @@ export interface HostedRelayAttemptBinding {
   readonly markDeliveryUnknown: (generation: number) => void;
   readonly connectionClosed: (generation: number) => void;
   readonly connectionRecovered?: (generation: number) => void;
-  /** A unary request has waited {@link HOSTED_REQUEST_STALL_PROBE_MS} without a reply. */
-  readonly requestStalled?: () => void;
+  /**
+   * The account connection carrying this channel may be dead: a unary request
+   * has waited {@link HOSTED_REQUEST_STALL_PROBE_MS} without a reply, the
+   * channel's heartbeat timed out, or the channel closed unintentionally. The
+   * replacement channel must not be opened on that connection unchecked.
+   */
+  readonly connectionSuspect?: () => void;
 }
 
 /**
@@ -255,7 +260,7 @@ function defaultBinding(): HostedRelayAttemptBinding {
     markDeliveryUnknown: (generation) => hostedHubController.markDeliveryUnknown(generation),
     connectionClosed: (generation) => hostedHubController.connectionClosed(generation),
     connectionRecovered: recoverHostedRelayConnection,
-    requestStalled: () => getHostedRuntimeConfiguration().probeHubSubscription?.(),
+    connectionSuspect: () => getHostedRuntimeConfiguration().probeHubSubscription?.(),
   };
 }
 
@@ -512,8 +517,18 @@ export class HostedRelayAttemptFactory {
         return delay;
       },
       onOpen: () => this.#reconnect.opened(),
+      // A silent channel says the account connection may be dead too — say a
+      // NAT rebinding no browser signal reported. Probing it now, before the
+      // retry builds the replacement channel, keeps that channel off a dead
+      // connection instead of waiting out the connection's liveness bound.
+      onHeartbeatTimeout: () => {
+        if (!this.#disposed) this.#binding.connectionSuspect?.();
+      },
       onClose: (_details, context) => {
         if (context.intentional) return;
+        // The replies the stall watch waits for died with this channel.
+        this.#clearStallWatch();
+        if (!this.#disposed) this.#binding.connectionSuspect?.();
         receiptedRequestOwner?.connectionLost();
         const generation = this.#activeGeneration;
         if (generation === null) return;
@@ -584,7 +599,7 @@ export class HostedRelayAttemptFactory {
         // Reported once per request; a probe answers for every request it covers.
         this.#unansweredRequests.delete(id);
       }
-      if (stalled && !this.#disposed) this.#binding.requestStalled?.();
+      if (stalled && !this.#disposed) this.#binding.connectionSuspect?.();
       this.#armStallWatch();
     }, delay);
   }

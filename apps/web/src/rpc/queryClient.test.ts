@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
+import { RpcRequestRefusedError } from "@ryco/client-runtime/rpc";
 
 import { QueryClient } from "./queryClient.ts";
 
@@ -117,6 +118,70 @@ describe("QueryClient reconnect refresh", () => {
     expect(client.getQueryData(key)).toBe("ready");
     removeFirst();
     removeSecond();
+  });
+
+  it("leaves a read refused until the session is ready to the post-ready refresh", async () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const key = ["query", environmentId, "awaiting-session"] as const;
+    const run = vi
+      .fn()
+      .mockRejectedValueOnce(new RpcRequestRefusedError("awaiting-session"))
+      .mockResolvedValue("ready");
+    const refetch = () => client.fetch(key, run, { force: true });
+    const remove = client.addObserver(key, { environmentId, staleTime: Infinity, refetch });
+
+    // The default retries do not apply: the refusal settles at once.
+    await expect(client.fetch(key, run)).rejects.toBeInstanceOf(RpcRequestRefusedError);
+    expect(run).toHaveBeenCalledTimes(1);
+
+    // The session became ready: the refresh runs it again without a backoff.
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(key)).toBe("ready");
+    remove();
+  });
+
+  it("re-runs a refused read when the post-ready refresh joined it in flight", async () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const key = ["query", environmentId, "refused-in-flight"] as const;
+    let refuse!: (error: unknown) => void;
+    const run = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            refuse = reject;
+          }),
+      )
+      .mockResolvedValue("ready");
+    const refetch = () => client.fetch(key, run, { force: true });
+    const remove = client.addObserver(key, { environmentId, staleTime: Infinity, refetch });
+
+    // The read was issued before the session was ready; its refusal is still pending
+    // when the session becomes ready and the refresh joins the attempt.
+    const first = client.fetch(key, run);
+    const refresh = client.refreshActiveQueriesForEnvironment(environmentId);
+    refuse(new RpcRequestRefusedError("awaiting-session"));
+
+    await expect(first).resolves.toBe("ready");
+    await refresh;
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(key)).toBe("ready");
+    remove();
+  });
+
+  it("still retries a read that failed for another reason", async () => {
+    vi.useFakeTimers();
+    const client = new QueryClient();
+    const key = ["query", environmentId, "transient"] as const;
+    const run = vi.fn().mockRejectedValueOnce(new Error("transient")).mockResolvedValue("ready");
+
+    const result = client.fetch(key, run, { retry: 1 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(result).resolves.toBe("ready");
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes stale active data without touching an inactive query", async () => {

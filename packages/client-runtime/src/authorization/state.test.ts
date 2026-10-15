@@ -4016,6 +4016,61 @@ describe("cookie-mode access checks", () => {
     });
   });
 
+  it("bounds the signed-out bootstrap probe a boot gate waits on by the access-check deadline", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockRejectedValue(
+      new HostedHubApiError("session_invalid", 401),
+    );
+    const availability = deferred<boolean>();
+    const getBootstrapAvailability = vi
+      .spyOn(hostedHubApi, "getBootstrapAvailability")
+      .mockReturnValue(availability.promise);
+
+    let gateReleased = false;
+    const gate = hostedHubController.bootstrapAccess().then(() => {
+      gateReleased = true;
+    });
+    await vi.waitFor(() => expect(getBootstrapAvailability).toHaveBeenCalledOnce());
+    expect(getBootstrapAvailability.mock.calls[0]?.[1]).toEqual({
+      deadlineMs: HOSTED_ACCESS_CHECK_DEADLINE_MS,
+    });
+    expect(gateReleased).toBe(false);
+
+    // The bounded probe times out: the gate releases on a signed-out answer.
+    availability.reject(
+      new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+    );
+    await gate;
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "signed-out",
+      bootstrapAvailable: false,
+    });
+  });
+
+  it("gives the signed-out bootstrap probe the full deadline once an access check has timed out", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession")
+      .mockRejectedValueOnce(
+        new HostedHubApiError("timeout", 0, undefined, undefined, undefined, "request-timeout"),
+      )
+      .mockRejectedValue(new HostedHubApiError("session_invalid", 401));
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+    const getBootstrapAvailability = vi
+      .spyOn(hostedHubApi, "getBootstrapAvailability")
+      .mockResolvedValue(true);
+
+    await hostedHubController.bootstrap();
+    expect(hostedHubStore.getState().accountStatus).toBe("unavailable");
+    await hostedHubController.bootstrap();
+
+    expect(getBootstrapAvailability).toHaveBeenCalledOnce();
+    expect(getBootstrapAvailability.mock.calls[0]?.[1]).toBeUndefined();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "signed-out",
+      bootstrapAvailable: true,
+    });
+  });
+
   it("bounds the first access check, then gives a timed-out link the full deadline until the Hub answers", async () => {
     vi.useFakeTimers();
     useCookieMode();

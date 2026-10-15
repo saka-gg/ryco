@@ -25,6 +25,28 @@ describe("repositoryListCache", () => {
     }),
   );
 
+  it.effect("lets an entry choose a shorter lifetime", () =>
+    Effect.gen(function* () {
+      let now = 0;
+      let loads = 0;
+      const cache = makeRepositoryListCache({ ttlMs: 30_000, nowMs: () => now });
+      const read = (key: string, ttlMs?: number) =>
+        cache.get({
+          repository: "a",
+          key,
+          load: Effect.sync(() => ++loads),
+          ...(ttlMs !== undefined ? { ttlMs } : {}),
+        });
+      expect(yield* read("detail", 5_000)).toBe(1);
+      expect(yield* read("list")).toBe(2);
+      now = 4_999;
+      expect(yield* read("detail", 5_000)).toBe(1);
+      now = 5_000;
+      expect(yield* read("detail", 5_000)).toBe(3);
+      expect(yield* read("list")).toBe(2);
+    }),
+  );
+
   it.effect("never caches a failure, and shares one in-flight read", () =>
     Effect.gen(function* () {
       const cache = makeRepositoryListCache();

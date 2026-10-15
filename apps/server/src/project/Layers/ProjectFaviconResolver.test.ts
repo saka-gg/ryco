@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Deferred, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
 
 import { ProjectFaviconResolver } from "../Services/ProjectFaviconResolver.ts";
 import {
@@ -132,19 +132,22 @@ describe("makeProjectFaviconResolverWith", () => {
       });
 
       const [slow, after] = yield* Effect.all(
-        [resolver.readIcon("/slow"), resolver.readIcon("/after")],
+        [Effect.flip(resolver.readIcon("/slow")), resolver.readIcon("/after")],
         { concurrency: "unbounded" },
       );
-      expect(slow).toBeNull();
+      // Unfinished is not "no icon": callers must not remember it as an absence.
+      expect(slow._tag).toBe("ProjectFaviconUnavailable");
       // The root behind the stall gets its own child and its icon.
       expect(after?.path).toBe("/after/favicon.svg");
 
-      // The stalled root backs off briefly, then is read again.
+      // The stalled root backs off briefly (still unavailable), then is read again.
       batches.length = 0;
-      yield* resolver.readIcon("/slow");
+      expect((yield* Effect.flip(resolver.readIcon("/slow")))._tag).toBe(
+        "ProjectFaviconUnavailable",
+      );
       expect(batches).toEqual([]);
       nowMs += 61_000;
-      yield* resolver.readIcon("/slow");
+      yield* Effect.flip(resolver.readIcon("/slow"));
       expect(batches).toEqual([["/slow"]]);
     }).pipe(Effect.scoped),
   );
@@ -169,15 +172,34 @@ describe("makeProjectFaviconResolverWith", () => {
       });
 
       // A rejected read is an unfinished one: its caller is answered at once.
-      expect(yield* resolver.readIcon("/a")).toBeNull();
+      expect((yield* Effect.flip(resolver.readIcon("/a")))._tag).toBe("ProjectFaviconUnavailable");
       expect((yield* resolver.readIcon("/b"))?.path).toBe("/b/favicon.svg");
 
       // A defect inside a batch answers its callers too (not at the 30 s
       // deadline), caches nothing for them and leaves the readers running.
       breakClock = true;
-      expect(yield* resolver.readIcon("/c")).toBeNull();
+      expect((yield* Effect.flip(resolver.readIcon("/c")))._tag).toBe("ProjectFaviconUnavailable");
       expect((yield* resolver.readIcon("/c"))?.path).toBe("/c/favicon.svg");
       expect((yield* resolver.readIcon("/d"))?.path).toBe("/d/favicon.svg");
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("kills an in-flight reader child when the resolver scope closes", () =>
+    Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const started = yield* Deferred.make<AbortSignal>();
+      const resolver = yield* makeProjectFaviconResolverWith({
+        readFavicons: (_roots, signal) => {
+          Deferred.doneUnsafe(started, Effect.succeed(signal));
+          return new Promise(() => {});
+        },
+      }).pipe(Scope.provide(scope));
+
+      yield* Effect.forkDetach(resolver.readIcon("/stuck"));
+      const signal = yield* Deferred.await(started);
+      expect(signal.aborted).toBe(false);
+      yield* Scope.close(scope, Exit.void);
+      expect(signal.aborted).toBe(true);
+    }),
   );
 });

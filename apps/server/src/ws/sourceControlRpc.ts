@@ -34,10 +34,18 @@ import {
 } from "../sourceControl/SourceControlProvider.ts";
 import { withSourceControlBodyFile } from "../sourceControl/sourceControlBodyFile.ts";
 import { PULL_REQUEST_INDEX_LIMIT } from "../sourceControl/pullRequestIndex.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 /** What a list without a limit returns (the hosts' own list default). */
 const DEFAULT_CHANGE_REQUEST_LIST_LIMIT = 20;
+
+/**
+ * How long row reads (`view: "row"`) of one change request share a detail.
+ * Short against the rows' 30 s poll: it folds rows, worktrees and clients that
+ * ask together, and mutations and remote refreshes drop it at once.
+ */
+export const CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS = 10_000;
 
 /** Actions that change the head branch, review gate, or open state, so linked worktrees must re-sync. */
 function isLifecycleChangingAction(action: ChangeRequestUpdateAction): boolean {
@@ -363,10 +371,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
                 ...(limit !== undefined ? { limit } : {}),
               }),
           }).pipe(
-            Effect.tap(() =>
+            Effect.tap((items) =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
                 reason: "sourceControl.listIssues",
+                knownIssues: items,
               }),
             ),
           ),
@@ -454,10 +463,11 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
                 ...(limit !== undefined ? { limit } : {}),
               }),
           }).pipe(
-            Effect.tap(() =>
+            Effect.tap((items) =>
               refreshLinkedWorktreeSourceControlStates({
                 cwd,
                 reason: "sourceControl.searchIssues",
+                knownIssues: items,
               }),
             ),
           ),
@@ -582,21 +592,36 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
           "rpc.aggregate": "source-control",
         },
       ),
-    [WS_METHODS.sourceControlGetChangeRequestDetail]: ({ cwd, reference, fullContent }) =>
+    [WS_METHODS.sourceControlGetChangeRequestDetail]: ({ cwd, reference, fullContent, view }) =>
       observeRpcEffect(
         WS_METHODS.sourceControlGetChangeRequestDetail,
         ownerEffect(
           WS_METHODS.sourceControlGetChangeRequestDetail,
-          sourceControlRegistry.resolve({ cwd }).pipe(
-            Effect.flatMap((provider) =>
-              provider.getChangeRequestDetail({
+          Effect.suspend(() => {
+            const read = sourceControlRegistry.resolve({ cwd }).pipe(
+              Effect.flatMap((provider) =>
+                provider.getChangeRequestDetail({
+                  cwd,
+                  reference,
+                  ...(fullContent !== undefined ? { fullContent } : {}),
+                }),
+              ),
+              Effect.tap(() => refreshStateForLinkedReference({ cwd, kind: "pr", reference })),
+            );
+            if (view !== "row") return read;
+            // Passive row glyphs: every visible row polls its change request,
+            // which is several forge children each. They queue in the
+            // background lane behind the focused surfaces, and rows of the
+            // same repository share one read for a few seconds.
+            return gitWorkflow
+              .cachedRepositoryList({
                 cwd,
-                reference,
-                ...(fullContent !== undefined ? { fullContent } : {}),
-              }),
-            ),
-            Effect.tap(() => refreshStateForLinkedReference({ cwd, kind: "pr", reference })),
-          ),
+                key: JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]),
+                load: read,
+                ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+              })
+              .pipe(inBackgroundProcessLane);
+          }),
         ),
         {
           "rpc.aggregate": "source-control",

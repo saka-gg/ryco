@@ -137,6 +137,11 @@ import { LocalDiagnosticsMetricsLive } from "./observability/Services/LocalDiagn
 import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegistry.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import {
+  ProjectFaviconResolver,
+  ProjectFaviconUnavailable,
+  type ProjectFaviconResolverShape,
+} from "./project/Services/ProjectFaviconResolver.ts";
+import {
   ProjectSetupScriptRunner,
   type ProjectSetupScriptRunnerShape,
 } from "./project/Services/ProjectSetupScriptRunner.ts";
@@ -531,6 +536,7 @@ const buildAppUnderTest = (options?: {
     sourceControlRepositoryService?: Partial<SourceControlRepositoryService.SourceControlRepositoryServiceShape>;
     vcsStatusBroadcaster?: Partial<VcsStatusBroadcaster.VcsStatusBroadcasterShape>;
     projectSetupScriptRunner?: Partial<ProjectSetupScriptRunnerShape>;
+    projectFaviconResolver?: ProjectFaviconResolverShape;
     terminalManager?: Partial<TerminalManagerShape>;
     orchestrationEngine?: Partial<OrchestrationEngineShape>;
     threadDeletionReactor?: Partial<ThreadDeletionReactorShape>;
@@ -705,7 +711,9 @@ const buildAppUnderTest = (options?: {
         Layer.provide(WorkspacePathsLive),
         Layer.provide(workspaceEntriesLayer),
       ),
-      ProjectFaviconResolverLive,
+      options?.layers?.projectFaviconResolver
+        ? Layer.succeed(ProjectFaviconResolver, options.layers.projectFaviconResolver)
+        : ProjectFaviconResolverLive,
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
       Layer.provideMerge(vcsDriverRegistryLayer),
@@ -1692,6 +1700,32 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.headers["cache-control"], "private, max-age=3600");
       assert.equal(response.headers["x-content-type-options"], "nosniff");
       assert.include(response.headers["content-security-policy"] ?? "", "sandbox");
+      assert.include(yield* response.text, 'data-fallback="project-favicon"');
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves an uncacheable fallback when the project favicon read did not finish", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        config: { devUrl: new URL("http://127.0.0.1:5173") },
+        layers: {
+          projectFaviconResolver: {
+            readIcon: (cwd) => Effect.fail(new ProjectFaviconUnavailable({ cwd })),
+          },
+        },
+      });
+
+      const response = yield* HttpClient.get(
+        `/api/project-favicon?cwd=${encodeURIComponent("/stalled/project")}`,
+        {
+          headers: {
+            cookie: yield* getAuthenticatedSessionCookieHeader(),
+          },
+        },
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers["cache-control"], "no-store");
       assert.include(yield* response.text, 'data-fallback="project-favicon"');
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

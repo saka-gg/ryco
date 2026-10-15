@@ -39,6 +39,13 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
     functions: ["useThreadMenuActions"],
   },
   { file: "../hooks/useSettings.ts", functions: ["useSettings"] },
+  // Sidebar calls these on every render; an uncompiled hook hands it a new
+  // new-thread handler each time, which re-renders every project row.
+  {
+    file: "../hooks/useHandleNewThread.ts",
+    functions: ["useNewThreadState", "useNewThreadHandler"],
+  },
+  { file: "../hooks/useProjectGroupingSettings.ts", functions: ["useProjectGroupingSettings"] },
   {
     file: "../components/chat/ChatComposer.tsx",
     functions: ["ChatComposer", "useSetPromptFromTraits"],

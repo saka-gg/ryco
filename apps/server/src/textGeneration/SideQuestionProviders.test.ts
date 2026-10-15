@@ -259,7 +259,7 @@ it.layer(testLayer)("side question provider isolation", (it) => {
       const service = yield* makeCopilotTextGeneration(
         Schema.decodeSync(CopilotSettings)({}),
         {},
-        () => client,
+        () => Effect.succeed(client),
       );
       const fiber = yield* service.answerSideQuestion(input).pipe(Effect.forkChild);
       yield* Effect.promise(() => started);

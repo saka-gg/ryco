@@ -2,13 +2,15 @@ import {
   createElement,
   use,
   useEffect,
-  useEffectEvent,
+  useLayoutEffect,
+  useRef,
   useState,
   type ComponentType,
   type FunctionComponent,
 } from "react";
 
 import { scheduleIdleTask } from "./idleTask";
+import { allowsSpeculativePreload } from "./shellIdlePreload";
 
 /**
  * A code-split component that renders synchronously once its module is loaded.
@@ -136,9 +138,15 @@ export function useLazyComponentReady(
   const failed = failedFor === component;
   const loaded = component.isLoaded();
   const handlesLoadError = options?.onLoadError !== undefined;
-  const reportLoadError = useEffectEvent((error: unknown) => {
-    options?.onLoadError?.(error, () => setFailedFor(null));
+  // The latest handler, read when the load settles. Not `useEffectEvent`:
+  // React 19.2 refreshes an effect event only in plain function components,
+  // so inside a `memo` or `forwardRef` caller it kept the first render's
+  // handler, and the handler's view of the caller's state was stale.
+  const onLoadErrorRef = useRef(options?.onLoadError);
+  useLayoutEffect(() => {
+    onLoadErrorRef.current = options?.onLoadError;
   });
+
   useEffect(() => {
     if (!wanted || loaded || failed) return;
     let active = true;
@@ -147,8 +155,9 @@ export function useLazyComponentReady(
       if (!active) return;
       if (handlesLoadError && !component.isLoaded()) {
         setFailedFor(() => component);
-        reportLoadError(
+        onLoadErrorRef.current?.(
           component.loadFailure?.()?.error ?? new Error("Lazy component failed to load."),
+          () => setFailedFor(null),
         );
         return;
       }
@@ -165,10 +174,12 @@ export function useLazyComponentReady(
  * Loads `component` in an idle slot after the caller mounts, while `enabled`,
  * so a surface the user is likely to open next does not wait on its chunk. A
  * failed idle load stays quiet: the next `preload()` (the open) retries it.
+ * The download is speculative, so data saver and slow links skip it (see
+ * `allowsSpeculativePreload`) and load the surface on the open instead.
  */
 export function usePreloadWhenIdle(component: PreloadableModule, enabled: boolean): void {
   useEffect(() => {
-    if (!enabled || component.isLoaded()) return;
+    if (!enabled || component.isLoaded() || !allowsSpeculativePreload()) return;
     return scheduleIdleTask(() => {
       void component.preload();
     });

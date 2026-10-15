@@ -971,3 +971,101 @@ describe("change request detail sharing", () => {
     release();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Row reads (inbox rows other than the focused one)
+// ---------------------------------------------------------------------------
+
+const ROW_DETAIL_INPUT = { ...SUMMARY_DETAIL_INPUT, view: "row" } as const;
+
+function calledWithView(view: "row" | undefined): number {
+  return client.getChangeRequestDetail.mock.calls.filter(
+    ([request]) => (request as { view?: string }).view === view,
+  ).length;
+}
+
+describe("change request row reads", () => {
+  it("never lets a row read stand in for a focused read of the same request", async () => {
+    const rowRead = createDeferred<SourceControlChangeRequestDetail>();
+    client.getChangeRequestDetail.mockReturnValueOnce(rowRead.promise);
+    const releaseRow = changeRequestDetailBinding.watch(ROW_DETAIL_INPUT, ACTIVE_POLL);
+    await flush();
+    expect(client.getChangeRequestDetail).toHaveBeenLastCalledWith({
+      cwd: CWD,
+      reference: "7",
+      view: "row",
+    });
+
+    // A focused surface (the active row, a popover) mounts while the row read
+    // is still queued: it reads on its own, interactively.
+    client.getChangeRequestDetail.mockResolvedValue(detail());
+    const releaseFocused = changeRequestDetailBinding.watch(SUMMARY_DETAIL_INPUT, ACTIVE_POLL);
+    await flush();
+    expect(client.getChangeRequestDetail).toHaveBeenLastCalledWith({ cwd: CWD, reference: "7" });
+
+    // Its refreshes and polls stay interactive too.
+    client.getChangeRequestDetail.mockClear();
+    await changeRequestDetailBinding.refreshAsync(SUMMARY_DETAIL_INPUT);
+    expect(calledWithView(undefined)).toBe(1);
+    expect(calledWithView("row")).toBe(0);
+
+    rowRead.resolve(detail());
+    await flush();
+    releaseRow();
+    releaseFocused();
+  });
+
+  it("shows the other read mode's detail while a row turns focused", async () => {
+    const rowDetail = detail({ title: "From the row" });
+    client.getChangeRequestDetail.mockResolvedValueOnce(rowDetail);
+    const releaseRow = changeRequestDetailBinding.watch(ROW_DETAIL_INPUT, ACTIVE_POLL);
+    await flush();
+
+    const focusedRead = createDeferred<SourceControlChangeRequestDetail>();
+    client.getChangeRequestDetail.mockReturnValueOnce(focusedRead.promise);
+    const releaseFocused = changeRequestDetailBinding.watch(SUMMARY_DETAIL_INPUT, ACTIVE_POLL);
+    releaseRow();
+    await flush();
+    // Its own read still runs, and the row's detail shows meanwhile.
+    expect(client.getChangeRequestDetail).toHaveBeenLastCalledWith({ cwd: CWD, reference: "7" });
+    expect(changeRequestDetailBinding.snapshotFor(SUMMARY_DETAIL_INPUT)).toMatchObject({
+      data: rowDetail,
+      isFetching: true,
+    });
+
+    const fresh = detail({ title: "Fresh" });
+    focusedRead.resolve(fresh);
+    await flush();
+    expect(changeRequestDetailBinding.snapshotFor(SUMMARY_DETAIL_INPUT).data).toBe(fresh);
+    releaseFocused();
+  });
+
+  it("writes lifecycle results and comment edits into the row variant", async () => {
+    changeRequestDetailBinding.updateData(FULL_DETAIL_INPUT, () => detail());
+    changeRequestDetailBinding.updateData(ROW_DETAIL_INPUT, () => detail());
+    const deferred = createDeferred<unknown>();
+    client.updateChangeRequest.mockReturnValueOnce(deferred.promise);
+    client.listChangeRequests.mockResolvedValue([]);
+    client.getChangeRequestActivity.mockResolvedValue(activity([]));
+
+    const pending = updateChangeRequest(TARGET, { kind: "labels", add: ["ui"], remove: ["bug"] });
+    expect(changeRequestDetailBinding.snapshotFor(ROW_DETAIL_INPUT).data?.labels).toEqual([
+      { name: "ui" },
+    ]);
+    const fresh = detail({ labels: [{ name: "ui", color: "00ff00" }] });
+    deferred.resolve({ detail: fresh });
+    await pending;
+    expect(changeRequestDetailBinding.snapshotFor(ROW_DETAIL_INPUT).data).toBe(fresh);
+
+    client.updateChangeRequestComment.mockResolvedValueOnce({ commentId: "ic-1", deleted: false });
+    await updateChangeRequestComment(TARGET, {
+      commentId: "ic-1",
+      commentKind: "issue-comment",
+      action: "edit",
+      body: "edited",
+    });
+    expect(changeRequestDetailBinding.snapshotFor(ROW_DETAIL_INPUT).data?.comments[0]?.body).toBe(
+      "edited",
+    );
+  });
+});

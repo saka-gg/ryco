@@ -1,5 +1,5 @@
 /**
- * CursorDriver — `ProviderDriver` for the Cursor Agent (`agent`) runtime.
+ * CursorDriver — `ProviderDriver` for the Cursor Agent (`cursor-agent` / `agent`) runtime.
  *
  * Cursor exposes an ACP-based CLI. Model catalog and capability refreshes
  * happen during the managed provider status check via Cursor's
@@ -34,21 +34,16 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
-import { cursorAgentCommandCandidates } from "../acp/CursorAgentCommand.ts";
+import {
+  cursorAgentCommandCandidates,
+  makeCursorMaintenanceCapabilities,
+  resolveCursorAgentCommand,
+} from "../acp/CursorAgentCommand.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("cursor");
-// Cursor updates itself (`agent update`), so capability resolution never needs PATH probing.
-const MAINTENANCE_CAPABILITIES = makeProviderMaintenanceCapabilities({
-  provider: DRIVER_KIND,
-  packageName: null,
-  updateExecutable: "agent",
-  updateArgs: ["update"],
-  updateLockKey: "cursor-agent",
-});
 
 export type CursorDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -119,6 +114,14 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
       });
       const textGeneration = yield* makeCursorTextGeneration(effectiveConfig, processEnv);
 
+      // Cursor updates itself with the command sessions and probes run, resolved on each read
+      // (cheap, and rare) so installing `cursor-agent` later is picked up.
+      const maintenanceCapabilities = resolveCursorAgentCommand(
+        effectiveConfig.binaryPath,
+        processEnv,
+        { fresh: true },
+      ).pipe(Effect.map(makeCursorMaintenanceCapabilities));
+
       const checkProvider = checkCursorProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -127,7 +130,7 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
       );
 
       const snapshot = yield* makeManagedServerProvider<CursorSettings>({
-        maintenanceCapabilities: Effect.succeed(MAINTENANCE_CAPABILITIES),
+        maintenanceCapabilities,
         probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
@@ -137,15 +140,19 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         // Model catalog and capabilities come exclusively from Cursor's
         // list_available_models extension method during provider checks.
         enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-          enrichCursorSnapshot({
-            settings,
-            snapshot: currentSnapshot,
-            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
-            publishSnapshot,
-            stampIdentity,
-            httpClient,
-            serverSettings,
-          }),
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichCursorSnapshot({
+                settings,
+                snapshot: currentSnapshot,
+                maintenanceCapabilities: capabilities,
+                publishSnapshot,
+                stampIdentity,
+                httpClient,
+                serverSettings,
+              }),
+            ),
+          ),
         refreshInterval: null,
       }).pipe(
         Effect.mapError(

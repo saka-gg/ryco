@@ -111,6 +111,10 @@ it.effect("applies the A/B-tested read tuning to file databases", () => {
     const [synchronous] = yield* sql<{ readonly synchronous: number }>`PRAGMA synchronous`;
     // Durability is unchanged (FULL), see docs/streaming-sqlite.md.
     assert.equal(synchronous?.synchronous, 2);
+    const [journalLimit] = yield* sql<{
+      readonly journal_size_limit: number;
+    }>`PRAGMA journal_size_limit`;
+    assert.equal(journalLimit?.journal_size_limit, 67108864);
   }).pipe(
     Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),

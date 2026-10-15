@@ -114,6 +114,47 @@ export interface ProjectionShellScope {
   readonly threadIds?: ReadonlyArray<ThreadId>;
 }
 
+/** A live thread's position in the shell's `(createdAt, id)` ascending order. */
+export interface ProjectionThreadOrderKey {
+  readonly createdAt: string;
+  readonly threadId: ThreadId;
+}
+
+/** One keyset page of live threads in shell order, strictly after `after`. */
+export interface ProjectionThreadKeyPageInput {
+  readonly after: { readonly createdAt: string; readonly threadId: string } | null;
+  readonly includeArchived: boolean;
+  readonly limit: number;
+}
+
+const compareThreadOrder = (
+  left: { readonly createdAt: string; readonly threadId: string },
+  right: { readonly createdAt: string; readonly threadId: string },
+): number =>
+  left.createdAt < right.createdAt
+    ? -1
+    : left.createdAt > right.createdAt
+      ? 1
+      : left.threadId < right.threadId
+        ? -1
+        : left.threadId > right.threadId
+          ? 1
+          : 0;
+
+/** The key page derived from a whole snapshot, for callers given a narrow test double. */
+export function threadKeyPageOf(
+  snapshot: OrchestrationShellSnapshot,
+  input: ProjectionThreadKeyPageInput,
+): ReadonlyArray<ProjectionThreadOrderKey> {
+  const after = input.after;
+  return snapshot.threads
+    .filter((thread) => input.includeArchived || thread.archivedAt === null)
+    .map((thread) => ({ createdAt: thread.createdAt, threadId: thread.id }))
+    .filter((key) => after === null || compareThreadOrder(key, after) > 0)
+    .toSorted(compareThreadOrder)
+    .slice(0, input.limit);
+}
+
 /** The scoped snapshot derived from a whole one, for callers given a narrow test double. */
 export function scopeShellSnapshot(
   snapshot: OrchestrationShellSnapshot,
@@ -139,12 +180,18 @@ export function scopeShellSnapshot(
   };
 }
 
+/**
+ * A checkpoint without its changed-file list. The list can be megabytes of JSON on a large
+ * checkpoint, and no reader of the checkpoint context needs it.
+ */
+export type ProjectionThreadCheckpointHead = Omit<OrchestrationCheckpointSummary, "files">;
+
 export interface ProjectionThreadCheckpointContext {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
-  readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
+  readonly checkpoints: ReadonlyArray<ProjectionThreadCheckpointHead>;
 }
 
 /**
@@ -228,6 +275,14 @@ export interface ProjectionSnapshotQueryShape {
     ProjectionWorkspacePlacement,
     ProjectionRepositoryError
   >;
+
+  /**
+   * Live threads in the shell's `(createdAt, id)` order, one keyset page at a time, without
+   * building a shell. Absent only in narrow test doubles: read through {@link readThreadKeyPage}.
+   */
+  readonly listThreadKeyPage?: (
+    input: ProjectionThreadKeyPageInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadOrderKey>, ProjectionRepositoryError>;
 
   /**
    * Live threads whose goal synchronization still awaits its provider, with the projection
@@ -507,6 +562,14 @@ export const readScopedShellSnapshot = (
 ): Effect.Effect<OrchestrationShellSnapshot, ProjectionRepositoryError> =>
   query.getScopedShellSnapshot?.(scope) ??
   Effect.map(query.getShellSnapshot(), (snapshot) => scopeShellSnapshot(snapshot, scope));
+
+/** One keyset page of live thread keys; see {@link readProjectShells}. */
+export const readThreadKeyPage = (
+  query: ShellSnapshotFallback<"listThreadKeyPage">,
+  input: ProjectionThreadKeyPageInput,
+): Effect.Effect<ReadonlyArray<ProjectionThreadOrderKey>, ProjectionRepositoryError> =>
+  query.listThreadKeyPage?.(input) ??
+  Effect.map(query.getShellSnapshot(), (snapshot) => threadKeyPageOf(snapshot, input));
 
 /** Threads whose goal synchronization is pending; see {@link readProjectShells}. */
 export const readPendingGoalSyncThreads = (

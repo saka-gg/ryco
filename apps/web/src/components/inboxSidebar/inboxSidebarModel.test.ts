@@ -25,6 +25,7 @@ import {
   buildPrimaryInboxSidebarEnvironment,
   buildSavedInboxSidebarEnvironment,
   describeInboxFocus,
+  sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
   type InboxSidebarFilters,
 } from "./inboxSidebarModel";
@@ -1269,4 +1270,33 @@ it("keeps a settled foreground turn with background work Working across inbox an
   expect(
     resolveThreadStatusPill({ thread: { ...background, backgroundLiveness: null } }),
   ).toMatchObject({ label: "Plan Ready" });
+});
+
+describe("sameInboxProviderCatalogs", () => {
+  const models = [] as unknown as ServerProvider["models"];
+  const provider = (overrides: Record<string, unknown> = {}) =>
+    ({
+      instanceId: "codex",
+      driver: "codex",
+      status: "ready",
+      models,
+      ...overrides,
+    }) as unknown as ServerProvider;
+
+  it("ignores status-only changes", () => {
+    expect(sameInboxProviderCatalogs([provider()], [provider({ status: "error" })])).toBe(true);
+    expect(sameInboxProviderCatalogs(null, null)).toBe(true);
+  });
+
+  it("detects catalog, driver, instance and presence changes", () => {
+    expect(sameInboxProviderCatalogs([provider()], [provider({ models: [] })])).toBe(false);
+    expect(sameInboxProviderCatalogs([provider()], [provider({ driver: "claudeAgent" })])).toBe(
+      false,
+    );
+    expect(sameInboxProviderCatalogs([provider()], [provider({ instanceId: "other" })])).toBe(
+      false,
+    );
+    expect(sameInboxProviderCatalogs([provider()], [provider(), provider()])).toBe(false);
+    expect(sameInboxProviderCatalogs(null, [provider()])).toBe(false);
+  });
 });

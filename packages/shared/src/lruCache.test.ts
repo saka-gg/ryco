@@ -40,4 +40,18 @@ describe("LRUCache", () => {
     expect(cache.get("b")).toBe("B");
     expect(cache.get("c")).toBe("C");
   });
+
+  it("deletes an entry and frees its share of the budget", () => {
+    const cache = new LRUCache<string>(10, 25);
+    cache.set("a", "A", 10);
+    cache.set("b", "B", 10);
+
+    expect(cache.delete("a")).toBe(true);
+    expect(cache.delete("a")).toBe(false);
+    expect(cache.get("a")).toBeNull();
+    expect(cache.retainedBytes).toBe(10);
+    cache.set("c", "C", 10);
+    expect(cache.get("b")).toBe("B");
+    expect(cache.get("c")).toBe("C");
+  });
 });

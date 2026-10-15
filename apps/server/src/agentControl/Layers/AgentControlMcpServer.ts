@@ -54,6 +54,7 @@ import {
   AgentControlSessionRegistry,
   type AgentControlLeaseRevocationReason,
 } from "../Services/AgentControlSessionRegistry.ts";
+import { trackStartupPhase } from "../../startupStallMonitor.ts";
 
 const makeAgentControlMcpServer = Effect.gen(function* () {
   const registry = yield* AgentControlSessionRegistry;
@@ -217,7 +218,10 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     Effect.map((settings) => settings.agentControl.enabled),
     Effect.catch(() => Effect.succeed(false)),
   );
-  yield* converge(initiallyEnabled, "feature-disabled");
+  yield* trackStartupPhase(
+    "agent-control.listener.start",
+    converge(initiallyEnabled, "feature-disabled"),
+  );
 
   yield* serverSettings.streamChanges.pipe(
     Stream.runForEach((settings) =>

@@ -33,6 +33,9 @@ export function buildFullThreadDiffInput(
     fromTurnCount: 0,
     toTurnCount,
     ignoreWhitespace,
+    // Every completed turn makes a new full-range key; the slot drops the
+    // superseded patch once nothing shows it, instead of keeping one per turn.
+    cacheSlot: "conversation",
   };
 }
 

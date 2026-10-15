@@ -22,6 +22,7 @@ import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGen
 import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
+import { probeOpenCodeGoUsageRateLimits } from "../Layers/OpenCodeGoUsage.ts";
 import {
   checkOpenCodeProviderStatus,
   makePendingOpenCodeProvider,
@@ -35,7 +36,7 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "../ProviderDriver.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import { type ServerProviderDraft, withProviderRateLimits } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -164,6 +165,11 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingOpenCodeProvider(settings)),
         checkProvider,
+        // An adopted snapshot's Go usage is re-read over HTTP alone: no `opencode serve`.
+        refreshUsage: (current) =>
+          probeOpenCodeGoUsageRateLimits(processEnv).pipe(
+            Effect.map((rateLimits) => withProviderRateLimits(current, rateLimits)),
+          ),
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
           maintenanceCapabilities.pipe(
             Effect.flatMap((capabilities) =>

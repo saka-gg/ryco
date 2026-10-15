@@ -572,11 +572,28 @@ export function makeForgejoPullRequestPageApi<Repository extends ForgejoPageRepo
     );
 
   /**
+   * Remembers listed rows, so another list (or a row's detail) naming the same
+   * pull request at the same update does not re-read it.
+   */
+  const rememberRows = (
+    repository: Repository,
+    records: ReadonlyArray<NormalizedForgejoPullRequestRecord>,
+  ) =>
+    Effect.forEach(
+      records,
+      (record) =>
+        sharedPullRequest.remember(
+          pullRequestKey(repository, record.number, recordUpdatedAtMs(record)),
+          record,
+        ),
+      { discard: true },
+    );
+
+  /**
    * Page list rows carry the facts above for open pull requests (closed and
    * merged ones state themselves). The newest `FORGEJO_ROW_STATUS_MAX` open
    * rows get their head's status; a row whose read fails keeps what the list
-   * said. The rows are also remembered, so another list naming the same pull
-   * request at the same update does not re-read it.
+   * said. The rows are also remembered (`rememberRows`).
    */
   const withRowReadiness = (
     operation: string,
@@ -584,15 +601,7 @@ export function makeForgejoPullRequestPageApi<Repository extends ForgejoPageRepo
     records: ReadonlyArray<NormalizedForgejoPullRequestRecord>,
   ) =>
     Effect.gen(function* () {
-      yield* Effect.forEach(
-        records,
-        (record) =>
-          sharedPullRequest.remember(
-            pullRequestKey(repository, record.number, recordUpdatedAtMs(record)),
-            record,
-          ),
-        { discard: true },
-      );
+      yield* rememberRows(repository, records);
       const open = records.filter((record) => record.state === "open");
       if (open.length === 0) return records;
       const read = open
@@ -1690,6 +1699,18 @@ export function makeForgejoPullRequestPageApi<Repository extends ForgejoPageRepo
     ) =>
       resolveRepository(request).pipe(
         Effect.flatMap((repository) => withRowReadiness("listPullRequests", repository, records)),
+      ),
+    /** A page list without readiness: only `rememberRows`. */
+    rememberRows: (
+      request: {
+        readonly cwd: string;
+        readonly context?: SourceControlProviderContext | undefined;
+      },
+      records: ReadonlyArray<NormalizedForgejoPullRequestRecord>,
+    ) =>
+      resolveRepository(request).pipe(
+        Effect.flatMap((repository) => rememberRows(repository, records)),
+        Effect.as(records),
       ),
     listInvolvedPullRequests,
     searchPullRequests,

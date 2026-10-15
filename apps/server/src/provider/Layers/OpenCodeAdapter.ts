@@ -1366,8 +1366,11 @@ export function makeOpenCodeAdapter(
       yield* Scope.close(context.sessionScope, Exit.void);
     });
 
-    /** Emit content.delta and item.completed events for an assistant text part. */
-    const emitAssistantTextDelta = Effect.fn("emitAssistantTextDelta")(function* (
+    /**
+     * Emit content.delta and item.completed events for an assistant text part.
+     * Runs for every text-part update: untraced, so it adds no span per update.
+     */
+    const emitAssistantTextDelta = Effect.fnUntraced(function* (
       context: OpenCodeSessionContext,
       part: Part,
       turnId: TurnId | undefined,
@@ -1465,7 +1468,9 @@ export function makeOpenCodeAdapter(
       }
     });
 
-    const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
+    // Runs once per subscribed SSE event (every stream delta included):
+    // untraced, so it adds no span to the trace file per event.
+    const handleSubscribedEvent = Effect.fnUntraced(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
     ) {

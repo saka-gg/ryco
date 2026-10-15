@@ -159,6 +159,47 @@ describe("LocalFileTracer", () => {
     }),
   );
 
+  it.live("normalizes SQL text only for the statement spans it keeps", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      const rawSql = "SELECT *\n  FROM   projection_threads\n  WHERE id = ?";
+      const spans: Array<Tracer.Span> = [];
+      const statement = (name: string, sleepMs: number) =>
+        Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ "db.query.text": rawSql });
+          spans.push(yield* Effect.currentSpan);
+          yield* Effect.sleep(`${sleepMs} millis`);
+        }).pipe(Effect.withSpan(name), Effect.ignore);
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* statement("fast-sql", 0);
+            yield* statement("slow-sql", 40);
+          }).pipe(Effect.provide(makeTestLayer(tracePath, 25))),
+        );
+
+        const [fast, slow] = spans;
+        // The dropped statement's text was never rewritten.
+        assert.equal(fast?.attributes.get("db.query.text"), rawSql);
+        assert.equal(
+          slow?.attributes.get("db.query.text"),
+          "SELECT * FROM projection_threads WHERE id = ?",
+        );
+        assert.deepEqual(
+          readTraceRecords(tracePath).map((record) => [
+            record.name,
+            record.attributes["db.query.text"],
+          ]),
+          [["slow-sql", "SELECT * FROM projection_threads WHERE id = ?"]],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
   it.live("records every SQL statement when the threshold is zero", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));

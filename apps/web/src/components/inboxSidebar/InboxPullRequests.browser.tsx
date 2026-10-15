@@ -6,6 +6,7 @@ import {
   type SourceControlChangeRequestDetail,
   type VcsStatusResult,
 } from "@ryco/contracts";
+import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { Option } from "effect";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -34,6 +35,7 @@ vi.mock("../../rpc/useSourceControl", async (importOriginal) => ({
     environmentId: string;
     cwd: string | null;
     reference: string | null;
+    view?: "row";
     enabled: boolean;
   }) => {
     harness.query(input);
@@ -163,8 +165,33 @@ it.each([null, "/repo/worktrees/feature"])(
           environmentId,
           cwd,
           reference: "42",
+          // A row glyph: the server queues it behind focused work.
+          view: "row",
           enabled: true,
         }),
+      );
+      // The focused thread's row is a focused surface: it reads interactively,
+      // under the key its popover and pull request views share.
+      const activeRow = (activeThreadKey: string | null) => (
+        <AppAtomRegistryProvider>
+          <InboxSidebar {...props} activeThreadKey={activeThreadKey} />
+        </AppAtomRegistryProvider>
+      );
+      harness.query.mockClear();
+      await mounted.rerender(
+        activeRow(scopedThreadKey(scopeThreadRef(environmentId, ThreadId.make("pr-thread")))),
+      );
+      await vi.waitFor(() =>
+        expect(harness.query).toHaveBeenLastCalledWith({
+          environmentId,
+          cwd,
+          reference: "42",
+          enabled: true,
+        }),
+      );
+      await mounted.rerender(activeRow(null));
+      await vi.waitFor(() =>
+        expect(harness.query).toHaveBeenLastCalledWith(expect.objectContaining({ view: "row" })),
       );
       // Hovering the chip names that PR, and only that: the row card stays shut.
       await page.getByLabelText("PR #42 · Open", { exact: true }).hover();

@@ -248,6 +248,35 @@ describe("remote environment api", () => {
       }),
     ).resolves.toBe("wss://remote.example.com/?wsToken=ws-token");
   });
+
+  it("abandons the websocket token request when its connect attempt gives up", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestSignal = init?.signal ?? undefined;
+          requestSignal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const attempt = new AbortController();
+
+    const pending = resolveRemoteWebSocketConnectionUrl({
+      wsBaseUrl: "wss://remote.example.com/",
+      httpBaseUrl: "https://remote.example.com/",
+      bearerToken: "bearer-token",
+      signal: attempt.signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(requestSignal?.aborted).toBe(false);
+    attempt.abort();
+
+    // The attempt's own cancellation, not a network failure of the request.
+    await expect(pending).rejects.toMatchObject({ cause: { name: "AbortError" } });
+    expect(requestSignal?.aborted).toBe(true);
+  });
 });
 
 afterEach(() => {

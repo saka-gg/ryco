@@ -1,14 +1,17 @@
 import { createFileRoute, lazyRouteComponent } from "@tanstack/react-router";
 
 import { ROUTE_PAGE_PENDING_MS, RoutePagePending } from "../components/routeViews/RoutePagePending";
+import { loadChatRouteView } from "../components/shell/phone/lazyPhoneThreadSurfaces";
 import { parseRightPanelRouteSearch } from "../rightPanelRouteSearch";
 
 export const Route = createFileRoute("/_chat/draft/$draftId")({
   validateSearch: (search) => parseRightPanelRouteSearch(search),
   // Route-level splitting: the router awaits this chunk before it commits the
   // match, so the draft view renders without a Suspense fallback.
+  // On the phone tier that includes the phone thread surfaces chunk, so the
+  // app bar and dock are there in the first frame.
   component: lazyRouteComponent(
-    () => import("../components/routeViews/DraftChatThreadRouteView"),
+    () => loadChatRouteView(() => import("../components/routeViews/DraftChatThreadRouteView")),
     "DraftChatThreadRoute",
   ),
   // A deep-linked document shows the shell with a blank pane instead of

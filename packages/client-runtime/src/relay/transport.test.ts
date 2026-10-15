@@ -7,6 +7,8 @@ import {
 } from "@ryco/contracts";
 import { RpcClientError } from "effect/rpc/RpcClientError";
 import * as Socket from "effect/socket/Socket";
+import type { HubSessionFrame } from "@ryco/contracts/hub-session";
+import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -38,6 +40,7 @@ import {
   hostedDispatchLineage,
   HostedDispatchUnconfirmedError,
 } from "./dispatchReplay.ts";
+import { HostedHubSession, type HubSessionSocket } from "./hostedHubSession.ts";
 import {
   admitHostedRequestForState,
   HostedRelayAttemptFactory,
@@ -285,6 +288,123 @@ describe("HostedRelayAttemptFactory", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(probe).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("probes the account subscription when the channel's heartbeat times out or it drops", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn();
+    configureHostedRuntime({ ...fakeRuntime(), probeHubSubscription: probe }, hostedHubApi);
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    lifecycle.onHeartbeatTimeout?.();
+    expect(probe).toHaveBeenCalledOnce();
+    lifecycle.onClose?.({ code: 1006, reason: "" }, { intentional: true });
+    expect(probe).toHaveBeenCalledOnce();
+    // An unanswered request on the dropped channel is not reported again later:
+    // the close already asked for the probe.
+    lifecycle.onRequestStart?.({ id: "1", tag: WS_METHODS.serverGetConfig, stream: false });
+    lifecycle.onClose?.({ code: 1006, reason: "" }, { intentional: false });
+    expect(probe).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    // A disposed transport probes nothing.
+    lifecycle.onDispose?.();
+    lifecycle.onHeartbeatTimeout?.();
+    lifecycle.onClose?.({ code: 1006, reason: "" }, { intentional: false });
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the channel a heartbeat timeout replaces off the suspect account socket", async () => {
+    vi.useFakeTimers();
+    const physical: (HubSessionSocket & {
+      sent: Uint8Array[];
+      closed: number;
+      receive(frame: HubSessionFrame): void;
+      ready(): void;
+    })[] = [];
+    const session = new HostedHubSession({
+      createSocket: () => {
+        const opens: (() => void)[] = [];
+        const messages: ((bytes: Uint8Array) => void)[] = [];
+        const closes: ((reason?: string, code?: number) => void)[] = [];
+        const socket = {
+          readyState: 0,
+          bufferedAmount: 0,
+          sent: [] as Uint8Array[],
+          closed: 0,
+          send(bytes: Uint8Array) {
+            socket.sent.push(Uint8Array.from(bytes));
+          },
+          close(code = 1000, reason = "closed") {
+            socket.readyState = 3;
+            socket.closed++;
+            for (const cb of closes) cb(reason, code);
+          },
+          onOpen: (cb: () => void) => void opens.push(cb),
+          onBinaryMessage: (cb: (bytes: Uint8Array) => void) => void messages.push(cb),
+          onClose: (cb: (reason?: string, code?: number) => void) => void closes.push(cb),
+          onError: () => undefined,
+          receive(frame: HubSessionFrame) {
+            const bytes = encodeHubSessionFrame(frame);
+            if (!bytes.ok) throw new Error("frame");
+            for (const cb of messages) cb(bytes.value);
+          },
+          ready() {
+            socket.readyState = 1;
+            for (const cb of opens) cb();
+            socket.receive({ type: "ready", protocolVersion: 1, maxChannels: 8 });
+          },
+        };
+        physical.push(socket);
+        return socket;
+      },
+      timers: {
+        now: Date.now,
+        setTimeout,
+        clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+        queueMicrotask,
+      },
+      random: () => 0.5,
+    });
+    const opened = (index: number) =>
+      physical[index]!.sent.filter((bytes) => {
+        const frame = decodeHubSessionFrame(bytes);
+        return frame.ok && frame.value.type === "open";
+      }).length;
+    configureHostedRuntime(
+      { ...fakeRuntime(), probeHubSubscription: () => session.probe() },
+      hostedHubApi,
+    );
+    session.start();
+    physical[0]!.ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const factory = new HostedRelayAttemptFactory();
+    factory.lifecycleHandlers().onHeartbeatTimeout?.();
+    // The retry's replacement channel, as the relay socket factory creates it.
+    const replacement = session.createSocket();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(replacement.readyState).toBe(0);
+    expect(opened(0)).toBe(0);
+    // A frame proves the account socket alive: the replacement opens on it.
+    physical[0]!.receive({ type: "ping", nonce: new Uint8Array(8).fill(9) });
+    expect(replacement.readyState).toBe(1);
+    expect(opened(0)).toBe(1);
+    // Silent again: the next heartbeat timeout's replacement waits for the
+    // account socket's replacement instead of opening on a dead path.
+    await vi.advanceTimersByTimeAsync(1_000);
+    factory.lifecycleHandlers().onHeartbeatTimeout?.();
+    const second = session.createSocket();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(physical[0]!.closed).toBe(1);
+    expect(opened(0)).toBe(1);
+    expect(second.readyState).toBe(0);
+    await vi.advanceTimersByTimeAsync(500);
+    physical[1]!.ready();
+    expect(second.readyState).toBe(1);
+    expect(opened(1)).toBeGreaterThanOrEqual(1);
+    session.dispose();
+    factory.lifecycleHandlers().onDispose?.();
   });
 
   it("exposes authoritative admission changes and releases their listener", () => {

@@ -15,7 +15,8 @@ import { ModelPickerContent } from "./ModelPickerContent";
 import { ModelTriggerTraits } from "./ModelTriggerTraits";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import type { ModelTuningSummary } from "./modelTuning.logic";
-import { PhoneModelSheet } from "./PhoneModelSheet";
+import { LazyPhoneModelSheet } from "../shell/phone/lazyPhoneThreadSurfaces";
+import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import {
   ModelEsque,
@@ -99,6 +100,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   // in the sheet branch, and the sheet never mounts on the desktop tier.
   const isPhoneTier = usePresentationTier() === "phone";
   const useSheet = (props.phoneSheet ?? false) && isPhoneTier;
+  const phoneModelSheetReady = usePhoneThreadSurfaceReady(LazyPhoneModelSheet, useSheet);
 
   // Resolve the active instance entry by exact routing key. The composer
   // resolves fallbacks before rendering this component; if the selected
@@ -251,19 +253,21 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         >
           {triggerContent}
         </Button>
-        <PhoneModelSheet
-          open={isMenuOpen}
-          onOpenChange={setIsMenuOpen}
-          activeInstanceId={activeInstanceId}
-          model={props.model}
-          lockedProvider={props.lockedProvider}
-          lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
-          instanceEntries={props.instanceEntries}
-          modelOptionsByInstance={props.modelOptionsByInstance}
-          disabled={props.disabled ?? false}
-          {...(props.disabledReason ? { disabledReason: props.disabledReason } : {})}
-          onInstanceModelChange={handleInstanceModelChange}
-        />
+        {phoneModelSheetReady ? (
+          <LazyPhoneModelSheet
+            open={isMenuOpen}
+            onOpenChange={setIsMenuOpen}
+            activeInstanceId={activeInstanceId}
+            model={props.model}
+            lockedProvider={props.lockedProvider}
+            lockedContinuationGroupKey={props.lockedContinuationGroupKey ?? null}
+            instanceEntries={props.instanceEntries}
+            modelOptionsByInstance={props.modelOptionsByInstance}
+            disabled={props.disabled ?? false}
+            {...(props.disabledReason ? { disabledReason: props.disabledReason } : {})}
+            onInstanceModelChange={handleInstanceModelChange}
+          />
+        ) : null}
       </>
     );
   }

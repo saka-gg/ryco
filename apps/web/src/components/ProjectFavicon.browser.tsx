@@ -15,7 +15,7 @@ import {
   resetPrimaryEnvironmentDescriptorForTests,
 } from "../environments/primary";
 import { createEnvironmentApiLookup } from "@ryco/client-runtime/connection";
-import type { ComponentProps } from "react";
+import { Profiler, type ComponentProps } from "react";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { clearProjectIconCache } from "./projectIconSource";
@@ -180,6 +180,171 @@ describe("hosted project icons", () => {
     );
     expect(read).toHaveBeenCalledTimes(1);
   });
+  it("keeps cached artwork on a row mounted from the cache after the entry is evicted or expires", async () => {
+    const read = vi.fn(async () => icon);
+    connect(read);
+    const dataUrl = `data:image/svg+xml;base64,${icon.dataBase64}`;
+    const first = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => first.container.querySelector("img")?.naturalWidth).toBe(16);
+    // A later surface for the same project renders from the cache.
+    const second = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} className="a" />,
+    );
+    expect(second.container.querySelector("img")?.src).toBe(dataUrl);
+    await first.unmount();
+
+    // The entry is evicted: the render-time cache read now misses, but the
+    // artwork the row already shows must stay.
+    clearProjectIconCache(env);
+    await second.rerender(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} className="b" />,
+    );
+    expect(second.container.querySelector("img")?.src).toBe(dataUrl);
+
+    // The same once a fresh entry has expired.
+    const third = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} className="c" />,
+    );
+    await expect.poll(() => third.container.querySelector("img")?.src).toBe(dataUrl);
+    const realNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(realNow + 5 * 60_000 + 1);
+    try {
+      await second.rerender(
+        <TestFavicon environmentId={env} cwd="/project" projectId={projectId} className="d" />,
+      );
+      expect(second.container.querySelector("img")?.src).toBe(dataUrl);
+      // Neither re-render asks the node again.
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("revalidates an expired entry when its read runs again, keeping the artwork meanwhile", async () => {
+    let complete!: (value: typeof icon) => void;
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(icon)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            complete = resolve;
+          }),
+      );
+    connect(read);
+    const dataUrl = `data:image/svg+xml;base64,${icon.dataBase64}`;
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    const realNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(realNow + 5 * 60_000 + 1);
+    try {
+      // A reconnect hands the row a new API: the expired entry is read again.
+      recordWsConnectionClosed({}, { environmentId: env });
+      await expect.poll(() => view.container.querySelector("img")).toBeNull();
+      connect(read);
+      await expect.poll(() => read.mock.calls.length).toBe(2);
+      // While the node answers, the latched artwork stays on screen.
+      expect(view.container.querySelector("img")?.src).toBe(dataUrl);
+      const updated = { ...icon, dataBase64: btoa(svg.replace("red", "blue")) };
+      complete(updated);
+      await expect
+        .poll(() => view.container.querySelector("img")?.src)
+        .toBe(`data:image/svg+xml;base64,${updated.dataBase64}`);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("asks again later when the node could not answer, without caching an absence", async () => {
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const read = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Project icon unavailable"))
+      .mockResolvedValueOnce(icon);
+    connect(read);
+    try {
+      const view = await render(
+        <TestFavicon
+          environmentId={env}
+          cwd="/project"
+          projectId={projectId}
+          fallbackName="ryco"
+        />,
+      );
+      await expect.poll(() => read.mock.calls.length).toBe(1);
+      await expect.poll(() => view.container.querySelector("svg text")?.textContent).toBe("R");
+      const retry = await vi.waitFor(() => {
+        const call = setTimeoutSpy.mock.calls.find(([, delay]) => delay === 60_000);
+        if (!call) throw new Error("no retry scheduled");
+        return call[0] as () => void;
+      });
+      retry();
+      await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("stops asking after a bounded number of retries when the node never answers", async () => {
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const read = vi.fn(async () => {
+      throw new Error("Project icon unavailable");
+    });
+    connect(read);
+    const retryDelays = [60_000, 120_000, 240_000];
+    const retryCalls = () =>
+      setTimeoutSpy.mock.calls.filter(([, delay]) => retryDelays.includes(delay ?? 0));
+    try {
+      const view = await render(
+        <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+      );
+      await expect.poll(() => read.mock.calls.length).toBe(1);
+      for (const [index, delay] of retryDelays.entries()) {
+        // Each retry waits longer than the one before.
+        const retry = await vi.waitFor(() => {
+          const call = retryCalls()[index];
+          if (!call) throw new Error("no retry scheduled");
+          return call;
+        });
+        expect(retry[1]).toBe(delay);
+        (retry[0] as () => void)();
+        await expect.poll(() => read.mock.calls.length).toBe(index + 2);
+      }
+      // The last retry failed too: nothing further is scheduled.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(retryCalls()).toHaveLength(retryDelays.length);
+      expect(read).toHaveBeenCalledTimes(retryDelays.length + 1);
+      expect(view.container.querySelector("img")).toBeNull();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("does not re-render on config pushes that keep the icon capability", async () => {
+    connect(vi.fn(async () => icon));
+    const renders = vi.fn();
+    const view = await render(
+      <AppAtomRegistryProvider>
+        <Profiler id="favicon" onRender={renders}>
+          <ProjectFavicon environmentId={env} cwd="/project" projectId={projectId} />
+        </Profiler>
+      </AppAtomRegistryProvider>,
+    );
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const settled = renders.mock.calls.length;
+    const current = appAtomRegistry.get(serverConfigAtom)!;
+    appAtomRegistry.set(serverConfigAtom, { ...current, providers: [] } as ServerConfig);
+    appAtomRegistry.set(serverConfigAtom, { ...current } as ServerConfig);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(renders).toHaveBeenCalledTimes(settled);
+  });
+
   it("reads artwork only once the icon is near the viewport", async () => {
     const observed: Array<{ target: Element; callback: IntersectionObserverCallback }> = [];
     vi.stubGlobal(

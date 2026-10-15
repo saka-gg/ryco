@@ -92,26 +92,49 @@ let pending: Promise<void> = Promise.resolve();
 /** A save is scheduled: waiting out the throttle, or for an idle period. */
 let savePending = false;
 const environments = new Map<EnvironmentId, CachedEnvironment>();
-/** Bumped by every scroll-position change, which mutates a shared map in place. */
-let scrollRevision = 0;
 /** The catalog last written for `owner`, so an unchanged catalog is not re-encrypted. */
 let writtenCatalog: { readonly owner: ReadVaultAccount; readonly key: string } | null = null;
 /**
  * The inputs each environment's record was last written from. A save whose
- * inputs are all the same objects has nothing new to encrypt and write; during
- * streaming that is every environment but the one receiving tokens.
+ * inputs are all unchanged has nothing new to encrypt and write; during
+ * streaming that is every environment but the one receiving tokens. The
+ * store-wide inputs (drafts, scroll positions, visits) are compared through
+ * this environment's own slice of them, so a keystroke, an auto-follow scroll
+ * or a visit elsewhere does not rewrite every record.
  */
 interface SavedEnvironmentInputs {
   readonly owner: ReadVaultAccount;
   readonly environment: unknown;
   readonly fallbackMetadata: unknown;
-  readonly draftThreads: unknown;
-  readonly drafts: unknown;
-  readonly visits: unknown;
+  readonly draftSessions: Readonly<Record<string, DraftThreadState>>;
+  readonly drafts: Readonly<Record<string, string>>;
+  readonly scroll: Readonly<Record<string, number>>;
+  readonly visits: Readonly<Record<string, string>>;
   readonly routedThreadId: string;
-  readonly scrollRevision: number;
 }
 const savedInputs = new Map<EnvironmentId, SavedEnvironmentInputs>();
+
+function sameRecordEntries<T>(
+  left: Readonly<Record<string, T>>,
+  right: Readonly<Record<string, T>>,
+): boolean {
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => Object.hasOwn(right, key) && left[key] === right[key]);
+}
+
+function sameEnvironmentInputs(left: SavedEnvironmentInputs, right: SavedEnvironmentInputs) {
+  return (
+    left.owner === right.owner &&
+    left.environment === right.environment &&
+    left.fallbackMetadata === right.fallbackMetadata &&
+    left.routedThreadId === right.routedThreadId &&
+    sameRecordEntries(left.draftSessions, right.draftSessions) &&
+    sameRecordEntries(left.drafts, right.drafts) &&
+    sameRecordEntries(left.scroll, right.scroll) &&
+    sameRecordEntries(left.visits, right.visits)
+  );
+}
 /**
  * Captured display content per thread, kept while the thread's message list is
  * the same object, with the UTF-8 length of its serialized record entry — so a
@@ -446,7 +469,6 @@ function sameItems<T>(left: ReadonlyArray<T>, right: ReadonlyArray<T>): boolean 
 }
 
 function onScrollChanged(): void {
-  scrollRevision++;
   scheduleSave();
 }
 
@@ -487,43 +509,57 @@ async function save() {
   const owner = account;
   if (!owner || !snapshot.enabled) return;
   const vault = getHostedReadVault();
+  const routedSegment = window.location.pathname.split("/").at(-1) ?? "";
   for (const node of snapshot.nodes) {
     const appState = useStore.getState();
     const state = appState.environmentStateById[node.environmentId];
     if (!state) continue;
     const composer = useComposerDraftStore.getState();
-    const visits = useUiStateStore.getState().threadLastVisitedAtById;
-    const routedThreadId = window.location.pathname.split("/").at(-1) ?? "";
+    // An input of this record only while the routed thread is one of its own
+    // (it is kept last when trimming), so a navigation rewrites just the
+    // records it enters or leaves.
+    const routedThreadId = state.threadIds.some((id) => encodeURIComponent(id) === routedSegment)
+      ? routedSegment
+      : "";
+    const drafts: Record<string, string> = {};
+    const scroll: Record<string, number> = {};
+    const draftSessions: Record<string, DraftThreadState> = {};
+    const visits: Record<string, string> = {};
+    for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey).slice(-32)) {
+      if (draft.environmentId === node.environmentId && !draft.promotedTo)
+        draftSessions[key] = draft;
+    }
+    for (const [key, draft] of Object.entries(composer.draftsByThreadKey)) {
+      if (
+        (parseScopedThreadKey(key)?.environmentId === node.environmentId ||
+          Object.hasOwn(draftSessions, key)) &&
+        draft.prompt.length <= 100_000
+      )
+        drafts[key] = draft.prompt;
+    }
+    for (const [key, position] of scrollPositions)
+      if (parseScopedThreadKey(key)?.environmentId === node.environmentId) scroll[key] = position;
+    for (const [key, visitedAt] of Object.entries(
+      useUiStateStore.getState().threadLastVisitedAtById,
+    ))
+      if (parseScopedThreadKey(key)?.environmentId === node.environmentId) visits[key] = visitedAt;
     const inputs: SavedEnvironmentInputs = {
       owner,
       environment: state,
       fallbackMetadata: environments.get(node.environmentId)?.metadata,
-      draftThreads: composer.draftThreadsByThreadKey,
-      drafts: composer.draftsByThreadKey,
+      draftSessions,
+      drafts,
+      scroll,
       visits,
       routedThreadId,
-      scrollRevision,
     };
     const saved = savedInputs.get(node.environmentId);
-    if (
-      saved &&
-      (Object.keys(inputs) as Array<keyof SavedEnvironmentInputs>).every(
-        (key) => saved[key] === inputs[key],
-      )
-    )
-      continue;
+    if (saved && sameEnvironmentInputs(saved, inputs)) continue;
     const metadata =
       readWorkspaceMetadataSnapshot(node.environmentId, Date.now(), false, appState) ??
       environments.get(node.environmentId)?.metadata;
     if (!metadata) continue;
     const content: Record<string, CachedThreadContent> = {};
-    const drafts: Record<string, string> = {};
-    const scroll: Record<string, number> = {};
-    const draftSessions: Record<string, DraftThreadState> = {};
-    for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey).slice(-32)) {
-      if (draft.environmentId === node.environmentId && !draft.promotedTo)
-        draftSessions[key] = draft;
-    }
     const threadIds = state.threadIds
       .filter((id) => state.messageIdsByThreadId[id]?.length)
       .toSorted(
@@ -538,16 +574,6 @@ async function save() {
       )
       .slice(-32);
     const captured = captureContent(node.environmentId, state, threadIds);
-    for (const [key, draft] of Object.entries(composer.draftsByThreadKey)) {
-      if (
-        (parseScopedThreadKey(key)?.environmentId === node.environmentId ||
-          Object.hasOwn(draftSessions, key)) &&
-        draft.prompt.length <= 100_000
-      )
-        drafts[key] = draft.prompt;
-    }
-    for (const [key, position] of scrollPositions)
-      if (parseScopedThreadKey(key)?.environmentId === node.environmentId) scroll[key] = position;
     // Trim display history before allowing a busy workspace to exceed the
     // per-record budget, least recently visited first and the routed thread
     // last. Measured from the cached entry lengths rather than by

@@ -39,8 +39,11 @@ import {
 } from "../provider/acp/GrokAcpSupport.ts";
 
 const GROK_TIMEOUT_MS = 180_000;
-/** A workspace change summary is short and optional; no summary is the fallback. */
-const GROK_SUMMARY_TIMEOUT_MS = 30_000;
+/**
+ * Titles, branch names and workspace change summaries are short; each has a fallback (the
+ * user's own message, or no summary), so a hung agent must not hold them for minutes.
+ */
+const GROK_NAMING_TIMEOUT_MS = 30_000;
 
 function mapGrokAcpError(
   operation:
@@ -255,6 +258,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      timeoutMs: GROK_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -278,6 +282,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      timeoutMs: GROK_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -341,7 +346,7 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
-      timeoutMs: GROK_SUMMARY_TIMEOUT_MS,
+      timeoutMs: GROK_NAMING_TIMEOUT_MS,
     });
     return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
   });

@@ -127,7 +127,7 @@ function makeDeviceEventStream(
   return Stream.callback<DeviceEvent, DeviceRpcError>(
     (queue) =>
       Effect.acquireRelease(
-        Effect.sync(() => manager.onEvent((event) => Queue.offerUnsafe(queue, event))),
+        Effect.sync(() => manager.onClientEvent((event) => Queue.offerUnsafe(queue, event))),
         (unsubscribe) => Effect.sync(unsubscribe),
       ),
     { bufferSize: DEVICE_EVENT_BUFFER_CAPACITY, strategy: "dropping" },

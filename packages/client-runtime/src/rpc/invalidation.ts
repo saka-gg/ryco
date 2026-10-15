@@ -3,7 +3,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
-import { Atom, Reactivity } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
+import * as Reactivity from "effect/reactivity/Reactivity";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
 

@@ -60,6 +60,15 @@ export interface UsageFileAggregate {
   readonly keyValues: Float64Array;
 }
 
+/**
+ * Rows a cached aggregate keeps resident, which is also what a summary walks:
+ * its slots plus its keyed responses. Keyless responses fold into their slot,
+ * so this is usually far below {@link UsageFileAggregate.recordCount}.
+ */
+export function usageFileAggregateRetainedRows(aggregate: UsageFileAggregate): number {
+  return aggregate.slots.length + aggregate.keys.length;
+}
+
 export const EMPTY_USAGE_FILE_AGGREGATE: UsageFileAggregate = {
   recordCount: 0,
   slots: [],

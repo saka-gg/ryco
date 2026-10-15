@@ -1,4 +1,4 @@
-import { AtomRegistry } from "effect/reactivity";
+import * as AtomRegistry from "effect/reactivity/AtomRegistry";
 
 export let appAtomRegistry = AtomRegistry.make();
 

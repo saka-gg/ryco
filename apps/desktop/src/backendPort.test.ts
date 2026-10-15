@@ -8,11 +8,15 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   canListenOnHost,
   DEFAULT_DESKTOP_BACKEND_PORT,
+  DESKTOP_RENDERER_ORIGIN_RECORD_FILE,
   hasPriorDesktopRendererState,
   LEGACY_DESKTOP_BACKEND_PORT,
+  readDesktopRendererOriginPort,
   resolveDesktopBackendPort,
   resolveDesktopBackendStartPort,
+  resolveDesktopPersistedBackendPort,
   shouldPersistDesktopBackendPort,
+  writeDesktopRendererOriginPort,
 } from "./backendPort.ts";
 
 describe("resolveDesktopBackendPort", () => {
@@ -218,5 +222,72 @@ describe("shouldPersistDesktopBackendPort", () => {
         hasPriorRendererState: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("renderer origin record", () => {
+  function withUserData(run: (directory: string) => void): void {
+    const directory = FS.mkdtempSync(Path.join(OS.tmpdir(), "ryco-renderer-origin-test-"));
+    try {
+      run(directory);
+    } finally {
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it("round-trips the port, owner-only", () => {
+    withUserData((directory) => {
+      expect(readDesktopRendererOriginPort(directory)).toBeNull();
+      writeDesktopRendererOriginPort(directory, DEFAULT_DESKTOP_BACKEND_PORT);
+      expect(readDesktopRendererOriginPort(directory)).toBe(DEFAULT_DESKTOP_BACKEND_PORT);
+      writeDesktopRendererOriginPort(directory, 7_931);
+      expect(readDesktopRendererOriginPort(directory)).toBe(7_931);
+      const recordPath = Path.join(directory, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
+      if (process.platform !== "win32") {
+        expect(FS.statSync(recordPath).mode & 0o777).toBe(0o600);
+      }
+      expect(FS.readdirSync(directory)).toEqual([DESKTOP_RENDERER_ORIGIN_RECORD_FILE]);
+    });
+  });
+
+  it("ignores a damaged or foreign record", () => {
+    withUserData((directory) => {
+      const recordPath = Path.join(directory, DESKTOP_RENDERER_ORIGIN_RECORD_FILE);
+      for (const content of ["{", "null", '{"version":2,"port":7926}', '{"version":1,"port":0}']) {
+        FS.writeFileSync(recordPath, content);
+        expect(readDesktopRendererOriginPort(directory), content).toBeNull();
+      }
+    });
+  });
+
+  it("prefers the record over the desktop settings port", () => {
+    expect(resolveDesktopPersistedBackendPort({ recordedPort: 7926, settingsPort: 3773 })).toBe(
+      7926,
+    );
+    expect(resolveDesktopPersistedBackendPort({ recordedPort: null, settingsPort: 3773 })).toBe(
+      3773,
+    );
+    expect(
+      resolveDesktopPersistedBackendPort({ recordedPort: null, settingsPort: null }),
+    ).toBeNull();
+  });
+
+  it("keeps an install on its port when the Ryco home was reset but userData survived", () => {
+    withUserData((directory) => {
+      // The first launch recorded its origin; it created renderer state but
+      // never reached readiness, and the settings file was then lost.
+      writeDesktopRendererOriginPort(directory, DEFAULT_DESKTOP_BACKEND_PORT);
+      FS.mkdirSync(Path.join(directory, "Local Storage"));
+      const persistedPort = resolveDesktopPersistedBackendPort({
+        recordedPort: readDesktopRendererOriginPort(directory),
+        settingsPort: null,
+      });
+      expect(
+        resolveDesktopBackendStartPort({
+          persistedPort,
+          hasPriorRendererState: hasPriorDesktopRendererState(directory),
+        }),
+      ).toBe(DEFAULT_DESKTOP_BACKEND_PORT);
+    });
   });
 });

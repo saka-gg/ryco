@@ -2,6 +2,7 @@ import { extname } from "node:path";
 import { Effect } from "effect";
 import {
   PROJECT_ICON_MAX_BYTES,
+  ProjectReadIconError,
   type OrchestrationProjectShell,
   type ProjectReadIconResult,
 } from "@ryco/contracts";
@@ -17,11 +18,15 @@ const iconTypes: Record<string, NonNullable<ProjectReadIconResult>["mimeType"]> 
   ".ico": "image/x-icon",
 };
 
-/** Resolve only the registered project's artwork; callers cannot supply filesystem paths. */
+/**
+ * Resolve only the registered project's artwork; callers cannot supply
+ * filesystem paths. `null` means the project has no artwork; a read that did
+ * not finish fails instead, so clients retry rather than remember an absence.
+ */
 export function readProjectIcon(
   project: Pick<OrchestrationProjectShell, "id" | "workspaceRoot" | "customAvatarContentHash">,
   services: { favicon: ProjectFaviconResolverShape | null; avatar: ProjectAvatarStoreShape | null },
-): Effect.Effect<ProjectReadIconResult> {
+): Effect.Effect<ProjectReadIconResult, ProjectReadIconError> {
   return Effect.gen(function* () {
     if (project.customAvatarContentHash && services.avatar) {
       const avatar = yield* services.avatar.read(project.id);
@@ -29,7 +34,15 @@ export function readProjectIcon(
         return { mimeType: "image/png" as const, dataBase64: avatar.bytes.toString("base64") };
       }
     }
-    const icon = services.favicon ? yield* services.favicon.readIcon(project.workspaceRoot) : null;
+    const icon = services.favicon
+      ? yield* services.favicon
+          .readIcon(project.workspaceRoot)
+          .pipe(
+            Effect.mapError(
+              () => new ProjectReadIconError({ message: "Project artwork is not available yet." }),
+            ),
+          )
+      : null;
     if (!icon || icon.bytes.length > PROJECT_ICON_MAX_BYTES) return null;
     const mimeType = iconTypes[extname(icon.path).toLowerCase()];
     return mimeType ? { mimeType, dataBase64: Buffer.from(icon.bytes).toString("base64") } : null;

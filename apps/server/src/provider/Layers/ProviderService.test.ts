@@ -2642,6 +2642,43 @@ it.live("ProviderServiceLive reads and keeps an instance's project commands per 
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live(
+  "ProviderServiceLive answers a failed first project-commands read empty and backs off",
+  () =>
+    Effect.gen(function* () {
+      const fake = makeFakeCodexAdapter();
+      let reads = 0;
+      const readProjectCommands = (cwd: string) =>
+        Effect.suspend(() => {
+          reads += 1;
+          return reads === 1
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: CODEX_DRIVER,
+                  method: "skills/list",
+                  detail: "cold start",
+                }),
+              )
+            : Effect.succeed({
+                skills: [{ name: `skill-${cwd}`, path: `${cwd}/SKILL.md`, enabled: true }],
+                slashCommands: [],
+              });
+        });
+      const providerLayer = makeStandaloneProviderServiceLayer([
+        { ...fake, adapter: { ...fake.adapter, readProjectCommands } },
+      ]);
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const read = () => provider.readProjectCommands!(codexInstanceId, "/repo-a");
+        // The failed read answers empty, and a broken provider is not re-read by every caller:
+        // the cache retries it only after its failure backoff (covered by the cache's own tests).
+        assert.deepEqual(yield* read(), { skills: [], slashCommands: [] });
+        assert.deepEqual(yield* read(), { skills: [], slashCommands: [] });
+        assert.equal(reads, 1);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("ProviderServiceLive retains the caller's path lease instead of acquiring its own", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();
@@ -3842,6 +3879,47 @@ describe("ProviderServiceLive turn input", () => {
           [
             `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nfirst`,
             `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nagain`,
+            "later",
+          ],
+        );
+      }).pipe(Effect.provide(makeStandaloneProviderServiceLayer([cursor])));
+    }),
+  );
+
+  it.effect("delivers the attachment instructions again after the provider compacts", () =>
+    Effect.gen(function* () {
+      const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-cursor-compacted");
+        yield* startThread(threadId, CURSOR_DRIVER, ProviderInstanceId.make("cursor"));
+
+        yield* provider.sendTurn({ threadId, input: "first", attachments: [] });
+        const compactedSeen = yield* provider.streamEvents.pipe(
+          Stream.filter((event) => event.type === "thread.state.changed"),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Effect.yieldNow;
+        cursor.emit({
+          type: "thread.state.changed",
+          eventId: asEventId("evt-cursor-compacted"),
+          provider: CURSOR_DRIVER,
+          createdAt: new Date().toISOString(),
+          threadId,
+          payload: { state: "compacted" },
+        });
+        yield* Fiber.join(compactedSeen);
+        yield* provider.sendTurn({ threadId, input: "after compaction", attachments: [] });
+        yield* provider.sendTurn({ threadId, input: "later", attachments: [] });
+
+        assert.equal(cursor.startSession.mock.calls.length, 1);
+        assert.deepEqual(
+          cursor.sendTurn.mock.calls.map((call) => call[0].input),
+          [
+            `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nfirst`,
+            `${ASSISTANT_ATTACHMENT_INSTRUCTIONS}\n\nafter compaction`,
             "later",
           ],
         );

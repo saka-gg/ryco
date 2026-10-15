@@ -9,9 +9,14 @@
  *
  * @module provider/acp/CursorAgentCommand
  */
-import { resolveCommandPath } from "@ryco/shared/shell";
+import { ProviderDriverKind } from "@ryco/contracts";
+import { resolveCommandPathAsync } from "@ryco/shared/shell";
 import { Effect } from "effect";
 
+import {
+  makeProviderMaintenanceCapabilities,
+  type ProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 import type { AcpStartupPhase } from "./AcpSessionRuntime.ts";
 
 export const DEFAULT_CURSOR_AGENT_COMMAND = "agent";
@@ -36,17 +41,21 @@ export interface ResolvedCursorAgentCommand {
 // probes re-resolve (`fresh`) so installing or removing `cursor-agent` is picked up.
 const resolutionByPath = new Map<string, ResolvedCursorAgentCommand>();
 
+/**
+ * Resolves on the promise API with each PATH entry bounded, so a stalled network or File Provider
+ * mount on PATH cannot block the event loop during probes and session spawns.
+ */
 export const resolveCursorAgentCommand = (
   binaryPath: string | null | undefined,
   environment: NodeJS.ProcessEnv = process.env,
   options?: { readonly fresh?: boolean },
 ): Effect.Effect<ResolvedCursorAgentCommand> =>
-  Effect.sync(() => {
+  Effect.promise(async () => {
     const configured = binaryPath?.trim() || DEFAULT_CURSOR_AGENT_COMMAND;
     if (configured !== DEFAULT_CURSOR_AGENT_COMMAND) {
       return {
         command: configured,
-        resolvedPath: resolveCommandPath(configured, { env: environment }),
+        resolvedPath: await resolveCommandPathAsync(configured, { env: environment }),
       };
     }
     const pathKey = environment.PATH ?? environment.Path ?? "";
@@ -54,13 +63,17 @@ export const resolveCursorAgentCommand = (
     if (cached !== undefined) {
       return cached;
     }
-    const preferredPath = resolveCommandPath(PREFERRED_CURSOR_AGENT_COMMAND, { env: environment });
+    const preferredPath = await resolveCommandPathAsync(PREFERRED_CURSOR_AGENT_COMMAND, {
+      env: environment,
+    });
     const resolution: ResolvedCursorAgentCommand =
       preferredPath !== null
         ? { command: PREFERRED_CURSOR_AGENT_COMMAND, resolvedPath: preferredPath }
         : {
             command: DEFAULT_CURSOR_AGENT_COMMAND,
-            resolvedPath: resolveCommandPath(DEFAULT_CURSOR_AGENT_COMMAND, { env: environment }),
+            resolvedPath: await resolveCommandPathAsync(DEFAULT_CURSOR_AGENT_COMMAND, {
+              env: environment,
+            }),
           };
     resolutionByPath.set(pathKey, resolution);
     return resolution;
@@ -75,3 +88,18 @@ export const cursorAgentCommandCandidates = (
     ? [PREFERRED_CURSOR_AGENT_COMMAND, DEFAULT_CURSOR_AGENT_COMMAND]
     : [configured];
 };
+
+/**
+ * Cursor updates itself (`<command> update`). The update runs the resolved command, so it never
+ * reaches another CLI's `agent` that happens to come first on PATH.
+ */
+export const makeCursorMaintenanceCapabilities = (
+  command: ResolvedCursorAgentCommand,
+): ProviderMaintenanceCapabilities =>
+  makeProviderMaintenanceCapabilities({
+    provider: ProviderDriverKind.make("cursor"),
+    packageName: null,
+    updateExecutable: command.resolvedPath ?? command.command,
+    updateArgs: ["update"],
+    updateLockKey: "cursor-agent",
+  });

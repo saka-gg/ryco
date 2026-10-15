@@ -221,6 +221,10 @@ export function InboxThreadRow(props: {
       environmentId: row.environmentId,
       cwd: row.gitCwd,
       reference: currentPr ? String(currentPr.number) : null,
+      // Every visible row polls its change request: other rows read it as a
+      // row glyph, queued behind the focused thread's surfaces. The active
+      // row is one of those surfaces and shares their key.
+      ...(props.active ? {} : { view: "row" as const }),
       enabled: sourceControlEnabled,
     },
     (data) =>

@@ -2242,6 +2242,15 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               if (!current) {
                 return state;
               }
+              // The composer calls this on every mount of an image-less draft;
+              // a no-op must keep the draft object, which callers compare by identity.
+              if (
+                current.persistedAttachments.length === 0 &&
+                current.nonPersistedImageIds.length === 0 &&
+                !shouldRemoveDraft(current)
+              ) {
+                return state;
+              }
               const nextDraft: ComposerThreadDraftState<TImage> = {
                 ...current,
                 persistedAttachments: [],
@@ -2371,7 +2380,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               ([threadKey, draftThread]) => [threadKey, toHydratedDraftThreadState(draftThread)],
             ),
           ) as Record<string, DraftThreadState>;
-          return {
+          const merged: ComposerDraftStoreState<TImage> = {
             ...currentState,
             draftsByThreadKey,
             draftThreadsByThreadKey,
@@ -2381,6 +2390,9 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
               normalizedPersisted.stickyModelSelectionByProvider ?? {},
             stickyActiveProvider: normalizedPersisted.stickyActiveProvider ?? null,
           };
+          // Before any write: what this tab later changes is measured against what it hydrated.
+          persistStorage.rebaseline(snapshotComposerDraftPersistState(merged));
+          return merged;
         },
       },
     ),

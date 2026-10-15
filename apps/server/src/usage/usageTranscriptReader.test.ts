@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   createUsageTranscriptReader,
   listUsageTranscriptFiles,
@@ -21,8 +21,38 @@ import {
   USAGE_TRANSCRIPT_LIMITS,
 } from "./usageTranscriptReader.ts";
 
+/** Observes directory opens of the listing; every call still reaches the real file system. */
+const opendirProbe = vi.hoisted(() => ({
+  inFlight: 0,
+  maxInFlight: 0,
+  calls: 0,
+  onOpen: undefined as (() => void) | undefined,
+  reset() {
+    this.inFlight = 0;
+    this.maxInFlight = 0;
+    this.calls = 0;
+    this.onOpen = undefined;
+  },
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const opendir: typeof actual.opendir = async (...args) => {
+    opendirProbe.calls++;
+    opendirProbe.onOpen?.();
+    opendirProbe.inFlight++;
+    opendirProbe.maxInFlight = Math.max(opendirProbe.maxInFlight, opendirProbe.inFlight);
+    try {
+      return await actual.opendir(...args);
+    } finally {
+      opendirProbe.inFlight--;
+    }
+  };
+  return { ...actual, opendir, default: { ...actual, opendir } };
+});
+
 const roots: string[] = [];
 afterEach(async () => {
+  opendirProbe.reset();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function setup() {
@@ -293,6 +323,72 @@ it("lists many transcripts with batched stats and skips files outside the window
   expect(listing.files.map((file) => file.path)).toEqual(
     listing.files.map((file) => file.path).toSorted((left, right) => left.localeCompare(right)),
   );
+});
+
+describe("concurrent transcript listing", () => {
+  it("visits many small directories concurrently with the same sorted result", async () => {
+    const root = await setup();
+    const expected: string[] = [];
+    for (let project = 0; project < 200; project++) {
+      const directory = join(root, `project-${project % 20}`, `session-${project}`);
+      await mkdir(directory, { recursive: true });
+      for (let index = 0; index < 3; index++) {
+        const path = join(directory, `${index}.jsonl`);
+        await writeFile(path, "");
+        if (index === 2) await utimes(path, 1, 1);
+        else expected.push(path);
+      }
+      await writeFile(join(directory, "notes.txt"), "");
+    }
+    const listing = await listUsageTranscriptFiles(root, 5_000);
+    expect(listing.errorCount).toBe(0);
+    expect(listing.skippedEntryCount).toBe(400);
+    expect(listing.files.map((file) => file.path)).toEqual(
+      expected.toSorted((left, right) => left.localeCompare(right)),
+    );
+    // 221 directories, several of them open at once.
+    expect(opendirProbe.calls).toBe(221);
+    expect(opendirProbe.maxInFlight).toBeGreaterThan(1);
+    expect(opendirProbe.maxInFlight).toBeLessThanOrEqual(16);
+  });
+
+  it("still reports the files limit when wide directories are walked concurrently", async () => {
+    const root = await setup();
+    const perDirectory = 100;
+    const directories = Math.ceil(USAGE_TRANSCRIPT_LIMITS.files / perDirectory) + 2;
+    for (let directory = 0; directory < directories; directory++) {
+      const path = join(root, `d-${directory}`);
+      await mkdir(path);
+      await Promise.all(
+        Array.from({ length: perDirectory }, (_, index) =>
+          writeFile(join(path, `${index}.jsonl`), ""),
+        ),
+      );
+    }
+    const listing = await listUsageTranscriptFiles(root, 0);
+    expect(listing.errorCount).toBeGreaterThan(0);
+    expect(listing.files.length).toBeLessThanOrEqual(USAGE_TRANSCRIPT_LIMITS.files);
+    expect(listing.files.length).toBeGreaterThan(USAGE_TRANSCRIPT_LIMITS.files - 100);
+  });
+
+  it("rejects once when aborted mid-walk and opens no directory after that", async () => {
+    const root = await setup();
+    for (let directory = 0; directory < 60; directory++) {
+      const path = join(root, `d-${directory}`);
+      await mkdir(path);
+      await writeFile(join(path, "a.jsonl"), "");
+    }
+    const controller = new AbortController();
+    opendirProbe.onOpen = () => {
+      if (opendirProbe.calls === 8) controller.abort();
+    };
+    await expect(listUsageTranscriptFiles(root, 0, controller.signal)).rejects.toThrow();
+    const opened = opendirProbe.calls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(opendirProbe.calls).toBe(opened);
+    expect(opened).toBeLessThan(61);
+    expect(opendirProbe.inFlight).toBe(0);
+  });
 });
 
 it("skips large inert Codex lines by their envelope and still reads usage and context", async () => {

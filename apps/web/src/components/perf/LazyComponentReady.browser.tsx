@@ -1,5 +1,6 @@
+import { memo } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { renderHook } from "vitest-browser-react";
+import { render, renderHook } from "vitest-browser-react";
 
 import {
   preloadableLazy,
@@ -58,6 +59,24 @@ describe("useLazyComponentReady", () => {
     await vi.waitFor(() => expect(hook.result.current).toBe(true));
     expect(load).toHaveBeenCalledTimes(2);
     expect(onLoadError).toHaveBeenCalledOnce();
+  });
+
+  it("hands the failure to the caller's latest handler inside a memo component", async () => {
+    // React 19.2 refreshes an effect event only in plain function components;
+    // a memo caller's handler must still see its latest render.
+    const LazyGreeting = preloadableLazy(failingOnceLoad(new Error("chunk failed")));
+    const seen: Array<string | null> = [];
+    const Surface = memo(function Surface({ target }: { readonly target: string | null }) {
+      useLazyComponentReady(LazyGreeting, target !== null, {
+        onLoadError: () => seen.push(target),
+      });
+      return null;
+    });
+
+    const screen = await render(<Surface target={null} />);
+    await screen.rerender(<Surface target="item-202" />);
+
+    await vi.waitFor(() => expect(seen).toEqual(["item-202"]));
   });
 
   it("loads again when the surface is wanted again after a handled failure", async () => {
@@ -135,5 +154,23 @@ describe("usePreloadWhenIdle", () => {
     // An idle slot can take up to the idle task's 1 s deadline on a busy page.
     await vi.waitFor(() => expect(LazyGreeting.isLoaded()).toBe(true), { timeout: 3_000 });
     expect(load).toHaveBeenCalledOnce();
+  });
+
+  it("skips the speculative download on data saver", async () => {
+    Object.defineProperty(navigator, "connection", {
+      configurable: true,
+      value: { saveData: true, effectiveType: "4g" },
+    });
+    try {
+      const load = vi.fn(async () => Greeting);
+      const LazyGreeting = preloadableLazy(load);
+
+      await renderHook(() => usePreloadWhenIdle(LazyGreeting, true));
+      // Longer than the idle task's 1 s deadline.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(load).not.toHaveBeenCalled();
+    } finally {
+      delete (navigator as { connection?: unknown }).connection;
+    }
   });
 });

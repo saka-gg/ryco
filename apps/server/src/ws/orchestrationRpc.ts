@@ -47,7 +47,7 @@ import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
 } from "./context/constants.ts";
-import { observeArrays } from "./context/orchestrationStreamBatching.ts";
+import { observeArrays } from "./streamBatching.ts";
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
@@ -61,6 +61,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     serverSettings,
     providerService,
     providerRuntimeIngestion,
+    threadViewers,
     terminalManager,
     checkpointDiffQuery,
     orchestrationEngine,
@@ -92,6 +93,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       ? withThreadHistoryRecovery(threadId, stream, reconcile, {
           mode: mode ?? "active",
           register: historyRecoveryRegistry.register(threadId),
+          ...(Option.isSome(threadViewers) ? { viewers: threadViewers.value } : {}),
         })
       : stream;
   };

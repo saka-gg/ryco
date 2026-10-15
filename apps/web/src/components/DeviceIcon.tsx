@@ -1,5 +1,5 @@
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 
 import {
   resolveEnvironmentMachineKind,
@@ -9,8 +9,12 @@ import { usePrimaryEnvironmentDescriptor } from "../environments/primary";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
 import { useHostedHubStore } from "../hostedHub/state";
-import { useServerConfig } from "../rpc/serverState";
+import { useServerConfigSelector } from "../rpc/serverState";
 import { isElectron } from "../env";
+
+// The machine kind is all an icon reads: provider and settings pushes keep it.
+const selectMachineKind = (config: ServerConfig | null) =>
+  config ? resolveEnvironmentMachineKind(config) : null;
 
 /** Read existing snapshots only. Rendering an icon never connects or wakes a node. */
 export function DeviceIcon({
@@ -26,20 +30,20 @@ export function DeviceIcon({
 }) {
   const primary = usePrimaryEnvironmentDescriptor();
   const desktop = useDesktopWorkspaceState();
-  const primaryConfig = useServerConfig();
+  const primaryKind = useServerConfigSelector(selectMachineKind);
   const id =
     isElectron && environmentId === desktop.localEnvironmentId
       ? primary?.environmentId
       : (environmentId ?? primary?.environmentId);
-  const saved = useSavedEnvironmentRuntimeStore((state) =>
-    id ? state.byId[id]?.serverConfig : undefined,
-  );
+  const savedKind = useSavedEnvironmentRuntimeStore((state) => {
+    const config = id ? state.byId[id]?.serverConfig : undefined;
+    return config ? resolveEnvironmentMachineKind(config) : null;
+  });
   const node = useHostedHubStore((state) =>
     state.nodes.find((node) => node.environmentId === environmentId),
   );
-  const config = id === primary?.environmentId ? primaryConfig : saved;
-  const kind = config
-    ? resolveEnvironmentMachineKind(config)
-    : inferEnvironmentMachineKind(platformOs ?? node?.platformOs, label ?? node?.label);
+  const configKind = id === primary?.environmentId ? primaryKind : savedKind;
+  const kind =
+    configKind ?? inferEnvironmentMachineKind(platformOs ?? node?.platformOs, label ?? node?.label);
   return <EnvironmentMachineIcon kind={kind} className={className} />;
 }

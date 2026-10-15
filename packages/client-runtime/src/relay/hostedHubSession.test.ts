@@ -50,13 +50,40 @@ class Socket implements HubSessionSocket {
     });
   }
 }
-function harness() {
+/**
+ * A browser WebSocket: `bufferedAmount` grows on `send()` and drops once the
+ * bytes reach the kernel, which keeps accepting them on a dead path too.
+ */
+class BrowserSocket extends Socket {
+  override send(bytes: Uint8Array) {
+    super.send(bytes);
+    this.bufferedAmount += bytes.byteLength;
+    setTimeout(() => {
+      this.bufferedAmount -= bytes.byteLength;
+    }, 1);
+  }
+}
+/**
+ * A browser WebSocket on a slow uplink: `bufferedAmount` grows on `send()` and
+ * only drops when the test drains it, in bursts as TCP acknowledgements free
+ * the kernel's send buffer.
+ */
+class UplinkSocket extends Socket {
+  override send(bytes: Uint8Array) {
+    super.send(bytes);
+    this.bufferedAmount += bytes.byteLength;
+  }
+  drain(bytes: number) {
+    this.bufferedAmount = Math.max(0, this.bufferedAmount - bytes);
+  }
+}
+function harness(SocketType: new () => Socket = Socket) {
   const sockets: Socket[] = [];
   const onFailure = vi.fn();
   const onInvalidate = vi.fn();
   const session = new HostedHubSession({
     createSocket: () => {
-      const socket = new Socket();
+      const socket = new SocketType();
       sockets.push(socket);
       return socket;
     },
@@ -299,6 +326,171 @@ describe("persistent Hub session", () => {
     expect(sockets).toHaveLength(2);
     session.dispose();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("loses an idle dead browser connection within the probe bound though its ping left the buffer", async () => {
+    const { session, sockets, onFailure } = harness(BrowserSocket);
+    session.createSocket();
+    sockets[0]!.ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(sockets[0]!.closed).toBe(1);
+    session.dispose();
+  });
+  it("loses a dead browser connection within the probe bound though small frames keep leaving", async () => {
+    const { session, sockets, onFailure } = harness(BrowserSocket);
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    // Channel pings, acks: a trickle the kernel accepts on a dead path too.
+    const trickle = setInterval(() => {
+      if (channel.readyState === 1) channel.send(new Uint8Array(64));
+    }, 1_000);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    clearInterval(trickle);
+    session.dispose();
+  });
+  it("keeps a probed browser connection while a backlogged upload drains", async () => {
+    const { session, sockets, onFailure } = harness(BrowserSocket);
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 1_024 * 1_024;
+    channel.send(new Uint8Array(1_024));
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    for (let second = 0; second < 12; second++) {
+      sockets[0]!.bufferedAmount -= 50 * 1_024;
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    session.dispose();
+  });
+  it("keeps a probed upload that drains in bursts after the ping leaves the queue", async () => {
+    const { session, sockets, onFailure } = harness(UplinkSocket);
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    const socket = sockets[0] as UplinkSocket;
+    for (let frame = 0; frame < 24; frame++) channel.send(new Uint8Array(64 * 1_024));
+    const drains = setInterval(() => socket.drain(100 * 1_024), 700);
+    // Probe just before a burst: the ping leaves the queue a few milliseconds
+    // later, behind a full browser buffer, and the upload stays backlogged.
+    await vi.advanceTimersByTimeAsync(699);
+    session.probe();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(socket.frames().filter((frame) => frame.type === "ping")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(7_000);
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(0);
+    // The path stalls while still backlogged: lost within one more probe wait.
+    clearInterval(drains);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(socket.closed).toBe(1);
+    session.dispose();
+  });
+  it("sends a probe ping ahead of queued stream data", async () => {
+    const { session, sockets } = harness();
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 300 * 1_024;
+    channel.send(new Uint8Array(1_024).fill(1));
+    channel.send(new Uint8Array(1_024).fill(2));
+    session.probe();
+    sockets[0]!.receive({ type: "ping", nonce: new Uint8Array(8).fill(9) });
+    sockets[0]!.bufferedAmount = 0;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sockets[0]!.frames().map((frame) => frame.type)).toEqual([
+      "open",
+      "ping",
+      "pong",
+      "data",
+      "data",
+    ]);
+    session.dispose();
+  });
+  it("counts the probe wait from when the ping leaves the queue", async () => {
+    const { session, sockets, onFailure } = harness();
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 300 * 1_024;
+    channel.send(new Uint8Array(1_024));
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    await vi.advanceTimersByTimeAsync(4_000);
+    // The uplink catches up just before the deadline: the ping leaves now.
+    sockets[0]!.bufferedAmount = 0;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sockets[0]!.frames().at(1)?.type).toBe("ping");
+    // Past the original deadline, but not yet the full bound since the ping left.
+    await vi.advanceTimersByTimeAsync(4_990);
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("keeps a probed connection while its uplink drains, and loses it once nothing moves", async () => {
+    const { session, sockets, onFailure } = harness();
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 1_024 * 1_024;
+    channel.send(new Uint8Array(1_024));
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    // A slow upload: bytes keep leaving the browser, no frame arrives.
+    for (let second = 0; second < 12; second++) {
+      sockets[0]!.bufferedAmount -= 50 * 1_024;
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(sockets[0]!.closed).toBe(0);
+    // The path stalls: the next check without progress loses the connection.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    expect(sockets[0]!.closed).toBe(1);
+    session.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("loses a congested connection whose uplink does not move within the probe bound", async () => {
+    const { session, sockets, onFailure } = harness();
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 300 * 1_024;
+    channel.send(new Uint8Array(1_024));
+    await vi.advanceTimersByTimeAsync(1_000);
+    session.probe();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(onFailure).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    session.dispose();
+  });
+  it("never extends a probe past the liveness bound since the last frame", async () => {
+    const { session, sockets, onFailure } = harness();
+    const channel = session.createSocket();
+    sockets[0]!.ready();
+    sockets[0]!.bufferedAmount = 1_536 * 1_024;
+    channel.send(new Uint8Array(1_024));
+    await vi.advanceTimersByTimeAsync(30_000);
+    session.probe();
+    for (let second = 0; second < 14; second++) {
+      sockets[0]!.bufferedAmount -= 10 * 1_024;
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(onFailure).not.toHaveBeenCalled();
+    sockets[0]!.bufferedAmount -= 10 * 1_024;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onFailure).toHaveBeenCalledWith({ kind: "network", retryable: true });
+    session.dispose();
   });
   it("keeps a live connection that answers a probe and reuses a pending heartbeat ping", async () => {
     const { session, sockets, onFailure } = harness();

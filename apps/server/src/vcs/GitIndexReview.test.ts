@@ -291,6 +291,26 @@ describe("Git index review", () => {
       expect((yield* f.git(["ls-files", "-s", "script.sh"])).stdout).toMatch(/^100755 /);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
+  it.effect.skipIf(process.getuid?.() === 0)(
+    "refuses an unreadable tracked file next to untracked ones with a review error",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const fs = yield* FileSystem.FileSystem;
+        yield* f.write("shared.txt", "tracked edit\n");
+        yield* fs.chmod(`${f.cwd}/shared.txt`, 0o000);
+        yield* f.write("untracked.txt", "new\n");
+        const failure = yield* f
+          .read()
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(fs.chmod(`${f.cwd}/shared.txt`, 0o644).pipe(Effect.orDie)),
+          );
+        expect(failure.detail).toBe(
+          "An untracked file changed or could not be read. Refresh the review.",
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
   it.effect("asks Git for the branch when HEAD lives in a reftable", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -379,6 +399,38 @@ describe("Git index review", () => {
         "diff --git a/inside/new.txt b/inside/new.txt",
         "diff --git a/outside/new.txt b/outside/new.txt",
       ]);
+      expect(snapshot.unstaged.files).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("keeps a tracked file's deletion when an untracked directory replaces it", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* f.write("foo", "tracked\n");
+      yield* f.commit("tracked file");
+      yield* fs.remove(`${f.cwd}/foo`);
+      yield* fs.makeDirectory(`${f.cwd}/foo`);
+      yield* f.write("foo/bar", "untracked\n");
+      const snapshot = yield* f.read();
+      expect(snapshot.unstaged.patch).toContain("diff --git a/foo b/foo\ndeleted file mode 100644");
+      expect(snapshot.unstaged.patch).toContain("diff --git a/foo/bar b/foo/bar\nnew file mode");
+      expect(snapshot.unstaged.files).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("keeps a tracked directory's deletions when an untracked file replaces it", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(`${f.cwd}/dir`);
+      yield* f.write("dir/x", "tracked\n");
+      yield* f.commit("tracked directory");
+      yield* fs.remove(`${f.cwd}/dir`, { recursive: true });
+      yield* f.write("dir", "untracked\n");
+      const snapshot = yield* f.read();
+      expect(snapshot.unstaged.patch).toContain(
+        "diff --git a/dir/x b/dir/x\ndeleted file mode 100644",
+      );
+      expect(snapshot.unstaged.patch).toContain("diff --git a/dir b/dir\nnew file mode");
       expect(snapshot.unstaged.files).toHaveLength(2);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );

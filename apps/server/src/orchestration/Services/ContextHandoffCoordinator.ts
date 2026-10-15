@@ -1,4 +1,4 @@
-import type { OrchestrationEvent } from "@ryco/contracts";
+import type { OrchestrationEvent, TurnId } from "@ryco/contracts";
 import { Context, Effect } from "effect";
 
 import type {
@@ -23,6 +23,8 @@ export type ContextHandoffTurnStartEvent = Extract<
  *   interrupt was already noted, closing the gap between start and ownership.
  * - `stopRequested` tells the failure path that the user stopped the thread, so
  *   the source is put back as `stopped`, never `ready`.
+ * - `onTurnAccepted` runs once the target provider accepted the turn and the
+ *   acceptance is persisted. It must not fail; it is best-effort.
  */
 export interface ContextHandoffLaneControl {
   readonly guardStart: <A, E, R>(
@@ -30,6 +32,7 @@ export interface ContextHandoffLaneControl {
   ) => Effect.Effect<A, E | ProviderSessionStartCancelledError, R>;
   readonly onDispatchStarted: Effect.Effect<void, ProviderSessionStartCancelledError>;
   readonly stopRequested: Effect.Effect<boolean>;
+  readonly onTurnAccepted?: (turnId: TurnId) => Effect.Effect<void>;
 }
 
 /** No lane: startup recovery and direct callers. */

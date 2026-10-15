@@ -19,6 +19,18 @@ vi.mock("expo-sqlite/kv-store", () => ({
 vi.mock("expo-linking", () => ({ getInitialURL: async () => null }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => "id" }));
+const fakeApi = vi.hoisted(() => ({
+  dispatchCommand: vi.fn(async (_command: unknown) => undefined),
+  getThreadWindow: vi.fn(async () => {
+    throw new Error("the subscribed state should have cleared this send");
+  }),
+}));
+vi.mock("../connection/environmentApi", () => ({
+  ensureEnvironmentApi: () => ({ orchestration: fakeApi }),
+}));
+vi.mock("../runtime/bootstrap", () => ({
+  createMobileConnectionRegistry: () => ({ driver: { supervisor: { read: () => null } } }),
+}));
 
 import {
   recordWsConnectionAttempt,
@@ -32,7 +44,9 @@ import {
   createOutboxLimitWake,
   createThreadOutboxDetailRetention,
   readThreadDrainState,
+  sendQueuedThreadMessage,
 } from "./use-thread-outbox-drain";
+import { writeEnvironmentServerConfig } from "./environmentServerConfigs";
 
 const ENV_A = "env-node-a" as EnvironmentId;
 const ENV_B = "env-node-b" as EnvironmentId;
@@ -324,5 +338,76 @@ describe("outbox usage-limit wake", () => {
     expect(run).toHaveBeenCalledTimes(1);
     wake.sync(null, 9_000);
     expect(timers).toHaveLength(2);
+  });
+});
+
+describe("queued Claude send", () => {
+  it("reuses the subscribed thread state instead of a review window read", async () => {
+    const environmentId = "env-claude" as EnvironmentId;
+    const threadId = "t-claude" as ThreadId;
+    const modelSelection = { instanceId: "claude-1", model: "claude-opus" } as never;
+    writeEnvironmentServerConfig(environmentId, {
+      providers: [{ instanceId: "claude-1", driver: "claudeAgent" }],
+    } as never);
+    const cleanup = await bootstrapShell(environmentId);
+    const { useStore } = await import("./threadsRuntime");
+    useStore.getState().syncServerThreadDetail(
+      {
+        id: threadId,
+        projectId: "p1",
+        title: "Claude",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/repo",
+        worktreeId: null,
+        manualStatusBucket: null,
+        manualPosition: 0,
+        latestTurn: null,
+        createdAt: "2026-08-19T10:00:00.000Z",
+        updatedAt: "2026-08-19T10:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "claudeAgent",
+          runtimeSessionId: "runtime-1",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-08-19T10:00:00.000Z",
+        },
+      } as never,
+      environmentId,
+    );
+    fakeApi.dispatchCommand.mockClear();
+    fakeApi.getThreadWindow.mockClear();
+    try {
+      await sendQueuedThreadMessage(
+        {
+          ...queuedFor(environmentId),
+          threadId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        } as QueuedThreadMessage,
+        { onBeforeTurnStart: () => undefined } as never,
+      );
+    } finally {
+      cleanup();
+    }
+
+    expect(fakeApi.getThreadWindow).not.toHaveBeenCalled();
+    expect(
+      fakeApi.dispatchCommand.mock.calls.map((call) => (call[0] as { type: string }).type),
+    ).toEqual(["thread.turn.start"]);
   });
 });

@@ -24,6 +24,7 @@ import {
   KEY_ARROW_UP_COMMAND,
   KEY_ENTER_COMMAND,
   KEY_TAB_COMMAND,
+  CLEAR_HISTORY_COMMAND,
   COMMAND_PRIORITY_HIGH,
   KEY_BACKSPACE_COMMAND,
   $getRoot,
@@ -885,6 +886,12 @@ export interface ComposerPromptEditorHandle {
 interface ComposerPromptEditorProps {
   value: string;
   cursor: number;
+  /**
+   * Whose prompt the editor holds (a thread or draft key). The editor outlives
+   * thread switches, so its undo history starts over when this changes: undo
+   * must never bring one thread's prompt into another's draft.
+   */
+  historyScope?: string;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
@@ -1417,9 +1424,11 @@ function ComposerPromptEditorInner({
   onChange,
   onCommandKeyDown,
   onPaste,
+  historyScope,
   editorRef,
 }: ComposerPromptEditorInnerProps) {
   const [editor] = useLexicalComposerContext();
+  const historyScopeRef = useRef(historyScope);
   const onChangeRef = useRef(onChange);
   const initialCursor = clampCollapsedComposerCursor(value, cursor);
   const terminalContextsSignature = terminalContextSignature(terminalContexts);
@@ -1452,6 +1461,12 @@ function ComposerPromptEditorInner({
   }, [disabled, editor]);
 
   useLayoutEffect(() => {
+    if (historyScopeRef.current !== historyScope) {
+      historyScopeRef.current = historyScope;
+      // Before the new prompt is written, so it becomes the first state of the
+      // new history rather than an undo step back to the previous prompt.
+      editor.dispatchCommand(CLEAR_HISTORY_COMMAND, undefined);
+    }
     const normalizedCursor = clampCollapsedComposerCursor(value, cursor);
     const previousSnapshot = snapshotRef.current;
     const contextsChanged = terminalContextsSignatureRef.current !== terminalContextsSignature;
@@ -1494,7 +1509,15 @@ function ComposerPromptEditorInner({
     queueMicrotask(() => {
       isApplyingControlledUpdateRef.current = false;
     });
-  }, [cursor, editor, skillsSignature, terminalContexts, terminalContextsSignature, value]);
+  }, [
+    cursor,
+    editor,
+    historyScope,
+    skillsSignature,
+    terminalContexts,
+    terminalContextsSignature,
+    value,
+  ]);
 
   const focusAt = useCallback(
     (nextCursor: number) => {
@@ -1705,6 +1728,7 @@ export const ComposerPromptEditor = forwardRef<
   {
     value,
     cursor,
+    historyScope,
     terminalContexts,
     skills,
     disabled,
@@ -1746,6 +1770,7 @@ export const ComposerPromptEditor = forwardRef<
       <ComposerPromptEditorInner
         value={value}
         cursor={cursor}
+        {...(historyScope !== undefined ? { historyScope } : {})}
         terminalContexts={terminalContexts}
         skills={skills}
         disabled={disabled}

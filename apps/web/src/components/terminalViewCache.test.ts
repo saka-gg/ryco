@@ -1,7 +1,9 @@
 import type { TerminalEvent } from "@ryco/contracts";
+import { MAX_TERMINALS_PER_GROUP } from "@ryco/client-runtime/state/threads";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  MAX_CACHED_TERMINAL_VIEWS,
   createTerminalViewCache,
   isTerminalEventIdSpaceReset,
   isTerminalViewCurrent,
@@ -61,7 +63,7 @@ describe("createTerminalViewCache", () => {
     expect(cache.size()).toBe(0);
   });
 
-  it("disposes the least recently detached view beyond its bound", () => {
+  it("disposes the least recently detached view beyond its bound", async () => {
     const cache = createTerminalViewCache<{ dispose(): void }, object>(2);
     const first = fakeView();
     const second = fakeView();
@@ -69,11 +71,46 @@ describe("createTerminalViewCache", () => {
     cache.stash("first", first.view);
     cache.stash("second", second.view);
     cache.stash("third", third.view);
+    await Promise.resolve();
 
+    expect(cache.size()).toBe(2);
     expect(first.terminal.dispose).toHaveBeenCalledTimes(1);
     expect(second.terminal.dispose).not.toHaveBeenCalled();
     expect(cache.take("first", "launch")).toBeNull();
     expect(cache.take("third", "launch")).toBe(third.view);
+  });
+
+  it("serves views swapped back in by the same commit before applying its bound", async () => {
+    // React runs all effect cleanups of a commit before its mounts, so a pane
+    // focus swap stashes the outgoing views before the incoming ones are taken.
+    const cache = createTerminalViewCache<{ dispose(): void }, object>(2);
+    const incoming = [fakeView(), fakeView()];
+    const outgoing = [fakeView(), fakeView()];
+    incoming.forEach((item, index) => cache.stash(`in-${index}`, item.view));
+    outgoing.forEach((item, index) => cache.stash(`out-${index}`, item.view));
+
+    expect(cache.take("in-0", "launch")).toBe(incoming[0]!.view);
+    expect(cache.take("in-1", "launch")).toBe(incoming[1]!.view);
+    await Promise.resolve();
+
+    expect(cache.size()).toBe(2);
+    for (const item of [...incoming, ...outgoing]) {
+      expect(item.terminal.dispose).not.toHaveBeenCalled();
+    }
+    expect(cache.take("out-0", "launch")).toBe(outgoing[0]!.view);
+  });
+
+  it("keeps every view of a full split group by default", async () => {
+    const cache = createTerminalViewCache<{ dispose(): void }, object>();
+    const group = Array.from({ length: MAX_TERMINALS_PER_GROUP }, () => fakeView());
+    group.forEach((item, index) => cache.stash(`terminal-${index}`, item.view));
+    await Promise.resolve();
+
+    expect(MAX_CACHED_TERMINAL_VIEWS).toBeGreaterThanOrEqual(MAX_TERMINALS_PER_GROUP);
+    group.forEach((item, index) => {
+      expect(cache.take(`terminal-${index}`, "launch")).toBe(item.view);
+      expect(item.terminal.dispose).not.toHaveBeenCalled();
+    });
   });
 
   it("discards a view on request", () => {

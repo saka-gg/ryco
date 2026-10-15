@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   DEFAULT_BINARY_PATH,
@@ -11,8 +11,17 @@ import {
   resolveCopilotCliPath,
 } from "./CopilotAdapter.types.ts";
 
+// Probes, session starts and text generation must not search PATH synchronously: a stalled mount
+// on PATH would block the event loop.
+vi.mock("@ryco/shared/shell", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@ryco/shared/shell")>()),
+  resolveCommandPath: () => {
+    throw new Error("synchronous PATH search");
+  },
+}));
+
 describe("resolveCopilotCliPath", () => {
-  it("resolves the default copilot command from PATH", () => {
+  it("resolves the default copilot command from PATH", async () => {
     const root = mkdtempSync(join(tmpdir(), "copilot-cli-path-"));
     const binDir = join(root, "bin");
     const copilotPath = join(binDir, "copilot");
@@ -21,27 +30,31 @@ describe("resolveCopilotCliPath", () => {
       mkdirSync(binDir, { recursive: true });
       writeFileSync(copilotPath, "#!/bin/sh\n", { encoding: "utf8", mode: 0o755 });
 
-      expect(resolveCopilotCliPath({ binaryPath: DEFAULT_BINARY_PATH }, { PATH: binDir })).toBe(
-        copilotPath,
-      );
+      expect(
+        await resolveCopilotCliPath({ binaryPath: DEFAULT_BINARY_PATH }, { PATH: binDir }),
+      ).toBe(copilotPath);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("keeps the default command name when copilot is not on PATH", () => {
-    expect(resolveCopilotCliPath({ binaryPath: DEFAULT_BINARY_PATH }, { PATH: "" })).toBe(
+  it("keeps the default command name when copilot is not on PATH", async () => {
+    expect(await resolveCopilotCliPath({ binaryPath: DEFAULT_BINARY_PATH }, { PATH: "" })).toBe(
       DEFAULT_BINARY_PATH,
     );
   });
 });
 
 describe("makeCopilotClientOptions", () => {
-  it("maps Ryco's binary, environment, and cwd settings to the Copilot v1 transport", () => {
+  it("maps Ryco's binary, environment, and cwd settings to the Copilot v1 transport", async () => {
     const environment = { PATH: "/usr/bin", COPILOT_TOKEN: "token" };
 
     expect(
-      makeCopilotClientOptions({ binaryPath: "/opt/copilot/bin/copilot" }, environment, "/repo"),
+      await makeCopilotClientOptions(
+        { binaryPath: "/opt/copilot/bin/copilot" },
+        environment,
+        "/repo",
+      ),
     ).toEqual({
       connection: {
         kind: "stdio",

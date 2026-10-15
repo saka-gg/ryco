@@ -1,3 +1,4 @@
+export * from "./activityPayload.ts";
 export * from "./contextHandoff.ts";
 export * from "./forkOrigin.ts";
 export * from "./dispatchAck.ts";

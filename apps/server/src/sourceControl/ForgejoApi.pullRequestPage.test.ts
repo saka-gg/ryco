@@ -1085,6 +1085,51 @@ describe("lists", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("skips row readiness when the listing opts out", () => {
+    const { execute, layer } = setup([
+      [
+        "GET",
+        `${repo}/pulls`,
+        () =>
+          Response.json([
+            forgejoPullRequest,
+            { ...forgejoPullRequest, number: 41, state: "closed", merged: true },
+          ]),
+      ],
+      // The authored list names the same pull request at the same update.
+      ["GET", `${repo}/issues`, () => Response.json([issue(42, forgejoPullRequest.updated_at)])],
+    ]);
+    return Effect.gen(function* () {
+      const forgejo = yield* ForgejoApi.ForgejoApi;
+      const rows = yield* forgejo.listPullRequests({
+        cwd: "/repo",
+        headSelector: "",
+        state: "all",
+        readiness: false,
+      });
+      assert.deepStrictEqual(
+        rows.map((row) => [row.number, row.readiness === undefined]),
+        [
+          [42, true],
+          [41, true],
+        ],
+      );
+      let requests = calls(execute);
+      assert.strictEqual(requests.filter((r) => apiPath(r).endsWith("/status")).length, 0);
+      assert.strictEqual(requests.filter((r) => apiPath(r) === pull).length, 0);
+
+      // Its rows are still remembered: another list naming the pull request
+      // at the same update does not re-read it.
+      yield* forgejo.listInvolvedPullRequests({
+        cwd: "/repo",
+        involvement: "authored",
+        state: "open",
+      });
+      requests = calls(execute);
+      assert.strictEqual(requests.filter((r) => apiPath(r) === pull).length, 0);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reads each row and head once across the lists the page polls together", () => {
     const { execute, layer } = setup([
       ["GET", `${repo}/pulls`, () => Response.json([forgejoPullRequest])],

@@ -24,13 +24,19 @@ interface ProviderSnapshotState {
   readonly lastRefreshAttemptAtMs: number | null;
   /** Set when a fingerprint-matched persisted snapshot was adopted instead of probing. */
   readonly persistedFreshUntilMs: number | null;
+  /**
+   * While an adopted snapshot's usage limits are re-read on their own (`refreshUsage`): until
+   * when the last read stays current. Cleared by a probe, which reads usage itself.
+   */
+  readonly usageFreshUntilMs: number | null;
 }
 
 const DEFAULT_SNAPSHOT_FRESHNESS = Duration.minutes(5);
 /**
  * How long a persisted snapshot whose probe fingerprint still matches stands in for a probe.
  * Models, slash commands and account data change rarely; an explicit refresh always re-probes.
- * Snapshots carrying usage limits only get the regular `snapshotFreshness` window.
+ * Usage limits keep the regular `snapshotFreshness` window: a driver with `refreshUsage`
+ * re-reads only them, and without it a snapshot carrying them gets only that window.
  */
 const DEFAULT_PERSISTED_SNAPSHOT_FRESHNESS = Duration.hours(6);
 
@@ -64,6 +70,13 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     readonly getSnapshot: Effect.Effect<ServerProvider>;
     readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
   }) => Effect.Effect<void>;
+  /**
+   * Re-reads only the usage limits of `snapshot`, without a CLI run or SDK session: the
+   * snapshot with its new limits, or without any when none could be read. Lets an adopted
+   * persisted snapshot stay fresh for `persistedSnapshotFreshness` while its usage keeps the
+   * `snapshotFreshness` window. Must not fail.
+   */
+  readonly refreshUsage?: (snapshot: ServerProvider) => Effect.Effect<ServerProvider>;
   readonly refreshInterval?: Duration.Input | null;
   readonly snapshotFreshness?: Duration.Input;
   readonly persistedSnapshotFreshness?: Duration.Input;
@@ -84,6 +97,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     enrichmentGeneration: 0,
     lastRefreshAttemptAtMs: null,
     persistedFreshUntilMs: null,
+    usageFreshUntilMs: null,
   });
   const settingsRef = yield* Ref.make(initialSettings);
   const enrichmentFiberRef = yield* Ref.make<Fiber.Fiber<void, unknown> | null>(null);
@@ -171,6 +185,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
               ...state,
               lastRefreshAttemptAtMs,
               persistedFreshUntilMs: null,
+              usageFreshUntilMs: null,
             })),
           ),
         ),
@@ -264,17 +279,63 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     );
   });
 
-  const isSnapshotFresh = (state: ProviderSnapshotState, nowMs: number) =>
+  const isProbedSnapshotFresh = (state: ProviderSnapshotState, nowMs: number) =>
     isProviderSnapshotFresh({
       lastRefreshAttemptAtMs: state.lastRefreshAttemptAtMs,
       nowMs,
       freshnessMs: snapshotFreshnessMs,
-    }) ||
-    (state.persistedFreshUntilMs !== null && nowMs < state.persistedFreshUntilMs);
+    });
+
+  const isAdoptedSnapshotFresh = (state: ProviderSnapshotState, nowMs: number) =>
+    state.persistedFreshUntilMs !== null && nowMs < state.persistedFreshUntilMs;
+
+  /** Whether `revalidate` needs no full probe; it may still re-read usage limits. */
+  const isSnapshotProbeFresh = (state: ProviderSnapshotState, nowMs: number) =>
+    isProbedSnapshotFresh(state, nowMs) || isAdoptedSnapshotFresh(state, nowMs);
+
+  const isSnapshotFresh = (state: ProviderSnapshotState, nowMs: number) =>
+    isProbedSnapshotFresh(state, nowMs) ||
+    (isAdoptedSnapshotFresh(state, nowMs) &&
+      (state.usageFreshUntilMs === null || nowMs < state.usageFreshUntilMs));
 
   const isFresh = Effect.all([Ref.get(snapshotStateRef), Clock.currentTimeMillis]).pipe(
     Effect.map(([state, nowMs]) => isSnapshotFresh(state, nowMs)),
   );
+
+  const isProbeFresh = Effect.all([Ref.get(snapshotStateRef), Clock.currentTimeMillis]).pipe(
+    Effect.map(([state, nowMs]) => isSnapshotProbeFresh(state, nowMs)),
+  );
+
+  // Serialized with probes and adoption, so concurrent callers re-read usage once: the later ones
+  // find it current. Undefined when the adopted window ended meanwhile and a probe is due.
+  const revalidateUsage = (refreshUsage: NonNullable<typeof input.refreshUsage>) =>
+    refreshSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const nowMs = yield* Clock.currentTimeMillis;
+        const state = yield* Ref.get(snapshotStateRef);
+        if (isSnapshotFresh(state, nowMs)) {
+          return state.snapshot;
+        }
+        if (!isAdoptedSnapshotFresh(state, nowMs)) {
+          return undefined;
+        }
+        const refreshed = yield* refreshUsage(state.snapshot);
+        const readAtMs = yield* Clock.currentTimeMillis;
+        return yield* publicationSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const previous = yield* Ref.getAndUpdate(snapshotStateRef, (current) => ({
+              ...current,
+              snapshot: refreshed,
+              usageFreshUntilMs: readAtMs + snapshotFreshnessMs,
+            }));
+            if (!Equal.equals(previous.snapshot, refreshed)) {
+              yield* PubSub.publish(changesPubSub, refreshed);
+            }
+            return refreshed;
+          }),
+        );
+      }),
+    );
 
   const revalidateSnapshot = Effect.fn("revalidateSnapshot")(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
@@ -282,12 +343,19 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     if (isSnapshotFresh(state, nowMs)) {
       return state.snapshot;
     }
+    if (input.refreshUsage && isAdoptedSnapshotFresh(state, nowMs)) {
+      const refreshed = yield* revalidateUsage(input.refreshUsage);
+      if (refreshed !== undefined) {
+        return refreshed;
+      }
+    }
     return yield* refreshSnapshot();
   });
 
   // Serialized with probes: a source that already probed (or is probing) keeps its own result.
-  // Usage limits are live account state the UI renders as current (they carry no timestamp), so a
-  // snapshot that includes them stands in for a probe only as long as a probed one would.
+  // Usage limits are live account state the UI renders as current (they carry no timestamp), so
+  // they stay current only as long as a probed snapshot's would: re-read on their own with
+  // `refreshUsage`, otherwise by a probe once the snapshot falls back to that window.
   const adoptPersistedSnapshot = (adopted: {
     readonly snapshot: ServerProvider;
     readonly checkedAtMs: number;
@@ -299,17 +367,23 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
             if (state.lastRefreshAttemptAtMs !== null) {
               return [false, state] as const;
             }
+            // A `checkedAt` from the future (clock change) never extends the window.
+            const checkedAtMs = Math.min(adopted.checkedAtMs, nowMs);
+            const carriesUsage = adopted.snapshot.rateLimits !== undefined;
             const freshnessMs =
-              adopted.snapshot.rateLimits === undefined
-                ? persistedSnapshotFreshnessMs
-                : snapshotFreshnessMs;
+              carriesUsage && input.refreshUsage === undefined
+                ? snapshotFreshnessMs
+                : persistedSnapshotFreshnessMs;
             return [
               true,
               {
                 ...state,
                 snapshot: adopted.snapshot,
-                // A `checkedAt` from the future (clock change) never extends the window.
-                persistedFreshUntilMs: Math.min(adopted.checkedAtMs, nowMs) + freshnessMs,
+                persistedFreshUntilMs: checkedAtMs + freshnessMs,
+                usageFreshUntilMs:
+                  carriesUsage && input.refreshUsage !== undefined
+                    ? checkedAtMs + snapshotFreshnessMs
+                    : null,
               },
             ] as const;
           }),
@@ -337,6 +411,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     getSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
     revalidate: revalidateSnapshot().pipe(Effect.tapError(Effect.logError), Effect.orDie),
     isFresh,
+    isProbeFresh,
     refresh: refreshSnapshot().pipe(Effect.tapError(Effect.logError), Effect.orDie),
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);

@@ -1,5 +1,12 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { build } from "tsdown";
 import { describe, expect, it } from "vite-plus/test";
+
+import tsdownConfig from "../tsdown.config.ts";
 
 async function readSource(relativePath: string): Promise<string> {
   return readFile(new URL(relativePath, import.meta.url), "utf8");
@@ -50,6 +57,8 @@ async function staticGraph(entry: string) {
 const LAZY_FROM_MAIN = [
   "./desktopHubStack.ts",
   "./desktopHostedIdentity.ts",
+  // Its node-claim schemas share a contracts module with the Hub identity ones.
+  "./desktopHubControl.ts",
   "./nativeSecurityHelper.ts",
   "./nativeSecretStore.ts",
   "./hostedCredentials.ts",
@@ -120,4 +129,45 @@ describe("desktop main bundle splitting", () => {
       ).toBe(true);
     }
   });
+});
+
+/**
+ * Top-level bindings of Hub identity, relay and account E2EE schemas. Desktop
+ * main never uses them before a Hub feature loads, but the bundler places
+ * modules shared with the lazy chunks in the entry chunk, so an eager import
+ * of any module that shares a contracts file with them evaluates them all
+ * before Electron is ready. The source graph above cannot see that.
+ */
+const HUB_ONLY_BINDING =
+  /^(?:NativeIdentity|PublicSignup|PasswordLogin|PasswordReset|ExternalIdentity|BrowserExternalIdentity|HostedAccountSecurity|HubBrowserSession|ActiveSpaceSwitch|NativeNodeClaim|NativeE2ee|Relay[A-Z]|RELAY_|NATIVE_IDENTITY_|NATIVE_NODE_CLAIM_|PUBLIC_SIGNUP_|PASSWORD_LOGIN_|PASSWORD_RESET_|EXTERNAL_IDENTITY_|GITHUB_EXTERNAL_IDENTITY_|ACTIVE_SPACE_SWITCH_)/;
+/** Source modules whose code must only run inside a lazy chunk. */
+const LAZY_ONLY_REGION =
+  /^\/\/#region (?:\.\.\/\.\.\/packages\/contracts\/src\/(?:hostedIdentity|relay|computerUse)\.ts|src\/computerUse\/|src\/cuaDriverHost\.ts)/m;
+
+describe("built desktop main bundle", () => {
+  it("evaluates no Hub identity, relay or Computer-use module before ready", async () => {
+    const [mainConfig] = Array.isArray(tsdownConfig) ? tsdownConfig : [tsdownConfig];
+    const outDir = await mkdtemp(join(tmpdir(), "ryco-desktop-main-bundle-"));
+    try {
+      await build({
+        ...mainConfig,
+        config: false,
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        entry: { desktopMain: "src/main.ts" },
+        outDir,
+        sourcemap: false,
+        dts: false,
+        logLevel: "silent",
+      });
+      const bundle = await readFile(join(outDir, "desktopMain.cjs"), "utf8");
+      const topLevelBindings = [
+        ...bundle.matchAll(/^(?:const|let|var|function|class) ([A-Za-z_$][\w$]*)/gm),
+        ...bundle.matchAll(/^exports\.([A-Za-z_$][\w$]*) =/gm),
+      ].map((match) => match[1]!);
+      expect(topLevelBindings.filter((name) => HUB_ONLY_BINDING.test(name))).toEqual([]);
+      expect(bundle.match(LAZY_ONLY_REGION)?.[0] ?? null).toBeNull();
+    } finally {
+      await rm(outDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

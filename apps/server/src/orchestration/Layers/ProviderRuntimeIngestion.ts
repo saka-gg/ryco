@@ -58,10 +58,11 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
+  type HistoryRecoveryTrigger,
   ProviderRuntimeIngestionService,
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
-import { type HistoryRecoveryState, historyRecoverySpacingMs } from "../historyRecoveryPolicy.ts";
+import { decideHistoryRecovery, type HistoryRecoveryState } from "../historyRecoveryPolicy.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { increment, providerRuntimeStaleEventsTotal } from "../../observability/Metrics.ts";
 import {
@@ -280,7 +281,7 @@ function findProposedPlanById(
 }
 
 function hasCheckpointForTurn(
-  checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+  checkpoints: ReadonlyArray<Pick<OrchestrationCheckpointSummary, "turnId">>,
   turnId: TurnId,
 ): boolean {
   for (let index = 0; index < checkpoints.length; index += 1) {
@@ -292,7 +293,7 @@ function hasCheckpointForTurn(
 }
 
 function maxCheckpointTurnCount(
-  checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
+  checkpoints: ReadonlyArray<Pick<OrchestrationCheckpointSummary, "checkpointTurnCount">>,
 ): number {
   let maxTurnCount = 0;
   for (let index = 0; index < checkpoints.length; index += 1) {
@@ -3499,14 +3500,28 @@ const make = Effect.gen(function* () {
   enqueueRuntimeInput = worker.enqueue;
 
   const historyAdmission = yield* Semaphore.make(2);
+  // Trailing reads outlive the trigger's caller (a subscription may close first).
+  const historyScope = yield* Effect.scope;
   const historyReads = new Set<ThreadId>();
+  const historyTrailingReads = new Set<ThreadId>();
   const historyRecoveryStates = new Map<ThreadId, HistoryRecoveryState>();
-  const recordHistoryRecovery = (threadId: ThreadId, failed: boolean) => {
+  /** Records an attempt. An interrupted read spaces the next one, but is not a failure. */
+  const recordHistoryRecovery = (
+    threadId: ThreadId,
+    startedAt: number,
+    outcome: "succeeded" | "failed" | "interrupted",
+  ) => {
     const previous = historyRecoveryStates.get(threadId);
     historyRecoveryStates.delete(threadId);
     historyRecoveryStates.set(threadId, {
       attemptedAt: Date.now(),
-      failures: failed ? (previous?.failures ?? 0) + 1 : 0,
+      startedAt,
+      failures:
+        outcome === "succeeded"
+          ? 0
+          : outcome === "failed"
+            ? (previous?.failures ?? 0) + 1
+            : (previous?.failures ?? 0),
     });
     for (const oldest of historyRecoveryStates.keys()) {
       if (historyRecoveryStates.size <= HISTORY_RECOVERY_TRACKED_THREADS) break;
@@ -3514,75 +3529,129 @@ const make = Effect.gen(function* () {
     }
     return previous?.failures ?? 0;
   };
+  /** One provider history read; the caller has checked that none is in flight. */
+  const readHistory = (threadId: ThreadId, trigger: HistoryRecoveryTrigger) => {
+    historyReads.add(threadId);
+    const startedAt = Date.now();
+    let reading = false;
+    // A read the provider was already serving still spaces the next one, so reconnect
+    // churn cannot re-read a large thread at once. It is not a failure.
+    const recordInterrupted = () => {
+      if (reading) recordHistoryRecovery(threadId, startedAt, "interrupted");
+      reading = false;
+    };
+    return historyAdmission
+      .withPermit(
+        Effect.gen(function* () {
+          const thread = yield* resolveThreadShell(threadId);
+          if (!thread?.session) return;
+          // Where the thread runs now: after a move the binding still records the old folder.
+          const project =
+            thread.worktreePath === null
+              ? Option.getOrUndefined(
+                  yield* projectionSnapshotQuery.getProjectShellById(thread.projectId),
+                )
+              : undefined;
+          const cwd = resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] });
+          reading = true;
+          const snapshot = yield* providerService.readThreadHistory!(threadId, cwd ? { cwd } : {});
+          if (Option.isNone(snapshot)) return;
+          const done = yield* Deferred.make<void>();
+          yield* worker.enqueue({
+            source: "history",
+            threadId,
+            expectedUpdatedAt: thread.updatedAt,
+            ...snapshot.value,
+            done,
+          });
+          yield* Deferred.await(done);
+        }),
+      )
+      .pipe(
+        Effect.timeout(HISTORY_RECOVERY_TIMEOUT),
+        Effect.matchCauseEffect({
+          onSuccess: () =>
+            Effect.sync(() => recordHistoryRecovery(threadId, startedAt, "succeeded")).pipe(
+              Effect.flatMap((previousFailures) =>
+                previousFailures > 0
+                  ? Effect.logInfo("Provider history recovery succeeded again", {
+                      threadId,
+                      previousFailures,
+                    })
+                  : Effect.void,
+              ),
+            ),
+          onFailure: (cause) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              recordInterrupted();
+              return Effect.interrupt;
+            }
+            const previousFailures = recordHistoryRecovery(threadId, startedAt, "failed");
+            const fields = { threadId, trigger, failures: previousFailures + 1 };
+            // The cause once per failure streak; the retries back off quietly.
+            return previousFailures === 0
+              ? Effect.logWarning("Provider history recovery failed; preserving local thread", {
+                  ...fields,
+                  cause: Cause.pretty(cause),
+                })
+              : Effect.logDebug("Provider history recovery failed again", fields);
+          },
+        }),
+        // The caller's interruption (a subscription closing mid-read) skips the match above.
+        Effect.onInterrupt(() => Effect.sync(recordInterrupted)),
+        Effect.ensuring(Effect.sync(() => historyReads.delete(threadId))),
+      );
+  };
+  /**
+   * The deferred read of a settle that a recent read spaced out: one per thread, after the
+   * spacing. The policy decides again then: a read since the settle may have covered it.
+   */
+  const scheduleTrailingHistoryRead = (threadId: ThreadId, afterMs: number) =>
+    Effect.suspend(() => {
+      if (historyTrailingReads.has(threadId)) return Effect.void;
+      historyTrailingReads.add(threadId);
+      const trailingSinceMs = Date.now();
+      return Effect.sleep(Duration.millis(afterMs)).pipe(
+        Effect.andThen(
+          Effect.suspend(() => {
+            historyTrailingReads.delete(threadId);
+            const decision = decideHistoryRecovery({
+              state: historyRecoveryStates.get(threadId),
+              trigger: "session-settled",
+              inFlight: historyReads.has(threadId),
+              nowMs: Date.now(),
+              trailingSinceMs,
+            });
+            return decision.kind === "read"
+              ? readHistory(threadId, "session-settled")
+              : Effect.void;
+          }),
+        ),
+        Effect.ensuring(Effect.sync(() => historyTrailingReads.delete(threadId))),
+        Effect.forkIn(historyScope),
+        Effect.asVoid,
+      );
+    });
   const reconcileThread: NonNullable<ProviderRuntimeIngestionShape["reconcileThread"]> = (
     threadId,
     trigger = "subscribe",
   ) =>
     Effect.suspend(() => {
-      if (!providerService.readThreadHistory || historyReads.has(threadId)) return Effect.void;
-      const state = historyRecoveryStates.get(threadId);
-      if (state && Date.now() - state.attemptedAt < historyRecoverySpacingMs(state, trigger)) {
-        return Effect.void;
+      if (!providerService.readThreadHistory) return Effect.void;
+      const decision = decideHistoryRecovery({
+        state: historyRecoveryStates.get(threadId),
+        trigger,
+        inFlight: historyReads.has(threadId),
+        nowMs: Date.now(),
+      });
+      switch (decision.kind) {
+        case "read":
+          return readHistory(threadId, trigger);
+        case "trail":
+          return scheduleTrailingHistoryRead(threadId, decision.afterMs);
+        case "skip":
+          return Effect.void;
       }
-      historyReads.add(threadId);
-      return historyAdmission
-        .withPermit(
-          Effect.gen(function* () {
-            const thread = yield* resolveThreadShell(threadId);
-            if (!thread?.session) return;
-            // Where the thread runs now: after a move the binding still records the old folder.
-            const project =
-              thread.worktreePath === null
-                ? Option.getOrUndefined(
-                    yield* projectionSnapshotQuery.getProjectShellById(thread.projectId),
-                  )
-                : undefined;
-            const cwd = resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] });
-            const snapshot = yield* providerService.readThreadHistory!(
-              threadId,
-              cwd ? { cwd } : {},
-            );
-            if (Option.isNone(snapshot)) return;
-            const done = yield* Deferred.make<void>();
-            yield* worker.enqueue({
-              source: "history",
-              threadId,
-              expectedUpdatedAt: thread.updatedAt,
-              ...snapshot.value,
-              done,
-            });
-            yield* Deferred.await(done);
-          }),
-        )
-        .pipe(
-          Effect.timeout(HISTORY_RECOVERY_TIMEOUT),
-          Effect.matchCauseEffect({
-            onSuccess: () =>
-              Effect.sync(() => recordHistoryRecovery(threadId, false)).pipe(
-                Effect.flatMap((previousFailures) =>
-                  previousFailures > 0
-                    ? Effect.logInfo("Provider history recovery succeeded again", {
-                        threadId,
-                        previousFailures,
-                      })
-                    : Effect.void,
-                ),
-              ),
-            onFailure: (cause) => {
-              if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
-              const previousFailures = recordHistoryRecovery(threadId, true);
-              const fields = { threadId, trigger, failures: previousFailures + 1 };
-              // The cause once per failure streak; the retries back off quietly.
-              return previousFailures === 0
-                ? Effect.logWarning("Provider history recovery failed; preserving local thread", {
-                    ...fields,
-                    cause: Cause.pretty(cause),
-                  })
-                : Effect.logDebug("Provider history recovery failed again", fields);
-            },
-          }),
-          Effect.ensuring(Effect.sync(() => historyReads.delete(threadId))),
-        );
     });
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>

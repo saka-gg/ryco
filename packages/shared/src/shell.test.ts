@@ -12,6 +12,7 @@ import {
   mergePathValues,
   readEnvironmentFromLoginShell,
   readEnvironmentFromWindowsShell,
+  readEnvironmentFromWindowsShellAsync,
   readPathFromLaunchctl,
   readPathFromLoginShell,
   resolveCommandPath,
@@ -197,6 +198,21 @@ describe("mergePathEntries", () => {
     expect(mergePathEntries("C:\\Tools;C:\\Windows", "C:\\Windows;C:\\Git", "win32")).toBe(
       "C:\\Tools;C:\\Windows;C:\\Git",
     );
+  });
+});
+
+describe("readEnvironmentFromWindowsShellAsync", () => {
+  it("falls back to Windows PowerShell and loads the profile only when asked", async () => {
+    const execFile = vi.fn(async (file: string, _args: ReadonlyArray<string>) => {
+      if (file === "pwsh.exe") throw new Error("not installed");
+      return "__RYCO_ENV_PATH_START__\r\nC:\\Tools\r\n__RYCO_ENV_PATH_END__\r\n";
+    });
+
+    await expect(
+      readEnvironmentFromWindowsShellAsync(["PATH"], { loadProfile: true }, execFile),
+    ).resolves.toEqual({ PATH: "C:\\Tools" });
+    expect(execFile.mock.calls.map(([file]) => file)).toEqual(["pwsh.exe", "powershell.exe"]);
+    expect(execFile.mock.calls[1]?.[1]).not.toContain("-NoProfile");
   });
 });
 

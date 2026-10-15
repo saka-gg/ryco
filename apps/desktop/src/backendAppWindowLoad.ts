@@ -23,16 +23,31 @@ export type BackendAppWindowAction = "load" | "reconnect" | "ignore";
 /**
  * How long an app load requested at `bound` stays valid. The backend holds the
  * renderer's API and WebSocket requests until it serves, but answers those held
- * longer than 10 s with a 503 (apps/server/src/httpStartupGate.ts). A backend
- * that took longer than this from bind to serving may have failed the early
- * document's first requests, so `ready` loads it again.
+ * longer than 10 s with a 503 (apps/server/src/httpStartupGate.ts). The
+ * document only sends such requests once it has committed, so the hold is
+ * measured from the commit (from the request while it is still pending). A
+ * backend that took longer than this from that point to serving may have
+ * failed the early document's first requests, so `ready` loads it again.
  */
 export const EARLY_APP_LOAD_MAX_HOLD_MS = 9_000;
+
+/**
+ * How long an app navigation started at `bound` may stay uncommitted while the
+ * window shows no document at all. Normally the backend serves the shell within
+ * a few hundred milliseconds of binding; longer means its event loop is stalled
+ * (a long migration), and the window would sit blank. It goes back to the boot
+ * page instead, and `ready` loads the app.
+ */
+export const EARLY_APP_LOAD_COMMIT_TIMEOUT_MS = 750;
 
 /** An app load requested from one backend child, per window. */
 export interface AppLoadRequest<Backend = unknown> {
   readonly backend: Backend;
   readonly requestedAtMs: number;
+  /** When the navigation was actually started (it waits for cache maintenance). */
+  navigationStartedAtMs?: number | undefined;
+  /** When the app document committed (`did-navigate`). */
+  committedAtMs?: number | undefined;
   /**
    * The navigation failed (`did-fail-load`). The record stays so a backend
    * that dies before serving still finds the windows it left on an error
@@ -47,12 +62,50 @@ export function isAppLoadRequestCurrent(input: {
   readonly backend: unknown;
   readonly nowMs: number;
 }): boolean {
+  const { request } = input;
   return (
-    input.request !== undefined &&
-    !input.request.failed &&
+    request !== undefined &&
+    !request.failed &&
     input.backend !== null &&
-    input.request.backend === input.backend &&
-    input.nowMs - input.request.requestedAtMs < EARLY_APP_LOAD_MAX_HOLD_MS
+    request.backend === input.backend &&
+    input.nowMs - (request.committedAtMs ?? request.requestedAtMs) < EARLY_APP_LOAD_MAX_HOLD_MS
+  );
+}
+
+/**
+ * Whether an app navigation was started and has neither committed nor failed:
+ * the window still shows whatever it showed before (nothing, if that was an
+ * uncommitted boot page).
+ */
+export function isAppLoadAwaitingCommit(request: AppLoadRequest | undefined): boolean {
+  return (
+    request !== undefined &&
+    !request.failed &&
+    request.navigationStartedAtMs !== undefined &&
+    request.committedAtMs === undefined
+  );
+}
+
+/**
+ * Whether an early app load leaves the window blank for too long: started at
+ * `bound`, uncommitted after {@link EARLY_APP_LOAD_COMMIT_TIMEOUT_MS}, over a
+ * window with no committed document, and its backend not serving yet (once it
+ * serves, the document arrives and nothing would load it again).
+ */
+export function isEarlyAppLoadStalled(input: {
+  readonly request: AppLoadRequest | undefined;
+  readonly currentUrl: string;
+  /** The request's backend is still the current one and has not settled yet. */
+  readonly backendStarting: boolean;
+  readonly nowMs: number;
+}): boolean {
+  const startedAtMs = input.request?.navigationStartedAtMs;
+  return (
+    startedAtMs !== undefined &&
+    isAppLoadAwaitingCommit(input.request) &&
+    input.backendStarting &&
+    (input.currentUrl.length === 0 || input.currentUrl === "about:blank") &&
+    input.nowMs - startedAtMs >= EARLY_APP_LOAD_COMMIT_TIMEOUT_MS
   );
 }
 
@@ -64,6 +117,11 @@ export function resolveBackendAppWindowAction(input: {
   readonly isBootUrl: (url: string) => boolean;
   /** Whether the current document reported a usable app shell. */
   readonly shellUsable: boolean;
+  /**
+   * The window's renderer process is gone (crashed or killed). Its document
+   * cannot reconnect, whatever it reported before, so only a load revives it.
+   */
+  readonly rendererGone?: boolean;
   /**
    * Whether this window's app load was already requested from the current
    * backend (and has not failed): at `bound`, so `ready` must not repeat it.
@@ -78,5 +136,5 @@ export function resolveBackendAppWindowAction(input: {
   }
   if ((input.moment ?? "ready") === "bound") return "ignore";
   if (!currentUrl.startsWith(input.backendHttpUrl)) return "ignore";
-  return input.shellUsable ? "reconnect" : "load";
+  return input.shellUsable && input.rendererGone !== true ? "reconnect" : "load";
 }

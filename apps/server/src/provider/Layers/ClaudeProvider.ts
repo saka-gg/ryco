@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type ModelSelection,
   ProviderDriverKind,
+  type ServerProvider,
   type ServerProviderRateLimits,
   type ServerProviderSlashCommand,
 } from "@ryco/contracts";
@@ -28,6 +29,7 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
+  withProviderRateLimits,
 } from "../providerSnapshot.ts";
 import {
   type ClaudeModelCatalog,
@@ -574,6 +576,43 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       ...(upgradeMessage ? { message: upgradeMessage } : {}),
     },
   });
+});
+
+/**
+ * Re-reads only the usage limits of a probed Claude snapshot: a Keychain or file read and one
+ * HTTPS call, with no `claude` process. Meant for snapshots that carried limits when probed,
+ * which proves the instance runs on its local claude.ai login (its environment and settings are
+ * covered by the probe fingerprint). Without a subscription on the snapshot no login is read, and
+ * a snapshot probed without limits (another token source) is returned as it is.
+ */
+export const refreshClaudeProviderUsage = Effect.fn("refreshClaudeProviderUsage")(function* (
+  claudeSettings: ClaudeSettings,
+  snapshot: ServerProvider,
+  environment: NodeJS.ProcessEnv,
+  resolveRateLimits: ResolveClaudeRateLimits,
+): Effect.fn.Return<ServerProvider, never, Path.Path> {
+  if (snapshot.rateLimits === undefined) {
+    return snapshot;
+  }
+  const subscriptionType =
+    snapshot.status === "ready" &&
+    snapshot.auth.status === "authenticated" &&
+    snapshot.auth.type !== "apiKey"
+      ? snapshot.auth.type
+      : undefined;
+  const credentialStore =
+    subscriptionType === undefined
+      ? undefined
+      : resolveClaudeLoginStore(yield* makeClaudeEnvironment(claudeSettings, environment), {
+          subscriptionType,
+          tokenSource: undefined,
+        });
+  const rateLimits = credentialStore
+    ? yield* resolveRateLimits(credentialStore, snapshot.version).pipe(
+        Effect.orElseSucceed(() => undefined),
+      )
+    : undefined;
+  return withProviderRateLimits(snapshot, rateLimits);
 });
 
 export const makePendingClaudeProvider = (claudeSettings: ClaudeSettings): ServerProviderDraft => {

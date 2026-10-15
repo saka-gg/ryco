@@ -26,8 +26,11 @@ import {
 } from "../connection/environmentApi";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
+  MAX_INACTIVE_CHECKPOINT_DIFF_CHARS,
+  MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES,
   checkpointDiffCacheKey,
   checkpointDiffCacheBytes,
+  evictCheckpointDiffsForThread,
   clearCheckpointDiffCacheForEnvironment,
   checkpointDiffStateAtom,
   invalidateCheckpointDiff,
@@ -61,8 +64,8 @@ beforeEach(() => {
 
 describe("checkpointDiffAtoms cache", () => {
   it("routes fromTurnCount 0 to getFullThreadDiff and caches the result by key", async () => {
-    const getFullThreadDiff = vi.fn(async () => ({ files: [{ id: "f1" }] }));
-    const getTurnDiff = vi.fn(async () => ({ files: [] }));
+    const getFullThreadDiff = vi.fn(async () => ({ diff: "full", files: [{ id: "f1" }] }));
+    const getTurnDiff = vi.fn(async () => ({ diff: "", files: [] }));
     __setEnvironmentApiOverrideForTests(ENV, {
       orchestration: { getFullThreadDiff, getTurnDiff },
     } as unknown as EnvironmentApi);
@@ -77,8 +80,8 @@ describe("checkpointDiffAtoms cache", () => {
   });
 
   it("routes a non-zero fromTurnCount to getTurnDiff", async () => {
-    const getFullThreadDiff = vi.fn(async () => ({ files: [] }));
-    const getTurnDiff = vi.fn(async () => ({ files: [{ id: "t" }] }));
+    const getFullThreadDiff = vi.fn(async () => ({ diff: "", files: [] }));
+    const getTurnDiff = vi.fn(async () => ({ diff: "turn", files: [{ id: "t" }] }));
     __setEnvironmentApiOverrideForTests(ENV, {
       orchestration: { getFullThreadDiff, getTurnDiff },
     } as unknown as EnvironmentApi);
@@ -94,7 +97,10 @@ describe("checkpointDiffAtoms cache", () => {
 
   it("refetches on invalidation while retaining the previously resolved data", async () => {
     let call = 0;
-    const getFullThreadDiff = vi.fn(async () => ({ files: [{ id: `call-${++call}` }] }));
+    const getFullThreadDiff = vi.fn(async () => ({
+      diff: "full",
+      files: [{ id: `call-${++call}` }],
+    }));
     __setEnvironmentApiOverrideForTests(ENV, {
       orchestration: { getFullThreadDiff, getTurnDiff: vi.fn() },
     } as unknown as EnvironmentApi);
@@ -121,7 +127,7 @@ it("clears unused diffs by device and preserves an actively viewed diff", async 
   const other = "env-b" as EnvironmentId;
   for (const id of [ENV, other])
     __setEnvironmentApiOverrideForTests(id, {
-      orchestration: { getFullThreadDiff: async () => ({ files: [{ id: "f1" }] }) },
+      orchestration: { getFullThreadDiff: async () => ({ diff: "full", files: [{ id: "f1" }] }) },
     } as unknown as EnvironmentApi);
   const a = input(),
     b = input({ environmentId: other });
@@ -137,4 +143,100 @@ it("clears unused diffs by device and preserves an actively viewed diff", async 
   clearCheckpointDiffCacheForEnvironment(ENV);
   expect(readState(a).data).toBeNull();
   expect(readState(b).data).not.toBeNull();
+});
+
+describe("checkpoint diff cache bounds", () => {
+  function mockDiffs(diffFor: (toTurnCount: number) => string) {
+    const getFullThreadDiff = vi.fn(async (request: { toTurnCount: number }) => ({
+      threadId: THREAD,
+      fromTurnCount: 0,
+      toTurnCount: request.toTurnCount,
+      diff: diffFor(request.toTurnCount),
+    }));
+    const getTurnDiff = vi.fn(async (request: { fromTurnCount: number; toTurnCount: number }) => ({
+      threadId: THREAD,
+      fromTurnCount: request.fromTurnCount,
+      toTurnCount: request.toTurnCount,
+      diff: diffFor(request.toTurnCount),
+    }));
+    __setEnvironmentApiOverrideForTests(ENV, {
+      orchestration: { getFullThreadDiff, getTurnDiff },
+    } as unknown as EnvironmentApi);
+    return { getFullThreadDiff, getTurnDiff };
+  }
+
+  async function watchUntilResolved(diffInput: CheckpointDiffInput) {
+    const release = watchCheckpointDiff(diffInput);
+    await vi.waitFor(() => expect(readState(diffInput).data).not.toBeNull());
+    return release;
+  }
+
+  const turn = (count: number) => input({ fromTurnCount: count - 1, toTurnCount: count });
+  // The review sheet's full-thread input: every completed turn is a new key.
+  const conversation = (count: number) => input({ toTurnCount: count, cacheSlot: "conversation" });
+
+  it("keeps recently released diffs and evicts the oldest past the entry bound", async () => {
+    mockDiffs((count) => `patch-${count}`);
+    const total = MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES + 2;
+    for (let count = 1; count <= total; count += 1) {
+      (await watchUntilResolved(turn(count)))();
+    }
+    expect(readState(turn(1)).data).toBeNull();
+    expect(readState(turn(2)).data).toBeNull();
+    expect(readState(turn(3)).data?.diff).toBe("patch-3");
+    expect(readState(turn(total)).data?.diff).toBe(`patch-${total}`);
+  });
+
+  it("evicts released diffs once their retained characters exceed the budget", async () => {
+    const largeLength = Math.floor(MAX_INACTIVE_CHECKPOINT_DIFF_CHARS / 2) + 1;
+    mockDiffs((count) => `${count}`.padEnd(largeLength, "x"));
+    (await watchUntilResolved(turn(1)))();
+    (await watchUntilResolved(turn(2)))();
+    expect(readState(turn(1)).data).toBeNull();
+    expect(readState(turn(2)).data?.diff.length).toBe(largeLength);
+  });
+
+  it("never evicts a diff that is still watched", async () => {
+    mockDiffs((count) => `patch-${count}`);
+    const releaseFirst = await watchUntilResolved(turn(1));
+    for (let count = 2; count <= MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES + 3; count += 1) {
+      (await watchUntilResolved(turn(count)))();
+    }
+    expect(readState(turn(1)).data?.diff).toBe("patch-1");
+    releaseFirst();
+  });
+
+  it("keeps one full-thread patch while turns complete under an open review", async () => {
+    mockDiffs((count) => `conversation-${count}`);
+    let release = await watchUntilResolved(conversation(1));
+    for (let count = 2; count <= 5; count += 1) {
+      // The sheet re-keys on the new turn count: watch the new key, then
+      // release the old one (React runs the old cleanup after the new effect
+      // is scheduled; either order leaves one entry).
+      const next = await watchUntilResolved(conversation(count));
+      release();
+      release = next;
+    }
+    for (let count = 1; count < 5; count += 1) {
+      expect(readState(conversation(count)).data).toBeNull();
+    }
+    expect(readState(conversation(5)).data?.diff).toBe("conversation-5");
+    release();
+    // The latest stays cached for a quick reopen.
+    expect(readState(conversation(5)).data?.diff).toBe("conversation-5");
+    expect(checkpointDiffCacheBytes(ENV)).toBeGreaterThan(0);
+  });
+
+  it("evicts a thread's diffs on archive, deferring the ones still on screen", async () => {
+    mockDiffs((count) => `patch-${count}`);
+    (await watchUntilResolved(turn(1)))();
+    const releaseSecond = await watchUntilResolved(turn(2));
+
+    evictCheckpointDiffsForThread(THREAD);
+    expect(readState(turn(1)).data).toBeNull();
+    expect(readState(turn(2)).data?.diff).toBe("patch-2");
+
+    releaseSecond();
+    expect(readState(turn(2)).data).toBeNull();
+  });
 });

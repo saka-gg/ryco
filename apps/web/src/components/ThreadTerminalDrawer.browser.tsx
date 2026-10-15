@@ -138,7 +138,8 @@ vi.mock("~/localApi", () => ({
 }));
 
 import { resetPreparedTerminalOpensForTests, prepareThreadTerminal } from "../terminalPrepare";
-import { useTerminalStateStore } from "../terminalStateStore";
+import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { MAX_TERMINALS_PER_GROUP } from "../types";
 import ThreadTerminalDrawer, {
   disposeCachedTerminalViewsForTests,
   TerminalViewport,
@@ -380,6 +381,100 @@ describe("TerminalViewport", () => {
       expect(terminalWriteSpy).not.toHaveBeenCalledWith("prompt$ ");
     } finally {
       await second.cleanup();
+    }
+  });
+
+  it("keeps every view of a full split group across a remount", async () => {
+    const environment = {
+      terminal: {
+        open: vi.fn(async (input: { terminalId: string }) => ({
+          threadId: THREAD_ID,
+          terminalId: input.terminalId,
+          cwd: "/repo/project",
+          worktreePath: null,
+          status: "running" as const,
+          pid: 123,
+          history: "prompt$ ",
+          exitCode: null,
+          exitSignal: null,
+          updatedAt: "2026-04-07T00:00:00.000Z",
+          cursor: { generation: "g1", sequence: 5 },
+        })),
+        write: vi.fn(async () => undefined),
+        resize: vi.fn(async () => undefined),
+      },
+    };
+    environmentApiById.set("environment-a", environment);
+    const threadRef = scopeThreadRef("environment-a" as never, THREAD_ID);
+    const store = useTerminalStateStore.getState();
+    for (const terminalId of ["two", "three", "four"]) store.splitTerminal(threadRef, terminalId);
+    const terminalIds = selectThreadTerminalState(
+      useTerminalStateStore.getState().terminalStateByThreadKey,
+      threadRef,
+    ).terminalIds;
+    expect(terminalIds).toHaveLength(MAX_TERMINALS_PER_GROUP);
+
+    const hosts: HTMLElement[] = [];
+    const mounted: Array<{ unmount(): Promise<void> | void }> = [];
+    const renderGroup = async () => {
+      const host = document.createElement("div");
+      host.className = "thread-terminal-drawer";
+      host.style.width = "800px";
+      host.style.height = "400px";
+      document.body.append(host);
+      hosts.push(host);
+      const screen = await render(
+        <>
+          {terminalIds.map((terminalId) => (
+            <TerminalViewport
+              key={terminalId}
+              threadRef={threadRef}
+              threadId={THREAD_ID}
+              terminalId={terminalId}
+              terminalLabel={terminalId}
+              cwd="/repo/project"
+              onSessionExited={() => undefined}
+              onAddTerminalContext={() => undefined}
+              focusRequestId={0}
+              autoFocus={false}
+              resizeEpoch={0}
+              drawerHeight={320}
+              keybindings={[]}
+            />
+          ))}
+        </>,
+        { container: host },
+      );
+      mounted.push(screen);
+      return screen;
+    };
+
+    try {
+      const first = await renderGroup();
+      await vi.waitFor(() => {
+        expect(environment.terminal.open).toHaveBeenCalledTimes(MAX_TERMINALS_PER_GROUP);
+        expect(terminalWriteSpy.mock.calls.filter(([data]) => data === "prompt$ ")).toHaveLength(
+          MAX_TERMINALS_PER_GROUP,
+        );
+      });
+      await first.unmount();
+      mounted.length = 0;
+      terminalWriteSpy.mockClear();
+      // Let the cache apply its bound before the group comes back.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(terminalDisposeSpy).not.toHaveBeenCalled();
+
+      await renderGroup();
+      await vi.waitFor(() => {
+        expect(environment.terminal.open).toHaveBeenCalledTimes(2 * MAX_TERMINALS_PER_GROUP);
+      });
+      // Every view was reattached, none rebuilt.
+      expect(terminalConstructorSpy).toHaveBeenCalledTimes(MAX_TERMINALS_PER_GROUP);
+      expect(terminalWriteSpy).not.toHaveBeenCalledWith("\u001bc");
+    } finally {
+      for (const screen of mounted) await screen.unmount();
+      for (const host of hosts) host.remove();
+      useTerminalStateStore.getState().removeTerminalState(threadRef);
     }
   });
 

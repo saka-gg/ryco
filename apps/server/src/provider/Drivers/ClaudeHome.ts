@@ -49,6 +49,20 @@ export const resolveClaudeSourceRoot = Effect.fn("resolveClaudeSourceRoot")(func
   return parseProviderSourcePaths("claudeAgent", config, env).root;
 });
 
+/**
+ * Files in the Claude configuration store whose replacement changes what a status probe reports:
+ * the credential file (login/logout) and `settings.json` (an `apiKeyHelper` or auth `env` switch).
+ * Stat'ed into the probe fingerprint so an adopted snapshot never outlives an auth change.
+ */
+export const resolveClaudeProbeAuthFiles = Effect.fn("resolveClaudeProbeAuthFiles")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+) {
+  const path = yield* Path.Path;
+  const root = yield* resolveClaudeSourceRoot(config, baseEnv);
+  return [path.join(root, ".credentials.json"), path.join(root, "settings.json")] as const;
+});
+
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(
   function* (config: Pick<ClaudeSettings, "homePath">, baseEnv: NodeJS.ProcessEnv = process.env) {
     if (baseEnv.CLAUDE_CONFIG_DIR?.trim())

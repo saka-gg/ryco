@@ -5,9 +5,17 @@ import {
   type ThreadId,
   type WorktreeId,
 } from "@ryco/contracts";
+import { RuntimeSessionId } from "@ryco/contracts/base-schemas";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
+import type { ClaudeCacheReviewThread } from "@ryco/shared/claudeCacheReview";
 import { sortThreads, type ThreadSortInput } from "./threadSort.ts";
-import { selectEnvironmentState, type AppState, type EnvironmentState } from "./store.ts";
+import {
+  selectEnvironmentState,
+  selectProjectByRef,
+  selectThreadByRef,
+  type AppState,
+  type EnvironmentState,
+} from "./store.ts";
 import {
   type Project,
   type SidebarThreadSummary,
@@ -185,6 +193,23 @@ export function selectThreadDetailLoaded(state: AppState, ref: ScopedThreadRef):
 }
 
 /**
+ * True once live detail has been applied for the thread: a thread-detail
+ * window, a full-detail snapshot or a live message. Unlike
+ * `selectThreadDetailLoaded`, messages hydrated from a read cache (marked in
+ * `cachedMessageThreadIds` until live data replaces them) do not count, so
+ * work that must wait for the thread's own live window (sibling prefetch)
+ * does not start while that window is still on its way.
+ */
+export function selectThreadLiveDetailLoaded(state: AppState, ref: ScopedThreadRef): boolean {
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return (
+    environmentState.threadHistoryByThreadId?.[ref.threadId] !== undefined ||
+    (environmentState.messageIdsByThreadId[ref.threadId] !== undefined &&
+      environmentState.cachedMessageThreadIds?.[ref.threadId] !== true)
+  );
+}
+
+/**
  * True when the environment's rows come from a live shell snapshot: bootstrap
  * completed and not cache provenance. Rows hydrated from the snapshot cache, or
  * demoted after a disconnect, are last-known state with every session dropped.
@@ -197,4 +222,56 @@ export function selectEnvironmentShellLive(
   return (
     environmentState.bootstrapComplete && (environmentState.hydratedFromCacheAt ?? null) === null
   );
+}
+
+/**
+ * What the live thread subscription holds for the Claude resume review
+ * (`CommitSendTurnDispatchInput.readSubscribedClaudeReviewState`): only a
+ * thread whose environment shell is live (not cache) and whose detail is
+ * loaded qualifies. Callers pass the store read at review time, not a value
+ * captured at render, so the review judges the newest observation.
+ *
+ * Accepted gap: "loaded" means loaded at some point, not re-synced since the
+ * environment last went live. Just after a reconnect (when a queued-send drain
+ * typically runs) the shell can be live while the retained detail still holds
+ * pre-disconnect activities, because the store records no per-thread detail
+ * sync generation. The review is an advisory cost guard: an older observation
+ * usually looks more review-worthy (so the send re-reads the server window),
+ * and the server never requires a guard that is absent.
+ */
+export function selectSubscribedClaudeReviewState(
+  state: AppState,
+  ref: ScopedThreadRef,
+):
+  | { readonly thread: ClaudeCacheReviewThread; readonly workspaceCwd: string | undefined }
+  | undefined {
+  if (!selectEnvironmentShellLive(state, ref.environmentId)) return undefined;
+  if (!selectThreadDetailLoaded(state, ref)) return undefined;
+  const thread = selectThreadByRef(state, ref);
+  if (!thread) return undefined;
+  const session = thread.session;
+  // The directory the next turn runs in: the thread's worktree, else its
+  // project root (the server's resolveThreadWorkspaceCwd).
+  const workspaceCwd =
+    thread.worktreePath ||
+    selectProjectByRef(state, { environmentId: ref.environmentId, projectId: thread.projectId })
+      ?.cwd ||
+    undefined;
+  return {
+    thread: {
+      modelSelection: thread.modelSelection,
+      activities: thread.activities,
+      session: session
+        ? {
+            providerName: session.provider,
+            ...(session.runtimeSessionId === undefined
+              ? {}
+              : { runtimeSessionId: RuntimeSessionId.make(session.runtimeSessionId) }),
+            status: session.orchestrationStatus,
+            activeTurnId: session.activeTurnId ?? null,
+          }
+        : null,
+    },
+    workspaceCwd,
+  };
 }

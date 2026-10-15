@@ -41,7 +41,11 @@ import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import type { MobileRemoteEnvironmentApi } from "./remoteApi";
 import { usableSavedSessionHint, type SavedSessionHints } from "./savedSessionHints";
-import { createThreadDetailEventApplier } from "./threadDetailEvents";
+import {
+  createThreadDetailEventApplier,
+  type ThreadDetailEventApplier,
+  type ThreadDetailEventScheduling,
+} from "./threadDetailEvents";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
 
 // §4 stub closure: the supervisor evicts idle thread-detail subscriptions; a
@@ -188,6 +192,8 @@ export interface MobileEnvironmentDriverDeps {
     record: SavedEnvironmentRecord,
     isCancelled: () => boolean,
   ) => Promise<EnvironmentConnection>;
+  /** Test seam: the frame scheduling of the thread-detail event batches. */
+  readonly threadDetailEventScheduling?: ThreadDetailEventScheduling;
 }
 
 export interface MobileEnvironmentDriver {
@@ -255,11 +261,16 @@ export function createMobileEnvironmentDriver(
       onEnvironmentProjectionChanged: markEnvironmentSnapshotDirty,
     });
   // Recovered/pushed thread-detail events flow through the same batch-effects path
-  // as the shell stream (§4).
-  const applyThreadDetailEvent = createThreadDetailEventApplier({
-    stateSink,
-    getSupervisor,
-  });
+  // as the shell stream (§4), one batch per frame. The applier registers a
+  // thread-store mutation barrier, so it is created on first use and disposed
+  // (flushed and unregistered) when the driver stops; a restart creates another.
+  let threadDetailEvents: ThreadDetailEventApplier | null = null;
+  const getThreadDetailEvents = () =>
+    (threadDetailEvents ??= createThreadDetailEventApplier({
+      stateSink,
+      getSupervisor,
+      ...deps.threadDetailEventScheduling,
+    }));
 
   const patchRuntime = (
     environmentId: EnvironmentId,
@@ -527,10 +538,15 @@ export function createMobileEnvironmentDriver(
       }
       registered = getSupervisor().register(connection);
       const isCurrent = () => getSupervisor().read(record.environmentId) === registered;
+      // An in-session renewal refreshes the hint, so the next cold connect
+      // starts from the rotated session instead of asking before its socket.
+      const rememberSession = (next: AuthSessionState) =>
+        sessionHints?.record(record.environmentId, next);
       stopRenewal = savedSessionRenewal.keepRenewed({
         environmentId: record.environmentId,
         session: renewal.session,
         isCurrent,
+        onSession: rememberSession,
         ...renewalCalls(record),
       });
       if (hintedSession !== null) {
@@ -563,6 +579,7 @@ export function createMobileEnvironmentDriver(
               environmentId: record.environmentId,
               session: check.session,
               isCurrent,
+              onSession: rememberSession,
               ...renewalCalls(record),
             });
           })
@@ -608,6 +625,8 @@ export function createMobileEnvironmentDriver(
           getSupervisor().resetShellProjection(environmentId),
         applyShellEvent: (event, environmentId) =>
           getSupervisor().applyShellEvent(event, environmentId),
+        applyThreadPriorities: (item, environmentId) =>
+          getSupervisor().applyThreadPriorities(item, environmentId),
         syncShellSnapshot: (snapshot, environmentId, callbacks) =>
           getSupervisor().syncShellSnapshot(snapshot, environmentId, callbacks),
       });
@@ -630,6 +649,10 @@ export function createMobileEnvironmentDriver(
       useStore
         .getState()
         .syncServerThreadDetail((snapshot as { readonly thread: never }).thread, environmentId),
+    // Windows and history pages carry bounded previews of large activity
+    // payloads (tool output, diffs); a work row reads the full payload when it
+    // opens (`orchestration.getActivityPayload`).
+    threadWindowActivityPayloads: "preview",
     syncThreadWindowSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerThreadWindow(snapshot, environmentId),
     syncThreadHistoryPage: (environmentId, threadId, page) =>
@@ -644,7 +667,7 @@ export function createMobileEnvironmentDriver(
         },
       }),
     applyThreadDetailEvent: (environmentId, event) =>
-      applyThreadDetailEvent(environmentId, event as OrchestrationEvent),
+      getThreadDetailEvents().enqueue(environmentId, event as OrchestrationEvent),
     stateSink,
     onShellSnapshotReceived: () => undefined,
     onShellSnapshotCurrent: () => undefined,
@@ -654,7 +677,16 @@ export function createMobileEnvironmentDriver(
 
   return {
     supervisor,
-    start: () => supervisor.start(),
+    start: () => {
+      const stop = supervisor.start();
+      return () => {
+        // Buffered detail events belong to the connections being stopped.
+        const applier = threadDetailEvents;
+        threadDetailEvents = null;
+        applier?.dispose();
+        stop();
+      };
+    },
     connectSavedEnvironment,
     forgetSessionHint: (environmentId) => sessionHints?.forget(environmentId),
     releaseDeferredPrimaryConnection: () => {

@@ -104,4 +104,30 @@ describe("AsyncRotatingFileSink", () => {
     expect(readdirSpy).not.toHaveBeenCalled();
     expect(fs.readdirSync(dir).toSorted()).toEqual(["other.log.9", "thread.log.1", "thread.log.2"]);
   });
+
+  it("prunes backups up to an earlier, deeper maxFiles", async () => {
+    const dir = makeTempDir();
+    const filePath = path.join(dir, "desktop-main.log");
+    // Left by a rotation that kept ten backups before maxFiles dropped to three.
+    for (const suffix of [".1", ".3", ".4", ".7", ".7.gz", ".10", ".11"]) {
+      fs.writeFileSync(`${filePath}${suffix}`, "old");
+    }
+    const readdirSpy = vi.spyOn(fs.promises, "readdir");
+
+    const sink = new AsyncRotatingFileSink({
+      filePath,
+      maxBytes: 1_024,
+      maxFiles: 3,
+      pruneBackupsUpTo: 10,
+    });
+    await sink.flush();
+
+    expect(readdirSpy).not.toHaveBeenCalled();
+    // Index 11 was never written by any configuration and is left alone.
+    expect(fs.readdirSync(dir).toSorted()).toEqual([
+      "desktop-main.log.1",
+      "desktop-main.log.11",
+      "desktop-main.log.3",
+    ]);
+  });
 });

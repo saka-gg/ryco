@@ -19,9 +19,9 @@ const PAGE_FRAMING_BYTES = 128;
  * `maxBytes` unless a single thread is larger, which then travels alone.
  *
  * Unarchived threads come first, in snapshot order, then the archived ones,
- * and the archived threads always start a new message: a client can show the
- * unarchived shell as soon as that part has arrived, without decoding the
- * archive first.
+ * filling the same byte budget. The archive does not start a message of its
+ * own: every message costs an ack round trip, and clients apply the snapshot
+ * only at `snapshot-end`, so a shell within the budget is exactly one message.
  */
 export const pageShellSnapshot = (
   snapshot: OrchestrationShellSnapshot,
@@ -71,7 +71,6 @@ export const pageShellSnapshot = (
   };
 
   addThreads(unarchived);
-  if (archived.length > 0 && (page.length > 0 || message.length > 0)) closeMessage();
   addThreads(archived);
   closePage();
   message.push({ kind: "snapshot-end" });

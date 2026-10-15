@@ -142,6 +142,30 @@ describe("environmentActions", () => {
     expect(record.label).toBe("My node");
   });
 
+  it("connects without the replaced credential's session answer, even one recorded meanwhile", async () => {
+    const reg = fakeRegistry();
+    const hints = new Map<EnvironmentId, string>([[ENV, "replaced credential"]]);
+    reg.spies.forgetSessionHint.mockImplementation((environmentId: EnvironmentId) => {
+      hints.delete(environmentId);
+    });
+    // The old connect, not yet cancelled, answers while the new record is stored.
+    reg.spies.persistRecord.mockImplementation(async () => {
+      hints.set(ENV, "replaced credential");
+    });
+    let hintAtConnect: string | undefined = "not connected";
+    reg.spies.ensureSavedEnvironmentConnection.mockImplementation(async () => {
+      hintAtConnect = hints.get(ENV);
+      return {};
+    });
+
+    await actions(reg).addSavedEnvironment({ label: "My node", pairingUrl: "ryco://x" });
+
+    expect(hintAtConnect).toBeUndefined();
+    expect(reg.spies.forgetSessionHint.mock.invocationCallOrder.at(-1)).toBeGreaterThan(
+      reg.spies.supervisorRemove.mock.invocationCallOrder.at(-1) ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
   it("rolls back and throws the exact message when the token write fails", async () => {
     const prior = {
       environmentId: ENV,

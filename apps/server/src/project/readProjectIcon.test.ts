@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { Effect, Option } from "effect";
 import { PROJECT_ICON_MAX_BYTES, ProjectId, WS_METHODS } from "@ryco/contracts";
 import { readProjectIcon } from "./readProjectIcon.ts";
+import { ProjectFaviconUnavailable } from "./Services/ProjectFaviconResolver.ts";
 import { makeProjectHandlers } from "../ws/projectRpc.ts";
 import type { WsRpcContext } from "../ws/context.ts";
 
@@ -54,6 +55,18 @@ describe("project artwork over RPC", () => {
         ),
       ).toBeNull();
     }
+  });
+  it("fails instead of answering 'no artwork' when the icon read did not finish", async () => {
+    const exit = await Effect.runPromiseExit(
+      readProjectIcon(project, {
+        favicon: {
+          readIcon: (cwd) => Effect.fail(new ProjectFaviconUnavailable({ cwd })),
+        },
+        avatar: null,
+      }),
+    );
+    expect(exit._tag).toBe("Failure");
+    expect(JSON.stringify(exit)).toContain("ProjectReadIconError");
   });
   it("returns no artwork for unknown/deleted projects and authorizes the read first", async () => {
     const lookup = vi.fn(() => Effect.succeed(Option.none()));

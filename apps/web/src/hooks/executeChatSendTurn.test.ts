@@ -144,6 +144,7 @@ describe("rollbackSendTurn", () => {
       removeComposerDraftImage: vi.fn(),
       setComposerDraftTerminalContexts: vi.fn(),
       setDraftThreadContext: vi.fn(),
+      readComposerDraftContent: vi.fn(() => null),
     };
   }
 
@@ -227,6 +228,84 @@ describe("rollbackSendTurn", () => {
     });
 
     expect(setOptimisticUserMessages).not.toHaveBeenCalled();
+    expect(draft.setComposerDraftPrompt).not.toHaveBeenCalled();
+  });
+
+  it("restores into the thread's stored draft alone once the view shows another thread", () => {
+    const refs = makeRefs();
+    // The view's live composer now belongs to the other thread, which is empty.
+    const draft = makeDraftDeps();
+    const resetCursorState = vi.fn();
+    const setOptimisticUserMessages = vi.fn();
+
+    rollbackSendTurn({
+      refs: refs as never,
+      composerHandle: {
+        readComposer: () => ({ resetCursorState }) as never,
+        showsSendThread: () => false,
+      },
+      dispatch: { setOptimisticUserMessages },
+      draft,
+      messageId: "msg-1",
+      promptSnapshot: "Fix the bug",
+      imagesSnapshot: [],
+      terminalContextsSnapshot: [],
+    });
+
+    expect(draft.setComposerDraftPrompt).toHaveBeenCalledWith(
+      DraftId.make("draft-1"),
+      "Fix the bug",
+    );
+    expect(refs.promptRef.current).toBe("");
+    expect(resetCursorState).not.toHaveBeenCalled();
+    expect(setOptimisticUserMessages).not.toHaveBeenCalled();
+  });
+
+  it("restores the thread's draft even while the other thread's composer has content", () => {
+    const refs = makeRefs();
+    refs.promptRef.current = "typed in the other thread";
+    const draft = makeDraftDeps();
+
+    rollbackSendTurn({
+      refs: refs as never,
+      composerHandle: { readComposer: () => null, showsSendThread: () => false },
+      dispatch: { setOptimisticUserMessages: vi.fn() },
+      draft,
+      messageId: "msg-1",
+      promptSnapshot: "Fix the bug",
+      imagesSnapshot: [],
+      terminalContextsSnapshot: [],
+    });
+
+    expect(draft.setComposerDraftPrompt).toHaveBeenCalledWith(
+      DraftId.make("draft-1"),
+      "Fix the bug",
+    );
+    expect(refs.promptRef.current).toBe("typed in the other thread");
+  });
+
+  it("leaves the thread's stored draft alone when it has content again", () => {
+    const refs = makeRefs();
+    const draft = {
+      ...makeDraftDeps(),
+      readComposerDraftContent: vi.fn(() => ({
+        prompt: "written since",
+        images: [],
+        terminalContexts: [],
+      })),
+    };
+
+    rollbackSendTurn({
+      refs: refs as never,
+      composerHandle: { readComposer: () => null, showsSendThread: () => false },
+      dispatch: { setOptimisticUserMessages: vi.fn() },
+      draft,
+      messageId: "msg-1",
+      promptSnapshot: "Fix the bug",
+      imagesSnapshot: [],
+      terminalContextsSnapshot: [],
+    });
+
     expect(draft.setComposerDraftPrompt).not.toHaveBeenCalled();
   });
 
@@ -437,6 +516,7 @@ describe("executeChatSendTurn", () => {
         removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
         setDraftThreadContext: vi.fn(),
+        readComposerDraftContent: vi.fn(() => null),
       },
       dispatch: {
         api: { orchestration: { dispatchCommand } } as never,
@@ -545,6 +625,7 @@ describe("executeChatSendTurn", () => {
         removeComposerDraftImage: vi.fn(),
         setComposerDraftTerminalContexts: vi.fn(),
         setDraftThreadContext: vi.fn(),
+        readComposerDraftContent: vi.fn(() => null),
       },
       dispatch: {
         api: { orchestration: { dispatchCommand } } as never,
@@ -659,6 +740,7 @@ function makeSendInput() {
       removeComposerDraftImage: vi.fn(),
       setComposerDraftTerminalContexts: vi.fn(),
       setDraftThreadContext: vi.fn(),
+      readComposerDraftContent: vi.fn(() => null),
     },
     dispatch: {
       api: { orchestration: { dispatchCommand } } as never,
@@ -675,6 +757,87 @@ function makeSendInput() {
   };
   return { input, dispatchCommand };
 }
+
+describe("a send whose view moved on to another thread", () => {
+  function switchedSend() {
+    const sent = makeSendInput();
+    const resetCursorState = vi.fn();
+    const setOptimisticUserMessages = vi.fn();
+    let shown = true;
+    sent.input.claudeCacheReview = null;
+    sent.input.dispatch.setOptimisticUserMessages = setOptimisticUserMessages;
+    sent.input.composerHandle = {
+      readComposer: () => ({ resetCursorState }) as never,
+      showsSendThread: () => shown,
+    };
+    /** The user opens another thread: the view's live composer becomes that thread's. */
+    const switchThread = (otherPrompt: string) => {
+      shown = false;
+      sent.input.refs.promptRef.current = otherPrompt;
+      resetCursorState.mockClear();
+      setOptimisticUserMessages.mockClear();
+    };
+    return { ...sent, resetCursorState, setOptimisticUserMessages, switchThread };
+  }
+
+  it("puts a failed prompt back into its own thread's draft, not the shown one", async () => {
+    for (const otherPrompt of ["typed in the other thread", ""]) {
+      const { input, dispatchCommand, resetCursorState, setOptimisticUserMessages, switchThread } =
+        switchedSend();
+      dispatchCommand.mockImplementation(async () => {
+        switchThread(otherPrompt);
+        throw new Error("The node went away.");
+      });
+
+      expect(await executeChatSendTurn(input)).toBe(false);
+      expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+        DraftId.make("draft-handoff"),
+        "Continue with Claude",
+      );
+      expect(input.refs.promptRef.current).toBe(otherPrompt);
+      expect(resetCursorState).not.toHaveBeenCalled();
+      expect(setOptimisticUserMessages).not.toHaveBeenCalled();
+    }
+  });
+
+  it("consumes its own thread's stored draft without touching the shown composer", async () => {
+    const { input, resetCursorState, setOptimisticUserMessages, switchThread } = switchedSend();
+    vi.mocked(input.draft.readComposerDraftContent).mockReturnValue({
+      prompt: "My next draft",
+      images: [],
+      terminalContexts: [],
+    });
+    input.scroll.scrollToEndBeforeOptimistic = vi.fn(async () => {
+      switchThread("typed in the other thread");
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalledWith(
+      DraftId.make("draft-handoff"),
+    );
+    expect(input.refs.promptRef.current).toBe("typed in the other thread");
+    expect(resetCursorState).not.toHaveBeenCalled();
+    // The optimistic message would land in the other thread's timeline.
+    expect(setOptimisticUserMessages).not.toHaveBeenCalled();
+  });
+
+  it("consumes its own thread's stored draft when the view moved on before the send started", async () => {
+    const { input, switchThread } = switchedSend();
+    vi.mocked(input.draft.readComposerDraftContent).mockReturnValue({
+      prompt: "My next draft",
+      images: [],
+      terminalContexts: [],
+    });
+    // Moved on while the caller was still preparing (a device screenshot, say).
+    switchThread("typed in the other thread");
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalledWith(
+      DraftId.make("draft-handoff"),
+    );
+    expect(input.refs.promptRef.current).toBe("typed in the other thread");
+  });
+});
 
 describe("chat first send with a retired project id", () => {
   const RETIRED_ID = ProjectId.make("chat-retired");
@@ -1031,6 +1194,55 @@ describe("worktree branch defaults", () => {
       prepareWorktree: { branch: expect.stringMatching(/^remembered\/[0-9a-f]{8}$/) },
     });
     expect(bootstrap).not.toHaveProperty("runSetupScript");
+    resetNewDraftDefaultsCacheForTests();
+  });
+
+  it("reads the project's prefix again once the node's settings changed", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.worktree.baseBranchForWorktree = "main";
+    input.worktree.shouldCreateWorktree = true;
+    const capableConfig = (worktreeBranchPrefix: string) =>
+      ({
+        environment: { capabilities: { projectPreferences: true } },
+        settings: { projectPreferences: { "project-1": { worktreeBranchPrefix } } },
+      }) as unknown as ServerConfig;
+    await readAndRememberProjectPreferences({
+      api: {
+        server: {
+          getProjectPreferences: async () => ({
+            worktreeBranchPrefix: { value: "old", source: "project" },
+          }),
+        },
+      } as never,
+      environmentId: EnvironmentId.make("env-1"),
+      config: capableConfig("old"),
+      projectId: ProjectId.make("project-1"),
+    });
+    // The project's prefix was saved since: the remembered answer is stale.
+    const getProjectPreferences = vi.fn(async () => ({
+      worktreeBranchPrefix: { value: "new", source: "project" },
+      runSetupScript: { value: true, source: "builtin" },
+    }));
+    input.dispatch.api = {
+      orchestration: { dispatchCommand },
+      server: {
+        getConfig: async () => capableConfig("new"),
+        getProjectPreferences,
+        getSettings: async () => ({ worktreeBranchPrefix: "team" }),
+      },
+    } as never;
+
+    expect(await executeChatSendTurn(input)).toBe(true);
+    expect(getProjectPreferences).toHaveBeenCalledTimes(1);
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bootstrap: expect.objectContaining({
+          prepareWorktree: expect.objectContaining({
+            branch: expect.stringMatching(/^new\/[0-9a-f]{8}$/),
+          }),
+        }),
+      }),
+    );
     resetNewDraftDefaultsCacheForTests();
   });
 

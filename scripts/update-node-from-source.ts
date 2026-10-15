@@ -132,7 +132,7 @@ if (!before.installed && !installServiceWhenMissing) {
     [
       "",
       "✓ Built. No background service is installed on this machine, so nothing was restarted.",
-      "  Run the node in a terminal:   node apps/server/dist/bin.mjs serve",
+      "  Run the node in a terminal:   node --max-semi-space-size=16 apps/server/dist/bin.mjs serve",
       "  Or install it as a service:   bun run node:update -- --no-pull --install-service",
     ].join("\n"),
   );

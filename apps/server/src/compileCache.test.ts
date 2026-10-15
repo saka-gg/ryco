@@ -41,6 +41,24 @@ describe("enableCompileCacheBestEffort", () => {
     expect(nodeModule.enableCompileCache.mock.calls).toEqual([["/cache/1.2.3"], [undefined]]);
   });
 
+  it("keeps Desktop's directory away from the processes this one starts", () => {
+    const env: Record<string, string | undefined> = {
+      RYCO_COMPILE_CACHE_DIR: "/cache/1.2.3",
+      NODE_COMPILE_CACHE: "/tmp/node-compile-cache",
+    };
+    enableCompileCacheBestEffort(env);
+    expect(nodeModule.enableCompileCache).toHaveBeenCalledWith("/cache/1.2.3");
+    expect(env).toEqual({ NODE_COMPILE_CACHE: "/tmp/node-compile-cache" });
+
+    // Also when the cache could not be enabled.
+    nodeModule.enableCompileCache.mockImplementation(() => {
+      throw new Error("unwritable cache directory");
+    });
+    const failing: Record<string, string | undefined> = { RYCO_COMPILE_CACHE_DIR: "/cache" };
+    enableCompileCacheBestEffort(failing);
+    expect(failing).toEqual({});
+  });
+
   it("never fails startup", () => {
     nodeModule.enableCompileCache.mockImplementation(() => {
       throw new Error("unwritable cache directory");

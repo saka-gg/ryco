@@ -67,6 +67,16 @@ export function readEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi
   return environmentApiOverridesForTests.get(environmentId) ?? lookup.read(environmentId);
 }
 
+/**
+ * Notifies when any environment's live client is registered, replaced or
+ * removed: every change `readEnvironmentApi` can answer differently for. A
+ * component reads the api through `useEnvironmentApi`, never in render, where
+ * React Compiler would cache the answer for as long as the environment id holds.
+ */
+export function subscribeEnvironmentApis(listener: () => void): () => void {
+  return registry().driver.supervisor.subscribe(listener);
+}
+
 export function ensureEnvironmentApi(environmentId: EnvironmentId): EnvironmentApi {
   const api = readEnvironmentApi(environmentId);
   if (!api) throw new Error(`Environment API not found for environment ${environmentId}`);

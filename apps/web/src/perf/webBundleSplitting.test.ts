@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vite-plus/test";
 
 async function readSource(relativePath: string): Promise<string> {
@@ -203,14 +203,24 @@ describe("web bundle splitting boundaries", () => {
     const worktreeList = await readSource("../components/sidebar/SidebarWorktreeList.tsx");
     const projectDialogs = await readSource("../components/sidebar/SidebarProjectDialogOwner.tsx");
     const projectItem = await readSource("../components/sidebar/SidebarProjectItem.tsx");
+    const sharedDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
 
-    expect(worktreeList).toContain('import("../worktrees/LinkedWorktreeItemDialog")');
+    // One code-split wrapper per dialog, shared with the chat, so a preload
+    // from either surface serves both.
+    expect(sharedDialogs).toContain('import("./LinkedWorktreeItemDialog")');
+    expect(sharedDialogs).toContain('import("./NewWorktreeDialog")');
+    expect(sharedDialogs).toContain("preloadableLazy(");
+    expect(sharedDialogs).not.toMatch(
+      /^import \{[^}]*\} from "\.\/(?:LinkedWorktreeItemDialog|NewWorktreeDialog)";$/mu,
+    );
     expect(worktreeList).not.toMatch(/import \{[^}]*\bLinkedWorktreeItemDialog\b/u);
-    expect(projectDialogs).toContain('import("../worktrees/NewWorktreeDialog")');
     expect(projectDialogs).not.toMatch(/import \{[^}]*\bNewWorktreeDialog\b/u);
     for (const source of [worktreeList, projectDialogs]) {
-      expect(source).toContain("preloadableLazy(");
+      expect(source).toContain('from "../worktrees/lazyWorktreeDialogs"');
+      expect(source).not.toContain("preloadableLazy(");
       expect(source).toContain("useLazyComponentReady(");
+      // A failed chunk is a toast with a Retry, never the root error view.
+      expect(source).toContain("onLoadError:");
       expect(source).not.toMatch(REACT_LAZY_IMPORT);
       expect(source).not.toContain("<Suspense");
     }
@@ -228,5 +238,30 @@ describe("web bundle splitting boundaries", () => {
     expect(automationsStore).toContain('import("./dialog/AutomationsDialog")');
     expect(primaryActions).toContain("onPointerEnter={preloadAutomationsDialog}");
     expect(primaryActions).toContain("onFocus={preloadAutomationsDialog}");
+  });
+
+  it("keeps React.lazy off every surface except an explicit allowlist", async () => {
+    // `React.lazy` commits its fallback on every first mount and React then
+    // holds the reveal for up to 300 ms; code-split surfaces use
+    // `preloadableLazy` instead. Allowed: the frozen phone tier, render-null or
+    // overlay guards whose fallback never shows content, and the PDF preview.
+    const allowed = new Set([
+      "main.tsx",
+      "routes/__root.tsx",
+      "components/AppSidebarLayout.tsx",
+      "components/shell/phone/PhoneSettingsSurface.tsx",
+      "components/chat/AttachmentDocumentPreview.tsx",
+    ]);
+    const srcRoot = new URL("../", import.meta.url);
+    const entries = await readdir(srcRoot, { recursive: true });
+    const offenders: string[] = [];
+    for (const entry of entries) {
+      const file = entry.replaceAll("\\", "/");
+      if (!file.endsWith(".tsx") || /\.(?:test|browser)\.tsx$/u.test(file)) continue;
+      if (allowed.has(file)) continue;
+      const source = await readFile(new URL(file, srcRoot), "utf8");
+      if (/(?<![\w.])lazy\(|React\.lazy\(/u.test(source)) offenders.push(file);
+    }
+    expect(offenders).toEqual([]);
   });
 });

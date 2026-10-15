@@ -749,13 +749,17 @@ export const makeWorktreeOperations = (deps: {
           : yield* gitWorkflow.listWorktreePaths(project.workspaceRoot).pipe(
               Effect.tap((paths) =>
                 Effect.sync(() => {
-                  if (fingerprint === null) knownWorktreeListings.delete(projectId);
-                  else
+                  // A repository always lists at least its own root, so an empty answer means
+                  // git could not answer (e.g. a failed rev-parse); never reuse it.
+                  if (fingerprint === null || paths.length === 0) {
+                    knownWorktreeListings.delete(projectId);
+                  } else {
                     knownWorktreeListings.set(projectId, {
                       root: project.workspaceRoot,
                       fingerprint,
                       paths,
                     });
+                  }
                 }),
               ),
               Effect.mapError((cause) =>
