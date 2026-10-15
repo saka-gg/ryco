@@ -1,0 +1,47 @@
+{
+  "id": "persistence-boot:orphan-chat-sweep-and-trace-spans",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Both parts of the finding are fixed by 60633eff3 (#710). That commit is an ancestor of HEAD and of the Hub's vendored 7bc39eec3. (1) The N+1 sweep (listAll, then listByProjectId for each chat older than 1 h) is now a single anti-join, listOrphanChatProjects. Its NOT EXISTS predicate is exactly !isRolledBackThreadCreation, written with IS NULL / IS NOT NULL only, so SQL NULL handling cannot change the result. The tests run against real projection tables. The sweep is forked after the command gate, http.wait and ready.publish; before, it ran at boot ahead of workspace.validate. (2) LocalFileSpan no longer pushes a SQL span (one carrying db.query.text) that succeeds in under 50 ms. Neither the NDJSON sink nor diagnostics.recordTraceRecords sees it. Failed and slow statements are kept, the OTLP delegate still receives every span, and RYCO_TRACE_SQL_MIN_DURATION_MS=0 restores full recording. I checked Effect 4.0.2's sql/Statement.js: it sets db.query.text through span.attribute(), so the filter does see it. No consumer of local SQL spans exists in web, desktop scripts or diagnostics. The only leftovers are small: whitespace normalisation runs on every statement, including ones that are then dropped, and the proposed aggregate per-query metrics were not added.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Layers/ProjectionProjects.ts:177-213",
+      "note": "listOrphanChatProjectRows: chat projects that are not deleted and have created_at < cutoff, with NOT EXISTS over projection_threads excluding rolled-back creations (deleted_at NOT NULL, trashed_at NULL, latest_turn_id NULL, latest_user_message_at NULL, lineage_source_message_id NULL). This mirrors isRolledBackThreadCreation and isNeverUsedThread in persistence/Services/ProjectionThreads.ts:83-100. The correlated subquery uses idx on projection_threads(project_id) (005:121) and (project_id, deleted_at, created_at) (019:14)."
+    },
+    {
+      "location": "apps/server/src/project/orphanChatProjects.ts:88-100",
+      "note": "One listOrphanChatProjects call. The fork ledger (2 queries) is read only when chats.length > 0. The threads repository is no longer a dependency, so no per-chat reads remain. Old code at f1be4abc7 lines 58-72 did listAll plus listByProjectId for each chat."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1028-1067",
+      "note": "The sweep is forked (Effect.forkScoped) after commandGate.signalCommandReady, http.wait and ready.publish. At f1be4abc7 it was forked at line 896, before workspace.validate (line 906), so it competed with startup."
+    },
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.ts:27,89-101",
+      "note": "DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS = 50. keepsLocalRecord drops a successful db.query.text span shorter than the threshold before spanToTraceRecord and sink.push. That removes the JSON serialisation, the file write and the diagnostics ring entry. Failures are always kept."
+    },
+    {
+      "location": "apps/server/node_modules/effect/dist/sql/Statement.js:734-746,784-789",
+      "note": "Effect 4.0.2 sets db.query.text through span.attribute() after span creation, inside withConnectionSpan, so LocalFileSpan.attributes sees it before end(). The span covers semaphore acquisition too, so statements queued for 50 ms or more are kept as slow."
+    },
+    {
+      "location": "apps/server/src/observability/Layers/Observability.ts:23-25,48-57,78",
+      "note": "RYCO_TRACE_SQL_MIN_DURATION_MS config (default 50) is passed to the tracer. diagnosticsSink.push wraps both the file sink and diagnostics.recordTraceRecords, so both are filtered. Documented at docs/observability.md:515-517. Tests are at LocalFileTracer.test.ts:131-180."
+    },
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.ts:103-112",
+      "note": "Minor leftover: normalizeSqlText (a regex replace over the whole SQL) runs eagerly in attribute() for every statement, including the ones that keepsLocalRecord then drops. A local micro-benchmark on the largest ProjectionProjects SQL (about 2 KB) measured about 2.5 us per call, so roughly 30-40 us per 12-15-statement event commit. That is far below the serialisation and write cost that was removed."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. One small inefficiency: LocalFileTracer.ts:103-112 normalises db.query.text on every SQL attribute set, but only slow or failed SQL spans are ever serialised. Normalisation could happen at keep time instead (about 2.5 us per 2 KB statement; it is a net win either way). The proposed aggregate per-query metrics were not implemented, so locally there is no count or time for fast SQL unless the threshold is set to 0. This is an observability gap, not a perf bug. The sweep now runs after the gate, so in theory it can race with a client re-sending a first message to a chat older than 1 h. The project.delete guards (expectedUpdatedAt, expectedThreadIds: []) still fail closed, and the worst outcome is the same retired-chat error the old pre-gate ordering always produced.",
+  "implementationSketch": "Optional nit only. In apps/server/src/observability/LocalFileTracer.ts, store the redacted db.query.text unchanged in attribute(). In end(), once keepsLocalRecord is true, replace the attribute with normalizeSqlText(value) before calling spanToTraceRecord(this). Alternatively, normalise inside spanToTraceRecord, or in LocalFileSpan only on the push path. Keep the existing tests: LocalFileTracer.test.ts already asserts that the kept slow-sql record has normalised text, and that test would cover the move.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "The fix is done. The optional nit is local observability plumbing with no auth, E2EE, hosted-lifecycle or Hub implications.",
+  "repos": "ryco",
+  "correction": "No change to the auditor's status. One point their note on normalizeSqlText missed: it runs on every SQL statement, including dropped ones, not only on the kept text. The cost is negligible (about 2.5 us per 2 KB statement). Line ranges at HEAD: the sweep query is ProjectionProjects.ts:177-213, and the startup fork is serverRuntimeStartup.ts:1055-1067, after the gate at 1028."
+}

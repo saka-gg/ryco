@@ -1,0 +1,53 @@
+{
+ "intro": "All 19 packages were merged onto one tree (local branch <code>perf3/recheck-2026-10-15</code>, 20 commits, 553 files) and validated together. 5 files needed manual merge resolution; an independent review of every file touched by two packages found no interaction bugs; a final verifier pass against this plan returned APPROVED on all five acceptance criteria.",
+ "checks": [
+  [
+   "bun run fmt:check",
+   "pass"
+  ],
+  [
+   "bun run lint",
+   "pass (0 errors; 779 warnings vs 786 on main)"
+  ],
+  [
+   "bun run typecheck (all packages)",
+   "pass"
+  ],
+  [
+   "bun run test (16 packages, 8,281 tests)",
+   "pass (one shutdown test needed <code>bun install</code> to re-apply the changed @effect/platform-node patch)"
+  ],
+  [
+   "bun run build",
+   "pass"
+  ],
+  [
+   "web browser suite",
+   "pass, 245/245 files (a known order-dependent ContextPickerButton flake passed on rerun; one new test had a wrong baseline and was fixed)"
+  ],
+  [
+   "bun run build:desktop",
+   "pass"
+  ],
+  [
+   "release:smoke",
+   "not run (no release-workflow change)"
+  ],
+  [
+   "merge with current origin/main (#729)",
+   "clean"
+  ]
+ ],
+ "notes": [
+  "Claude now receives Ryco's appended system prompt (attachment instructions, project custom system prompt, token-mode instructions) through <code>systemPrompt.append</code>; it previously received none of it.",
+  "Adopted Claude/OpenCode provider snapshots stay valid for 6 h; their usage limits are still re-read every 5 minutes, but without starting a Claude SDK session or <code>opencode serve</code>. Codex is unchanged.",
+  "A Stop pressed while a turn waits for its pre-turn checkpoint now cancels the start; a lost <code>turn.completed</code> is repaired by a bounded, liveness-triggered history read while the thread stays open.",
+  "The server keeps the idle provider sessions of up to 4 viewed threads for up to 30 minutes; unviewed threads keep the 5-minute reaper, and a session is re-checked for an active turn right before it is stopped.",
+  "Desktop: a missing server entry or bootstrap pipe stops after 3 failed starts and shows the error dialog instead of retrying forever; the renderer origin port is recorded in userData right after selection.",
+  "The live command model keeps only the activity kinds it reads and no checkpoint file lists; after a restart a pending checkpoint revert blocks turn starts until it is recovered, as it already did while running.",
+  "A failed or timed-out project-skills read keeps the last good list and retries after 30 s instead of caching an empty list.",
+  "Terminal history is persisted append-only (full rewrite only on clear, restart, close or compaction). Subprocess activity checks no longer run every second during output: Linux reads /proc without spawning; macOS and Windows still spawn ps/PowerShell, but only on edges and the 5 s idle sweep (foreground-process detection was not possible through node-pty).",
+  "The tiny-chunk merge (#61) was measured and rejected: every variant regressed the RootAppShell gzip budget or file count; only the guard shipped.",
+  "Existing checkouts need <code>bun install</code> after pulling, because the @effect/platform-node patch content changed."
+ ]
+}

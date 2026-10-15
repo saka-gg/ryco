@@ -1,0 +1,33 @@
+{
+  "id": "web-bootstrap:eager-device-socket-and-simctl",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "I confirm the fix. On a current server, a client boot or reconnect no longer lists devices and no longer opens /ws/device, and the server spawns no Xcode or simctl process on connect. Connections only register their device client. The device event stream starts once a thread view or the simulator pane holds the device runtime (ensureDeviceRuntime, released 60 s after the last holder lets go), and it runs over the main /ws socket, which now serves the device RPCs. Subscribing only adds a manager.onEvent listener. The only inventory read left is SimulatorPanel's refresh, and the pane mounts only while the simulator tab is active. That read is cheaper too: xcode-select and xcodebuild results are cached and shared, and a 2 s reuse window gives one simctl list per read instead of two. No other client or server path runs simctl, xcode-select or xcodebuild on connect.",
+  "evidence": [
+    {"location": "packages/client-runtime/src/connection/connection.ts:323-326", "note": "The connection only calls registerDeviceConnection. reconnect() at :360-370 only calls deviceBinding?.reconnecting() and lists nothing."},
+    {"location": "packages/client-runtime/src/state/device/runtime.ts:22-62", "note": "bindDeviceConnection subscribes to events only. It has no list or refreshInventory call."},
+    {"location": "packages/client-runtime/src/state/device/runtime.ts:112-182", "note": "registerDeviceConnection binds only while something retains the runtime. ensureDeviceRuntime is ref-counted and unbinds after DEVICE_RUNTIME_IDLE_MS = 60 s."},
+    {"location": "apps/web/src/components/device/useDeviceRuntime.ts:11-16", "note": "This hook holds the runtime. Its only callers are SimulatorPanel.tsx:166, ChatThreadRouteView.tsx:128 and DraftChatThreadRouteView.tsx:95."},
+    {"location": "apps/web/src/components/device/SimulatorPanel.tsx:209-224", "note": "The only client inventory read is a parallel list() + getThreadState(), run on mount or when the generation changes. ThreadWorkspacePanel.tsx:1536-1538 mounts the pane only when activeMode === 'simulator'."},
+    {"location": "apps/web/src/lib/devicePromptContext.ts:83-90", "note": "Its getThreadState call runs only when a prompt looks like a device task, never on connect."},
+    {"location": "apps/server/src/ws.ts:68-97", "note": "/ws serves WsHostedRpcGroup, the app group merged with the device group, using the device layer. /ws/device stays only for older clients."},
+    {"location": "packages/client-runtime/src/rpc/deviceRpcClient.ts:139-273", "note": "createDirectDeviceRpcTransport: RPCs and the event stream use the main socket. The dedicated socket opens only for requestBulk (screenshots) or after an 'Unknown request tag' answer, and closes after 60 s idle. A non-retryable stream failure, such as unsupported-platform on Linux, calls onError once and does not loop (wsTransport.ts:381-395)."},
+    {"location": "apps/web/src/environments/runtime/service.ts:988-1009, 1159-1180", "note": "The primary and saved-environment clients create DeviceWsTransport only inside the lazy openDedicated callback. The hosted path (:959) shares the relay transport."},
+    {"location": "apps/server/src/ws/deviceRpc.ts:122-135, 376-386", "note": "subscribeEvents only registers manager.onEvent and spawns nothing."},
+    {"location": "apps/server/src/device/IosSimulatorBackend.ts:83-90, 1055-1081", "note": "DEVICE_LISTING_REUSE_MS = 2 s, with one shared listing promise. boot re-reads with fresh:true (:518) and shutdown clears the cache (:537)."},
+    {"location": "apps/server/src/device/IosSimulatorBackend.ts:1119-1180", "note": "xcode-select -p is cached for 60 s and xcodebuild -version for 5 min, as shared promises. A non-Xcode path or an unaccepted license is not kept."},
+    {"location": "apps/server/src/device/HostDeviceBackend.ts:113-170", "note": "Availability probes and discovery are single-flighted per host, so the pane's concurrent list() and getThreadState() share one read."},
+    {"location": "packages/client-runtime/src/state/device/runtime.test.ts:30-125", "note": "Tests assert that list is not called on connect, resubscribe or reconnect, plus lazy binding and idle unbind."},
+    {"location": "apps/server/src/device/IosSimulatorBackend.probeCache.test.ts:43-91", "note": "Tests cover one simctl run per read, reuse of the toolchain caches, and a fresh listing after boot."}
+  ],
+  "remaining": "",
+  "fixDefects": "No blocking defect, and nothing brings back the per-connect cost. The auditor's three deviations are accurate: the stream starts on thread-view mount, the reuse window is 2 s rather than 30 s, and a failed listing is reused for 2 s. Two more small notes. (1) A reconnect bumps the device generation twice, once in deviceBinding.reconnecting() (connection.ts:362) and again on the stream's onResubscribe (runtime.ts:35-37). With the simulator pane open, that runs two list() + getThreadState() refreshes. The 2 s listing reuse and HostDeviceBackend single-flight usually merge them into one simctl run on the server. It costs nothing when the pane is closed. (2) The Android backend (AndroidEmulatorBackend.ts:211-341) has no listing cache. availability() is cached for only 5 s, and listDevices() re-runs emulator -list-avds, adb devices -l and two adb calls per running emulator. On hosts with the Android SDK, each pane refresh therefore spawns several adb/emulator processes. That code is unchanged since f1be4abc7 and runs only on pane open, never on connect.",
+  "implementationSketch": "Optional, low value. (a) Drop the explicit deviceBinding?.reconnecting() bump in connection.ts reconnect(), or skip the onResubscribe bump when a reconnecting() bump has not yet seen a resubscribe, so one reconnect causes one pane refresh. Add a runtime.test.ts case that counts generation bumps per reconnect. (b) Give AndroidEmulatorBackend a short (~2 s) shared-promise listing cache like IosSimulatorBackend.listDevicesUnchecked: let probeAvailability reuse the avds()/running() result, and clear the cache on boot, shutdown and boot-completion. Test with a fake run() counter, as in IosSimulatorBackend.probeCache.test.ts.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

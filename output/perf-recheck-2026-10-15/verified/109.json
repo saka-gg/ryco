@@ -1,0 +1,62 @@
+{
+  "id": "client-runtime-sync:shell-upsert-per-thread-event",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is correct. I found no implementation the auditor missed. The server half is fixed: shell upserts are coalesced latest-wins per thread over a 250 ms window, collapsed once per drained batch, and the row read is shared across subscribers by (threadId, sequence). These came in 60633eff3 and 8fb94df00, and both are in the Hub vendor pin 7bc39eec3. Still open: there is no WHERE thread_id IN batch read. Unchanged upserts are not skipped, because updated_at is still bumped on every message, activity and plan event. On the client, every changed upsert still spreads up to four dictionaries keyed by every thread; the only change is that ensureThreadRegistered no longer does the threadIds.includes scan. The auditor missed one more case of the same O(N) spread: the detail-stream path still copies all of threadShellById on every 32 ms streaming delta for subscribed threads, and that path has no 250 ms coalescing. I reproduced the auditor's fix defect with a node one-off against effect 4.0.2: if the owner of a shared read is interrupted, a subscriber that joined the read gets an interrupt-only failure, and toShellStreamEvent's Effect.catch does not absorb it.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/orchestrationEventCoalescing.ts:62",
+      "note": "orchestrationShellFrameKey keys thread.activity-appended, thread.message-sent and thread.proposed-plan-upserted by thread. Every other event returns null and flushes held frames first, so ordering holds."
+    },
+    {
+      "location": "apps/server/src/ws/context/constants.ts:35",
+      "note": "ORCHESTRATION_SHELL_THREAD_COALESCE_WINDOW_MS = 250. It is wired into the shell live feed at orchestrationStreams.ts:831-838. Each subscription runs its own flush tick, at orchestrationStreams.ts:636-640."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:381",
+      "note": "toShellStreamEvents keeps only the last upsert-class event per thread in each drained batch. Replay and live both use it, at line 597."
+    },
+    {
+      "location": "apps/server/src/ws/context/sharedThreadShellReads.ts:54",
+      "note": "Shared reads are keyed by thread and sequence, with a 2 s TTL and 512 entries. Lines 66-72 complete the shared Deferred with the owner's exit, including an interrupt. In my one-off (owner forked, joiner forked, owner interrupted), the joiner exited Failure with an interrupt-only cause, even with Effect.catch applied as toShellStreamEvent does at orchestrationStreams.ts:360."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:1160",
+      "note": "message-sent (updatedAt at 1178), proposed-plan-upserted (1200) and activity-appended or approval-response (1218) all still write updatedAt: event.occurredAt. ProviderRuntimeIngestion.ts:177 still flushes assistant deltas every 32 ms."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3481",
+      "note": "getThreadShellById still reads one thread per call, with four reads (thread, latest turn, session, priority). There is no batch variant; the grep found no getThreadShellsByIds or similar."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1113",
+      "note": "writeThreadShellState matches f1be4abc7 byte for byte. It spreads threadShellById (1141), threadSessionById (1153), threadTurnStateById (1165) and sidebarThreadSummaryById (1180) whenever the equality checks fail, and both shell and summary compare updatedAt (722, 643)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:877",
+      "note": "ensureThreadRegistered skips threadIds.includes when the thread already has a shell (8fb94df00). This is the only client-side change for this finding."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:4310",
+      "note": "applyShellEvents commits a frame of updates once, but folds each update through writeThreadShellState and commitEnvironmentState with no batch-local owned copy. supervision.ts:1026 applyShellBatch feeds it. applyThreadPriorities (store.ts:3690) already uses copy-on-first-write (??=), which is the pattern to reuse."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1589",
+      "note": "Missed by the auditor. updateThreadShellTimestamp spreads all of threadShellById. It is called on every detail-stream message-sent (1871) and activity append (1958), next to the messageByThreadId spread at 1808. The thread stream uses orchestrationProgressFrameKey (orchestrationStreams.ts:932), which never coalesces thread.message-sent, so subscribed streaming threads pay an O(N threads) copy about 30 times a second. ownedMessageMaps only avoids re-copying the per-thread message map."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/environmentStateSink.ts:79",
+      "note": "The per-upsert after-hook is now cheap: a full UI sync only runs for new threads, seedThreadVisitedAt is a no-op once seeded, and eviction is O(at most 32 subscriptions)."
+    }
+  ],
+  "remaining": "At the user's ~282 threads this costs microseconds. It matters only for clients with 2k to 5k threads.\n\n(a) Client O(N threads) work per changed upsert. writeThreadShellState (packages/client-runtime/src/state/threads/store.ts:1113-1188) spreads four records at 1141, 1153, 1165 and 1180. Because updatedAt changes on every server event, each coalesced upsert re-copies at least threadShellById and sidebarThreadSummaryById. That is at most about 4 per second per streaming thread per client.\n\n(b) The same O(N) pattern on the detail stream, which is not coalesced. updateThreadShellTimestamp (store.ts:1589-1608, called at 1871 and 1958) plus the messageByThreadId spread (1808) and the threadTurnStateById spread (1857) run on every 32 ms assistant delta for subscribed threads.\n\n(c) The server does no batch read (ProjectionSnapshotQuery.ts:3481) and never skips unchanged upserts. Skipping would first require changing the updatedAt bumps at ProjectionPipeline.ts:1178, 1200 and 1218. This is marginal: the SQL measured 0.017 ms per call.\n\n(d) Shared-read hits are below the ideal because each subscription has its own flush phase (orchestrationStreams.ts:636). Concurrent subscribers mostly share only the immediately passed-through structural thread events.",
+  "fixDefects": "sharedThreadShellReads.ts:66-72. The owner's read runs on the owning subscriber's fiber, and Effect.onExit completes the shared Deferred with whatever exit it gets, including an interrupt. If the owning shell subscription is torn down mid-read (a tab closes, or it resubscribes after a reconnect) while another subscriber has joined the same (threadId, sequence) entry, the joiner's Deferred.await fails with an interrupt-only cause. I confirmed this with a node one-off against the installed effect 4.0.2. toShellStreamEvent's Effect.catch (orchestrationStreams.ts:360) only handles typed failures, so the interrupt propagates into the joiner's shell stream and fails or ends it. The client then has to resubscribe or resync. The failed entry is deleted, so later readers re-read; only concurrent joiners are hit. It is unlikely, because joiners mostly arise on non-coalesced structural thread events, and it heals itself, but it is a real correctness gap. sharedThreadShellReads.test.ts does not cover it.",
+  "implementationSketch": "1) Fix the shared-read interrupt defect (S, low risk). In sharedThreadShellReads.ts, start the owner's getThreadShellById with Effect.forkDetach, which exists in effect 4.0.2; a uninterruptible wrapper would also work but delays teardown if the SQLite semaphore is busy. The detached fiber completes the Deferred, and the owner and joiners all await it, so interrupting any one subscriber interrupts only its own await. Keep the delete-on-failure. Test in sharedThreadShellReads.test.ts: fork an owner on a query that sleeps, fork a joiner, interrupt the owner, and assert the joiner resolves to Some(shell) after one read.\n\n2) Client batch-local owned records (M, low-medium risk).\n- Add an owned-records WeakSet next to ownedMessageMaps. Add a helper setRecordEntry(owned, record, key, value) that copies the record on its first write in a batch, adds the copy to the set, and mutates in place after that. This generalizes the ??= pattern in applyThreadPriorities (store.ts:3690).\n- Thread the set through writeThreadShellState (store.ts:1113), ensureThreadRegistered's threadIdsByProjectId update, updateThreadShellTimestamp (1589), applyThreadMessageSentEvent (messageByThreadId at 1808, threadTurnStateById at 1857) and the activity path (1958).\n- Create one set per batch in applyShellEvents (store.ts:4310), the ShellEventCoalescer flush (4093) and applyOrchestrationEvents (3192, alongside ownedMessageMaps). Single-event entry points pass undefined, which keeps today's copy-on-write.\n- Also stop commitEnvironmentState (2001) from re-spreading environmentStateById per event inside a batch: fold per environment, then commit once.\n- The input state's records must never be mutated. Only copies created in the current batch may be. The prepare callbacks in the web and mobile sinks read values synchronously before each apply, so they stay correct.\n- Tests in packages/client-runtime/src/state/threads/store.test.ts: a batch of upserts across many threads must equal a sequential fold, the input AppState must stay deeply unchanged (frozen fixture), untouched records must keep their identity, and a detail-stream batch of message-sent events must update threadShellById once. Re-run the investigator's 2k/5k-thread bench, expecting under 0.05 ms per upsert.\n- Alternative: replace the per-thread records with a persistent map. That is a much larger API change for selectors, so it is not recommended now.\n\n3) Optional, low value.\n- Batch row reads in toShellStreamEvents with a getThreadShellsByIds(threadIds) built on json_each, like the scoped queries at ProjectionSnapshotQuery.ts:851.\n- Widen read sharing: record the engine's latest committed sequence when a read starts, and let a request for (threadId, seq) join any live entry whose start sequence is at least seq.\n- Changing updatedAt semantics so unchanged upserts can be skipped needs a product decision; see decisionReason.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The recommended work needs no decision: the interrupt fix and the client batch-local copies are internal. Only the optional server-side skip of unchanged upserts would need a product call, because it requires changing what thread updatedAt means. Bumping it only on final messages or turn completion changes sidebar recency ordering, visited-at seeding (environmentStateSink.ts:88) and unread behaviour.",
+  "repos": "ryco"
+}

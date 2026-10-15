@@ -1,0 +1,70 @@
+{
+  "id": "web-boot-cpu:snapshot-no-structural-sharing",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The client half is done and correct. syncEnvironmentShellSnapshot now keeps the previous shell, session, turnState, summary, project and worktree objects and the containers when nothing changed. The equality helpers cover every field of those types, and the cross-environment selectors return the same arrays. The server half is only partly wired: the server sends a small thread-priorities item to clients that ask for it, and web, desktop and mobile direct connections ask. The mobile hosted (Hub relay) primary connection does not pass applyThreadPriorities, so it never sends threadPriorities:\"delta\". It still receives a full, paged shell snapshot for every AI Focus ranking batch over the E2EE relay. Structural sharing keeps that from re-rendering rows, but the transfer, decrypt, decode and O(n) compare per batch remain for that client. Two nearby paths still rebuild every row without sharing: demoting an environment to cached state, and re-hydrating a hosted read cache that has the same capturedAt.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:2064-2213",
+      "note": "syncEnvironmentShellSnapshot reuses the previous projects (plainDataEqual), worktrees, shell, session, turnState and summary objects, then the containers through reuseUnchangedIds, reuseUnchangedIdsByKey and reuseUnchangedRecord. Lookups use own keys only."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:603-776",
+      "note": "threadSessionsEqual, sidebarThreadSummariesEqual, threadShellsEqual and threadTurnStatesEqual compare every field of ThreadSession, SidebarThreadSummary and ThreadShell (types.ts:196-275), apart from environmentId on summaries, which is constant per environment. Reuse therefore cannot keep stale data."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3304-3412",
+      "note": "createSliceRowsSelector and createAcrossEnvironmentsSelector are memoised on container identity, so reused containers return the same row arrays."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/storeStructuralSharing.test.ts:104-176",
+      "note": "Tests cover an identical re-apply (all containers identical), a single-row change, and dropped rows."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:761-782",
+      "note": "priorityStream sends {kind:\"thread-priorities\"} (only threads with a usable ranking) when threadPriorities===\"delta\". Every other client still gets a full (paged) shell snapshot for each ranking."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:62-65,294",
+      "note": "applyThreadPriorities is optional, and the connection sends threadPriorities:\"delta\" only when the caller supplies it."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:821-925 (888)",
+      "note": "All three web and desktop createEnvironmentConnection calls (1289 primary or hosted, 1349 desktop Hub relay, 1551 saved) spread createEnvironmentConnectionHandlers, which includes applyThreadPriorities. Web and desktop are covered."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentDriver.ts:514-515",
+      "note": "Mobile direct (saved) connections pass applyThreadPriorities and opt in."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/primaryConnection.ts:60-67,243-289",
+      "note": "UNCOVERED CALLER: HostedPrimaryConnectionDeps picks only applyShellEvent and resetShellProjection, plus syncShellSnapshot and pushSequenceMonitor. The createEnvironmentConnection call passes no applyThreadPriorities, so the mobile Hub-relay connection never requests the delta."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentDriver.ts:605-613",
+      "note": "createPrimaryConnection hands the hosted factory only pushSequenceMonitor, resetShellProjection, applyShellEvent and syncShellSnapshot."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3107-3109 (getShellSnapshot updatedAt folds in priority rankedAt)",
+      "note": "A ranking batch moves the snapshot's updatedAt forward, so on mobile hosted classifyProjectionSnapshot marks the priority-driven full snapshot as \"newer\" and applies it. The cost is paid on every batch (at most one automatic batch per 60 s, THREAD_PRIORITY_AUTOMATIC_MIN_INTERVAL_MS)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3964-3995",
+      "note": "Adjacent gap: demoteEnvironmentStateToCachedSnapshot rebuilds every summary as {...summary, session:null, backgroundLiveness:null}, including summaries that already have both null. It also rebuilds threadSessionById. This runs on hosted connection loss (apps/web/src/hostedHub/threadReadCache.ts:52-74 and environment.ts:53; apps/mobile/src/hostedHub/nodeStateCleanup.ts:8) and causes one full row re-render before the shared live snapshot arrives."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3855-3918",
+      "note": "Adjacent gap: hydrateEnvironmentStateFromCache with replaceCached rebuilds every row when cached.capturedAt equals previous.hydratedFromCacheAt (the check is a strict <). The hosted read cache calls it on every route change and every thread-detail commit while the node is not live (packages/client-runtime/src/authorization/threadReadCache.ts:217,501; apps/web/src/hostedHub/threadReadCache.ts:113-124)."
+    }
+  ],
+  "remaining": "Mobile hosted primary connection (apps/mobile/src/hostedHub/primaryConnection.ts:60-67 and :243-289, wired from apps/mobile/src/connection/environmentDriver.ts:605-613) does not supply applyThreadPriorities, so connection.ts:294 never sends threadPriorities:\"delta\". When AI Focus is on, orchestrationStreams.ts:775-781 still sends that Hub-relay phone client a full paged shell snapshot for every ranking batch (about 2.2 MB at 2,000 threads, at most once a minute automatically). Lower priority, same problem class: demoteEnvironmentStateToCachedSnapshot (store.ts:3964-3995) rebuilds every summary on hosted connection loss, and hydrateEnvironmentStateFromCache with replaceCached (store.ts:3855-3918) rebuilds every row when the hosted cache is re-applied with the same capturedAt (on route changes and thread-detail reads while the node is offline).",
+  "fixDefects": "Uncovered caller: the auditor said both mobile planes opt in to the delta. Only mobile direct does (environmentDriver.ts:514). The mobile hosted relay primary connection does not, so it falls into the 'legacy or third-party' full-snapshot fallback the auditor called intentional. No correctness bugs were found in the structural-sharing code. The equality helpers are field-complete, null sessions and own-key lookups are handled, and applyThreadPriorities correctly keeps unchanged summaries.",
+  "implementationSketch": "1) Mobile hosted delta opt-in (main item): in apps/mobile/src/hostedHub/primaryConnection.ts, widen HostedPrimaryConnectionDeps to Pick<OrchestrationHandlers, \"applyShellEvent\" | \"resetShellProjection\"> & { applyThreadPriorities: NonNullable<OrchestrationHandlers[\"applyThreadPriorities\"]> }. In the createEnvironmentConnection call (:243), add applyThreadPriorities: (item, environmentId) => { if (!acceptsEvent()) return; deps.applyThreadPriorities(item, environmentId); }, gated by generation like applyShellEvent. In apps/mobile/src/connection/environmentDriver.ts:605, pass applyThreadPriorities: (item, environmentId) => getSupervisor().applyThreadPriorities(item, environmentId). To stop this recurring, consider making applyThreadPriorities required in OrchestrationHandlers (connection.ts:62) so every first-party caller must wire it. That needs small fixes to test fakes such as apps/web/src/components/shell/phone/PhoneHome.browser.tsx. Tests: in apps/mobile/src/hostedHub/primaryConnection.test.ts, assert that subscribeShell is called with threadPriorities:\"delta\" and that a thread-priorities item from a stale generation is dropped; in environmentDriver.test.ts, assert the dependency is forwarded. 2) Optional: in demoteEnvironmentStateToCachedSnapshot (store.ts:3964), keep a summary when summary.session === null && (summary.backgroundLiveness ?? null) === null, and keep the threadSessionById container when every value is already null (reuseUnchangedRecord). Add a case to storeStructuralSharing.test.ts. 3) Optional: in hydrateEnvironmentStateFromCache (store.ts:3855), for the replaceCached rebuild, reuse previous shell and summary objects when threadShellsEqual or sidebarThreadSummariesEqual holds, and reuse message maps when ids and text match, as the retainedLiveSnapshot branch already does. Alternatively return state early when capturedAt is unchanged and no new thread content arrived. Test that re-hydrating an identical cache keeps row identity.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "No protocol, crypto or Hub change is involved. The server already supports the delta, and the relay is E2EE and opaque to the Hub. The mobile change only wires an existing client handler, using the same acceptsEvent generation gate as applyShellEvent, so hosted lifecycle ownership in AGENTS.md is unchanged.",
+  "repos": "ryco"
+}

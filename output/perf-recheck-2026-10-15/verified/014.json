@@ -1,0 +1,25 @@
+{
+  "id": "desktop-boot:asar-dead-weight",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Both parts of the proposal are in 60633eff3. The server now emits ESM only, and the current apps/server/dist contains only .mjs files plus client, device-helper and resource-monitor. DESKTOP_BUILD_FILES excludes cua-driver, ryco-computer-use-helper(.exe) and ryco-computer-ui-helper from prod-resources and keeps the icons. The only consumer of prod-resources is resolveResourcePath, which loads icons. Every excluded binary still ships through extraResources and is resolved from process.resourcesPath. A test pins the exclusion list. One small leftover: apps/server/dist/device-helper (about 140 KiB of Swift sources) sits in the asar and is also shipped through mac extraResources. That is negligible.",
+  "evidence": [
+    {"location": "apps/server/tsdown.config.ts:36", "note": "format: [\"esm\"]. The cjs output is gone, and the local dist has no .cjs files."},
+    {"location": "scripts/build-desktop-artifact.ts:761-770", "note": "The prod-resources binaries are excluded and the icons stay. The security helper was already excluded."},
+    {"location": "scripts/build-desktop-artifact.ts:948-991", "note": "extraResources still delivers use-helper (all platforms) and, on mac, ui-helper, cua-driver, security-helper and device-helper."},
+    {"location": "scripts/build-desktop-artifact.ts:1330", "note": "The prod-resources copy is kept for AppImage icons."},
+    {"location": "apps/desktop/src/main.ts:2375-2400", "note": "resolveResourcePath, the only prod-resources consumer, resolves icon.* only."},
+    {"location": "scripts/build-desktop-artifact.test.ts:593", "note": "A test pins the new exclusions."},
+    {"location": "scripts/build-desktop-artifact.ts:988", "note": "Minor: apps/server/dist/device-helper (140 KiB of sources) is duplicated in the asar and in extraResources. Negligible."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Optional and negligible: add '!apps/server/dist/device-helper/**' to DESKTOP_BUILD_FILES. Only do this after checking that the server resolves the helper only through RYCO_DEVICE_HELPER_SOURCE_DIR (backendLauncher.ts:104) in desktop mode. Saves about 140 KiB.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

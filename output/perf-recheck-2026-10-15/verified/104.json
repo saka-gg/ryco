@@ -1,0 +1,63 @@
+{
+  "id": "client-runtime-sync:history-recovery-poll-per-thread-subscription",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The 30 s Effect.forever poll per subscription is gone (60633eff3). Recovery now reads when an active subscription opens (at most once per 5 min per thread) and when the watched session settles (at most once per 30 s), with exponential backoff on failure. Prewarm, retained-idle, tab-prefetch and outbox-drain subscriptions are passive and never read. Stored reads share one pooled read-only codex app-server with a 60 s idle timeout (cd0b163e9). processHistory checks the thread shell and binding preconditions before reading, then runs a payload-free repair query (10fe5af78). That query is 'bounded' only in the sense that it skips payload decode and unrelated rows: for a full includeTurns read it still covers every turn of the thread. Measured read-only on the user's DB, it takes about 19 ms for the largest live Codex thread (4,940 activities, 14.9 MB payload_json), down from the reported 105 ms+. No defect undoes the fix. Two leftovers are design choices, not part of the described cost: a full-history thread/read still runs on each turn end of a viewed Codex thread, and success never backs off.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:85",
+      "note": "withHistoryRecovery delegates to withThreadHistoryRecovery with the request's mode (absent means active, for older clients) and a per-connection registry. setThreadHistoryRecovery (line 454) flips running subscriptions. Both subscribeThread (610) and subscribeThreadWindow (643) use it. The old Effect.forever(reconcile, sleep 30 s) at f1be4abc7 orchestrationRpc.ts:68-81 is gone."
+    },
+    {
+      "location": "apps/server/src/orchestration/historyRecoveryPolicy.ts:142",
+      "note": "There is no timer. The fix reads once on open, only when active (readOnOpen). It reads again only when a mapped stream array contains a thread.session-set that settlesThreadSession accepts (line 46: ready, stopped or error with no active turn). Passive subscriptions never read until setMode turns them active."
+    },
+    {
+      "location": "apps/server/src/orchestration/historyRecoveryPolicy.ts:16",
+      "note": "Spacing is 5 min after a subscribe, 30 s after a settle, and on failure 30 s doubling up to 15 min. There is no backoff when a successful read restores nothing (proposal 2 asked for one)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:522",
+      "note": "Mode is active only while viewCount > 0 (incremented at 862 only for {view: true}). Only apps/web/src/components/ChatView.tsx:2750 and apps/mobile/src/features/threads/ThreadDetailScreen.tsx:434 pass view:true. Sidebar prewarm, threadDetailPrewarm, useChatSessionTabsPrefetch, threadNavigationIntent, messageQueueDrain and the mobile outbox drain are passive. The mode is re-evaluated on every (re)subscribe (wsRpcClient.ts:87-92, 1102-1116). setThreadHistoryRecovery is in RPC_ACCESS_POLICY as viewer/read (packages/shared/src/rpcAccessPolicy.ts:106,364)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:3517",
+      "note": "reconcileThread is called only from orchestrationRpc subscriptions. It dedupes in-flight reads (historyReads), checks per-thread spacing and backoff state (an LRU of 1,000 threads), and runs under Semaphore(2) with a 25 s timeout. Failures log once per streak."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:3331",
+      "note": "processHistory reads the shell (resolveThreadShell) and checks updatedAt and the runtime/instance ids before loadHistoryRepairContext (3298). getThreadDetailById is used only as a fallback for query doubles without getThreadHistoryRepairContext."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1937",
+      "note": "The repair activity-key query extracts providerItemId in SQL (json_valid/json_extract) for every activity in the transcript's turns. A Codex includeTurns read lists all completed turns, so this is effectively the whole thread, without payload transfer or JS decode. Measured with sqlite3 immutable read-only on the largest live Codex thread (93afaaf4…, 4,940 activities, 14.9 MB payload_json): 19 ms."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexStoredThreadReader.ts:61",
+      "note": "One lazily started, shared read-only app-server per adapter instance, closed after 60 s idle (line 59), and retired on exit or transport failure. CodexAdapter.ts:1938 creates it and CodexAdapter.ts:2610 uses it. The old spawn-per-read helper readStoredCodexThread (CodexSessionRuntime.ts:1192) is now used only by CodexCollabRuntime.integration.test.ts."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:2594",
+      "note": "A ready or running live runtime serves the read through runtime.readThread with a 2 s timeout. It falls back to the shared stored reader, so a very large thread can be read twice. This behavior predates the fix (same at f1be4abc7)."
+    },
+    {
+      "location": "packages/effect-codex-app-server/src/client.ts:228",
+      "note": "Every thread/read response (includeTurns:true, CodexSessionRuntime.ts:1228) is JSON-parsed and fully Effect-Schema-decoded (decodeOptionalPayload with getClientRequestResponseSchema), then mapped item by item. That per-read cost is unchanged; only its frequency dropped. Ryco Codex threads on this install have rollouts up to 63 MB zst."
+    },
+    {
+      "location": "apps/server/src/cliRemote/threads.ts:132",
+      "note": "The CLI remote follow-turn subscription sends no mode, so it is active. That is at most one read per CLI send (5 min spacing) plus a settle read, which is usually interrupted when the stream ends. Negligible."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No verified defects. Minor nits: (1) In reconcileThread, an interrupted read (subscription closed mid-read, e.g. relay reconnect churn) records no attempt (the onFailure interrupt path skips recordHistoryRecovery). The next subscription therefore re-reads at once instead of honoring the 5 min spacing. This is bounded by in-flight dedupe and only matters for large threads on flapping connections. (2) The readStoredCodexThread spawn-per-read helper (CodexSessionRuntime.ts:1192) survives as test-only dead code. Not a defect, but noted for the follow-up: for an actively viewed Codex thread, every turn end (at most once per 30 s) still triggers a full includeTurns thread/read, with JSON.parse, a full Effect Schema decode and O(history) mapping, even when the live runtime streamed the turn cleanly. Proposal part (2), reading only when a gap is possible, once per runtime-session generation, with backoff on no-op reads, was replaced by this settle trigger.",
+  "implementationSketch": "Optional follow-up, not required for this finding. (a) In ProviderRuntimeIngestion, track per thread and runtimeSessionId whether a gap is possible: the runtime was retired or failed, a turn ended without turn.completed, the session went stopped or error, or the session was resumed from the stored binding rather than started live. In withThreadHistoryRecovery (historyRecoveryPolicy.ts), or at the top of reconcileThread for trigger 'session-settled', skip the read when the settled session is 'ready' and the live runtime streamed the turn with no anomaly. Keep the 'subscribe' read. (b) Record a no-op outcome: when processHistory dispatches nothing, have recordHistoryRecovery double the success spacing (capped, e.g. at 30 min), and reset it on any restore. (c) Record attemptedAt on interruption too (without counting a failure) in reconcileThread's onFailure interrupt branch. Tests: extend historyRecoveryPolicy.test.ts and ProviderRuntimeIngestion.test.ts with fake providerService.readThreadHistory counters. Assert that a clean live turn end performs no read, that a stopped/error settle or a retired runtime does read, that repeated no-op reads back off, and that an interrupted read still enforces spacing. Gating (a) trades turn-end recovery coverage for CPU, so confirm that the live mapping never relies on the settle read to fill items (e.g. reasoning via historyReasoningActivities) before adopting it.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Nothing further is required for this finding. The optional turn-end gating would be a reliability-versus-CPU behavior trade-off, since it narrows when missed Codex output is recovered. It would need a product decision before anyone builds it.",
+  "repos": "none",
+  "correction": "No change to the classification. One nuance on 'loads only a bounded slice': the repair context is bounded by the transcript, and a Codex includeTurns read lists every completed turn. So it still scans all of the thread's messages and activity keys, with SQL-side JSON extraction over every payload. It is cheap only because it avoids payload transfer and JS decode (measured 19 ms on the largest live Codex thread). The per-read Codex-side cost (full thread/read, JSON.parse and full Effect Schema decode of the response) is unchanged per read; only the read frequency fell."
+}

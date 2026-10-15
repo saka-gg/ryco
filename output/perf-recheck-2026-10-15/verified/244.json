@@ -1,0 +1,43 @@
+{
+  "id": "mobile-boot:retarget-trailing-debounce",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The trailing retarget debounce went from 250 ms to 100 ms in 60633eff3 (#710). That is the finding's own fallback proposal (about 80 to 100 ms) and saves 150 ms on every cold cross-node thread open. The leading-edge variant was rejected, and the rejection holds up. If an idle open dispatches immediately, A is dispatched at once, so an A then B tap-through costs two acquisitions. The finding claimed leading edge keeps the one-ticket guarantee, and that claim was wrong. The engine has a single production caller: ThreadDetailScreen through useThreadConnectionRetarget. No production code overrides debounceMs. Web has no equivalent retarget debounce. A regression test keeps the constant at 100 ms or below. The only defects are cosmetic, in comments.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/connection/threadConnectionRetarget.ts:244",
+      "note": "THREAD_CONNECTION_RETARGET_DEBOUNCE_MS = 100 (was 250 at f1be4abc7). 60633eff3 is the only commit since f1be4abc7 that touches this file or its test."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadConnectionRetarget.ts:237-243",
+      "note": "Doc comment records that the leading dispatch for an idle engine was rejected because it would spend a ticket on A in the A to B case. This is correct: with leading edge, A dispatches at once and B queues behind the in-flight A (single-flight at :403), so the pair costs two acquisitions."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadConnectionRetarget.ts:270,319-325,365,432",
+      "note": "The default debounce is read at :270. open() always calls armDebounce (:432), and evaluate() bails while the timer is pending (:365). Store or roster re-evaluations after the window (for example, the directory becoming ready on a cold deep link) run immediately through scheduleEvaluate, with no second debounce."
+    },
+    {
+      "location": "apps/mobile/src/connection/useThreadConnectionRetarget.ts:28",
+      "note": "The only production entry point. Its only caller is ThreadDetailScreen.tsx:441. git grep finds no production debounceMs override in apps/mobile/src."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadConnectionRetarget.test.ts:650-662",
+      "note": "The new test asserts the constant is 100 ms or below and that the default window dispatches at exactly that time. It was inserted between the JSDoc for 'cancels an intent released before the debounce fires' (:645-649) and that test (:664), so the back-swipe JSDoc now sits above the wrong test."
+    },
+    {
+      "location": "apps/mobile/src/connection/hostedConnectionCoordinator.ts:325-353",
+      "note": "In Wave 3b the actuator (acquireMobileHostedNode, then coordinator.acquire) only refreshes lastAccessedAt and moves the selection cursor for an already-pooled node. The 100 ms therefore adds to a multi-second relay turn-up on cold nodes and is mostly invisible on warm ones. The remaining wait is small next to the measured 5.0 to 6.7 s for a remote Hub thread open."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Cosmetic only, no behavioural defect. (1) threadConnectionRetarget.test.ts:645-649: the JSDoc 'Prevents a connection being opened for a thread the user has already navigated away from (a back-swipe inside the debounce window must cost nothing at all)' now sits above the new 'starts a single cross-node open within the default window' test (:650) instead of 'cancels an intent released before the debounce fires' (:664). (2) threadConnectionRetarget.ts:232: the debounceMs prop comment 'Long enough to swallow an A->B tap-through' is slightly stale next to the new rationale at :237-243. (3) threadConnectionRetarget.ts:256-260: the engine doc says every dispatched selectNode 'buys a real teardown and turn-up'. After Wave 3b's bounded pool (MAX_MOBILE_HOSTED_CONNECTIONS) a superseded acquisition holds or evicts a pooled slot instead of tearing down. The conclusion (drop superseded targets before dispatch) still holds; only the wording is dated.",
+  "implementationSketch": "Optional comment-only cleanup. In apps/mobile/src/connection/threadConnectionRetarget.test.ts, move the new 'starts a single cross-node open within the default window' test above the back-swipe JSDoc block, so the JSDoc again directly precedes 'cancels an intent released before the debounce fires'. In threadConnectionRetarget.ts:232, change the prop comment to point at THREAD_CONNECTION_RETARGET_DEBOUNCE_MS (for example 'Trailing debounce window; see THREAD_CONNECTION_RETARGET_DEBOUNCE_MS'). Optionally reword :256-260 to say a superseded dispatch costs a relay ticket and a pooled connection slot. Check with: bun run --cwd apps/mobile test -- threadConnectionRetarget. If the last 100 ms ever matters, a further option is to skip the debounce when the target environment already has a pooled primary connection (deps.hasHostedConnection(env) true): acquire then only touches the record and moves the cursor, with no ticket spent. That is a separate, low-value tweak, not part of this finding.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Comment-only cleanup. The leading-edge versus window tradeoff was already decided and documented in the code.",
+  "repos": "ryco",
+  "correction": "Nothing material. One addition: the finding's leading-edge proposal claimed it 'keeps the one-ticket guarantee for rapid A->B', but it does not. An idle A dispatches immediately, so only B, C and later opens would coalesce. That confirms the rejection at :237-243 was right, not a gap. A second cosmetic test-file defect was also missed: the misplaced JSDoc at threadConnectionRetarget.test.ts:645-649."
+}

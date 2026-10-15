@@ -1,0 +1,58 @@
+{
+  "id": "dedicated-pages:statistics-sql-affinity-and-tooluse-scan",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All three parts of the proposal shipped in #710 (60633eff3). (1) The NOT EXISTS lookup compares against `+a.activity_id` and `+a.created_at`. (2) Migration 085 adds a full kind-led index `(kind, thread_id, sequence, created_at, activity_id)` and drops the redundant 008 prefix index. It serves both the tool-use count and the fallback's outer `kind='context-window.updated'` scan, scoped and unscoped. (3) Each payload is parsed once and shared by every aggregation pass. I re-ran EXPLAIN QUERY PLAN read-only on the user's live 9.8 GB DB (migration 90) with the exact current SQL. The NOT EXISTS uses `idx_orch_events_statistics_usage (stream_id=? AND <expr>=? AND <expr>=?)` both unscoped and scoped. The tool-use query is `SEARCH ... COVERING INDEX idx_projection_thread_activities_kind_order (kind=?)` (plus `AND thread_id=?` when scoped). The fallback outer is `SEARCH a USING INDEX ..._kind_order`. Timed (warm): fallback branch 0.11 s, was 1.67 s. Tool-use count 0.05 s over 121k tool.completed rows, was 0.70 s. The whole unscoped token query is 0.3-0.5 s. Reads now run on the read-only worker connection and are mostly thread-scoped incremental reads, so the event-loop cost the finding described is gone. I found no regressions. The new fork-inheritance residual filters only read columns the kind index already covers. The kind index also turns the `provider.turn.start.cancelled` lookup in delegatedRunStatus.ts into an index SEARCH. No other statistics or recap query has the affinity-blocked expression-index pattern.",
+  "evidence": [
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:129-136",
+      "note": "NOT EXISTS compares `json_extract(...) = +a.activity_id` / `= +a.created_at`. Comment at 99-102 explains the affinity reason. Introduced in 60633eff3 (git log -S'+a.activity_id')."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:142-154",
+      "note": "Tool-use query (`kind = 'tool.completed'` plus inherited-row residual filter on activity_id/thread_id). Every column it reads is in the 085 index, so the read is index-only."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.ts:41-45",
+      "note": "CREATE INDEX idx_projection_thread_activities_kind_order(kind, thread_id, sequence, created_at, activity_id) and DROP of the redundant 008 thread_sequence prefix index. Registered as migration 85 (Migrations.ts:229) and re-run as an idempotent post-migrator repair (Migrations.ts:516-522, 739-741). The live user DB already has it."
+    },
+    {
+      "location": "ryco live DB ~/.ryco/userdata/state.sqlite (read-only EXPLAIN, sqlite 3.54)",
+      "note": "Token query, unscoped: `SEARCH a USING INDEX ..._kind_order (kind=?)` and `CORRELATED SCALAR SUBQUERY: SEARCH e USING INDEX idx_orch_events_statistics_usage (stream_id=? AND <expr>=? AND <expr>=?)`. Scoped: `(kind=? AND thread_id=?)` with the same three-column correlated search. Tool use: `SEARCH ... COVERING INDEX ..._kind_order (kind=?)` (+thread_id when scoped) and a temp b-tree for GROUP BY."
+    },
+    {
+      "location": "ryco live DB timing (read-only, warm)",
+      "note": "Fallback branch COUNT 0.11 s, 0 rows, 98,992 context-window rows probed. The finding measured 1.67 s warm. Tool-use GROUP BY 0.05 s, 805 groups / 121,021 rows; the finding measured 0.70 s warm. The full unscoped token UNION is 0.31-0.52 s, mostly the event-history branch reading payloads it needs."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.test.ts:903-963",
+      "note": "EXPLAIN tests: the unscoped NOT EXISTS uses all three index columns; the tool-use query is a SEARCH on the COVERING kind index; the fallback outer is `SEARCH a` on the kind index."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.test.ts:66-99",
+      "note": "Both statistics activity queries, scoped and unscoped, must SEARCH the kind index and never SCAN projection_thread_activities or `a`."
+    },
+    {
+      "location": "apps/server/src/statistics/statisticsAggregation.ts:317-322",
+      "note": "Payloads are parsed once (`parseTokenActivityPayload`) into `parsed`. collectParsedProcessedTokenUsage (processedTokenUsage.ts:62-91) and the lastPerTurn / firstExact / cumulativeFallback passes (statisticsAggregation.ts:342-389) reuse `entry.payload`. The only other JSON.parse in statistics is for persisted partials (StatisticsQuery.ts:492)."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:259-263,365-400",
+      "note": "Beyond the proposal: rows are read on SqliteReadClient (provided by persistence/Layers/Sqlite.ts:74), and only dirty threads are read via a json_each scope. A full read happens only on cold or large changes."
+    },
+    {
+      "location": "apps/server/src/persistence/delegatedRunStatus.ts:43-46",
+      "note": "Regression check: the kind index does not displace the 070 partial expression index for turn-start-failed lookups (live EXPLAIN still uses local_task_start_failures). It improves the cancelled lookup to `SEARCH ... kind_order (kind=? AND thread_id=?)`."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. One small test gap: StatisticsQuery.test.ts:917-927 checks only that the scoped token query's outer event branch uses `(stream_id=?)`. It does not assert that the scoped NOT EXISTS lookup keeps `(stream_id=? AND <expr>=? AND <expr>=?)`, and the scoped shape is the common incremental path. The live EXPLAIN shows the scoped plan is correct today. One difference from the proposal: the index is full rather than the proposed partial `(thread_id, substr(created_at,1,10)) WHERE kind='tool.completed'`. So the tool-use GROUP BY still builds a temp b-tree over about 121k entries (measured 50 ms), and every activity insert writes a slightly wider index entry. Dropping the 008 index offsets that.",
+  "implementationSketch": "Optional hardening only: in StatisticsQuery.test.ts 'plans the projection-only fallback lookup on every index column', add an assertion that the scoped plan (`selectStatisticsTokenActivities(sql, '[\"thread\"]')`) also contains `idx_orch_events_statistics_usage` with `(stream_id=? AND <expr>=? AND <expr>=?)`. No production change is needed.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

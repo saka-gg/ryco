@@ -1,0 +1,59 @@
+{
+  "id": "persistence-boot:resume-probe-decodes-1000-events",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. PR #710 (60633eff3) replaced the two decoding readEventsPage probes in canResumeAfter. The new path is a payload-free store probe (probeResume): EXISTS on the sequence key, plus count(*) over an inner LIMIT limit+1, plus, for threads, a count over the stream index. It is wired in production because OrchestrationLayerLive is provideMerge'd in server.ts, so Effect.serviceOption(OrchestrationEventStore) in ws/context.ts resolves to Some. EXPLAIN QUERY PLAN on the real schema shows a rowid range search for the global count and a COVERING INDEX idx_orch_events_stream_sequence search for the stream count, with no JSON parse and no Schema decode. Threads replayed through their own stream skip the global count (limit 0). The only events decoded now are the ones the replay actually sends. One latent side effect: the old probe happened to fall back to a snapshot when a gap event would not decode. That fallback is gone. This is not observed in practice (see fixDefects).",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:688",
+      "note": "canResumeAfter uses deps.probeResume (lines 691-722) and decides on anchored and the capped counts. It decodes no events. The old two-readEventsPage path (723-729) runs only when no probe is wired, i.e. in narrow test doubles."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:510",
+      "note": "probeResume runs EXISTS(sequence = ?) and count(*) over (SELECT 1 ... sequence > ? LIMIT limit+1). For threads it adds a stream-index count capped at limit+1 (528-536). payload_json is never selected."
+    },
+    {
+      "location": "apps/server/src/persistence/Services/OrchestrationEventStore.ts:109",
+      "note": "The probeResume contract is documented as reading the sequence key and stream index and never payload_json. It is optional, which is why the fallback path still exists."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:1274",
+      "note": "eventStore.probeResume and readStreamEventsPage are passed into makeOrchestrationStreamHelpers. The store comes from Effect.serviceOption at context.ts:207 and is provided through server.ts:505 (provideMerge OrchestrationLayerLive, which re-exports OrchestrationEventStoreLive per orchestration/runtimeLayer.ts:11-33)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:815",
+      "note": "The shell resubscribe path calls canResumeAfter(resumeFromSequence)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:896",
+      "note": "The thread resubscribe path calls canResumeAfter(resumeFromSequence, { threadId }). Its replay reads its own stream through readStreamEventsPage (944-958)."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts:9",
+      "note": "sequence is INTEGER PRIMARY KEY, and idx_orch_events_stream_sequence (aggregate_kind, stream_id, sequence) exists (line 31). A scratch-DB EXPLAIN QUERY PLAN confirmed 'SEARCH USING INTEGER PRIMARY KEY (rowid>?)' and 'SEARCH USING COVERING INDEX idx_orch_events_stream_sequence'."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.test.ts:245",
+      "note": "The store test sets payload_json to 'not json' and the probe still answers, which proves it never parses payloads. It also checks the limit+1 cap and the stream count."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreamBatching.test.ts:306",
+      "note": "The 'resume decisions' tests cover thread own-backlog resume, the snapshot over 1,000 thread events, and the fallback global scan bound. Line 237 asserts that the resume decision reads no event page."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:488",
+      "note": "No other caller probes this way. replayEventsPage and replayEvents decode only the events they return. ProviderCommandReactor.ts:3463 reads one event that it actually uses."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defect in the perf fix. One latent robustness change, not observed in practice. The old probe decoded the gap events, so an undecodable event there made canResumeAfter return false and the client got a snapshot. The snapshot replays from about the latest sequence and skips the bad row. The payload-free probe now resumes instead: the 'resumed' head is sent, and the replay then fails with OrchestrationGetSnapshotError (orchestrationStreams.ts:556-566). That error is not retryable in wsTransport.ts:381. For thread windows, supervision.ts:658-659 resets failedWindowAttempts on the 'resumed' item, and appliedSequence is unchanged, so the client retries the same resume every THREAD_WINDOW_RETRY_BASE_MS (1 s) indefinitely. This only matters if a stored event stops decoding, for example after an incompatible schema change while a direct client was away. Hosted and hub-hosted thread subscriptions never resume (supervision.ts:562).",
+  "implementationSketch": "Optional hardening, low priority. Client side (simplest): in packages/client-runtime/src/connection/supervision.ts handleWindowFailure, set appliedSequence = null for kind 'failed' so the retry takes a snapshot. Reset failedWindowAttempts only on a snapshot or event item, not on a bare 'resumed' item, so the backoff can grow. Do the same in the shell subscription's onError path (connection.ts ~310): clear the shell baseline so the next subscribe asks for a snapshot. Server-side alternative: in makeReplayableShellStream and makeReplayableThreadStream, when the subscription was resumed and the replay fails with a PersistenceDecodeError cause, catch it, load the snapshot, and emit a snapshot item before continuing live. Tests: an orchestrationStreamBatching.test.ts case where a stored replay event fails to decode after a resume, and a supervision test asserting that the retry after a failed resumed window subscribes without resumeFromSequence. Separately, the readEventsPage fallback in canResumeAfter (orchestrationStreams.ts:723-729) could go if probeResume became non-optional in the store contract, but test doubles would need updating.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "correction": "The auditor's DONE is correct. Two small refinements. (1) The global count is a rowid range read over table leaf pages, which hold the inline part of payload_json. It never parses or decodes the payload or follows overflow pages, but 'never touches payload_json' overstates it slightly. The cost is negligible. (2) The auditor reported no defects but missed the lost incidental snapshot fallback for undecodable gap events (see fixDefects). It is latent, not a practical regression today.",
+  "repos": "ryco"
+}

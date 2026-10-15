@@ -1,0 +1,63 @@
+{
+  "id": "client-runtime-sync:no-local-shell-cache-for-primary",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "correction": "The PARTIAL classification holds, but the auditor's one fix defect is wrong. They said persistence never starts for a page that pairs or logs in after boot. In fact PairRouteView calls navigate({to:'/'}) after authentication (apps/web/src/routes/pair.tsx:49). TanStack Router runs every matched route's beforeLoad again on each navigation, retained root included (router-core 1.171.28 load-client.js:146-155). cachedReadyRootContext is set only for authenticated states (__root.tsx:170-175), so the root takes the async path again. This time it sees 'authenticated', calls loadPrimaryShellCache (the path is '/', not '/pair'), then restorePrimaryShellCache, then startPrimaryShellCachePersistence. So a freshly paired page does persist. The auditor also understated Phase 2. Beyond seeding hasShellBaseline it needs three more things: (a) a store promotion path, because only syncServerShellSnapshot sets bootstrapComplete=true and clears hydratedFromCacheAt (store.ts:2144-2147), and a 'resumed' item would leave the cached environment permanently not-live; (b) seeding the supervisor's projectionTracker and shellThreadIdsByEnvironment; (c) a stronger server anchor check. canResumeAfter and probeResume only check that a row with that sequence exists (OrchestrationEventStore.ts:516-518, orchestrationStreams.ts:724). The environment id is a separate file from state.sqlite (config.ts:328, :350), so a persisted sequence can wrongly resume against a reset database that keeps the same environment id.",
+  "summary": "Phase 1 is implemented in 45f7a9be6 (plus e664e643f, which keeps last-activity data so cached rows settle). The direct primary environment on loopback pages and the desktop app persists a bounded WorkspaceMetadataSnapshot to IndexedDB. It reads the snapshot in parallel with the auth and descriptor requests in the root beforeLoad, then hydrates it through hydrateEnvironmentStateFromCache as last-known, not-live state. Measured cached sidebar commit: 73-94 ms, against 217-303 ms for the live sidebar on the 2,000-thread fixture. Phase 2 is not implemented anywhere: web, desktop or mobile. That means persisting the projection sequence and resuming the first subscription from the cached baseline. I found no renamed module or alternative mechanism (conditional snapshot, epoch, persisted sequence). A cold boot still takes a full, paged shell snapshot, and mobile likewise resumes only from an in-memory baseline. The auditor's single fix defect (no persistence after pairing post-boot) is refuted, because navigating to '/' after pairing re-runs the root beforeLoad. There is a different minor persistence gap: the write debounce has no maximum wait and no flush on pagehide.",
+  "evidence": [
+    {
+      "location": "apps/web/src/persistence/primaryShellCache.ts:112",
+      "note": "hydratePrimaryShellFromCache hydrates via useStore.hydrateEnvironmentStateFromCache. It is a no-op over existing state (:124) and drops records for other environments (:119-122)."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:228",
+      "note": "beforeLoad starts the IndexedDB read in parallel with ensurePrimaryEnvironmentReady and resolveInitialServerAuthGateState (:232-253). It restores after startPrimaryConnectionEarly, bounded at 150 ms (:96, :311-332), and clears the cache when the session is unauthenticated (:258-262). The paint still waits for the descriptor and auth round trips (:316-317)."
+    },
+    {
+      "location": "apps/web/src/routes/pair.tsx:49",
+      "note": "After pairing, the page navigates to '/'. That re-runs the root beforeLoad (router-core load-client.js:146-155 runs beforeLoad for every match on each navigation). cachedReadyRootContext was never set for requires-auth (__root.tsx:170-175), so the restore and persistence path runs. The auditor's fix defect is refuted."
+    },
+    {
+      "location": "apps/web/src/persistence/primaryShellCacheEligibility.ts:15",
+      "note": "Persistence is limited to desktop or loopback, by design (privacy). LAN/WAN browsers, where the finding expected the largest gain, never cache."
+    },
+    {
+      "location": "apps/web/src/persistence/primaryShellCache.ts:199",
+      "note": "scheduleWrite resets a 2 s timer on every identity change of the environment state. EnvironmentState also holds messageByThreadId and activityByThreadId (packages/client-runtime/src/state/threads/store.ts ~:150-160), so continuous streaming postpones the write indefinitely. There is no maximum wait and no pagehide or visibilitychange flush in the module."
+    },
+    {
+      "location": "apps/web/src/persistence/primaryShellCache.ts:38",
+      "note": "PrimaryShellCacheRecord holds only origin, environmentId, savedAt and snapshot. There is no sequence or epoch, and WorkspaceMetadataSnapshot (packages/client-runtime/src/state/workspace/types.ts:141) has none either. The snapshot is bounded to 400 threads (metadataSnapshot.ts:11) with session null (apps/web/src/workspaceMetadataProjection.ts:214), so it is lossy as a resume baseline."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:252",
+      "note": "hasShellBaseline=false is set only by a live 'resumed' or 'snapshot' item (:262, :277). resumeFromSequence returns null until then (:298-299), so the first subscription always takes a snapshot."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:1295",
+      "note": "readShellProjectionSequence reads the in-memory projectionTracker, which only syncShellSnapshot (:1102) and shell events (:1041) seed. The web reader is apps/web/src/environments/runtime/service.ts:861 and the mobile reader is apps/mobile/src/connection/environmentDriver.ts:510. Neither is persisted."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:2144",
+      "note": "Only syncServerShellSnapshot sets bootstrapComplete=true and clears hydratedFromCacheAt. A resume from a cache-hydrated baseline would need a new promotion action."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:516",
+      "note": "The resume anchor is EXISTS(sequence = N) only (also orchestrationStreams.ts:724). The environment id is a separate file from state.sqlite (apps/server/src/config.ts:328, :350), so a persisted sequence could resume against a reset database. The shell snapshot contract has no epoch or anchor id (packages/contracts/src/orchestration.ts:1194)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:813",
+      "note": "makeReplayableShellStream resumes only when canResumeAfter accepts, with at most 1,000 events (ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT, constants.ts:3). Otherwise it sends a full or paged snapshot."
+    }
+  ],
+  "remaining": "Phase 2 (resume from the cached baseline) is not implemented on web, desktop or mobile. (1) The persisted record has no sequence or epoch (apps/web/src/persistence/primaryShellCache.ts:38; mobile apps/mobile/src/persistence/environmentSnapshotPersistence.ts). The cached view is also lossy: 400-thread cap, session null (workspaceMetadataProjection.ts:214). (2) connection.ts:252-299 sends resumeFromSequence only after a live baseline. (3) No store or supervisor path promotes a cache-hydrated environment to live on a 'resumed' item (store.ts:2144-2147 is the only place bootstrapComplete becomes true; projectionTracker and shellThreadIdsByEnvironment are seeded only in syncShellSnapshot, supervision.ts:1090-1106). (4) The server resume anchor checks only that a sequence exists (OrchestrationEventStore.ts:516-518), which is unsafe across a database reset that keeps the environment-id file. Smaller Phase 1 gaps: the paint still waits for the descriptor, auth and RootAppShell chunk (__root.tsx:250-257, :316-317, withRootSurfaceLoaded :127-137). Non-loopback browsers never cache (by design). The persistence debounce has no maximum wait or pagehide flush (primaryShellCache.ts:199-206).",
+  "fixDefects": "Minor: startPrimaryShellCachePersistence (apps/web/src/persistence/primaryShellCache.ts:199-206) restarts a 2 s debounce on every change to the environment state object, which includes message and activity maps. Continuous streaming therefore starves writes, and there is no flush on pagehide or hidden visibility. If a session closes during a long agent run, the cache can be stale or never written on a first session. The impact is low, because live data replaces it on the next boot. The auditor's claimed defect (no persistence after pairing post-boot) is not real: pair.tsx:49 navigates to '/', which re-runs the root beforeLoad and starts persistence.",
+  "implementationSketch": "Minor fix (S): in startPrimaryShellCachePersistence, add a maximum wait so a write happens at least every ~30 s under continuous change (track firstPendingAt; skip clearing the timer once the maximum wait has elapsed). Add a window 'pagehide' / document 'visibilitychange'→hidden listener that runs write() synchronously-scheduled, removed in stop(). Test with fake timers in apps/web/src/persistence/primaryShellCache.test.ts: continuous store changes every 500 ms still produce a write within the maximum wait, and pagehide triggers a write.\nPhase 2 (L), if pursued: (a) Contracts and server: add a projection epoch, a random id created with the database in a meta table, to OrchestrationShellSnapshot (packages/contracts/src/orchestration.ts:1194). Add an optional resumeEpoch next to resumeFromSequence on the shell subscribe input (:1352). In canResumeAfter (apps/server/src/ws/context/orchestrationStreams.ts:688) return false when the epoch differs. Alternatively, anchor on the anchor event's event_id in probeResume (OrchestrationEventStore.ts:510). (b) Client persistence: store a separate full-fidelity baseline record next to the bounded paint snapshot: {sequence, epoch, updatedAt, complete}. Capture it in the same tick as the store snapshot after supervisor.flushShellEvents(), using readShellProjectionSequence. Mark it complete only when the snapshot was not truncated and includes thread sessions and latestTurn; otherwise persist no sequence. (c) connection.ts: add an input readPersistedShellBaseline(environmentId). When !hasShellBaseline and that returns a baseline that matches the cache-hydrated store, have resumeFromSequence return it and send the epoch. On a 'resumed' item that came from a persisted baseline, call a new supervisor method, seedShellBaselineFromCache(environmentId, {sequence, updatedAt, threadIds}). It should markSnapshot the projectionTracker, set shellThreadIdsByEnvironment, run reconcileSubscriptionsForEnvironment, attachListedThreads and reconcileSnapshotDerivedState, and call a new store action promoteCachedEnvironmentToLive (bootstrapComplete=true, hydratedFromCacheAt=undefined) before notifyShellReadiness. If the server sends a snapshot instead, the existing syncServerShellSnapshot path already replaces the cache. (d) Wire the same baseline into mobile (apps/mobile/src/persistence/environmentSnapshotPersistence.ts, environmentDriver.ts:510). Hosted stays snapshot-only. Tests: connection.test.ts (first subscription sends the cached sequence; a resumed item promotes to live; a snapshot fallback replaces the cache), a server orchestrationStreams test (epoch mismatch or reset database gives a snapshot), and a browser test extending apps/web/src/browser/primaryShellCache.browser.tsx for a cold boot that resumes.",
+  "worth": "low",
+  "effort": "L",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Phase 2 needs three decisions. (1) A contract and server protocol addition (a projection epoch or anchor identity on the shell subscribe and snapshot) to make cross-boot resume safe against a database reset. (2) A reversal of the deliberate Phase 1 design that the cache holds no sessions or liveness and is capped at 400 threads, because a resume baseline must be complete. (3) Extending caching to non-loopback browsers, where the gain is largest, which is a privacy and product decision; the module comments say paired devices should not keep a copy without asking. The measured loopback gain is small, because the cached sidebar already paints at ~73-94 ms. The minor debounce fix needs no decision.",
+  "repos": "ryco"
+}

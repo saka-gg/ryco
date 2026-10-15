@@ -1,0 +1,50 @@
+{
+  "id": "web-boot-cpu:per-row-intersection-observers",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. #710 (60633eff3) replaced the per-element `new IntersectionObserver` in useHasIntersectedViewport and useIsIntersectingViewport with one module-level observer per rootMargin. Each observer has a Map<Element, Set<listener>> and dispatches entries by entry.target. The hook APIs are unchanged; useIsIntersectingViewport only gained an optional hysteresis argument. Every caller uses the default '160px 0px' margin: SidebarThreadRow, InboxThreadRow, SidebarProjectHeader, and ProjectFavicon, which #710 newly made lazy. All of them share a single observer, so the ~400 constructions at boot are gone. No other boot-scale per-row IntersectionObserver or ResizeObserver remains. The remaining `new IntersectionObserver` sites are one-off surfaces such as Mermaid, browser preview, device stream and project detail. codeHighlightQueue was already shared. The Hub vendors Ryco at 7bc39eec3, which contains 60633eff3, so hosted builds get the fix too. Only latent hardening and test gaps remain.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:17-77",
+      "note": "sharedObservers Map is keyed by rootMargin. observeViewportIntersection lazily builds one observer per margin and dispatches by entry.target. It calls observe() only for a node's first listener. When the node's last listener goes it calls unobserve(), and when the observer's last node goes it calls disconnect() and deletes the entry. Dispatch iterates the Set, which tolerates self-removal."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:91-114",
+      "note": "useHasIntersectedViewport registers through the shared observer. The old f1be4abc7 code built `new IntersectionObserver` per node."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:116-176",
+      "note": "useIsIntersectingViewport registers through the shared observer. It processes every entry in order, where the old code used find() and took the first."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarThreadRow.tsx:133",
+      "note": "Default margin, so it uses the shared observer. The ref is attached at :479."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxThreadRow.tsx:195",
+      "note": "Default margin, so it uses the shared observer. The ref is attached at :365."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectHeader.tsx:85",
+      "note": "Default margin on the header div. The inner ProjectFavicon (:123) observes its own separate node, which is redundant but cheap."
+    },
+    {
+      "location": "apps/web/src/components/ProjectFavicon.tsx:82",
+      "note": "useHasIntersectedViewport was added in #710. ProjectFaviconImage observes exactly one node at a time, either the fallback or the img, so no node carries two listeners."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.browser.tsx:7-35",
+      "note": "The test harness has no unobserve(). No test checks that N rows build one observer or covers the unobserve and multi-listener paths. This is a test gap, not a defect."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No current defects. Latent hazard: a second listener added to a node that is already observed gets no initial entry, because observe() runs only for the first listener (useHasIntersectedViewport.ts:58-63). An already-visible static node with a second hook would read false until it crosses the margin. No node has two hooks today. Test gaps: no test asserts a single construction across many rows or exercises unobserve, and the hook harness has no unobserve().",
+  "implementationSketch": "Optional hardening, low value. In observeViewportIntersection (apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:58-63), when a node already has listeners, call `current.observer.unobserve(node); current.observer.observe(node);`. Re-observing makes the browser queue a fresh initial entry, which every listener on that node receives, so the new listener gets its initial state. Repeat entries are harmless for both hooks. Add browser tests to useHasIntersectedViewport.browser.tsx with a counting stub that implements observe, unobserve and disconnect: (1) mount 3 probes and expect exactly one constructor call and three observed targets; (2) unmount one probe and expect unobserve for its node only, with no disconnect; (3) unmount all and expect disconnect, then a fresh mount builds a new observer; (4) put two hooks on one node and expect both to get state after an emit.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local web rendering hook. No auth, E2EE, hosted lifecycle, Hub protocol or product trade-off is involved.",
+  "repos": "none"
+}

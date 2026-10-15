@@ -1,0 +1,66 @@
+{
+  "id": "hub-connection:pwa-precache-and-boot-doc",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "I re-checked the current code and the auditor's DONE holds. All four parts of the proposal are on main and in the Ryco version the Hub vendors (60633eff3 and 3ce80cee6 are both ancestors of 7bc39eec3). (1) The install-time precache now covers only the static closures of 12 named boot, hosted-root, workspace and thread modules. Fonts and images are left out except the DM Sans boot face. Every other fingerprinted chunk is cached the first time it is fetched, and only if it is on the build's own allowlist; API, relay and E2EE paths stay network-only. (2) Install copies each unchanged URL from older ryco-pwa-shell-* caches and fetches only what is new. Activate also carries runtime-cached chunks forward. (3) Registration waits for the hosted boot gate's root-before-load-ready mark (capped at 15 s), then for idle (capped at 5 s). (4) The boot document is the built index.html (themed boot shell and logo) plus modulepreload links. I also checked the Hub side. Its CSP allows exactly one inline script, by the hash of index.html's inline script, and applies that CSP to every response. The boot document copies that script byte for byte, so it runs. Fingerprinted assets are served with 'public, max-age=31536000, immutable'. I found no correctness defects, only minor non-blocking observations.",
+  "evidence": [
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:52",
+      "note": "HOSTED_PWA_PRECACHE_MODULES: main.tsx, hosted state/readCache/e2eeRuntime, PreviewFileNavigationGuard, hostedWorkspaceOwners, HostedHubRoot, hostedRootAppShell, RootAppShell, ChatThreadRouteView, DraftChatThreadRouteView, PhoneHome. All 12 files exist. The lazy ones are real dynamic-import targets (e.g. bootGate.ts:28,31, __root.tsx:39-48), so each has its own chunk. state and readCache are statically imported by bootGate and land in the boot chunk anyway."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:162",
+      "note": "cacheableUrls covers the full reachable set (followDynamic:true) and is used only as the allowlist. The precache (lines 167-177) follows static imports from the named roots (followDynamic:false) and drops fonts and images (RUNTIME_CACHED_ASSET_PATTERN, line 76) except bootDocumentAssets."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:245",
+      "note": "install(): copies each fingerprinted precache URL from older shell caches, otherwise fetches it through the HTTP cache. A text/html fallback is rejected (cacheableResponse). offline.html is always refetched with no-cache. A partial cache left by a failed install is reused on retry (cache.match short-circuit at 252) and removed at the next successful activate."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:272",
+      "note": "activate(): copies runtime-cached allowlisted entries forward, then deletes old caches and claims clients. Carry-over failures cannot keep old caches alive."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:336",
+      "note": "Fetch handler: only exact allowlisted same-origin fingerprinted URLs are cached on first use, with basic/200/non-HTML checks. Network-only paths are checked first (line 329), before the navigation fallback."
+    },
+    {
+      "location": "apps/web/src/pwa/lifecycle.ts:338",
+      "note": "registerWhenSettled: awaits whenAppReady, then requestIdleCallback (5 s timeout, line 80), then register. Both the readyState==='complete' branch (405-406) and the load listener (408) go through it. Covered by lifecycle.test.ts:203 and :237."
+    },
+    {
+      "location": "apps/web/src/pwa/lifecycle.ts:442",
+      "note": "whenBrowserAppReady waits for ryco:startup:root-before-load-ready via getEntriesByName or a buffered PerformanceObserver, with a 15 s cap. In hosted mode that mark fires after runHostedBootGate, i.e. after the access check and the HostedHubRoot/workspace-shell preload (routes/__root.tsx:200)."
+    },
+    {
+      "location": "apps/web/src/pwa/offlineDocument.ts:20",
+      "note": "renderHostedPwaBootDocument injects deduplicated modulepreload links into the built index.html before </head>. It returns null, and the caller falls back to the minimal document, only when the HTML has no root div or module src script."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:365",
+      "note": "The plugin runs in generateBundle with order:'post', after vite:build-html has applied the transformIndexHtml hints from createBootPreloadPlugin (modulePreload.ts:72). The boot document therefore inherits the boot-chain modulepreload and stylesheet preload, and its own preloads are deduplicated against them."
+    },
+    {
+      "location": "ryco-hub:scripts/build-static-manifest.ts:99",
+      "note": "The Hub requires exactly one inline script in index.html and hashes it into the CSP (src/http/securityHeaders.ts:30). The CSP is applied to every response, offline.html included (src/http/app.ts:428). The boot document contains the identical inline script, so it is allowed."
+    },
+    {
+      "location": "ryco-hub:src/http/staticAssets.ts:260",
+      "note": "Hashed assets are served with 'public, max-age=31536000, immutable'. service-worker.js and offline.html get 'no-cache' plus a strong ETag. Missing dotted paths never get the SPA HTML fallback, so a removed chunk returns 404, not HTML."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.test.ts:343",
+      "note": "Tests cover carry-over from older caches, rejecting an HTML fallback during install (375), surviving a failed carry-over (393), runtime caching on first use plus the allowlist (407), and deriving the boot document (244)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects. Minor non-blocking observations: (a) activate() at buildArtifacts.ts:272-297 copies every runtime-cached chunk before clients.claim(). After the user applies an update, the reload navigation's fetch waits for activation, so this copy (proportional to how many lazy chunks the user has loaded) is now on the post-update reload path. Before the fix, activate only deleted caches. The cost is unmeasured and probably tens to a few hundred ms on phones for heavy users. (b) whenBrowserAppReady (lifecycle.ts:442-466) re-implements phase waiting with a PerformanceObserver even though startupInstrumentation.ts:85 already exports onStartupPhase, which also fires when performance.mark is unavailable. (c) No real-build guard checks that each HOSTED_PWA_PRECACHE_MODULES entry still maps to a chunk facade. A rename, or a merge into a manual group, would silently shrink the offline precache. (d) The DM Sans face is precached in hosted builds, but the boot document paints only an SVG logo.",
+  "implementationSketch": "Optional polish only. (a) In the rendered worker (buildArtifacts.ts renderHostedPwaServiceWorker), move the runtime-cache carry-over into install(): after the precache Promise.all, copy every allowlisted entry from the previous shell caches that the new cache lacks, ignoring errors. That work runs while the worker waits, off the critical path. In activate(), keep only a delta pass (entries cached by the old worker after install), which is mostly cache.match hits. Extend the existing 'installs from the previous version's cache' test to assert that the runtime entry is present after install, before activate. (b) Have whenBrowserAppReady wrap onStartupPhase('root-before-load-ready', ...) plus the 15 s timer, and drop the PerformanceObserver. Update lifecycle.test.ts if it stubs performance. (c) Add an assertion in the hosted build path (e.g. in createHostedPwaBuildPlugin, this.warn or this.error) that every HOSTED_PWA_PRECACHE_MODULES entry matches at least one chunk facade or the boot group, or add a hosted-build smoke test in scripts/perf. (d) Pass bootDocumentAssets only when the boot document references the face. All low-risk and S effort.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Nothing needed. The remaining items are optional worker-internal polish that keeps the existing cache boundary (fingerprinted allowlist only; no API, relay or credential data) and does not touch hosted lifecycle ownership, E2EE, auth or the Hub protocol.",
+  "repos": "ryco"
+}

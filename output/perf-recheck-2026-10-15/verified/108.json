@@ -1,0 +1,71 @@
+{
+  "id": "client-runtime-sync:repo-identity-git-on-snapshot-path",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "The DONE status stands: the snapshot no longer runs git. The auditor was wrong to report no fix defects. #710 changed Agent Control project plans so the approved 'before' identity comes from the persisted column, but revalidation still checks it against a live git resolve. The two sources now disagree in reachable cases. The worst is a project whose root is missing: its last persisted identity is kept on purpose, while the live resolve returns null. Agent Control can then never update or remove that project, including re-rooting it after the folder moved. Before #710 both sides came from the same resolver cache.",
+  "summary": "The finding is fixed. Shell snapshots, placement and project lookups read repository_identity_json from projection_projects (migration 086) with no git and no timeout. resolveRepositoryIdentitiesForProjects and timeoutOption(1000) are gone. A background sync with concurrency 4 runs at startup, every 30 min, and on project.created or a root move. It revalidates with stat-only fingerprints of the enclosing repo's commondir/config, forces a re-resolve after 24 h, runs git in the background process lane, and announces changes with an empty project.meta.update that keeps updatedAt. The 1-minute resolver TTLs now back only the stream-enrichment fallback, the sync's refresh, and Agent Control. One regression came in with the fix: AgentControlProjectPlans compares the persisted identity key (stateFor via readWorkspacePlacement) with a live resolver key in revalidate. Agent Control project update/remove fails as 'project-stale: The approved repository identity changed' whenever the persisted identity lags or the root is missing. A lag lasts up to 30 min after a remote change, or seconds for a new or moved project. A missing root never recovers.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3007",
+      "note": "buildShell is pure SQL, and the comment says identities are persisted so a snapshot never waits on git. The file only imports decodePersistedRepositoryIdentity (line 73), not the resolver."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3267",
+      "note": "getWorkspacePlacement maps project rows with the persisted identity. Agent Control reads this through readWorkspacePlacement."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3384",
+      "note": "getProjectShellById uses the persisted identity. The pre-fix code called repositoryIdentityResolver.resolve here (f1be4abc7 lines 2806 and 2837)."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/086_ProjectionProjectRepositoryIdentity.ts:4",
+      "note": "Adds the repository_identity_json, _fingerprint and _checked_at columns. There is no backfill: a NULL checked_at means the first sweep resolves the project."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/ProjectionProjects.ts:79",
+      "note": "The projector upsert keeps the identity columns unless workspace_root changed. recordRepositoryIdentity only writes when the root still matches, so a race with a move cannot store an identity for the old root."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentityPersistence.ts:71",
+      "note": "The stat-only fingerprint walks up to the enclosing .git and follows gitdir/commondir to config size and mtime. It returns null for a missing root."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentitySync.ts:104",
+      "note": "A null fingerprint (missing root) is skipped, so the last known identity is kept indefinitely. Lines 108-113 skip git when the fingerprint is unchanged and the identity is under 24 h old. Line 117 runs git in the background lane."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentitySync.ts:133",
+      "note": "A changed identity is announced with an empty project.meta.update. decider.ts:655 keeps updatedAt for an update that changes nothing."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1070",
+      "note": "runRepositoryIdentitySync is started after the gate, with the domain-event subscription. It sweeps once immediately, then every 30 min."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:429",
+      "note": "project.created and project.meta-updated enrichment reads the persisted identity and calls resolver.resolve only when it is null. This is on the event path, not the snapshot path."
+    },
+    {
+      "location": "apps/server/src/agentControl/Layers/AgentControlProjectPlans.ts:69",
+      "note": "stateFor uses project.repositoryIdentity, the persisted value from readWorkspacePlacement, as the plan's before/expected repositoryIdentityKey (lines 194 and 219)."
+    },
+    {
+      "location": "apps/server/src/agentControl/Layers/AgentControlProjectPlans.ts:266",
+      "note": "Regression: revalidate compares the live resolver key (identityKey, git with a 1-min cache) with expected.repositoryIdentityKey, which is persisted. For a missing root, live is null (an unspawnable probe reads as no identity, RepositoryIdentityResolver.ts:111) while persisted keeps the old key, so this always fails. After a remote change, persisted lags for up to 30 min. Before #710 both sides came from the resolver (f1be4abc7 used getShellSnapshot with resolver-backed identities)."
+    },
+    {
+      "location": "apps/server/src/agentControl/Layers/AgentControlProjectPlans.test.ts:65",
+      "note": "The test double resolver always returns null and the projects have no persisted identity, so the mismatch is not covered."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "AgentControlProjectPlans mixes identity sources since #710. The before/expected repositoryIdentityKey comes from the persisted column (stateFor via readWorkspacePlacement, AgentControlProjectPlans.ts:69/194/219), but revalidate checks it against a live git resolve (AgentControlProjectPlans.ts:266). Three cases follow. (1) The project root is missing, for example an agent ran `mv` and then proposed a project update to the new root, or it wants to unlink a project whose folder was deleted. The sync keeps the last persisted identity (repositoryIdentitySync.ts:104) while the live probe returns null, so update and remove always fail with 'project-stale: The approved repository identity changed', and retrying does not help. (2) After `git remote add/set-url`, persisted lags the live identity for up to 30 min (the sweep interval), so update/remove fails for that long, depending on whether the 1-min resolver cache already holds the new value. (3) Briefly after a project is created or moved, persisted is NULL until the event-triggered sync records it. This sync can sit behind a running sweep's lock. Agent Control project update/remove is the only consumer that compares identities; the snapshot fix itself is sound.",
+  "implementationSketch": "In apps/server/src/agentControl/Layers/AgentControlProjectPlans.ts, compare like with like by binding approvals to the live identity, as before #710. Change stateFor to take the identity key as an argument. In prepareUpdate and prepareRemove, compute `const currentKey = yield* identityKey(project.workspaceRoot)` and build before/expected with it. In revalidate, compute the live key of current.workspaceRoot once. Compare title, workspaceRoot and updatedAt from the projection, compare the live key against expected.repositoryIdentityKey, and drop the persisted-identity equality at line 261. This keeps the TOCTOU guarantee: the repository identity the user approved is re-checked live at execution. Two alternatives: resolve both sides through resolver.refresh to bypass the 1-min cache, or have prepare trigger the identity sync for that project so persisted and live converge. The live-vs-live comparison is simpler. Tests in AgentControlProjectPlans.test.ts: (a) the persisted identity is null or stale while the resolver returns key K; prepareUpdate/prepareRemove followed by revalidate succeeds. (b) The persisted identity is K, the root is missing, and the resolver returns null; prepareRemove followed by revalidate succeeds. (c) The resolver returns K at prepare and K2 at revalidate; revalidate fails with project-stale. No contract or schema change is needed, because AgentControlProjectState.repositoryIdentityKey only changes provenance.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The snapshot fix needs no decision. The defect fix touches Agent Control approval revalidation. It restores the pre-#710 semantics, where the approved and re-checked identity both come from the live resolver, and does not loosen the post-approval check, so no product or security decision should be needed. A reviewer familiar with Agent Control approvals should still look at it.",
+  "repos": "ryco"
+}

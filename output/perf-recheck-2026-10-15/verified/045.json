@@ -1,0 +1,59 @@
+{
+  "id": "persistence-boot:engine-hydration-before-serve",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. Nothing makes hydration asynchronous: the engine still runs projector catch-up and command-read-model hydration inside Layer.effect construction (OrchestrationEngine.ts:601-605), and HttpRouter.serve (server.ts:807) still sits above RuntimeServicesLive (server.ts:830). The router, environment descriptor, auth/API routes and WS upgrade therefore still wait for hydration. #710 (60633eff3) added httpStartupGate, which closes the reliability half: early requests and upgrades are held and replayed, or get 503 + Retry-After after 10 s or 256 entries. 347008e60 serves static assets early in every mode and the document `/` early in desktop mode. Provider drivers and the Hub connector moved after serve, and catch-up is batched and filtered by event type. On the user's real desktop the remaining bind-to-serve window (migrations + hydration + other layers) is about 20-440 ms, typically 40-170 ms. Its end comes before the renderer's own DOM-ready, so for desktop boots the remaining perf value is now small. What is left matters mainly for web/headless nodes (document still held), for large post-upgrade projector replays, and for starting the hosted Hub connector earlier.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:601",
+      "note": "`yield* projectionPipeline.bootstrap; commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel(); const bootSequence = yield* eventStore.latestSequence;` (601-605) still runs synchronously during OrchestrationEngineLive construction (Layer.effect at 685-688). git grep finds no engine-ready Deferred or forked hydration anywhere in apps/server/src."
+    },
+    {
+      "location": "apps/server/src/server.ts:807",
+      "note": "HttpRouter.serve(makeRoutesLayer) lives in serverApplicationLayer, which is provideMerge'd over RuntimeServicesLive (:830), and RuntimeServicesLive includes ProviderRuntimeLayerLive -> OrchestrationLayerLive (:503-506). httpServingLayer (markHttpServing at :723) therefore still follows hydration."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2607",
+      "note": "bootstrapProjectors is now batched per transaction and filtered by event type (:2654-2698), so it is much cheaper than at f1be4abc7. It is still awaited before the engine layer completes, so a large lagging-projector replay still delays the router."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:106",
+      "note": "Mitigation added in 60633eff3. The gate is installed before listen (server.ts:252-259). It holds requests and upgrades (max 256 entries, 10 s at :25-26), replays them when the real listeners attach, and answers 503 + Retry-After on overflow, timeout or close. This removes the never-answered-connection hang. I found no defect in the hold/replay/close logic."
+    },
+    {
+      "location": "apps/server/src/server.ts:282",
+      "note": "Early static handler: desktop serves `/` + assets (isEarlyStaticRequest); other modes serve assets only (isEarlyStaticAssetRequest, httpStartupGate.ts:285-291). `/` is held outside desktop because the SSH wait_ready probe polls it (packages/ssh/src/tunnel.ts:262-300)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1606",
+      "note": "The environment descriptor is a readiness probe for the desktop HTTP fallback, and also for the CLI's probeLocalServer (apps/server/src/cli.ts:3835). Serving it from the gate before the router attaches, as the auditor's cheaper step 2 suggests, would make these report ready early. That is the same objection that keeps `/` held for SSH."
+    },
+    {
+      "location": "apps/server/src/orchestration/Services/OrchestrationEngine.ts:33",
+      "note": "`bootSequence: number` is a plain value on the engine shape. It is read synchronously by ProviderCommandReactor.recoverIntents (ProviderCommandReactor.ts:3538) and ws/context.ts:1249 (settleThreadDeletionCleanup). Async hydration needs this to become an Effect or Deferred-backed value."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:527",
+      "note": "Shell snapshot reads SQL projections directly (projectionSnapshotQuery.getShellSnapshot), as does orchestration/http.ts:45. These reads implicitly depend on projector catch-up having finished, and nothing gates them today because the router cannot serve before bootstrap. WS dispatch is already gated by startup.enqueueCommand (ws/context.ts:1122)."
+    },
+    {
+      "location": "apps/server/package.json:23",
+      "note": "Production runs on Node (`start: node dist/bin.mjs`, engines.node at :62; desktop launches Electron-as-Node, apps/desktop/src/backendLauncher.ts:107-109). The gate-less Bun branch of HttpServerLive (server.ts:236-244) is a dev/test path only, so it is not a real remaining production gap."
+    },
+    {
+      "location": "~/.ryco/userdata/logs/desktop-main.log (outside repo)",
+      "note": "Real boots on 2026-10-13/14: desktop.backend.http-bound -> http-serving = 20-440 ms (e.g. run b1b8af618599: bound 217 ms, serving 384 ms, but renderer app.dom-ready only at 552 ms and primary-ws-open later). The router is ready before the renderer can use it, so async hydration would save about 0 ms on a typical desktop boot."
+    }
+  ],
+  "remaining": "(1) Engine hydration still blocks router start: OrchestrationEngine.ts:601-605 runs inside layer construction, and HttpRouter.serve (server.ts:807) is built over RuntimeServicesLive (server.ts:830). The environment descriptor (http.ts:344-354), auth/API routes and the WS upgrade (server.ts:697-700 via makeRoutesLayer) are only held by the gate until hydration ends, and get 503 if it takes more than 10 s (httpStartupGate.ts:26, e.g. a large post-upgrade projector replay). (2) Outside desktop mode the document `/` is still not served before the router (server.ts:282, httpStartupGate.ts:285-291), so a browser opening a web/headless node right after a restart waits for migrations + hydration. (3) The Hub connector starts only after serve (server.ts:723-726), so a hosted relay attempt after a node restart cannot begin until hydration is done. Measured on the user's desktop, the whole bind-to-serve window is now about 40-440 ms and finishes before renderer DOM-ready, so the remaining cost is mostly in edge cases (large replays, headless nodes on big DBs) rather than typical boots.",
+  "fixDefects": "No defect found in the implemented mitigation (httpStartupGate hold/replay/503/close handling, early static handler). Limitations only: requests held longer than 10 s get 503 + Retry-After rather than a response, and the bound is 256 pending entries.",
+  "implementationSketch": "Option A (full fix, only if headless/large-DB boots matter). In OrchestrationEngine.ts, create `engineReady = Deferred.make<void, PersistenceError>()`. Fork `projectionPipeline.bootstrap -> getCommandReadModel -> eventStore.latestSequence` into a scoped fiber that sets `commandReadModel` and `bootSequence` and completes the Deferred. Have the worker (:607-623) `Deferred.await(engineReady)` before its first `Queue.take`, so dispatch (:645) only queues. Change OrchestrationEngineShape.bootSequence (Services/OrchestrationEngine.ts:33) to `Effect<number>` (await, then read), make getReadModel await, and update ProviderCommandReactor.recoverIntents (:3538) and ws/context.ts:1249. Expose `awaitReady` on the engine. Await it in: ServerRuntimeStartup.startup (before workspace.validate / startOrchestrationRuntime), every WS RPC handler that reads projections (gate once at the RPC route or in ws/context, not per handler; e.g. orchestrationRpc.ts:527 shell snapshot), the HTTP snapshot route (orchestration/http.ts:45), and the Hub connector's first snapshot publication. On hydration failure, fail through the existing startup fatal path (desktop `fatal` frame plus process exit). Then audit the other RuntimeServicesLive layers that do blocking work at build time, because the router only starts early if all of them are non-blocking. Readiness probes need a decision: the descriptor (desktop main.ts:1606 fallback, cli.ts:3835) and SSH wait_ready `/` would then report ready before data is ready. Either add a `ready` flag or a separate readiness endpoint, or accept the earlier signal; the desktop's primary signal (the http-serving frame) can stay tied to engine readiness. Tests: in server.test.ts, use a Deferred-controlled fake ProjectionPipeline.bootstrap and assert that, while bootstrap is pending, the WS upgrade completes and the descriptor answers, while a shell-snapshot RPC and a dispatch both wait; that after release they return caught-up data in order; and that bootstrap failure closes the server and answers held clients with 503. Option B (cheap, non-desktop document): switch the SSH wait_ready probe (packages/ssh/src/tunnel.ts:262-300) to a dedicated readiness path that only the router serves (keep accepting `/` for old remote servers), then let non-desktop modes use isEarlyStaticRequest in server.ts:282. Old launch scripts against new servers would report ready early, so keep `/` held for one release or version-gate it. Recommendation: Option A is not worth its risk at current measured numbers. Keep this as a deferred item, and consider Option B only if headless boot latency is reported.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Making hydration async changes readiness semantics: the environment descriptor (desktop HTTP fallback, CLI probeLocalServer) and the SSH wait_ready probe of `/` would report ready before the engine is, and every projection-reading RPC has to be gated. It also brings the hosted Hub connector start forward relative to data readiness. Measured remaining gain on typical desktop boots is about 0 ms, so whether to take on this complexity and risk is a product/architecture trade-off rather than a clear win.",
+  "repos": "ryco",
+  "correction": "Three corrections to the auditor's details, not to the status. (a) The Bun HttpServerLive branch (server.ts:236-244) has no gate, but it is dev/test-only: production and desktop run Node (apps/server/package.json:23,62; backendLauncher.ts:107-109), so it is not a remaining production gap. (b) The auditor's cheaper step 2 (serve the environment descriptor from the gate's early handler) breaks readiness semantics, because the descriptor is a readiness probe (desktop main.ts:1606, cli.ts:3835). That is the same reason `/` is held for SSH. (c) The auditor left the remaining value unquantified, and it is small: on the user's real desktop logs the whole bind-to-serve window is about 40-440 ms and ends before renderer DOM-ready, so async hydration would save about 0 ms on typical desktop boots. Also missed: bootSequence is a synchronous number on the engine shape read by ProviderCommandReactor.ts:3538 and ws/context.ts:1249, and the shell snapshot reads SQL projections directly (ws/orchestrationRpc.ts:527), so async hydration needs an interface change and explicit read gating."
+}

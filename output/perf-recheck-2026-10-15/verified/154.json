@@ -1,0 +1,75 @@
+{
+  "id": "gap-right-panel-first-open:checkpoint-diff-client-cache-unbounded",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The web raw checkpoint-diff store fix (60633eff3, #710) is correct and covers every part of the proposal: an inactive LRU capped at 8 entries and 16M chars, conversation-slot supersession, and eviction on archive and removal, all with tests. The finding's goal of keeping client patch memory near 16 MB is still not met, for two reasons. (1) The mobile client store apps/mobile/src/rpc/checkpointDiffAtoms.ts describes itself as a verbatim mirror of the web store and already existed at f1be4abc7. It is unchanged and still keeps every viewed full-thread patch forever. ReviewSheet keys diffs by toTurnCount, so every turn that completes while the sheet is open adds another retained patch, and every thread reviewed keeps its own. (2) On web, DiffPanel's module-level renderablePatchCache is a DiffParseCache with 50 entries and its memory budget explicitly turned off. It keys parsed payloads by the conversation:<all turn ids> scope, which changes on every turn. Since 65af92766, patches of 1M chars or more parse in a worker and come back as independent structured clones. Context lines are stored in both line arrays, so each clone is at least the size of the raw patch. The finding's own example (50 turns with a 1 MB diff) therefore still retains about 50 MB or more, now in parsed form. A minor residue remains as well: evicted keys leave keepAlive atom nodes whose key strings contain every turn id.",
+  "correction": "The auditor's check of the web raw store holds: no functional bug. The auditor treated the mobile twin as an out-of-scope side note and did not look at DiffPanel's parsed-payload cache. Both still show the retention pattern the finding describes (a new entry per completed turn under the conversation key), so the expected bound of about 16 MB is not reached. DONE overstates the outcome; PARTIAL is accurate.",
+  "evidence": [
+    {
+      "location": "apps/web/src/rpc/providerAtoms.ts:212-213",
+      "note": "MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES = 8 and MAX_INACTIVE_CHECKPOINT_DIFF_CHARS = 16 MiB. The web raw store is now bounded as proposed."
+    },
+    {
+      "location": "apps/web/src/rpc/providerAtoms.ts:313-398",
+      "note": "evictCheckpointDiffEntry, enforceInactiveCheckpointDiffBudget, releaseCheckpointDiffEntry and supersedeCheckpointDiffSlot are correct. React runs the old cleanup before the new watch: the old key joins the inactive set and the new watch evicts it. Watched entries are never evicted."
+    },
+    {
+      "location": "apps/web/src/rpc/providerAtoms.ts:450-466",
+      "note": "evictCheckpointDiffsForThread is called on archive and on thread-removed (apps/web/src/environments/runtime/environmentStateSink.ts:100,113)."
+    },
+    {
+      "location": "apps/web/src/rpc/providerAtoms.test.ts:356-480",
+      "note": "Tests cover the count and char budgets, protection of watched entries, conversation-slot supersession and archive eviction."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:138",
+      "note": "renderablePatchCache = new DiffParseCache<ParsedDiffContent>() is module-level and is never cleared: not by evictCheckpointDiffsForThread and not by clearCheckpointDiffState on hosted teardown."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:616",
+      "note": "The parse cache key uses turnId = conversationCacheScope ('conversation:' plus every turn id, built at :523-528), so every completed turn with the panel open creates a new parse-cache entry. The superseded entry stays until 50 newer parses push it out."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:633-665",
+      "note": "Patches of OFF_THREAD_DIFF_PARSE_MIN_CHARS (1,000,000, diffParseOffThread.ts:8) or more are parsed in the worker with no previous payload. Each result is a fresh structured clone, stored by renderablePatchCache.set at :665, with no file objects shared between successive conversation parses."
+    },
+    {
+      "location": "apps/web/src/lib/diffParseCache.ts:35-64",
+      "note": "DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES = 50 and UNBOUNDED_MEMORY_BYTES = Infinity. The shared LRUCache byte budget is deliberately disabled, so there is no byte bound on parsed payloads."
+    },
+    {
+      "location": "apps/web/src/lib/diffParsing.ts:14-23",
+      "note": "RenderablePatch holds FileDiffMetadata[]. In @pierre/diffs 1.4.1, deletionLines and additionLines both include context lines, so each parsed payload takes at least as much memory as the raw patch."
+    },
+    {
+      "location": "apps/mobile/src/rpc/checkpointDiffAtoms.ts:185-191",
+      "note": "The mobile twin (its header says it mirrors the web store verbatim) still uses an Atom.family with keepAlive and has no inactive budget, slot or eviction. Since f1be4abc7 it has changed only in import paths."
+    },
+    {
+      "location": "apps/mobile/src/rpc/checkpointDiffAtoms.ts:304-310",
+      "note": "Release only decrements refCount. Patch data stays until the user clears the device cache in settings (deviceCache.ts:55) or a hosted reset runs (hostedHub/nodeStateCleanup.ts:9)."
+    },
+    {
+      "location": "apps/mobile/src/features/review/useReviewDiffData.ts:19-37",
+      "note": "buildFullThreadDiffInput keys by toTurnCount, the latest turn count. ReviewSheet.tsx:44-46 uses it, so each completed turn while the sheet is open creates a new key, and the old patch is never released."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentStateSink.ts:80-98",
+      "note": "The mobile archive and thread-removed hooks release terminal state but do not evict checkpoint diffs."
+    },
+    {
+      "location": "apps/web/src/rpc/providerAtoms.ts:186-191",
+      "note": "Atoms are keepAlive. The effect 4.0.2 AtomRegistry removes only non-keepAlive nodes, so every key ever rendered keeps its atom, node, family entry and key string, with no patch data. Conversation keys contain every turn id."
+    }
+  ],
+  "remaining": "(1) Mobile: apps/mobile/src/rpc/checkpointDiffAtoms.ts:185-311 has no automatic count or byte bound, no slot supersession and no archive or removal eviction. ReviewSheet (apps/mobile/src/features/review/ReviewSheet.tsx:44-46 via useReviewDiffData.ts:19-37) creates a new full-thread key for every completed turn and for every thread reviewed, and none is ever released. On a phone that is memory the OS can kill the app over. (2) Web: DiffPanel's renderablePatchCache (DiffPanel.tsx:138, set at :642 and :665, keyed at :616 by the per-turn conversation scope) keeps parsed copies of superseded conversation patches, up to 50 entries with no byte budget (diffParseCache.ts:41,64). Patches of 1M chars or more are independent worker clones, so 50 turns with a 1 MB conversation diff still retain 50 MB or more. The cache also survives thread archive and hosted node or account teardown.",
+  "fixDefects": "The web raw-store fix has no functional bug. One minor residue: evictCheckpointDiffEntry (providerAtoms.ts:313-331) resets the atom value, but keepAlive atoms are never removed from appAtomRegistry and Atom.family keeps its entry. Each distinct key therefore keeps an atom, a node, a label and its key string. Conversation keys contain every turn id (about 37 chars per turn), so a thread whose diff panel stays open across N turns keeps roughly 18·N² bytes of key strings: about 185 KB at 100 turns and about 1.7 MB at 300. Separately, evictCheckpointDiffsForThread and clearCheckpointDiffState do not touch renderablePatchCache. Parsed node-owned diff content therefore outlives the raw store's archive and hosted-teardown eviction (in memory only, never persisted).",
+  "implementationSketch": "1) Shared store and mobile port. Move the bounded checkpoint-diff store out of apps/web/src/rpc/providerAtoms.ts (entries, inactive LRU, slot supersession, evictCheckpointDiffsForThread, invalidate and clear functions) into packages/client-runtime, for example src/state/checkpointDiff/store.ts. It must stay free of DOM and React Native code, use appAtomRegistry from @ryco/client-runtime/rpc, and take the API through a resolveApi(environmentId) parameter, or through a small factory makeCheckpointDiffStore({ ensureEnvironmentApi }). The web providerAtoms.ts and mobile checkpointDiffAtoms.ts then become thin wrappers, which removes the verbatim duplicate as AGENTS.md asks. Reimplement mobile's checkpointDiffCacheBytes and clearCheckpointDiffCacheForEnvironment on top of the shared evict function so they also update the inactive set and slot map. In the mobile useReviewDiffData.ts, have buildFullThreadDiffInput set cacheSlot: 'conversation' and have useCheckpointDiff forward it. Call evictCheckpointDiffsForThread on the archive transition and on thread-removed in apps/mobile/src/connection/environmentStateSink.ts:80-98. Move the cache-bound tests (providerAtoms.test.ts:356-480) to client-runtime, and add a mobile test showing that toTurnCount churn under the slot leaves a single entry. 2) Web parse cache. Give DiffParseCache an optional maxMemoryBytes and a per-entry weight, and pass normalizedPatch.length at DiffPanel.tsx:642 and :665 (for example a 32M-char budget). Also make conversation parses supersede each other: use a stable turnId of 'conversation:' + environmentId + ':' + threadId (blobSha already identifies the content), and add a slot-replace operation so a new hash for the same slot evicts the previous entry. Export a clearDiffPanelParseCache and call it beside clearCheckpointDiffState in apps/web/src/hostedHub/environment.ts and in account teardown. Optionally drop a thread's entries on archive. Tests: weight-based eviction in diffParseCache.test.ts, and a check that two successive conversation scopes for one thread leave one parse entry. 3) Optional: stop embedding every turn id in the cache key. Hash the joined ids, or use the latest turn id plus the count, to remove the O(N²) key residue. Alternatively hold atoms with registry.mount instead of keepAlive and unmount on eviction so the registry can drop the node.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "These are client-side memory bounds and a refactor that moves duplicated code into packages/client-runtime. No E2EE, auth, Hub protocol or hosted lifecycle ownership change. Clearing an in-memory parse cache on hosted teardown only tightens existing cleanup.",
+  "repos": "ryco"
+}

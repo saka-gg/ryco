@@ -1,0 +1,51 @@
+{
+  "id": "projects-loading:shell-snapshot-reads-deleted-rows",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) is the only commit that introduced listActiveThreadShellRows, listActiveThreadSessionShellRows and readShellUpdatedAt. buildShell, which backs both getShellSnapshot and getScopedShellSnapshot, now reads only live projects, threads, worktrees and sessions in SQL. There is no JS deletedAt filter any more. The per-row latestCompletedTurnAt subquery is gone on every path; it is now a trigger-maintained column (migration 087, d6a3f6819). The snapshot updatedAt is a MAX() aggregate over whole tables, and it matches the old loop: projects, threads, worktrees updated_at/archived_at and sessions over all rows, latest turns over live threads only (as before), and state rows; priority rankedAt is now included as well. The unfiltered listThreadRows and listThreadSessionRows are used only by getSnapshot and getCommandReadModel. Those run at engine boot, from the CLI, over HTTP, and as the currentCommandReadModel fallback, so none is a per-subscription path. A read-only check on the user's current DB: 791 thread rows, 323 live (59% skipped); 732 session rows, 313 for live threads. The live thread query plan is SCAN plus a temp B-tree on about 800 rows, roughly 0.2 ms. The Hub does not use this path.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:878",
+      "note": "listActiveThreadShellRows: WHERE deleted_at IS NULL plus the scope filter. The comment at :837 explains the intent."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1298",
+      "note": "listActiveThreadSessionShellRows: thread_id IN (live threads). EXPLAIN shows a LIST SUBQUERY plus a PK search on sessions."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:865",
+      "note": "Projects are SQL-filtered too (listActiveProjectShellRows). Worktrees are restricted to live projects at :988-999, which replaces the old JS activeProjectIds filter."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:909",
+      "note": "readShellUpdatedAt: MAX over every row of projects, threads, worktrees (updated_at and archived_at) and sessions. maxIso (:413) is a lexicographic string comparison like SQL MAX, so the result equals the old JS loop. EXPLAIN uses covering indexes for most branches."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3010",
+      "note": "buildShell uses only the Active* queries plus readShellUpdatedAt, and folds latest-turn, state and priority timestamps in at :3091-3109. getShellSnapshot (coalesced, :3207-3215) and getScopedShellSnapshot (:3201) both go through it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:2419",
+      "note": "The unfiltered listThreadRows and listThreadSessionRows are left only in getSnapshot (:2399) and getCommandReadModel (:2716, at :2736/:2768), as the proposal said. Callers: OrchestrationEngine.ts:602 at boot, cli.ts:1175, http.ts:45, and the currentCommandReadModel.ts:22 fallback."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:715",
+      "note": "latestCompletedTurnAt is now a plain column maintained by triggers, so the correlated subquery the finding blamed is gone on every read path."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts:2864",
+      "note": "The tombstone test asserts the shell excludes deleted projects and threads; :172 does the same for deleted threads. No test asserts that deleted rows still bump the shell's updatedAt."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defect found. Correction to the auditor's note (2): leaving deleted threads' latest-turn timestamps out of updatedAt is not a change. At f1be4abc7, listActiveLatestTurnRows already had WHERE threads.deleted_at IS NULL (old line 1031), so semantics are identical. Two optional gaps, both low value. (a) The (created_at, thread_id) WHERE deleted_at IS NULL partial index was not added; at about 323 live rows the temp B-tree sort costs about 0.2 ms. (b) No test pins the rule that a deletion still bumps the shell's updatedAt through readShellUpdatedAt.",
+  "implementationSketch": "Optional hardening only. In apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts, in the 'keeps deleted project and thread tombstones in the command read model' test (around :2864), add assert.equal(shellSnapshot.updatedAt, <deleted thread's updated_at>), or insert one live row with an older updated_at plus a deleted row with a newer one and assert the shell's updatedAt equals the deleted row's timestamp. This guards readShellUpdatedAt against someone later adding a deleted_at filter to it. No index migration is warranted at current row counts.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "correction": "Status confirmed. The auditor's fixDefects point (2) suggested a narrowing of updatedAt for deleted threads' latest turns. That narrowing already existed before the fix, so there is no behaviour change.",
+  "repos": "none"
+}

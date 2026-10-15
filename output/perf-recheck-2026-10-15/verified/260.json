@@ -1,0 +1,66 @@
+{
+  "id": "gap-logging-io:client-tracing-always-on",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All four parts of the proposal are on main. (1) Export is gated: AuthenticatedTracingBootstrap configures the OTLP exporter only when the primary server advertises observability.browserTracesEnabled (set when otlpTracesUrl is configured or RYCO_BROWSER_TRACES=1) or the build is a VITE_RYCO_PERF_PROFILE build. Otherwise it calls disableClientTracing and spans stay plain NativeSpans. (2) The default export interval is 10 s, matching the server. (3) The server's decode-failure warning logs only the cause and a span count, never bodyJson. (4) OTLP, FetchHttpClient and the serializer moved into clientTracingExporter.ts, which is dynamically imported. Two guards keep them out of the boot graph: a source-level test, and a bundle-budget rule on node_modules/effect/dist/observability/Otlp*. The changes landed in #710 (60633eff3: lazy exporter, 10 s interval, log fix) and 65af92766 (server-advertised gating). Both are in the Hub's vendored pin 7bc39eec3. I searched for missed paths and found none. Mobile uses client-runtime's noop tracer. Hosted-hub, hosted-static and hosted-cached sessions never mount the bootstrap. No other web or client-runtime module imports Otlp*. The server config atom is only cleared on hosted paths, so exportTraces does not flicker during local reconnects. The only leftovers are a few minor latent nits, none of which affect perf.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:221-231",
+      "note": "AuthenticatedTracingBootstrap computes exportTraces from shouldExportClientTraces and calls configureClientTracing() or disableClientTracing() in an effect keyed on exportTraces. It is mounted only when authGateState.status === 'authenticated' (localTracingAllowed)."
+    },
+    {
+      "location": "apps/web/src/observability/clientTracing.ts:45-50",
+      "note": "Returns perfProfile || observability?.browserTracesEnabled === true. Older servers omit the field, so their clients export nothing."
+    },
+    {
+      "location": "apps/web/src/perf/perfInstrumentation.ts:10-15",
+      "note": "isWebPerfProfileEnabled is a build-time constant from VITE_RYCO_PERF_PROFILE, not a runtime toggle."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:1201-1203",
+      "note": "browserTracesEnabled = config.otlpTracesUrl !== undefined || config.browserTracesEnabled === true. The env var is defined at apps/server/src/cli.ts:323 and the schema at packages/contracts/src/server.ts:338."
+    },
+    {
+      "location": "apps/web/src/observability/clientTracing.ts:12",
+      "note": "DEFAULT_EXPORT_INTERVAL_MS = 10_000. It was 1_000 at f1be4abc7."
+    },
+    {
+      "location": "apps/web/src/observability/clientTracing.ts:91-94",
+      "note": "await import('./clientTracingExporter'). The exporter module (clientTracingExporter.ts:1-3) holds FetchHttpClient and OtlpExporter/OtlpSerialization/OtlpTracer. clientTracing.ts only imports its type."
+    },
+    {
+      "location": "apps/web/src/perf/standardBootGraph.test.ts:160-168",
+      "note": "Asserts that clientTracingExporter.ts is not statically reachable from main.tsx."
+    },
+    {
+      "location": "scripts/perf/model.ts:247-249",
+      "note": "The bundle-budget rule forbids node_modules/effect/dist/observability/Otlp* in the boot chunks of the real dist."
+    },
+    {
+      "location": "apps/server/src/http.ts:356-403",
+      "note": "DecodeOtlpTraceRecordsError now carries spanCount, not bodyJson. The warning logs { cause, spanCount } under the comment 'Never log the payload'. The old code (f1be4abc7 http.ts:291-297) logged bodyJson."
+    },
+    {
+      "location": "packages/client-runtime/src/platform/index.ts:359",
+      "note": "The default ObservabilityService tracingLayer is a noop tracer, so mobile and other clients have no OTLP export path."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/serverState.ts:186-191",
+      "note": "clearServerState (which sets the config to null) is called only from hostedHub/environment.ts. Local authenticated sessions do not null the config on reconnect, so the gate does not toggle during reconnects."
+    },
+    {
+      "location": "apps/web/src/observability/clientTracing.ts:65-68",
+      "note": "Minor latent nit, not reachable in practice. configure() short-circuits whenever activeConfigKey !== null, even when a disableClientTracing() is still queued behind an in-flight apply. A true->false->true flip inside one exporter load would therefore end disabled. exportTraces only changes when the server's advertised config changes, so this does not happen today."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Minor non-perf nits: (a) clientTracing.ts:65-68: the configure() fast path ignores a queued disable, so a rapid true->false->true flip during an in-flight exporter load would leave tracing disabled. This is unreachable today because the gate only changes when the server's advertised config changes. (b) clientTracing.ts:95-103: if the dynamic import or exporter start fails, activeConfigKey stays set and later configure() calls never retry. This was already true at f1be4abc7 and only affects diagnostics. (c) RYCO_BROWSER_TRACES is not listed in the docs/observability.md env-var section (around line 519). (d) Intentional behaviour change: the Settings > Diagnostics recent-spans table (DetailedTraceDiagnostics.tsx, source 'browser') no longer shows browser spans by default unless OTLP or RYCO_BROWSER_TRACES is set. The commit message documents this.",
+  "implementationSketch": "Optional hardening only: (1) In apps/web/src/observability/clientTracing.ts, track a desired-state flag (desiredEnabled) that configure/disable set synchronously, and have the fast path in configureClientTracing return early only when desiredEnabled was already true and no disable is queued. Alternatively, clear activeConfigKey synchronously in disableClientTracing. Add a test that calls configure(); disable(); configure() without awaiting between calls and asserts that an exporter is active at the end. (2) In the catch branch of applyClientTracingConfig, reset activeConfigKey = null when generation === configurationGeneration so a later configure() can retry. (3) Add RYCO_BROWSER_TRACES to the OTLP env-var list in docs/observability.md. None of these change perf.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains to decide. Making browser spans opt-in, which hides them from the default Diagnostics view, was a deliberate product choice already made in 65af92766.",
+  "repos": "ryco"
+}

@@ -1,0 +1,24 @@
+{
+  "id": "server-boot:reactor-start-repo-identity",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (PR #710). ProviderCommandReactor.start now reads pending goal syncs with a narrow SQL query, not a shell snapshot. Shell snapshots decode persisted repository identities (migration 086) and never call git. Git resolution moved to a background sync, forked after the command gate opens, that skips projects whose fingerprint is unchanged. No reactor or boot path still calls getShellSnapshot. The remaining getShellSnapshot callers (WorkspaceLifecycle, StorageService, Agent Control thread reads, chatFolders) are on-demand and no longer spawn git.",
+  "evidence": [
+    {"location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:3429-3431", "note": "start calls readPendingGoalSyncThreads, a narrow read, inside reactors.start."},
+    {"location": "apps/server/src/orchestration/Services/ProjectionSnapshotQuery.ts:512-516", "note": "Uses listPendingGoalSyncThreads. Falls back to getShellSnapshot only for stubs that lack the method; in production that fallback costs no git either."},
+    {"location": "apps/server/src/persistence/Migrations.ts:230", "note": "Migration 086 (repository identity columns) is registered, with a repair hook at :526-529 and :743."},
+    {"location": "apps/server/src/serverRuntimeStartup.ts:1028", "note": "The command gate opens (signalCommandReady) before the repository-identities.sync phase at :1070-1082."},
+    {"location": "apps/server/src/project/repositoryIdentitySync.ts:221-233", "note": "The event-triggered worker and the initial plus periodic sweep are both forkScoped, so the startup phase does not wait on git."},
+    {"location": "apps/server/src/project/repositoryIdentitySync.ts:98-120", "note": "Skips git when the fingerprint is unchanged and the record is younger than 24 h. Resolution runs in the background process lane."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

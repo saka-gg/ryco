@@ -1,0 +1,67 @@
+{
+  "id": "gap-first-turn-latency:turnstart-redundant-reads-and-global-lock",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor wrote 'No defect in the fix itself'. That is wrong. The lease handoff (d97dac1d9) replaced startSession's full admission re-check with retainStoragePathUseLease, which skips storagePathBlocker whenever any use of the path is counted. That shortcut is safe for checkout cleanup and worktree relocation, because those check the use-count map (hasWorktreeCreationLease). Chat promotion does not check it. It writes its project_relocations fence under the exclusive lock and relies on every later start being refused at admission (chatPromotion.ts:976-984). A start whose reactor lease was admitted before the fence now gets into the moving folder, where the old code refused it. Minor: thread shells are now read 2x per turn, not 'once' (prepare at :2005 and reconcileThreadGoal at :1139), and getThreadShellById runs its 4 queries one after another (Effect.all without concurrency), not in parallel.",
+  "decisionReason": "The defect is in storage-admission and lifecycle fence semantics, and the current behaviour is deliberate: both lifecycle.test.ts:175 ('retains a held use lease without the admission check') and ProviderService.test.ts:2645 assert that a start holding a lease is admitted into a path with a pending project relocation. Restoring the refusal reverses a choice the author tested for, so the owner should confirm that 'nothing new starts in a moving chat folder' (chatPromotion.ts:976-978) is the invariant to keep. The fix itself costs nothing in performance.",
+  "summary": "The perf finding is fixed. Per turn start, thread reads fell from 4 to 2 and project reads from 3-4 to 1. Path leases fell from 3 (each a realpath plus about 6 SQL queries) to 1, plus a retain with no I/O in startSession. The goal RPC now runs once per runtime instead of every turn. storageLifecycleLock is a fair read/write lock: leases and command processing take it shared, and terminals take it exclusively only for a short admission section. One defect in the fix: the retained lease skips the project-relocation fence re-check that startSession used to do, so in a narrow race a session start can be admitted into a chat folder being promoted. Small leftovers: the reconcileThreadGoal re-read, a double lease on the context-handoff path, sqlite_master probes on every lease, and WorkspaceFileSystem writes holding the exclusive lock for the whole write.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:2005",
+      "note": "prepareAndSubmitTurnStart reads the thread once (:2005) and the project once (:2085), then passes both to buildSendTurnRequestForThread, which passes them to ensureSessionForThread as prefetched (:1318-1324)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:776",
+      "note": "ensureSessionForThread uses prefetched.thread and prefetched.project (:776-783), takes one lease (:785) and calls ensureRecordedWorktreeAvailable with pathLeased: true (:786, skip at :622). It passes the held lease to startSession (:901)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1139",
+      "note": "reconcileThreadGoal still re-reads the thread shell, the second shell read per turn. It needs the runtimeSessionId that ensureSessionForThread may just have rebound. The goalless cache returns early at :1149-1152 and is filled at :1220-1226. Test: ProviderCommandReactor.test.ts:1112."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:1469",
+      "note": "startSession retains heldPathLease when its path equals effectiveCwd (:1471-1472). The reactor's lease candidate (worktreePath ?? workspaceRoot) and resolveThreadWorkspaceCwd (checkpointing/Utils.ts:33) produce the same string, so the fast path really fires."
+    },
+    {
+      "location": "apps/server/src/storage/lifecycle.ts:165",
+      "note": "retainStoragePathUseLease: when creations.get(canonical) > 0 it only increments the count. It does not call storagePathBlocker, so it never checks project_relocations (isProjectRelocationBlocked, :334-352)."
+    },
+    {
+      "location": "apps/server/src/project/chatPromotion.ts:979",
+      "note": "Chat promotion writes the 'pending' relocation fence under withPermit and never calls hasWorktreeCreationLease. Only checkoutFence.ts:49, managedWorktreeMigration.ts:105/411 and StorageService.ts:734 do. The comment at :976-978 says nothing new starts in the folder from this point. vacateChatFolder (:934-945) catches queued turns (busy 'queued-turn') and live sessions, but not an in-flight start on a thread without a session."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:2449",
+      "note": "Exposed path: processGoalUpdated calls ensureSessionForThread(kind 'restart'), which starts a new session on an idle thread with no session. Between the reactor lease (:785) and the retain, it can wait seconds: the prewarm claim awaits an in-flight prewarm start (ProviderSessionPrewarm.ts:315-330), and startSession waits on its per-thread lock. A fence written in that window is no longer re-checked."
+    },
+    {
+      "location": "apps/server/src/storage/lifecycle.test.ts:175",
+      "note": "This test, and ProviderService.test.ts:2645, assert that a lease-holding start is admitted after a 'pending' project relocation was journaled. The behaviour is deliberate and covered by tests."
+    },
+    {
+      "location": "apps/server/src/storage/readWriteLock.ts:36",
+      "note": "Fair FIFO read/write lock; interruption handling is correct. I found no nested shared acquisition under processEnvelope: OrchestrationEngine.ts:339, chatPromotion and managedWorktreeMigration call storagePathBlocker without the lock. A nested acquisition would deadlock only under contention."
+    },
+    {
+      "location": "apps/server/src/terminal/Layers/Manager.ts:1509",
+      "note": "Terminal open, restart and guarded write hold the exclusive lock only for assertValidCwd plus commit. Spawn and history I/O run outside it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1843",
+      "note": "The context-handoff turn path still takes two leases (ensureRecordedWorktreeAvailable without pathLeased at :1844, then leaseThreadPath at :1849). The coordinator's own startSession does a full acquire. Rare path."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceFileSystem.ts:656",
+      "note": "writeFile and stageFileReference hold the exclusive lock for the whole write, so a large staged attachment delays every shared lease and command. This was not part of the proposal, and relaxing it has fence semantics of its own."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1) Fence regression from the lease handoff (d97dac1d9). retainStoragePathUseLease (storage/lifecycle.ts:165-171) skips the admission check whenever the path has any counted use. Only cleanup and worktree-relocation claims consult those counts. Chat promotion's project_relocations fence (chatPromotion.ts:979-984) does not, and relies on every later start being refused at admission. A provider start whose reactor lease (ProviderCommandReactor.ts:785) was admitted before the fence is therefore admitted into the moving folder. Concrete case: processGoalUpdated on an idle chat thread with no session (:2449), with promotion fencing while the start waits on the prewarm claim or startSession's per-thread lock. The old code refused it with PROJECT_RELOCATION_PENDING_MESSAGE. busyThreads does not see such a start, and stopChatSessions only sees it if the adapter has already registered it. The window is narrow, but the result is a provider session spawned in a folder being renamed or copied. 2) Minor and contrived: goallessRuntimes (:467-475) is never invalidated when goal state changes. If a native goal notification is dropped while a client goal sync is pending (ProviderRuntimeIngestion.ts:2386-2387) and the goal later returns to null, later turns on that runtime skip the getThreadGoal that used to repair it. Cheap hardening: delete the threadId:runtimeSessionId entry whenever reconcileThreadGoal or ingestion dispatches a goal sync or clear.",
+  "implementationSketch": "Fence fix, preferred because it adds no I/O. In storage/lifecycle.ts add a module counter, fenceEpoch, and export noteStorageFenceRaised() to increment it. Capture the counter in HeldStoragePathUseLease (new field 'epoch') inside acquireStoragePathUseLeaseHandle's withShared section. retainStoragePathUseLease takes the fast path only when count > 0 && held.epoch === fenceEpoch; otherwise it does a full acquireStoragePathUseLease. Call noteStorageFenceRaised() inside every exclusive section that raises a fence: chatPromotion.ts:979 after relocations.create, checkoutFence.claim, managedWorktreeMigration's moving-state writes (:251/:405) and the StorageService claims (:728/:919). Simpler alternative: in retain, always run isProjectRelocationBlocked(sql, held.canonical). That is 2 SQL queries and no realpath; the other fence kinds already honour use counts. Tests: invert the relocation part of lifecycle.test.ts:175 and ProviderService.test.ts:2645 so that retaining after a 'pending' relocation is refused. Add a lifecycle test showing that retain still needs no lock and no SQL when no fence was raised, e.g. it completes while an exclusive holder is parked. Optional leftovers, all low value: (a) have ensureSessionForThread return the bound runtimeSessionId and pass it, with the prefetched thread's goal, into reconcileThreadGoal, which drops the :1139 re-read, or use a narrow goal-plus-session query. (b) Cache the sqlite_master existence probes in isWorktreeRelocationBlocked and isProjectRelocationBlocked (lifecycle.ts:309-311, :340-342) once they return true; this cuts the per-turn lease from about 6 to about 4 queries. (c) In runContextHandoffTurnStart (:1843-1860), take leaseThreadPath once in one scope, call ensureRecordedWorktreeAvailable with pathLeased: true, and thread heldPathLease through the coordinator's startSession. (d) Pass prefetched shells from processModeChange (:2931) and processGoalUpdated (:2445). Do not make the per-turn lease lazy: it is the turn-start admission gate that checkoutFence.ts:13-16 documents.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": true,
+  "repos": "ryco"
+}

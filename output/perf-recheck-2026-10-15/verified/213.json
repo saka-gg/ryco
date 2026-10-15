@@ -1,0 +1,71 @@
+{
+  "id": "hub-connection:boot-gate-hostedhubroot-waterfall",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The DONE status holds, but the auditor missed three things. (1) The fix has a side-effect defect. The hosted branch passes `HostedHubRoot.preload()` to the gate on every pathname (__root.tsx:199). The gate then awaits it, and for a signed-in account it also awaits the RootAppShell graph (bootGate.ts:46-55). That includes /native/authorize/* and /pair, which render only <Outlet/> (__root.tsx:405). The explicit preload at __root.tsx:159-165 deliberately excludes those two paths, so the two code paths disagree. (2) The overlap is overstated. bootGate.ts:28 imports only the small `hostedRootAppShell` wrapper. `import(\"../RootAppShell\")` itself runs only in `preloadHostedRootAppShell()`, which is called after `bootstrapAccess` resolves. The shell graph therefore downloads after the access check, not while it is on the wire, so the bootGate comment at :23-27 is wrong. The relay connect is not gated by this. (3) Minor: the owners start in `.then` of a dynamic import, at the same time as the access check, not strictly before it is awaited.",
+  "summary": "Confirmed DONE for the finding. Relay connect no longer waits for the HostedHubRoot chunk graph. The boot gate starts the routed-node orchestrator, the workspace coordinator and the browser lifecycle once the small hostedWorkspaceOwners chunk loads, in parallel with the access check. These owners only call controller primitives. The directory read rides with the session restore, and `connectPrimary` registers the relay connection and its shell subscription without RootAppShell mounting, so selectNode, the ticket, the relay and `markSessionReady` all proceed without the hosted root or the workspace shell mounting. HostedHubRoot is preloaded at the start of beforeLoad. RootAppShell is lazy (only a type import remains), and the thread route chunk is prefetched. One defect in the fix: for a signed-in account, the hosted gate preloads and awaits HostedHubRoot and the RootAppShell graph even on /native/authorize/* (the native app's sign-in handoff) and /pair, where neither renders. On a cold cache that delays the consent page by roughly a few hundred ms to about 1 s. Also, the shell graph download is serialized after the access check, despite the gate comment. There is no behavioural test that the gate starts the owners before the root mounts.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/__root.tsx:159-165",
+      "note": "HostedHubRoot.preload() and preloadMatchedRouteChunks(pathname) fire before the async gate, but only when pathname is not /pair and not a native-authorization path."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:195-201",
+      "note": "The hosted branch calls `runHostedBootGate({ pathname, hostedRoot: HostedHubRoot.preload() })` unconditionally, so /native/authorize/* and /pair also preload and await HostedHubRoot. This is the fix defect."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:405-407",
+      "note": "RootRouteView renders only <Outlet/> for /pair and native-authorization paths, so HostedHubRoot and RootAppShell are never rendered there."
+    },
+    {
+      "location": "apps/web/src/hostedHub/bootGate.ts:28-41",
+      "note": "Imports the owners module and the hostedRootAppShell wrapper. Once the owners chunk loads it calls retainHostedWorkspaceOwners() and prefetchHostedRouteCode(), in parallel with bootstrapAccess."
+    },
+    {
+      "location": "apps/web/src/hostedHub/bootGate.ts:45-55",
+      "note": "Awaits bootstrapAccess only, then awaits hostedRoot plus preloadHostedRootAppShell() when authenticated or a read preview is possible. Neither wait depends on pathname. The RootAppShell import starts here, after the access check."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/hostedRootAppShell.tsx:15-30",
+      "note": "preloadableLazy calls import('../RootAppShell') only when preload() is called. The early import in the gate fetches just this wrapper."
+    },
+    {
+      "location": "apps/web/src/hostedHub/hostedWorkspaceOwners.ts:32-72",
+      "note": "Reference-counted single start of the orchestrator, coordinator and lifecycle, in the same order as the old root effects. prefetchHostedRouteCode warms ChatThreadRouteView for thread URLs."
+    },
+    {
+      "location": "apps/web/src/hostedHub/nodeRouteOrchestrator.ts:203-370",
+      "note": "reconcile needs only the installed history (main.tsx:25-29, installed before the router) and the hosted store, with no React tree. It reaches selectNode, or retains the thread scope for the coordinator, once the directory is ready and browserStatus is current or synchronizing."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:894-906",
+      "note": "connectPrimary, called by selectNode through the hosted runtime, registers the connection and its shell subscriptions without supervisor.start(). markHostedSessionReady (apps/web/src/environments/runtime/service.ts:893-905) therefore fires without RootAppShell's EnvironmentConnectionManagerBootstrap."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:619-662,743-780",
+      "note": "bootstrapAccess settles on the account answer. The directory read rides with the session restore and is committed by the controller, independent of any mount."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HostedHubRoot.tsx:35-38,210-222",
+      "note": "No static RootAppShell import remains (grep finds only a type import in hostedRootAppShell.tsx:5). The root only retains the owners, and preloads the shell once authenticated."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HostedNativeAuthorizationRoute.tsx:19-23",
+      "note": "The native consent page needs the HostedHubRoot chunk only for the signed-out authentication surface (lazy). Signed-in consent needs neither HostedHubRoot nor RootAppShell, yet the gate awaits both."
+    },
+    {
+      "location": "apps/web/src/perf/webBundleSplitting.test.ts:77-128",
+      "note": "Only source-text assertions. No test exercises runHostedBootGate starting the owners, or selectNode beginning before HostedHubRoot mounts."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "(1) Regression from the fix: the hosted boot gate preloads and awaits HostedHubRoot (__root.tsx:199). For an authenticated account or a read preview it also awaits the RootAppShell graph (bootGate.ts:46-55). This happens on every pathname, including /native/authorize/$handoffId and /pair, which render only <Outlet/> (__root.tsx:405). For the native app's sign-in handoff with a signed-in browser, the consent page waits for downloading, parsing and evaluating roughly the 570 KiB gzip graph it never renders. On a cold cache that is about 0.3-1 s; on a warm SW cache, about 0.1-0.3 s of phone parse and eval. The native-authorization route chunk itself is also not prefetched (excluded at __root.tsx:159), so it starts only after those waits. The gate also starts the workspace owners on these paths. That is mostly harmless: no discovery, and the lifecycle only suspends and resumes. (2) The bootGate.ts:23-27 comment claims the workspace shell downloads while the access check is on the wire. Only the wrapper module does: `import(\"../RootAppShell\")` starts after bootstrapAccess, so a signed-in cold-cache boot holds the boot surface for the access check plus the shell graph fetch in series. This does not affect relay connect. (3) Cosmetic: an orphaned `bootstrapAccess` docblock sits above `accessCheckPending()` (packages/client-runtime/src/authorization/state.ts:639-648). (4) Test gap: there is no test that the gate's early owners drive selectNode before the root mounts.",
+  "implementationSketch": "Fix (1): compute once in resolveRootBeforeLoadContextAsync whether the hosted root renders for this path. Reuse the check from rootSurfaceFor (pathname !== '/pair' && !isNativeAuthorizationPath(pathname)) by extracting a shared `rendersRootSurface(pathname)` helper, so the preload at :159-165, rootSurfaceFor and the gate cannot drift. Pass `hostedRoot: renders ? HostedHubRoot.preload() : Promise.resolve()` and a `rendersHostedRoot` flag to runHostedBootGate. When the flag is false, skip the shell import/preload and, optionally, the owners retain. HostedHubRoot already retains the owners on mount, and withRootSurfaceLoaded preloads it on a later navigation to '/'. For native-authorization paths in hosted mode, call preloadMatchedRouteChunks(pathname) so the consent chunk downloads during the access check. Add that branch to the :159 guard while keeping the standard-mode exclusion. Fix (2), optional: correct the bootGate comment. If wanted, start preloadHostedRootAppShell() before the access check when a synchronous 'likely signed-in' hint exists, such as canShowHostedReadPreview() with a remembered account or a bearer token present. That is a bandwidth trade-off for signed-out visitors, so only on such a hint. Fix (3): move the orphaned docblock onto bootstrapAccess. Tests: a Vitest unit test for runHostedBootGate with rendersHostedRoot=false, where a never-resolving hostedRoot and a spied preloadHostedRootAppShell must not block or be called. A test that the gate's owners call hostedHubController.selectNode for a routed node once the store reports authenticated, ready and current, with HostedHubRoot never rendered. Extend webBundleSplitting.test to assert that the root does not pass HostedHubRoot.preload() for native-authorization paths. Validate with focused `bun run test` on apps/web for these files and `bun typecheck`.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "None needed. Skipping chunk waits on paths that never render the hosted root changes no auth, E2EE or lifecycle-ownership semantics. The controller stays the single lifecycle owner, and the owners are still retained by HostedHubRoot whenever it mounts.",
+  "repos": "ryco"
+}

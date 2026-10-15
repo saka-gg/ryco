@@ -1,0 +1,31 @@
+{
+  "id": "gap-right-panel-first-open:files-tree-listentries-sort-payload",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (landed in 60633eff3, #710). The client no longer re-sorts the listEntries result on load or refetch. The server listing sends only {path, kind}, is not sorted, and is built once per index and cached. Both tree builders (web turnDiffTree, mobile/client-runtime fileTree) sort each directory's children with a hoisted Intl.Collator, so unsorted server order is safe. The full-list client sort was redundant even before the fix, because the tree builders already sorted per directory. No consumer of listEntries depends on order or on parentPath: PreviewPanel's filter and .some() calls, the mobile ThreadFiles model, and search rows that derive parentPath from the path. Older clients are safe under version skew: at f1be4abc7 the old web client sorted itself, the old mobile tree builder sorted per directory, and no client read parentPath from listEntries. The Hub has no listEntries handling, and its vendored Ryco (7bc39eec3) contains #710.",
+  "evidence": [
+    {"location": "apps/web/src/rpc/useProjectPreview.ts:17-56", "note": "useProjectListEntries returns the atom data unchanged. The old toSorted(localeCompare with an inline options object) in the useMemo and again in refetch (f1be4abc7 lines 40-66) is gone."},
+    {"location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:221-232", "note": "buildWorkspaceListing maps the selected entries to {path, kind} only and does not sort."},
+    {"location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1282-1295", "note": "listEntries caches the payload with index.listing ??= buildWorkspaceListing(index)."},
+    {"location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1051-1054", "note": "This is the only place index.entries is mutated in place (recordFileWrite), and it resets index.listing = null. Rebuilt indexes start with listing: null (lines 524, 659)."},
+    {"location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:480-526", "note": "indexListedFiles no longer sorts. The old server-side localeCompare sorts of directories and files (f1be4abc7 lines 374, 382) are gone."},
+    {"location": "apps/server/src/workspace/Layers/WorkspaceEntries.index.test.ts:119-127", "note": "A test asserts the 25,000 cap, shallowest-first selection, and that no listed entry carries parentPath."},
+    {"location": "apps/web/src/lib/turnDiffTree.ts:36-49", "note": "Hoisted NAME_COLLATOR. compareByName uses collator.compare. Before, it called localeCompare with options on every comparison (f1be4abc7 line 46)."},
+    {"location": "apps/web/src/lib/turnDiffTree.ts:90-107", "note": "The tree builder sorts each directory's subdirectories and files itself. Directory nodes are created through a Map, so input order does not matter."},
+    {"location": "apps/web/src/components/chat/ChangedFilesTree.tsx:30-34", "note": "The tree and the directoryPathsKey expansion key both derive from the sorted tree, not the input order, so unsorted server order cannot reset expansion state."},
+    {"location": "packages/client-runtime/src/state/files/fileTree.ts:19-21", "note": "The mobile tree builder also uses a hoisted collator and sorts per directory (line 63). ensureDirectory handles a file entry that arrives before its directory."},
+    {"location": "apps/web/src/components/PreviewPanel.tsx:357-367", "note": "Consumers are order-independent: filterPreviewProjectEntries (PreviewPanel.logic.ts:182-209) and .some() lookups at lines 367 and 541."},
+    {"location": "packages/client-runtime/src/state/files/search.ts:54", "note": "Mobile search rows derive parentPath with workspaceFileParentPath(path). They do not read it from the wire. ComposerAttachmentMenus.tsx:176 reads parentPath from search results, which still send it (WorkspaceEntries.ts:144-149, 1274)."},
+    {"location": "packages/contracts/src/project.ts:48-52", "note": "ProjectEntry.parentPath is optional, so dropping it from the listing is wire-compatible."}
+  ],
+  "remaining": "",
+  "fixDefects": "None verified. Minor, non-blocking observations: (1) apps/web/src/lib/turnDiffTree.test.ts has no test that input in arbitrary order (for example b.ts listed before a.ts, or file10 before file2) comes out sorted naturally. The web Files tree now depends on that, while the mobile fileTree.test.ts:71 does cover it. (2) No test checks that listEntries returns a fresh listing after recordFileWrite. markRootChanged plus awaitPendingChanges also forces a rebuild, so this cannot go stale in practice. (3) The same anti-pattern survives outside this finding's scope in DiffPanel.tsx:116-126 (sortRenderableFiles calls localeCompare with inline options). It runs over diff files only, a small N cached by the parsed-diff cache, so it is not worth a separate fix.",
+  "implementationSketch": "Nothing is required. Optional hardening: add a turnDiffTree.test.ts case that passes entries in reverse or random order with numeric names and asserts the natural, directories-first output. Add a WorkspaceEntries.index.test.ts case that calls listEntries, then recordFileWrite of a new path, then listEntries again, and checks that the new path is listed. The finding's longer-term idea (load the collapsed tree lazily per directory through WorkspaceEntries.browse) is a separate, larger feature and does not belong to this finding.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

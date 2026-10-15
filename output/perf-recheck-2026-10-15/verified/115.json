@@ -1,0 +1,50 @@
+{
+  "id": "client-runtime-sync:shell-sql-reads-deleted-rows",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Every shell build goes through buildShell (WS subscriptions, Hub mirror, Agent Control, storage, workspace lifecycle). It uses live-only SQL: threads WHERE deleted_at IS NULL, sessions restricted to live threads, latest turns joined to live threads, and worktrees of live projects. latestCompletedTurnAt is a trigger-maintained column (migration 087, registered and also run as a post-migrator repair), so the per-row correlated subquery is gone. The JS deletedAt filter is gone, and concurrent builds are coalesced. A read-only run on the user's real DB (791 threads, 323 live) took 0.68 ms for the live thread query (323 rows), 0.32 ms for live sessions (313 of 732), 0.39 ms for live latest turns and 0.04 ms for updatedAt. The report had 5.47 ms for threads alone. Only the optional partial index is missing, and it is worth well under 0.5 ms.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:878-889",
+      "note": "listActiveThreadShellRows: WHERE deleted_at IS NULL plus scope filter. Unfiltered listThreadRows (:826-835) is used only by getSnapshot/getCommandReadModel (:2419, :2736), which need deleted rows."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1298-1311",
+      "note": "listActiveThreadSessionShellRows restricts sessions to thread_id IN (live threads). Real-DB plan: SEARCH sessions by autoindex using the subquery list."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1360-1385",
+      "note": "listActiveLatestTurnRows joins only live threads. The plan is index lookups per thread with no turn scan (pinned by ProjectionSnapshotQuery.test.ts:131-190, which also asserts deleted threads are absent from the shell)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:712-715",
+      "note": "latestCompletedTurnAt is now sql.literal(\"latest_completed_turn_at\"), a plain column, so the per-row correlated subquery is removed."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/087_ProjectionThreadAnchorsAndStatisticsPartials.ts:32-221",
+      "note": "Adds the column, plus triggers on thread insert and on turns/sessions insert, update and delete, plus a backfill. Registered at apps/server/src/persistence/Migrations.ts:231 and repaired post-migration at :536-546/:746. ProjectionThreads.ts:45/115 upserts with ON CONFLICT DO UPDATE without touching the column, and the column has no other writers, so the trigger value survives."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3010-3215",
+      "note": "buildShell uses only the live-only queries. readShellUpdatedAt aggregates MAX(updated_at) over whole tables via covering indexes (0.04 ms), keeping the old deleted-rows-bump-updatedAt semantics. getShellSnapshot is coalesced across concurrent callers."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:527",
+      "note": "The WS shell subscription calls projectionSnapshotQuery.getShellSnapshot(), and so does hubConnector/threadReadCacheShellMirror.ts:110, so every consumer path gets the fix."
+    },
+    {
+      "location": "/tmp/perf3/v115/q.mjs",
+      "note": "Read-only measurement on ~/.ryco/userdata/state.sqlite: liveThreads 323 rows 0.675 ms (SCAN + TEMP B-TREE), allThreads 791 rows 1.45 ms, liveSessions 313 rows 0.32 ms, liveLatestTurns 0.39 ms."
+    }
+  ],
+  "remaining": "Only the optional partial index from the proposal is missing. There is no index ON projection_threads(created_at, thread_id) WHERE deleted_at IS NULL in apps/server/src/persistence/Migrations, so listActiveThreadShellRows (ProjectionSnapshotQuery.ts:878-889) still does a full table scan plus a temp B-tree sort. On the real DB that whole query takes 0.68 ms, so an index would save a fraction of a millisecond. Not material.",
+  "fixDefects": "None material. A minor, intended semantic shift: buildShell (:3092-3100) now folds only live threads' latest-turn timestamps into updatedAt, whereas the old code included the latest turns of deleted threads. A deleted thread's updated_at is bumped at deletion and still counted by readShellUpdatedAt, so this has no practical effect.",
+  "implementationSketch": "Optional only. Add a migration (next id) that runs CREATE INDEX IF NOT EXISTS idx_projection_threads_live_created ON projection_threads(created_at, thread_id) WHERE deleted_at IS NULL. Check with EXPLAIN QUERY PLAN that listActiveThreadShellRows and listActiveThreadWorkspaceRows switch to SCAN USING INDEX with no TEMP B-TREE. Add a migration test that asserts the index exists and the plan has no 'USE TEMP B-TREE FOR ORDER BY'. Expected gain is sub-millisecond per shell build, so the extra index maintenance on every thread write may not be worth it.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

@@ -1,0 +1,74 @@
+{
+  "id": "thread-and-draft:composer-persist-stringify-per-keystroke",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Independently confirmed DONE. The zustand persist middleware still calls storage.setItem on every set (zustand 5.0.15 middleware.mjs:358-368), but partialize now copies five references (draftSplitStorage.ts:50-61) and the split storage's setItem only stores `pending` and schedules a 300 ms trailing debounce (draftSplitStorage.ts:314-318, apps/web/src/lib/storage.ts:45-51). When the debounce fires, the flush skips drafts whose object identity is unchanged. It partializes and stringifies only the changed draft and writes it only when its JSON differs. Image bytes go to IndexedDB as `bytes: \"local\"`. Write throws are caught per entry. The per-project sidebar selector returns early when draftThreadsByThreadKey keeps the same identity, and setPrompt never replaces it. Both commits (a1e8b31f3, 60633eff3) are ancestors of HEAD, and a unit test spies on JSON.stringify to assert that typing serializes nothing. I found no regression. Some leftovers, all small or outside this finding: (a) if the IndexedDB put fails, a draft keeps a base64 dataUrl in localStorage. That draft is then stringified once per debounced flush, never per keystroke. (b) About 15 per-keystroke selectors (getDraftSessionByRef, resolveComposerDraftKey) still loop over draft sessions. That costs microseconds for realistic counts. (c) The separate PR review draft store (text only, capped at 50) still persists without debounce on each summary keystroke via createJSONStorage. Its writes are KB-sized, so it is not part of this finding.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:2359",
+      "note": "partialize: (state) => snapshotComposerDraftPersistState(state): a reference-only snapshot, nothing serialized per set."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:985-988",
+      "note": "Persist storage is createSplitComposerDraftPersistStorage. createJSONStorage and createDebouncedStorage are gone from this store, and storage.ts no longer exports createDebouncedStorage."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:314-318",
+      "note": "setItem keeps the latest snapshot in `pending` and calls scheduleWrite(flush). Per keystroke it does no stringify and no storage write."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:223-251",
+      "note": "The flush skips any draft whose object is identical to the last one written. Only changed drafts are partialized and stringified, and a write happens only if the JSON differs. Failed writes are untracked so they are retried."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:157-165",
+      "note": "tryWrite catches setItem throws (quota) and calls onWriteError, so a timer no longer throws unhandled and one bad entry cannot lose every draft."
+    },
+    {
+      "location": "apps/web/src/lib/storage.ts:45-51",
+      "note": "createWriteScheduler is a trailing TanStack Debouncer (300 ms). During continuous typing the flush runs only after a pause."
+    },
+    {
+      "location": "apps/web/src/composerDraftPersistence.ts:36-79",
+      "note": "Web binding: localStorage (memory in hosted mode), a debounced scheduleWrite, flushes on beforeunload and pagehide, and releaseAttachments deletes the IndexedDB bytes."
+    },
+    {
+      "location": "apps/web/src/composerDraftPersistence.ts:113-135",
+      "note": "persistComposerImageBytes puts bytes in IndexedDB keyed by attachment id and persists { bytes: \"local\" }. It returns null (dataUrl fallback) only if IndexedDB is unavailable or the put fails."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatComposer.tsx:1496-1515",
+      "note": "The image persist effect tries IndexedDB first and uses a dataUrl only as a fallback. Its deps (composerImages, fileUploadRecords, target) do not change on setPrompt, so typing does not re-run it."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:1526-1545",
+      "note": "setPrompt replaces only draftsByThreadKey and the one draft object (the spread keeps the images reference). draftThreadsByThreadKey keeps its identity."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/sidebarTreeAdapters.ts:180-188",
+      "note": "The per-project draft selector returns its previous rows when draftThreadsByThreadKey has the same identity. sidebarProjectTreeCache.ts:65-71 caches one selector per project, so the early return holds between renders."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStorePersistence.test.ts:85",
+      "note": "The test spies on JSON.stringify: 0 calls while typing 5 keystrokes, 2 calls (draft + index) on flush, and the next keystroke rewrites only that one entry."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:1054-1063",
+      "note": "Minor leftover: getDraftSessionByRef (used by about 15 component selectors) still loops over all draft sessions on every store update. That is microseconds for realistic draft-session counts, and this finding never proposed changing it."
+    },
+    {
+      "location": "packages/client-runtime/src/state/pull-request-review/reviewDraftStore.ts:504-510",
+      "note": "Similar pattern in another store, outside this finding: the review draft store persists through createJSONStorage over raw localStorage with no debounce. ReviewSubmitPopover.tsx:185 calls setSummary on every keystroke. The data is text only and capped at 50 drafts, so the cost is negligible."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No verified defects. Non-blocking leftovers: (1) If IndexedDB is unavailable or a put fails in durable (non-hosted) web mode, ChatComposer.tsx:1501-1515 still persists a base64 dataUrl. That draft's entry is then stringified and written to localStorage on each debounced flush where it changed (after each typing pause, not each keystroke). If that hits the quota, onWriteError only logs and verifyPersistedAttachments drops the attachment so the prompt still saves. In hosted mode verify drops it right away, because readPersistedAttachmentIds returns [] there. (2) The first flush after hydration re-stringifies every hydrated draft once, because hydrated entries have draft:null. This is a one-off and skips the writes because the JSON is identical. (3) The image persist effect still re-runs on every upload-progress tick because fileUploadRecords is a dependency, which was already true before. With IndexedDB this is now cheap (no re-encode), and it has nothing to do with keystrokes.",
+  "implementationSketch": "No work required for this finding. Optional, low value: (a) Debounce the PR review draft store by giving createReviewDraftStore an optional scheduleWrite. Either wrap apps/web/src/pullRequestReviewDraftStore.ts storage with createWriteScheduler(300) and flush on pagehide/beforeunload, or reuse a small debounced PersistStorage that defers partialize and stringify, like draftSplitStorage. Test: spy on JSON.stringify while calling setSummary repeatedly. (b) If many draft sessions become common, add a memoized (environmentId, threadId) -> draftId index derived from draftThreadsByThreadKey identity (a WeakMap cache keyed on the record). Use it in getDraftSessionByRef and resolveComposerDraftKey in packages/client-runtime/src/state/composer/draftStore.ts.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "The fix is entirely client-side persistence. It does not touch auth, E2EE, the hosted lifecycle or the Hub protocol, and hosted mode stays memory-only as before.",
+  "repos": "none"
+}

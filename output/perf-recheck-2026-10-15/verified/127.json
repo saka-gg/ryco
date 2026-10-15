@@ -1,0 +1,63 @@
+{
+  "id": "thread-and-draft:thread-cache-byte-estimate-never-decays",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PR #710 (60633eff3) fixed the main symptom. Deltas and repeated updates of the same row no longer add bytes. Pinned threads no longer count against the idle byte budget. Eviction runs once per chunk instead of once per event. The unit test the finding asked for exists. But the estimate still never decays. Every new row id adds its full size, and the store trims to 500 activities and 2000 messages without the estimate following. Most activity kinds use the event id as the row id, so nearly every tool and subagent update is a new row. Read-only data from the user's state.sqlite: thread b2714955 (the one the finding cites) has 8,312 unique activity rows. The fixed estimate grows to about 10.8 MB while the store keeps only the last 500 rows, about 0.6 MB. Four recent threads would pass the 12 MiB per-entry clamp: 1f88d2e9 (43 MB of unique-row bytes), c3110312 (15.8 MB), 08be3c64 (15.7 MB) and 58db77a7 (12.6 MB). 1f88d2e9 and 58db77a7 each reach the clamp after about 6 hours. A thread at the clamp fills the whole idle budget once it goes idle. Releasing it then evicts every older idle cached thread, or the hot thread is evicted at the next release. The original problem happened on every event. This one happens about once per long session, and the next snapshot resets it.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:215-248",
+      "note": "retainedRowWrite counts message-sent, activity-appended and proposed-plan-upserted, keyed by row id. Other events add nothing. This part of the proposal is done."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:438-451",
+      "note": "recordRetainedEvent counts a repeated row id only by its growth, but every new row id adds bytes plus 256. Nothing is ever subtracted, so rows the store has trimmed stay counted until the next snapshot (434-437)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:452-455",
+      "note": "recordRetainedHistoryPage adds each page's size with no dedup and no decay."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:431-433",
+      "note": "The per-entry clamp equals the whole 12 MiB budget, so one inflated entry can take the entire idle budget by itself."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:173-176",
+      "note": "The store caps a thread at 2000 messages, 200 plans and 500 activities. Trimming happens at 1770-1779 for messages and 1930-1941 for activities. The estimate ignores this cap."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:988-1003",
+      "note": "subagent.updated activities use id: event.eventId, as do many other kinds (lines 565-770). Each runtime update is a new row on the client, so for tool and subagent traffic creating a row is the same as traffic."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:724-740",
+      "note": "evictToCapacity uses byteBudget \"evictable\", which fixes the problem while the hot thread is pinned. Once the hot thread is idle and unviewed, its inflated estimate does count."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:869-887",
+      "note": "Release sets lastAccessedAt to now (878) and runs evictToCapacity (885). Switching away from an idle hot thread at the clamp makes it the newest idle entry. LRU then evicts every older idle entry until the total fits."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/evictionPolicy.ts:25-41",
+      "note": "The byteBudget option is implemented correctly."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.test.ts:665-720",
+      "note": "Tests cover a pinned hot thread and a single row re-sent many times. None covers many unique rows beyond the store cap, or a hot thread being released."
+    },
+    {
+      "location": "~/.ryco/userdata/state.sqlite (read-only, immutable=1)",
+      "note": "b2714955: 25,779 activity events (30.5 MB), 8,312 unique ids. Sum of max row size plus overhead is 10.77 MB. The last 500 rows hold 0.60 MB. Hourly growth of the new estimate: 1.7, 5.9, 8.2, 9.9 and 10.6 MB. 1f88d2e9 reaches 12 MiB at 22:08 after starting at 16:08, and 58db77a7 at 21:11 after starting at 15:08."
+    }
+  ],
+  "remaining": "The estimate still only grows for row-creating events and history pages (supervision.ts:438-455). It ignores the store's trim to MAX_THREAD_ACTIVITIES 500 and MAX_THREAD_MESSAGES 2000 (state/threads/store.ts:173-176). Activity rows use the event id as row id (ProviderRuntimeIngestion.ts:988-1003 and others), so a busy tool or subagent thread reaches 10-12 MiB in about 4-6 hours on real data, while the store holds about 0.6 MB. Once that thread is idle and released, it takes the whole idle budget (per-entry clamp = budget, supervision.ts:431-433). The release at supervision.ts:878-885 then evicts all older idle cached threads (idle less than 5 minutes), or the hot thread itself at the next release. That causes cold window re-opens. It happens once per long session and resets on the next snapshot.",
+  "fixDefects": "This is a defect in the implemented fix, not just the minor residual the auditor described. The auditor called the overestimate 'bounded' and said it evicts entries 'slightly early'. On the user's real data it reaches the 12 MiB clamp on 4 recent threads, and at the clamp releasing that thread evicts every older idle entry. Smaller items: (1) A row already in the snapshot that is later updated live is counted again as a new row (the full size plus 256 B, once per row). (2) History pages add without dedup. (3) No test covers unique rows beyond the store cap, or releasing a hot thread.",
+  "implementationSketch": "1) Move the store caps (MAX_THREAD_MESSAGES, MAX_THREAD_ACTIVITIES, MAX_THREAD_PROPOSED_PLANS in state/threads/store.ts:173-176) into a small shared module, e.g. state/threads/limits.ts, and import them in both store.ts and connection/supervision.ts. 2) In supervision.ts, replace the single rowRetainedBytes map with one insertion-ordered Map per collection (message, activity, plan). In recordRetainedEvent, when a new key makes a collection exceed its cap, delete the oldest key and subtract its bytes, mirroring the store's FIFO trim. Optionally, at recordRetainedSnapshot, record each collection's row count and average row bytes from the snapshot. Then, once live rows plus snapshot rows exceed the cap, also subtract one average snapshot row per new row, so the estimate tracks the retained window. 3) In recordRetainedHistoryPage, key page items by id into the same per-collection maps, which dedups them and subjects them to the same cap, instead of adding the raw page size. 4) Optional hardening: clamp a single entry to MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES / 2, so one entry cannot flush every other idle entry. Alternative to 2-3: add an input callback estimateThreadRetainedBytes(environmentId, threadId) that walks the stored rows with approximateJsonSize. Call it only in evictToCapacity, and only for evictable entries when the cheap estimate is over budget, to re-baseline. Tests in supervision.test.ts: (a) a thread receives 2,000 unique 10 KB activity rows (about 20 MB), goes idle and is released. An older idle 200 KB thread must not be evicted, because the estimate stays at about 500 rows (about 5 MB). (b) A history page re-applied twice is counted once. (c) The existing two tests still pass. Run with bun run test --filter client-runtime, i.e. Vitest scoped to packages/client-runtime. Separately, consider upserting subagent.updated activities by subagent id on the server, which would also cut store churn. That is a data-model change outside this finding.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is a client-only change to cache accounting in packages/client-runtime, with no protocol, auth, hosted lifecycle or product trade-off. The optional server-side change to upsert subagent activities by id would be a separate data-model decision.",
+  "repos": "ryco",
+  "correction": "The auditor marked this DONE and called the remaining overestimate minor ('bounded', 'slightly early'). The cap is the same 12 MiB as the whole budget, and real data shows 4 recent threads would pass it within about 6 hours. Activity ids come from event ids, so 'only row-creating events' still counts about a third of the raw traffic bytes for b2714955 (10.8 of 30.5 MB) and stays about 15 times the retained state. At the clamp, releasing the idle hot thread evicts every older idle entry, the same symptom the finding described, now once per session instead of on every event. So the status is PARTIAL, not DONE."
+}

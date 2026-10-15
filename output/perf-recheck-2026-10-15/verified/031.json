@@ -1,0 +1,55 @@
+{
+  "id": "startup-hang:startup-accept-before-handler-blackhole",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "Two corrections, neither changes DONE. (1) Line numbers: the auditor's citations for httpStartupGate.ts and its test are off. installHttpStartupGate is at :106, not :92. onNewListener is at :201, the close wrapper at :220, the constants at :25/:26, and the 503 headers at :67/:74. The tests are at :81/:97/:112/:123/:130/:140, and the Effect regression test is at :183. (2) The auditor wrote that no in-repo launcher runs the server under Bun. That is wrong: `bun dev:desktop` spawns the backend with the pinned Bun on purpose (apps/desktop/src/main.ts:3186-3200, resolveDevelopmentBunExecutable at :3011, comment: kept for Bun.secrets keychain custody). So the Bun branch without a gate (apps/server/src/server.ts:236-244) does run in desktop development. Packaged desktop, the CLI, web/headless and SSH launches all run under Node and are covered.",
+  "summary": "Confirmed DONE for the Node path, which is what the finding describes and what production runs. The gate is installed in NodeHttpServer.layer's evaluate() before listen() (server.ts:253-258). It holds early requests and upgrades: at most 256, for at most 10 s, then 503 with Retry-After. When the platform's serve() attaches its handlers with server.on, the gate replays the held entries into them; the repo's platform-node patch changes only shutdown, not how handlers attach. If the server closes while still gated, held entries get 503. A real Effect regression test covers it. The desktop's loopback-compression upgrade listener is registered before the gate, so the gate correctly ignores it. The early static handler (added later) cannot shadow any router route. The desktop reloads a document it loaded at bind time if bind-to-serve takes longer than 9 s, so the gate's 10 s 503 cap does not strand the renderer. Clients also retry on 502-504. The only gap is dev-only: under `bun dev:desktop` the Bun branch has no gate, and BunHttpServer's placeholder answers 404 during the startup window.",
+  "evidence": [
+    {
+      "location": "apps/server/src/httpStartupGate.ts:106",
+      "note": "installHttpStartupGate adds the gate's request and upgrade listeners and a newListener hook (:243-245). Held entries are bounded by HTTP_STARTUP_GATE_MAX_PENDING=256 (:25) and MAX_WAIT_MS=10000 (:26). Past either limit: 503 with Retry-After: 1, no-store and Connection: close (:67); raw 503 on upgrade sockets (:74). Entries are dropped when the client closes (:142, :164)."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:201",
+      "note": "onNewListener sees the real handler arrive and replays held requests and upgrades on process.nextTick (releaseRequests :170, releaseUpgrades :181). The close wrapper (:220) answers 503 to everything held when the server closes while gated, and is removed once both handlers attach (:192)."
+    },
+    {
+      "location": "apps/server/src/server.ts:253",
+      "note": "NodeHttpServer.layer(() => { createServer(); installHttpStartupGate(server) (:258) }) is the evaluate()-based wiring the finding proposed. HttpServerLive is still provideMerged low in the graph (:833), so the port binds early, but the gate now covers the window."
+    },
+    {
+      "location": "node_modules/.bun/@effect+platform-node@4.0.2+8fabb152f7781780/node_modules/@effect/platform-node/src/NodeHttpServer.ts:106",
+      "note": "evaluate() runs before server.listen (:128). serve() attaches handlers with server.on('request'/'upgrade') (:194-195), which fires newListener. patches/@effect%2Fplatform-node@4.0.2.patch changes only preemptive shutdown (closes WebSockets first, then closeAllConnections), not how handlers attach, so it is compatible with the gate."
+    },
+    {
+      "location": "apps/server/src/webSocketCompression.ts:58",
+      "note": "In desktop mode the loopback-compression 'upgrade' listener is registered before the gate (server.ts:257 before :258), so the gate does not mistake it for the real handler, as documented at httpStartupGate.ts:101-104."
+    },
+    {
+      "location": "apps/server/src/server.ts:276",
+      "note": "earlyStaticServingLayer serves only static-shell paths during the window: all modes serve assets, and desktop also serves '/'. isEarlyStaticPath (httpStartupGate.ts:263) cannot shadow a router route. Every non-static route is under /api/*, /ws*, /attachments* or /.well-known/*, and no route serves a root-level file with an extension."
+    },
+    {
+      "location": "apps/desktop/src/backendAppWindowLoad.ts:31",
+      "note": "EARLY_APP_LOAD_MAX_HOLD_MS=9000. If bind-to-serve takes longer than the gate's 10 s hold, the window loaded at http-bound is loaded again at http-serving. Clients also retry 502/503/504 (packages/client-runtime/src/connection/primaryAuth.ts:95), so the 503 cap degrades gracefully."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.test.ts:183",
+      "note": "Regression test: builds NodeHttpServer.layer with the gate and HttpRouter.serve behind a slow route layer, sends a request before serve, and asserts 200 'pong'. Unit tests cover hold/replay (:81), upgrade replay (:97), overflow 503 (:112), deadline 503 (:123), close-while-gated 503 (:130) and the early handler (:140)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3186",
+      "note": "launchBackendChild uses resolveDevelopmentBunExecutable() (:3011) in development, so `bun dev:desktop` runs the backend under Bun. That takes the gateless Bun branch at apps/server/src/server.ts:236-244, where BunHttpServer's placeholder fetch returns 404 'not found' until serve (platform-bun 4.0.2 BunHttpServer.ts:142-147). Dev-only."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defects found in the Node gate. One minor path is not covered, and only in development. Under `bun dev:desktop` the backend runs on Bun (apps/desktop/src/main.ts:3186-3200), and the Bun branch of HttpServerLive (apps/server/src/server.ts:236-244) has no gate. It also has no early static serving and writes no http-bound frame. During the bind-to-serve window, BunHttpServer's placeholder therefore answers 404 to HTTP requests and WebSocket upgrades, and primaryAuth treats 404 as non-transient. First dev boot is masked because the dev window waits for http-serving. Exposure is limited to renderer reconnects across a dev backend restart and to other dev clients (for example mobile) pointed at a dev desktop backend. It is a fast 404, not an indefinite hang.",
+  "implementationSketch": "Optional dev-only follow-up for the Bun gap. Add patches/@effect%2Fplatform-bun@4.0.2.patch, registered in root package.json patchedDependencies like the existing platform-node patch. In BunHttpServer.make, replace the 404 placeholder at handlerStack[0] with a gate. It awaits a promise that resolves when serve() pushes the real handler, then forwards to handlerStack[handlerStack.length - 1](request, server). It races a 10 s timer that returns new Response('Ryco is starting', { status: 503, headers: { 'Retry-After': '1', 'Cache-Control': 'no-store', Connection: 'close' } }), and caps pending requests at 256 for parity with httpStartupGate.ts. Check that Bun's server.upgrade() still works when called from the deferred async fetch path. Test it with a Bun-run script or test: build BunHttpServer.layer plus HttpRouter.serve behind a Deferred-gated route layer, send GET and a WS upgrade before serve, and assert 200 and 101. Simpler alternative: accept the gap, since it only affects dev. Running the dev backend under Node instead would drop the Bun.secrets keychain custody that main.ts:3195-3197 calls intentional.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The finding is DONE. The optional Bun follow-up is a dev-only dependency patch with no auth, E2EE, Hub or lifecycle implications. Switching the dev backend to Node instead would be a product/tooling decision because of Bun.secrets keychain custody, but that route is not recommended.",
+  "repos": "ryco"
+}

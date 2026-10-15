@@ -1,0 +1,70 @@
+{
+  "id": "gap-right-panel-first-open:diff-parse-render-eager-index",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Three of the four proposal parts are implemented (60633eff3, 65af92766). The search index is built only while a query is active. The parse scope is the constant \"diff-panel\", so a theme toggle no longer re-parses. Patches of 1,000,000 chars or more parse in a worker with a main-thread fallback. The fourth part is only partly done: using a server revision as the cache key instead of hashing multi-MB strings works for local changes only. Comparison patches still hash the whole text, even though comparison.data.source.revision (a server sha256 that covers the patch and ignoreWhitespace) is already in turnScope. Checkpoint diffs carry no revision in the contract, so they hash too. The memo that is supposed to avoid re-hashing lives on the per-instance ActiveDiffParser (DiffPanel.tsx:399 useState), and DiffPanel unmounts whenever the review tab is left. So every open of the review tab, including the first open this finding is named after, still runs two full FNV passes over a checkpoint or comparison patch. That happens even when the parsed result is already in the module-level renderablePatchCache and the atom cache hands back the same string. The diffParsing.ts docstring wrongly says a remount costs only one string comparison. The residual is small: measured in Node about 1.9 ms for 800 KiB and 4.7 ms for 1.9 MiB at 1x, about 4 times that at 4x CPU.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:694-699",
+      "note": "Search index is built only when diffSearchActive (non-empty normalized query); otherwise EMPTY_DIFF_SEARCH_INDEX. Done."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:603-605",
+      "note": "parseScope = DIFF_PANEL_PARSE_SCOPE (constant). resolvedTheme is not in the memo deps (645-655). Done."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:633-638,657-677",
+      "note": "Patches of OFF_THREAD_DIFF_PARSE_MIN_CHARS (1_000_000, diffParseOffThread.ts:8) or more parse in diffParse.worker.ts. Any failure or the 5 s watchdog falls back to an inline parse. Done."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:623-626",
+      "note": "blobSha is `revision:${localScope}` only for local changes. Comparisons and checkpoint diffs call activeDiffParser.identify(normalizedPatch) synchronously in render, even for patches of 1 MB or more that then go to the worker."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:580-585,611-613",
+      "note": "comparisonRevision already includes comparison.data.source.revision and is in turnScope, so the extra content hash is redundant for comparisons."
+    },
+    {
+      "location": "apps/server/src/vcs/GitComparison.ts:95-108",
+      "note": "The comparison revision is sha256 over [mode, ref/base/head OIDs, ignoreWhitespace, patch], so it fully identifies the patch text."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:3369-3375",
+      "note": "ThreadTurnDiff has only threadId, the turn-count range and diff. Checkpoint diffs have no server revision or OIDs, so the client must hash."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.tsx:399",
+      "note": "const [activeDiffParser] = useState(() => new ActiveDiffParser()). The identify memo is per mounted DiffPanelContent instance."
+    },
+    {
+      "location": "apps/web/src/components/ThreadWorkspacePanel.tsx:1498-1501",
+      "note": "DiffPanel mounts only while activeMode === \"review\". Switching tabs or closing and reopening the panel remounts it with a new ActiveDiffParser, which loses the identify memo."
+    },
+    {
+      "location": "apps/web/src/lib/diffParsing.ts:103-113",
+      "note": "The docstring says 'a refetch, a remount, or any re-render ... costs one string comparison'. The remount case is false because #identified is an instance field."
+    },
+    {
+      "location": "apps/web/src/rpc/providerAtoms.ts:212-213,363-375",
+      "note": "Released checkpoint diffs are kept (8 entries / 16M chars), so a re-open gets the same data object and string, and renderablePatchCache (module-level) hits. Only the full-patch double-FNV hash is redone on every re-open."
+    },
+    {
+      "location": "apps/web/src/components/DiffPanel.identity.browser.tsx:385-420",
+      "note": "The test covers the worker parse and the no-rehash-on-rerender case only. There is no unmount-and-remount case and no comparison case."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/files/usePullRequestDiffFiles.ts:113-116",
+      "note": "Out of scope but the same pattern: the PR review diff still parses large patches synchronously in a useMemo with no off-thread path."
+    }
+  ],
+  "remaining": "The full patch text is still hashed with buildPatchCacheKey (two FNV passes plus a regex trim) synchronously in render for comparison and checkpoint patches, at DiffPanel.tsx:626 via ActiveDiffParser.identify (diffParsing.ts:109-114). (a) Comparisons: the server revision is already available (DiffPanel.tsx:584, GitComparison.ts:95) but is not used as blobSha. (b) Checkpoint diffs: the identify memo is per component instance (DiffPanel.tsx:399), so every open of the review tab re-hashes, even with a warm renderablePatchCache and an unchanged string from the atom cache. The ThreadTurnDiff contract (orchestration.ts:3369) has no revision that would let the very first open skip the hash. Cost is about 2-5 ms at 1x for 0.8-1.9 MiB patches, roughly 4 times that at 4x CPU, per open.",
+  "fixDefects": "The ActiveDiffParser.identify docstring (diffParsing.ts:103-108) says a remount re-delivering an unchanged patch costs one string comparison. The memo is an instance field of a parser created per DiffPanelContent mount (DiffPanel.tsx:399), and DiffPanel unmounts on every review-tab switch or panel close (ThreadWorkspacePanel.tsx:1498). So a remount re-hashes the whole patch. The browser test only checks rerender, so this gap is untested. No functional or correctness defect: the off-thread path has a full inline fallback, the local revision is a server sha256 over root and both patches (GitIndexReview.ts:288), and the cache keys stay content-correct.",
+  "implementationSketch": "1) Comparisons (client only, trivial): in DiffPanel.tsx blobSha (line 623), add a `comparing && comparison.data ? \"revision:comparison\"` branch. turnScope already holds JSON [environmentId, source.revision], and that revision is a server sha256 over the patch and ignoreWhitespace, so it identifies the content. 2) Remount: move the identity memo out of the per-instance ActiveDiffParser into a module-level helper in apps/web/src/lib/diffParsing.ts, either (a) a WeakMap<object, string> keyed by the checkpoint-diff result object (activeCheckpointDiffQuery.data, which lives exactly as long as its providerAtoms cache entry), or (b) a small bounded list (about 8 entries, matching MAX_INACTIVE_CHECKPOINT_DIFF_ENTRIES) of {source, key} compared with === (an O(1) pointer compare for the same atom-cached string). Keep the per-instance #previous for segment reuse. Fix the docstring. 3) Optional, to remove the first-open hash too: add an optional `revision` field to ThreadTurnDiff (packages/contracts/src/orchestration.ts:3369), computed on the server where the checkpoint diff is produced (sha256 over [threadId, fromTurnCount, toTurnCount, ignoreWhitespace, diff], or the from/to checkpoint commit OIDs plus ignoreWhitespace). Use `revision:${revision}` as blobSha when present and fall back to identify() for older servers. Tests: in DiffPanel.identity.browser.tsx, extend 'never re-hashes unchanged text' with unmount and a fresh render of the same patch, asserting wholePatchHashes stays 1 (0 with option 3). Add a comparison fixture asserting no whole-patch hash. Add a unit test for the module-level memo bound.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Client-only cache-key change for parts 1-2. Part 3 adds an optional field to an RPC contract, which is additive and backward compatible: no Hub protocol, auth, E2EE or hosted-lifecycle impact.",
+  "repos": "ryco"
+}

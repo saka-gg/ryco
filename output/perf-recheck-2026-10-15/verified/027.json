@@ -1,0 +1,79 @@
+{
+  "id": "server-boot:desktop-provider-status-cache-never-read",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE by 60633eff3 (#710), which is also in the Hub-vendored 7bc39eec3. The desktop-only empty registry and the Effect.sleep(100ms) reconcile are gone. Every mode now reads settings once, derives the configured identities without building drivers (listConfigured), and reads <providerStatusCacheDir>/<instanceId>.json for each one in parallel during the ProviderRegistry layer build. The validated snapshots go into providersRef before the HTTP listener exists, so the first server-config snapshot carries the last-known providers and models. When a driver arrives after the boot gate opens, its cached entry is either adopted (fingerprint match) or kept until a demand probe replaces it. It is never overwritten by a placeholder, because makeManagedServerProvider never probes or publishes on construction. I could not find another composition, caller or mode with the old gap.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:124-150",
+      "note": "Registry starts empty in every mode (no config.mode branch remains). Settings are read once, the map comes from deriveProviderInstanceConfigMap, and identities come from resolveConfiguredProviderIdentities (schema decode only, no driver.create)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:156-243",
+      "note": "plannedIdentities is exposed as listConfigured (230). Drivers are built only after gateReleased (187-208). getInstance forces the build on demand for configured ids (218-227). The old DesktopSettingsReconcileLive with Effect.sleep(\"100 millis\") at f1be4abc7 was removed."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts:157-195",
+      "note": "resolveConfiguredProviderIdentities and resolveInstanceEnabled use the same decode and enabled derivation as buildEntry (266-275), so the seeded identity's enabled flag matches what the driver later reports."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:272-326",
+      "note": "Boot reads listConfigured and reads one cache file per identity in parallel inside the provider.status-cache.seed phase. Identity is validated by hydrateCachedProviderFromConfig, and mismatches are logged and dropped."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:931-936",
+      "note": "Persisted snapshots are upserted into providersRef at layer build with publish:false and persist:false, before any driver exists."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:725-758",
+      "note": "settleBootArrival either adopts the persisted snapshot (matching fingerprint) or keeps the cached entry. The driver's placeholder is upserted only when providersRef has no entry for the instance."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:838-852",
+      "note": "Instances still awaiting driver arrival stay in knownInstanceIds, so the prune at 892-902 does not drop cached entries while drivers build. Instances removed from settings before they arrived are dropped."
+    },
+    {
+      "location": "apps/server/src/provider/makeManagedServerProvider.ts:47-52",
+      "note": "Construction never probes and never publishes the initial placeholder to streamChanges, so a kept cached entry is not replaced by 'Checking...' when the driver's change subscription starts (ProviderRegistry.ts:816-821)."
+    },
+    {
+      "location": "apps/server/src/provider/providerStatusCache.ts:54-76",
+      "note": "Validates instanceId, driver and enabled against the settings-derived identity, and takes displayName and accentColor from current settings."
+    },
+    {
+      "location": "apps/server/src/server.ts:525-531",
+      "note": "The only composition of ProviderRegistryLive and ProviderInstanceRegistryHydrationLive, shared by desktop, web and headless."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1153-1158",
+      "note": "markHttpServing (called from server.ts:723 after HttpRouter.serve) releases the boot gate, so driver construction is off the listener critical path."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:1173-1175",
+      "note": "loadServerConfig reads providerRegistry.getProviders, which now returns the seeded list. The auditor's 1160 is loadDiagnosticsSnapshot."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:751-762",
+      "note": "revalidateStale is forked only after the snapshot is emitted. If a client asked before the drivers arrived, a pass reruns on boot arrival (ProviderRegistry.ts:866-868)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.test.ts:1601-1650",
+      "note": "With the real hydration layer, listConfigured is populated from settings and listInstances stays empty until the gate opens."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.test.ts:3098-3171",
+      "note": "Covers serving the persisted snapshot before the driver exists, adoption on fingerprint match, keeping a stale snapshot until a demand probe, and the placeholder when nothing was persisted."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None found. Minor non-defects: (1) No single test drives the real ProviderInstanceRegistryHydrationLive plus an on-disk cache file through to getProviders before the gate opens. Each half is tested separately (ProviderRegistry.test.ts:1601 and the fake-registry tests at 3098+). (2) A seeded snapshot that was not adopted can show cached usage limits (rateLimits carry no timestamp) until the demand pass probes it. That pass has concurrency 2 and a 250 ms stagger, so with many providers the window is a few seconds. This is an accepted last-known-state tradeoff. (3) The enabled-mismatch rejection at providerStatusCache.ts:62 falls back to the placeholder after an offline toggle, as the auditor noted. This is deliberate.",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains. The fix is merged and covers every mode.",
+  "repos": "none",
+  "correction": "Small citation fix only: the server-config snapshot reads getProviders in loadServerConfig at apps/server/src/ws/context.ts:1175. Line 1160 is loadDiagnosticsSnapshot. The classification stands."
+}

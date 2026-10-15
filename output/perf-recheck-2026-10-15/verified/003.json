@@ -1,0 +1,55 @@
+{
+  "id": "desktop-boot:v8-compile-cache-backend-and-main",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "DONE is right: the cache is on and working. The auditor was wrong to report no fix defects and to call the inherited variable harmless. RYCO_COMPILE_CACHE_DIR is never stripped, so every terminal, provider CLI and agent shell started by the desktop backend inherits it. apps/server/src/bin.ts honors it in any Ryco server or CLI process, so other Ryco instances started from inside Ryco Desktop write into Desktop's per-version cache. Those instances can come from the dev checkout, worktrees, smoke scripts or a Bun-run dev backend. Pruning only removes other version directories, so those entries are never cleaned up while the version stays the same.",
+  "summary": "Implemented in #710 (60633eff3) and working on this machine. The cache is enabled in the Electron main process (compileCache.cjs is required before desktopMain.cjs), in the early and restarted backend (via --require), in the MCP bridge child, and in bin.ts for the stdio proxy, device host and MCP bridge helper modes. It uses a per-version directory under userData, is skipped for AppImage and dev builds, and is flushed after backend startup. I checked the installed app's cache. ~/Library/Application Support/ryco/compile-cache/0.1.31/v24.21.0-arm64-8c6a5e03-501 holds entries keyed to app.asar/.../desktopMain.cjs (CJS key 626ff022) and to file://.../app.asar/apps/server/dist/bin.mjs (ESM key bcd02a4f). So both the main process and the backend persist bytecode. One minor side-effect defect: the variable leaks into foreign processes. The same directory also holds 4,761 Node entries (101 MB) in a second subdirectory keyed to /Users/laurinfrank/Code/ryco/apps/server/dist/*.mjs and that checkout's node_modules, plus a Bun 1.4.3 subdirectory (131 files, 37 MB). That is about 138 MB of the 198 MB total, and none of it is pruned while the app version stays 0.1.31.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:35",
+      "note": "enableDesktopCompileCache sets RYCO_COMPILE_CACHE_DIR and requires compileCache.cjs before desktopMain.cjs is required (line 172). It is called on the bridge path (132) and the normal path (150)."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:40",
+      "note": "In Node mode the backend args include --require <compileCache.cjs>. The early backend (desktopEntry.ts:99) and the restart path (main.ts:3187-3195, COMPILE_CACHE_HOOK_PATH main.ts:330) both use them."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:135",
+      "note": "The MCP bridge forwarder spawns its Node-mode child with --require compileCache.cjs."
+    },
+    {
+      "location": "apps/server/src/bin.ts:34",
+      "note": "enableCompileCacheBestEffort() runs before the dynamic imports of the stdio proxy, device host, external MCP bridge and cliMain. It honors RYCO_COMPILE_CACHE_DIR in any process (apps/server/src/compileCache.ts:22-46), so the stdio proxy that cursor-agent spawns (CursorAdapter.ts:603, ProviderInjection.ts:289) is cached."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1147",
+      "note": "flushCompileCacheBestEffort() runs once startup completes, so the cache survives a backend that is later SIGKILLed."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1623",
+      "note": "pruneStaleDesktopCompileCaches runs on the first backend ready. It removes only sibling version directories and never touches entries inside the current version directory."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:70",
+      "note": "createDesktopBackendChildEnv copies process.env and does not delete RYCO_COMPILE_CACHE_DIR. TERMINAL_ENV_BLOCKLIST (apps/server/src/terminal/Layers/Manager.ts:105) blocks only PORT, ELECTRON_RENDERER_PORT and ELECTRON_RUN_AS_NODE. Terminals, provider CLIs and agent shells therefore all inherit the variable."
+    },
+    {
+      "location": "~/Library/Application Support/ryco/compile-cache/0.1.31 (on-disk, read-only check)",
+      "note": "This directory is 198 MB and holds three subdirectories. v24.21.0-arm64-8c6a5e03-501 (1,450 entries, 60 MB) contains Desktop's own entries: desktopMain.cjs and the app.asar bin.mjs. v24.21.0-arm64-964aae3f-501 (4,761 entries, 101 MB) contains entries whose crc32 keys match file:///Users/laurinfrank/Code/ryco/apps/server/dist/*.mjs and that checkout's node_modules/.bun, so those are dev-checkout servers run from Ryco-spawned shells. v1.4.3-aarch64-c6da4a4d3-501 (131 files, 37 MB) was written by Bun 1.4.3, the repo's pinned Bun, which Desktop never runs in packaged mode."
+    },
+    {
+      "location": "apps/server/src/compileCache.ts:34",
+      "note": "The doc says the API is 'Absent under Bun', but the Bun-tagged cache subdirectory shows Bun 1.4.3 implements module.enableCompileCache and honors the directory. The comment is stale."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "This is a minor defect that costs disk space, not runtime speed: RYCO_COMPILE_CACHE_DIR leaks into foreign processes. Desktop sets it in its main process env (desktopEntry.ts:42), and createDesktopBackendChildEnv (backendLauncher.ts:79) passes it to the backend. Neither the backend env, the terminal env blocklist (terminal/Layers/Manager.ts:105) nor provider spawns strip it. bin.ts:34 then honors it in every Ryco server, CLI or helper process, including copies from other checkouts or worktrees and Bun-run dev backends (a dev desktop launched from a Ryco terminal inherits it). Those processes write entries keyed by their own paths into Desktop's per-version directory. pruneStaleDesktopCompileCaches (compileCacheDirectory.ts:43) only deletes other version directories, so these entries pile up until the version string changes. On this machine about 138 MB of the 198 MB cache came from such processes in two days. A related issue: the server bundle has hashed chunk names, so local rebuilds that keep the version (this machine runs repeated 0.1.31 builds) add a new set of entries on every build. Release updates bump the version, so pruning bounds this for normal users. A smaller nit: the 'Absent under Bun' comments in apps/server/src/compileCache.ts are stale.",
+  "implementationSketch": "1) Stop the variable from reaching processes Desktop does not own. In apps/server/src/compileCache.ts, have enableCompileCacheBestEffort return the directory it resolved. In bin.ts, delete process.env.RYCO_COMPILE_CACHE_DIR right after enabling, so terminals, provider CLIs, git and agent shells no longer inherit it. The desktop main process can keep it, because restarts pass it through backendChildEnv. 2) Keep the stdio proxy on the Desktop cache by passing the captured directory explicitly in the ProviderInjection stdio-proxy mcpServer env (apps/server/src/agentControl/ProviderInjection.ts:291), only when it was set. Alternatively, let the proxy fall back to Node's default tmpdir cache, which still gives the speedup. 3) Optional, to bound same-version rebuilds: add a build identity (commit or build id from the packaged package.json) to resolveDesktopCompileCacheDir, so each rebuild gets a fresh directory and the old one is pruned. 4) Update the stale 'Absent under Bun' comments. Tests: compileCache.test.ts should assert the variable is consumed (removed from env) after enabling. Add a ProviderInjection test that the stdio-proxy env carries the directory when set. Add a terminal Manager or backendLauncher test that spawned terminal env lacks RYCO_COMPILE_CACHE_DIR. Manual check: launch the packaged app, open a Ryco terminal and confirm `env | grep RYCO_COMPILE_CACHE_DIR` prints nothing.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local cache-directory plumbing only. No auth, E2EE, Hub protocol or hosted lifecycle semantics are involved.",
+  "repos": "ryco"
+}

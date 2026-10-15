@@ -1,0 +1,71 @@
+{
+  "id": "dedicated-pages:mcp-settings-double-fetch",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "DONE is correct, but the evidence overstates the server-side gain and the defect list misses the most consequential problem. (1) The auditor wrote that a repeat listServers within 5 s 'spawns no codex app-server and does no workspace discovery'. That is wrong. The RPC goes through ProviderMcpRegistry.route -> findAdapter (apps/server/src/mcp/ProviderMcpRegistry.ts:154-170, 206-207), which runs every adapter's listWorkspaces one after another before the Codex cache is checked. That includes Codex discoverWorkspaces with materializeCodexShadowHome (CodexMcpService.ts:594) and OpenCode discover, which spawns `opencode --version` for each enabled OpenCode instance (OpenCodeMcpAdapter.ts:347). On a cache miss, CodexMcpService.findWorkspace (line 785) runs Codex discovery a second time. (2) The 5 s cache is per CodexMcpService instance, and there are several of them. makeWsRpcContext builds one per WebSocket connection (ws/context.ts:263; ws.ts:27 'Per-connection RPC layer'), and AgentControlExternalInstallation builds a process-wide one (AgentControlExternalInstallation.ts:537). Invalidation in one instance never reaches the others. (3) The cache is also read by Agent Control's optimistic-concurrency guards: CodexMcpAdapter inspect/install/remove call service.listServers (CodexMcpAdapter.ts:14-15, 75). Those guard reads can therefore be up to 5 s stale. The auditor did not mention this.",
+  "summary": "The double fetch on open is fixed. loadWorkspaces no longer depends on selectedWorkspaceId: the selection lives in a ref, the effect runs once per mcpApi, and mcpApi stays stable because the WeakMap API lookup and the panel key remount it only on a node change. Selector changes trigger exactly one loadServers, and a generation token drops responses that arrive late. A browser test asserts 1x listWorkspaces and 1x listServers on open. On the server, a 5 s per-workspace listing cache in CodexMcpService skips the codex app-server spawn on a quick reopen, and mutations do mutate+reload+list in one app-server session. That is the proposal's 'and/or cache' option; no pooled app-server was built. The described cost (2x loads and 2x app-server spawns per open, plus the selection race) is gone. Several fix defects remain, all edge cases. (a) If a mutation result lands while a non-quiet loadServers is in flight, applyServersResult bumps the generation and refreshing stays true, leaving Refresh and Reload disabled. (b) The server cache is per instance (one per WebSocket connection plus one for Agent Control), not process-wide. (c) A listing that started before a mutation can overwrite the fresh post-mutation cache entry. (d) Agent Control's install/remove fingerprint guards now read through the cache. (e) Cache hits still pay full all-adapter discovery in ProviderMcpRegistry.findAdapter, including an `opencode --version` spawn per enabled OpenCode instance.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.tsx:864-868",
+      "note": "selectedWorkspaceIdRef and a stable selectWorkspace (deps []) replace the selectedWorkspaceId dependency."
+    },
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.tsx:902-929",
+      "note": "loadWorkspaces deps are [loadServers, mcpApi, selectWorkspace]. The effect runs once per mcpApi, so the self-retrigger is gone."
+    },
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.tsx:837-841",
+      "note": "mcpApi is memoized on settingsTarget, which is a new object every SettingsPage render. It stays referentially stable because createEnvironmentApiLookup caches the api per WsRpcClient (packages/client-runtime/src/connection/environmentApi.ts:213-231). SettingsPage panelKey (SettingsPage.tsx:795, 1057) remounts the panel on a node change."
+    },
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.tsx:870-875",
+      "note": "DEFECT: applyServersResult bumps serversGenerationRef for mutation results. Any non-quiet loadServers still in flight then fails isCurrent() and its finally (line 896) skips setRefreshing(false). No mutation resets refreshing, so Refresh (disabled at 1072) and Reload (disabled at 1085) stay disabled until a workspace switch or a remount. Server toggles are not disabled while refreshing, so a user can reach this state."
+    },
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.tsx:1059-1062",
+      "note": "The workspace switch now does a single loadServers. The previous workspace's snapshot is not cleared (this predates the fix), so its server cards briefly render under the new workspace's header and capabilities, and a click there mutates the newly selected workspace."
+    },
+    {
+      "location": "apps/web/src/components/settings/McpServersSettings.browser.tsx:136-146",
+      "note": "Regression test for single load on open. Nothing tests the selection race, the refreshing reset, or the server cache."
+    },
+    {
+      "location": "apps/server/src/mcp/CodexMcpService.ts:756-792",
+      "note": "5 s recentServerLists cache, checked at 784 before findWorkspace/withClient. rememberServerList (767-779) overwrites unconditionally, so a listing that started before a mutation and finishes after it replaces the fresh entry with pre-mutation data for 5 s."
+    },
+    {
+      "location": "apps/server/src/mcp/CodexMcpService.ts:795-816",
+      "note": "reloadAndList invalidates, then does mutate + reload + list in one app-server session. startOauthLogin invalidates at 891."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:263",
+      "note": "makeCodexMcpService runs inside makeWsRpcContext, which is built per WebSocket connection (apps/server/src/ws.ts:27; ws/index.ts:36). The cache and its invalidation are therefore per connection."
+    },
+    {
+      "location": "apps/server/src/agentControl/Layers/AgentControlExternalInstallation.ts:537",
+      "note": "A second, process-wide CodexMcpService with its own cache. Edits made through the Settings page connection never invalidate it, and the reverse is also true."
+    },
+    {
+      "location": "apps/server/src/mcp/adapters/CodexMcpAdapter.ts:14-15",
+      "note": "inspect, used for install's before/after fingerprint checks and for verify, plus remove's preservedUserChanges check (line 75), read through the cached service.listServers. The compare-and-set guards can act on a listing up to 5 s old."
+    },
+    {
+      "location": "apps/server/src/mcp/ProviderMcpRegistry.ts:154-170",
+      "note": "findAdapter calls adapter.listWorkspaces for every adapter, one after another, on every routed listServers or mutation. This happens before the Codex cache is consulted, so cache hits still pay all-adapter discovery."
+    },
+    {
+      "location": "apps/server/src/mcp/adapters/OpenCodeMcpAdapter.ts:347",
+      "note": "OpenCode discover spawns `<binary> --version` (5 s timeout) for each enabled OpenCode instance. It runs on every listWorkspaces and on every routed MCP call through findAdapter, cache hits included."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1) Client, refreshing can stick (McpServersSettings.tsx:870-875, 895-897). Mutation results bump the same generation that gates the in-flight load's setRefreshing(false). If a mutation lands while a Refresh or workspace-switch load is pending, refreshing stays true and the Refresh/Reload buttons stay disabled until a workspace switch or a remount. 2) Server cache scope (CodexMcpService.ts:756; ws/context.ts:263; AgentControlExternalInstallation.ts:537): the cache is per CodexMcpService instance, which means one per WebSocket connection plus one Agent Control instance, so invalidation is not shared. After an edit made elsewhere (another tab or device, Agent Control install/disconnect, or an external config edit), a listing can be stale for up to 5 s. 3) Stale overwrite (CodexMcpService.ts:767-792): rememberServerList stores whatever finishes last, so a listing that started before a mutation can replace the post-mutation entry. 4) Guard reads (CodexMcpAdapter.ts:14-15, 75): Agent Control's install 'before' check and remove's preservedUserChanges check read through the cache. Within the 5 s window they can miss a user edit, then overwrite or delete a user-modified entry. The window is narrow, but these are data-preservation guards. 5) Cache placement: ProviderMcpRegistry.findAdapter (154-170) runs every adapter's discovery serially before the cache, including an `opencode --version` spawn per enabled OpenCode instance (OpenCodeMcpAdapter.ts:347). A miss also runs Codex discovery twice (findAdapter, then findWorkspace at CodexMcpService.ts:785). 6) Minor: loadWorkspaces (902-925) has no generation or unmount guard, so a pending listWorkspaces from an old mcpApi (client replaced on reconnect) can toast errors or clear loading after the new load starts. Server-side calls are not coalesced (concurrent misses each spawn an app-server). No test covers the cache.",
+  "implementationSketch": "Client (apps/web/src/components/settings/McpServersSettings.tsx): keep two refs. loadGenerationRef is bumped only by loadServers and gates setRefreshing(false). applyGenerationRef is bumped by both loadServers and applyServersResult and gates setSnapshot. Alternatively, clear refreshing in applyServersResult when it supersedes a pending load. On a workspace switch, set the snapshot to null (or hold a snapshotWorkspaceId and render cards only when it equals the selection) so stale cards cannot mutate the new workspace. Give loadWorkspaces a generation or AbortController and cancel it in the effect cleanup. Browser tests: (a) Refresh pending + toggle resolving first -> Refresh button becomes enabled again; (b) switch A->B with A resolving last -> B's servers shown; (c) unmount during load -> no toast. Server: move recentServerLists out of makeCodexMcpService into a process-wide Layer (e.g. CodexMcpListCache, keyed by workspaceId) that ws/context and AgentControlExternalInstallation share, so invalidation is global. Add a per-workspace epoch that every forget increments. listServersForWorkspace captures the epoch before spawning and only remembers when it is unchanged. Coalesce concurrent misses with a per-key Deferred or Effect.cached. Add a `fresh` path (internal readServersFresh, not on the RPC) that CodexMcpAdapter's inspect/install/remove use, so fingerprint guards never read cached data. In ProviderMcpRegistry, memoize adapter discovery with a short TTL (or keep a workspaceId->adapter index from the last listWorkspaces, revalidated on miss). Cache OpenCode probeVersion by binaryPath plus binary mtime/size. Pass the resolved runtime from the registry into the Codex service so a miss does not rediscover. Tests in apps/server/src/mcp: a stubbed withClient/spawner counting spawns verifies a hit skips the spawn, a mutation invalidates across two service handles, a list started before a mutation does not overwrite the post-mutation entry, and guard reads bypass the cache.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local client-state and server-cache correctness fixes. No auth, E2EE, hosted lifecycle, or Hub protocol impact, and no product trade-off beyond keeping the existing 5 s reuse window.",
+  "repos": "ryco"
+}

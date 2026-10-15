@@ -1,0 +1,63 @@
+{
+  "id": "server-boot:node-compile-cache",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. In #710 (60633eff3), apps/server/src/bin.ts became a tiny entry shim: its only static imports are compileCache.ts and stdioProxyProtocol.ts. It enables the V8 compile cache, then loads the server graph by dynamic import. The built dist/bin.mjs is 3.2 KB, and its only static import is node:module. Desktop enables the cache for the packaged Electron backend through `--require compileCache.cjs` plus a per-version userData directory. This covers both the early-spawn and the restart paths, and old version directories are pruned. The server calls flushCompileCache after 'startup phase complete'. On this machine the installed Ryco.app writes entries under its own Electron tag (v24.21.0-arm64-8c6a5e03), so the cache works in the packaged app. Two small side effects were found. (1) The desktop sets RYCO_COMPILE_CACHE_DIR in its own process.env. Every provider agent session inherits it (only terminals and side questions strip RYCO_*). Any Ryco dev server or CLI that an agent runs under Homebrew Node or Bun then writes into the packaged app's version directory, which Node never evicts. (2) The 'Absent under Bun' comments are wrong: Bun 1.4.x implements module.enableCompileCache.",
+  "evidence": [
+    {
+      "location": "apps/server/src/bin.ts:10-11",
+      "note": "The only static imports are stdioProxyProtocol.ts and compileCache.ts. enableCompileCacheBestEffort() runs at line 34. Every heavy graph is a dynamic import: device host at :39, stdio proxy at :47, MCP bridge at :51, cliMain at :75."
+    },
+    {
+      "location": "apps/server/dist/bin.mjs:3",
+      "note": "The built entry (3,226 bytes, newer than HEAD) has one static import, `node:module`. The cliMain, stdioProxy, bridge and deviceHostWorker chunks are dynamic imports (lines 46-69), so the cache is enabled before the 4.8 MB graph is compiled."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:125-133",
+      "note": "There IS a regression test, contrary to the auditor. 'keeps the process entry free of the server graph' asserts that bin.ts's static closure is exactly {bin.ts, stdioProxyProtocol.ts, compileCache.ts} with externals ['node:module']. Lines 210-218 also assert that a current built bin.mjs has no static chunk imports."
+    },
+    {
+      "location": "apps/server/src/compileCache.ts:36-55",
+      "note": "Best-effort enable (RYCO_COMPILE_CACHE_DIR, else NODE_COMPILE_CACHE, else tmpdir) and flush. The doc comments at :34 and :50 say the API is absent under Bun. That is false for Bun 1.4.x: `bun -e` shows enableCompileCache/flushCompileCache are functions, and Bun writes a v1.4.0-aarch64-* cache directory."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1142-1147",
+      "note": "flushCompileCacheBestEffort() runs right after 'startup phase complete', in both the headless and browser branches. This is proposal part 3."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:35-48",
+      "note": "enableDesktopCompileCache sets process.env.RYCO_COMPILE_CACHE_DIR = userData/compile-cache/<version> and requires compileCache.cjs. It is used for the MCP bridge (:132-135) and the normal launch (:150). The early backend gets --require through desktopBackendSpawnArgs (:99-103)."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:32-54",
+      "note": "Shared spawn args add `--require <compileCache.cjs>` for Node-mode (Electron) backends. The main-bundle restart path uses the same helper (apps/desktop/src/main.ts:3186-3195)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1618-1628",
+      "note": "Stale per-version cache directories are pruned after the first ready backend. Pruning keys on the version string only."
+    },
+    {
+      "location": "apps/server/src/terminal/Layers/Manager.ts:905-913",
+      "note": "Terminals strip RYCO_* env vars, but provider agent sessions inherit backend process.env unfiltered. This agent session (spawned by Ryco Desktop) has RYCO_COMPILE_CACHE_DIR=~/Library/Application Support/ryco/compile-cache/0.1.31 in its env."
+    },
+    {
+      "location": "~/Library/Application Support/ryco/compile-cache/0.1.31 (runtime state, outside repos)",
+      "note": "There are 198 MB in 3 tag directories after about 2 days: v24.21.0-arm64-8c6a5e03 (60 MB, 1,450 entries) is the installed Ryco.app Electron runtime (verified by running its binary with ELECTRON_RUN_AS_NODE), which shows the packaged cache works. v24.21.0-arm64-964aae3f (101 MB, 4,761 entries) is Homebrew Node 24.21 (verified). v1.4.3-aarch64-* (37 MB) is Bun. So about 138 MB were written by Ryco dev processes that agents started and that inherited the variable."
+    },
+    {
+      "location": "apps/desktop/src/compileCacheDirectory.ts:4-10",
+      "note": "The rationale that 'third-party Node programs the backend spawns never write into Ryco's cache' holds. Ryco's own bin.ts, run from other checkouts or under Bun, does write into it."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The cache is wired correctly and the described per-boot compile cost is removed for packaged desktop and the npm CLI. Minor defects: (1) The env var leaks. desktopEntry.ts:42 puts RYCO_COMPILE_CACHE_DIR into Electron main's process.env. The backend inherits it, and so does every provider agent session it starts; only terminals strip RYCO_*. bin.ts honours the variable under any runtime (compileCache.ts:22-27), so Ryco dev servers or CLIs that agents run from source under Homebrew Node or Bun write into the packaged app's per-version directory. Node never evicts entries, and pruning only happens when the app version changes. Measured here: 138 of 198 MB in the 0.1.31 directory came from non-Electron runtimes after about 2 days. Local rebuilds that keep the same version string (0.1.31 built repeatedly from Oct 12 to Oct 14) also accumulate in the Electron tag directory without pruning. (2) The compileCache.ts:34/:50 comments claim the API is absent under Bun. Bun 1.4.x implements it, so the Bun dev desktop backend and `bun` dev runs also enable a JSC bytecode cache, which the comments do not anticipate. (3) A correction to the auditor: there is a regression test (serverBundleBoundaries.test.ts:125-133 and :210-218) that fails if bin.ts gains a heavy static import.",
+  "implementationSketch": "Optional cleanup, low priority. (a) In apps/server/src/compileCache.ts resolveCompileCacheDirectory, honour RYCO_COMPILE_CACHE_DIR only when running under the Electron runtime. Add a `versions = process.versions` parameter and return undefined unless versions.electron is set. Homebrew Node and Bun processes then fall back to Node's default (NODE_COMPILE_CACHE or tmpdir). The packaged backend, MCP bridge and agent-launched stdio proxy (all Electron in Node mode) keep the shared directory. Alternative: delete process.env.RYCO_COMPILE_CACHE_DIR in bin.ts right after enabling, so descendants never see it; the stdio proxy graph is under 10 files, so losing the shared directory there costs nothing. (b) Decide whether the Bun dev runtime should use the cache. Either skip when process.versions.bun is set, or fix the 'Absent under Bun' comments at compileCache.ts:34 and :50. (c) Optionally key the desktop directory on version plus a build id (for example the server dist chunk hash or app.asar mtime) in compileCacheDirectory.ts resolveDesktopCompileCacheDir, so same-version rebuilds get pruned too. Tests: extend apps/server/src/compileCache.test.ts with cases for 'RYCO_COMPILE_CACHE_DIR ignored without versions.electron' and 'used with versions.electron'. If (c) is done, update compileCacheDirectory.test.ts.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Only the cache-directory scoping in a local optimisation changes. It has no auth, E2EE, Hub or lifecycle impact. Whether dev Bun should use the cache is a trivial engineering choice.",
+  "repos": "ryco",
+  "correction": "The auditor said there is no regression test that keeps bin.mjs a tiny chunk. That is wrong: serverBundleBoundaries.test.ts:125-133 asserts bin.ts's exact static closure, and :210-218 asserts the built bin.mjs has no static chunk imports. The auditor also reported no functional side effects. They missed that RYCO_COMPILE_CACHE_DIR leaks to provider agent sessions, letting Ryco dev/CLI processes under Homebrew Node or Bun fill the packaged app's cache (about 138 MB observed). They also missed that the 'no-op under Bun' claim (copied from the code comments) is false for Bun 1.4.x. Status DONE stands."
+}

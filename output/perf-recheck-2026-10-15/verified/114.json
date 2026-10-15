@@ -1,0 +1,75 @@
+{
+  "id": "client-runtime-sync:monolithic-unbounded-shell-snapshot",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. The two parts that mattered are fixed and shipped to the Hub. First, the shell snapshot is paged: every client in the shared client-runtime asks for 'paged' delivery, so the server sends messages of at most 1 MiB, under the 4 MiB relay cap, and the client reassembles them into one snapshot it applies at once. Second, the extra whole-snapshot decodeShellSnapshot is gone, and a test checks that per-row decoding already normalizes. The Hub vendors 7bc39eec3, which contains both commits, so hosted web pages too. Not done: archived threads are still in every boot snapshot, no wire fields were trimmed, and there is no Worker decode. The paging fix also has a defect the auditor missed. pageShellSnapshot always starts a new message for archived threads. Every RPC chunk waits for a client ack, and the client gains nothing from the split because the assembler holds everything until snapshot-end. So any user with at least one archived thread gets 2 messages instead of 1, which adds a full round trip before the shell can be applied. On hosted web that round trip goes through the relay and happens on every connect, because hosted never resumes. The user's real DB has 27 archived of 323 live threads.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/shellSnapshotPages.ts:74",
+      "note": "`if (archived.length > 0 && (page.length > 0 || message.length > 0)) closeMessage();` The message always holds at least snapshot-begin, so any archived thread forces a second message even when the whole shell fits in one 1 MiB page."
+    },
+    {
+      "location": "apps/server/node_modules/effect/src/rpc/RpcServer.ts:457",
+      "note": "With supportsAck, streamEffect writes each emitted array as one Chunk and then waits on latch.await before pulling the next one. RpcByteSession (relay) sets supportsAck: true (apps/server/src/ws/RpcByteSession.ts:328). The client sends Ack only after offering the chunk (effect RpcClient.ts:600-610). So each page message costs one round trip."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/shellSnapshotAssembly.ts:41",
+      "note": "The assembler buffers snapshot-threads and emits only at snapshot-end. Nothing uses the unarchived-first split to apply early, so the split is pure latency. archivedThreadCount is read nowhere except tests."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:857",
+      "note": "resumeShell is false when hostedGeneration !== null. Hosted web takes a full shell snapshot on every connect and reconnect, so it pays the extra relay round trip every time."
+    },
+    {
+      "location": "apps/server/src/ws/context/shellSnapshotPages.test.ts:65",
+      "note": "The test 'sends unarchived threads first and starts the archive in a new message' asserts messages.length === 2 for a tiny shell. The extra message is deliberate, not accidental."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:747",
+      "note": "shellSnapshotItems pages when snapshotDelivery === 'paged'. It is used for the initial snapshot (:876) and for non-delta priority re-ranks (:779). Web and mobile both pass applyThreadPriorities and so subscribe with threadPriorities 'delta' (packages/client-runtime/src/connection/connection.ts:294), so shipped clients never get full re-rank snapshots."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:1090",
+      "note": "The shared client always sends snapshotDelivery: 'paged'."
+    },
+    {
+      "location": "apps/server/src/ws/context/constants.ts:54",
+      "note": "ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES = 1 MiB. The relay cap is min(RELAY_MAX_RPC_MESSAGE_BYTES = 4 MiB, maxQueuedBytes 8 MiB - control 256 KiB) (RelayChannelRegistry.ts:726)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:111",
+      "note": "decodeShellSnapshot was removed (git grep finds no occurrence). Row schemas apply the wire normalizations, guarded by ProjectionSnapshotQuery.shell.test.ts:81."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:878",
+      "note": "listActiveThreadShellRows filters only on deleted_at IS NULL, so archived threads stay in the boot shell (proposal part 3 not done)."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:874",
+      "note": "OrchestrationSession still carries threadId, runtimeSessionId and lastError. It is unchanged since f1be4abc7 (part 4 not done)."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/inboxSidebarModel.ts:712",
+      "note": "The sidebar reads thread.session.lastError for errorDetail. Part 4 as proposed (move lastError to thread detail) would break this shell consumer. Only session.threadId is truly redundant."
+    },
+    {
+      "location": "apps/server/src/ws/context/shellSnapshotPages.ts:10",
+      "note": "jsonBytes runs JSON.stringify once per thread to size pages: an extra O(n) pass, well under 1 ms at the user's 323 threads."
+    },
+    {
+      "location": "ryco-hub:docs/relay-contracts.md:9",
+      "note": "The Hub pin is 7bc39eec3, which contains d2aa947a3 and 60633eff3, so the hosted web served by the Hub requests paged delivery."
+    }
+  ],
+  "remaining": "(a) Defect in the fix. shellSnapshotPages.ts:74 forces archived threads into a separate message, which adds one ack round trip before a paged snapshot can be applied whenever any archived thread exists. No client gets anything back for it: shellSnapshotAssembly.ts applies only at snapshot-end, and archivedThreadCount is unused. Hosted web is hit on every connect because it never resumes (service.ts:857). (b) Archived threads are still loaded and sent in every boot snapshot (ProjectionSnapshotQuery.ts:878 listActiveThreadShellRows filters only deleted_at, and buildShell is at :3010). Real data: 27 of 323 live threads are archived (8%), so excluding them saves about 8% of a roughly 420 KiB payload. (c) Wire trimming not done (contracts orchestration.ts:874). Only session.threadId is truly redundant. lastError is used by the sidebar (inboxSidebarModel.ts:712), so it cannot move to thread detail as proposed. (d) No Worker decode on web (part 5). (e) snapshot-begin (projects plus worktrees) is still one unpaged message. That is a theoretical bound only.",
+  "fixDefects": "1) Extra round trip (missed by the auditor). pageShellSnapshot always closes the message before the archived threads (shellSnapshotPages.ts:74). Each message is one RPC Chunk, and with supportsAck the server waits for the client's Ack before sending the next one (effect RpcServer.ts:438/457, RpcByteSession.ts:328). The assembler withholds the snapshot until snapshot-end. So a shell that fits in one page now needs 2 messages and 1 more round trip than the old single 'snapshot' item whenever at least one thread is archived. Over the hosted relay that is a browser-Hub-node round trip on every connect, since hosted does not resume shells. The 'show unarchived before the archive arrives' benefit named in the code comments and the contract doc (orchestration.ts OrchestrationShellSnapshotDelivery) is not implemented by any client. 2) Minor: an extra per-thread JSON.stringify to size pages (shellSnapshotPages.ts:10/64). This is under 1 ms at 323 threads, and only the initial snapshot pays it for shipped clients, which take priority deltas. 3) Correction to the auditor: re-rank full snapshots do not reach the shipped web or mobile clients, because both use threadPriorities 'delta'. 4) A thread-count mismatch only console.warns and still applies (shellSnapshotAssembly.ts:56). This is acceptable because the server builds counts from the same array.",
+  "implementationSketch": "Recommended (S, low risk): remove the forced archive split. In apps/server/src/ws/context/shellSnapshotPages.ts, drop line 74 (`if (archived.length > 0 && ...) closeMessage();`) so archived threads fill the same page budget. The unarchived-first order can stay because it does no harm, or the original snapshot order can be restored. Then a shell under 1 MiB is again exactly one message ([begin, threads, end]) and one ack. Update the doc comment at shellSnapshotPages.ts:20-25 and the OrchestrationShellSnapshotDelivery/BeginItem comments in packages/contracts/src/orchestration.ts (~1266-1280) so they no longer promise an early unarchived view. Keep archivedThreadCount for wire compatibility or mark it informational. Tests: change shellSnapshotPages.test.ts 'sends unarchived threads first and starts the archive in a new message' to expect one message when under budget, and add a case where the archive spills over only once the budget is exceeded. The server.test.ts paged test (~6158) still passes because its order assertion holds. Run `bun run test` scoped to apps/server (shellSnapshotPages.test.ts, server.test.ts -t 'pages the shell') and packages/client-runtime (shellSnapshotAssembly.test.ts). Optional, same file: size pages more cheaply by stringifying the whole snapshot once and returning a single message when it fits (the common case). Fall back to per-thread sizing only above the budget, so the extra O(n) stringify is skipped for most homes. The alternative, keeping the split and having the assembler emit a provisional unarchived snapshot, needs a partial-snapshot concept in the threads store (syncShellSnapshot replaces the thread set, which would briefly drop archived threads). Not worth it at current sizes. Not recommended now: (3) excluding archived threads from the boot shell, with a paged archived-threads RPC used by the archive views, mobile and cliRemote --include-archived. That is L effort, changes archive and search behaviour, and saves about 8% for this user. (4) Making session.threadId optional saves about 40 B per thread with a session and requires a mixed-version window, since old clients decode it as required. lastError must stay. (5) A Worker decode is not justified at about 420 KiB.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The recommended work (removing the forced archive split and, optionally, cheaper sizing) is an internal paging change with no protocol or security impact, and old and new clients stay compatible. Leaving archived threads out of the boot shell (proposal part 3) would be a product trade-off for the archive and search views and would need a decision, but it is not recommended at the current data size (8% archived, about 420 KiB shell).",
+  "repos": "ryco",
+  "correction": "The auditor missed a regression introduced by the paging fix: archived threads always start a second message, which adds one ack round trip before the snapshot is applied, on every hosted connect for users with any archived thread. Also, full re-rank snapshots do not reach the shipped web or mobile clients (both use threadPriorities 'delta'), so the stringify-overhead concern applies only to the initial snapshot. Proposal part 4 is partly unworkable as written because the sidebar uses session.lastError (inboxSidebarModel.ts:712). The real DB now has 27 of 323 live threads archived (8%), not 4 of 282."
+}

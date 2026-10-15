@@ -1,0 +1,51 @@
+{
+  "id": "server-boot:pierre-diffs-root-import",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. At f1be4abc7, Diffs.ts imported the @pierre/diffs root, which loaded shiki and the highlighting stack at boot. #710 (60633eff3) switched Diffs.ts to the dependency-free '@pierre/diffs/utils/parsePatchFiles' subpath. 37772e074 then always-bundles @pierre/diffs, because that subpath exists only through the repo patch. The current dist's cliMain boot closure is 49 chunks and 6.61 MB. Its externals are node: builtins only: no @pierre, shiki, @shikijs, oniguruma or hast-util. The only inlined pierre code is six small parser regions. Diffs.ts is the only server import of the package, and the Hub has no server-side @pierre use. The source guard rejects a root import on the serve path. A side note: the dist-level @pierre assertions cannot catch a root import, because alwaysBundle inlines it. The 7 MB byte budget (about 388 KB of headroom) and the source guard cover that case, so this is not a real gap.",
+  "evidence": [
+    {
+      "location": "apps/server/src/checkpointing/Diffs.ts:3",
+      "note": "Now `import { parsePatchFiles } from \"@pierre/diffs/utils/parsePatchFiles\"`. At f1be4abc7 it was `from \"@pierre/diffs\"` (git show). git grep finds no other @pierre/diffs import in apps/server/src or packages/*."
+    },
+    {
+      "location": "apps/server/node_modules/@pierre/diffs/dist/utils/parsePatchFiles.js:1-6",
+      "note": "Imports only ../constants.js and five ./utils helpers. None of these import anything, so the parser is a 7-module, dependency-free closure."
+    },
+    {
+      "location": "apps/server/tsdown.config.ts:42-47",
+      "note": "alwaysBundle includes isBundledPatchedPackageImport, which covers ['@pierre/diffs'] (scripts/patchedPackages.ts:16). This keeps the published ryco-cli working without the repo patch, which adds the exports at patches/@pierre%2Fdiffs@1.4.1.patch."
+    },
+    {
+      "location": "apps/server/dist/cliMain-BZ--4hne.mjs:79179-79341",
+      "note": "Built today. The only @pierre regions are getHunkSideBoundaries, composeCacheKey, cleanLastNewline, detachString, realignChangeContent and parsePatchFiles. No dist .mjs file mentions shiki, @shikijs, oniguruma or hast-util, and none has an @pierre import specifier. The static boot closure (49 chunks, 6,611,615 bytes) has only node: builtins as externals."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:141-146",
+      "note": "The source guard requires the cliMain static graph, which follows workspace packages, to have no external '@pierre/diffs'. A root import anywhere on the serve path, including a workspace package, fails this test. This is the 'ban the root import' guard the finding proposed."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:224-229",
+      "note": "The dist assertions ban any '@pierre/diffs*' external. Because alwaysBundle inlines any @pierre/diffs specifier, they can only catch the package being dropped from BUNDLED_PATCHED_PACKAGES, not a root import, despite the test title."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:246-253",
+      "note": "The boot-closure byte budget (under 7,000,000) stands in for the proposed module-count guard. Current size is 6.61 MB, about 388 KB of headroom. An inlined pierre root plus shiki core would almost certainly exceed it."
+    },
+    {
+      "location": "apps/server/scripts/package-smoke.mjs:63-75",
+      "note": "The publish smoke test installs the packed CLI and runs `serve`, so a regression to an unbundled patch-only export would fail before npm publish."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. One minor guard-precision note: the built-dist checks at apps/server/src/serverBundleBoundaries.test.ts:224 and :227 cannot detect a root import in the bundle. alwaysBundle (tsdown.config.ts:46 via patchedPackages.ts:16) inlines '@pierre/diffs', so it never appears as an external specifier. Root-import protection therefore rests on the source guard (:146) and the 7 MB budget (:253). Both are adequate.",
+  "implementationSketch": "Nothing is required. Optional hardening (low worth): in the 'keeps the boot chunks within budget' loop at serverBundleBoundaries.test.ts:254-260, add `expect(source).not.toMatch(/^\\/\\/#region .*@pierre\\/diffs\\/dist\\/(?!utils\\/(?:parsePatchFiles|getHunkSideBoundaries|composeCacheKey|cleanLastNewline|detachString|realignChangeContent)\\.js$)/mu)` plus a ban on `^//#region .*node_modules/.*/(?:shiki|@shikijs)/` region markers. This makes the dist guard catch an inlined root import directly instead of relying on the byte budget. Separate and unrelated to boot: @pierre/diffs is still a declared runtime dependency in apps/server/package.json:38, even though it is fully bundled. npm installs of ryco-cli therefore still download shiki and @shikijs/*. Moving it to devDependencies, which scripts/cli.ts strips at publish, would trim install size. Check the published package with package-smoke.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Server-local bundling and import change. It touches no auth, E2EE, Hub protocol or hosted lifecycle code.",
+  "correction": "The auditor listed the built-dist '@pierre/diffs*' assertions as guards related to the root-import ban. With alwaysBundle in place they cannot fail for a root import, so they only guard against the package being unbundled. Root-import protection comes from the source guard and the byte budget. This does not change the DONE classification.",
+  "repos": "none"
+}

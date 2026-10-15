@@ -1,0 +1,82 @@
+{
+  "id": "client-runtime-sync:thread-window-full-activity-payloads",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The finding said windows could go past the 4 MiB relay cap and then fall back for good to the unbounded legacy subscribeThread. Both are fixed in current code, and all four proposal parts landed: (1) a 1 MiB payload budget on window and history-page activities, counted by SQLite length() without parsing, with hasMoreBefore set correctly; (2) previews that keep payload structure (8 KiB for tool rows, 64 KiB for the rest), getActivityPayload wired on server, client and hosted access policy (viewer/read), and expand-to-fetch in the web timeline; (3) legacy fallback only for 'Unknown request tag' or 'Bounded thread history is unavailable', shrink-and-retry on the relay too-large error, and backoff retry for every other failure; (4) a walking size estimate instead of stringify plus TextEncoder. Migration 088, in the same commit 36760bffd, also rewrote legacy oversized tool rows, so stored payloads behind the 3-5 MiB measurements are smaller too. The Hub vendors Ryco at 7bc39eec3, which includes all four commits, so hosted web clients get the fix. The remaining issues are rare edge cases that do not reopen the finding.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:189-210",
+      "note": "THREAD_WINDOW_ACTIVITY_MAX_PAYLOAD_BYTES = 1 MiB. takeNewestRowsWithinByteBudget always keeps the newest row, and hasMoreBefore = rows.length > kept.length, which is correct with limit+1 input."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:2140-2163",
+      "note": "listNewestThreadActivityRows selects length(CAST(payload_json AS BLOB)) AS payloadBytes, so the budget uses stored byte size."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3881-3886",
+      "note": "getThreadWindow applies toSentActivityRows(preview) and then the byte budget. history.activities.hasMoreBefore comes from the budget, so pagination continues from the window's edge."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:4276-4290",
+      "note": "getThreadHistoryPage applies the same budget and preview to activity pages."
+    },
+    {
+      "location": "apps/server/src/orchestration/activityPayloadPreview.ts:26-37,131-173",
+      "note": "Previews cut strings and arrays but keep scalars and keys, so command, exit code, changed files and the numeric additions/deletions in collapsed rows survive. getActivityPayload is capped at 2 MiB."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:173-199,442-446,618-650",
+      "note": "loadThreadWindow forwards activityPayloads. getActivityPayload is wired. subscribeThreadWindow uses loadThreadWindow."
+    },
+    {
+      "location": "packages/shared/src/rpcAccessPolicy.ts:103,361",
+      "note": "getActivityPayload is allowed for hosted viewer/read roles, so expanding a previewed row works over the relay."
+    },
+    {
+      "location": "apps/server/src/ws/RpcByteSession.ts:301-321",
+      "note": "An over-cap Chunk or Exit is replaced with an Exit die carrying 'The response exceeded the largest message this connection can carry.' This is the message the client classifies as response-too-large."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsTransport.ts:112-118,145-154,381-396",
+      "note": "The too-large message is not a retryable transport error, so it reaches classifyFailure and becomes 'response-too-large'. isUnsupportedRpcError matches only 'Unknown request tag'."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:175-204,612-654",
+      "note": "Legacy is used only for 'unsupported'. response-too-large halves messages and activities down to a floor of 10. Any other failure retries the bounded window with backoff (1 s to 30 s)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.test.ts:561-583",
+      "note": "Tests cover legacy only for unsupported servers, shrinking on too-large, and backoff retry instead of legacy on load failure."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts:2531-2627",
+      "note": "Test: a 5 MiB activity is previewed in preview mode, and the full payload is returned on request. A client that does not ask for previews gets a byte-bounded window instead."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/088_LegacyActivityPayloads.ts:15-31",
+      "note": "Landed in 36760bffd, after f1be4abc7. It rewrites legacy tool rows of up to 1 MB to the capped shape, which also cuts server-side parse cost per window."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:199",
+      "note": "The web and desktop client sends threadWindowActivityPayloads: 'preview'."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentDriver.ts:582-640",
+      "note": "Mobile does not opt into previews. Its primary environment runs through the Hub relay, so it gets full payloads within the 1 MiB budget. The newest row is the exception: it is kept even when over budget."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/approximateJsonSize.ts:12-44",
+      "note": "Retained bytes are estimated by walking the value, not by JSON.stringify. Old code: f1be4abc7 supervision.ts:280-286."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defect reopens the finding. The residuals are rare edge cases. (a) Mobile (apps/mobile/src/connection/environmentDriver.ts:582) does not request previews. If the newest activity alone is over the relay cap, the thread cannot open. That needs a file_change diff or image_view row, which ingestion exempts from the 16k string cap (apps/server/src/orchestration/activityDataCap.ts:24). The same applies to a history page whose first row is that large, since the budget always keeps one row. The window shrinks to 10/10 and then stops (supervision.ts:627-634). (b) Live thread.activity-appended events are never previewed, on any client. One such exempt row over 4 MiB on the relay hits too_large, and the client then shrinks the window, which is unnecessary because the window was not the problem. Hosted resubscribes take a fresh snapshot, so web recovers, but repeated events walk the limits down to the give-up state. (c) The give-up state is silent: only a console.warn, no thread error state and no retry until reconnect or re-retain. Shrunk windowLimits also stay for the lifetime of the entry. (d) threadExport (packages/client-runtime/src/connection/threadExport.ts:90) and inbox context handoff (apps/web/src/components/inboxSidebar/inboxContextHandoff.ts:67) call getThreadWindow and getThreadHistoryPage without activityPayloads: 'preview'. They fit under the cap thanks to the budget but download full payloads they never use. Export keeps only id, kind, summary, boundary and forkOrigin. (e) The server still JSON-parses limit+1 full payloads and previews all of them before the budget cuts. That is CPU only, and smaller since migration 088.",
+  "implementationSketch": "Optional hardening, low priority. 1) Window stream: in apps/server/src/ws/orchestrationRpc.ts subscribeThreadWindow, when input.activityPayloads === 'preview', map 'thread.activity-appended' events through previewActivityPayload (payloadBytes from jsonByteLength) and set activity.payloadPreview. The client already handles payloadPreview through session-logic outputPreviewActivityId. Test: a window subscription with preview receives a bounded live activity for a large file_change payload. 2) Make the give-up path visible. In supervision.ts handleWindowFailure, when shrinkThreadWindowLimits returns null, report a thread-level error through an input callback (for example setThreadHistoryRequestState or a new onThreadWindowUnavailable) and schedule a retry with backoff instead of stopping. Optionally reset entry.windowLimits to THREAD_WINDOW_LIMITS after a successful snapshot plus a quiet period. Add supervision tests for both. 3) Pass activityPayloads: 'preview' in threadExport.ts (window and activity pages) and inboxContextHandoff.ts. Handoff payloads are non-tool, so they keep up to 64 KiB. Extend the existing export test to assert the field. 4) Mobile: adopt previews once mobile has an expand-to-fetch path (getActivityPayload through packages/client-runtime environmentApi), then set threadWindowActivityPayloads: 'preview' in environmentDriver.ts. 5) Server CPU, optional: in listNewestThreadActivityRows, select payload_json only for rows whose running payloadBytes stays within the budget (SUM(...) OVER window) or whose size is at most the preview cap. Parse and preview only rows that will be sent.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The residuals are internal client and server hardening. Previewing live events in the window stream reuses the already-contracted payloadPreview field and the hosted viewer-allowed getActivityPayload. No E2EE, auth, Hub protocol or hosted lifecycle ownership change is involved. Mobile preview adoption is a UX task, not a policy decision.",
+  "repos": "ryco"
+}

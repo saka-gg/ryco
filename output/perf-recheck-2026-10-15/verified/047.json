@@ -1,0 +1,59 @@
+{
+  "id": "persistence-boot:statistics-recompute-blocks-connection",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The auditor is right that the described cost is gone. Statistics rows are read in one transaction on the read-only worker-thread connection. In production that is Node or Electron in Node mode; only Bun dev builds fall back. Decode and aggregation run after that transaction, chunked by thread. Per-thread partials are persisted, and only threads with new thread events or changed meta are re-read. checkpoint_files_json is summed in SQLite on the worker, each token payload is parsed once, and both statistics queries use the kind and usage indexes. The writer connection is held only for a cheap revision probe and short chunked partial writes. The auditor missed one defect, which the fix itself introduced. The stale-while-revalidate bookkeeping can latch a finished fiber, after which every later request returns the same old snapshot until the server restarts. I reproduced this in isolation with the repo's effect 4.0.2. Whether a real request hits it is unconfirmed and probably rare. The auditor's two residuals also hold: every new migration forces a full rebuild, and the full-rebuild decode is not chunked.",
+  "evidence": [
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:263",
+      "note": "reader = SqliteReadClient (worker connection), wired at apps/server/src/persistence/Layers/Sqlite.ts:74. canUseReadWorker (apps/server/src/persistence/SqliteReadClient.ts) excludes only Bun and in-memory databases. The server runs under node (apps/server/package.json dev/start) and the packaged desktop runs it under ELECTRON_RUN_AS_NODE, so production reads go off the writer. Only statistics and DailyRecap share the worker, so there is no new head-of-line blocking for interactive reads."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:603-611",
+      "note": "reader.withTransaction(readRows) runs the read only. aggregate() runs after it, outside any transaction, and calls Effect.yieldNow every 256 threads (:432). effect 4.0.2's MixedScheduler yields through setImmediate, so I/O can run between chunks. This replaces the old sql.withTransaction(cache check + computeStatistics) at f1be4abc7 StatisticsQuery.ts:731-769."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:365-391",
+      "note": "Dirty set: threads with aggregate_kind='thread' events after coveredSequence, plus meta changes and deleted threads. A commit from another process (data_version), a history that moved backwards, or a projection reset forces a full rebuild. I checked every writer of projection_turns, projection_thread_activities and orchestration_events. Only the projection pipeline writes them, keyed by event.payload.threadId. ThreadFork and session imports go through the engine, and the 088 repair touches only tool payloads. The invariant holds."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:161-190",
+      "note": "Checkpoint file totals are computed with json_each in SQL, so the JS no longer parses 8.6 MB of checkpoint JSON."
+    },
+    {
+      "location": "apps/server/src/statistics/statisticsAggregation.ts:317-321",
+      "note": "Each token payload is parsed once and shared by every pass (proposal 5)."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.ts:42",
+      "note": "idx_projection_thread_activities_kind_order(kind, thread_id, ...) is new since f1be4abc7. The usage index from migration 071 has stream_id as its leading column, so the scoped token reads are indexed (proposal 6)."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:616-624",
+      "note": "DEFECT: sharedRefresh forks `refresh` with an `ensuring` that clears backgroundRefresh, then sets backgroundRefresh = fiber in a later `tap`. forkIn only schedules the child. If the parent fiber reaches its op budget at the boundary between forkIn and tap, the child runs first. A cache-hit refresh finishes synchronously (cacheLock and a sync node:sqlite readRevision). The child's ensuring clears the variable, and then the tap stores the finished fiber. /tmp/perf3/scratch047/race5.mjs uses this exact pattern with the default MaxOpsBeforeYield. It ends with backgroundRefresh holding the finished fiber for 8 of 4200 preceding-op counts (two adjacent counts per ~1023)."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:637-643",
+      "note": "Every production call is a stale-while-revalidate call: statisticsRpc.ts always passes maxWaitMs, and `stale` is defined after the first snapshot. Once backgroundRefresh holds a finished fiber, sharedRefresh returns it, Fiber.join returns its old snapshot at once, and refresh never runs again. The web and mobile UI never show generatedAt, so the staleness is silent until the server restarts."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:282",
+      "note": "Residual: schemaVersion = MAX(migration_id), and loadPersistedState drops the partials when it changes (:480). Any release that adds a migration therefore makes the next first open a full rebuild. It runs on the worker, but the RPC waits for it because restored state has no snapshot (:638)."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:409-415",
+      "note": "Residual: on a full rebuild, Schema decode of every token and turn row runs unchunked on the main thread before the 256-thread yield loop. loadPersistedState also JSON.parses every persisted partial unchunked (:491-493). Both are small next to the original 0.4-0.6 s writer stall."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Latent stale-while-revalidate race added by the fix (39d17c78f), apps/server/src/statistics/StatisticsQuery.ts:616-624. backgroundRefresh is cleared in the child's `ensuring` but set in the parent's `tap` after forkIn. forkIn only schedules the child (effect 4.0.2 forkUnsafe -> scheduleTask). If the parent's op budget expires at that boundary, the child runs first. A cache-hit refresh completes synchronously, so the order is: child clears, then tap stores the finished fiber. From then on every getStatistics({maxWaitMs}) call, which is every production call, joins that finished fiber and returns the same snapshot until restart, and the UI gives no sign of it. I reproduced the exact pattern in isolation with the repo's effect 4.0.2 and the default budget (/tmp/perf3/scratch047/race5.mjs: stuck for 8 of 4200 preceding-op counts). Not shown on a real RPC path: whether a request lands on that boundary depends on the handler's op count since its last async resume, so it is probably rare. The auditor's residuals also stand: a full rebuild after any new migration, and an unchunked decode on full rebuilds. Neither is a regression.",
+  "implementationSketch": "1) Fix the race in StatisticsQuery.ts sharedRefresh (:616-624). Drop the `ensuring` clear. In the tap, set `backgroundRefresh = fiber` and then call `fiber.addObserver(() => { if (backgroundRefresh === fiber) backgroundRefresh = undefined })`. addObserver fires at once on a finished fiber, so both orders end cleared. As a guard, reuse backgroundRefresh only while `backgroundRefresh.pollUnsafe() === undefined`. pollUnsafe and addObserver are public Fiber API and are already used in ClaudeAdapter.ts:5040/5877. Better still, extract the single-flight background-refresh pattern into a small shared helper if a second user appears. Test in StatisticsQuery.test.ts: run getStatistics twice under `Effect.provideService(Scheduler.MaxOpsBeforeYield, n)` for n in 4..32, with no writes in between so the refresh is a cache hit. Then write a row and assert that a later getStatistics({maxWaitMs: 5000}) returns the new data. Today this fails for some n (n=8 latched in the isolated run). 2) Optional, low value: key persisted partials on a statistics-source schema version (bump STATISTICS_PARTIAL_FORMAT_VERSION when a migration rewrites threads, turns, activities, events or worktree rows) instead of MAX(migration_id), so upgrades stay incremental. Then add a migration-checklist note. 3) Optional: decode token and turn rows per thread chunk inside the aggregation loop, and parse persisted partials in chunks, so a full rebuild never runs one long main-thread slice.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The race fix is local server code with no contract, auth, Hub or lifecycle impact. Changing the partials invalidation key is an internal cache-correctness choice that tests can pin.",
+  "correction": "The auditor said no correctness defect was found. The new stale-while-revalidate bookkeeping (StatisticsQuery.ts:616-624) can latch a finished fiber, after which statistics stay frozen until restart. I reproduced this in isolation with effect 4.0.2 and the default op budget; it was not shown on a real request.",
+  "repos": "ryco"
+}

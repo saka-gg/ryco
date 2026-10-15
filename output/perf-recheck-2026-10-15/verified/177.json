@@ -1,0 +1,59 @@
+{
+  "id": "gap-composer-pickers:post-turn-global-search-refetch",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "Two details are wrong, but the status holds. (1) The auditor said the proposal's server-owned debounced rebuild was 'not needed'. It is actually implemented in the same commit 60633eff3. The server index is now stale-while-revalidate: markRootChanged (WorkspaceEntries.ts:1001-1015) schedules one background rebuild, debounced 250 ms (line 58), only when the root was read within the 10-minute hot window (line 56). Colder roots just drop their index. So all three proposal parts landed, not two. (2) The gitCwd evidence row is labelled ComposerAttachmentMenus.tsx:2389, but that line is in apps/web/src/components/ChatView.tsx:2389.",
+  "summary": "Confirmed DONE in 60633eff3, which is also inside the Hub's vendored Ryco (7bc39eec3). All three proposal parts are in place. (1) Turn-diff and revert events invalidate only the changed thread's checkout (worktree, else project root). They fall back to the whole environment only when the thread's cwd is unknown. The old unfiltered global call is gone, and the queue is the only caller of invalidateProjectSearchEntries. (2) The composer retains a search scope only while enabled, meaning an '@' path trigger is active. composerMenuOpen is Boolean(composerTrigger), so a closed menu has observerCount 0. Invalidation then only clears its client cache, and the next open refetches. (3) The server owns rebuild timing. An invalidated root rebuilds in the background (debounced, single-flight) only if it was read in the last 10 minutes, and otherwise drops its index. Live thread-detail events are the only web route into the provider invalidation (service.ts:744-746). React <Activity> hiding runs effect cleanups, so a hidden composer cannot keep a scope retained either. One residual by design: if '@' was used in a root within 10 minutes, each turn completion there still triggers one server-side background rebuild, even when the turn changed no files. This is the SWR warm-index trade-off the proposal asked for. Separately, the mobile Files screen has its own unscoped invalidateProjectFilesState. That is a different surface and only refetches observed queries.",
+  "evidence": [
+    {
+      "location": "apps/web/src/rpc/projectSearchInvalidation.ts:37-87",
+      "note": "Per-batch queue. noteEvents collects threadIds from thread.turn-diff-completed and thread.reverted per environment. flush calls invalidate({environmentId, cwd}) per resolved checkout, and invalidate({environmentId}) only when a cwd cannot be resolved. Unit tests are in projectSearchInvalidation.test.ts:22-65."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:126-138",
+      "note": "flushProviderInvalidation calls projectSearchInvalidations.flush(). resetProviderInvalidation (line 175) resets the queue."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:744-746",
+      "note": "This is the only markProviderInvalidationNeeded call site on web. Events are noted per environment first. Thread-detail events reach it through threadDetailEventBatcher (line 805)."
+    },
+    {
+      "location": "apps/web/src/rpc/useProject.ts:43-54",
+      "note": "The scope is retained only when enabled !== false. At f1be4abc7 it was retained whenever environmentId and cwd were non-null."
+    },
+    {
+      "location": "apps/web/src/components/chat/ComposerAttachmentMenus.tsx:129-140",
+      "note": "The composer passes enabled: requestsPathSearch, which is isPathTrigger && (query non-empty || server lists the empty query). composerMenuOpen = Boolean(composerTrigger) at line 283, so a retained scope means a visibly open path menu."
+    },
+    {
+      "location": "apps/web/src/rpc/projectAtoms.ts:485-505",
+      "note": "invalidateProjectSearchEntries filters by environmentId and cwd, clears the cache, and force-refetches only when observerCount > 0 && lastInput !== null. projectAtoms.test.ts:271-332 covers idle scopes (cache cleared, no refetch), retained scopes (refetch) and cwd scoping."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:2389-2394",
+      "note": "gitCwd = projectScriptCwd({project.cwd, activeThread.worktreePath}). This is the same helper resolveThreadCheckoutCwd uses with threadShell.worktreePath (ThreadShell has worktreePath, client-runtime state/threads/types.ts:219), so scope keys match the invalidation filter."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:46-58,843-856,918-946,1001-1023",
+      "note": "This is the server-owned SWR rebuild the auditor missed. invalidate -> markRootChanged sets dirty and calls scheduleRebuild (250 ms debounce, single-flight via startRefresh) only if isHot (read within 10 minutes). Otherwise it drops the slot. readIndex returns the existing index without waiting and revalidates in the background. At f1be4abc7 invalidate only did Cache.invalidate on a 15 s TTL cache, so rebuilds were driven by client reads."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:540",
+      "note": "The server still invalidates the turn's cwd on every checkpoint capture, before it computes the diff. With a hot root this means one background rebuild per turn, even for no-change turns. That is intended under the SWR design."
+    },
+    {
+      "location": "apps/mobile/src/rpc/projectFilesAtoms.ts:409-421",
+      "note": "Adjacent and out of scope. Mobile's provider flush invalidates every project-files query across all environments and cwds. It only refetches observed ones (Files screen mounted, search only with a non-empty query), so closed pickers are not hit. Low cost."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None found. I checked: the scope key and filter cwd use the same derivation; retain/release order on enable toggles is correct; lastInput tracks the open menu's current query; there is no other unfiltered invalidateProjectSearchEntries caller; hidden or Activity-wrapped composers release in effect cleanup; the server path is single-flight with no double build when a forced read races the debounced rebuild. The fix is in the Hub's vendored Ryco.",
+  "implementationSketch": "Nothing is required for this finding. Two optional low-value follow-ups. (a) CheckpointReactor.captureAndDispatchCheckpoint (CheckpointReactor.ts:540): call workspaceEntries.invalidate(input.cwd) only after the diff, and only when it lists at least one file or the diff failed. The web queue could likewise skip thread.turn-diff-completed events whose payload has no files. This avoids a hot-root rebuild on no-change turns. Test with a WorkspaceEntries spy in the CheckpointReactor tests. (b) Move the per-checkout queue from apps/web/src/rpc/projectSearchInvalidation.ts into packages/client-runtime, so mobile's invalidateProjectFilesState can also scope by environment and cwd.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains. The optional follow-ups are client and server cache-timing tweaks with no auth, E2EE, hosted lifecycle or Hub protocol impact.",
+  "repos": "ryco"
+}

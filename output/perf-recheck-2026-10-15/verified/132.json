@@ -1,0 +1,54 @@
+{
+  "id": "thread-and-draft:branch-listrefs-duplicate-and-teardown",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (commit 60633eff3, #710). On first mount, the prefetch and the controller now share one in-flight first-page read per key. This holds whichever effect runs first: the prefetch registers its request synchronously, and the poller's run happens a microtask later and joins it. A remount within the 15 s stale time adopts the cached pages and the ledger timestamp, and its poller does not run immediately. Past 15 s it refetches, which is exactly the rule the proposal gave, so dropping the idle-TTL keep-alive changes nothing visible. On the server, listRefs is now one for-each-ref plus a cached config snapshot, behind a 5 s per-cwd listing cache. That cache is dropped by driver writes and by GitManager invalidateLocalStatus/invalidateStatus after git actions and agent turns. Only two small issues remain in how invalidations interact with the new freshness ledger. Neither brings back the duplicate or teardown cost.",
+  "evidence": [
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:232",
+      "note": "branchesFirstPageInFlight plus the branchesFetchedAt ledger. fetchFirstBranchesPage (265-286) joins a pending first-page read per key and marks detached reads with fetchedAt=null."
+    },
+    {
+      "location": "apps/web/src/components/BranchToolbarBranchSelector.tsx:242",
+      "note": "The prefetch effect (242-245) still runs before useGitBranches (254 -> useGit.ts:60 watchBranches). prefetchBranchesByKey (gitAtoms.ts:604-641) puts its request in the shared map synchronously. The controller's poller runs pollBranches a microtask later (visibilityPolling.ts:46-49), and loadInitialBranchesNow (gitAtoms.ts:340) joins that request, so first mount issues exactly one listRefs. If the order were reversed, prefetch returns early because a controller exists (608-612)."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:531",
+      "note": "watchBranches adopts the cached pages when the ledger is within GIT_BRANCHES_STALE_TIME_MS (105). It sets hasLoadedOnce, and runImmediately is !adoptCached (575), so a thread or draft remount within 15 s makes no listRefs. unwatchBranches (585-602) still deletes the controller, but the proposal also refetches past 15 s, so behavior is equivalent."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:302",
+      "note": "markBranchesStaleForScopes (called from invalidateScopes:53) drops ledger entries and in-flight joins for the cwd, so the menu-open invalidation (BranchToolbarBranchSelector.tsx:515) and branch actions (396) are not hidden by adoption."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:410",
+      "note": "Defect (minor): refetchBranchesNow writes the ledger whenever generation === branchesFetchGeneration. That generation only changes in clearGitAtomState (859), not on invalidation. An invalidation that lands during an in-flight 60 s poll is swallowed by the poller's inFlight dedupe (visibilityPolling.ts:47), and the ledger is then re-stamped fresh for a pre-invalidation read. A remount within 15 s adopts it. The first-page path has explicit protection against this through detach (fetchedAt=null); the refetch path does not."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:350",
+      "note": "Defect (minor, the auditor's): controller.lastFetchedAt = Date.now() even for a detached read (fetchedAt === null). This suppresses the focus stale refetch (maybeRefetchStaleBranches:506) for 15 s after an invalidation was swallowed."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2594",
+      "note": "branchListingCache: TTL 5 s, capacity 256 (80-81), keyed by path.resolve(cwd). It is invalidated by any non-readOnly execute (1078-1082, 2598-2601), by fetchOrigin (2609-2612), and by invalidateRefListing from GitManager.ts:1857/1884."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2445",
+      "note": "readBranchListing: one for-each-ref with %(worktreepath) plus the cached config snapshot (1145-1173). It replaces the ~6 git processes the report counted. Repo detection is cached in VcsDriverRegistry (138-183)."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.test.ts:202",
+      "note": "Tests cover the shared prefetch/watch read, remount adoption, a stale or invalidated remount, a dropped watcher, and next-page reset. The web vitest config sets no DOM environment, so the tests take the no-window path (gitAtoms.ts:578). The poller path used in production (571-577) is not unit-tested."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No blocking defects; the duplicate first-mount read and the teardown refetch are both gone. Two minor invalidation-consistency gaps in the new freshness ledger. (1) gitAtoms.ts:410-412: refetchBranchesNow re-stamps the ledger even when invalidateScopes ran while it was in flight, because only clearGitAtomState bumps branchesFetchGeneration. With the pre-existing swallow of invalidation-triggered refreshes by the poller's inFlight dedupe (visibilityPolling.ts:47) and runBranchesFetch (gitAtoms.ts:317), a remount within 15 s can adopt a pre-invalidation list. Before #710 every remount healed this. The window is narrow: the invalidation has to land in the ~50 ms poll that runs every 60 s. Opening the menu invalidates again. (2) gitAtoms.ts:350: lastFetchedAt is set to Date.now() for detached reads, which delays focus-driven staleness checks by up to 15 s. Out of scope but adjacent: a visibilitychange foreground or resume event (appLifecycle.ts:11-14) makes every live branch controller refetch unconditionally (visibilityPolling.ts:63-70), ignoring the 15 s stale time.",
+  "implementationSketch": "Optional hardening in apps/web/src/rpc/gitAtoms.ts. (a) Add a per-key invalidation epoch, Map<string, number>, bumped in markBranchesStaleForScopes for affected keys. Capture it at the start of refetchBranchesNow and loadInitialBranchesNow, and only call recordBranchesFetched or set a fresh lastFetchedAt if the epoch is unchanged. Otherwise publish the pages but leave lastFetchedAt at 0, so focus or remount refetches. (b) Make an invalidation during an in-flight read schedule one follow-up read instead of being swallowed: add a controller.rerunAfterInFlight flag, set it in the invalidation listener when controller.inFlightPromise is set, and have runBranchesFetch's finally re-invoke refetchBranches once when the flag is set. (c) Optionally have the poller's foreground/resume path consult the stale time for branches, for example by routing branch-controller lifecycle refreshes through maybeRefetchStaleBranches. Tests in apps/web/src/rpc/gitAtoms.test.ts: use a deferred listRefs promise during a refetch, call invalidateScopes, resolve it, and assert a second listRefs follows. Then release and rewatch within 15 s and assert another read rather than adoption. Add one test that stubs globalThis.window/document (or a browser test) so the poller path with runImmediately:false is covered.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Client-side cache freshness hardening only; no auth, hosted lifecycle, Hub protocol, or product trade-off involved.",
+  "repos": "ryco"
+}

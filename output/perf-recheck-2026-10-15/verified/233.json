@@ -1,0 +1,55 @@
+{
+  "id": "mobile-boot:direct-only-gate-waits-for-hub-probe",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All four parts of the proposal are implemented. deriveAppAccess unlocks via direct-node once the direct plane hydrates with a readable credential, without waiting on the hosted plane. ensureMobileHostedSession returns before hostedHubController.bootstrap() when no Hub token is stored. That launch skips the missing-token failure, clearSessionMaterial, the DPoP-minted getBootstrapAvailability request and the Secure Enclave key load. The key load is deferred to first hosted use, and the cost only applies after the gate has opened, on pushed hosted screens (Machines, Settings > Hub, Hub account, E2EE), never on Home. A stored-session launch is also capped at the 8 s hosted launch deadline instead of the 30 s request deadline. The auditor's one flagged defect is not real: the first-run sign-in copy has no production consumer.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/features/access/appAccessModel.ts:33-41",
+      "note": "Either plane unlocks on its own. direct = directHydrated && directCredentialReadable gives unlocked/direct-node regardless of hostedHydrated. hydrating is returned only when nothing has been granted and a plane is still deciding."
+    },
+    {
+      "location": "apps/mobile/src/features/access/appAccessModel.test.ts:25-29",
+      "note": "Test 'unlocks a direct-only device without waiting for the Hub probe' (hostedHydrated:false, directCredentialReadable:true) expects direct-node. The old 'stays hydrating until both' test was replaced."
+    },
+    {
+      "location": "apps/mobile/src/features/access/AppAccessGate.tsx:64-82",
+      "note": "hostedHydrated is forced true at HOSTED_LAUNCH_DECISION_DEADLINE_MS (launchDecision.ts:20, 8 s) if ensureMobileHostedSession has not settled. The direct plane (lines 84-113) depends only on the catalog KV hydration plus per-environment keychain reads (packages/client-runtime/src/connection/catalog.ts:188-218), not on the hosted plane."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:430-458",
+      "note": "The token read gates everything. createMobileDpopSigner starts only when hasStoredSession(). With no stored session, line 455 returns configureMobileHostedRuntime('deferred') before bootstrap(). So the launch makes no network request, does no clearSessionMaterial keychain delete and runs no Secure Enclave op."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:154-192",
+      "note": "deferredDpopSigner and ensureMobileHostedDeviceKey load the hardware key on first proof or first hosted-surface mount, with no software fallback."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.test.ts:520-554",
+      "note": "Tests pin that bootstrap is not called, the call order is hydrate/trust-hydrate/configure, the account stays signed-out, and createMobileDpopSigner is not called when no session is stored."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:780-789",
+      "note": "clearSessionMaterial plus getBootstrapAvailability now runs only when the Hub actually rejects a stored session (isSessionFailure). It is no longer reached on every direct-only launch."
+    },
+    {
+      "location": "apps/mobile/src/Stack.tsx:429",
+      "note": "RootStack's initialRouteName is Home. The surfaces that call useHostedModeAvailable/ensureMobileHostedDeviceKey (HubNodeSection via NodesScreen, SettingsHubRouteScreen, HostedAccountRouteScreen, E2eeNodeSecurityRouteScreen) are pushed routes, so a direct-only launch does not load the hardware key."
+    },
+    {
+      "location": "apps/mobile/src/features/hostedHub/hostedAuthModel.ts:432",
+      "note": "bootstrapAvailable's only mobile reader is resolveSignInSurface -> deriveHostedSignInView. git grep shows no production consumer of deriveHostedSignInView, at HEAD or at f1be4abc7: only hostedAuthModel.test.ts and README.md. NativeIdentityScreen imports only deriveHostedBrowserSignInAction/deriveHostedProviderSignInActions. So no rendered surface loses its 'first-run' copy."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "correction": "The auditor flagged a side effect: a fresh install never shows the 'Set up your Hub / first-run' copy because bootstrapAvailable is no longer probed. That is not user-visible. deriveHostedSignInView, the only reader of bootstrapAvailable on mobile, has no production consumer at HEAD or at f1be4abc7 (only hostedAuthModel.test.ts and README.md). The runtime.ts:449-454 comment ('whose answer no mobile surface reads') is therefore accurate, and no lazy probe is needed. Minor: the gate's hosted-deadline lines are now AppAccessGate.tsx:64-82, not 62-78.",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains. The implemented change keeps fail-closed hardware-key semantics (no software fallback) and does not alter the hosted lifecycle ownership rules.",
+  "repos": "none"
+}

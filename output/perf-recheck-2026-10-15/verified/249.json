@@ -1,0 +1,67 @@
+{
+  "id": "mobile-boot:e2ee-crypto-eager-via-authorization-barrel",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "All three proposal parts are implemented, and the pre-first-frame graph no longer reaches the relay E2EE stack on mobile or in the standard web build. (1) assertE2eeAccountId, RelayE2eeValidationError and invalidRelayE2eeInput moved to the dependency-free @ryco/shared/relayE2eeIds. Behaviour is byte-identical to f1be4abc7, and Keys/Transcripts re-export the same class, so instanceof still holds. api.ts imports the light module. (2) The root authorization barrel no longer re-exports nativeE2eeEnrollment, nativeE2eeTrustResolver or nativeTrustOnboarding. They sit behind ./authorization/e2ee, and no consumer anywhere in the repo imports those 29 symbols from the root barrel. (3) Guards exist at three levels: client-runtime lightSubpaths.test.ts, a mobile launch-graph test from index.ts (Metro iOS resolution, workspace packages followed, self-check that runtime.ts does reach the crypto), and a web standardBootGraph test from main.tsx. I re-ran both entry walks read-only. Mobile index.ts reaches 446 modules and 0 heavy chains (authorization/index, api, relayE2eeIds and relayE2eeConstants are reached as intended), and runtime.ts reaches 21 heavy chains, so the walker works. Web main.tsx in the standard build reaches 391 modules with no @noble, cborg or relayE2ee*/relayCodec. The auditor's DONE stands, but two points in their fixDefects are wrong (see correction).",
+  "correction": "1) The auditor wrote that there is 'no mobile-entry or web boot-graph assertion'. That is wrong. apps/mobile/src/perf/mobileStartupImports.test.ts:176-187,241-272 asserts that chainsTo(\"index.ts\", RELAY_E2EE_CRYPTO) is [] (@noble/*, cborg, relayE2ee* other than Ids/Constants, relayCodec, client-runtime relay/relayE2ee*, authorization/native(E2ee|TrustOnboarding)), with a non-vacuity check from hostedHub/runtime.ts. apps/web/src/perf/standardBootGraph.test.ts:142-167 forbids @noble/*, cborg, relay(E2ee|Codec) and the heavy authorization/relay modules from main.tsx. Both were added in 60633eff3, so proposal part 3 is fully done. 2) The auditor flagged threadConnectionRetarget.ts:10 (static import of ../hostedHub/runtime) as loading authorization/e2ee and noble on thread open for direct-only users. In practice that edge costs nothing. runtime.ts is already evaluated at launch for every user: AppAccessGate.tsx:74 calls ensureMobileHostedSession, and state.ts:42 runs `await import(\"./runtime\")` before any hosted-config check. Metro also has inline requires on (metro.config.js, 1b8bfd183), so evaluating runtime.ts does not evaluate authorization/e2ee or noble until they are used. Retargeting that import to ./runtimeAvailability is hygiene only. 3) Minor point on the finding's expected-gain sentence, which neither the auditor nor the finding verified: 'for direct-only users it is removed from the process entirely once the Hub probe fix lands' is not literally true. On the default hosted-configured build (app.config.ts:118 DEFAULT_HOSTED_APP_ORIGIN), every launch runs mobileE2eeTrustStore.hydrate() (runtime.ts:443) and then configureMobileHostedRuntime(\"deferred\") (runtime.ts:455), which calls createNativeE2eeEnrollmentCoordinator (runtime.ts:264). That loads the authorization/e2ee wrapper modules after the first commit. Under inline requires, neither the coordinator constructor nor the signed-out selection watch calls crypto, so noble and cborg module init are most likely still skipped. This is off the direct unlock path (appAccessModel.ts unlocks on a direct credential alone), so it is not a defect of this fix.",
+  "evidence": [
+    {
+      "location": "packages/shared/src/relayE2eeIds.ts:1-48",
+      "note": "Dependency-free validator module. Its only import is relayE2eeConstants (contracts plus relayMessageChunks). The function body is identical to the old relayE2eeTranscripts.ts:374-379 at f1be4abc7. Exported at packages/shared/package.json:81."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeKeys.ts:15,55",
+      "note": "Re-exports RelayE2eeValidationError and invalidRelayE2eeInput from relayE2eeIds, so there is still one error class. relayE2eeTranscripts.ts:28 imports assertE2eeAccountId from relayE2eeIds."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:58",
+      "note": "Imports assertE2eeAccountId from @ryco/shared/relayE2eeIds, not relayE2eeTranscripts."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/index.ts:1-14",
+      "note": "The root barrel no longer re-exports nativeE2eeEnrollment, nativeE2eeTrustResolver or nativeTrustOnboarding. A repo-wide scan found no `import {...} from \"@ryco/client-runtime/authorization\"` naming any of their 29 exports."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/e2ee.ts:1-10",
+      "note": "New ./authorization/e2ee subpath (package.json exports). Used by apps/mobile/src/hostedHub/runtime.ts:7-10, which is only reached through `await import(\"./runtime\")` at apps/mobile/src/hostedHub/state.ts:42,51."
+    },
+    {
+      "location": "apps/mobile/src/perf/mobileStartupImports.test.ts:176-187",
+      "note": "RELAY_E2EE_CRYPTO forbidden set for the mobile launch graph: noble, cborg, relayE2ee* other than Ids/Constants, relayCodec, relay/relayE2ee*, authorization/native(E2ee|TrustOnboarding)."
+    },
+    {
+      "location": "apps/mobile/src/perf/mobileStartupImports.test.ts:241-272",
+      "note": "Walks from index.ts the way Metro resolves iOS (.ios/.native, workspace exports, column-0 require). Asserts the walker reaches the crypto from runtime.ts (non-vacuity) and that index.ts reaches none of it. A read-only replica at HEAD gives 446 modules and 0 heavy chains from index.ts, versus 21 heavy chains from runtime.ts."
+    },
+    {
+      "location": "apps/web/src/perf/standardBootGraph.test.ts:142-167",
+      "note": "The web standard-build boot-graph guard from main.tsx forbids @noble/*, cborg, shared relay(E2ee|Codec) and heavy authorization/relay modules, with seam siblings applied. A read-only replica gives 391 modules and no heavy hits."
+    },
+    {
+      "location": "packages/client-runtime/test/lightSubpaths.test.ts:14-104",
+      "note": "Package-level guard: ./authorization and the light subpaths must not import noble, cborg or heavy relayE2ee*. It also includes a non-vacuity check on ./authorization/e2ee and ./relay/e2ee."
+    },
+    {
+      "location": "apps/mobile/metro.config.js:76-101",
+      "note": "Inline requires (1b8bfd183) further limit evaluation to first use. This makes the auditor's threadConnectionRetarget.ts:10 edge effectively free."
+    },
+    {
+      "location": "apps/mobile/src/features/access/AppAccessGate.tsx:74",
+      "note": "On every launch, ensureMobileHostedSession() leads to state.ts:42 `await import(\"./runtime\")`, which runs before the config check at runtime.ts:423. So runtime.ts is loaded at launch regardless of the thread-route edge."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:443,455,264",
+      "note": "On a hosted-configured build (the default), a direct-only user still runs trust-store hydrate and configureMobileHostedRuntime(\"deferred\"), which calls createNativeE2eeEnrollmentCoordinator, after the first commit. That loads the authorization/e2ee wrapper modules. Under inline requires, noble/cborg init is likely skipped because no crypto call is made when signed out. This is outside the finding's pre-first-frame scope."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Nothing is required. Optional hygiene only: (a) apps/mobile/src/connection/threadConnectionRetarget.ts:10 could import isMobileHostedModeAvailable from \"../hostedHub/runtimeAvailability\" (as hostedHub/state.ts:16-19 does) so the static thread-route graph stops naming runtime.ts. It is not a runtime win, because AppAccessGate already loads runtime.ts at launch. Its existing tests in threadConnectionRetarget.test.ts cover it. (b) The comment at apps/mobile/src/perf/mobileStartupImports.test.ts:12 says 'no inline requires', which has been stale since 1b8bfd183. Reword it to say the static graph is the upper bound of what launch can evaluate. (c) If a direct-only launch should load zero E2EE wrapper modules, configureMobileHostedRuntime could create the enrollment coordinator lazily, on the first authenticated selection-watch tick, via a dynamic import of @ryco/client-runtime/authorization/e2ee. That touches the section 4.4 ordering comments in runtime.ts and would need an E2EE review. Measure first with a dev-build __r.getModules() count after unlock. The likely gain is under a millisecond under inline requires.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "The finding's proposal is fully implemented and guarded, and nothing remains. Only the optional item (c), deferring creation of the native E2EE enrollment coordinator, would touch E2EE lifecycle ordering and need a security review. It is not recommended without an on-device measurement.",
+  "repos": "none"
+}

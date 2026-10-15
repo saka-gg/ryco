@@ -1,0 +1,94 @@
+{
+  "id": "browser-measure:server-config-overfetch",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is confirmed. The auditor's evidence holds at ec250e386. The boot duplicate getConfig, the usage preflight, the automation-centre read and the non-hosted new-thread read are gone. Provider pushes are now deltas, and a config snapshot omits catalogs the client names by digest. Saved environments now reuse the subscription snapshot for their metadata refresh; at f1be4abc7 they ran a parallel getConfig. The auditor did not mention that improvement or the following gaps.\n\n(a) Catalog persistence is enabled only on desktop and loopback pages. Hosted Hub web, LAN/Tailscale browsers and mobile therefore start every page load or cold start with an empty catalog cache. Their first config snapshot still carries the full ~117 KB of catalogs, on exactly the slow remote links where the finding measured head-of-line blocking.\n\n(b) The unary server.getConfig is not catalog-aware. Every remaining caller pays the full ~125 KB. That includes hosted Hub new-thread (every draft) and hosted first worktree send, where it sits on the critical path only to read settings and one capability bit.\n\n(c) Mobile opens two subscribeConfig streams on the active connection: the connection-level onConfigUpdated plus startServerStateSync. On a cold start these can carry two full snapshots.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/rpc/serverState.ts:156-178",
+      "note": "Proposal 1 done: startServerStateSync only subscribes lifecycle and config. The parallel getConfig is gone."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:900-915",
+      "note": "getUsageSummary asserts the contract version locally. There is no getConfig preflight."
+    },
+    {
+      "location": "apps/web/src/components/automations/useAutomationCentre.ts:71-74",
+      "note": "Providers come from the live useEnvironmentServerConfig, not from a getConfig per bind."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:1236-1249",
+      "note": "Not noted by the auditor. Saved-environment metadata refresh awaits the subscription's config snapshot (awaitSavedEnvironmentConfig). It falls back to getConfig only on timeout. At f1be4abc7 (service.ts:1143) it ran getConfig in parallel."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:718-746",
+      "note": "With providerStatuses:'delta' the stream sends providerStatusesDelta, and nothing when nothing changed."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:768-777",
+      "note": "The snapshot omits catalogs named in knownProviderCatalogs. The client restores them in wsRpcClient.ts:979-1018 and resubscribes without claims on a miss."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:583-640",
+      "note": "revalidateStale is a single-flight pass owned by the registry. Fresh sources cost nothing (proposal 4)."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:195-201,228-238",
+      "note": "Hosted Hub mode returns before the catalog store is attached. Elsewhere persistence runs only when keepsLocalCaches is true."
+    },
+    {
+      "location": "apps/web/src/persistence/primaryShellCacheEligibility.ts:12-17",
+      "note": "keepsLocalCaches = desktop || loopback hostname. Any remote browser, including hosted Hub, keeps catalogs in memory only, so each page load's first snapshot carries all catalogs."
+    },
+    {
+      "location": "packages/contracts/src/rpc.ts:810-814",
+      "note": "WsServerGetConfigRpc payload is Schema.Struct({}) and success is the full ServerConfig. The unary read has no catalog digests or omission."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:201-204",
+      "note": "serverGetConfig returns the full loadServerConfig, catalogs included (~125 KB per the d1ffcef9f measurement)."
+    },
+    {
+      "location": "apps/web/src/hooks/useHandleNewThread.ts:146-161",
+      "note": "requireFreshConfig is hosted || isHostedHubMode(), so every hosted draft issues a full getConfig. A lease check runs before and after (146-170)."
+    },
+    {
+      "location": "apps/web/src/hooks/useHandleNewThread.ts:398-409,459-469",
+      "note": "Draft registration reads only config.settings.defaultThreadEnvMode and defaultAgentTokenMode. Together with capabilities.projectPreferences, that is all the ~125 KB read is used for."
+    },
+    {
+      "location": "apps/web/src/hooks/newDraftDefaults.ts:113-136",
+      "note": "The non-hosted path uses cachedConfig with no getConfig. The hosted path awaits getConfig, with the preferences read in parallel only when the cache already shows the capability."
+    },
+    {
+      "location": "apps/web/src/hooks/executeChatSendTurn.ts:617-620",
+      "note": "A hosted Hub first send with a worktree awaits a full getConfig only for capabilities.projectPreferences. It runs sequentially before the preferences read when nothing is remembered."
+    },
+    {
+      "location": "apps/web/src/hostedHub/environment.ts:54",
+      "note": "A hosted node switch calls clearServerState(). The stale-primary-cache concern behind requireFreshConfig is an ordering race with the old stream's late events, not a permanently stale value."
+    },
+    {
+      "location": "apps/web/src/editorPreferences.ts:60-61",
+      "note": "openInPreferredEditor still does a full getConfig only for availableEditors. Unchanged since f1be4abc7."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/agentHandoff.ts:176-196",
+      "note": "readDraftDefaults still does a full getConfig. It also duplicates readNewDraftDefaults logic without its cache path."
+    },
+    {
+      "location": "apps/mobile/src/state/serverStateSync.ts:29",
+      "note": "Mobile starts startServerStateSync on the active connection. That connection already observes config itself (connection.ts:179,223-251 via onConfigUpdated at hostedHub/primaryConnection.ts:248 and connection/environmentDriver.ts:499). Result: two subscribeConfig streams, each with its own snapshot and deltas. The catalog cache is never persisted on mobile."
+    }
+  ],
+  "remaining": "1. Hosted Hub new-thread and first send still read the full ~125 KB getConfig on the critical path.\n   - New thread: apps/web/src/hooks/useHandleNewThread.ts:160 into apps/web/src/hooks/newDraftDefaults.ts:125-136. It uses only settings defaults and capabilities.projectPreferences.\n   - First send with a worktree: apps/web/src/hooks/executeChatSendTurn.ts:617-619. It uses only the capability bit.\n2. The unary serverGetConfig (packages/contracts/src/rpc.ts:810-814, apps/server/src/ws/providerRpc.ts:201-204) has no catalog omission, so every remaining caller pays for all catalogs.\n3. Catalog persistence is limited to desktop and loopback (apps/web/src/routes/__root.tsx:195-201,228-238; apps/web/src/persistence/primaryShellCacheEligibility.ts:12-17). Hosted Hub, remote browsers and mobile receive the full catalogs in the first config snapshot of every page load or cold start. This is the slow-link case the finding measured, though now as one copy instead of two.\n4. Small user-action leftovers: apps/web/src/editorPreferences.ts:61 (open in editor) and apps/web/src/components/pullRequests/agentHandoff.ts:185 (PR handoff) do full getConfig reads.\n5. Adjacent, mobile: apps/mobile/src/state/serverStateSync.ts:29 opens a second subscribeConfig stream beside the connection-level one. That doubles the snapshot and deltas, and both can carry full catalogs on a cold start.",
+  "fixDefects": "No verified bugs in the implemented parts. Usage, automation centre, the non-hosted draft path, deltas, catalog omission with claim-free resubscribe on a miss, and single-flight revalidation are all correct as read. The mobile double config subscription predates the fix (at f1be4abc7 it also issued a getConfig) and is not a regression. Residual design gap: the per-page catalog cache helps only reconnects and node switches on non-persisting surfaces, never the first load.",
+  "implementationSketch": "A. Per-connection live config for hosted targets (removes hosted new-thread and first-send getConfig).\n   - packages/client-runtime/src/connection/connection.ts: make every connection kind observe config (drop the kind/onConfigUpdated gate at :179). Expose `config: { read(): ServerConfig | null; subscribe(listener) }`. read() returns observedConfig only if the connection is not disposed, the WS status is connected, and the snapshot arrived on the current attempt. Track the attempt like shellSnapshot does, and reset it in onResubscribe and reconnect().\n   - Change startServerStateSync (packages/client-runtime/src/rpc/serverState.ts:162) to take that connection-level observer instead of opening its own subscribeConfig. Update apps/web/src/components/ServerStateBootstrap.tsx and apps/mobile/src/state/serverStateSync.ts. This removes mobile's duplicate stream and keeps exactly one config stream per connection everywhere.\n   - apps/web/src/hooks/useHandleNewThread.ts:155-161: for hosted targets pass cachedConfig = readEnvironmentConnection(id)?.config.read() and set requireFreshConfig only when that is null. Keep the existing before/after mutation-lease check.\n   - apps/web/src/hooks/executeChatSendTurn.ts:617-620: same rule.\n   - Tests: connection.test.ts (read() is null after resubscribe until the new snapshot, null after dispose, not double-subscribed); newDraftDefaults/useHandleNewThread tests (hosted with current-attempt config → getConfig not called; stale or absent → getConfig); executeChatSendTurn.test.ts hosted worktree path; mobile serverStateSync test asserting one subscribeConfig per connection.\n\nB. Alternative or complement, without touching lifecycle: make the unary read catalog-aware. Add optional knownProviderCatalogs to the WsServerGetConfigRpc payload and an optional providerCatalogs bookkeeping key to the response (a wrapper or optionalKey; older servers ignore the field). Reuse omitKnownProviderCatalogs (apps/server/src/ws/providerCatalogs.ts:33) in providerRpc.ts:201, and pin/restore with providerCatalogCache in wsRpcClient.ts:891. This cuts every remaining getConfig from ~125 KB to ~8 KB. Add contract tests for both shapes, like the subscribe ones.\n\nC. Leftovers:\n   - editorPreferences.ts:61: use getServerConfig()?.availableEditors and fall back to getConfig only when it is null.\n   - agentHandoff.ts:176-196: replace readDraftDefaults with readNewDraftDefaults({ cachedConfig: readEnvironmentServerConfig(env), requireFreshConfig: same rule as useHandleNewThread }), removing the duplicated logic.\n   - Tests: the existing agentHandoff and editorPreferences unit tests, with getConfig mocks asserting it is not called when a live config exists.\n\nD. Optional, needs decision: persist the catalog cache on hosted and remote browsers and on mobile (ProviderCatalogStore over IndexedDB, or an MMKV/SQLite store on mobile). It would be opt-in or tied to the existing hosted cache opt-in, cleared on sign-out and account change.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Part A changes how hosted Hub targets decide that config is current. It replaces a fresh scoped read with a generation- and attempt-gated per-connection value, which touches AGENTS.md hosted lifecycle ownership (stale generations must not publish state). Part D persists node-owned catalogs on non-loopback, hosted and mobile clients. The codebase deliberately keeps no copy there without asking (primaryShellCacheEligibility.ts), so that is a privacy and product decision. Parts B and C are plain contract-additive or local changes and need no decision.",
+  "repos": "ryco"
+}

@@ -1,0 +1,63 @@
+{
+  "id": "server-boot:sharp-static-import",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710; also in the Hub-vendored 7bc39eec3). No production module statically imports sharp any more. The only reference is apps/server/src/loadSharp.ts: a type-only import plus `import(\"sharp\").then(m => m.default)`. sharp 0.35.5 ships an ESM entry (dist/index.mjs) with `export default Sharp`, so `.default` is correct. All four former static importers await loadSharp() only inside operation-time functions, and no boot-time code calls them. The dist was built at 21:45, after HEAD's 21:40 commit. In that dist, bin.mjs's static closure is bin.mjs alone. The serve chunk's static closure is 49 chunks whose externals are only node: builtins. sharp appears only as a dynamic import at cliMain chunk line 20749. Two guard tests prevent regressions: a source-graph test at serverBundleBoundaries.test.ts:141-144 and a built-bundle test at :216-223. Side effect: a missing or broken sharp native binary (unsupported platform, --omit=optional) no longer stops the server from booting. Now only image features degrade.",
+  "evidence": [
+    {
+      "location": "apps/server/src/loadSharp.ts:10-15",
+      "note": "`import type sharp` is erased at compile time, and loadSharp = () => import(\"sharp\").then(m => m.default). The module cache memoizes it. Concurrent first callers share one module record."
+    },
+    {
+      "location": "apps/server/node_modules/sharp/package.json",
+      "note": "sharp 0.35.5 exports {import: ./dist/index.mjs}, and index.mjs:25 is `export default Sharp`, so module.default resolves the factory under both Node and Bun."
+    },
+    {
+      "location": "apps/server/src/project/Layers/ProjectAvatarStore.ts:3,30-36",
+      "note": "Only write() calls loadSharp. A load failure becomes a defect through Effect.promise, the same as an invalid image did before."
+    },
+    {
+      "location": "apps/server/src/attachmentMedia.ts:265-276,303",
+      "note": "probeImageDimensions wraps the call in Effect.tryPromise, timeoutOption(5s) and Effect.catch->null. A sharp load failure therefore silently yields null dimensions, which answers the auditor's open question. The first call's import now counts toward the 5 s probe timeout, which matters little at about 30-45 ms."
+    },
+    {
+      "location": "apps/server/src/attachmentMedia.ts:285",
+      "note": "Small correction to the auditor: the bytes-based probe (probeAttachmentMediaDimensionsFromBytes) is used only in tests and is tree-shaken from dist. In production only the path probe at :303 runs. It is called from http.ts:536 (attachment serving, memoized per dev/ino/size/mtime) and Normalizer.ts:387."
+    },
+    {
+      "location": "apps/server/src/htmlRender/thumbnails.ts:13,48",
+      "note": "encodeHtmlRenderThumbnail awaits loadSharp(). Its caller at HtmlRenderLive.ts:227-233 catches failures and logs them at debug level."
+    },
+    {
+      "location": "apps/server/src/agentControl/Mcp/htmlRenderTools.ts:43,262",
+      "note": "fitHtmlPreviewScreenshot awaits loadSharp(). Its only caller is the preview tool at :520."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:141-144",
+      "note": "Source guard: the static graph of src/cliMain.ts has no `sharp` external. The STATIC_IMPORT regex skips `import type`."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:216-223",
+      "note": "Built-bundle guard: the entry closure is only bin.mjs, and the serve chunk's static externals exclude sharp. It is skipped when no current dist exists."
+    },
+    {
+      "location": "apps/server/dist/cliMain-BZ--4hne.mjs:20749",
+      "note": "Re-ran the static-closure walk on the current dist. It found 49 chunks and only node: builtin externals. loadSharp call sites (lines 20908, 38386, 92029, 96448) are all inside function bodies."
+    },
+    {
+      "location": "scripts/lib/validate-runtime-dependencies.ts:169-188",
+      "note": "Packaging is driven by the dependency list rather than by tracing static imports, so the lazy import cannot cause sharp to be pruned. The staged @img native payloads are still validated."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Nothing is required. One optional, low-value nit: a broken sharp install is now mostly silent. Attachment probes swallow the error and return null, and thumbnails log only at debug level. Before the fix, the same breakage failed at boot. To make it visible, wrap the import in loadSharp.ts with a one-time console/Effect warning on rejection, e.g. `.catch((error) => { if (!warned) { warned = true; console.warn('sharp failed to load; image features are degraded', error); } throw error; })`. Add a unit test that mocks the import rejection. Do not add an idle warm-up, because that would give back the ~25 MiB RSS saving for users who never touch image features.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco",
+  "correction": "The auditor's DONE stands. Minor corrections: (1) the attachmentMedia.ts:285 bytes probe is used only in tests, so in production only the :303 path probe runs (via http.ts:536 and Normalizer.ts:387), not both per attachment. (2) The auditor's open question is answered: probeImageDimensions (attachmentMedia.ts:265-276) turns a sharp load failure into silent null dimensions, and the first import now counts toward the 5 s probe timeout."
+}

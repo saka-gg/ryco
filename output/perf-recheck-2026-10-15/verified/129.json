@@ -1,0 +1,66 @@
+{
+  "id": "thread-and-draft:detail-subscription-after-mount-hero-flash",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "#710 (60633eff3) shipped the main parts: retain at navigation time (route loader, sidebar and inbox intent, welcome prewarm) and a hero gate with ThreadHistorySkeleton. But the gate decides 'never started' from latestTurn and latestUserMessageAt only. A fresh fork has inherited history yet neither field, because the server leaves inherited prompts out of latestUserMessageAt and the fork has no turn of its own. So every fork opened on web still flashes NewThreadHero, with NewThreadWorkLocation and its git and listRefs reads, until the window arrives. The web fork dialog navigates into the fork right away, so this is the normal fork path. The browser test hides the gap: its fixture gives the fork a latestUserMessageAt the server would never send. Separately, the sidebar intent retain ends with release({immediately:true}). If the user left the thread within 10 s, that disposes the subscription and skips the 5-minute idle cache. Part 3 (a non-hosted message read cache) is still absent, but it matters less than the auditor said. Idle eviction keeps messages in the store, so a revisit in the same session paints at once. Only the first open after a reload or restart waits.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/ChatView.logic.ts:441",
+      "note": "isServerThreadHistoryPending counts a thread as started only if hasLatestTurn or latestUserMessageAt is set. It ignores lineage."
+    },
+    {
+      "location": "apps/server/src/orchestration/forkInheritance.ts:88",
+      "note": "countsTowardUserRecency leaves inherited prompts out. Used by ProjectionPipeline.ts:789 and :1170, so a fork's shell latestUserMessageAt stays null until it sends its own message."
+    },
+    {
+      "location": "apps/server/src/orchestration/decider.ts:1020",
+      "note": "thread.fork.create emits thread.created (latestTurnId null) plus the inherited message-sent events. Nothing sets latestTurnId, so the fork's shell has latestTurn === null."
+    },
+    {
+      "location": "packages/shared/src/threadFork.ts:97",
+      "note": "threadHasConversation already exists for this case ('a fork that has not sent anything yet still counts through its lineage'), but the hero gate does not use it."
+    },
+    {
+      "location": "apps/web/src/components/chat/ForkThreadDialog.tsx:193",
+      "note": "The fork dialog navigates into the new fork right away, with its detail not loaded. Result: hero plus NewThreadWorkLocation (git status, listRefs) until the window arrives."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.Fork.browser.tsx:271",
+      "note": "The test fixture sets latestUserMessageAt to the first inherited message's time. The real server sends null, so the test passes and hides the hero flash."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/threadNavigationIntent.logic.ts:90",
+      "note": "Intent retains release with {immediately:true} after 10 s. Scenario: press opens thread A (intent retain, then view retain), and the user leaves A within 10 s. ChatView's release only drops refCount to 1. The intent release then reaches refCount 0 and disposes at once (supervision.ts:880), skipping the 5-minute idle cache. The comment at lines 63-69 claims the subscription 'stays and later reaches the idle cache as usual', which is false here."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.threadSubscriptions.test.ts:328",
+      "note": "The immediate-release test covers only 'speculative released first, view later'. The reverse order (view released first) is untested."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1224",
+      "note": "Thread messages leave the store only on thread removal (removeThreadState) or when the thread drops out of the shell (store.ts:2114). Disposing a subscription (supervision.ts:709) does not clear them, so selectThreadDetailLoaded stays true and in-session revisits paint at once. Part 3 only helps after a reload or restart."
+    },
+    {
+      "location": "apps/web/src/routes/_chat.$environmentId.$threadId.tsx:19",
+      "note": "Confirmed: the route loader retains synchronously (not on preloads), lifecycle hooks drop superseded retains, and ChatThreadRouteView.tsx:155 releases the bridge once ChatView holds its own retain. Releasing too early is harmless: a normal release only starts the idle timer."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5777",
+      "note": "Confirmed: the skeleton replaces the hero and timeline while history is pending, and showNewThreadComposerSpacer (line 1785) is gated as well."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:628",
+      "note": "Minor: if a 'response-too-large' window cannot shrink further, the code returns without retrying. The detail never loads and the skeleton stays indefinitely with no error state. It is rare, and the old behaviour (hero) was also wrong."
+    }
+  ],
+  "remaining": "1) Fork gap: isServerThreadHistoryPending (apps/web/src/components/ChatView.logic.ts:441) treats a fresh fork (lineage.relationship === 'forked', latestTurn null, latestUserMessageAt null) as never started. Each first open of such a fork, including the one the fork dialog does automatically (ForkThreadDialog.tsx:193), renders NewThreadHero and NewThreadWorkLocation (git status, listRefs) for one window round trip before the inherited transcript appears. 2) Optional proposal part 3: there is no non-hosted message read cache (persistence/primaryShellCache.ts holds metadata only). It affects only the first open of a thread after a reload or restart. In-session revisits after idle eviction already paint from the store.",
+  "fixDefects": "a) The hero gate misses forks. The browser fixture at ChatView.Fork.browser.tsx:271 sets latestUserMessageAt from an inherited message, which the server never does (forkInheritance.ts:88), so the gap is untested. b) Sidebar and inbox intent retains end with release({immediately:true}) (threadNavigationIntent.logic.ts:90; supervision.ts:880). When the user opens a thread whose detail was not loaded and leaves within 10 s, the view's release runs first, and the intent's immediate release then disposes the subscription at once instead of letting it idle for 5 minutes. A revisit shows stale store data and pays a fresh window request. Only the reverse order is tested (service.threadSubscriptions.test.ts:328).",
+  "implementationSketch": "Fork gap (S): change isServerThreadHistoryPending in apps/web/src/components/ChatView.logic.ts to take `lineage` (or a precomputed hasConversation) and use the shared rule: pending = isServerThread && !detailLoaded && messageCount === 0 && (hasLatestTurn || threadHasConversation({ latestUserMessageAt, lineage })), importing threadHasConversation from @ryco/shared/threadFork. In ChatView.tsx around line 1773, pass activeThread.lineage (or selectSidebarThreadSummaryByRef(...).lineage). Add a unit case in ChatView.logic.test.ts ('fork with lineage, no latestTurn and no latestUserMessageAt is pending'). Change the ChatView.Fork.browser.tsx fixture (line 271) to latestUserMessageAt: null so it matches the server, and assert that the fork view never shows the hero or the 'Work in' surface before the window arrives. Intent idle-cache bypass (S): in packages/client-runtime/src/connection/supervision.ts retain(), add a per-entry viewEpoch counter that increments on each view retain. Capture it in the returned release closure, and dispose on `immediately` only if no view retain happened since this retain was taken (entry.viewEpoch === epochAtRetain); otherwise fall through to reconcileEntry (idle eviction). This also fixes useSidebarThreadPrewarm's immediate releases. Add a test to service.threadSubscriptions.test.ts: speculative retain, view retain, view release, then immediate release of the speculative one → not disposed until the 5-minute idle timer. Optionally fix the comment in threadNavigationIntent.logic.ts. Part 3 (optional, M): persist the last ~20 messages per recently opened thread for loopback or desktop primary environments, alongside primaryShellCache, and seed them through hydrateEnvironmentStateFromCache. This only improves the first open after a reload, and it changes what the persistence boundary stores, so treat it as a product decision.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The fork gate and the idle-cache fix are local client changes with no auth, E2EE, Hub or lifecycle impact. Only the optional part 3 (persisting message content for non-hosted environments) would need a decision on the persistence and privacy boundary.",
+  "repos": "ryco"
+}

@@ -1,0 +1,54 @@
+{
+  "id": "gap-right-panel-first-open:checkpoint-diff-git-spawns",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The fix in 60633eff3 (#710, also inside the Hub's vendored 7bc39eec3) does what the proposal asked. getTurnDiff and getFullThreadDiff no longer run the 2 parallel hasCheckpointRef rev-parse calls followed by 2 sequential re-resolves. One `git cat-file --batch-check=%(objectname)` process resolves both refs (`<ref>^{commit}` on stdin), and the OIDs go straight into `git diff`. A cache miss now costs 2 spawns with a critical path of 2, down from 5 spawns with a critical path of 4. A cache hit costs 1 spawn and no `git diff`. The 32-entry / 32 MB LRU is keyed by [cwd, fromOid, toOid, ignoreWhitespace], so a ref rewritten by a revert misses instead of serving a stale patch. A scratch repo on git 2.55 confirmed the batch semantics: a missing ref or a failed peel prints one `<name> missing` line, keeping output aligned with input, and exits 0. Every server consumer goes through the cache: WS getTurnDiff/getFullThreadDiff (ws/orchestrationRpc.ts:388-405) and Agent Control threadReads.ts:522. The only remaining users of hasCheckpointRef and diffCheckpoints are in CheckpointReactor, on the turn-completion path rather than the panel-open path. No regressions found. Error semantics match the old code: a non-zero cat-file exit maps to CheckpointUnavailableError, as a failed rev-parse did. Two small leftovers, both outside the finding's scope. First, concurrent identical cache misses each run `git diff` because there is no in-flight dedup. Second, CheckpointReactor.captureAndDispatchCheckpoint (CheckpointReactor.ts:520-548) still runs a warning-only hasCheckpointRef rev-parse and then re-resolves the same from-ref inside diffCheckpoints, which is one redundant spawn per turn completion.",
+  "evidence": [
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointDiffQuery.ts:126-146",
+      "note": "One resolveCheckpointCommits call replaces the old Effect.all of two hasCheckpointRef calls (f1be4abc7 :100-112). A null OID maps to CheckpointUnavailableError with the same detail text as before."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.ts:317-341",
+      "note": "Runs one process, `cat-file --batch-check=%(objectname)`, with refs on stdin. CR/LF refs are filtered out and only FULL_COMMIT_OID lines are accepted. A scratch-repo probe confirmed that missing refs and failed peels each answer one 'missing' line and exit 0."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.ts:386-407",
+      "note": "diffCheckpointCommits takes resolved OIDs and runs only `git diff --patch --minimal --no-color [--ignore-all-space]`."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointDiffQuery.ts:32-48",
+      "note": "LRUCache of 32 entries and 32 MB, keyed by JSON [cwd, fromCommitOid, toCommitOid, ignoreWhitespace]."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointDiffQuery.ts:154-161",
+      "note": "Uses get-or-compute with a null-sentinel miss. packages/shared/src/lruCache.ts:18-26 returns null only for a missing key, so an empty \"\" diff is a valid hit. The maximum entry is 10 MB of output, about 20 MB counted at UTF-16 x2, so it fits under the byte bound."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointDiffQuery.ts:180-188",
+      "note": "getFullThreadDiff delegates to getTurnDiff, so the conversation view and Agent Control (agentControl/Mcp/threadReads.ts:522) use the same batch resolve and cache."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointDiffQuery.test.ts:188-238",
+      "note": "Tests a cache hit, a separate whitespace-flag entry, and a miss after the ref moves (diffRuns == 3). The mock store makes hasCheckpointRef and diffCheckpoints die, which proves the query path no longer uses them."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.test.ts:372-404",
+      "note": "A real-git test checks that resolveCheckpointCommits returns results in input order with a missing ref in the middle, then diffs the resolved OIDs."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:520-548",
+      "note": "Out of scope: the turn-completion path still runs a warning-only hasCheckpointRef rev-parse and then diffCheckpoints, which re-resolves the same from-ref (one redundant spawn per turn completion, ignoreWhitespace:false, so it cannot seed the default query cache)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None that matter. 1) There is no in-flight dedup, so concurrent identical cache misses (two clients, or invalidation refetches racing) each run `git diff`. 2) resolveCheckpointCommits filters only CR and LF, while the old resolveCommitOid also rejected leading '-' and all control characters. A leading '-' is harmless on stdin. Other control characters could only arrive through server-generated checkpoint refs (Base64Url thread ids), so the gap is theoretical. 3) The documented trade-off stands: .gitattributes and diff config are not part of the cache key.",
+  "implementationSketch": "Optional polish only. (a) In-flight dedup: in CheckpointDiffQuery.ts keep a Map<cacheKey, Deferred<string, E>>, or use Effect's Cache/RequestResolver keyed by the same string, so concurrent misses share one `git diff`, and delete the in-flight entry on completion or failure. Test: two concurrent getTurnDiff calls with a mock diffCheckpointCommits that awaits a Deferred should produce diffRuns == 1. (b) CheckpointReactor.captureAndDispatchCheckpoint: drop the pre-capture hasCheckpointRef, or run it concurrently with captureCheckpoint, and log the missing-baseline warning when diffCheckpoints reports an unavailable from-ref. That saves one spawn per turn completion; extend the existing CheckpointReactor tests that assert the warning.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

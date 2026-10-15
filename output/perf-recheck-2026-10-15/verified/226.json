@@ -1,0 +1,71 @@
+{
+  "id": "hub-connection:reads-held-until-shell-snapshot",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "Still not done at ec250e386. Hosted unary reads are refused at request start (RpcRequestRefusedError 'awaiting-session') until sessionStatus is 'ready'. The client sets 'ready' only after it accepts the shell snapshot. The post-connect query refresh, the capability hooks and the keyed source-control admission all wait for 'ready' as well. Nothing in Ryco or in the Hub (origin/main 5f656ad) admits reads early. #710 and a38ecac4b changed only the delivery-unknown read admission and the channel-adoption recovery. d2aa947a3 pages the shell snapshot but applies it atomically at snapshot-end, so readiness still waits for every page. 8c42d3334 is an HTTP cache for Hub shell/thread reads, which is a different path. The auditor's evidence and line numbers are accurate. A few details: there are now 116 read methods, not 106. Mobile shares the same admission function. After a38ecac4b the gate also applies on every adopted reconnect. The legacy useQuery client can stretch the post-ready delay beyond one round trip.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:72-101",
+      "note": "admitHostedRequestForState: a non-stream request is 'allowed' only when it is live and hostedSessionAdmits passes (line 79). The synchronizing window (lines 80-90) covers only `info.stream` tags in HOSTED_SESSION_SYNC_SUBSCRIPTIONS (lines 39-47, unchanged at 7 entries). Everything else returns 'awaiting-session' (line 100)."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/capabilities.ts:26-33",
+      "note": "hostedSessionAdmits is true only for 'ready', or for delivery-unknown with sessionRecoveredAfterUnknown and an rpcDeliveryEffect of 'read'. #710 added that second branch for the unknown-delivery recovery case, not for the initial sync."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/protocol.ts:441-442",
+      "note": "onRequestStart throws RpcRequestRefusedError(admission) synchronously. wsTransport.request (packages/client-runtime/src/rpc/wsTransport.ts:195-221) has no wait-for-admission loop; only subscribe() retries on admission changes (wsTransport.ts:273-275, 341-351). Unary reads fail fast and are never queued."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2638-2656",
+      "note": "markSessionReady is the only place that sets sessionStatus 'ready', and it runs from syncShellSnapshot onCurrent/onReady. connectionRecovered (2624-2636) adopts the replacement channel but leaves the session stale or replaying until that channel's own snapshot. So reads are also refused for the length of a snapshot after every adopted reconnect."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.test.ts:543-565,586",
+      "note": "The tests encode the policy explicitly. Requests in the synchronizing, stale and browser-synchronizing states expect 'awaiting-session', and one test is named 'retains only session-sync authority across a retryable socket close'. Changing this is a deliberate policy change, not a bug fix."
+    },
+    {
+      "location": "apps/web/src/rpc/environmentQueryRefresh.ts:36-50",
+      "note": "isHostedEnvironmentQueryRefreshReady still requires sessionStatus==='ready' and sessionEstablished. The file is unchanged since f1be4abc7."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:842-855,894-906",
+      "note": "completeQueryRefresh runs only from syncShellSnapshot onCurrent/onReady, after markHostedSessionReady, and only when isAuthoritativelyReady. Fenced or refused reads are therefore re-run only after the accepted snapshot."
+    },
+    {
+      "location": "apps/web/src/rpc/queryClient.ts:396-399,437-438",
+      "note": "Secondary detail the auditor missed. QueryClient.fetch returns an existing entry.promise even with force:true. A legacy useQuery read with the default retry of 3 that mounts while the session is synchronizing gets refused and sleeps 1 s, then 2 s, in backoff. The post-ready refreshActiveQueriesForEnvironment then calls refetch(force), which joins that sleeping attempt, so the read goes out when the backoff ends rather than right after ready. Example: the WorkItemsTab vcs.listRefs query (apps/web/src/components/projectExplorer/WorkItemsTab.tsx:164-176). Keyed atom queries are not affected (keyedQuery.ts:332-395 has no retry sleep; refreshActiveEnvironment re-runs error states)."
+    },
+    {
+      "location": "apps/web/src/hostedHub/capabilities.ts:30",
+      "note": "Capability hooks pass sessionReady: hostedSessionAdmits(state, method). The same applies at apps/web/src/rpc/sourceControlReadAdmission.ts:51, apps/web/src/components/settings/useDiagnosticsCapability.ts:34 and apps/web/src/lib/threadExport.ts:34. Source-control keyed queries get key null, and so do not fire, until 'ready'."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/primaryConnection.ts:131-147",
+      "note": "The native app calls the same admitHostedRequestForState with its per-connection state. Any change to the shared policy changes mobile read admission too."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/shellSnapshotAssembly.ts:51",
+      "note": "d2aa947a3 pages the snapshot, but the assembler applies it only at snapshot-end, so 'ready' still waits for every page of a large shell. Because pages are bounded at 1 MiB, admitted reads could now interleave with them on the relay."
+    },
+    {
+      "location": "packages/shared/src/rpcAccessPolicy.ts:285-521",
+      "note": "RPC_DELIVERY_EFFECT_POLICY now classifies 116 methods as read, 104 as mutation and 1 as receipted. The finding's 106 is out of date."
+    },
+    {
+      "location": "ryco-hub:origin/main (5f656ad)",
+      "note": "No Hub code references hostedSessionAdmits, admitHostedRequestForState or HOSTED_SESSION_SYNC_SUBSCRIPTIONS. There is no Hub-side implementation."
+    }
+  ],
+  "remaining": "Every hosted unary read (116 read-effect methods) that a view issues before the shell snapshot is accepted is refused at request start (packages/client-runtime/src/relay/transport.ts:79,100; packages/client-runtime/src/rpc/protocol.ts:442). It is re-run only by the post-ready refresh (apps/web/src/environments/runtime/service.ts:842-855,894-906; apps/web/src/rpc/environmentQueryRefresh.ts:36-50) or by an admission change (source-control keyed queries via apps/web/src/rpc/sourceControlReadAdmission.ts:51). So each first-paint read costs one browser to Hub to node round trip after the full, possibly paged, snapshot instead of being pipelined with it. This happens on cold connect and on every adopted reconnect (state.ts:2624-2656). On top of that, legacy useQuery reads with default retries (apps/web/src/rpc/queryClient.ts:396-399,437-438) can wait out a 1-2 s retry backoff after ready, because a forced refetch joins the sleeping attempt. Impact on the thread view's primary content stays low: shell, thread window, VCS status, server config and terminal events already come through the admitted session-sync subscriptions. The cached Hub shell/thread reads from 8c42d3334 also paint the thread before the relay is up.",
+  "fixDefects": "",
+  "implementationSketch": "Part A is cheap, independent and needs no policy change. In QueryClient.fetch (apps/web/src/rpc/queryClient.ts:396-445), do not retry when the error is isAwaitingAdmission(error) (import from @ryco/client-runtime/rpc). Record the error state at once and let the post-ready refreshActiveQueriesForEnvironment re-run it, as keyed queries already do. Alternatively, let a force:true fetch supersede an attempt that is sleeping in backoff (bump fetchId and start a new run). Test: a vitest that mounts a query whose queryFn throws RpcRequestRefusedError('awaiting-session') once and then succeeds, calls refreshActiveQueriesForEnvironment, and asserts the queryFn runs again without the 1 s timer advancing.\n\nPart B is the actual proposal and needs a decision. (1) Add a shared predicate such as hostedSessionAdmitsRead(state, method) in packages/client-runtime/src/authorization/capabilities.ts. It is true when rpcDeliveryEffectFor(method)==='read' and sessionStatus is one of 'synchronizing' | 'replaying' | 'stale' (the channel is a fresh or adopted current-generation channel), and false for 'closed'. Keep hostedSessionAdmits unchanged for mutation and receipted methods. (2) In admitHostedRequestForState (packages/client-runtime/src/relay/transport.ts:72-101), add a branch for !info.stream && rpcDeliveryEffectFor(info.tag)==='read' && transportStatus==='online' && roleFresh && (browserStatus==='current' || browserStatus==='synchronizing') && hostedSessionAdmitsRead(...). This automatically covers mobile (apps/mobile/src/hostedHub/primaryConnection.ts:137). (3) Make the read-only capability callers use the read predicate: apps/web/src/rpc/sourceControlReadAdmission.ts:51, apps/web/src/lib/threadExport.ts:34, and read-only uses of apps/web/src/hostedHub/capabilities.ts:30 and useDiagnosticsCapability.ts:34. Mutation capabilities keep sessionReady===ready. (4) Split isHostedEnvironmentQueryRefreshReady (apps/web/src/rpc/environmentQueryRefresh.ts:36-50) into a reads-may-run gate (session established or synchronizing on the current generation) and keep the post-snapshot refresh. The existing staleness check in refreshActiveQueriesForEnvironment (queryClient.ts:370-386) and keyedQuery refreshActiveEnvironment already skip fresh successful entries, so a read that succeeded before the snapshot is not fetched twice as long as staleTime > 0. Queries with staleTime 0 need a per-generation 'fetched since begin()' mark to avoid the double fetch. (5) Update the tests that encode the current policy: packages/client-runtime/src/relay/transport.test.ts:543-565 and 586 ('retains only session-sync authority...'), capabilities.test.ts, environmentQueryRefresh.test.ts and apps/mobile/src/connection/hostedConnectionCoordinator.test.ts. Add cases where reads are allowed while synchronizing or replaying, mutations stay 'awaiting-session', and stale-generation reads are fenced. (6) Validate with the hosted browser suite (apps/web test:browser) and a cold-connect trace on a large shell to confirm reads overlap the snapshot pages.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Part B changes the hosted admission policy that AGENTS.md assigns to the single hosted lifecycle owner. Its tests deliberately encode 'retains only session-sync authority' until the snapshot. Reads before the snapshot is accepted are not mutation authority, but the hosted lifecycle owner still has to sign off. The change also alters native (mobile) admission, because both apps share admitHostedRequestForState. Part A (no retry on awaiting-admission in the legacy QueryClient) involves no policy change and can be done without a decision.",
+  "repos": "ryco",
+  "correction": "No correction to the classification. Additions: the read count is now 116, not 106. The policy is shared with mobile (apps/mobile/src/hostedHub/primaryConnection.ts:137). After a38ecac4b the gate also applies on every adopted reconnect. The paged snapshot (d2aa947a3) still applies atomically at snapshot-end. The legacy QueryClient's forced refetch joins an in-flight retry backoff (queryClient.ts:396-399,437-438), so some reads wait up to 1-2 s after ready, not just one round trip. The auditor's suggestion to admit reads in 'stale and similar' states should exclude 'closed' and require transportStatus 'online'."
+}

@@ -1,0 +1,67 @@
+{
+  "id": "desktop-boot:hub-identity-resume-waterfall",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL confirmed. Since f1be4abc7 (60633eff3, ecd6e206a): the credential hydrate and Hub restoreSession start at bootstrap through prepareResume and are adopted by the post-ready resume; the GitHub read overlaps setup and enrollment; one security helper serves each burst of requests (2 s idle); and desktop.hub.resume.start/end marks exist. I found no other implementation of the rest. Still missing: only #setup should wait for backend readiness, but the whole #run still starts in resumeDesktopHostedIdentityForBackend. So credentials.flush, nativeE2eeEnrollment.ensure (helper ops plus the upsert RTT) and the GitHub read all still start after readiness. The auditor also missed one step: the device catalog listNodes RTT runs strictly after #run, in DesktopWorkspaceClient.#adoptIdentity -> refreshCatalog. So 'catalog ready' after backend-ready is still flush + max(setup, enrollment, github) + cache.list + listNodes RTT + per-node trust reads. The remaining gain depends on config. With the connector enabled (background claim allowed, this user's setup), setup is about 2 Hub RTTs plus about 6 backend control calls and already hides enrollment and GitHub, so moving those earlier gains about 0. With a standby connector, setup is local-only and moving them saves about 1 RTT plus helper ops.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/main.ts:4856",
+      "note": "Bootstrap runs startBackend() and then prepareDesktopHostedIdentityResume() (4857), after awaiting shell env capture (4855)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1279",
+      "note": "prepareDesktopHostedIdentityResume runs only if a hub-session-token record exists. It builds the coordinator (hub stack, native identity context, DPoP signer) and calls prepareResume(). No startup mark covers this early prepare."
+    },
+    {
+      "location": "apps/desktop/src/desktopHostedIdentity.ts:303",
+      "note": "prepareResume starts only #restoreSession (hydrate + restoreSession, 320-334). It starts neither enrollment nor the GitHub read."
+    },
+    {
+      "location": "apps/desktop/src/desktopHostedIdentity.ts:538",
+      "note": "#run adopts the prepared restore through #takePreparedRestore (341-347) and discards it if the outcome is 'unavailable'. It then runs credentials.flush (559) after backend readiness."
+    },
+    {
+      "location": "apps/desktop/src/desktopHostedIdentity.ts:569",
+      "note": "readingGitHub starts before allSettled([#setup, nativeE2eeEnrollment.ensure]) (570-573) and is awaited at 580. GitHub-to-setup overlap is done (test at desktopHostedIdentity.test.ts:678). Enrollment.ensure (572) still starts only post-ready."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1256",
+      "note": "resumeDesktopHostedIdentityForBackend is called only from the backend-ready .then (1806 packaged, 1676 dev). It marks desktop.hub.resume.start/end (1266/1270) and starts the whole #run via ensureDesktopWorkspaceClient().resume()."
+    },
+    {
+      "location": "apps/desktop/src/desktopHostedIdentity.ts:233",
+      "note": "Default #setup is the only backend user. runDesktopAutomaticNodeClaim (automaticNodeClaim.ts:46-109) costs control descriptor -> Hub start RTT -> control sign -> Hub finish RTT -> control commit, then local introduction control calls and a helper sign. Gated by desktopHubAllowsBackgroundNodeClaim (desktopSettings.ts:305-306), otherwise #retainedLocalNode, which is local-only."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeEnrollment.ts:381",
+      "note": "ensure() does: helper ensureIdentity, fire-and-forget refreshDirectory (383), ensureClientPrekey, then the Hub upsertE2eeDeviceEnrollment RTT (429). It runs on every launch (per-process state) and needs only the account session."
+    },
+    {
+      "location": "apps/desktop/src/desktopHostedIdentity.ts:219",
+      "note": "Desktop's refreshDirectory calls api.listNodes() and discards the result. Hub GET /api/nodes is read-only (ryco-hub:src/http/identityRoutes.ts:333), so this is a wasted RTT and DPoP signature per launch. It is concurrent, not on the critical path."
+    },
+    {
+      "location": "apps/desktop/src/desktopWorkspaceClient.ts:463",
+      "note": "#adoptIdentity lists the metadata cache and then calls refreshCatalog (478), which awaits identity.listNodes() (243), another Hub RTT, only after #run resolves. The finding's 'device catalog ready' still waits for this sequential RTT."
+    },
+    {
+      "location": "apps/desktop/src/nativeSecurityHelper.ts:143",
+      "note": "HELPER_IDLE_MS = 2000. The runner keeps one helper per burst and serializes requests through a queue. The Swift helper loops over newline-delimited requests (RycoDesktopSecurityHelper.swift:329-343) but rebuilds the SE key from its dataRepresentation on every request (117). The bootstrap prepare burst and the post-ready burst usually use separate helpers, about 1 extra launch per boot."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2360",
+      "note": "A rotated bearer token from the early restore is written right away through writeBearerToken, which persistence enqueues (hostedCredentials.ts:76). Quitting before the post-ready flush does not lose a rotated token, so the early restore has no durability defect."
+    }
+  ],
+  "remaining": "(1) Only #setup should wait for backend readiness, but the whole #run still starts post-ready via resumeDesktopHostedIdentityForBackend (apps/desktop/src/main.ts:1256, called at 1676/1806). credentials.flush (desktopHostedIdentity.ts:559), nativeE2eeEnrollment.ensure(accountId) (572; helper ops plus Hub upsert RTT) and #readGitHubState (569) need only the account session, yet start after readiness. (2) Not covered by the auditor: the device catalog listNodes RTT (desktopWorkspaceClient.ts:478 -> 243) runs strictly after #run, so catalog-ready = backend-ready + flush + max(setup, enrollment, github) + cache.list + listNodes RTT + trust reads. (3) Minor: enrollment's refreshDirectory (desktopHostedIdentity.ts:219-221) issues a discarded listNodes on every launch. No early-prepare startup mark. The helper is reused per burst (2 s), not long-lived, so the bootstrap and post-ready bursts usually launch separate helpers. Realistic remaining gain: about 0 when the connector is enabled (setup's 2 Hub RTTs plus backend calls already dominate enrollment and GitHub). About 1 Hub RTT plus helper ops (roughly 100-300 ms) with a standby connector, where setup is local-only. Up to one more RTT if the catalog listNodes is overlapped with setup.",
+  "fixDefects": "No correctness defect in the implemented parts. Checked: a prepared 'unavailable' outcome is never adopted (desktopHostedIdentity.ts:346), so an offline launch only re-restores. disconnect() awaits #idle and clears #preparedRestore before clearing credentials (390-397). A token rotated by the early restore is persisted right away, not at flush. Minor, non-defect: helper per-burst reuse means the bootstrap burst (DPoP signing for restoreSession) and the post-ready burst usually pay separate launches, about 8 ms. The Swift helper still reconstructs the SE key handle on every request, so the commit's 'no key reload' claim holds only for the process launch.",
+  "implementationSketch": "A. Prefetch the account-only steps in prepareResume (apps/desktop/src/desktopHostedIdentity.ts:303). Chain on the prepared #restoreSession(). When it resolves to kind 'session', start and store #preparedAccount = { accountId, flushed: this.#credentials.flush(), github: this.#readGitHubState(), enrollment: this.#nativeE2eeEnrollment?.ensure(accountId) }, attaching .catch handlers to avoid unhandled rejections. In #run (535+), adopt them only when restored.kind === 'session' and session.account.id matches: use the stored github promise instead of a new #readGitHubState(), and the stored enrollment promise in allSettled instead of a second ensure(). This matters: once the early ensure settles, the coordinator's operation is null (nativeE2eeEnrollment.ts:477), so a second ensure() would repeat the upsert RTT. Add the new promises to #idle() and clear #preparedAccount in disconnect() and in #takePreparedRestore when the outcome is not a session. Optionally re-read GitHub if the prefetch is older than a few seconds. B. Optionally overlap the catalog read: inside #run, start this.#api.listNodes() beside setup and expose it through a one-shot #takePrefetchedNodes(accountId) used by the first listNodes() after #run (desktopHostedIdentity.ts:421). Because a first-ever claim adds the local node to the directory, adopt the prefetch only when setup returned a node already present in it, or follow with one refreshCatalog after setup. C. Point desktop's refreshDirectory (219-221) at desktopWorkspaceClient?.refreshCatalog() or drop it, so each launch no longer pays a discarded listNodes. D. Add markDesktopStartupPhase('desktop.hub.resume.prepare') in prepareDesktopHostedIdentityResume (main.ts:1279), plus a mark when the prepared restore settles. Tests in desktopHostedIdentity.test.ts: prepareResume followed by resume() calls upsert, GitHub configuration/security and flush exactly once; an account mismatch or signed-out outcome discards the prefetch; disconnect during the prefetch prevents adoption; enrollment still runs on resume when prepare was skipped. Measure desktop.backend.listening -> desktop.hub.resume.end with the connector enabled and in standby before and after.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The core remaining work (A, C, D) only reschedules existing calls (the same enrollment ensure, GitHub read and flush for the same restored account) and does not change E2EE, auth or hosted lifecycle semantics: nothing new is published before #run, and mutation readiness is unchanged. Only the optional catalog prefetch (B) is a behaviour trade-off (a directory possibly stale relative to a first-time node claim), and it would need a product call if pursued.",
+  "correction": "Classification and evidence are accurate. Additions: (a) the auditor missed that the device catalog's listNodes RTT (desktopWorkspaceClient.ts:463-478 -> 243) is a further sequential step after #run, so 'catalog ready' still trails backend readiness by setup/enrollment plus one more RTT; (b) the remaining gain is config-dependent. With the connector enabled, setup (2 Hub RTTs + ~6 backend control calls) already dominates enrollment and GitHub, so moving them before readiness gains about 0. Only with a standby connector is it about 1 RTT plus helper ops. (c) Commit 52e33643a (#725) also touched desktopHostedIdentity.ts (enrollment recovery and live account E2EE state). That is not a perf change, but a prefetch must account for it: a second ensure() after the first settles repeats the upsert.",
+  "repos": "ryco"
+}

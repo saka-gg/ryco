@@ -1,0 +1,59 @@
+{
+  "id": "projects-loading:sidebar-jira-link-rpc-per-project",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the stated cost. PR #710 (60633eff3) changed the gate on useSidebarProjectJiraLinks from projectHeaderHasIntersected to a sticky projectMenuIntent flag, which is set on pointerenter or focus capture of the project header. On first sidebar render the getProjectLink and listConnections RPCs no longer fire (30 -> 0-1). No other surface issues per-row Atlassian reads: ProjectOverviewTab, WorkItemsTab, the settings forms and ProjectAtlassianSection are single-project, user-opened views; PhoneHome passes an empty map; mobile and client-runtime never call getProjectLink. The auditor missed some small leftovers. (1) Both queries use staleTime 0, so every newly hovered project re-watches the per-environment connections key and sends a fresh listConnections RPC. The boot-time in-flight coalescing is gone, so a first hover costs 2 RPCs, and moving the pointer across collapsed headers sends 2 RPCs per header crossed. (2) That connections read is redundant in the common case: since 332da2298, saveProjectLink always stores a vetted jiraSiteUrl, and resolveJiraProjectOpenUrl prefers it. (3) The native/DOM-fallback context menu snapshots the map synchronously, so a fast right-click over a slow relay can leave out \"Open Jira project\". (4) No test covers the intent gating.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectItem.tsx:189-193",
+      "note": "projectMenuIntent useState(false) plus handleProjectMenuIntent; the comment states the goal: resolve the Jira link on menu intent, not for every visible project at boot."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectItem.tsx:251-255",
+      "note": "useSidebarProjectJiraLinks({ explorerOpen: false, projectVisible: projectMenuIntent }). At f1be4abc7 this was projectHeaderHasIntersected."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectHeader.tsx:88-93",
+      "note": "The header wrapper div has onFocusCapture and onPointerEnter = onMenuIntent. The ProjectSettingsMenu trigger (around line 228) sits inside this wrapper, so the dropdown always sets intent before it opens."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.logic.ts:479-484",
+      "note": "shouldQuerySidebarSourceControlCounts returns explorerOpen || projectVisible, which is false until intent because explorerOpen is hard-coded false."
+    },
+    {
+      "location": "apps/web/src/rpc/atlassianAtoms.ts:22-23,96,113-152",
+      "note": "isEnabled requires enabled, so keyOf returns null and watch is a no-op while disabled. Both stale times are 0, so shouldFetchOnWatch is always true and every new watch on an existing key starts a new read unless one is already in flight."
+    },
+    {
+      "location": "apps/web/src/rpc/useAtlassian.ts:118-123,159-168",
+      "note": "Each SidebarProjectItem watches the shared connections key for its environment in its own effect. With per-item intent the watches are staggered in time, so each new hover sends a fresh listConnections instead of joining one in-flight read (packages/client-runtime/src/rpc/keyedQuery.ts:343,744)."
+    },
+    {
+      "location": "apps/web/src/lib/workItemLocalLinks.ts:96-111",
+      "note": "resolveJiraProjectOpenUrl uses link.jiraSiteUrl first and falls back to the connection's baseUrl only when it is null."
+    },
+    {
+      "location": "apps/server/src/atlassian/AtlassianConnectionService.ts:189-222,386-397",
+      "note": "saveProjectLink always stores a vetted jiraSiteUrl when jiraConnectionId is set (added in 332da2298), so the sidebar's connections RPC matters only for legacy rows."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useSidebarProjectContextMenu.ts:145-182",
+      "note": "The right-click menu reads jiraProjectOpenUrlByProjectKey synchronously before api.contextMenu.show. If the lazily started reads have not returned (e.g. over a hub relay), \"Open Jira project\" is left out of that menu. The React dropdown (ProjectSettingsMenu.tsx:40-43,57) is reactive and fills in once the reads return."
+    },
+    {
+      "location": "apps/web/src/components/shell/phone/PhoneHome.tsx:494-505",
+      "note": "The frozen phone tier passes EMPTY_JIRA_PROJECT_LINKS and makes no Atlassian RPCs (unchanged since f1be4abc7)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No regression against the finding's metric; minor inefficiency and UX leftovers in the fix. (1) The connections read has staleTime 0 (apps/web/src/rpc/atlassianAtoms.ts:22) and is watched once per project item (apps/web/src/components/sidebar/hooks/useSidebarProjectJiraLinks.ts:28-35). Each first hover therefore sends getProjectLink plus a new listConnections, even when connections were fetched a moment earlier for another project in the same environment. A vertical pointer sweep across N collapsed headers sends about 2N RPCs. Before the fix it was P+E, coalesced at boot. Lazy and amortized, but more total relay frames per session if the user eventually hovers most projects. (2) That listConnections call is usually unnecessary: links saved since 332da2298 always carry jiraSiteUrl. (3) Race in the right-click menu: useSidebarProjectContextMenu.ts:145-182 snapshots the map at contextmenu time. A right-click within one relay RTT of pointerenter, or on a header that scrolled under a still cursor without a pointerenter, omits \"Open Jira project\" for that open. (4) No unit or browser test asserts that sidebar boot issues zero getProjectLink calls or that hover issues one per member.",
+  "implementationSketch": "Optional follow-up, all in apps/web. (a) In apps/web/src/components/sidebar/hooks/useSidebarProjectJiraLinks.ts, derive the environments that need the fallback from the loaded link results: memberProjects where link.data?.jiraConnectionId is set and jiraSiteUrl is null. Pass only those to useAtlassianConnectionsBatch (enabled when that list is non-empty). This removes the connections RPC in the common case and halves per-hover cost. As an alternative or addition, give CONNECTIONS_STALE_TIME_MS a small window (e.g. 30-60s) in apps/web/src/rpc/atlassianAtoms.ts. Every connection or link mutation already calls invalidateAtlassian (SourceControlSettings.tsx:370/411/440, useProjectAtlassianLinkForm.ts:151, useAtlassian.ts:189), so staleness stays bounded. (b) To close the right-click race, have the hook also return a 'pending' flag (any enabled link/connections state with isLoading). In useSidebarProjectContextMenu.openProjectMenu, which is already async, when pending await a promise that resolves on the next settled state, either by subscribing to the relevant atoms through appAtomRegistry or by a small whenSettled helper. Cap the wait at about 300-500 ms, then call api.contextMenu.show. Also call onMenuIntent from handleProjectButtonContextMenu so a header that scrolled under a still cursor still starts the read. (c) Tests: a vitest for useSidebarProjectJiraLinks/SidebarProjectItem with a mocked environment connection. Assert that atlassian.getProjectLink and listConnections are not called on mount; that after pointerenter on the header there is one getProjectLink per member and no listConnections when jiraSiteUrl is present; and that the context menu includes \"Open Jira project\" when the read resolves inside the wait window.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Web-only client change: no auth, E2EE, Hub protocol or hosted lifecycle implications. Waiting up to ~400 ms before showing the right-click menu is a small UX choice, not a product-level trade-off.",
+  "repos": "ryco",
+  "correction": "The auditor's DONE classification is right. Its fixDefects missed that the sidebar's per-environment listConnections read (staleTime 0) is re-sent for every newly hovered project, because the boot-time in-flight coalescing is gone. A first hover costs 2 RPCs, not the 1 per member the auditor described. That read is also redundant whenever the link carries the vetted jiraSiteUrl, which every link saved since 332da2298 does."
+}

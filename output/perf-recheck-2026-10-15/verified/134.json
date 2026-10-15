@@ -1,0 +1,55 @@
+{
+  "id": "thread-and-draft:timeline-estimate-and-measure-reuse",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. Part 1 of the proposal is done: getItemType (per-type size averages) shipped in #710 and is still wired up. Parts 2 and 3 are not in the tree. The first-visit estimate is still a flat 56 px. MessagesTimeline still remounts per thread, and nothing remembers measured heights between visits. a01ef8557 did implement both: a 120 px estimate, plus an LRU keyed by thread, row id and width that seeded the list's sizes before first layout. It measured 11 mounted rows instead of 23 on first open, and on reopen 0 size corrections and ~33 ms settle instead of 11 corrections and ~75 ms. #723 (5ebb23825) deliberately removed both while adding a blank-timeline diagnostic. Nothing since #723 (only #727 and #728 touched these files) brings either back. I found no renamed module and no other approach (LRU, getFixedItemSize, onItemSizeChanged, estimatedListSize, or seeding). One correction to the auditor's suggested route: in LegendList 3.3.10, getState().sizes IS the internal sizesKnown map, and getFixedItemSize also writes into sizesKnown. So switching to getFixedItemSize would hit the same pre-layout 'all sizes known' shortcut as the reverted seeding. It is not obviously safer.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.logic.ts:513",
+      "note": "timelineRowItemType returns `message:<role>` or row.kind. Added in #710 (60633eff3); f1be4abc7 had no getItemType. This part is done."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:907",
+      "note": "getItemType={timelineRowItemType} is passed to LegendList."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:909",
+      "note": "estimatedItemSize={56}, the same value as at f1be4abc7 (line 820 there). recycleItems={false} is at :910 and initialScrollAtEnd at :911 (unless readHostedThreadScroll gives an offset, :358-361). Neither changed. There is no getFixedItemSize, onItemSizeChanged or estimatedListSize."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5782",
+      "note": "<MessagesTimeline key={activeThread.id} (at :5783) still remounts the list on every thread switch, so LegendList's sizesKnown and averageSizes are dropped."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:696",
+      "note": "The one-shot blank-timeline diagnostic added in #723 (:696-722) logs list state 1 s after rows settle. #723 deleted timelineRowHeights.ts, its unit test and MessagesTimeline.rowHeights.browser.tsx, and reset the estimate from 120 to 56. Nothing under apps/web/src references a height cache now."
+    },
+    {
+      "location": "apps/web/node_modules/@legendapp/list/react.mjs:7517",
+      "note": "getState() exposes `sizes: state.sizesKnown`. The reverted a01ef8557 code wrote remembered heights straight into the list's 'known' map, not into a rendered-size cache."
+    },
+    {
+      "location": "apps/web/node_modules/@legendapp/list/react.mjs:1155",
+      "note": "getKnownOrFixedSize writes the getFixedItemSize result into state.sizesKnown (:1160-1161). getFixedItemSize therefore seeds the same map as the reverted code."
+    },
+    {
+      "location": "apps/web/node_modules/@legendapp/list/react.mjs:4711",
+      "note": "Initial layout readiness is checkAllSizesKnown(start..end) (defined at :2340, which reads sizesKnown) followed by setDidLayout and handleInitialScrollLayoutReady. Any pre-seeded size, whether written directly or via getFixedItemSize, lets readiness and the initial scroll fire before mounted rows are measured. This is the plausible link to the blank-until-scroll symptom #723 diagnosed. It is not proven."
+    },
+    {
+      "location": "apps/web/node_modules/@legendapp/list/react.mjs:4900",
+      "note": "With getFixedItemSize, a measurement is skipped only when it equals sizesKnown (:4920-4922). A row that measures differently still goes through updateOneItemSize. However, fixed-size rows never feed averageSizes (:4992)."
+    }
+  ],
+  "remaining": "(1) First-visit over-render. MessagesTimeline.tsx:909 is still estimatedItemSize={56}. Until one row of each type has been measured, every type falls back to 56. a01ef8557 measured 23 mounted rows on first open versus 11 at 120 px on a 150-message thread. (2) No memory of measured heights across visits. ChatView.tsx:5782-5783 remounts MessagesTimeline per thread, and no cache or seeding exists, so a reopened thread re-measures and corrects every row in range (11 corrections, ~75 ms settle versus 0 and ~33 ms with the reverted cache). Both were implemented in a01ef8557 and reverted on purpose in #723. The cause of the blank timeline that #723 diagnosed is still unresolved.",
+  "fixDefects": "None in the shipped part. timelineRowItemType is a pure function, and the list uses it for both pooling and per-type averages. The auditor's suggested fallback (getFixedItemSize instead of writing getState().sizes) is not a defect in the code, but it is a flawed recommendation: getFixedItemSize writes into the same sizesKnown map (react.mjs:1155-1162) and short-circuits checkAllSizesKnown in the same way. It does not avoid the suspected readiness problem.",
+  "implementationSketch": "Step 0 (gate): use the describeBlankTimeline warning (MessagesTimeline.tsx:696-722) in dev or dogfood to collect `hidden`, listRange and listBufferedRange, and whether didFinishInitialScroll was reached, on the current 56 px build. If blank reports still appear with no seeding at all, the cache was not the cause. Step 1 (low risk, S): raise only the estimate. Change MessagesTimeline.tsx:909 to a named constant around 100-120 px. It touches no list internals. Verify with a real-list browser test: restore the deleted MessagesTimeline.rowHeights.browser.tsx from 5ebb23825^ minus the cache assertions. Mount a ~150-message fixture, count [data-timeline-root] elements after settle (expect about 11 instead of 23), and assert that the end anchor is reached and the content wrapper's opacity is not 0 (reuse describeBlankTimeline logic) with both initialScrollAtEnd and a readHostedThreadScroll offset. Step 2 (M, only after step 0 clears it): reuse heights without feeding the readiness path. One option is to keep a module LRU (thread key + row id + rounded width) written from onItemSizeChanged. Instead of seeding sizesKnown, use it to compute a per-thread mean or median height, pass that as estimatedItemSize on remount, and pass estimatedListSize from the last viewport. The list then still measures every mounted row before it reports readiness. Another option is to seed only rows outside the initial buffered range, so that above-the-fold rows are still measured before checkAllSizesKnown passes. Do not use getFixedItemSize for this: it has the same sizesKnown effect. A third option is to stop keying MessagesTimeline by thread, which keeps LegendList's own caches; that is a larger change with scroll and expansion state reset implications. Tests: a browser test that opens thread A, switches to B, returns to A, and asserts no blank (opacity 1, rowsInView > 0), at most N onItemSizeChanged corrections, and the end anchor held. Also cover a width change between visits.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "This is pure client-side rendering work: no auth, E2EE, Hub protocol or hosted lifecycle rules are involved. The owner did revert this exact change on purpose in #723, though. Reintroducing height reuse should wait until the blank-timeline diagnostic shows that seeding is not the cause, and should be coordinated with whoever owns that investigation. Raising the estimate alone is a safe, independent step.",
+  "repos": "ryco",
+  "correction": "The classification and evidence are correct. One correction to the recommendation: getState().sizes is LegendList's sizesKnown map (react.mjs:7517), and getFixedItemSize also writes into sizesKnown (react.mjs:1155-1162). So 'use getFixedItemSize rather than writing into getState().sizes' is not the safer route; it triggers the same pre-measurement checkAllSizesKnown readiness (react.mjs:4711). A safer approach feeds the remembered heights back through estimatedItemSize/estimatedListSize, or seeds only rows outside the initial buffered range. Minor line drift: the key is at ChatView.tsx:5783 inside the element opened at :5782."
+}

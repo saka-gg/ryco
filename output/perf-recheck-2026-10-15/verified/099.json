@@ -1,0 +1,54 @@
+{
+  "id": "browser-measure:duplicate-listrefs",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Fixed in 60633eff3 (#710). The prefetch and the watcher's first-page load now go through fetchFirstBranchesPage, which joins any in-flight first-page promise for the same environmentId/cwd/query key. A thread open (the prefetch effect runs, then the useGitBranches watcher effect in the same commit) now sends one vcs.listRefs. The poller runs input.run in a microtask after creation, so the watcher always joins the pending prefetch RPC. A recreated watcher also adopts a list fetched within the 15 s stale time (runImmediately: !adoptCached), so ChatView remounts no longer refetch. Nothing in the web client duplicates this on thread open: every other listRefs caller is a dialog or a one-off search with a different payload. The 'same pattern for status prefetches' part of the proposal does not apply. Git status is a refcounted stream keyed per cwd/view/interval, there is no status prefetch, and refreshStatus already has a keyed in-flight map. I looked for regressions in the fix and found none.",
+  "evidence": [
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:232",
+      "note": "branchesFirstPageInFlight replaces the removed prefetch-only branchesPrefetchInFlight Set (deleted in 60633eff3)."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:265-286",
+      "note": "fetchFirstBranchesPage returns the pending promise or registers a new one. A read detached by invalidation or reset reports fetchedAt null."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:329-345",
+      "note": "loadInitialBranchesNow (watcher first load via pollBranches) goes through the shared fetch."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:604-641",
+      "note": "prefetchBranchesByKey bails if a first page is in flight or a controller exists. Otherwise it uses the shared fetch and discards its own publish when a controller appeared meanwhile (the controller publishes the same result)."
+    },
+    {
+      "location": "apps/web/src/lib/visibilityPolling.ts:44-58,74",
+      "note": "refresh() calls run via Promise.resolve().then(run): a microtask after watchBranches. The prefetch RPC is still pending then, so the watcher joins it."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:531-580",
+      "note": "A recreated watcher adopts a fresh cached list and skips the immediate run."
+    },
+    {
+      "location": "apps/web/src/components/BranchToolbarBranchSelector.tsx:242-258",
+      "note": "This is the only prefetchBranches caller. The prefetch effect is declared before useGitBranches (useGit.ts:60 useEffect), and both use the same key: query '' with the initial deferred query ''."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.test.ts:200-218",
+      "note": "The test asserts one listRefs for prefetch plus watcher of the same key. It runs in the node environment without window, so it covers the no-poller path, but the poller path only adds a microtask."
+    },
+    {
+      "location": "apps/web/src/lib/gitStatusState.ts:80,137-167,262-265",
+      "note": "Status is a refcounted stream subscription and refreshStatus has a keyed in-flight map. There is no status prefetch, so the proposal's status remark does not apply."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None that regress or reintroduce the duplicate. Minor notes, not defects: (1) Joiners now share a failure: if the shared first-page read fails, the watcher shows the error until the next 60 s poll or a lifecycle/focus refresh. Before, it made its own attempt, which would normally have failed the same way. (2) An invalidation during the initial load drops the shared in-flight entry, but the poller's own inFlight dedupe (visibilityPolling.ts:47) still swallows the controller's refresh, so the pre-change list can stay up to 60 s. This predates the fix (the old code behaved the same way) and only matters if a branch mutation runs during the first load. (3) The dedupe unit test does not exercise the browser poller path.",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Client-only caching change already merged. It does not touch auth, E2EE, hosted lifecycle or the Hub.",
+  "repos": "ryco"
+}

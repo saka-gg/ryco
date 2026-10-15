@@ -1,0 +1,54 @@
+{
+  "id": "gap-composer-pickers:alias-probe-hydration",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. PR #710 (60633eff3) replaced the per-entry isMacOSBookmarkAlias call in filesystem.browse with probeBrowseAliasCandidate. That function skips content extensions before any syscall, stats once, refuses to open dataless placeholders (blocks===0), and caches results by path, size and mtime (FIFO, 2048 entries). Browse also skips probing when a directory has more than 500 regular-file candidates. I checked the blocks guard on this user's real Dropbox File Provider tree: csconfig.txt (593 B, flags 'compressed,dataless') stats as blocks=0, a materialized file stats as blocks=8, and stat() left the file dataless. So the hydration path described in the finding is closed. No other code path probes aliases: isMacOSBookmarkAlias is only used for the single typed-path check, and no other readdir path opens files to detect aliases. The leftovers are minor: the 500-file cap also counts content-extension files that are never opened, the typed-path check has no dataless guard, and the new tests are darwin-only, so Linux-only CI never runs them.",
+  "evidence": [
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1188-1191",
+      "note": "Browse calls probeBrowseAliasCandidate(fullPath, dirent.name), not isMacOSBookmarkAlias, only for regular files and only when probeAliases is true."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1159-1166",
+      "note": "fileCandidateCount counts every regular-file candidate, and probeAliases = isDarwin && count <= MACOS_ALIAS_PROBE_MAX_CANDIDATES (500, line 353). Content-extension files are included in the count even though they are never opened."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:357-373",
+      "note": "MACOS_ALIAS_CONTENT_EXTENSIONS plus hasContentExtension. Returns false before any stat or open (line 381)."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:380-400",
+      "note": "One stat per probed file, a 4 B to 64 KiB size gate, and `if (stats.blocks === 0) return false` before readsMacOSBookmarkMagic. The cache key is `${filePath}\\0${size}\\0${mtimeMs}` with FIFO eviction at 2048 (line 354)."
+    },
+    {
+      "location": "/Users/laurinfrank/Library/CloudStorage/Dropbox/csconfig.txt (live check, read-only stat)",
+      "note": "node fs.statSync: size=593 blocks=0 on a 'compressed,dataless' Dropbox File Provider file. The materialized rules.dropboxignore reports blocks=8. After the stat, ls -lO still shows 'dataless', so the guard detects online-only files correctly and stat does not download them."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:324-334, 1095-1104",
+      "note": "isMacOSBookmarkAlias (stat, then open, with no blocks guard) is now only called for the single typed path, when it ends with a separator and lstat says it is a regular file."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.test.ts:460-514",
+      "note": "New tests 'only opens small files without a content extension' (476) and 'skips alias probing in directories with many files' (496) are both it.effect.skipIf(process.platform !== 'darwin'). The size-cap test at 569 predates the fix and tests isMacOSBookmarkAlias, not the browse probe. No test covers the cache or the blocks===0 guard."
+    },
+    {
+      "location": "scripts/ci/test-matrix.ts:28-46",
+      "note": "All unit-test CI runners are ubuntu, so the darwin-gated browse alias-probe tests never run in CI."
+    },
+    {
+      "location": "apps/web/src/lib/projectPaths.ts:201-212; apps/web/src/components/CommandPaletteDialog.tsx:767-818",
+      "note": "The palette always browses the directory path with a trailing separator and filters on the client, so prefix is '' and every regular file in the directory becomes a candidate. The 500 cap and the cache matter here, and both are in place."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor, low-impact items only. (1) The candidate cap counts content-extension files that are never opened (WorkspaceEntries.ts:1159-1166). A directory with more than 500 media or source files plus one Finder alias (for example ~/Downloads or ~/Desktop) therefore stops showing that alias, even though probing it would cost one stat. The cap only needs to bound probe-eligible files. (2) The typed-path check isMacOSBookmarkAlias (WorkspaceEntries.ts:324-334, called at 1102) has no blocks===0 guard. If a user types a dataless, extension-less regular file with a trailing slash, the open() can still download that one file. (3) readsMacOSBookmarkMagic returns false on any open or read error (WorkspaceEntries.ts:336-348), and probeBrowseAliasCandidate caches that false (line 399), so a transient EMFILE or EIO hides an alias until the file's size or mtime changes. (4) The new browse-probe tests are darwin-only and CI is Linux-only. There are also no tests for the cache hit or the dataless guard, so a regression in this logic would only show up on a developer Mac. Out of scope but adjacent: resolveMacOSAliasTargets still spawns osascript and Finder on every browse or prefetch of a directory that contains aliases, because only the probe result is cached, not the resolved target.",
+  "implementationSketch": "Optional polish in apps/server/src/workspace/Layers/WorkspaceEntries.ts. (a) In browse, count only dirent.isFile() && !hasContentExtension(dirent.name) toward MACOS_ALIAS_PROBE_MAX_CANDIDATES. (b) Move the size and blocks gate into a shared helper, for example statAliasProbeCandidate(filePath), returning the stats or null. Use it from both isMacOSBookmarkAlias and probeBrowseAliasCandidate so the typed-path check also refuses dataless files. (c) Make readsMacOSBookmarkMagic return `boolean | undefined`, with undefined on an error other than ENOENT, EACCES or EPERM, and skip caching undefined. (d) Tests in WorkspaceEntries.test.ts: export probeBrowseAliasCandidate, or an internal test hook plus a cache reset, and drop the darwin gate for the helper-level tests so they run on Linux CI. Add one test that browses twice and expects a single open per alias candidate, using the existing countOpensDuring spy. Add one test that mocks fsPromises.stat to return blocks: 0 and expects no open. Add one test where 600 .png files plus a 'Projects' bookmark file still yields probing after (a). Optionally cache resolveMacOSAliasTargets results per (aliasPath, mtime) so repeat browses and prefetches skip osascript. Validation: focused `bun run test` on apps/server WorkspaceEntries tests only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The main fix already shipped and the remaining items are small, local correctness and test-coverage polish in one server file. There is no auth, crypto, Hub or hosted-lifecycle impact. Counting only probe-eligible files toward the cap is a tiny behaviour change that makes more aliases visible.",
+  "correction": "No change to the classification. Small corrections to the auditor's evidence: the 'probe size cap' test at WorkspaceEntries.test.ts:569 is a pre-existing isMacOSBookmarkAlias test, not coverage of the new browse probe. The new browse-probe tests are darwin-only and never run on the Linux-only CI. The auditor also missed that the 500 cap counts content-extension files, which can hide aliases in large media folders. The dataless guard is confirmed to work on the user's real Dropbox File Provider files (blocks=0)."
+}

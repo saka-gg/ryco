@@ -1,0 +1,83 @@
+{
+  "id": "client-runtime-sync:rpc-streams-one-chunk-per-event",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "The DONE status holds for the orchestration streams, and I checked every combinator on them. The auditor's 'no fix defects that matter' is too strong, though. The same one-Chunk-plus-Ack-per-event mechanism is still live in a sibling relayed stream, subscribeTerminalEvents (Stream.tap at apps/server/src/ws/terminalRpc.ts:280 and :285). No other finding in the report covers it. Separately, mobile still commits thread-detail events to the store one at a time. Neither changes the status of this orchestration-scoped finding.",
+  "summary": "Fixed in 60633eff3 (#710), which also ships in the Hub-vendored 7bc39eec3. The shell, thread and thread-window pipelines are now chunk-preserving end to end, checked against effect 4.0.2. Replay pages leave as one array per page (fromIterable on an Array is fromArray). Live batches drain through fromQueue, which uses Queue.takeAll. The shell mapping is batch-level mapArrayEffect and also collapses repeated per-thread upserts. Ledger and metrics run through tapArray, dedupe uses Stream.filter (filterArray), and rechunkByBudget uses chunks+flatMap, so arrays are never merged. History recovery is mapArrayEffect (with a test asserting array sizes [1,3,1,1]). The perf taps are observeArrays and the RPC instrumentation is onExit only. Thread chunks are capped at 256 KiB and 1000 items; shell chunks at 128 items. The tests show that 1000 replayed events take at most ceil(bytes/256KiB)+1 chunks, that 500 shell events take 2 chunks, and that 200 live events queued during one held ack take at most 2 chunks. On the client, wsTransport.subscribe and requestStream use runForEachArray, and web batches shell and thread-detail items into one store commit per frame. Residual items are outside this finding's scope. The terminal event stream still de-chunks per event (same mechanism). Mobile applies thread-detail events one commit per event. Shell chunks are capped by count, not bytes. Thread priorities still use per-element mapEffect, but they emit one item per ranking. The shell merge with priorityItems pre-fetches one array, which can add up to one RTT of latency but costs no throughput.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreamBatching.ts:78-99",
+      "note": "rechunkByBudget (Stream.chunks + flatMap to fromArray/fromArrays, which only splits), tapArray (mapArrayEffect), observeArrays."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:583",
+      "note": "Each replay page is Stream.fromIterable(Array). In effect 4.0.2 that becomes fromArray, so one page is one array."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:593-599",
+      "note": "shellEventsFromDomainEvents uses mapArrayEffect(toShellStreamEvents) followed by Stream.filter (Channel.filterArray, which preserves arrays). This replaces the old per-element mapEffect+flatMap at f1be4abc7:427-428."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:661-674",
+      "note": "drainLiveQueue is Stream.fromQueue (Channel.fromQueueArray, which uses Queue.takeAll) plus one tapArray. This replaces fromQueue->tap->tap at f1be4abc7:549-551/641-643."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:849-859",
+      "note": "Shell: per-array replay metric, dedupe by Stream.filter, rechunk to 128 items. The live side passes through Stream.merge with priorityItems; Channel.merge passes whole arrays, so batching is unaffected."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:960-980",
+      "note": "Thread: per-array replay metric, filter/map, then rechunk to 1000 items and ORCHESTRATION_STREAM_CHUNK_MAX_BYTES=256 KiB (constants.ts:41). The thread stream is pull-only (concat), with no merge prefetch."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:545-547",
+      "note": "The subscribeShell perf tap is observeArrays. subscribeThread (611-613) and subscribeThreadWindow (644-646) use the same. Both thread handlers wrap the stream in withHistoryRecovery."
+    },
+    {
+      "location": "apps/server/src/orchestration/historyRecoveryPolicy.ts:171-176",
+      "note": "mapArrayEffect passes arrays through. historyRecoveryPolicy.test.ts:100-107 asserts that array sizes [1,3,1,1] are preserved."
+    },
+    {
+      "location": "apps/server/src/observability/RpcInstrumentation.ts:72-90",
+      "note": "observeRpcStream and observeRpcStreamEffect add only Stream.onExit, which does not de-chunk."
+    },
+    {
+      "location": "node_modules/.bun/effect@4.0.2/node_modules/effect/src/Stream.ts:2127-2140",
+      "note": "Confirms the mechanism: mapEffect (and tap, which is built on it) does flattenArray then map(Arr.of), emitting single-element arrays. RpcServer.ts:448-457 writes one Chunk per array and waits on latch.await (the Ack)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreamBatching.test.ts:197-303",
+      "note": "Regression tests: 1000-event replay takes at most ceil(bytes/cap)+1 chunks with every chunk within the cap; 500-event shell replay takes 2 chunks with one row re-read; 200 live events during one held ack take at most 2 chunks."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsTransport.ts:567-578",
+      "note": "subscribe uses runForEachArray and delivers a chunk in one synchronous pass. requestStream (line 234) does the same."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:1067-1071",
+      "note": "Shell items are frame-batched into one store commit (shared client-runtime, used by web and mobile)."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:801-811",
+      "note": "Web thread-detail events are frame-batched through createEnvironmentEventBatcher (added in 60633eff3)."
+    },
+    {
+      "location": "apps/server/src/ws/terminalRpc.ts:279-286",
+      "note": "Uncovered sibling with the same mechanism: subscribeTerminalEvents runs Stream.fromQueue(queue) through a per-element Stream.tap(releaseTerminalSubscriberEvent), and the bootstrap goes through a per-element Stream.tap(recordServerPerfPayload). The terminal Manager publishes one event per pending PTY output chunk (Manager.ts:1703-1710). Subscriber capacity is 256 events / 4 MiB (terminalRpc.ts:19,31). On a hosted or remote link (relayed per relay/transport.ts:46), each output event costs one Chunk+Ack RTT, so chatty output overflows into TerminalSubscriptionResyncError."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadDetailEvents.ts:62",
+      "note": "Minor client gap: mobile applies each thread-detail event as its own store commit (applyRecoveredEventBatch([event])) instead of reusing the client-runtime frame batcher that web uses."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defects in the orchestration fix itself. I checked every combinator from source to RpcServer and the client consumer. The uncovered sibling and minor gaps are: (1) apps/server/src/ws/terminalRpc.ts:280 and :285 still use per-element Stream.tap on subscribeTerminalEvents, a relayed hosted sync subscription. Every terminal output event is therefore a separate Chunk with an Ack round trip. With capacity 256 (terminalRpc.ts:19) at 50-150 ms RTT, the server sends about 7-20 events/s. Sustained output above that fills the queue and fails with TerminalSubscriptionResyncError, so the client resubscribes every 250 ms. No report finding covers this. (2) Mobile commits thread-detail events one at a time (apps/mobile/src/connection/threadDetailEvents.ts:62); web frame-batches them. (3) Shell chunks are bounded by count only (128). A rare project row with a large customSystemPrompt is unmeasured, but 128 such rows still fit under the 4 MiB relay cap. (4) The shell's Stream.merge with priorityItems prefetches one array, which adds up to one RTT of latency but costs no throughput.",
+  "implementationSketch": "Terminal sibling (worth doing). (a) Move tapArray/observeArrays out of apps/server/src/ws/context/orchestrationStreamBatching.ts into a shared apps/server/src/ws/streamBatching.ts. Keep the orchestration-specific orchestrationEventBytes where it is. (b) In terminalRpc.ts:279-286, replace the bootstrap Stream.tap with observeArrays(true or isServerPerfProfileEnabled(), items => items.forEach(e => recordServerPerfPayload('server.ws.terminal.events', e))). Replace the live Stream.tap(releaseTerminalSubscriberEvent) with tapArray(events => releaseTerminalSubscriberEvents(ledger, events)), a new batch variant that subtracts summed approximateJsonBytes and the event count in one Effect.sync. Optionally cache per-event bytes in a WeakMap, as orchestrationEventBytes does, so the offer and release paths do not stringify twice. The following Stream.filter already preserves arrays. Optionally add rechunkByBudget with about 256 KiB (sizeOf = cached approximateJsonBytes) so a backlog of terminal output stays under the relay cap. (c) Test, in terminalRpc.test.ts: open the subscription and hold the first array in Stream.runForEachArray behind a Deferred, as the orchestration live test does. Publish 200 output events, release, and assert that they arrive in at most 2 arrays with the ledger back at 0. Mobile (low priority): in apps/mobile/src/connection/threadDetailEvents.ts, wrap applyRecoveredEventBatch in createEnvironmentEventBatcher from @ryco/client-runtime/state/threads, as web's threadDetailEventBatcher does. Better still, hoist the thread-detail batcher into client-runtime so web and mobile share it, per the AGENTS.md no-duplication rule. Test that N events enqueued in one task produce one applyOrchestrationEvents call.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local stream plumbing plus an optional mobile client batching change. No protocol, auth, E2EE, Hub or hosted-lifecycle semantics change; the RPC wire format is the same, only chunk grouping differs.",
+  "repos": "ryco"
+}

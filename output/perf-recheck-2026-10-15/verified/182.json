@@ -1,0 +1,50 @@
+{
+  "id": "dedicated-pages:projects-git-status-ignored-traditional",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Fixed in #710 (60633eff3). inspectCheckout now runs `git status --porcelain=v1 -z --untracked-files=normal --ignored=matching`. It then drops protected `!! dir/` entries that hold only nested empty directories, using a bounded readdir walk that keeps the entry protected when the budget runs out. Listing reads go through a fingerprinted 30 s TTL cache with in-flight sharing, which list() and suggestions() share. I ran a read-only comparison on 22 live ryco worktrees, using GIT_OPTIONAL_LOCKS=0 and a JS copy of parse, classify and drop. Matching plus drop gave the same blocking decision as traditional in all 22. Git time fell from 30.2 s to 0.64 s total (about 1.4-1.7 s down to about 30 ms per worktree). The only !! differences were per-file listings of directories no pattern names, for example apps/web/output/*.png against apps/web/output/, and they did not change blocking. The other inspectCheckout callers (Agent Control preflight, WorkspaceChangeSummary, preview and apply) also use matching mode and pass no cache, so they read fresh and still get the speed-up. The finding's verifier asked for a correction for empty-only directories; it is implemented and covered by an integration test. The remaining `--ignored` (traditional) call is storage/filesystem.ts assertCleanWorktree, which an on-demand storage cleanup apply path runs once per checkout as a deliberately strict check, so the Projects listing does not hit it.",
+  "evidence": [
+    {
+      "location": "apps/server/src/workspace/checkoutInspection.ts:511",
+      "note": "Status args are `-c core.fsmonitor=false status --porcelain=v1 -z --untracked-files=normal --ignored=matching`, with a 10 s timeout, maxOutputBytes 256 KiB, truncateOutputAtMaxBytes and readOnly. Only the storage cleanup path still uses traditional `--ignored` (apps/server/src/storage/filesystem.ts:279)."
+    },
+    {
+      "location": "apps/server/src/workspace/checkoutInspection.ts:78",
+      "note": "directoryHoldsContent and dropEmptyIgnoredDirectories (lines 78-124) only drop a protected `dir/` entry when the walk proves it has no files or symlinks. Unreadable directories count as content, and an exhausted 4096-entry budget keeps the entry. Every failure case keeps the entry protected."
+    },
+    {
+      "location": "apps/server/src/workspace/checkoutInspection.ts:531",
+      "note": "The drop runs after parseWorktreeStatus, before `truncated` is attached. A truncated partial path fails readdir, so the entry stays protected, and `truncated` blocks anyway."
+    },
+    {
+      "location": "apps/server/src/workspace/checkoutInspection.ts:157",
+      "note": "makeCheckoutReadCache keys each slot by kind and directory, versioned by checkoutReadFingerprint (line 217): the directory ino and mtime, the .git link, HEAD, index and branch head. Concurrent callers join one in-flight run, failures are not kept, capacity is 1024 slots, and checkoutInspection.test.ts covers it."
+    },
+    {
+      "location": "apps/server/src/workspace/WorkspaceLifecycle.ts:457",
+      "note": "listingCaches is shared by list() (line 1384, concurrency 4, with one projectFactsFor per listing) and suggestions() (line 1436). loadState (line 912), which preview, apply and applyCurrent use, calls inspectWorkspace without caches, so every destructive path reads fresh."
+    },
+    {
+      "location": "apps/server/src/workspace/WorkspaceLifecycle.test.ts:519",
+      "note": "Integration test: an empty scratch-cache/a/b/ does not block, while userdata/profiles/state.json blocks in both preview and list()."
+    },
+    {
+      "location": "packages/shared/src/workspaceLifecycle.test.ts:77",
+      "note": "parseWorktreeStatus tests for both the traditional (line 77) and matching (line 88) output shapes, as the finding asked."
+    },
+    {
+      "location": "/tmp (read-only live check)",
+      "note": "On 22 live ryco worktrees, traditional mode took 30,181 ms in total and matching mode 641 ms. blockT equalled blockM in every worktree. The only differing entries were per-file listings, in the agent-control worktree's apps/web/output and output/taskNN, which blocked either way."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None that blocks. Three low-severity caveats. (1) checkoutReadFingerprint covers the top-level directory mtime, the .git link, HEAD, index and branch head, but not changes deeper in the working tree. A tracked file edited in a subdirectory, or a new untracked file below the top level, can therefore leave a cached 'clean' status in list() and suggestions() for up to CHECKOUT_READ_TTL (30 s). That holds even after an explicit reinspect, because the client nonce does not bypass the server cache. Preview, apply and applyCurrent re-inspect without the cache, so this can never cause data loss; the worst case is a briefly stale summary or suggestion that preview then blocks. (2) Matching mode lists a wholly-ignored directory per file when no pattern names it. A directory with thousands of such files could reach the 256 KiB bound, and truncated is treated as blocking. That fails safe but could block a removal that traditional mode allowed. I saw no such case in live worktrees. (3) dropEmptyIgnoredDirectories has no direct unit test for the budget-exhaustion, symlink and unreadable-directory branches; only the WorkspaceLifecycle integration test covers it.",
+  "implementationSketch": "Optional hardening, not required. (a) Add unit tests for dropEmptyIgnoredDirectories in apps/server/src/workspace/checkoutInspection.test.ts using temp directories: empty nested directories are dropped; a file, a symlink, or an unreadable (chmod 000) subdirectory keeps the entry; a tree over 4096 entries keeps it (null result); entries without a trailing slash pass through unchanged. (b) To bound staleness for explicit reinspect, thread an optional `fresh: true` flag (or the client nonce) from lifecycle.listWorkspaces through list() so it skips listingCaches.reads, keeping the cache for mount, revision and suggestions traffic. Alternatively, cut the status TTL to about 5-10 s while keeping in-flight sharing. Test: a WorkspaceLifecycle.test.ts case that edits a tracked file in a subdirectory, then checks that a list() with fresh=true shows the modification.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

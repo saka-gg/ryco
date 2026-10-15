@@ -1,0 +1,842 @@
+{
+ "base": "ec250e386",
+ "wps": [
+  {
+   "id": "WP01",
+   "title": "Claude/provider session correctness",
+   "area": "apps/server/src/provider (Claude/Copilot/Cursor/Grok/OpenCode adapters, text generation, ProviderService skills cache, usage probes)",
+   "items": [
+    {
+     "n": 140,
+     "scope": "all"
+    },
+    {
+     "n": 143,
+     "scope": "all, incl. fixing ClaudeAdapter.test.ts which asserts the wrong field; first-turn adapters re-delivering after provider auto-compaction only if cheap"
+    },
+    {
+     "n": 179,
+     "scope": "fix defect: never cache a failed/timed-out skills probe as an empty success; keep last good list"
+    },
+    {
+     "n": 20,
+     "scope": "Part A for Claude and OpenCode only: cheap usage-only refresh (no SDK session, no --version, no opencode serve) so adopted capability snapshots stay fresh for 6 h while usage keeps its 5-minute freshness. Codex behaviour unchanged. Must NOT make usage limits staler than today, and must keep CLIProxyAPI/per-subscription usage working"
+    },
+    {
+     "n": 138,
+     "scope": "bounded timeouts + abort for Copilot/Cursor/Grok/OpenCode title/branch generation; light mode where the provider supports it; Copilot honours includeBranch if simple"
+    },
+    {
+     "n": 149,
+     "scope": "item 2 only: Cursor maintenance update and user-facing hints must use the resolved Cursor binary, never a bare `agent` that may resolve to another tool"
+    }
+   ]
+  },
+  {
+   "id": "WP02",
+   "title": "Turn start, prewarm, checkpoints and history recovery",
+   "area": "apps/server/src/orchestration (ProviderCommandReactor, CheckpointReactor, ProviderSessionPrewarm, historyRecoveryPolicy, ProviderRuntimeIngestion), apps/server/src/provider/Layers/ProviderSessionReaper.ts",
+   "items": [
+    {
+     "n": 144,
+     "scope": "fix both defects: a Stop noted during joinPreTurnBaseline must cancel the start; the baseline-timeout activity must stay visible"
+    },
+    {
+     "n": 141,
+     "scope": "Part A only (server-side computer-use turn must not claim a prewarmed session). Web/mobile client parts are in WP10/WP14A"
+    },
+    {
+     "n": 254,
+     "scope": "fix defect: a dropped turn.completed on a live runtime must be repaired again while the thread stays open (bounded, event-driven, no 30 s polling storm)"
+    },
+    {
+     "n": 145,
+     "scope": "do not decode checkpoint_files_json where no caller reads .files"
+    },
+    {
+     "n": 104,
+     "scope": "interrupted history read should still honour spacing (minor)"
+    },
+    {
+     "n": -1,
+     "scope": "R1 (from theme 8, not a single finding): ProviderSessionReaper must not reap a session for a thread that currently has an active detail subscriber/viewer; keep the 5-minute reaper for unviewed threads and keep a hard cap so memory stays bounded"
+    }
+   ]
+  },
+  {
+   "id": "WP03",
+   "title": "Server boot, startup attribution and shutdown",
+   "area": "apps/server/src (server.ts, bin.ts, cliMain, serverRuntimeStartup, startupStallMonitor, desktopLifecycle frames, os-jank, httpStartupGate, webSocketCompression, hubConnector service gating), patches/@effect%2Fplatform-node@4.0.2.patch, apps/desktop/scripts/boot-report.mjs (frame consumer only)",
+   "items": [
+    {
+     "n": 5,
+     "scope": "forward migration/ledger/repair, provider.instance.create and server.startup.* phases over fd 4 with durations; boot-report reads them"
+    },
+    {
+     "n": 2,
+     "scope": "Part A (attribution of hydration/read-model/agent-control/auth layer builds) and Part D (async Cursor/Copilot maintenance-capability resolution) only. No upgrading-data UI, no migration reordering"
+    },
+    {
+     "n": 18,
+     "scope": "fix defects: negative cache + background retry for a login shell slower than 1.5 s (async refresh off the critical path may use a longer bound); avoid synchronous PowerShell before listen on win32"
+    },
+    {
+     "n": 25,
+     "scope": "the on-demand registry fallback must not build every driver on the listen path"
+    },
+    {
+     "n": 32,
+     "scope": "on graceful-shutdown timeout also destroy upgraded WebSocket sockets that never answered the 1001 close (Node drops them from closeAllConnections)"
+    },
+    {
+     "n": 117,
+     "scope": "item 1 only: /ws/device-frames must never negotiate permessage-deflate; policy installed in all modes"
+    },
+    {
+     "n": 30,
+     "scope": "Hub routes waiting on custody: bounded wait then 503 + Retry-After; fix the stale comment (also covers #40)"
+    },
+    {
+     "n": 38,
+     "scope": "stale comments about a 2 s SIGKILL (grace is 3 s)"
+    },
+    {
+     "n": 21,
+     "scope": "RYCO_COMPILE_CACHE_DIR must not leak into provider/agent/terminal child envs (also covers #3)"
+    },
+    {
+     "n": 24,
+     "scope": "apply --max-semi-space-size=16 for CLI/serve/SSH-runner entries where it can be done safely (re-exec guard or NODE_OPTIONS for spawned long-lived servers); document it. Skip with a note if it cannot be done without a re-exec penalty"
+    },
+    {
+     "n": 28,
+     "scope": "do not load the Hub/E2EE connector graph when hubConnector is disabled; lazy-load the cheap-to-split static serve-closure modules listed (device host, htmlRender, Atlassian/Jira, ExternalMcp, Forgejo) only where it is a mechanical dynamic import"
+    },
+    {
+     "n": 26,
+     "scope": "make the built-server bundle boundary suites actually run in CI (turbo/test dependency or a dedicated CI step)"
+    }
+   ]
+  },
+  {
+   "id": "WP04",
+   "title": "Desktop main process",
+   "area": "apps/desktop/src (main.ts, backendPort.ts, backendStartup*, backendAppWindowLoad.ts, desktopHostedIdentity.ts), packages/shared/src/logging.ts (rotation pruning only)",
+   "items": [
+    {
+     "n": 0,
+     "scope": "missing server entry / missing bootstrap pipe must go through backendFailurePolicy, not retry forever"
+    },
+    {
+     "n": 4,
+     "scope": "Part A only: renderer-origin record in userData written right after port selection; no migration of existing installs"
+    },
+    {
+     "n": 7,
+     "scope": "Step 1 only: no blank window on a pending early app load; age early loads from document commit"
+    },
+    {
+     "n": 9,
+     "scope": "no-tracker readiness path should not poll HTTP from t=0"
+    },
+    {
+     "n": 12,
+     "scope": "skip the synchronous dock.setIcon when the bundle icon already matches; do not await computer-use start before the envelope/window"
+    },
+    {
+     "n": 16,
+     "scope": "start the account-session-only parts of hosted identity resume (credentials flush, enrollment ensure, GitHub state) before backend readiness; only #setup waits"
+    },
+    {
+     "n": 39,
+     "scope": "render-process-gone: drop the webContents from the usable set so a later crash-restart reloads it"
+    },
+    {
+     "n": 13,
+     "scope": "only if safe: keep V8 code cache for content-hashed chunks across version changes (filtered clearCodeCaches); otherwise leave and note"
+    },
+    {
+     "n": 258,
+     "scope": "prune orphaned rotated log files beyond maxFiles (e.g. .7-.10 left by the old maxFiles=10)"
+    },
+    {
+     "n": 6,
+     "scope": "desktop main bundle guard: also catch hoisted Hub/Computer-use schema bindings evaluated before ready (built-artifact check)"
+    }
+   ]
+  },
+  {
+   "id": "WP05",
+   "title": "Persistence, projections and repository identity",
+   "area": "apps/server/src/persistence, apps/server/src/orchestration (projector, ProjectionSnapshotQuery, shellSnapshotPages), apps/server/src/project (RepositoryIdentityResolver, repositoryIdentitySync), apps/server/src/agentControl/AgentControlProjectPlans.ts, ws/context/worktreeOperations.ts (empty-list cache only), hubConnector/ThreadReadCachePublisher.ts",
+   "items": [
+    {
+     "n": 49,
+     "scope": "command read model: retain only activity kinds the command model reads (plus required milestones); stop keeping checkpoint `files` in the live command model"
+    },
+    {
+     "n": 52,
+     "scope": "move clearly read-only heavy queries (getSnapshot for read RPCs, message search, history pages, event replay reads where safe) to the read-only worker connection; keep engine hydration and anything needing read-your-writes on the main connection; document the rule"
+    },
+    {
+     "n": 201,
+     "scope": "fix defect: a transient identity probe failure (timeout/spawn error) must not be persisted as 'no repository'; keep the previous identity and retry soon (also covers #44)"
+    },
+    {
+     "n": 108,
+     "scope": "AgentControlProjectPlans: use one identity source for expected vs revalidated keys"
+    },
+    {
+     "n": 43,
+     "scope": "never cache an empty `git worktree list` answer under a valid fingerprint (also covers #106, #202)"
+    },
+    {
+     "n": 50,
+     "scope": "add a value-change WHEN guard to projection_turns_latest_completed_update (new migration, numbered after the highest existing one)"
+    },
+    {
+     "n": 54,
+     "scope": "set PRAGMA journal_size_limit (64 MiB) on the write connection"
+    },
+    {
+     "n": 56,
+     "scope": "ThreadReadCachePublisher: never upload thread bodies the bounded index does not list"
+    },
+    {
+     "n": 114,
+     "scope": "item (a) only: do not force archived threads into a separate snapshot message (extra ack RTT). Archived threads stay in the snapshot"
+    },
+    {
+     "n": 51,
+     "scope": "unscoped list_threads paging must not rebuild the whole shell per page"
+    }
+   ]
+  },
+  {
+   "id": "WP06",
+   "title": "Statistics and usage",
+   "area": "apps/server/src/statistics, apps/server/src/usage, apps/web/src/components/statistics, apps/mobile/src/features/settings/statistics",
+   "items": [
+    {
+     "n": 47,
+     "scope": "fix the stale-while-revalidate backgroundRefresh race"
+    },
+    {
+     "n": 184,
+     "scope": "fix defect: scope the client statistics cache by environment; clear on hosted node switch/account teardown; show errors when a stale snapshot is displayed"
+    },
+    {
+     "n": 191,
+     "scope": "prefetchStatisticsPage must not fetch activity statistics for the Limits view"
+    },
+    {
+     "n": 57,
+     "scope": "usage scan cache cap should count resident cost, not folded record counts"
+    },
+    {
+     "n": 93,
+     "scope": "rates fetch: the 10 s timeout must not cover the background body read on slow links (separate connect/headers deadline, longer body budget)"
+    },
+    {
+     "n": 196,
+     "scope": "list transcript directories with bounded cross-directory concurrency"
+    },
+    {
+     "n": 190,
+     "scope": "mobile usage: show partial results per node and cancel superseded range requests"
+    }
+   ]
+  },
+  {
+   "id": "WP07A",
+   "title": "Git status and VCS core",
+   "area": "apps/server/src/vcs (GitVcsDriverCore, GitVcsDriver, VcsProcess, VcsStatusBroadcaster, VcsDriverRegistry), apps/server/src/git (GitManager status paths, GitIndexReview), apps/server/src/workspace/WorkspaceChangeSummary.ts, packages/shared/src/logOnceEvery.ts",
+   "items": [
+    {
+     "n": 199,
+     "scope": "status numstat diffs must not take .git/index.lock (e.g. -c diff.autoRefreshIndex=false / plumbing), incl. WorkspaceChangeSummary"
+    },
+    {
+     "n": 200,
+     "scope": "Windows: do not taskkill a git child that has already exited"
+    },
+    {
+     "n": 198,
+     "scope": "first remote status with polling enabled must not block on the network fetch; no-fetch loads must not await an in-flight fetch"
+    },
+    {
+     "n": 204,
+     "scope": "remote status after fetch: use rev-list ahead/behind instead of re-running the full local status; a failed fetch must not count as fetched"
+    },
+    {
+     "n": 159,
+     "scope": "fix intent-to-add file/directory clash regression in the local-changes temp index"
+    },
+    {
+     "n": 207,
+     "scope": "fix the detection cache-defeating loop for subdirectories with an invalid .git"
+    },
+    {
+     "n": 253,
+     "scope": "logOnceEvery window must cover the loop's max backoff (VCS remote status refresh)"
+    }
+   ]
+  },
+  {
+   "id": "WP07B",
+   "title": "Forge/PR lookups, worktree sweeps and project inspection",
+   "area": "apps/server/src/sourceControl (GitHubCli, GitHubSourceControlProvider, Forgejo*, refreshWorktreeSourceControlState), apps/server/src/git/GitManager.ts (ref summary / PR index fallback), apps/server/src/ws/context.ts (sweeps), apps/server/src/ws/sourceControlRpc.ts, apps/server/src/processGovernor.ts, apps/server/src/workspace/checkoutInspection.ts",
+   "items": [
+    {
+     "n": 205,
+     "scope": "Forgejo index listing honours lean fields (no per-row commit-status fan-out)"
+    },
+    {
+     "n": 206,
+     "scope": "inbox per-row PR detail goes through the forge lane with a short cache; export governor in-flight stats"
+    },
+    {
+     "n": 197,
+     "scope": "badge path: bound/cache the per-branch gh fallback (negative cache, no fallback when the index listing itself failed)"
+    },
+    {
+     "n": 192,
+     "scope": "repository resolution cache keyed per repository (common dir), longer TTL with background refresh, so cold PR/issue lists are one gh wave"
+    },
+    {
+     "n": 178,
+     "scope": "only run batched PR state reads when a swept worktree is due; batch/reuse linked issue states (also covers #183)"
+    },
+    {
+     "n": 261,
+     "scope": "Parts A, C, D only: unavailable checkouts logged once without stacks and not re-probed for ~15 min; close lifecycle/relocation races; retry a failed record. No auto-archive policy change"
+    },
+    {
+     "n": 188,
+     "scope": "project inspection: batched ahead/behind; do not gate the settings list on lifecycle suggestions; Agent Control list reuses inspection results"
+    }
+   ]
+  },
+  {
+   "id": "WP08",
+   "title": "Workspace index and composer pickers",
+   "area": "apps/server/src/workspace/Layers/WorkspaceEntries.ts, apps/server/src/vcs/GitVcsDriver.ts (ls-files listing only), apps/web/src/components/chat/ComposerAttachmentMenus.tsx, composerPathMenu, ContextPickerPopup",
+   "items": [
+    {
+     "n": 167,
+     "scope": "markRootChanged must keep a stale index (serve stale, rebuild in background) instead of deleting a non-hot root's index"
+    },
+    {
+     "n": 171,
+     "scope": "bare-listing stand-in check must compare against the live query, not the debounced one"
+    },
+    {
+     "n": 168,
+     "scope": "ContextPickerPopup uses the lean picker rows"
+    },
+    {
+     "n": 172,
+     "scope": "chunk the over-cap selectShallowestFiles/entry build so it yields to the event loop"
+    },
+    {
+     "n": 173,
+     "scope": "the tracked stand-in listing should be index-only (ls-files -c) as documented"
+    }
+   ]
+  },
+  {
+   "id": "WP09",
+   "title": "Terminal server and client",
+   "area": "apps/server/src/terminal, apps/server/src/ws/terminalRpc.ts, apps/web/src/components/terminalViewCache.ts",
+   "items": [
+    {
+     "n": 162,
+     "scope": "foreground-process detection without spawning ps every second where the PTY can tell us (node-pty process / tcgetpgrp), ps only as fallback; append-only (or chunked) history persistence instead of rewriting up to 2 MiB per second"
+    },
+    {
+     "n": 103,
+     "scope": "item (1): subscribeTerminalEvents must be chunk-preserving (no per-element Stream.tap ack per event)"
+    },
+    {
+     "n": 158,
+     "scope": "terminal view cache must hold at least MAX_TERMINALS_PER_GROUP views; evict after mounts"
+    }
+   ]
+  },
+  {
+   "id": "WP10",
+   "title": "Web chat and composer correctness",
+   "area": "apps/web/src/components/ChatView.tsx, chat/ComposerPromptEditor.tsx, send engine (sendEngine.ts, executeChatSendTurn.ts), hooks/useHandleNewThread.ts, hooks/newDraftDefaults.ts, packages/client-runtime/src/state/composer (draftSplitStorage, draftStore, sessionPrewarm)",
+   "items": [
+    {
+     "n": 128,
+     "scope": "fix both defects: per-thread undo history (no cross-thread Cmd+Z), and send continuations/local dispatch state bound to the originating thread"
+    },
+    {
+     "n": 88,
+     "scope": "fix multi-tab draft loss in split storage (merge foreign index writes, never sweep entries a live tab owns)"
+    },
+    {
+     "n": 124,
+     "scope": "defect fixes only (draftStore no-op guard, field-level untouched check, remembered-preferences invalidation). No hosted getConfig change"
+    },
+    {
+     "n": 129,
+     "scope": "fork gap: a fresh fork with inherited history must not render the new-thread hero"
+    },
+    {
+     "n": 141,
+     "scope": "web only: add a short dwell (~300-500 ms) before a focus-triggered prewarm so browsing threads does not churn CLI processes. Do NOT create a shared gating helper here (WP14A owns resolveProviderSessionPrewarmRequest); keep ChatView's existing gating"
+    }
+   ]
+  },
+  {
+   "id": "WP11",
+   "title": "Web streaming, thread data and rendering",
+   "area": "apps/web/src/environments/runtime/service.ts, packages/client-runtime/src/connection/supervision.ts, packages/client-runtime/src/state/threads/store.ts (selectors), apps/web/src/components/chat (codeHighlightQueue, useChatSessionTabsPrefetch), DiffPanel/diffParsing, sidebar/threadNavigationIntent, apps/web/src/rpc/queryClient.ts",
+   "items": [
+    {
+     "n": 119,
+     "scope": "items (1) and (3): coalescing must never cut assistant text; delete the dead recovery coordinator. Mobile batching is in WP14A"
+    },
+    {
+     "n": 126,
+     "scope": "sibling prefetch waits for the live active window, not cache-hydrated messages; spread sidebar prewarm retains"
+    },
+    {
+     "n": 127,
+     "scope": "retained-bytes estimate respects the store trims (activities 500, messages 2000)"
+    },
+    {
+     "n": 85,
+     "scope": "memoize selectDelegatedChildThreadsForThreadRef"
+    },
+    {
+     "n": 136,
+     "scope": "tokenizeMaxLineLength for highlighting; split very large blocks so one job is not a long task"
+    },
+    {
+     "n": 166,
+     "scope": "reuse a server revision / stable key instead of hashing full patch text on every review open"
+    },
+    {
+     "n": 154,
+     "scope": "web part: byte budget for DiffPanel renderablePatchCache. Mobile part is in WP14A"
+    },
+    {
+     "n": 102,
+     "scope": "navigation intent release must not drop the subscription when the route retain is already gone"
+    },
+    {
+     "n": 226,
+     "scope": "Part A only: QueryClient does not retry awaiting-admission errors; the post-ready refresh re-runs them"
+    },
+    {
+     "n": 109,
+     "scope": "avoid O(all threads) record spreads per coalesced upsert / detail event when only one thread changes"
+    }
+   ]
+  },
+  {
+   "id": "WP12A",
+   "title": "Web sidebar, settings, theme and project icons",
+   "area": "apps/web/src/components/Sidebar.tsx, hooks/useHandleNewThread.ts (handler identity only), hooks/useSettings, ProjectFavicon.tsx, themes/registry.ts, hooks/useTheme.ts, settings (McpServersSettings, DeviceIdentitySettings), automations hooks, apps/server/src/project/Layers/ProjectFaviconResolver.ts",
+   "items": [
+    {
+     "n": 73,
+     "scope": "stable handleNewThread identity (fix the compiler bailout / inline selector)"
+    },
+    {
+     "n": 81,
+     "scope": "narrow Sidebar providers selection to driver+models; ProjectFavicon/DeviceIcon/ThreadPriorityRefreshBridge stop subscribing to the whole config"
+    },
+    {
+     "n": 75,
+     "scope": "compute inactive-mode sidebar derivations lazily"
+    },
+    {
+     "n": 87,
+     "scope": "theme apply is a no-op when nothing changes (no style rewrite, no transition guard)"
+    },
+    {
+     "n": 245,
+     "scope": "web part: ProjectFavicon latches resolved artwork and refetches after TTL/eviction. Mobile part in WP14B"
+    },
+    {
+     "n": 203,
+     "scope": "distinguish 'unfinished read' from 'no icon' so the client retries instead of caching null for 5 min"
+    },
+    {
+     "n": 92,
+     "scope": "pass interruption to the favicon reader child"
+    },
+    {
+     "n": 187,
+     "scope": "MCP settings: refreshing flag can no longer stick when a mutation lands during a load"
+    },
+    {
+     "n": 101,
+     "scope": "gate all Agent Control subscriptions/list calls on Agent Control being enabled; reopen when it is turned on"
+    },
+    {
+     "n": 66,
+     "scope": "DeviceIdentitySettings must not statically import hostedHub/api in standard builds (also covers #218)"
+    },
+    {
+     "n": 76,
+     "scope": "theme catch-up after lazy listener attach must re-apply when any applied input differs"
+    }
+   ]
+  },
+  {
+   "id": "WP12B",
+   "title": "Web boot, routes, lazy surfaces and hosted boot",
+   "area": "apps/web/src/routes/__root.tsx, RootAppShell.tsx, ServerStateBootstrap.tsx, lib/shellIdlePreload.ts, lib/preloadableLazy.ts callers, browser/LazyBrowserPanel.tsx, settings/IntegrationsSettingsPanel.tsx, chat right-panel preload, hostedHub/bootGate.ts, hostedHub/readCache.ts, packages/client-runtime/src/connection/savedEnvironmentSession.ts",
+   "items": [
+    {
+     "n": 65,
+     "scope": "start welcome/config sync with the early primary connection, not in ServerStateBootstrap's effect (also covers #105)"
+    },
+    {
+     "n": 98,
+     "scope": "idle preloads wait for the first thread render and run one at a time; no unconditional 5 s cap before the shell snapshot"
+    },
+    {
+     "n": 59,
+     "scope": "convert the remaining non-phone React.lazy surfaces (LazyBrowserPanel, ComputerUseSettings, others listed) to preloadableLazy with intent preloads (also covers #89, #122, #194). Do not touch the frozen web phone tier"
+    },
+    {
+     "n": 60,
+     "scope": "lazy dialogs pass onLoadError so a failed chunk shows an error instead of throwing"
+    },
+    {
+     "n": 160,
+     "scope": "sheet layout gets the right-panel mode hint/idle preload; mod+d preloads review before navigate"
+    },
+    {
+     "n": 223,
+     "scope": "hosted read cache: per-environment write skip must ignore scroll-only and unrelated draft changes during streaming"
+    },
+    {
+     "n": 213,
+     "scope": "hosted boot gate must not await HostedHubRoot/RootAppShell on /pair and /native/authorize"
+    },
+    {
+     "n": 107,
+     "scope": "item (2) only: web saved-environment connect must not send a full getConfig beside the config snapshot. Mobile part is in WP14A"
+    },
+    {
+     "n": 68,
+     "scope": "item (1): start loading the RootAppShell graph beside the session request instead of after it (preload only; no change to who decides access)"
+    },
+    {
+     "n": 186,
+     "scope": "FilesTab lazy load passes onLoadError (same pattern as #60)"
+    }
+   ]
+  },
+  {
+   "id": "WP13",
+   "title": "Web build, workers and perf guards",
+   "area": "apps/web/vite.config.ts, apps/web/src/viteBuild/*, apps/web/src/lib/diffWorkerPool.ts, scripts/perf/*, apps/web/src/perf/*.test.ts, ChatView phone-tier imports (lazy only)",
+   "items": [
+    {
+     "n": 153,
+     "scope": "probe WebAssembly/CSP and fall back to the JS regex engine when wasm is blocked (hosted); guard that the built worker has no inlined Oniguruma WASM. No Hub CSP change"
+    },
+    {
+     "n": 61,
+     "scope": "merge tiny app-code chunks (entriesAware groups) to cut cold-path requests substantially; measure request count before/after with the existing perf scripts; keep only if it does not regress boot bytes or the boot graph budgets"
+    },
+    {
+     "n": 72,
+     "scope": "chat chunk budgets and forbidden-module rules (overview/crown/diff renderer/shiki) for the route closures; make the existing lazy phone overview split real by lazy-loading the frozen phone-tier surfaces from the chat graph (no behaviour change) (also covers #130)"
+    },
+    {
+     "n": 97,
+     "scope": "preload coverage guard must parse Vite's .then()/async-destructuring wrappers"
+    },
+    {
+     "n": 120,
+     "scope": "item (1): move the server-only agentControl schemas (internal MCP surface, external MCP tool catalog) out of the module the web boot chunk evaluates, e.g. a server-only subpath; keep contracts schema-only"
+    }
+   ]
+  },
+  {
+   "id": "WP14A",
+   "title": "Mobile data plane",
+   "area": "apps/mobile/src/connection, apps/mobile/src/state, apps/mobile/src/rpc, apps/mobile/src/features/threads (send/outbox/activity rows), apps/mobile/src/persistence, apps/mobile/src/hostedHub/primaryConnection.ts",
+   "items": [
+    {
+     "n": 131,
+     "scope": "mobile requests activity previews and fetches full payloads on expand (getActivityPayload)"
+    },
+    {
+     "n": 154,
+     "scope": "mobile part: bound the checkpoint-diff cache (count + bytes, release on unmount/archive)"
+    },
+    {
+     "n": 107,
+     "scope": "item (1): one config stream per mobile connection"
+    },
+    {
+     "n": 119,
+     "scope": "item (2): frame-batch mobile thread-detail events"
+    },
+    {
+     "n": 78,
+     "scope": "mobile hosted primary connection supplies applyThreadPriorities so priorities arrive as deltas"
+    },
+    {
+     "n": 237,
+     "scope": "snapshot capture skips work while only timestamps churn during streaming"
+    },
+    {
+     "n": 147,
+     "scope": "item (1): mobile sends reuse the subscribed Claude review state (no extra getThreadWindow RTT)"
+    },
+    {
+     "n": 141,
+     "scope": "Part B: create a pure shared helper resolveProviderSessionPrewarmRequest in packages/client-runtime/src/state/composer/sessionPrewarm.ts that encodes the web gating policy from ChatView.tsx (~5224-5255) with unit tests, and use it from the mobile thread composer on focus / first keystroke. Do not edit apps/web (the integration step switches ChatView to the helper)"
+    }
+   ]
+  },
+  {
+   "id": "WP14B",
+   "title": "Mobile boot and render cost",
+   "area": "apps/mobile/babel.config.js, apps/mobile/src/features/threads (ThreadDetailScreen, ThreadComposer render structure), apps/mobile/src/components/ProjectFavicon.tsx, apps/mobile/src/navigation/lazyRouteScreens.ts, apps/mobile/src/connection (session hints), packages/client-runtime/src/connection/savedSessionRenewal.ts, packages/client-runtime effect sub-barrel imports",
+   "items": [
+    {
+     "n": 240,
+     "scope": "widen the React Compiler to the thread surfaces and components; remove the bailouts in ThreadDetailScreen/ThreadComposer/useThreadChecks"
+    },
+    {
+     "n": 245,
+     "scope": "mobile part of the project icon latch + clear the icon cache on hosted sign-out/domain change"
+    },
+    {
+     "n": 238,
+     "scope": "make the Thread route prewarm actually evaluate ThreadDetailScreen under inline requires"
+    },
+    {
+     "n": 239,
+     "scope": "items (a)-(c) only; keep re-reading the bearer on every use"
+    },
+    {
+     "n": 248,
+     "scope": "import effect rpc/reactivity submodules instead of the sub-barrel indexes in client-runtime and mobile"
+    }
+   ]
+  },
+  {
+   "id": "WP15",
+   "title": "Client-runtime hosted session and device",
+   "area": "packages/client-runtime/src/relay/hostedHubSession.ts, packages/client-runtime/src/authorization (state.ts restore branch, api.ts ticket memo), apps/web/src/environments/remote/api.ts, packages/client-runtime/src/state/device, packages/shared relay E2EE corpus tests",
+   "items": [
+    {
+     "n": 216,
+     "scope": "liveness probe deadline starts after the ping is flushed (not behind queued data); unintentional logical-channel closes trigger a probe. Do not change lifecycle ownership"
+    },
+    {
+     "n": 225,
+     "scope": "ticket minor fallback memo expires (e.g. per hub-session generation or TTL) instead of sticking for the instance lifetime"
+    },
+    {
+     "n": 215,
+     "scope": "401 restore chain uses the short boot-phase deadline and settles access"
+    },
+    {
+     "n": 34,
+     "scope": "declare `signal` in the resolveRemoteWebSocketConnectionUrl wrapper type"
+    },
+    {
+     "n": 110,
+     "scope": "agent device.open-pane-requested for a thread that is not subscribed must not be lost (buffer or re-surface on navigation) (also covers #96)"
+    },
+    {
+     "n": 228,
+     "scope": "Part B only: run the relay E2EE corpus with the native provider installed (test-only)"
+    }
+   ]
+  },
+  {
+   "id": "WP16",
+   "title": "Provider event logging",
+   "area": "apps/server/src/provider/providerEventLogRecords.ts, EventNdjsonLogger.ts, ProviderEventLoggers.ts, OpenCodeAdapter/CopilotAdapter event logging hooks, LocalFileTracer.ts",
+   "items": [
+    {
+     "n": 251,
+     "scope": "lifecycle mode: keep raw.payload for canonical lifecycle records whose native message the native lifecycle filter dropped"
+    },
+    {
+     "n": 252,
+     "scope": "delta coalescing also for OpenCode message.part.delta and Copilot assistant deltas"
+    },
+    {
+     "n": 256,
+     "scope": "do not stringify over-cap records fully before capping"
+    },
+    {
+     "n": 257,
+     "scope": "bound the logger finalizer drain time; close Claude/Copilot loggers"
+    },
+    {
+     "n": 259,
+     "scope": "remove per-event named Effect.fn spans on the OpenCode streaming hot path"
+    },
+    {
+     "n": 8,
+     "scope": "normalize SQL text only for spans that are kept"
+    }
+   ]
+  }
+ ],
+ "deferred": [
+  {
+   "n": 2,
+   "why": "Parts B/C: upgrading-data UI and moving data backfills behind the router are product/boundary decisions"
+  },
+  {
+   "n": 4,
+   "why": "Part B: migrating existing installs to a new origin moves user data (drafts, UI state, attachments)"
+  },
+  {
+   "n": 7,
+   "why": "Step 2: decoupling the shell from the backend means a new request path in main or the ryco:// origin (auth semantics)"
+  },
+  {
+   "n": 20,
+   "why": "Codex usage freshness without an app-server spawn needs a product choice"
+  },
+  {
+   "n": 45,
+   "why": "async engine hydration changes readiness semantics; measured gain about 0 ms on typical boots"
+  },
+  {
+   "n": 46,
+   "why": "lazy archived threads change the subscribeShell protocol and product behaviour"
+  },
+  {
+   "n": 79,
+   "why": "same as #46"
+  },
+  {
+   "n": 69,
+   "why": "hosted DM Sans preload reverses a deliberate, test-pinned exclusion and needs a Hub deploy"
+  },
+  {
+   "n": 71,
+   "why": "reverses the measured BOOT_ROOT_MODULES trade-off or moves auth outside the client-runtime owner"
+  },
+  {
+   "n": 95,
+   "why": "hosted live-config and persisting catalogs on non-loopback clients touch hosted lifecycle and privacy decisions"
+  },
+  {
+   "n": 112,
+   "why": "web/desktop saved-pairing auth flow change"
+  },
+  {
+   "n": 117,
+   "why": "item 3: relay compression is compress-before-encrypt (CRIME/BREACH-class side channel to the Hub)"
+  },
+  {
+   "n": 121,
+   "why": "cross-boot shell resume needs a contract addition and reverses the Phase 1 cache design"
+  },
+  {
+   "n": 124,
+   "why": "removing the hosted fresh getConfig trusts a cached snapshot under the hosted lifecycle rules"
+  },
+  {
+   "n": 146,
+   "why": "keeping the worktree prefetch warm adds background fetches; reordering setup vs agent changes visible order"
+  },
+  {
+   "n": 148,
+   "why": "lease handoff vs pending relocation is a deliberate, tested lifecycle choice"
+  },
+  {
+   "n": 150,
+   "why": "shared Codex app-server trades per-thread failure isolation for memory"
+  },
+  {
+   "n": 174,
+   "why": "client-side index copies trade bandwidth/memory and need a server push for freshness"
+  },
+  {
+   "n": 212,
+   "why": "hosted connectionRecovered deadline is inside the hosted lifecycle owner"
+  },
+  {
+   "n": 214,
+   "why": "opening the Hub-session socket before session validation changes hosted lifecycle ownership"
+  },
+  {
+   "n": 219,
+   "why": "Hub-session protocol v2 (tickets on the socket) is a Hub protocol + security change"
+  },
+  {
+   "n": 220,
+   "why": "hosted shell resume relaxes the AGENTS.md hosted lifecycle rule"
+  },
+  {
+   "n": 221,
+   "why": "relay payload compression needs a crypto/security review"
+  },
+  {
+   "n": 226,
+   "why": "Part B: hosted read admission before the snapshot belongs to the hosted lifecycle owner"
+  },
+  {
+   "n": 227,
+   "why": "WebCrypto path for the browser handshake needs crypto review"
+  },
+  {
+   "n": 228,
+   "why": "Part A: async WebCrypto AEAD on Electron needs crypto review"
+  },
+  {
+   "n": 229,
+   "why": "moving the data plane into a Worker moves key material and lifecycle ownership"
+  },
+  {
+   "n": 230,
+   "why": "treating a cached enrollment as ready changes E2EE enrollment semantics"
+  },
+  {
+   "n": 231,
+   "why": "ending the T_ADV window early changes \u00a74.4 K13 of the E2EE protocol"
+  },
+  {
+   "n": 235,
+   "why": "showing cached workspace on an unconfirmed session reverses a documented auth-gate rule"
+  },
+  {
+   "n": 239,
+   "why": "item (d): reusing a bearer read changes superseded-bearer semantics"
+  },
+  {
+   "n": 241,
+   "why": "cached enrollment/prewarmed relay before selection change E2EE and lifecycle ordering"
+  },
+  {
+   "n": 242,
+   "why": "native AEAD on Hermes is forbidden by \u00a714.7 today"
+  },
+  {
+   "n": 261,
+   "why": "Part B: which missing parents count as deleted also auto-archives workspaces"
+  }
+ ],
+ "notScheduled": [
+  {
+   "n": 82,
+   "why": "micro-benchmarks for web boot functions: measurement only, low value now"
+  },
+  {
+   "n": 134,
+   "why": "timeline height memory was reverted on purpose in #723 while the blank-timeline cause is open"
+  }
+ ]
+}

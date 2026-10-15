@@ -1,0 +1,43 @@
+{
+  "id": "web-boot-cpu:chatview-server-thread-keys",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) removed the serverThreadKeys selector, which ran selectThreadsAcrossEnvironments and built a scoped key for every thread on every store commit. It also removed the Set-building useMemo. ChatView now runs a useShallow selector over the 0-2 open terminal keys only: a draft-key check first, then parseScopedThreadKey and selectThreadExistsByRef, an O(1) threadShellById lookup. The behaviour matches the old code. The old membership came from getThreads -> getThreadFromEnvironmentState, which returns a thread exactly when threadShellById[threadId] exists, and the draft keys are still unioned in. No other caller in apps/web, apps/mobile or client-runtime maps all threads to keys inside a store selector.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/ChatView.tsx:865-876",
+      "note": "existingOpenTerminalThreadKeys = useStore(useShallow(state => openTerminalThreadKeys.filter(draft check || parseScopedThreadKey + selectThreadExistsByRef))). Cost per commit is O(open terminals). useShallow returns the previous array when the result is shallow-equal, so the empty and unchanged cases stay referentially stable."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:836-843",
+      "note": "openTerminalThreadKeys is still a useShallow selector over the terminal store, not the thread store, so it does not re-run on streaming thread commits."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:1110-1123",
+      "note": "The only consumer, the reconcileMountedTerminalThreadIds effect, depends on existingOpenTerminalThreadKeys directly. No serverThreadKeys or selectThreadsAcrossEnvironments reference remains in ChatView.tsx. The \"use no memo\" directive is at :586."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3560-3567",
+      "note": "selectThreadExistsByRef is selectEnvironmentState(state, envId).threadShellById[threadId] !== undefined. It derives no Thread and allocates no strings."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/threadDerivation.ts:102-109",
+      "note": "getThreadFromEnvironmentState returns undefined only when the shell is missing, so the old membership test (getThreads over threadIds) and the new shell lookup agree. Every shell write registers the id in threadIds (store.ts ensureThreadRegistered)."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:855-864",
+      "note": "draftThreadKeys is a useMemo keyed on draftThreadsByThreadKey and is checked first. This keeps the old union of server and draft keys. Because the selector closure changes when draftThreadKeys or openTerminalThreadKeys change, zustand v5 useSyncExternalStore re-evaluates it during render."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Purely local web selector change. It touches no auth, E2EE, hosted lifecycle or Hub protocol.",
+  "repos": "none",
+  "correction": ""
+}

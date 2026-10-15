@@ -1,0 +1,63 @@
+{
+  "id": "server-boot:command-read-model-scan",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE, verified independently, including against the real 9.8 GB state DB opened read-only. Migration 085 (60633eff3) adds the kind-led index idx_projection_thread_activities_kind_order. The actionable-activity query now plans as 'SEARCH ... USING INDEX idx_projection_thread_activities_kind_order (kind=?)' plus a temp B-tree for the ORDER BY, and returns 482 of 625,420 rows in 5-7 ms (the report measured 0.24-2 s). The DB has no sqlite_stat tables and the server never runs ANALYZE or PRAGMA optimize, so the heuristic plan the unit tests pin is the plan production gets. workspace.validate returns before reading any model when the workspace is unrestricted. reconcileOrphanedProviderSessions, RestartContinuation.dispatchPending and ThreadPurgeReactor read the engine's in-memory model through currentCommandReadModel. The only production engine (OrchestrationEngine.ts:662) implements getReadModel, so the SQL fallback is reachable only from test doubles. That leaves one SQL hydration per boot, at engine construction, and all nine of its sub-queries together take about 10 ms on the real DB.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.ts:20",
+      "note": "Creates (kind, thread_id, sequence, created_at, activity_id) and drops the redundant 008 prefix index. It is idempotent and re-run as a post-migrator repair (Migrations.ts:516, called at :740). No INDEXED BY references the dropped 008 index; the only INDEXED BY (ProjectionSnapshotQuery.ts:1665) names the 029 index, which still exists."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1247",
+      "note": "listActionableThreadActivityRows filters on WHERE kind IN ${sql.in(COMMAND_READ_MODEL_ACTIVITY_KINDS)}, the shared constant at :372, which now has 10 kinds including thread.forked."
+    },
+    {
+      "location": "~/.ryco/userdata/state.sqlite (read-only, outside the repo)",
+      "note": "Real DB: 9.8 GB, migration 90, kind_order index present, no sqlite_stat1. EXPLAIN QUERY PLAN gives 'SEARCH projection_thread_activities USING INDEX idx_projection_thread_activities_kind_order (kind=?)' and 'USE TEMP B-TREE FOR ORDER BY'. 482 rows in 4.8-6.9 ms over 3 runs. The other command-model queries (threads, anchors, latest turns, plans, sessions) each take 0.02-3.8 ms."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:53",
+      "note": "Says ANALYZE and PRAGMA optimize are not adopted. With no stats, the planner keeps the heuristic plan that the tests check on an empty DB, whatever the DB's size."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.shell.test.ts:411",
+      "note": "Plan guard: asserts SEARCH via kind_order and no SCAN of projection_thread_activities, for the actionable query and the checkpoint-revert query."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:903",
+      "note": "workspace.validate returns early when !isRestricted. When restricted it reads currentCommandReadModel (:907)."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:650",
+      "note": "reconcileOrphanedProviderSessions uses currentCommandReadModel, i.e. the engine's in-memory model."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/RestartContinuation.ts:682",
+      "note": "The per-page model read uses currentCommandReadModel, so pages no longer trigger SQL hydration."
+    },
+    {
+      "location": "apps/server/src/orchestration/currentCommandReadModel.ts:18",
+      "note": "Prefers engine.getReadModel(). OrchestrationEngine.ts:662 is the only production engine implementation, and it always provides getReadModel."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.test.ts:1594",
+      "note": "Test: startup reaches command-ready with getCommandReadModel stubbed to die, and reads the engine model exactly once."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:602",
+      "note": "The single remaining boot hydration. It now costs roughly 10 ms of SQL on the real DB."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Nothing required. One optional nicety: loadOrchestrationHttpSnapshot (apps/server/src/orchestration/http.ts:43) still runs a SQL hydration per request, but only for the owner-only GET /api/orchestration/snapshot that the CLI uses. It could read currentCommandReadModel(engine, projections) instead. Value is negligible now that the index makes the hydration take about 10 ms.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none",
+  "correction": ""
+}

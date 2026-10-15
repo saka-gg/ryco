@@ -1,0 +1,54 @@
+{
+  "id": "dedicated-pages:pr-files-tab-eager-diff-highlighter",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Fixed in #710 (60633eff3). PullRequestReader now loads FilesTab through preloadableLazy(() => import(\"./files/FilesTab\")). It shows the diff-free PullRequestDiffSkeleton until useLazyComponentReady reports the chunk ready, and preloads it when a reader mounts. A reader only mounts when ?pr=N is set, since there is no auto-selection. I confirmed this on the real build as well as in source. apps/web/dist was built at 21:45 on Oct 14, after HEAD ec250e386 (21:40). The static chunk closure of PullRequestsRouteView-*.js (73 chunks) has no @pierre/diffs, shiki or oniguruma code. The only shiki strings in it are __vite__mapDeps preload-list filenames for the dynamic FilesTab import. FilesTab adds about 621 KB raw / 174 KiB gzip that load only behind that import: shiki-engine, useDiffFileNavigation, DiffWorkerPoolProvider, diffWorkerPool, FilesTab and a few small chunks. This is more than the finding's 518 KiB / 148 KiB estimate. The ThreadLinkList chunk that used to carry shiki is now 1.5 KB. Three guards protect the fix, the third of which runs in CI: (1) a source-text test, (2) a transitive source-graph test, and (3) a dist-level bundle-budget rule that forbids @pierre/diffs, shiki and @shikijs from the PullRequestsRouteView closure. The proposal's optional parts are only partly done: ChecksTab and CommitsTab stay eager, which is low value. The preload runs on PR selection rather than on pointer intent, and the code documents this as a deliberate trade-off.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/pullRequests/PullRequestReader.tsx:29",
+      "note": "const FilesTab = preloadableLazy(() => import(\"./files/FilesTab\").then(m => m.FilesTab)). No static FilesTab import remains."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/PullRequestReader.tsx:37",
+      "note": "FilesTabBody renders PullRequestDiffSkeleton until useLazyComponentReady(FilesTab, true). It never commits a Suspense fallback, and a deep link to tab=files works because the hook starts the load."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/PullRequestReader.tsx:73",
+      "note": "FilesTab.preload() runs on reader mount. The reader mounts only when model.selection && readerKey (PullRequestsPageBody.tsx:150), and selection comes only from search.pr (usePullRequestsModel.ts:162). The inbox first open therefore downloads no diff code."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/files/PullRequestDiffSkeleton.tsx:1",
+      "note": "The skeleton imports only cn and Skeleton, so it is diff-free."
+    },
+    {
+      "location": "apps/web/src/perf/standardBootGraph.test.ts:203",
+      "note": "Transitive source-graph guard. From PullRequestsPage.tsx it forbids pkg:@pierre/diffs, pkg:shiki, files/FilesTab.tsx and the hosted runtime."
+    },
+    {
+      "location": "scripts/perf/model.ts:292",
+      "note": "Dist-level bundle budget rule for the PullRequestsRouteView closure. It forbids DIFF_RENDERER_SOURCES (@pierre/diffs, shiki, @shikijs/*). It runs in CI at .github/workflows/_validation.yml:213."
+    },
+    {
+      "location": "apps/web/src/perf/webBundleSplitting.test.ts:190",
+      "note": "Source-text test. The reader must use import(\"./files/FilesTab\") and preloadableLazy, with no static import, React.lazy or Suspense."
+    },
+    {
+      "location": "apps/web/dist/assets/PullRequestsRouteView-Dbp7z5yw.js",
+      "note": "Read-only analysis of the built static-import closure. No chunk in it contains @pierre/diffs or shiki code. Beyond RootAppShell the page is now 817 KB raw / 267 KB gzip, and about 340 KB raw of that is markdown-stack, which #710 moved out of RootAppShell. The FilesTab dynamic import adds about 621 KB raw / 178 KB gzip only when the tab chunk loads."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/PullRequestReader.tsx:6",
+      "note": "ChecksTab and CommitsTab are still static imports. The finding listed these as optional ('probably'), and they are small and diff-free."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No material defects. There is one minor reliability nuance. FilesTabBody calls useLazyComponentReady without onLoadError. If the reader-mount preload fails and the retry on Files tab open also fails (a transient network error), the hook reports ready, FilesTab throws, and the error propagates. /pull-requests has no route errorComponent (routes/pull-requests.tsx), so the error reaches RootRouteErrorView (routes/__root.tsx:435), a full-screen 'Something went wrong'. Chat surfaces handle the same case with notifyChatSurfaceLoadFailure and an in-place retry. RootAppShell dialogs use the same default as FilesTab, so this matches existing practice. For a stale chunk hash after a server update, a full reload is the right recovery anyway. Low impact.",
+  "implementationSketch": "Optional, low priority. In apps/web/src/components/pullRequests/PullRequestReader.tsx, have FilesTabBody pass useLazyComponentReady(FilesTab, true, { onLoadError: (error, retry) => setLoadFailure({ retry }) }). On failure, render an inline error state with a Retry button inside the tab panel, keeping the rest of the reader and the page usable. Alternatively, reuse a shared surface-load-failure notifier generalized from notifyChatSurfaceLoadFailure. Add a browser test in PullRequestsPage.browser.tsx that makes the FilesTab import reject, then asserts the reader stays mounted and Retry loads the tab. Separately and optionally, make ChecksTab and CommitsTab preloadableLazy the same way. The gain is small (tens of KB), so this is only worth doing if measurements show it.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

@@ -1,0 +1,70 @@
+{
+  "id": "server-boot:http-accept-before-handler",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. On the Node path (production, desktop, `ryco serve`, and dev, which runs `node --watch`), HttpServerLive passes NodeHttpServer.layer a createServer factory that installs httpStartupGate before the platform calls server.listen(). The gate has provisional 'request'/'upgrade' listeners and a 'newListener' hook. Early requests and upgrades are parked in a bounded set (256 entries, 10 s). They are replayed on nextTick once Effect's serve attaches its real handlers. Overflow, deadline and close-while-gated all get 503 + Retry-After. This is proposal (a). An integration test proves a request sent before HttpRouter.serve attaches gets 200. I found no route shadowed by the early static path, no other in-process HTTP listener with the bind-before-handler pattern, and no Hub equivalent. The 10 s cap (shorter than the proposed 30 s) is covered by the clients: client-runtime bootstrap retries 502-504 for 15 s, and desktop re-loads an early (bind-time) window at ready when bind-to-serve took longer than 9 s. Remaining nits are low-value: the Bun branch is ungated (early requests get platform-bun's default 404), and no server-level test pins that HttpServerLive wires the gate.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:250-267",
+      "note": "The NodeHttpServer.layer factory calls NodeHttp.createServer(), optionally the loopback compression 'upgrade' hook, then installHttpStartupGate(server). All of this runs before the platform's listen."
+    },
+    {
+      "location": "node_modules/.bun/@effect+platform-node@4.0.2+8fabb152f7781780/node_modules/@effect/platform-node/dist/NodeHttpServer.js:80",
+      "note": "server.listen() still runs at layer build. Handlers are attached only in serve via server.on('request'/'upgrade') at :126-127, not :117-118 as cited. Both are plain .on() calls, so the gate's 'newListener' hook sees them. The repo's platform-node patch does not touch this."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:122-168",
+      "note": "gateRequest/gateUpgrade hold early items in bounded sets with an unref'd 10 s timer. On overflow or deadline they answer 503 + Retry-After: 1. Held entries are dropped on response/socket close, so aborted desktop probes do not leak entries."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:170-215",
+      "note": "newListener marks the handler attached synchronously and replays held items on process.nextTick. Effect attaches both handlers synchronously, so both exist before the replay. The gate listeners and the close override are then removed."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:219-241",
+      "note": "If startup fails while gated, the close override answers held items with 503 first. The platform's shutdown finalizer looks up server.close at call time, so it hits the override."
+    },
+    {
+      "location": "apps/server/src/server.ts:268-300",
+      "note": "While gated, the early static handler serves assets in every mode and '/' only in desktop. It uses the same serveStaticRequest (http.ts:852-940) as the router's GET * catch-all. Every explicit route is under /api, /ws, /.well-known or /attachments, which isEarlyStaticPath excludes, so no dynamic route is shadowed."
+    },
+    {
+      "location": "apps/server/src/server.ts:715-728",
+      "note": "The http-serving frame, startup.markHttpServing and hubConnector.start are built after HttpRouter.serve (server.ts:807), so readiness follows handler attachment."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.test.ts:182-219",
+      "note": "Regression test with the real Effect Node server. A GET sent while the routes layer is blocked on a Deferred, before serve attaches, resolves 200 'pong'. Unit tests at :80-158 cover the upgrade replay, overflow, deadline and close-while-gated cases."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:95-135",
+      "note": "Bootstrap control-plane requests retry 502/503/504 (and timeouts) for up to 15 s. A 503 from the gate's 10 s cap becomes a retry, not a hard failure."
+    },
+    {
+      "location": "apps/desktop/src/backendAppWindowLoad.ts:23-30",
+      "note": "Desktop loads the window at http-bound and sets EARLY_APP_LOAD_MAX_HOLD_MS = 9 s. If bind-to-serve exceeds the gate's hold, the window is loaded again at ready, so held requests that got a 503 do not strand the renderer."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:326",
+      "note": "The HTTP readiness fallback starts 3 s late and polls /.well-known/ryco/environment (main.ts:1597-1609). That path is held, not served early, so it can never report ready before the router serves."
+    },
+    {
+      "location": "apps/server/src/server.ts:236-244",
+      "note": "The Bun branch has no gate. platform-bun's Bun.serve starts with a default fetch that returns 404 'not found' (BunHttpServer.js:71-78), so early requests under Bun get a misleading 404. The bin shebang is node (tsdown.config.ts:60) and dev uses `node --watch`, so this is effectively unused."
+    },
+    {
+      "location": "ryco-hub:src/http/server.ts:17-27",
+      "note": "Hub binds with Bun.serve and its fetch handler in one call, so the Hub has no bind-before-handler window."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects in the shipped Node path. Minor, non-blocking gaps: (1) The Bun branch at apps/server/src/server.ts:236-244 is ungated. Early requests under Bun get platform-bun's default 404 'not found' (BunHttpServer.js:71-78) instead of being held. This only matters if someone runs the server under Bun; the bin and dev scripts use node. (2) No server-level test pins that HttpServerLive installs the gate. httpStartupGate.test.ts builds its own gated factory, so removing installHttpStartupGate from server.ts:258 would not fail any test. (3) Cosmetic: a held upgrade keeps a no-op 'error' listener on its socket after replay (httpStartupGate.ts:163). This is harmless.",
+  "implementationSketch": "Optional hardening only. (a) Test wiring: export HttpServerLive, or a small helper that builds the Node server layer with the gate, from server.ts. Add a test that builds it with a ServerConfig on port 0, sends a GET /.well-known/ryco/environment before serving a router gated on a Deferred, and asserts 200 after the router attaches (or 503 with a tiny maxWaitMs). (b) Bun parity, only if Bun is ever supported: wrap the Bun path so the initial fetch handler awaits a 'router attached' promise with the same 10 s/256 bound and 503 Retry-After. This needs a patch to platform-bun's handlerStack[0] default (patches/@effect%2Fplatform-bun@4.0.2.patch), or a Bun.serve wrapper that delegates once serve pushes its handler. Alternatively delete the Bun branch if Bun runtime support is not intended.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains that touches auth, E2EE, hosted lifecycle ownership or the Hub protocol. The optional Bun-branch question (gate it or delete it) is a small maintenance call, not a product or security decision.",
+  "repos": "ryco"
+}

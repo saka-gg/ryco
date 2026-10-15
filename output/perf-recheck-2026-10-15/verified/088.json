@@ -1,0 +1,59 @@
+{
+  "id": "web-boot-cpu:composer-draft-image-persistence",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "DONE stands: a1e8b31f3 removes all three costs the finding described. The auditor's claim that there was no concrete defect is wrong. The split storage brought in a multi-tab draft-loss regression. Each tab rewrites the shared index only when its own index refs change, so another tab's stale index can drop a draft that this tab is still actively writing. I reproduced this against the real createSplitComposerDraftPersistStorage. The old single-blob model would have kept that draft, because there the last writer's full state won.",
+  "summary": "The perf finding is fixed. Drafts now persist as one small localStorage entry each, plus an index. Image bytes are stored as Blobs in IndexedDB, and the entry records only bytes:\"local\". Hydration builds rows without decoding anything; bytes load lazily at idle time or when a composer shows them. partialize only snapshots references, and the debounced flush stringifies and writes only the drafts whose identity and text changed. readPersistedAttachmentIds reads only the one thread's entry. The lib/utils DraftId import remains, but it is moot because environmentStateSink pulls the store into the boot graph anyway. One fix defect: with two tabs open, the index (draftKeys) is last-writer-wins per index change, while entries are last-writer-wins per draft. Tab B can write an index that omits draft T, which tab A created after B booted. If A then only types in T, A never rewrites the index, so T is dropped on the next reload, and any tab's boot sweep removes T's entry. The old model kept T. Residuals that are not worth fixing: the prompt stash still keeps data URLs in one localStorage blob, capped at 2 MB and written only on stash actions. Hosted mode still encodes a data URL once per image add, and verify then discards it.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:215-251",
+      "note": "flush() serializes only drafts whose object identity changed and writes only when the JSON text differs, so a keystroke rewrites one small entry. This confirms the auditor."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:2349-2360",
+      "note": "The persist config uses the split storage. partialize = snapshotComposerDraftPersistState (references only), so the per-set whole-state JSON.stringify of the old createJSONStorage (f1be4abc7 draftStore.ts:2264-2268) is gone."
+    },
+    {
+      "location": "apps/web/src/composerDraftPersistence.ts:113-135,211-228",
+      "note": "Image bytes go to IndexedDB (bytes:\"local\"). Hydration creates rows with file:null and bytesPending, and decodes nothing. atob now runs only for legacy data URLs during the idle-time restore, which also migrates them into IndexedDB (lines 340-351)."
+    },
+    {
+      "location": "apps/web/src/composerDraftPersistence.ts:92-106",
+      "note": "readPersistedAttachmentIdsFromStorage parses only composerDraftEntryStorageKey(threadKey), not the whole blob."
+    },
+    {
+      "location": "apps/web/src/composerDraftStore.ts:97-109; apps/web/src/composerFileUpload.ts:142",
+      "note": "Bytes restore at requestIdleCallback after hydration. Send is blocked with a 'Loading' message while bytesPending, and stash shows a toast (ChatComposer.tsx:2193)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:253-291",
+      "note": "DEFECT: indexChanged compares only this tab's own refs (writtenIndexRefs), and the index is never re-read. Once another tab has overwritten the index, this tab's entry writes for a draft missing from that index never re-list it."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftSplitStorage.ts:185,300",
+      "note": "DEFECT, compounding: at boot every unindexed ryco:composer-draft:v2:* entry is collected and deleted on the first flush. A newly booted tab therefore deletes the entry of a draft that another live tab is writing but that the current index omits."
+    },
+    {
+      "location": "apps/web/src/composerDraftPersistence.ts:49-73",
+      "note": "There is no cross-tab coordination for drafts: no storage-event listener and no rehydrate. Reproduction (bun -e against draftSplitStorage.ts with a shared Map): A creates T, B changes stickyActiveProvider, A types in T. The index stays draftKeys:[\"X\"] while entry T holds the latest text, and reload yields only [\"X\"]."
+    },
+    {
+      "location": "apps/web/src/lib/utils.ts:4; apps/web/src/environments/runtime/environmentStateSink.ts:7-11",
+      "note": "The lib/utils DraftId import is still there, but the store is in the boot graph through environmentStateSink regardless, so it is moot."
+    },
+    {
+      "location": "apps/web/src/promptStashStore.ts:105,259-265; packages/client-runtime/src/state/composer/promptStash.ts:11",
+      "note": "A sibling path with the same pattern, outside this finding: the prompt stash stores data URLs in one localStorage blob, parsed at module eval and capped at 2 MB of attachment chars. Writes happen only on stash, take or finalize, never per keystroke. Boot cost is under 1 ms worst case. Not worth acting on."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Multi-tab draft loss from the split storage (a1e8b31f3). packages/client-runtime/src/state/composer/draftSplitStorage.ts:253-291 rewrites the shared index only when the tab's own index refs (draft threads, logical mappings, sticky selection, version, draftKeys) change, and never notices a foreign index write. Scenario: tabs A and B are open with draft X. A starts draft T, so the index becomes [X,T]. B changes its sticky model, creates or sends some draft, or promotes a thread, and writes index [X], which omits T. A keeps typing in T, so only entry T is rewritten and the index stays [X]. After a reload, T is gone, and the boot sweep (lines 185 and 300) deletes its entry. A newly booted third tab likewise deletes entries of live drafts that the current index omits. Under the old single blob, A's last write kept T. Reproduced with bun -e against the real module. Minor, mobile-only and outside the web-boot scope: apps/mobile/src/state/composerDraftStore.ts:28-32 passes no scheduleWrite, so every set flushes the changed draft at once, and no keys(), so orphaned entries are never swept. tryWrite only catches synchronous throws, so async KV write failures are treated as written.",
+  "implementationSketch": "In packages/client-runtime/src/state/composer/draftSplitStorage.ts flush():\n(1) Before computing indexChanged, read the stored index when storage.getItem returns synchronously; on web this is a cheap read of a small string. If it differs from writtenIndexJson, another tab wrote it, so force indexChanged.\n(2) Build draftKeys as the union of (a) this tab's live keys and (b) foreign keys from the stored index that this tab neither tracks in `written` nor removed itself. Track a `removedByThisTab` set, filled where entries are removed.\n(3) For keys this tab tracks that the foreign index dropped: if this tab's draft is unchanged since it was read or written (written.get(k).draft === draft, or the entry is missing from storage), drop the key and respect the other tab's delete. If this tab edited the draft, keep it, so the user's latest edit wins.\n(4) Narrow the boot sweep (lines 185 and 300): re-check each candidate against the freshly read stored index at flush time, and skip keys that index now lists.\nOptionally, also add a window 'storage' listener in apps/web/src/composerDraftPersistence.ts for COMPOSER_DRAFT_INDEX_STORAGE_KEY that marks the split storage stale, so flushes can skip the extra read.\nTests in packages/client-runtime/src/state/composer/draftStorePersistence.test.ts, using two createSplitComposerDraftPersistStorage instances over one shared Map:\n- foreign-draft survival: A creates T, B changes sticky provider, A edits T, a fresh instance reads, and T is present.\n- delete propagation: B clears X, which A never edited, then A flushes an unrelated change, and X is not resurrected.\n- edit wins: B clears X, A edits X, and X is present.\n- sweep safety: a new instance does not delete an entry that the current index lists.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The perf fix is complete and needs no decision. The multi-tab repair is a localized reliability fix in the client-runtime split storage. It defines merge semantics (union of foreign keys, local edits win) but touches no auth, E2EE, Hub or hosted-lifecycle surface. Hosted mode is memory-only and unaffected.",
+  "repos": "ryco"
+}

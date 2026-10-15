@@ -1,0 +1,63 @@
+{
+  "id": "persistence-boot:denormalize-anchors-latest-completed",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Migration 087 (d6a3f6819) stores first_user_message_id, latest_user_message_id and latest_completed_turn_at on projection_threads and keeps them current with triggers. Hydration (listThreadRows and listUserMessageAnchorRows), shell builds and the single-thread query read the columns, so both per-thread correlated subqueries are gone. A read-only parity check on the user's real DB (791 threads, 3,569 turns, 33,924 messages, written for two days since the migration) found zero mismatches in all three columns against the original rules. The old subqueries take 3.7 ms and 8.3 ms on that DB; the column reads take 1.2 ms and 1.6 ms. The anchor join plans as SCAN threads plus SEARCH messages by the message_id PK. Two small leftovers, neither a correctness bug. (1) The turn update trigger has no value-change WHEN guard. It fires on every projection_turns upsert, including the one each streamed assistant delta causes, and recomputes the thread twice (NEW and OLD). That adds about 25 us per upsert in an in-memory benchmark. (2) The text-free anchor select still reads overflow pages for large user messages, because is_streaming, created_at, updated_at and dispatch_mode come after text in the stored record.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Migrations/087_ProjectionThreadAnchorsAndStatisticsPartials.ts:39-75",
+      "note": "The frozen rule SQL is identical to the pre-commit subqueries, including the NOT inherited clause the snapshot query had at d6a3f6819^. The latest anchor orders by created_at DESC, rowid DESC, matching latestUserMessageIdQuery."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/087_ProjectionThreadAnchorsAndStatisticsPartials.ts:77-148",
+      "note": "Triggers cover thread insert and message, turn and session insert, update and delete. The message update trigger is role-filtered. The session update trigger has an active_turn_id-changed guard. The turn update trigger (114-123) has no WHEN guard and recomputes for both NEW and OLD."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations.ts:536-540",
+      "note": "The repair re-runs 087 at every boot (called at Migrations.ts:746). It recreates triggers that are missing by name (087:211) and backfills only when the columns were just added."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:715",
+      "note": "latestCompletedTurnAt is the plain column. It is used in threadColumns (:800, shared by listThreadRows and the shell) and in the single-thread query (:1528). No other correlated latestCompletedTurnAt remains in apps/server."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1106-1128",
+      "note": "The anchor join is on message_id IN (threads.first_user_message_id, threads.latest_user_message_id) and selects '' as text. Its plan on the real DB: SCAN threads, SEARCH messages USING sqlite_autoindex (message_id=?), then a temp b-tree for the ORDER BY over about 2 rows per thread."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/ProjectionThreads.ts:45-140",
+      "note": "The thread upsert's ON CONFLICT DO UPDATE never sets the three columns, so trigger values survive. The AFTER INSERT trigger only fires on the real-insert branch."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/ProjectionTurns.ts:79-92",
+      "note": "upsertByTurnId always SETs assistant_message_id, state, requested_at and completed_at. Because UPDATE OF triggers fire whenever a listed column is in the SET list, projection_turns_latest_completed_update fires on every turn upsert, even when no value changes."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2087-2117",
+      "note": "Every assistant thread.message-sent event with a turnId, streaming deltas included (decider.ts:2880, flushed about every 32 ms per ProviderRuntimeIngestion.ts:177), calls upsertByTurnId. So the commit message's 'assistant streaming does not fire them' holds only for the message triggers. The thread row is already rewritten per event (ProjectionPipeline.ts:1160-1180), so the extra cost is CPU, not extra WAL pages."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/087_ProjectionThreadAnchorsAndStatisticsPartials.test.ts:114-208",
+      "note": "Parity tests cover backfill, rowid ties, an earlier insert, assistant updates, delete-latest (revert), role and created_at changes, running, completed, active-session and inherited turns, turn and session deletes, a thread inserted after its history, and thread updates. ProjectionSnapshotQuery.test.ts:2175-2195 pins the anchor plan to SEARCH by message_id with no messages SCAN."
+    },
+    {
+      "location": "ryco userdata state.sqlite (read-only)",
+      "note": "Read-only parity on the real DB: first, latest and completed mismatches are 0/0/0 over 791 threads. The anchor rows total 1.23 MB of text; 77 of 1,251 exceed one page, about 133 overflow pages."
+    },
+    {
+      "location": "apps/server/src/threadPriority/ThreadPriorityCandidateQuery.ts:71-75",
+      "note": "This is outside the finding's hydration and shell scope. The opt-in AI Focus candidate query still runs a per-active-thread correlated latest-user-message subquery (created_at DESC, message_id DESC) instead of joining on thread.latest_user_message_id."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects. One minor inefficiency on a hot write path. projection_turns_latest_completed_update (087:114-123) has no value-change WHEN guard, and ProjectionTurns.upsertByTurnId (ProjectionTurns.ts:79-92) always lists the watched columns in DO UPDATE SET. As a result, every assistant delta's turn upsert runs two latest-completed recomputes and two projection_threads row rewrites, the second for OLD.thread_id, which is the same thread. An in-memory benchmark (500 turns, 2 KB thread row) measured about 25 us extra per upsert. That is negligible at about 30 deltas/s per streaming thread. The message and session update triggers also recompute NEW and OLD when thread_id did not change.",
+  "implementationSketch": "Optional, low value. (1) Add a migration (e.g. 091) that DROPs and re-CREATEs projection_turns_latest_completed_update under the SAME name. The 087 repair only checks trigger names, so a renamed trigger would let the repair bring back the old unguarded body on the next boot. Add WHEN OLD.state IS NOT NEW.state OR OLD.completed_at IS NOT NEW.completed_at OR OLD.requested_at IS NOT NEW.requested_at OR OLD.assistant_message_id IS NOT NEW.assistant_message_id OR OLD.turn_id IS NOT NEW.turn_id OR OLD.thread_id IS NOT NEW.thread_id. Run the OLD-thread recompute only when OLD.thread_id IS NOT NEW.thread_id, by adding that predicate to its UPDATE's WHERE. Apply the same OLD/NEW dedupe to the message and session update triggers. Keep the rule SQL byte-identical. Give it its own post-migrator repair, as the other migrations have. Tests: extend the 087 parity test (or add a 091 test) so that an upsert with identical values leaves total_changes() unchanged by the trigger, which proves the guard works. Keep all existing parity assertions. (2) Optionally, in ThreadPriorityCandidateQuery.ts:71-75, join message.message_id = thread.latest_user_message_id. Tie-breaking on equal created_at moves from message_id DESC to rowid DESC, which is harmless for a ranking prompt. (3) Optionally, if cold-boot traces still show anchor overflow reads, add latest/first anchor created_at, turn_id and dispatch_mode columns to projection_threads so the command model skips the message join. This is probably not worth it: about 133 overflow pages on a 791-thread DB.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local SQLite trigger and read-path change only. It does not touch auth, E2EE, Hub protocol or hosted lifecycle.",
+  "repos": "ryco",
+  "correction": "Status DONE is correct. One overstatement: the auditor said selecting '' AS text closes the verifier's caveat that the cold saving needs anchor text dropped. That is only mostly true. The anchor select still reads is_streaming, created_at, updated_at and dispatch_mode, which follow text (column 4) in the record, so SQLite still walks overflow pages for large user messages. On the real DB that is about 133 pages across 791 threads, so the remaining cost is small but not zero. The auditor's note on per-write cost is also optimistic: the turn update trigger fires on every streamed assistant delta, not only on user-message, turn and session state changes. It is still cheap."
+}

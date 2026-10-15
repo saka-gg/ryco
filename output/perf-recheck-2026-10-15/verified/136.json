@@ -1,0 +1,55 @@
+{
+  "id": "thread-and-draft:shiki-sync-highlight",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. #710 (60633eff3) removed the headline cost. Settled code blocks now render as plain text, and DeferredShikiCodeBlock queues a job in codeHighlightQueue, which runs codeToHtml in requestIdleCallback slots, on-screen blocks first, and swaps the HTML in. There is no use(), Suspense or codeToHtml in render any more, and the reveal-throttle reset is gone. I found no prewarm and no worker under any other name: ShellIdlePreloads only warms route chunks, and the only highlight caller is ChatMarkdown. Highlighting still runs on the main thread, and each job is one task that cannot be interrupted. The auditor also missed a gap: the chat queue passes no tokenizeMaxLineLength, while the diff pool and PreviewPanel both cap it at 1,000. In a shiki 4.4.3 / JS-engine one-off, a 270 KB single-line JSON block took 509 ms (it ran into shiki's 500 ms per-line limit), against 0.3 ms with the cap. A 400-line TSX block took 165 ms cold and 44 ms warm.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/ChatMarkdown.tsx:301-326",
+      "note": "DeferredShikiCodeBlock renders the fallback and reads the LRU with readHighlightedCode in render. requestCodeHighlight runs in useEffect, and pendingRef is passed for visibility priority. Nothing highlights in render."
+    },
+    {
+      "location": "apps/web/src/components/ChatMarkdown.tsx:830-856",
+      "note": "Streaming blocks stay on PlainCodeBlock. Settled blocks use DeferredShikiCodeBlock with no Suspense or error boundary (the old code is at f1be4abc7 ChatMarkdown.tsx:355-410)."
+    },
+    {
+      "location": "apps/web/src/components/chat/codeHighlightQueue.ts:117-131",
+      "note": "highlight() calls highlighter.codeToHtml(job.code, { lang, theme }) synchronously on the main thread. It passes no tokenizeMaxLineLength or tokenizeTimeLimit, so shiki's defaults apply: no line-length cap and 500 ms per line."
+    },
+    {
+      "location": "apps/web/src/components/chat/codeHighlightQueue.ts:178-193",
+      "note": "drain() checks the 8 ms HIGHLIGHT_SLOT_BUDGET_MS only between jobs (line 190), and it ignores IdleDeadline.timeRemaining(). One cold-grammar or large job is still one 50-500 ms task."
+    },
+    {
+      "location": "apps/web/src/components/chat/codeHighlightQueue.ts:73-96",
+      "note": "@pierre/diffs is imported dynamically on the first job, and getSharedHighlighter(langs:[language]) is called per language. Correction to the auditor: the highlighter is a page-wide singleton (@pierre/diffs dist/highlighter/shared_highlighter.js). Only grammar attachment happens per language. Nothing prewarms it."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:175-187",
+      "note": "ShellIdlePreloads only warms route chunks, the command palette and settings. There is no highlighter or grammar warm-up after the first thread paint."
+    },
+    {
+      "location": "apps/web/src/lib/diffWorkerPool.ts:23,56",
+      "note": "The diff worker pool caps tokenizeMaxLineLength at 1,000, and PreviewPanel.tsx:596 does the same. The chat queue is the only highlighter without a cap. The pool's WorkerPoolManager (primeFileHighlightCache/getFileResultCache) exists, but chat markdown does not use it."
+    },
+    {
+      "location": "apps/web/src/components/chat/codeHighlightQueue.test.ts:43-97",
+      "note": "Unit tests cover off-task highlighting, dedupe, cancel and the unsupported-language fallback. No test covers visible-first ordering or the slot budget. ChatMarkdown.browser.tsx:275-305 covers plain-first-then-swap and reading the cache on remount."
+    },
+    {
+      "location": "apps/web/src/perf/chatViewBundleSplitting.test.ts:66-76",
+      "note": "This test pins that @pierre/diffs is not statically imported by ChatMarkdown or the queue."
+    }
+  ],
+  "remaining": "The cost has moved off the commit, but it still runs on the main thread. (1) codeHighlightQueue.ts:117-131 runs each job as one synchronous codeToHtml task, and the budget check at line 190 only runs between jobs. The first block of each grammar costs 50-80 ms, large blocks cost 44 ms warm and 165 ms cold for 400 TSX lines, and both still land as long tasks in idle time. They can delay input if the user types or scrolls right after opening a thread, and the rIC timeout of 500 ms (line 24) forces them to run even when the page is busy. (2) codeHighlightQueue.ts:119 and :126 pass no tokenizeMaxLineLength. A block with one very long line (minified JSON or a log) costs about 500 ms per line, measured at 509 ms for 270 KB, while the diff pool and PreviewPanel cap this at 1,000. (3) The proposal's idle warm-up of ts/tsx/js/json/bash/diff after the first thread paint is not implemented (RootAppShell.tsx:175-187). (4) The proposal's worker path is not implemented: no dedicated shiki worker, and the @pierre/diffs WorkerPoolManager is not reused.",
+  "fixDefects": "No correctness bug. Minor: (a) the slot budget cannot bound a single job, and the queue ignores the IdleDeadline. (b) The first drain can run before the IntersectionObserver's first callback arrives. requestIdleCallback is armed in the same passive effect that calls observe() (line 240), so an idle period before the next rendering update falls back to insertion order (top of thread first) for up to one slot. (c) No line-length cap, unlike the other two highlighters in the app (see remaining item 2). (d) No test pins visible-first ordering or the budget.",
+  "implementationSketch": "Stage 1 (S, closes the worst case): in apps/web/src/components/chat/codeHighlightQueue.ts, pass tokenizeMaxLineLength: 1_000 and a modest tokenizeTimeLimit (e.g. 50) to both codeToHtml calls (lines 119 and 126). Move the 1_000 into a shared constant in lib/diffRendering.ts, used by diffWorkerPool.ts:23 and PreviewPanel.tsx:596 as well. Optionally, treat blocks above a size threshold (e.g. more than 600 lines or 64 KB) as low priority, or leave them plain until they are visible. Make scheduleIdleTask optionally forward the IdleDeadline, and have drain() stop when deadline.timeRemaining() < 1 as well as at the 8 ms budget. Add unit tests in codeHighlightQueue.test.ts: the options are passed to codeToHtml; an element reported intersecting runs before an earlier-inserted off-screen job (mock IntersectionObserver); and a slow mocked codeToHtml makes drain yield and reschedule. Stage 2 (M, removes the main-thread cost): add apps/web/src/components/chat/codeHighlight.worker.ts, imported via Vite ?worker like diffWorkerPool.ts:3. It creates a shiki/core highlighter with createJavaScriptRegexEngine (or oniguruma WASM when available, measured about 25% faster in diffWorkerPool.ts:30-33) and the @pierre/theming pierre-dark/pierre-light themes, loads grammars on demand, and answers {id, code, lang, theme} with HTML. Keep the queue, LRU and visibility ordering on the main thread. Replace highlight() with a promise-based post to a single lazily created worker, and fall back to the current main-thread path when Worker is unavailable or the worker fails. Optionally terminate the worker after an idle grace, like diffWorkerPoolOwner. Stage 3 (S, optional): once the worker exists, prewarm it with ts/tsx/json/bash/diff as a last task in ShellIdlePreloads (RootAppShell.tsx:178), gated by allowsSpeculativePreload. Do not warm grammars on the main thread, because warming means tokenizing and is itself a 50-80 ms task. Validate with the focused tests (codeHighlightQueue.test.ts, ChatMarkdown.browser.tsx, chatViewBundleSplitting.test.ts), and keep the parity HTML class .chat-markdown-shiki pre.shiki so styling stays the same.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Stages 1-3 are internal performance changes with no auth, E2EE, Hub or lifecycle impact. Leaving very large blocks as plain text permanently would be a small product trade-off and needs sign-off. The sketch avoids it: large blocks only get lower priority, and the worker handles the cost.",
+  "correction": "The auditor said 'highlighter creation is per language'. In fact getSharedHighlighter is a page-wide singleton, and only grammar attachment happens per language. The auditor also missed that the chat queue is the only highlighter in the app without tokenizeMaxLineLength (diffWorkerPool.ts:23,56 and PreviewPanel.tsx:596 use 1,000). In a local shiki 4.4.3 JS-engine one-off, a 270 KB single-line JSON block took 509 ms uncapped against 0.3 ms capped. Status and other evidence stand.",
+  "repos": "ryco"
+}

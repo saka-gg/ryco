@@ -1,0 +1,26 @@
+{
+  "id": "mobile-boot:metro-inline-requires-off",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Commit 1b8bfd183 turns on Metro inline requires through getTransformOptions (experimentalImportSupport and inlineRequires both true; React and React Native are in nonInlinedRequires). An @ryco/* ESM resolver shim keeps the bundle's module set the same. The import-time configurators stay eager through bare imports in index.ts. The commit message gives release-build measurements: 2,331 -> 1,257 modules evaluated by splash hide, and 283 -> 255 ms median from bundle start to splash hide. I looked for other side effects at module scope in apps/mobile/src. App.tsx has two (preventAutoHideAsync and applyResolvedAppColorScheme), and they run when App is evaluated, which index.ts forces right away through registerRootComponent. hostedHub/runtime.ts registers the trust source and the primary connection factory at module scope. Since #710, which landed before 1b8bfd183, that module has been loaded lazily on purpose, and both of its consumers handle a missing registration: primaryConnectionFactory returns null, and useAuthoritativeNodeTrust handles a null source with a subscription. Deferring them further therefore changes nothing. Barrel re-exports (export *) still evaluate eagerly, as the original verifier noted. That limits how much more inlining can save, but it is not a gap in the fix. Nothing has changed metro.config.js or index.ts since the commit.",
+  "evidence": [
+    {"location": "apps/mobile/metro.config.js:86-101", "note": "NON_INLINED_REQUIRES (React, react/jsx-runtime, react-compiler-runtime, react-native) plus the getTransformOptions override: inlineRequires true, experimentalImportSupport true."},
+    {"location": "apps/mobile/metro.config.js:48-55", "note": "@ryco/* specifiers are resolved with isESMImport:true so the import-only export conditions still match when requires are inlined."},
+    {"location": "apps/mobile/index.ts:1-7", "note": "Bare imports of polyfills, threadsRuntime and hostedHub/state come before App, so those registrations stay eager."},
+    {"location": "apps/mobile/src/App.tsx:32-39", "note": "Module-scope splash and color-scheme calls run when App is evaluated, which registerRootComponent triggers immediately. Unaffected."},
+    {"location": "apps/mobile/src/hostedHub/runtime.ts:66-86", "note": "Module-scope configureAuthoritativeNodeTrustSource and installHostedPrimaryConnectionFactory. runtime.ts is already lazy by design (#710), and its consumers tolerate the registrations being absent."},
+    {"location": "apps/mobile/src/hostedHub/primaryConnectionFactory.ts:30-35", "note": "Returns null until the hosted runtime loads, which matches the documented pre-load behaviour."},
+    {"location": "apps/mobile/src/features/home/useAuthoritativeNodeTrust.ts:53-73", "note": "Handles a null trust source and subscribes for late registration."},
+    {"location": "apps/mobile/src/connection/metroStartupConfig.test.ts:34-78", "note": "Tests pin the inline-requires options, the ESM resolution of @ryco/* packages, and the order of the bare imports in index.ts."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

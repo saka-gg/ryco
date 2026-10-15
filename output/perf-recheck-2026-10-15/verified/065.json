@@ -1,0 +1,71 @@
+{
+  "id": "web-bootstrap:serial-shell-ws-thread-phases",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Proposals (a) to (d) are in the code. The shell chunk and deep-linked page chunks preload alongside auth. The ws-token is prefetched with the session check. The primary socket and its shell subscription open from beforeLoad. Only one ws-token is issued at boot. Welcome-time and idle thread-chunk preloads exist, and defaultPreload is 'intent'. Most of the described cost is gone. One gap remains that the auditor described wrongly. The early connection carries only the shell subscription. The lifecycle (welcome) and config subscriptions are still opened by ServerStateBootstrap's passive effect after the shell commits, because the primary connection has no onWelcome/onConfigUpdated. On the measured '/' bootstrap-redirect path, the welcome-driven thread-chunk preload, the thread-detail prewarm and the redirect all start at shell commit plus one WS round trip. They do not overlap the shell download, so the intent of (b)+(c) is only half met. The auditor's idea of observing the early connection's welcome from beforeLoad cannot work, because no welcome is requested early. This path exists only in web mode: the server sends bootstrapThreadId only when autoBootstrapProjectFromCwd is set, which defaults to true only for non-headless web mode. Desktop and headless nodes land on the index and rely on idle or intent preloads. The low fetch-priority part of (c) was not done, but it hardly matters now. Remaining value is small: about one RTT plus shell eval and commit on slow links, tens of ms locally.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/__root.tsx:163",
+      "note": "(a) Shell (or HostedHubRoot) preload plus preloadMatchedRouteChunks(pathname) start before the auth fetches. Awaited after auth through withRootSurfaceLoaded (127-137). /pair and native authorize are skipped."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:249",
+      "note": "(b) prefetchPrimaryWebSocketToken runs with the session check. It is discarded at 258 when not authenticated. startPrimaryConnectionEarly() runs at 254-255. Hosted-hub (195-202) and hosted-static (214-223) return before this, consistent with AGENTS.md."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:342",
+      "note": "startPrimaryConnectionEarly only calls connectPrimaryEnvironment(). It does not start server-state sync, so welcome and config are not requested early."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:178",
+      "note": "shouldObserveLifecycle/shouldObserveConfig are true only for saved connections or when onWelcome/onConfigUpdated are passed. Primary connections pass neither (service.ts createEnvironmentConnectionHandlers), so the early socket carries only subscribeShell."
+    },
+    {
+      "location": "apps/web/src/components/ServerStateBootstrap.tsx:22",
+      "note": "startServerStateSync (client-runtime rpc/serverState.ts:162-176: subscribeLifecycle + subscribeConfig) is called only from this passive effect. It mounts inside RootAppShell (RootAppShell.tsx:90), so after the shell chunk loads and commits."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:286",
+      "note": "(c) The welcome handler calls preloadRouteChunk(THREAD_ROUTE_ID) and prewarmThreadDetailSubscription before ensureEnvironmentConnectionBootstrapped. Because welcome arrives only after ServerStateBootstrap subscribes, this runs at shell commit + 1 WS RTT. The redirect navigate (324) is gated the same way."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:175",
+      "note": "(c) ShellIdlePreloads warms the thread and draft chunks after primary-shell-painted plus idle. lib/shellIdlePreload.ts:15-23 skips data-saver and non-4g links, so on slow profiles only the welcome path warms the thread chunk on '/'."
+    },
+    {
+      "location": "apps/web/src/router.ts:15",
+      "note": "(d) defaultPreload 'intent', defaultPreloadDelay 50. The thread route uses lazyRouteComponent (_chat.$environmentId.$threadId.tsx:33). Sidebar rows also warm through threadNavigationIntent.ts."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:179",
+      "note": "The prefetched token is taken once (60 s max age). A failed prefetch yields null and the socket requests again. Covered by primaryAuth.test.ts:205-280."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/deviceRpcClient.ts:175",
+      "note": "The dedicated /ws/device socket and its ws-token open only on demand (acquireDedicated), so boot issues one ws-token (65af92766)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:894",
+      "note": "connectPrimary returns the existing connection and disposes a duplicate candidate. start() (1218-1265) reuses the early connection, so ownership stays safe."
+    },
+    {
+      "location": "apps/server/src/cli.ts:639",
+      "note": "autoBootstrapProjectFromCwd defaults to mode === 'web' (false when headless). serverRuntimeStartup.ts:413 sets bootstrapThreadId only under that flag, and RootAppShell.logic.ts:24 redirects only on '/' outside the phone tier. The residual applies only to web-mode CLI boots."
+    },
+    {
+      "location": "apps/web/src/viteBuild/modulePreload.ts:22",
+      "note": "Dynamic imports preload their whole static closure. The '4 discovery levels' for the thread graph noted in the finding is gone."
+    }
+  ],
+  "remaining": "In standard web mode on '/', with a server bootstrapThreadId and outside the phone tier, the welcome and config subscriptions start only in ServerStateBootstrap's passive effect (apps/web/src/components/ServerStateBootstrap.tsx:22-25 -> packages/client-runtime/src/rpc/serverState.ts:162-176), after the shell chunk loads and commits. The early primary connection (apps/web/src/routes/__root.tsx:342-348) does not subscribe to them (connection.ts:178-179). As a result, the welcome-driven thread-route chunk preload and thread-detail prewarm (RootAppShell.tsx:284-288) and the bootstrap redirect (RootAppShell.tsx:324) start at shell commit + one WS RTT instead of overlapping the shell download. The ~100 KB config snapshot is also serialized behind the commit. The proposal (c) low-fetch-priority sub-item was not done, but it is moot because the remaining preloads already run after the shell. Adjacent and outside this finding's primary scope: saved-environment connections also start only from start() after shell commit (supervision.ts:1235-1242), so deep links into a saved environment's thread still put their connect chain behind the shell.",
+  "fixDefects": "No bugs found in the implemented parts. Minor: connectsEarly (__root.tsx:245) also prefetches a ws-token on /pair and on every unauthenticated boot. That is a guaranteed 401 POST, harmless because the route has no rate limit (apps/server/src/auth/http.ts:181-193). The auditor said the '/' thread chunk 'starts at shell commit' and proposed 'observing the early connection's welcome from beforeLoad'. In fact it starts at commit + ServerStateBootstrap effect + one lifecycle RTT, and the early connection never requests welcome, so that idea needs the lifecycle subscription moved first.",
+  "implementationSketch": "1) packages/client-runtime/src/rpc/serverState.ts: make startServerStateSync reference-counted per client, e.g. retainServerStateSync(client). The first retain opens subscribeLifecycle + subscribeConfig and the last release closes them, so two holders never open duplicate streams. ServerStateBootstrap.tsx uses the retain unchanged. 2) apps/web/src/routes/__root.tsx startPrimaryConnectionEarly: after connectPrimaryEnvironment() returns a connection, take a retain on connection.client.server (standard mode only, already guaranteed by the call site). Release it once ServerStateBootstrap has taken its own, or after a bounded timeout if the shell never mounts. 3) In the same early path, register a one-shot onWelcome (serverState.ts:138). If location is '/', shouldApplyBootstrapThreadRedirect({pathname:'/', tier:getPresentationTier(), hostedHome:false}) holds and payload.bootstrapThreadId is set, call RootAppShell.preload().then(() => preloadRouteChunk('/_chat/$environmentId/$threadId')) and prewarmThreadDetailSubscription(environmentId, bootstrapThreadId). Sequencing after the shell module avoids taking bandwidth from the shell graph, and the prewarm is idempotent and deadline-bounded. EventRouter stays the sole owner of the navigate. 4) Tests: serverState unit tests (two retains -> one lifecycle/config subscription; last release unsubscribes). A root/early-boot unit test (welcome with bootstrapThreadId on '/' triggers the chunk preload and prewarm once; not on deep links, phone tier, hosted-hub or hosted-static). Run the existing ServerStateBootstrap.browser.tsx. Confirm with the startup perf harness on a throttled web-mode profile that the thread chunk request and welcome precede root-shell-module-ready + commit, and that the 'usable' timing does not regress.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Standard (non-hosted) mode only; no auth, E2EE, Hub protocol or hosted lifecycle change. Sequencing the thread chunk after the shell module avoids a usable-vs-composer bandwidth trade-off, so no product decision is required.",
+  "repos": "ryco",
+  "correction": "Auditor's DONE overstates it. The early connection does not carry the welcome or config subscriptions; they still start after shell commit from ServerStateBootstrap. So on the '/' redirect path the thread chunk, thread prewarm and redirect start at commit + 1 RTT, and the auditor's suggested fix (observe the early connection's welcome) would need the lifecycle subscription moved first. The path is also narrower than implied: bootstrap redirects only happen for non-headless web-mode servers (autoBootstrapProjectFromCwd), not desktop or headless nodes."
+}

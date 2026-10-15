@@ -1,0 +1,83 @@
+{
+  "id": "web-boot-cpu:shell-snapshot-decode-archived",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "Not done. I tried to refute the auditor and could not. Every non-deleted thread, archived ones included, still goes over the wire as a full OrchestrationThreadShell. The client RPC layer decodes each one with the full Effect Schema on the main thread: Schema.Trim ids and titles, the ModelSelection transformEffect, and the withDecodingDefault fields. The client applies everything atomically only at snapshot-end. The one related change is d2aa947a3. It pages the snapshot into messages of at most 1 MiB and sends archived threads last, in their own messages. That shortens individual long tasks, but total decode, JSON.parse and store work stay the same. The client also never uses the archived-last ordering. The RPC client decodes each snapshot-threads page against the full schema before shellSnapshotAssembly sees it, and the assembler holds every page until snapshot-end. The pageShellSnapshot doc comment says a client 'can show the unarchived shell ... without decoding the archive first', but no client does that. I found no Worker decode, no trusted codec, no slim archived form, no excludeArchived option and no Hub-side change. The Hub relay never parses shell items. Two things make the cost larger than when the finding was written. First, #722 (46f0f6cd0, ThreadTrashRetirement) moves every conversation that was in Trash, previously excluded from the shell because deleted_at was set, into Archive, so they now ship in every shell snapshot. Second, hosted connections never resume the shell (apps/web/src/environments/runtime/service.ts:857 requires hostedGeneration === null), so every hosted reconnect pays the full archived transfer, relay decrypt and decode again.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:878-889",
+      "note": "listActiveThreadShellRows filters only deleted_at IS NULL plus an optional scope. Archived threads are included."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3133-3170",
+      "note": "buildShell maps every row to a full OrchestrationThreadShell (modelSelection, latestTurn, goal, session, lineage, priority) whether or not it is archived."
+    },
+    {
+      "location": "apps/server/src/ws/context/shellSnapshotPages.ts:27-80",
+      "note": "pageShellSnapshot splits threads into unarchived and archived and starts a new message for the archived ones. The pages carry the same full shells, so this only bounds message size (1 MiB, constants.ts:54)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:747-753",
+      "note": "shellSnapshotItems turns each page array into one stream chunk, which is one RPC message."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:1293-1296",
+      "note": "OrchestrationShellSnapshotThreadsItem.threads is Schema.Array(OrchestrationThreadShell), so archived pages are fully decoded by the RPC client."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:1145-1190",
+      "note": "OrchestrationThreadShell is unchanged since f1be4abc7: TrimmedNonEmptyString title/branch/worktreePath, ModelSelection, and withDecodingDefault on interactionMode, goal, archivedAt, settledOverride and settledAt."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:123-157",
+      "note": "The ModelSelection Schema.decodeTo + transformEffect still runs per thread."
+    },
+    {
+      "location": "packages/contracts/src/baseSchemas.ts:4-5",
+      "note": "TrimmedString = Schema.Trim and TrimmedNonEmptyString = Trim plus isNonEmpty."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/protocol.ts:517",
+      "note": "This is the RpcSerialization.layerJson wiring; the auditor's line 472 is wrong. It is still plain JSON plus full RPC schema decode on the main thread. The client-runtime and web clients use no Worker for RPC; the only Workers are the diff parsers."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:1077-1100",
+      "note": "subscribeShell always requests snapshotDelivery \"paged\" and feeds the already-decoded items into the assembler."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/shellSnapshotAssembly.ts:36-67",
+      "note": "The assembler concatenates every page, archived ones included, and emits a single snapshot only at snapshot-end. archivedThreadCount is never read on the client; git grep finds no consumer."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:272-283",
+      "note": "syncShellSnapshot and bootstrapGate.resolve() run only after the full snapshot, archive included, has been assembled. Shell readiness therefore also waits for the archived pages to arrive and decode."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:857-866",
+      "note": "Shell resume is disabled for hosted connections (hostedGeneration !== null), so every hosted reconnect takes a full paged snapshot including all archived threads."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ThreadTrashRetirement.ts:67-110",
+      "note": "#722 untrashes and archives every conversation that was in Trash. Those threads were excluded from the shell before (deleted_at set) and now ship as archived shells, which grows the archived share."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:1345-1368",
+      "note": "OrchestrationSubscribeShellInput has only resumeFromSequence, threadPriorities and snapshotDelivery. There is no option to exclude or slim archived threads."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useSidebarTree.ts:174",
+      "note": "One of many store consumers of archived shells. Others: archivedSettings.ts:61, threadLineage.ts:69, CommandPalette.logic.ts:154, state/terminal/cleanup.ts, projectWorkspaces.logic.ts, and mobile projectsModel.ts and threadHeaderModel.ts. Any slimming or on-demand path has to cover all of them."
+    }
+  ],
+  "correction": "The classification is right. One small fix: the RpcSerialization.layerJson wiring is now at packages/client-runtime/src/rpc/protocol.ts:517, not 472. The audit also left out two facts that raise the cost. #722's trash retirement moves former Trash conversations into the archived shell set. Hosted connections never resume the shell, so the archived cost repeats on every hosted reconnect, not only on cold boot.",
+  "remaining": "The full cost described in the finding remains. ProjectionSnapshotQuery.ts:878-889 and :3133-3170 put every archived thread into the shell as a full OrchestrationThreadShell. shellSnapshotPages.ts:27-80 sends them as full shells. The client decodes each page with Schema.Array(OrchestrationThreadShell) (orchestration.ts:1293-1296) on the main thread via the RPC layer (protocol.ts:517, wsRpcClient.ts:1077-1100). shellSnapshotAssembly.ts:36-67 applies them atomically with the live threads at snapshot-end, which gates shell readiness in connection.ts:272-283. The archived-last ordering from d2aa947a3 is unused on the client. The hosted read cache (apps/web/src/hostedHub/readCache.ts) and the primary shell cache only paint from bounded metadata and only trim archived threads under budget pressure, so they do not change the live path.",
+  "fixDefects": "No fix exists for this finding. One inaccuracy in related code: the doc comment on pageShellSnapshot (apps/server/src/ws/context/shellSnapshotPages.ts:20-24) and on OrchestrationShellSnapshotDelivery (orchestration.ts:~1266-1272) says a client can show the unarchived shell before decoding the archive. No client can do this today, because the RPC layer schema-decodes every page before the assembler runs and the assembler waits for snapshot-end.",
+  "implementationSketch": "Preferred: an opt-in slim archived form plus on-demand full shells. (1) In packages/contracts/src/orchestration.ts, add OrchestrationArchivedThreadStub: id, projectId, title, createdAt, updatedAt, archivedAt, worktreeId, branch, worktreePath, latestUserMessageAt and lineage. Use cheap leaf schemas where safe; the server already trims. Add a stream item kind 'snapshot-archived-threads' with threads: Schema.Array(OrchestrationArchivedThreadStub). Add an optional input field archivedThreads: Schema.optional(Schema.Literal('stub')) to OrchestrationSubscribeShellInput. Older servers ignore unknown keys. Do not widen the 'paged' literal, because old servers would reject a new literal value. (2) In apps/server/src/ws/context/shellSnapshotPages.ts, when the subscriber asked for stubs, emit the archived threads as stub pages. Thread the flag through orchestrationStreams.ts:747 shellSnapshotItems, priorityStream and orchestrationRpc.ts:542. (3) Add an RPC orchestration.getThreadShells({ threadIds } | { projectId, archived: true, cursor }) backed by the existing scoped buildShell (ProjectionSnapshotQuery getScopedShellSnapshot, which already supports a threadIds scope from 502adfd1e). Page it under the relay cap, reusing ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES. (4) In client-runtime, have shellSnapshotAssembly.ts accept stub pages and pass them through in the assembled snapshot as a separate archivedStubs array, or as shells marked detail: 'stub'. state/threads/store.ts stores stubs so the sidebar archived section, the archive settings view, lineage and the command palette keep working without a fetch. A later thread-upserted (unarchive sends a full shell) replaces the stub. Opening an archived thread already loads full detail through subscribeThreadWindow. Any consumer that needs a full field (modelSelection, goal, session) calls getThreadShells on demand. (5) Audit every archivedAt consumer and confirm stub fields are enough: useSidebarTree, sidebarTreeAdapters, archivedSettings, CommandPalette.logic, threadLineage, terminal/cleanup, workItemLocalLinks, agentThreads.logic, projectWorkspaces.logic, sessionTabs.selectors, mobile projectsModel, threadHeaderModel, environmentSnapshotCodec and workspaceMetadataProjection/primaryShellCache. (6) Tests: shellSnapshotPages.test.ts (stub pages; unarchived-only page bytes), shellSnapshotAssembly.test.ts (stubs plus threadCount accounting), store tests for stub-to-full upgrade on thread-upserted and archive-to-stub downgrade on re-snapshot, an orchestrationRpc compat test (old client without the flag still gets full shells), and a mobile environmentSnapshotCodec round-trip. Re-run the report's bench-decode-split at 2,000 threads with 60% archived. Expect decode close to the unarchived-only 39-40% plus a small stub cost, and roughly 50-60% fewer shell bytes on hosted reconnects. A cheaper variant with no product change: send the archived pages as Schema.Array(Schema.Unknown) behind a flag and decode them in idle slices. That only moves work off the critical path and does not reduce total CPU or bytes. Emitting the unarchived snapshot before the archive arrives would make the store drop and re-add archived threads; avoid it unless the store gains an additive 'archived-threads' apply. Longer term, use a Worker or trusted codec for shell pages.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Slimming archived threads or fetching them on demand changes product behaviour. The archive view, the sidebar archived sections, lineage and delegated-child lookups, search and terminal cleanup would work from stubs or wait for a fetch. It also adds a contract and RPC shared by server, web and mobile. Using cheaper leaf schemas for stubs relaxes client-side validation of node-supplied data, which a hosted or E2EE path may want reviewed. Any variant that publishes the unarchived shell before the archive arrives would change when hosted shell readiness and mutation capability are granted, which falls under the AGENTS.md hosted lifecycle rules. No Hub protocol change or Hub deploy is needed, because the relay treats shell items as opaque.",
+  "repos": "ryco"
+}

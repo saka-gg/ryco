@@ -1,0 +1,74 @@
+{
+  "id": "mobile-boot:hosted-relay-turnup-waterfall",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is correct. (c) is done. (a) and (b) are not implemented, and no Hub-side or renamed implementation exists. Their payoff has largely disappeared, though. Since #710 the directory read runs beside the session restore, so (b) gains about nothing. Since 94ec18751 the relay socket's TCP, TLS and upgrade (about 3 RTT from selection) start beside the enrollment wait and the ticket. On a cold launch the socket, not the upsert, is now usually the critical path. (a) also cannot skip the local identity and prekey reads, because the ready enrollment carries that material into the handshake. It would save at most one DPoP sign plus one upsert RTT, and only when the local work exceeds about 1 RTT. The auditor's sketch for (a) misses one thing: a stale cached summary gets Hub 'forbidden enrollment_unavailable', which maps to a retryable network failure, so the relay would back off forever without re-enrolling. Two smaller observations. First, the enrollment's refreshDirectory call probably sends a redundant listNodes at launch now that the prefetched directory commits early. Second, the hosted primary connection is still held behind full SQLite hydration.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotPersistence.ts:537",
+      "note": "(c) DONE: installHubSelectionPersistence runs before runtime.hydrate() (:551), so the KV read overlaps the SQLite open."
+    },
+    {
+      "location": "apps/mobile/src/runtime/bootstrap.ts:57",
+      "note": "admitPrimaryConnection is still mobileRuntimeStartupBarrier.isHydrated(). environmentDriver.ts:601 defers the hosted primary (relay) connect, and its early socket, until full snapshot hydration. This is unchanged from before (the whole driver used to start after hydration). It only matters when hydration is slower than session plus directory."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:753",
+      "note": "#restoreAccess sends listNodes beside restoreSession (prefetchHostedDirectory at :470) and commits it at :773. In bearer/mobile mode too, since 9adb0372c. Directory-ready is now about the same time as authenticated, which removes almost all of (b)'s intended gain."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:343",
+      "note": "nextUrl opens the early socket before awaiting prepareSocketContext (:345) and issueRelayAttempt. After a ticket-stage failure (:379) retries go serial again."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/relaySocket.ts:109",
+      "note": "The early socket waits EARLY_RELAY_SOCKET_TICKET_WAIT_MS (5000-1500 = 3.5 s) after open (timer at :181), then is discarded. The upgrade is authorized by session token plus DPoP only and is not node-specific."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/accountE2eeAttempt.ts:117",
+      "note": "prepareMobileRelaySocketContext awaits awaitNativeE2eeEnrollmentSettled (up to MOBILE_ENROLLMENT_GATE_WAIT_MS = 10 s, :110) and still requires ready (:128-129). That covers both the account-grant and the local verified-pin/pairing kinds, although the local kind never uses the enrollment."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:357",
+      "note": "(a) NOT DONE: watchSelectionForE2ee calls enrollmentCoordinator.ensure() whenever the account is authenticated and the coordinator is idle, which is every launch."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeEnrollment.ts:381",
+      "note": "(a) NOT DONE: start() always runs ensureIdentity, then (at :385-389) prekey, enrollmentId and random, then the DPoP-signed upsert at :429, before publish ready at :451. Since f1be4abc7 the only change is the awaitNativeE2eeEnrollmentSettled helper. Ready = {namespace, enrollment, identity, prekey}, so a cached ready would still need the local identity and prekey reads."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeEnrollment.ts:383",
+      "note": "After ensureIdentity resolves (a native async call), the coordinator calls refreshDirectory(). #refreshDirectoryWith (state.ts:2148) joins only an in-flight read. When the prefetched listNodes resolved before restoreSession, the commit finishes in microtasks, so this probably sends a second listNodes and DPoP proof at launch, alongside the upsert. Minor."
+    },
+    {
+      "location": "apps/mobile/src/platform/nativeE2ee.ts:249",
+      "note": "clearEnrollment is a no-op. Only the enrollment id (:231) and the prekey certificate are persisted. No persisted ready summary exists anywhere in apps/mobile/src or packages/client-runtime/src."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/selectionPersistence.ts:63",
+      "note": "(b) NOT DONE: deriveHubSelectionRestore waits until accountStatus is authenticated, directoryStatus ready and browserStatus current (:69-74). The file is unchanged since f1be4abc7."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2358",
+      "note": "selectNode requires directoryStatus ready and the node in state.nodes (:2359-2366). The mobile coordinator's nodeForId (apps/mobile/src/runtime/bootstrap.ts:145) also reads the directory, so (b) would need a directory-less acquisition path."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeTrustResolver.ts:231",
+      "note": "The account-grant ticket request carries enrollmentId, enrollmentRevision and clientPrekeyCertificateDigest, so a persisted summary could drive the ticket. unavailable() at :111 maps any other ticket error to retryable recovery-required."
+    },
+    {
+      "location": "ryco-hub:src/e2ee/accountE2eeService.ts:854",
+      "note": "activeEnrollment throws revoked/enrollment_revoked only for a revoked enrollment. A revision mismatch, digest mismatch or expired certificate gets forbidden/enrollment_unavailable (:868-875), which the client treats as retryable, not as a reason to re-enroll. Rename does not bump the revision (repositories.ts:2969), and accountAuthEpoch is joined at read time, so a cached summary stays valid in the normal case. The ticket route (src/http/accountE2eeRoutes.ts:117-158) also marks the enrollment used."
+    }
+  ],
+  "remaining": "(a) Not implemented: every authenticated launch runs the DPoP-signed upsert (nativeE2eeEnrollment.ts:381-451, triggered at runtime.ts:357-364) before prepareMobileRelaySocketContext lets the ticket go (accountE2eeAttempt.ts:117-129). (b) Not implemented: restore and selectNode stay directory-gated (selectionPersistence.ts:69-74, state.ts:2359-2366, nodeForId at bootstrap.ts:145). The cost both were meant to remove is now mostly hidden. The directory is prefetched beside the session restore (state.ts:753-773). The relay socket's TCP, TLS and upgrade (about 3 RTT plus one sign, transport.ts:343) start beside the enrollment wait and the ticket (about 2 RTT plus 2 signs plus local key reads). Residual gain from (a) is about max(0, local identity/prekey reads + one sign − 1 RTT): roughly 0 on cellular, maybe 20-60 ms on low-RTT Wi-Fi. Residual gain from (b) is about the gap between listNodes and session restore (near 0). Remaining edges: (1) If enrollment plus ticket exceed the 3.5 s early-socket window (relaySocket.ts:109), or any ticket-stage failure occurs (transport.ts:379), the attempt goes serial again. (2) The hosted primary connect is still deferred until full SQLite hydration (bootstrap.ts:57, environmentDriver.ts:601). (3) The enrollment's refreshDirectory (nativeE2eeEnrollment.ts:383) probably sends a redundant listNodes at launch. The only meaningful lever left is not in the finding: the socket path is now critical, so opening the not-node-specific early relay socket at authenticated time, or with the stored token at launch, rather than after selection could hide 1-2 RTT.",
+  "fixDefects": "None that break correctness in the implemented parts. The early socket carries no authority before its ticket, and the enrollment await grants nothing because ready is still required. Minor, plausible side effect of the #710 prefetch: the enrollment's refreshDirectory (nativeE2eeEnrollment.ts:383) used to join the in-flight launch listNodes. Now the prefetched read often commits before ensureIdentity resolves, so a second listNodes and DPoP proof is sent alongside the upsert on many launches (#refreshDirectoryWith at state.ts:2148 only joins an in-flight read). This is extra launch traffic and Secure Enclave contention, not a correctness bug.",
+  "implementationSketch": "Priority is low. If anything is done, prefer the cheaper wins.\n\n(1) Redundant launch listNodes. In apps/mobile/src/hostedHub/runtime.ts:272, pass refreshDirectory as a call that skips when hostedHubStore.getState().directoryStatus === 'ready' and the last commit was recent. Alternatively add a controller method that joins an in-flight read or reuses one committed within N seconds. Test in runtime.test.ts: bootstrap with enrollment, where the prefetched listNodes resolves before restoreSession, should give exactly one listNodes.\n\n(2) Optional, needs decision: open the relay early socket at authenticated time instead of after selection. Add a 'prewarm' in packages/client-runtime/src/relay/transport.ts that an authenticated-account hook calls once (mobile: from watchSelectionForE2ee in runtime.ts when accountStatus flips to authenticated). It keeps one MobileEarlyRelaySocket (relaySocket.ts:259) that the first nextUrl adopts instead of opening its own. It is discarded on generation, account or sign-out changes and after the existing 3.5 s window. Tests in transport.test.ts and relaySocket.test.ts: adoption, discard on account change, no adoption after expiry.\n\n(3) Proposal (a), only if measurements show the local work exceeds 1 RTT:\n- Add a public-only persisted summary to the platform contract (packages/client-runtime/src/platform/index.ts, NativeE2eePlatformService): readEnrollmentSummary/writeEnrollmentSummary. Fields: hubOrigin, accountId, enrollmentId, enrollmentRevision, clientPrekeyCertificateDigest, certificateExpiresAt, status. Implement it in apps/mobile/src/platform/nativeE2ee.ts on the secure store, and clear it on a namespace change and in invalidate('revoked'|'signed-out').\n- In nativeE2eeEnrollment.ts start(), after ensureIdentity and ensureClientPrekey (both still needed, because ready carries identity and prekey), compare the cached summary's namespace, enrollmentId and digest with the local prekey, and check the certificate is not within its renewal margin. If it matches, publish ready from the summary plus local material, then run the upsert in the background. On an upsert answer that differs, publish the new ready (generation bump). Write the summary after every successful upsert.\n- Required fix the auditor missed: in accountE2eeAttempt.ts issueMobileRelayAttempt (around :265-289) and nativeE2eeTrustResolver.ts:252-270, treat Hub forbidden/enrollment_unavailable on the account-grant ticket as stale cached enrollment. Drop the cache and call coordinator.retry() before the next attempt. Otherwise the relay backs off forever on a mismatched revision or digest. Keep enrollment_revoked failing closed.\n- Tests in nativeE2eeEnrollment.test.ts: cached-ready publishes without an upsert; a background upsert with a new revision republishes; a near-expiry certificate forces a foreground upsert; a namespace change ignores the cache. accountE2eeAttempt.test.ts: enrollment_unavailable triggers a re-upsert; enrollment_revoked invalidates.\n\n(b) as proposed is not worth doing: the directory is already prefetched beside the session.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Proposal (a) changes E2EE enrollment semantics. The device would treat a cached enrollment as ready without a fresh Hub upsert, which needs security review of the cache contents, expiry margin and stale or revoked handling. Proposal (b), and the alternative of prewarming the relay socket before selection or before session validation, change ordering under the single hosted lifecycle owner (AGENTS.md 'Hosted Hub and PWA Boundaries'). Only the redundant listNodes dedupe is a local, decision-free change.",
+  "repos": "ryco"
+}

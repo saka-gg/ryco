@@ -1,0 +1,58 @@
+{
+  "id": "dedicated-pages:statistics-recharts-weight",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) replaced the dedicated Statistics page's three recharts charts with an in-house SVG module (apps/web/src/components/statistics/charts.tsx). recharts is now imported only by settings/statistics/charts.tsx, which only the frozen phone StatisticsPanel uses, and that panel is reached only through a lazy import in PhoneSettingsSurface. I checked a current dist build (built 2026-10-14 21:45, after HEAD ec250e386). recharts sits only in StatisticsPanel-*.js (339 KB raw), and the only chunk that references it is PhoneSettingsSurface-*.js. The useStatistics chunk dropped from 375 KB to 2.5 KB. Beyond main+RootAppShell, the Statistics route now costs 137 KB raw / 47 KB gzip with no recharts, d3 or redux. The hosted Hub vendors 7bc39eec3, which contains 60633eff3. Two small issues remain, neither about performance. First, no bundle-budget rule stops recharts from coming back into the Statistics closure. Second, CodeChangesChart keeps a fixed 4px gap and a 1px minimum bar width, so bars overlap on dense ranges, where recharts dropped the gap.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/statistics/charts.tsx:355",
+      "note": "SeriesAreaChart, plain SVG. ProjectBars is at :511 and CodeChangesChart at :653. Imports are React, ui/chart (palette and tooltip body only) and statisticsFormat. No recharts."
+    },
+    {
+      "location": "apps/web/src/components/statistics/usage/UsageView.tsx:34",
+      "note": "Imports SeriesAreaChart from ../charts. No recharts import is left."
+    },
+    {
+      "location": "apps/web/src/components/statistics/activity/ActivityView.tsx:25",
+      "note": "ProjectBars and CodeChangesChart come from ../charts (the in-house module), not from settings/statistics/charts."
+    },
+    {
+      "location": "apps/web/src/components/ui/chart.tsx:1",
+      "note": "Type-only React import plus CHART_PALETTE, chartColor and ChartTooltipContent. recharts is gone."
+    },
+    {
+      "location": "apps/web/src/components/settings/statistics/charts.tsx:13",
+      "note": "The only recharts import in apps/web/src (TokensOverTimeChart and ProviderDonut for the frozen phone tier). It re-exports the SVG bar charts at :26."
+    },
+    {
+      "location": "apps/web/src/components/shell/phone/PhoneSettingsSurface.tsx:169",
+      "note": "StatisticsPanel, the only importer of settings/statistics/charts, is loaded only through lazy(import(...)) here. PhoneSettingsSurface is itself lazy in AppSidebarLayout.tsx:40."
+    },
+    {
+      "location": "apps/web/dist/assets/StatisticsPanel-BCFAttdJ.js",
+      "note": "Build from 2026-10-14 21:45, after HEAD. This is the only chunk with recharts code (339,226 B raw), and only PhoneSettingsSurface-*.js references it. StatisticsRouteView beyond main+RootAppShell is 137,483 B raw / 48,459 B gzip, with no recharts, d3 or redux. useStatistics-*.js is 2,503 B (375,367 B at f1be4abc7)."
+    },
+    {
+      "location": "scripts/perf/model.ts:262",
+      "note": "DEFAULT_BUNDLE_BUDGET_POLICY has closures for boot, RootAppShell, ChatThreadRouteView and PullRequestsRouteView, but none for StatisticsRouteView. Nothing in CI forbids recharts from coming back to the page."
+    },
+    {
+      "location": "apps/web/src/components/statistics/charts.tsx:690",
+      "note": "barWidth = max(1, min(18, (band*0.8 - 4)/2)) with a fixed 4px gap. Once band is under ~7.5px (about 60+ days on a half-width panel, so the 90d and 'all' ranges), each day's bar pair (2*1+4 = 6px) is wider than its band and overlaps the neighbours. recharts dropped the gap in this case (node_modules/recharts/es6/state/selectors/combiners/combineAllBarPositions.js:55-58)."
+    },
+    {
+      "location": "apps/web/src/components/statistics/charts.tsx:196",
+      "note": "useElementSize measures in useLayoutEffect and calls setState there. React flushes that before paint, so the SVG appears in the first painted frame. The auditor's note that the charts mount one frame later is not accurate: there is only an extra render pass."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor, non-perf: (1) CodeChangesChart (apps/web/src/components/statistics/charts.tsx:690-737) keeps a fixed 4px gap between the added and removed bars and a 1px minimum width. When band < ~7.5px (90d and 'all' ranges on the half-width Code changes panel), day groups overlap their neighbours. recharts set the gap to 0 when it did not fit and allowed sub-pixel bars. (2) No regression guard: DEFAULT_BUNDLE_BUDGET_POLICY (scripts/perf/model.ts:262) has no StatisticsRouteView closure. If the page imports TokensOverTimeChart or ProviderDonut from settings/statistics/charts, the ~339 KB recharts chunk comes back silently. Correction to the auditor: ChartFrame does not delay paint by a frame, because its measurement setState runs in a layout effect.",
+  "implementationSketch": "Optional hardening, no further work is needed for the finding itself. (a) Regression guard: in scripts/perf/model.ts add a closure to DEFAULT_BUNDLE_BUDGET_POLICY: { name: 'StatisticsRouteView', chunk: 'StatisticsRouteView', beyondBoot: true, maxGzipBytes: null (or ~80 KiB, since it measures ~47 KiB gzip beyond the shell and more beyond main alone), forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...MARKDOWN_SOURCES, ...DIFF_RENDERER_SOURCES, { pattern: /^node_modules\\/(?:recharts|victory-vendor|d3-[a-z-]+|@reduxjs\\/toolkit|react-redux|decimal\\.js-light)\\//u, reason: 'charting library (the Statistics page draws plain SVG; recharts is phone-tier only)' }] }. Add a case to scripts/perf/bundleBudget.test.ts. It runs in CI through `bun run perf:bundle-budget` in .github/workflows/_validation.yml. (b) Dense bar fix in CodeChangesChart: compute gap = band*0.8 - 2*1 > 4 ? 4 : 0 and barWidth = min(18, max(0.5, (band*0.8 - gap)/2)), and pass gap to the group layout (groupLeft = center - barWidth - gap/2; removed bar x = groupLeft + barWidth + gap). Extend apps/web/src/components/statistics/charts.browser.tsx with a 365-day case at ~400px width that checks no bar's x range crosses into a neighbouring band.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The remaining hardening is a CI bundle rule and a visual bar-layout tweak on the desktop Statistics page. Neither touches auth, E2EE, hosted lifecycle, Hub protocol or the frozen phone tier (recharts stays there as the proposal allowed).",
+  "repos": "ryco"
+}

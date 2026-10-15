@@ -1,0 +1,67 @@
+{
+  "id": "gap-logging-io:retry-loop-log-storms",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "summary": "The two log storms that made up 83% of the measured volume and the Electron IPC error-stack storm are gone. SourceControlProviderError: the real cause (deleted worktree directories re-probed on every read) is fixed by recording them once via worktree.checkout.remove (reason 'missing') and skipping removed rows; any other failure is now logged per worktree through logOnceEvery. History recovery: per-thread backoff, with one WARN per failure streak. activate-transport: returns a typed {ok:false} and the desktop log is async. One defect the auditor missed: the 'VCS remote status refresh failed' source (10% of the measured volume) barely shrinks in steady state. The loop's own backoff (8 then 15 minutes) is longer than the limiter's 5-minute window, and the limiter logs every occurrence that arrives after a full window in full. A simulation gives 37 of 40 failures still logged, almost all with the full cause. Latent retry loggers that never showed in the measured logs also still bypass the helper. All leftovers are low value.",
+  "evidence": [
+    {
+      "location": "packages/shared/src/logOnceEvery.ts:45-73",
+      "note": "admit(): an occurrence after the window with entry.skipped === 0 returns LOG (full cause). So a key that recurs at intervals >= window is always logged in full, never summarised."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:54-55,164-177,557-565",
+      "note": "Failure backoff is 30s*2^(n-1), capped at 15 min (already present at f1be4abc7). The logOnceEvery call uses the default 5-min window. Simulating the real LogOnceEveryLimiter on this delay sequence: 37 of 40 failures logged (0s log, 450s summary, then a full log at 930s, 1830s, 2730s, ...). Steady state is one full-cause WARN per cwd per 15 min, the same as before #710."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:148,173-207",
+      "note": "Root-cause fix confirmed: on resolve failure, ENOENT on the checkout (with its parent present) is recorded once as worktree.checkout.remove reason 'missing', and checkoutRemovedAt rows return early. A missing parent (an unmounted volume) still fails, and that failure is rate-limited per worktree by ignoreCauseLogOnceEvery (ws/context.ts:325-330,512,551). Since linkRefresh/discovery timestamps are only set after resolve succeeds, failing worktrees are re-probed on every sweep (5s debounce), which the limiter then dedupes well."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:3503-3584",
+      "note": "History recovery: per-thread HistoryRecoveryState with exponential spacing (historyRecoveryPolicy.ts: 30s to 15 min). The WARN with Cause.pretty fires only when previousFailures === 0, then 'failed again' at Debug and an Info line on recovery. This does remove the 37% source regardless of cadence."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3831-3862",
+      "note": "activate-transport validates the input and never rejects; it returns {ok:false, reason}, and the desktop log keeps one line per distinct message. Desktop logs now go through AsyncRotatingFileSink (main.ts:1489-1492,1890-1899), so they are no longer sync writes."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3832-3834",
+      "note": "prepareTransport (and reportConnection at ~3895) still throw over IPC, so Electron prints 'Error occurred in handler' with a stack for each rejected attempt. The renderer backoff bounds the rate (at most about 1/min in steady state)."
+    },
+    {
+      "location": "apps/web/src/platform/desktopWorkspaceSocket.ts:74-86,206-217",
+      "note": "The renderer treats ok:false as a 4401 close. The HostedReconnectPolicy backoff was not added by the perf fixes: it landed in a8b64ed64 (#695, 2026-10-09), before the report commit. The 815/min storm (Sep 5) predates it."
+    },
+    {
+      "location": "apps/desktop/src/backendStartup.ts:211-254",
+      "note": "BackendOutputCapture (49d90708a) stops copying backend stdout/stderr into the desktop log once the backend serves. Only a 16 KB in-memory tail is kept."
+    },
+    {
+      "location": "apps/server/src/serverLogger.ts:107-124",
+      "note": "Desktop mode adds a batched async logfmt file sink, but Logger.consolePretty() still formats every line to the stdout pipe, which Electron main now just tails into memory. So lines are double-formatted (the optional proposal item)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/UsageLimitRecovery.ts:328-335,382",
+      "note": "Latent same-pattern loop that does not use the helper: a full Cause.pretty WARN every 30s (SWEEP_INTERVAL) while the sweep keeps failing."
+    },
+    {
+      "location": "apps/server/src/agentControl/Layers/CompletionReturnDelivery.ts:1031-1032",
+      "note": "Latent: 'Completion return recovery will retry.' WARN every 2s on persistent scan failure (no cause, about 43k lines/day if stuck)."
+    },
+    {
+      "location": "apps/server/src/project/chatFolders.ts:314,376,549",
+      "note": "Latent: 'chats root probe failed' WARN with cause on every 30s retry while the git probe fails."
+    }
+  ],
+  "remaining": "None of the measured storms remain. Leftovers (all low value): (1) Fix defect: VcsStatusBroadcaster.ts:557-565 dedupe barely works in steady state, because the loop's 8/15-min backoff exceeds the 5-min window, so each steady failure still logs a full cause. (2) Latent retry loops that bypass logOnceEvery: UsageLimitRecovery.ts:332 (30s, full stack), CompletionReturnDelivery.ts:1031 (2s) and chatFolders.ts:314/376 (30s). (3) desktop main.ts:3832 prepareTransport and reportConnection still reject over IPC (Electron prints a stack per rejection; rate bounded by the renderer backoff). (4) serverLogger.ts:110-111 still runs consolePretty to stdout in desktop mode, alongside the logfmt file sink.",
+  "fixDefects": "VCS remote status refresh: logOnceEvery({key:'vcs.remoteStatusRefresh:'+cwd}) at apps/server/src/vcs/VcsStatusBroadcaster.ts:559 uses the default 5-min window. The loop's backoff reaches 480s and then 900s (VcsStatusBroadcaster.ts:54-55,164-177). LogOnceEveryLimiter.admit (packages/shared/src/logOnceEvery.ts:61-71) treats every occurrence after a full quiet window as a new burst and logs it in full. A simulation with the real limiter: 37 of 40 consecutive failures emit a line, nearly all as full-cause WARNs. Steady state is unchanged from before #710: one full stack per failing cwd every 15 min. The auditor's claim that this source is deduped holds only for poller churn (re-subscriptions resetting the backoff within 5 min). No correctness bugs found in the other parts of the fix.",
+  "implementationSketch": "1) VCS streak logging (S): in VcsStatusBroadcaster.makeRemoteRefreshLoop (~:540-570), mirror ProviderRuntimeIngestion's history-recovery pattern. Log the WARN with exit.cause only when consecutiveFailures === 1 (or when briefCause(exit.cause) differs from the last logged one, kept in a Ref), use Effect.logDebug for later failures, and add an Effect.logInfo('VCS remote status refresh recovered', {cwd, previousFailures}) on success when the previous count was > 0. Keep logOnceEvery keyed per cwd for the streak-start line so poller churn stays deduped. Minimal alternative: pass window: Duration.hours(1) to that logOnceEvery call. Or make it generic: add an optional fullCauseEvery to LogOnceEveryOptions/LogOnceEveryLimiter, so a key whose last full line was within fullCauseEvery gets a summary instead of a full log even after a quiet window. Tests: add to packages/shared/src/logOnceEvery.test.ts a case with occurrences 15 min apart expecting summaries; add a VcsStatusBroadcaster test with TestClock and a failing workflow.remoteStatus that asserts one Warn per streak and Debug afterwards. 2) Latent loops (S): wrap UsageLimitRecovery.ts:332, CompletionReturnDelivery.ts:1031 and chatFolders.ts:314/376 with logOnceEvery (keys 'usageLimit.sweep', 'agentControl.completionReturn.scan', 'chats.rootProbe:'+root), passing the cause, and cover them with the existing layer tests via a fresh makeLogOnceEvery limiter. 3) Desktop (S): make the prepareTransport handler (main.ts:3832) return {ok:true, transportId} | {ok:false, reason}, as activate does. Update DesktopBridge.prepareDesktopWorkspaceTransport in packages/contracts/src/ipc.ts, preload.ts and DesktopWorkspaceIpcSocketFactory.nextUrl (throw a renderer-side error on ok:false so the URL-provider retry/backoff path is unchanged). Optionally route lastWorkspaceActivationFailure through the shared LogOnceEveryLimiter so alternating messages are also bounded. Test in desktopWorkspaceIpc.test.ts and desktopWorkspaceSocket tests. 4) Optional (S): in serverLogger.ts, use Logger.consoleLogFmt (or drop the console logger) when config.mode === 'desktop', since stdout is only tailed into memory after readiness. Keep stderr output for crash tails.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Log hygiene only. No auth, E2EE, hosted lifecycle or Hub protocol semantics change. The optional prepareTransport typed result touches the desktop IPC contract but not its security posture.",
+  "repos": "ryco",
+  "correction": "Status stays DONE, but two auditor claims need correcting. (a) 'VCS remote status refresh failed now goes through logOnceEvery' implies it is deduped, but with the loop's existing 8/15-min backoff the 5-min limiter window passes on every steady failure, so it still logs a full cause each time (37 of 40 in simulation). The auditor's 'fixDefects: None seen' misses this. (b) The renderer HostedReconnectPolicy backoff was not part of the fix: it existed since a8b64ed64 (#695, 2026-10-09), before the report commit f1be4abc7. The Sep 5 storm predates it. The auditor also did not list the latent same-pattern retry loggers (UsageLimitRecovery 30s full stack, CompletionReturnDelivery 2s, chats root probe 30s) or that prepareTransport still rejects over IPC."
+}

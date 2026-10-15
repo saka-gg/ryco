@@ -1,0 +1,26 @@
+{
+  "id": "web-bootstrap:bundle-guard-dist-based",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. scripts/perf/bundleBudget.ts and bundleGraph.ts walk the real dist static-import graph, check per-closure gzip budgets (boot, RootAppShell, ChatThreadRouteView, beyond-boot subtraction), and apply forbidden-module rules taken from the hidden sourcemaps. All of the proposal's forbidden sources are covered, plus extra rules for the diff renderer, shiki and OTLP. If sourcemaps are missing the check fails instead of passing silently. It is wired into the reusable _validation.yml build job, so it runs on every PR. Turbo keys @ryco/web#build on RYCO_WEB_SOURCEMAP, so a cached build without sourcemaps cannot be restored by mistake. A browser test guards route reveal latency with a 50 ms budget, stricter than the proposed 100 ms. The one deviation is deliberate: ChatThreadRouteView is capped at 880 KiB instead of 700 KiB. That cap blocks growth; shrinking the route to 700 KiB is size work tracked by other findings, not part of the guard. I found no defects in the fix.",
+  "evidence": [
+    {"location": "scripts/perf/bundleBudget.ts:44", "note": "checkBundleBudgets: walks the real closures, throws when no sourcemaps exist (line 60-64) and on a hosted build, emits one violation per forbidden rule, and checks preload depth."},
+    {"location": "scripts/perf/bundleGraph.ts:31", "note": "Parses static and dynamic imports between dist chunks; staticClosure, closureSize (gzip), and readChunkSources from the .map files."},
+    {"location": "scripts/perf/model.ts:214", "note": "HOSTED_RUNTIME_SOURCES covers @noble, cborg, relayE2ee/relayCodec, the relay engine, the client-runtime authorization barrel and hostedHub/state. MARKDOWN_SOURCES covers react-markdown, micromark and parse5. Both apply to boot and RootAppShell."},
+    {"location": "scripts/perf/model.ts:265", "note": "Budgets: boot 520 KiB, RootAppShell 420 KiB (proposal: 400; the comment explains the code-splitting shift), ChatThreadRouteView 880 KiB as a growth cap (target 700)."},
+    {"location": ".github/workflows/_validation.yml:199", "note": "Build runs with RYCO_WEB_SOURCEMAP=hidden, then the 'Web bundle budgets' step runs whenever apps/web/dist/index.html exists. The workflow is reused by the PR and branch CI workflows."},
+    {"location": "turbo.json:82", "note": "@ryco/web#build declares env RYCO_WEB_SOURCEMAP, so the turbo cache key differs by sourcemap mode and CI cannot restore a dist without maps."},
+    {"location": "apps/web/src/components/perf/RouteRevealThrottle.browser.tsx:29", "note": "Reveal-latency browser test with REVEAL_BUDGET_MS=50 and a React.lazy control that proves the harness detects the throttle."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none",
+  "correction": "None of substance. Minor nit: the doc comment above DEFAULT_BUNDLE_BUDGET_POLICY still says ChatThreadRouteView is 974 KiB, while the inline comment says 813 KiB after route splitting. This is cosmetic only."
+}

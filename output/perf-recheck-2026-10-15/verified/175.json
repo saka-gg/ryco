@@ -1,0 +1,50 @@
+{
+  "id": "gap-composer-pickers:model-picker-sidebar-rerender",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE, fixed in 60633eff3 (#710), which is on main and in the Hub-vendored Ryco at 7bc39eec3. The Sidebar function body no longer subscribes to the model-picker open flag. Its keydown handler reads the flag lazily through the new getModelPickerOpen(), so the window listener stays bound across picker toggles. The reactive subscription moved into the SidebarThreadJumpHintController leaf, which returns null. The fix also moved the held-modifier subscription (useShortcutModifierState) out of Sidebar, which goes beyond what the finding asked for. That leaf reaches the Sidebar only through a controller that calls setState when hint visibility actually flips, so an ordinary click open or close never re-renders the Sidebar. A browser render-count test guards this. The one other subscriber, ChatRouteGlobalShortcuts, was already there and the finding did not cover it. It returns null, so a toggle costs only a tiny re-render and a listener re-bind. That is an optional nit.",
+  "evidence": [
+    {
+      "location": "apps/web/src/modelPickerOpenState.ts:15-18",
+      "note": "Adds the non-reactive getter getModelPickerOpen() = useModelPickerOpenStore.getState().open, closing the verifier's caveat that no getter was exported."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:786-795",
+      "note": "getCurrentSidebarShortcutContext reads getModelPickerOpen() at call time, with deps [routeThreadRef] only. The old version had [modelPickerOpen, routeThreadRef] deps (old 680-692), and the old sidebarShortcutContext memo (old 1052-1064) is gone."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1171-1247",
+      "note": "The keydown effect calls getCurrentSidebarShortcutContext() at event time, and its deps hold no picker-derived value, so a picker toggle no longer removes and re-adds the window listener."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:288-312",
+      "note": "The SidebarThreadJumpHintController leaf owns both useShortcutModifierState() and useModelPickerOpen(), computes shouldShowThreadJumpHintsNow, and forwards it in an effect. It returns null."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.logic.ts:236-255",
+      "note": "controller.sync() calls onVisibilityChange (the Sidebar's setShowThreadJumpHints) only when visibility actually changes or when the delayed show fires. A click open or close with no modifier held keeps visibility false, so the Sidebar is not re-rendered."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1573-1578",
+      "note": "The controller is mounted unconditionally outside the Activity/FrozenWhileHidden subtrees, so hint visibility keeps working in both sidebar modes."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.renders.browser.tsx:191-200",
+      "note": "The regression test toggles setModelPickerOpen(true/false) with 30 projects and 2,000 threads, then asserts the Sidebar function-body render count (usePerfMark) is unchanged."
+    },
+    {
+      "location": "apps/web/src/components/routeViews/ChatLayoutRouteView.tsx:48,62-66,166",
+      "note": "This remaining subscriber was already present before the fix (routes/_chat.tsx:48 at f1be4abc7) and is not part of the finding. ChatRouteGlobalShortcuts returns null, so a toggle re-renders only this leaf and re-binds its keydown listener. Its own comment prefers getState() reads at event time, but modelPickerOpen is still read reactively. This is a negligible nit."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None found. I checked three possible regressions. (1) hasOpenDialogShortcutTarget() is now evaluated when the leaf renders, not on every Sidebar render. The leaf re-renders on each modifier-key change, which is the moment the old code needed, so behaviour is equivalent. (2) routeTerminalOpen for hint labels is a non-reactive read memoized on routeThreadRef. The old code was just as stale (it only refreshed incidentally on picker toggles), so this is not a regression. (3) The keyboard handler now reads the flag at event time, not the last committed value, which is if anything fresher. Optional nit outside the finding: ChatRouteGlobalShortcuts (ChatLayoutRouteView.tsx:48,166) could read getModelPickerOpen() inside onWindowKeyDown and drop modelPickerOpen from its deps. That would stop a null-rendering leaf from re-rendering and re-binding a listener on each toggle, a gain of microseconds.",
+  "implementationSketch": "Nothing is required. Optional nit: in apps/web/src/components/routeViews/ChatLayoutRouteView.tsx, remove `const modelPickerOpen = useModelPickerOpen()` (line 48), use `modelPickerOpen: getModelPickerOpen()` inside onWindowKeyDown's resolveShortcutCommand context (line 65), and drop modelPickerOpen from the effect deps (line 166), matching how commandPaletteOpen is read through getState(). Test: extend an existing ChatLayoutRouteView or shortcuts browser test, or add a small one, that toggles setModelPickerOpen and checks that a jump-to-model shortcut still resolves while the picker is open.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Purely client-side React render hygiene. No auth, E2EE, hosted lifecycle, Hub protocol or product behaviour trade-off is involved.",
+  "repos": "none"
+}

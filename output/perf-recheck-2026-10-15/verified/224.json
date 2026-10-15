@@ -1,0 +1,59 @@
+{
+  "id": "hub-connection:node-connector-challenge-ws-serial",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) changed RelayConnectionSession.#authenticate. It now starts the proof (readOrCreate, key selection, HTTPS challenge, sign) and opens the relay WebSocket at the same time. The auth frame goes out when both are ready, whichever finishes last. If the proof is still pending 4 s after open (RELAY_AUTHENTICATION_DEADLINE_MS 5 s minus 1 s), the early socket is released and the attempt retries in the old order: proof first, then a fresh socket. That is the whole primary proposal. I tried to break it through the timer hand-offs, open() throwing synchronously before the resolved-proof microtask, an error/close before auth while the proof is pending, shutdown during either leg, a Hub error frame before auth, and the PROOF_LATE-then-proof-rejects path. In every case the bytes are wiped, the failure kind is right, and nothing leaks or double-settles. The Hub starts its 5 s auth timer at socket open (websocketRuntime.ts open handler), so the node's 4 s release fits inside it. HubConnector adds a proofFirst mode after a refused proof (429/503/key-store failure), so a refusing Hub does not also get a relay upgrade on every retry. It resets after a successful authenticate. The post-ready steps before state.online (readState, confirmAuthenticatedKey, building the E2EE statement) are local and cached, with no Hub round trip. The only part not done is the optional 'longer-term' Hub change (challenge as the first WS frame). Now that both legs run in parallel it would save about 0 RTT: a fresh HTTPS challenge (TCP+TLS+POST) and the WS open (TCP+TLS+upgrade) are the same length. So it would only remove one TLS connection and one Hub request per reconnect, and is not worth a Hub protocol change.",
+  "evidence": [
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:364",
+      "note": "#authenticate starts #prepareAuthentication() and, unless proofFirst, awaits #connect(proof, PROOF_AFTER_OPEN_DEADLINE_MS) beside it (377-380); on PROOF_LATE awaits the proof and opens a fresh socket with it in hand (381-388)."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:159",
+      "note": "PROOF_AFTER_OPEN_DEADLINE_MS = RELAY_AUTHENTICATION_DEADLINE_MS - 1_000, which is 4 s (contracts relay.ts:20 sets 5_000)."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:473",
+      "note": "When the proof resolves, the bytes are stored and sent at once if the socket is already open. A proof rejection fails the attempt. Released or closed attempts ignore the proof, and the bytes are wiped by the #authenticate handler at 369-371."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:489",
+      "note": "transport.open is called synchronously without waiting for the proof; the 5 s pre-open stall timer is armed at 613."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:497",
+      "note": "onOpen sends the auth frame if the proof is ready, otherwise it arms the 4 s proof-late timer, which releases the socket and resolves PROOF_LATE (507-511)."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.ts:438",
+      "note": "A socket that fails before auth while the proof is pending is released, and the attempt reports the proof's own failure. The bytes are wiped. Checked against open() throwing before the resolved-proof microtask in the serial path: released=true is set synchronously, so the bytes are wiped once and nothing leaks."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnector.ts:938",
+      "note": "The connector passes proofFirst. It resets after a successful authenticate (972) and is set when session.proofRefused (1047). The 1014-1034 steps before online are local reads: readState, confirmAuthenticatedKey, and the cached E2EE statement build."
+    },
+    {
+      "location": "apps/server/src/hubIdentity/HubNodeProofClient.ts:253",
+      "note": "The proof still POSTs /api/node/auth/challenges, but this now overlaps the WS handshake. The Hub (origin/main src/http/identityRoutes.ts:259) still serves the route, and the optional first-frame challenge was not implemented."
+    },
+    {
+      "location": "ryco-hub:src/relay/websocketRuntime.ts:1072",
+      "note": "The Hub arms its 5 s authentication timer in the socket open handler (origin/main), so the node's 4 s post-open wait leaves about 1 s minus 1 RTT for delivery and verification."
+    },
+    {
+      "location": "apps/server/src/hubConnector/RelayConnectionSession.test.ts:668",
+      "note": "Tests cover send-on-late-proof (668), fallback to serial after the 4 s wait (710), proof failure winning over the early socket failure (780), the shutdown race (616), and proofFirst (888, 914). HubConnector.test.ts:949 and 1015 cover switching proofFirst on and off."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None found. Minor non-defect trade-offs: (1) A slow proof (more than 4 s after open, e.g. a keychain prompt) costs one wasted relay upgrade per attempt, and the Hub rate-limits upgrades per peer IP. The proofFirst flag only covers refused proofs, not slow ones, but attempts are backed off, so this is negligible. (2) Under very high RTT (above about 1 s) a proof that lands just before the 4 s release could arrive after the Hub's 5 s timer. The node then gets authentication_timeout and retries. This is an edge case only. (3) The proof-first mode is sticky until an authenticate succeeds, so the first reconnect after a 429/503 refusal is serial. That is intended.",
+  "implementationSketch": "Nothing required. Optional, not recommended now: have the Hub send a node challenge frame right after upgrade on /v1/relay/node, and have RelayConnectionSession sign that nonce instead of POSTing /api/node/auth/challenges. That would need a relay protocol minor bump, Hub support for both paths during rollout, and conformance tests on both sides. The latency gain is about 0 RTT because both legs already run in parallel. The only gain is one TLS connection and one Hub request per reconnect. Separately, apps/server/src/hubConnector/ThreadReadCacheSync.ts:74-118 runs a challenge, sign and POST in series for every cloud-cache post. That is a background path that is off by default (RYCO_HUB_THREAD_CACHE_ENABLED), not a reconnect latency, and is out of scope here.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "The primary proposal is implemented. The only unimplemented part is the optional Hub-side first-frame challenge. That would be a relay protocol and auth change needing a cross-repo decision, but it has close to zero latency value now, so no decision is needed.",
+  "correction": "No correction to the status. One nuance on the auditor's 'remaining': the Hub first-frame idea is not just deferred. Once both legs run in parallel it would save essentially no round trips, only a TLS connection and an HTTP request.",
+  "repos": "none"
+}

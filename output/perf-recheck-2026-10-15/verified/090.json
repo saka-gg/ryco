@@ -1,0 +1,71 @@
+{
+  "id": "browser-measure:statistics-usage-summary-latency",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3 #710, e5e676f95; both are ancestors of 7bc39eec3, so the Hub-vendored web bundle has the client half too). Every cost the finding names is gone. (1) Claude and Codex transcript sources are memoized per source on sourceId + request key, with fingerprint = rates generation + listing (path/size/mtime/dev:ino:ctime per file). Only 'complete' results are stored, LRU 32. (2) The scan cache holds per-file 15-minute slot aggregates, priced once per slot, not per record. The randomized equivalence test covers DST and :45 zones. (3) Sources run with concurrency 2. (4) A client UsageSummaryCache keeps the last usable result per (env, range, tz), peek() repaints it right away, and UsageView shows the skeleton only when nothing is cached. (5) The route loader prefetches on link intent (defaultPreload 'intent', 50 ms). The bare /statistics link defaults to view=usage, range=30d, so hovering it starts the exact request the page makes. The other verifier items are also fixed: scan budgets count only fresh parses, rates are stale-while-revalidate, the cache store is sharded and persists after the response, there is an idle release, and identical and abandoned requests are shared or dropped. Measured here (read-only, real ~/.claude + ~/.codex, about 2.2k files, warm FS): the memo-hit listing plus fingerprint takes 67-94 ms. So a hit sits at the edge of the <100 ms target, and with the client cache a reopen within a session paints instantly. The remaining problems are second-order. One is a rare robustness issue, not a correctness bug.",
+  "evidence": [
+    {
+      "location": "apps/server/src/usage/UsageService.ts:792-813",
+      "note": "Per-source memo hit: key = sourceId + summaryRequestKey (contract, start, end, tz), fingerprint = ratesGeneration + listingFingerprint (250-262). The hit returns before loadScanCache and before any file read."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:917-928",
+      "note": "Only complete results are memoized (LRU SOURCE_MEMO_LIMIT=32 at 112). ratesGeneration bumps only on a new revision (416-420) or a disk load (393)."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:990-992",
+      "note": "Effect.forEach(plans, scanSource, { concurrency: SUMMARY_SOURCE_CONCURRENCY = 2 }) replaces the sequential source loop. store.ensureLoaded is serialized by loadLock (usageScanCacheStore.ts:186-187), so concurrent sources load the cache safely."
+    },
+    {
+      "location": "apps/server/src/usage/usageFileAggregate.ts:87-145,239-264",
+      "note": "Per-file slot aggregates, priced per slot via priceUsageSlot. Keyed responses (dedupeKey) stay as compact typed-array rows and are walked on every summary for cross-file dedup."
+    },
+    {
+      "location": "apps/server/src/usage/claudeTranscript.ts:45-50",
+      "note": "Every Claude record gets a dedupeKey, so the Claude fold on a memo miss is still O(records): a Set lookup plus 7 Float64 reads each. The commit reports 42 ms per 97.5k, versus 265 ms per-record."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:78-166",
+      "note": "The listing (opendir + 32-way batched lstat) runs on every request, including memo hits, because it proves the memo is valid. Measured with a /tmp script importing this module: 67-94 ms for 2,161-2,245 files."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:1162-1196",
+      "note": "Identical requests share one forked scan. Abandoned waiters interrupt it. The flight is put in `inflight` (1173) before forkIn runs (1174-1181), so an interrupt at the runtime's auto-yield in between (effect 4.0.2 internal/effect.ts:643-650 wraps the next op in yieldNow) leaves an entry with no fiber and an unresolved Deferred."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.ts:32",
+      "note": "USAGE_SCAN_CACHE_RECORD_LIMIT = 1,000,000 is still counted in raw records (usageScanCache.ts:509-522), below the per-source SOURCE_CACHED_RECORDS = 2,000,000 (UsageService.ts:101). The cap was sized when entries held raw records."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:346-360,234-243",
+      "note": "An appended file re-reads and SHA-256s its whole old prefix on each memo miss. Checkpoints are LRU-bounded to 128 files / 100k records / 32 MB, so a file without one is fully reparsed. This machine has 393 Claude transcripts modified within a day (300 MB)."
+    },
+    {
+      "location": "packages/client-runtime/src/usage/summaryCache.ts:68-160",
+      "note": "UsageSummaryCache: last usable result per (env, range, tz), up to 32. Identical flights are shared and prefetch handoffs go through SharedRequests (sharedRequests.ts:49-182)."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.ts:136-148,158-166",
+      "note": "Until the view answers, it uses peek() as the stale-while-revalidate value. refreshing = loading && merged !== null. UsageView.tsx:82 shows StatSkeleton only when nothing is cached."
+    },
+    {
+      "location": "apps/web/src/routes/statistics.tsx:38-45",
+      "note": "The loader calls prefetchStatisticsPage (statisticsPrefetch.ts:17-24), which calls prefetchUsageSummary (useUsageSummary.ts:42-50). router.ts:15-16 sets defaultPreload 'intent' with a 50 ms delay. statisticsSearch.ts:50-51 defaults view=usage and range=30d, so the sidebar <Link to=\"/statistics\"> (SidebarChrome.tsx:56, AppSidebarLayout.tsx:211) prefetches the exact request."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.test.ts:527-627",
+      "note": "Tests cover a memo hit (parsedFileCount 0), invalidation after an append, a shared concurrent scan (listing called once), persisted shards reused by a new process, and dropping a queued scan once its caller leaves."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defect that defeats the fix. Minor residuals, from most to least relevant: (a) Hit rate while agents run. Any change in a source's listing misses its memo, which in practice means almost always for Claude during active sessions. The miss path is: the listing (~70-90 ms here), one Effect.fn span per listed file from readFileRecords (UsageService.ts:603; LocalFileTracer records every non-SQL span to server.trace.ndjson), an O(records) keyed Claude fold, and a full-prefix SHA-256 re-check of every appended transcript, or a full reparse when its checkpoint was evicted (usageTranscriptReader.ts:236-243, 346-360). For parallel-agent users with dozens of active multi-10MB transcripts I estimate a few hundred ms per miss, not measured. That is still far below 2.5-8 s, and client SWR hides it on reopen, but it is visible on the first open after a reload. (b) Rare robustness race in readSummary. inflight.set (UsageService.ts:1173) runs before Effect.forkIn (1174-1181). If the caller is interrupted at an auto-yield between them, the key is left with no fiber and a Deferred that never completes, and every later identical request hangs until endDate rolls over. (c) USAGE_SCAN_CACHE_RECORD_LIMIT = 1M raw records (usageScanCacheStore.ts:32) is below SOURCE_CACHED_RECORDS = 2M. Histories over 1M responses within the 120-day retention evict the oldest files after each summary. 90d/all views then reparse them under the 100k/5 s budget, return 'partial', and never memoize. (d) I agree with the auditor's notes: OpenCode/Cursor sources are not memoized (OpenCode has its own fingerprinted DB aggregate cache at opencodeUsageReader.ts:224-226, so the impact is small), scanSemaphore is still 1, and there is no whole-summary memo. Corrections to the auditor: the useUsageSummary line refs are 136-148 and 166 (not 132-141 and 163). The hit-path listing measured 67-94 ms, not 'tens of ms'. The Claude fold is still O(records) because every Claude record is keyed.",
+  "implementationSketch": "Optional hardening, all in apps/server/src/usage. (1) In-flight race: in UsageService.readSummary (1162-1196), make 'create Flight + inflight.set + forkIn + assign fiber' atomic. Wrap the `if (flight === undefined) {...}` block in Effect.uninterruptible (or uninterruptibleMask and restore only the Deferred.await), so an entry never exists without its fiber. Covered by review plus the existing 'drops a queued scan' test. (2) Cache cap: now that entries are aggregates, size the cap by footprint, not raw records. Count slots.length + keys.length per entry in capUsageScanCache (usageScanCache.ts:509), or raise USAGE_SCAN_CACHE_RECORD_LIMIT to at least SOURCE_CACHED_RECORDS. Add a UsageService test with an injected small limit: two consecutive 'all'-range summaries over more files than the limit must not reparse on the second call and must report 'complete'. (3) Miss-path trimming, optional and low value: drop the per-file span by making readFileRecords a plain generator helper (or Effect.fnUntraced) so a miss stops writing ~2k spans. Store transcript checkpoints as an incremental UsageFileAggregate builder state instead of raw UsageRecord[] (usageTranscriptReader.ts:185-197), so more active files keep checkpoints within the 32 MB budget. Keep full-prefix validation. Replacing it with sampled or tail validation would be a correctness trade-off that needs a decision. Validate with UsageService.test.ts and usageTranscriptReader.test.ts plus a local timing of two back-to-back summaries after appending to N files.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The core finding is DONE. The optional hardening (atomic flight registration, cache-cap units, untraced per-file helper) is local server-side work with no auth, E2EE, hosted-lifecycle or Hub impact. Only one option needs a decision, and it is not recommended: weakening the full-prefix append validation in usageTranscriptReader.",
+  "repos": "ryco",
+  "correction": "Status and verdict unchanged. Refinements: the memo-hit listing measured 67-94 ms on ~2.2k real files, at the edge of the <100 ms target rather than 'tens of ms'. The Claude fold is still O(records) because every Claude record carries a dedupeKey. The auditor missed a rare in-flight registration race (UsageService.ts:1173 vs 1174-1181) and the 1M raw-record cache cap that is now below the 2M per-source budget. The useUsageSummary line refs are 136-148 and 166."
+}

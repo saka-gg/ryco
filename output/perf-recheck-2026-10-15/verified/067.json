@@ -1,0 +1,28 @@
+{
+  "id": "web-bootstrap:workspace-packages-sideeffects",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. #710 (60633eff3) added \"sideEffects\": false to all three workspace packages the web app imports: contracts, shared and client-runtime. The Hub-vendored Ryco (7bc39eec3) has it too. Those packages resolve through node_modules symlinks and package exports (the web tsconfig maps only ~/*), so rolldown applies the flag. The current dist (built 21:45, after HEAD ec250e386) shows it pruning. The contracts hostedIdentity/nativeE2ee schemas are only in the lazy hosted api-*.js chunk, not in boot, and the contracts computerAudit module is gone from every chunk. I parsed all 409 non-test modules of the three packages with @babel/parser. I found no side-effect-only imports. I found no module-scope global writes, listener or service-worker registrations, Effect.run* calls, subscriptions or polyfills, so a blanket false is safe. The only top-level statements with effects are a constant-consistency throw guard (relayE2eeInitiator.ts:285), Object.freeze on module-local constants (draftStore.ts:464-467) and static assignments on a local class (qrCode.ts:984-985). As the earlier verifier noted, the boot-time schema cost is a different finding: rpc.ts still statically reaches 48 of 70 contracts modules through wsTransport, which is still in the boot chunk (the storage.scan tag is in boot-*.js).",
+  "evidence": [
+    {"location": "packages/contracts/package.json:9", "note": "\"sideEffects\": false, added in 60633eff3 (#710); also present in 7bc39eec3, which the Hub vendors"},
+    {"location": "packages/shared/package.json:6", "note": "\"sideEffects\": false"},
+    {"location": "packages/client-runtime/package.json:6", "note": "\"sideEffects\": false (a blanket flag instead of the proposed allowlist; no registering modules exist, see the scan)"},
+    {"location": "apps/web/tsconfig.json:12", "note": "paths maps only ~/*, so @ryco/* resolve via node_modules + package exports and rolldown sees the package.json flag"},
+    {"location": "apps/web/src/viteBuild/codeSplitting.ts:13", "note": "The boot/vendor grouping relies on these packages being side-effect free, and createBootGraphMatcher (line ~145) stops at re-export barrels"},
+    {"location": "apps/web/dist/assets/api-BJhIvEex.js", "note": "Built after HEAD. The contracts hostedIdentity strings (existing_account, external_authorization_*) appear only here and in ExternalIdentityWeb.logic, not in boot-D36cWeP2.js. The computerAudit strings (dispatched-unknown, not-dispatched) appear in no chunk. So unused barrel members are pruned."},
+    {"location": "packages/client-runtime/src/relay/relayE2eeInitiator.ts:285", "note": "Top-level if/throw constant guard. This and the next two entries are the only effectful top-level statements the AST scan found."},
+    {"location": "packages/client-runtime/src/state/composer/draftStore.ts:464", "note": "Object.freeze on module-local constants (benign)"},
+    {"location": "packages/shared/src/qrCode.ts:984", "note": "QrCode.Ecc / QrSegment.Mode static assignment on local classes (benign)"},
+    {"location": "packages/contracts/src/rpc.ts:1", "note": "Statically reaches 48 of 70 contracts modules; wsTransport stays in boot (storage.scan tag found in boot-D36cWeP2.js), so the boot schema cost belongs to the separate wsTransport finding"}
+  ],
+  "remaining": "",
+  "fixDefects": "None found. No side-effect-only imports of @ryco/* exist anywhere in apps/ or packages/. No module in the three packages depends on load-time evaluation that the flag could silently drop. The one gap is enforcement: nothing (lint rule or test) stops a future module-scope registration in shared or client-runtime from being tree-shaken away. That is a hardening gap, not a regression.",
+  "implementationSketch": "Optional hardening, low priority. Add a unit test in packages/client-runtime (or scripts/) that parses every non-test .ts under packages/{contracts,shared,client-runtime}/src with oxc-parser or @babel/parser. The test fails on side-effect-only imports and on top-level ExpressionStatement/IfStatement/loop/static blocks outside an explicit allowlist (relayE2eeInitiator.ts guard, draftStore.ts freezes, qrCode.ts statics). It also fails on top-level assignments to non-local roots (globalThis/window/self/document/navigator). If a registering module is ever needed, switch that package's \"sideEffects\" to an array that lists the module. No product change is needed. Separately, the boot schema cost is tracked by the wsTransport/contracts-in-boot finding.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

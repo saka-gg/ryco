@@ -1,0 +1,63 @@
+{
+  "id": "mobile-boot:snapshot-capture-full-reserialize",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "correction": "The PARTIAL status stands, but the auditor's diagnosis of the remaining gap is wrong. They blame the defeated O(1) skip mainly on detail-stream events (sink.applyOrchestrationEvents). Their fix option (a), dropping projectionChanged there, assumes the shell stream does not cause the same churn. It does. The server sets the projected thread row's updatedAt to event.occurredAt on every thread.message-sent, streaming assistant deltas included (ProjectionPipeline.ts:1160-1181). The shell stream maps every thread-aggregate event to a thread-upserted re-read (orchestrationStreams.ts:343-358, 369-372), coalesced to at most one per thread per 250 ms (orchestrationEventCoalescing.ts:62-74, constants.ts:35). On mobile, writeThreadShellState then replaces both threadShellById and sidebarThreadSummaryById, because both equality checks include updatedAt (store.ts:1138-1146, 1172+, 642, 723). So identity skipping cannot hit while any thread in the environment has agent activity, open in the app or not. Option (a) only removes marks that the debounce already merges. The fix has to target serialization cost (incremental per-thread fragments or per-thread rows), or make an explicit product choice to ignore updatedAt-only churn. Also, the skip test (environmentSnapshotPersistence.test.ts:601-622) only covers two back-to-back captures with no state change, not any real event path. That is why the code comment at :228-230 is wrong and no test catches it.",
+  "summary": "Proposal parts 2 and 3 are fully done: no TextEncoder double encode, an allocation-free charCode byte count passed through to SQLite, a 2 s debounce with 10 s max-wait, and a flush on background. Part 1, the identity skip, is implemented but almost never fires in the scenario the finding targets. During any agent activity the shell stream bumps updatedAt on the shell and summary of the active thread up to 4 times a second, so every debounce window still does a full rebuild, a JSON.stringify of up to 2 MiB, a 2 MiB charCode scan, a full-row SQLite upsert and a stats query. That is now at most once per 10 s instead of once per 500 ms quiet gap. Part 4, per-thread rows or incremental writes, is not done.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/persistence/snapshotDb.ts:84-105,186",
+      "note": "payloadByteLength is an allocation-free charCode loop with no TextEncoder. saveEnvironmentSnapshot uses the caller's payloadBytes and only measures when none is given. Part 2 is done, but without the payload.length*3 <= cap fast path."
+    },
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotCodec.ts:131-141",
+      "note": "One stringify and one byte count per bound round, returning {record,payload,payloadBytes}. The whole environment is still stringified on every real capture."
+    },
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotPersistence.ts:46-47,265-284",
+      "note": "2 s trailing debounce with 10 s max-wait (dirtySince) and flushPending on background. Wired at apps/mobile/src/runtime/bootstrap.ts:130-134 and apps/mobile/src/platform/appLifecycle.ts:49-60. Part 3 is done (commit 60633eff3, #710)."
+    },
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotPersistence.ts:121-153,228-251",
+      "note": "Identity skip over the seven persisted slices plus a global removalEpoch guard. The comment at :228-230 claims message streaming, session and liveness changes are skipped, which is false (see below). After every real write: full captureEnvironmentSnapshotRecord, bound, save, then evictToCapacity, which calls listEnvironmentSnapshotStats (:188-202)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:1160-1181",
+      "note": "On every thread.message-sent, streaming deltas included (decider.ts:2880-2900, ProviderRuntimeIngestion.ts:1413/1759), the projected thread row is upserted with updatedAt: event.occurredAt."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:343-372",
+      "note": "Every thread-aggregate event becomes a thread-upserted re-read of the shell row. The shell feed coalesces message-sent, activity-appended and proposed-plan per thread over 250 ms (orchestrationEventCoalescing.ts:62-74, constants.ts:35). Each active thread therefore pushes a shell upsert with a fresh updatedAt up to 4 times a second."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1113-1146,1172,3170-3171",
+      "note": "The shell-stream thread-upserted goes through writeThreadShellState, which replaces threadShellById when threadShellsEqual fails (updatedAt is compared at :723) and replaces sidebarThreadSummaryById when sidebarThreadSummariesEqual fails (updatedAt at :642, session at :635, backgroundLiveness at :655). This alone defeats samePersistedSlices during any agent activity."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1589-1611,1871,1958",
+      "note": "The detail-stream path does the same: message-sent and activity-appended end in updateThreadShellTimestamp(..., event.occurredAt), which spreads a new threadShellById. This is a second source of the same churn, not the only one."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentStateSink.ts:53-71,105-112",
+      "note": "applyShellEvents, applyOrchestrationEvents and syncServerShellSnapshot all call projectionChanged unconditionally."
+    },
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotPersistence.test.ts:601-622",
+      "note": "The skip test only captures twice with no intervening store change. No test covers a shell-stream or detail event leaving the persisted content unchanged."
+    },
+    {
+      "location": "apps/mobile/src/persistence/environmentSnapshotPersistence.ts:170-178,240,250-251,402-406",
+      "note": "removalEpoch is global and bumped by any removal: eviction of another environment, purge, or a hydration discardRow. The epoch is read before the write, and evictToCapacity can bump it right after written.set, so the next capture of every environment rewrites once even when nothing changed. Inefficient but not incorrect."
+    }
+  ],
+  "remaining": "1) The identity skip (environmentSnapshotPersistence.ts:231-239) is effectively dead during agent activity. The shell stream delivers a thread-upserted with a new updatedAt for each active thread every <=250 ms (ProjectionPipeline.ts:1179, orchestrationStreams.ts:343-358, orchestrationEventCoalescing.ts:62-74). writeThreadShellState then replaces threadShellById and sidebarThreadSummaryById (store.ts:1138-1146, 1172+). Detail events add more of the same churn (store.ts:1871, 1958). While any agent runs in the environment, each 10 s max-wait window, or each 2 s quiet gap, still runs captureEnvironmentSnapshotRecord over all threads, JSON.stringify of up to 2 MiB (environmentSnapshotCodec.ts:69-96, 131-141), a 2 MiB charCode scan (snapshotDb.ts:84-105), a full-row TEXT upsert (snapshotDb.ts:171-190) and listEnvironmentSnapshotStats plus eviction planning (environmentSnapshotPersistence.ts:188-202, 251). Session or backgroundLiveness changes also force a full rewrite even though those fields are stripped from the payload (store.ts:635, 655 vs codec :86). The finding's expected gain, that most captures during streaming become no-ops, is not achieved. 2) Proposal part 4, per-thread or incremental writes, is not done. 3) Minor: no payload.length*3 <= cap fast path; the global removalEpoch makes one eviction, purge or hydration discard cost every other environment a redundant rewrite; the stats query runs after every write.",
+  "fixDefects": "No correctness defect. Two weaknesses in the implemented skip. (a) The comment at environmentSnapshotPersistence.ts:228-230 says message streaming, session and liveness changes are skipped in O(1). Store equality includes updatedAt, session and backgroundLiveness (store.ts:635, 642, 655, 723) on both the shell-stream and detail paths, so none of those are skipped. The only test (environmentSnapshotPersistence.test.ts:601-622) never exercises an event path, so nothing catches this. (b) The global removalEpoch, read at :240 before the write and bumpable by evictToCapacity at :251 right after written.set at :250, and also bumped by every hydration discardRow, invalidates the skip for all environments after any single removal. It costs one redundant full rewrite per environment and is still correct.",
+  "implementationSketch": "Recommended, effort S, no product trade-off, payload stays byte-identical: incremental serialization in apps/mobile/src/persistence/environmentSnapshotCodec.ts. 1) Add createEnvironmentSnapshotSerializer(), which holds Map<ThreadId, {shell, summary, json: string, bytes: number}>. For each thread, reuse the cached fragment when shell === cached.shell && summary === cached.summary. Otherwise build JSON.stringify({shell, summary: {...summary, session: null, backgroundLiveness: null}}) and compute payloadByteLength(json). Prune entries for threads that are gone. 2) Assemble the payload as the stringified envelope prefix ('{\"schemaVersion\":1,\"environmentId\":...,\"capturedAt\":...,\"projects\":[...],\"worktrees\":[...],\"threads\":[') + fragments.join(',') + ']}', keeping JSON.stringify's key order. payloadBytes = prefix/suffix bytes + sum(fragment bytes) + commas. 3) Re-implement boundStoredEnvironmentSnapshot's trim loop on fragment byte sums with the same drop order (archived first, then oldest), so trimming never re-stringifies. 4) In environmentSnapshotPersistence.ts keep one serializer per environment next to `written`, and drop it in removeStoredSnapshot and purgeEnvironment. 5) Make removalEpoch a per-environment Map bumped in removeStoredSnapshot(environmentId), so evicting environment X no longer invalidates environment Y's skip. 6) Fix the comment at :228-230 to say what is actually skipped. Tests: a codec property test asserting that the assembled payload === JSON.stringify(boundRecord) and that payloadBytes === new TextEncoder().encode(payload).length, covering non-ASCII text, astral characters, lone surrogates and the trim path; a persistence test that applies a shell-stream thread-upserted changing one thread's updatedAt and asserts only that thread's fragment is re-stringified (inject a stringify counter or spy). Optional follow-ups: (i) mirror per-environment {bytes, updatedAt} in memory after the first stats read so evictToCapacity skips listEnvironmentSnapshotStats when the plan cannot change; (ii) part 4 proper, effort M: an environment_snapshot_threads(environment_id, thread_id, payload, payload_bytes) table plus a header row, schema version 2 with v1 rows discarded, a transactional upsert of only changed thread rows, hydration reading rows grouped by environment, and eviction summing bytes per environment. This also removes the 2 MiB string crossing JSI to expo-sqlite on each write. (iii) Not recommended without a decision: demote updatedAt-, latestTurn-, session-, liveness- and priority-only churn to a low-priority dirty flag with a ~60 s max-wait plus the background flush. The cached sidebar's recency ordering could then lag if the app is killed without being backgrounded.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The recommended incremental-serialization fix keeps the stored payload byte-identical and changes no behaviour. Only the optional demotion of updatedAt-only churn, option (iii), would be a product trade-off on cached recency freshness.",
+  "repos": "ryco"
+}

@@ -1,0 +1,67 @@
+{
+  "id": "mobile-boot:shiki-grammars-eager",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) removed every static value import of @shikijs/core, @shikijs/engine-javascript, the 7 initial grammars and both themes from shikiReviewHighlighter.ts. Core, themes, grammars, the native engine and the JS regex engine are now import()s inside getHighlighter. SelectableMarkdownText.ios.tsx loads the highlighter module through an async wrapper, and an idle prewarm after Home paints builds the singleton. An independent walk of the static launch graph from apps/mobile/index.ts (Metro iOS resolution, type-only imports and function-scoped requires excluded) reaches no shiki, @pierre/diffs or highlighter module. The highlighter is reachable only from the lazily required ThreadFileRouteScreen. The only diffs import that remains is the dependency-free 7.8 KB getFiletypeFromFileName. Every part of the proposal is implemented, including the verifier's request that the JS engine also be lazy. Metro inline requires (1b8bfd183) were also enabled since. No correctness defects found: shiki 4.4.3 normalizeGetter unwraps module namespaces ({default}) for both themes and langs, the singleton resets on failure, and loadedLanguages pre-seeding stays valid because every highlighter creation loads the initial set.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/features/review/shikiReviewHighlighter.ts:1",
+      "note": "Only a type-only import from @shikijs/core remains. The f1be4abc7 version statically imported core, engine-javascript, 7 langs and 2 themes at lines 1-11."
+    },
+    {
+      "location": "apps/mobile/src/features/review/shikiReviewHighlighter.ts:223-229",
+      "note": "createHighlighterCore comes from await import(\"@shikijs/core\"). Themes are import() promises, and initial grammars go through the languageImports map (lines 62-71, 73-136)."
+    },
+    {
+      "location": "apps/mobile/src/features/review/shikiReviewHighlighter.ts:233",
+      "note": "react-native-shiki-engine is a dynamic import (it already was in f1be4abc7)."
+    },
+    {
+      "location": "apps/mobile/src/features/review/shikiReviewHighlighter.ts:276",
+      "note": "The JS regex engine is now a dynamic import, used only on the fallback path."
+    },
+    {
+      "location": "apps/mobile/src/features/review/shikiReviewHighlighter.ts:319-322",
+      "note": "prewarmReviewHighlighter() reuses the singleton highlighterPromise."
+    },
+    {
+      "location": "apps/mobile/src/native/SelectableMarkdownText.ios.tsx:6,14-15",
+      "note": "A type-only import plus an async wrapper that awaits import() of the highlighter. The wrapper is a module-level constant, so the highlightCode identity stays stable for the NativeMarkdownBlock effect deps."
+    },
+    {
+      "location": "apps/mobile/src/navigation/lazyRouteScreens.ts:195-205",
+      "note": "scheduleWorkspaceRoutePrewarm runs ThreadRouteScreen.preload() in one idle slice and the highlighter prewarm in a nested, separate idle slice. RN 0.86.3 provides requestIdleCallback through NativeIdleCallbacks (setUpTimers.js:47-58)."
+    },
+    {
+      "location": "apps/mobile/src/features/home/HomeRouteScreen.tsx:9",
+      "note": "useEffect(scheduleWorkspaceRoutePrewarm, []) triggers the warm-up after Home mounts."
+    },
+    {
+      "location": "apps/mobile/src/features/files/ThreadFileScreen.tsx:62-66",
+      "note": "Still a static highlighter import. It is harmless: the module is now light and ThreadFileRouteScreen is a function-scoped require (lazyRouteScreens.ts:41-46)."
+    },
+    {
+      "location": "apps/mobile/src/perf/mobileStartupImports.test.ts:230-239",
+      "note": "Per-file assertion: no static @shikijs value import in the highlighter and no shiki import in SelectableMarkdownText.ios.tsx."
+    },
+    {
+      "location": "apps/mobile/metro.config.js:80-103",
+      "note": "Inline requires (commit 1b8bfd183) were enabled since, which further defers evaluation."
+    },
+    {
+      "location": "node_modules/metro-runtime/src/modules/asyncRequire.js (0.84.6)",
+      "note": "asyncRequire is an async function that calls require.importAll synchronously when there is no split bundle. import() therefore still defers evaluation until the call, but it evaluates synchronously at the call site."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Two minor hardening notes, neither a regression. (1) Because Metro's asyncRequire evaluates synchronously (no bundle splitting on native), the prewarm at lazyRouteScreens.ts:200-203 evaluates shiki core, vscode-textmate, both themes and all 7 grammar modules (~0.8 MB JSON.parse plus Grammar registration) as one contiguous JS-thread block inside a single idle callback. The callback has timeout 2000 and ignores deadline.timeRemaining(), so on slow devices it can drop a frame or two if the user is scrolling Home at that moment. The prewarm also runs on every launch, so the retained grammar heap is deferred rather than avoided, which is what the proposal asked for. It also does not compile regex scanners, which still happens on the first tokenize. (2) The regression test is per-file only (mobileStartupImports.test.ts:230-239). It would not catch a new static import of shiki, @shikijs/* or react-native-shiki-engine from some other launch-path module, although the same file already has a graph walker (chainsTo) that could assert this.",
+  "implementationSketch": "Optional hardening only. (a) Test: in apps/mobile/src/perf/mobileStartupImports.test.ts add expect(chainsTo(LAUNCH_ENTRY, [/^pkg:shiki$/u, /^pkg:@shikijs\\//u, /^pkg:react-native-shiki-engine$/u, /^pkg:@pierre\\/diffs$/u, /shikiReviewHighlighter\\.ts$/u])).toEqual([]). The walker already maps package specifiers to pkg:<name>, so @shikijs/langs/x becomes pkg:@shikijs/langs. (b) Prewarm slicing: in shikiReviewHighlighter.ts, let prewarmReviewHighlighter create the highlighter with one or two grammars (or langs: []), then load the remaining initial grammars one per idle callback via loadSingleLanguage. loadedLanguages would then have to start as {text} plus whatever was actually loaded, and getHighlighter must still guarantee the initial set on the non-prewarm path (e.g. by awaiting the pending loads before tokenizing). Alternatively, pass the IdleDeadline through runWhenIdle and reschedule when timeRemaining() < ~8 ms. Measure with a Hermes release build (sampling profiler or a performance.now() around prewarm) before deciding whether (b) is worth doing.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Purely a mobile-client module loading/test change. No auth, E2EE, hosted lifecycle, Hub protocol or product trade-off is involved. Whether to keep an unconditional idle prewarm was already decided by the proposal and #710.",
+  "correction": "The ThreadFileScreen highlighter import is at lines 62-66 (not 63-67). Also, Metro's import() evaluates synchronously at the call site in non-split native bundles, so the 7 grammar parses run as one contiguous block whether or not their import() calls are 'back to back'.",
+  "repos": "ryco"
+}

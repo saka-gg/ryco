@@ -1,0 +1,63 @@
+{
+  "id": "persistence-boot:command-read-model-bloat",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "correction": "PARTIAL holds, and no projector-side activity filter exists anywhere (COMMAND_READ_MODEL_ACTIVITY_KINDS is used only by the hydration query and its plan-guard test). Three corrections to the auditor's remaining list. (a) It misses a second live-only bloat source. thread.turn-diff-completed (projector.ts:1031-1074) keeps up to 500 checkpoint summaries per thread, each with its full `files` array. No command-model consumer reads them: CheckpointReactor and ingestion read checkpoints from snapshot queries, and the authoritative revert path was built to work without them. Hydration sets `checkpoints: []` (ProjectionSnapshotQuery.ts:2969). Sampling the local DB: checkpoint_files_json averages 2.5 KB and the largest is 3.6 MB. (b) The per-append re-sort is overstated. A micro-benchmark of the exact filter + toSorted(compareThreadActivities) + slice over 500 entries costs about 0.02 ms per append at steady state; TimSort is near-linear on presorted input. A 500-activity bulk append (fork or history import) costs about 5 ms. This is a side benefit of the allowlist, not a reason to do the work. (c) Of the three kinds missing from hydration, provider.turn.start.failed/cancelled are mostly covered after restart by ContextHandoffCoordinator.recover(), which fails preparing/dispatching handoffs at boot. checkpoint.revert being absent after restart predates the fix. All three still must be in any live-projector allowlist.",
+  "summary": "Commit d6a3f6819 fixed the finding's main points. User-message anchors no longer carry text, assistant messages are not kept at all (they only bump updatedAt), plan markdown is replaced by a placeholder both live and when hydrated, hydration reads two anchors per thread by primary key with no text columns, and an id index replaced find/map. Two kinds of live data the decider never reads are still kept. First, thread.activity-appended keeps every activity kind with its full payload, up to 500 per thread plus preserved milestones. In the 20,000 most recent local activities, only 19 (0.1%) are kinds any command consumer reads, and payloads average about 1.07 KB of JSON. That is roughly 0.5 MB of JSON per thread touched since boot, a few times more as heap objects. Second, live checkpoint summaries keep their files arrays (up to 500 per thread). The hydrated model holds neither, so a long-running server still grows well past a freshly booted one.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/projector.ts:87",
+      "note": "commandModelMessage / commandModelProposedPlan (87-99) produce the slim shapes: text \"\" and the placeholder COMMAND_MODEL_OMITTED_PLAN_MARKDOWN. Done."
+    },
+    {
+      "location": "apps/server/src/orchestration/projector.ts:871",
+      "note": "thread.message-sent: non-user roles only update updatedAt. User messages are stored as text-free anchors and capped by capThreadMessagesPreservingUserAnchors (MAX_THREAD_MESSAGES=2000). Done."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1106",
+      "note": "listUserMessageAnchorRows selects '' AS text and NULL attachments, joined on first_user_message_id/latest_user_message_id (migration 087). listCommandModelProposedPlanRows (1150) replaces plan_markdown with the constant. Done."
+    },
+    {
+      "location": "apps/server/src/orchestration/threadIndex.ts:46",
+      "note": "updateThreadInArray: O(1) lookup through a WeakMap index, but it still does threads.slice() (53), an O(T) pointer copy per thread event, including every assistant delta. Minor."
+    },
+    {
+      "location": "apps/server/src/orchestration/projector.ts:1188",
+      "note": "REMAINING: thread.activity-appended has no kind filter. It appends every activity (tool.completed, subagent.updated, reasoning, ...) with its full payload, then filter + toSorted (1204) + capThreadActivitiesPreservingMilestones(…, 500) (1205-1208)."
+    },
+    {
+      "location": "apps/server/src/orchestration/projector.ts:1044",
+      "note": "REMAINING (not in the auditor's list): checkpoints are decoded with files: payload.files (1051) and kept up to MAX_THREAD_CHECKPOINTS=500 (1074). Only the projector's own revert handler reads thread.checkpoints (1121), and the authoritative revert rule does not need files."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:372",
+      "note": "COMMAND_READ_MODEL_ACTIVITY_KINDS: hydration loads only these kinds (query at 1247-1270, no per-thread cap), and getCommandReadModel sets checkpoints: [] (2969). The live and hydrated models therefore differ in size and content."
+    },
+    {
+      "location": "apps/server/src/orchestration/commandInvariants.ts:72",
+      "note": "ENDED_TURN_START_KINDS (provider.turn.start.failed/cancelled) is read from the command model by hasActionableContextHandoff (90-111). These kinds are not in the hydration allowlist, so a projector allowlist must add them."
+    },
+    {
+      "location": "apps/server/src/orchestration/checkpointRevertPolicy.ts:149",
+      "note": "isCheckpointRevertPending reads checkpoint.revert from thread.activities. It is reached through decider.ts:1677 (requireNoPendingCheckpointRevert) and requireThreadReadyForCheckpointRevert (208). This kind is not in the hydration allowlist either."
+    },
+    {
+      "location": "apps/server/src/orchestration/currentCommandReadModel.ts:18",
+      "note": "Every engine.getReadModel consumer was checked: RestartContinuation, serverRuntimeStartup, ThreadPurgeReactor, decider, invariants, threadSettlementInput and restartContinuationPolicy. They read only pending-request kinds, context-handoff, thread.forked, provider.turn.start.* and checkpoint.revert. RestartContinuation's activities come from snapshot windows, not the command model."
+    },
+    {
+      "location": "apps/server/src/orchestration/decider.ts:495",
+      "note": "Batch decisions run projectEvent once per planned event. A fork with N inherited activities (decider.ts:966-990) therefore does N re-sorts. Measured at about 5 ms for N=500, so this is low-value on its own."
+    }
+  ],
+  "remaining": "1) Live activity retention (main item). projector.ts:1188-1215 appends every activity kind with its full payload, keeping up to 500 per thread plus milestones and a background-work checkpoint (shared threadActivity.ts:64-82). The only kinds any command-model consumer reads are COMMAND_READ_MODEL_ACTIVITY_KINDS (ProjectionSnapshotQuery.ts:372-383) plus provider.turn.start.failed, provider.turn.start.cancelled (commandInvariants.ts:72-84) and checkpoint.revert (checkpointRevertPolicy.ts:121-155, decider.ts:1677). Locally these are 0.1% of recent activities. 2) Live checkpoint files. projector.ts:1044-1074 keeps `files` on up to 500 checkpoint summaries per thread (local DB: average 2.5 KB, largest 3.6 MB), while hydration keeps no checkpoints (ProjectionSnapshotQuery.ts:2969). 3) Minor: updateThreadInArray's O(T) slice per thread event (threadIndex.ts:53), and per-append sorting (projector.ts:1204, about 0.02 ms, negligible). 4) Optional, hydration side: listActionableThreadActivityRows (ProjectionSnapshotQuery.ts:1247-1270) loads every historical approval/user-input pair with its full payload and no per-thread cap. The decider only needs unresolved requests (requestId), the latest context-handoff and thread.forked.",
+  "fixDefects": "No functional defect in d6a3f6819. The placeholder markdown does not leak into forks, which read plans through snapshots.getThreadDetailById (ThreadFork.ts:1001). The debug /api/orchestration/snapshot endpoint (orchestration/http.ts:45) and the offline CLI snapshot (cli.ts:1175) now return empty text and placeholder markdown; the CLI only uses projects, so nothing breaks. Layering nit: ProjectionSnapshotQuery.ts:79 imports COMMAND_MODEL_OMITTED_PLAN_MARKDOWN from projector.ts. Asymmetries that existed before the fix: live proposedPlans are capped at 200 (projector.ts:1019) but hydration loads all of them, and hydrated actionable activities are uncapped while live ones are capped at 500.",
+  "implementationSketch": "1) Add apps/server/src/orchestration/commandReadModelShape.ts. Move into it COMMAND_MODEL_OMITTED_PLAN_MARKDOWN, commandModelMessage and commandModelProposedPlan from projector.ts, and COMMAND_READ_MODEL_ACTIVITY_KINDS from ProjectionSnapshotQuery.ts:372. Extend the list with \"provider.turn.start.failed\", \"provider.turn.start.cancelled\" and CHECKPOINT_REVERT_ACTIVITY_KIND, and export `isCommandModelActivityKind(kind)` backed by a Set. Have ProjectionSnapshotQuery and projector both import from it, which also fixes the layering nit. 2) projector.ts thread.activity-appended (1188): if !isCommandModelActivityKind(payload.activity.kind), return updateThread(..., { updatedAt: event.occurredAt }) only, mirroring the assistant-message branch at 871-877. Otherwise keep the current upsert, sort and cap; the arrays stay tiny, so the sort cost disappears too. Leave the thread.reverted activity filter as is. 3) projector.ts thread.turn-diff-completed (1044-1057): store a slim checkpoint via a new commandModelCheckpoint(checkpoint) that sets files: []. The status guard at 1064-1067 and the turn-count logic do not use files. 4) Hydration (ProjectionSnapshotQuery.ts:1247-1270) uses the shared list. Re-run the index plan-guard test (ProjectionSnapshotQuery.shell.test.ts:434) with the three new kinds, which are already covered by idx_projection_thread_activities_kind_order. Optionally restrict to unresolved request pairs with an anti-join and the latest checkpoint.revert/context-handoff per thread. 5) Optional, low value: carry a Map<id, position> alongside threads, or accept the O(T) slice. Tests in projector.test.ts: (a) appending tool.completed / subagent.updated / reasoning leaves thread.activities unchanged and advances updatedAt; (b) appending each allowlisted kind keeps it; (c) after a live provider.turn.start.failed append, hasActionableContextHandoff returns false for a 'preparing' handoff targeting that message; (d) a live pending checkpoint.revert append makes the decider reject thread.turn.start; (e) the turn-diff-completed checkpoint has files: []. Update the existing assertions that expect tool.* activities to survive a revert (four tool.completed and one tool.started fixtures). Add a guard test that lists every kind read by commandInvariants, checkpointRevertPolicy, derivePendingThreadRequests and forkContextHandoffPending and asserts each is in the shared list. Measure the result with apps/server/scripts/generate-fixture-home.ts plus measure-persistence-reads.ts: engine.getReadModel heap after a synthetic long session, compared with a fresh hydration.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Internal server memory optimisation of the engine's in-memory command model. No protocol, auth, E2EE, Hub or hosted-lifecycle change, and no user-visible behaviour trade-off as long as the allowlist covers every kind the decider and invariants read. The risk is correctness (a missed kind silently weakens an approval, handoff or revert guard), which tests and the guard test cover.",
+  "repos": "ryco"
+}

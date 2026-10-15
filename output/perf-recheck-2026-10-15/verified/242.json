@@ -1,0 +1,70 @@
+{
+  "id": "mobile-boot:relay-frames-base64-and-js-crypto",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "NOT_DONE is confirmed. On mobile, every hosted relay frame still crosses RN 0.86.3's WebSocket as base64. Inbound frames are decoded with base64-js on the JS thread, then opened with pure-JS noble ChaCha20-Poly1305 on Hermes. The Noise handshake stays on noble too. Nothing has been measured: there is no throughput benchmark and there are no snapshot receive, decrypt or apply marks. There is no native crypto module, no JSI or alternate WebSocket, and no compression. Since f1be4abc7 four nearby changes landed, and none of them removes this cost. c1a83bcab added a node:crypto seam, but only the server and desktop install it, and section 14.7 says Hermes never does. 2cb0d3f5e sped up frame equality and canonical CBOR checks. That is per-frame JS work, but not base64 or AEAD. d2aa947a3 pages the shell snapshot into messages of at most 1 MiB. That lowers the peak size of a single message but not the total bytes, and it lets snapshots for very large homes (more than ~2,600 threads) go past the old 4 MiB relay cap. 94ec18751 and 4e07cee4c cut connect latency, not per-byte cost. One correction to the original finding: the '<=2 MiB per environment' bound is the last-known-shell cache bound, not a bound on the live snapshot. A measured 2,000-thread home is 2.9 MB, so the per-snapshot cost may be higher than the finding assumed.",
+  "evidence": [
+    {
+      "location": "apps/mobile/node_modules/react-native/Libraries/WebSocket/WebSocket.js:242",
+      "note": "RN 0.86.3 (apps/mobile/package.json:81) still decodes inbound binary frames with base64.toByteArray(ev.data).buffer on the JS thread."
+    },
+    {
+      "location": "apps/mobile/node_modules/react-native/Libraries/WebSocket/WebSocket.js:202",
+      "note": "Outbound binary frames still go through NativeWebSocketModule.sendBinary(binaryToBase64(data))."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/relaySocket.ts:285",
+      "note": "defaultCreateSocket (:285-297) builds the stock globalThis.WebSocket and passes headers. binaryType is set to 'arraybuffer' at :173, :323 and :502. There is no JSI, Nitro or other WebSocket. The early-socket work in 94ec18751 reuses the same constructor."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/relaySocket.ts:308",
+      "note": "classifyInboundMessage copies every inbound frame again (ArrayBuffer.slice(0) at :309, Uint8Array.from at :310/:313). The outbound path copies twice with Uint8Array.from, at :585 (facade to engine) and :383 (engine to socket), before RN's base64 encode."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeSession.ts:409",
+      "note": "The record AEAD seal and open (:409-442) use native primitives only if they were installed through e2eeNativePrimitives(). Otherwise they call noble chacha20poly1305 (:422 and :441), which is always the case on mobile."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeNoise.ts:1",
+      "note": "The Noise handshake still imports noble chacha20poly1305, HKDF, sha256 and utils directly (:1-4). Only X25519 is routed through the relayE2eeKeys dispatch (:12)."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeKeys.ts:382",
+      "note": "installE2eeNativePrimitives is a synchronous seam from c1a83bcab. A sync JSI or Nitro module could implement it. Its doc comment at :333-337 and :378-381 says 'Browsers and Hermes never install anything' and 'The server and desktop compositions call this once at startup; nothing else may.'"
+    },
+    {
+      "location": "packages/shared/src/relayE2eeNodeCrypto.ts:406",
+      "note": "installE2eeNodeNativePrimitives is the only installer. It is called only at apps/server/src/hubConnector/HubConnectorLive.ts:323 and apps/desktop/src/desktopHubStack.ts:18. A git grep over apps/mobile finds no caller."
+    },
+    {
+      "location": "docs/relay-e2ee-protocol.md:5069",
+      "note": "Section 14.7 limits native fast paths to node and desktop ('Browsers and Hermes never install one', :5081-5082). It keeps Noise CipherState, SHA-256, HMAC and HKDF on noble everywhere (:5108-5110). The section is 'proposed' and 'recording owner acceptance ... is REQUIRED' (:5071-5072)."
+    },
+    {
+      "location": "apps/mobile/package.json:58",
+      "note": "expo-crypto is used only for getRandomValues (apps/mobile/polyfills.ts:116) and provides no AEAD. react-native-nitro-modules 0.36.5 (:86) is already a dependency for nitro-markdown, so a Nitro crypto module would not add a new runtime. There is no quick-crypto or fast-base64 dependency. apps/mobile/modules has no crypto module, and nothing changed there since f1be4abc7. CryptoKit is used only by the desktop macOS security helper."
+    },
+    {
+      "location": "apps/mobile/src/devtools/e2eeVectorRunner.ts:1",
+      "note": "This runner only checks correctness vectors. A grep for bench, MB/s, throughput and performance.now finds nothing. Under apps/mobile/src and packages/client-runtime/src there are no performance marks around relay snapshot receive, decrypt or apply. The only performance.now uses are in shikiReviewHighlighter.ts and platform/frame.ts."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:1090",
+      "note": "Every client, mobile included, now requests snapshotDelivery: 'paged' (d2aa947a3). Pages are at most 1 MiB (apps/server/src/ws/context/constants.ts:54). This caps how much a single message decrypts at once, but not the total bytes decoded and decrypted."
+    },
+    {
+      "location": "apps/server/src/hubConnector",
+      "note": "No relay compression exists. A grep for gzip, deflate, zstd, brotli, lz4 and compress over hubConnector, packages/shared/src/relay*, client-runtime/src/relay and mobile hostedHub finds only P-256 'uncompressed point' hits. The Hub sees only ciphertext, so any compression would have to happen on the node before sealing."
+    }
+  ],
+  "remaining": "Nothing in the proposal has been done.\n(1) Measure. Nobody has measured base64 decode, ChaCha20-Poly1305 open or handshake throughput on Hermes. The only dev hook, apps/mobile/src/devtools/e2eeVectorRunner.ts, is correctness-only. There are no receive, decrypt or apply marks in apps/mobile/src/hostedHub/relaySocket.ts (#deliver at ~:547) or in packages/client-runtime/src/relay.\n(2a) Native AEAD/X25519 on mobile. installE2eeNativePrimitives (packages/shared/src/relayE2eeKeys.ts:382) is never called on mobile. Section 14.7 (docs/relay-e2ee-protocol.md:5069-5110) forbids Hermes from installing a provider.\n(2b) WebSocket without base64. relaySocket.ts:285-297 still uses RN's base64-bridged WebSocket (WebSocket.js:202/:242). There are redundant copies at relaySocket.ts:309-313 (inbound) and :383 and :585 (outbound).\n(3) Relay payloads are not compressed. Paged snapshots (d2aa947a3) cap the size of one message, not the total bytes. Large homes can now send more than 4 MiB of shell over the relay. That makes the per-byte cost larger than the finding's '<=2 MiB' assumption.",
+  "fixDefects": "No fix was implemented for this finding. The related changes (c1a83bcab node:crypto seam, 2cb0d3f5e frame equality and canonical check, d2aa947a3 paged snapshot) look correct for their own goals. None of them targets the Hermes base64 or noble cost.",
+  "implementationSketch": "Phase 1 (S, no protocol impact, do first).\n(a) Extend apps/mobile/src/devtools/e2eeVectorRunner.ts, or add a sibling apps/mobile/src/devtools/relayThroughputBench.ts exposed through the same __DEV__ global hook. Benchmark on device with performance.now():\n- base64-js toByteArray and fromByteArray at 16 KiB, 256 KiB and 1 MiB. Import base64-js through react-native's dependency, or call the RN WebSocket's path directly.\n- noble chacha20poly1305 open and seal at the same sizes.\n- A full NX handshake (relayE2eeNoise) and one Ed25519 and one P-256 verify.\n- Uint8Array.from(u8) against u8.slice() at 256 KiB. Hermes TypedArray.from may take the iterator path.\n- decodeRelayFrame at 256 KiB.\nReport MB/s and ms. Run release builds on a physical iPhone (and on a low-end Android if one is supported).\n(b) Add marks for: first inbound byte of the shell subscription; record decrypted (relayE2eeSession open); snapshot-end assembled (packages/client-runtime/src/rpc/shellSnapshotAssembly.ts); snapshot applied in the client-runtime shell store. Put them behind a dev or diagnostics flag and log them once per connect. A cheap first step is to wrap the engine's inbound handler in relaySocket.ts #deliver and the relayE2eeSession open callback with a cumulative-ms counter, and dump it after the first snapshot.\n\nPhase 2a (L, only if the numbers justify it): a native crypto module. Add apps/mobile/modules/ryco-e2ee-crypto, preferably as a Nitro HybridObject because react-native-nitro-modules is already a dependency. It needs synchronous ArrayBuffer calls, because the seam is synchronous. iOS CryptoKit provides ChaChaPoly (seal/open with AAD and a 12-byte nonce), Curve25519.KeyAgreement (X25519), Curve25519.Signing (Ed25519 verify) and P256.Signing (ECDSA verify). Android would use Tink or BoringSSL via conscrypt, or decline, which falls back to noble.\nBuild an E2eeNativePrimitives object that mirrors relayE2eeNodeCrypto.ts: lazy per-primitive known-answer self-tests (RFC 7748, 8032, 6979 and 8439 vectors plus forgeries), and a minBytes threshold for the AEAD. Then call installE2eeNativePrimitives from the mobile hosted runtime setup (apps/mobile/src/hostedHub/runtime.ts) or from polyfills.ts.\nAmend docs/relay-e2ee-protocol.md section 14.7 Selection, and the relayE2eeKeys.ts comment at :333-381, to allow a Hermes provider. Get the required owner acceptance.\nCaveats:\n- CryptoKit Ed25519 is cofactorless and may reject torsion signatures. Section 14.7 already handles this: a native false is re-decided by noble.\n- CryptoKit ChaChaPoly.open returns plaintext only after the tag is verified. That satisfies the section 9.5 erasure rule.\n- If the handshake's own CipherState and HKDF also show up as hot in Phase 1, the 'Unchanged' bullet would have to be revisited. That is unlikely: handshake messages are small.\nTests: run the section 16 corpus with the provider installed and absent, the way relayE2eeNodeCrypto.test.ts does, through a JS fake provider in vitest plus an on-device run through e2eeVectorRunner.\n\nPhase 2b (M to L, independent of crypto): a WebSocket without base64. Swap defaultCreateSocket (relaySocket.ts:285) for a JSI or Nitro WebSocket that delivers ArrayBuffers natively, for example react-native-nitro-websocket or a small custom URLSessionWebSocketTask module. It must keep custom headers (the DPoP proof and the session cookie handling described at :489-502), close codes, and bufferedAmount semantics. Test it with the existing relaySocket.test.ts suite through the createSocket injection point.\nCheap independent cleanup (S): replace Uint8Array.from(x) with x.slice() in relaySocket.ts. Keep one defensive copy where the engine zeroes buffers (:383). Drop the inbound copy at :309 if the engine does not retain or zero the RN-owned buffer, and check that against relayEngine's ownership rules first.\n\nPhase 3 (M, node side, separate decision): compression before sealing, for example a negotiated deflate of RPC payloads. This is a protocol and capability change. Note that compression before encryption carries a length side-channel (CRIME-style) risk when secrets and attacker-influenced data share a message. Prefer shrinking the shell snapshot schema itself.",
+  "worth": "medium",
+  "effort": "L",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Phase 2a changes E2EE crypto policy. Section 14.7 of docs/relay-e2ee-protocol.md explicitly says Hermes never installs a native provider, and that section still needs recorded owner acceptance. A mobile native provider needs a protocol-doc amendment and a security review of the CryptoKit and Android equivalence arguments. Phase 3 (compressing before sealing) is a wire or capability change with side-channel trade-offs. Phase 1 (measurement and perf marks) and the copy cleanup need no decision.",
+  "repos": "ryco"
+}

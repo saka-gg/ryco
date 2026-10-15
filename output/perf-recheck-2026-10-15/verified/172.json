@@ -1,0 +1,51 @@
+{
+  "id": "gap-composer-pickers:index-build-event-loop-block",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710; the addDirectoryAncestors, WORKSPACE_INDEX_BUILD_CHUNK and selectShallowestFiles symbols all landed there). Every cost the finding names is gone. (1) isPathInIgnoredDirectory uses indexOf+slice. (2) directoryAncestorsOf is replaced by a lastIndexOf walk that stops at the first known parent. (3) The redundant per-ancestor ignore check is dropped. (4) Both localeCompare sorts are removed; the index and the listing are unsorted and the cap uses depth buckets. The build is also chunked: Effect.yieldNow runs every 20k paths. In effect 4.0.2 that goes through MixedScheduler.setImmediate (a macrotask, not a microtask), so pending WebSocket I/O really does run between chunks. I replayed the new code path on 61k synthetic paths (this repo's tracked list x8, node 24). The longest chunk took 3-5 ms, the whole loop 10-13 ms, entry construction 2-6 ms, and the first cached listEntries payload 4-5 ms. The finding measured 104-127 ms of one block, so it no longer applies. I checked the code-unit/no-sort risk: every listEntries consumer is order-independent. The web side (ChangedFilesTree via buildTurnDiffTree) and mobile (client-runtime buildWorkspaceFileTree) each sort per directory with a cached Intl.Collator, and search tie-breaks on path. I found no correctness defect in the fix. The one leftover is minor and only hits repos past the new 200k-entry cap: after the chunked loop, selectShallowestFiles and entry construction run as one unchunked block.",
+  "evidence": [
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:151",
+      "note": "isPathInIgnoredDirectory: first segment via indexOf/slice, no split."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:161",
+      "note": "addDirectoryAncestors: lastIndexOf walk, deepest first, returns at the first directory already in the set. Every caller passes a set built only by this function (indexListedFiles, selectShallowestFiles, recordFileWrite's fresh missingDirectories), so the early-exit invariant holds."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:484",
+      "note": "indexListedFiles: one filter + ancestor pass with no ancestor ignore check and no sort. The loop at 490-502 yields with Effect.yieldNow between WORKSPACE_INDEX_BUILD_CHUNK (line 82, 20_000) slices."
+    },
+    {
+      "location": "apps/server/node_modules/effect/src/Scheduler.ts:176",
+      "note": "effect 4.0.2: the default MixedScheduler in async mode dispatches yieldNow via setImmediate. The yield is a real event-loop turn, so I/O callbacks run between chunks."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:505",
+      "note": "Only past WORKSPACE_INDEX_MAX_ENTRIES (line 76, 200_000; the auditor cited line 69): selectShallowestFiles (177-199) depth-bucket selection. It is unchunked, then entries are built in an unchunked loop (513-519)."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:226",
+      "note": "buildWorkspaceListing: unsorted shallowest-first payload, cached on index.listing (line 1293). About 5 ms at 65k entries and 13-16 ms at 212k in my replay."
+    },
+    {
+      "location": "apps/web/src/rpc/useProjectPreview.ts:20",
+      "note": "Documents order-independence. Confirmed: apps/web/src/lib/turnDiffTree.ts:92/105 and packages/client-runtime/src/state/files/fileTree.ts:61-64 sort each directory with a cached Intl.Collator."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:557",
+      "note": "listWorkspaceFiles now uses three ls-files calls and no check-ignore. The listing side adds no new per-path sync hot spot: adjacent-dedupe plus push."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects or regressions. One minor gap: the chunking covers only the per-path loop. When a repo exceeds WORKSPACE_INDEX_MAX_ENTRIES (200k), WorkspaceEntries.ts:505-519 runs selectShallowestFiles over every listed path and then builds all 200k entries (toLowerCase each) in one synchronous block. On 537k synthetic paths I measured 48-75 ms for the selection plus 7-23 ms for entries, about 60-90 ms in one block. That case only applies to giant monorepos, which the old code took about 1 s to index, so it is a small leftover, not a failure of this fix. A related but separate point: raising the cap from 25k to 200k (the fix for finding 169) means rankWorkspaceEntries scans up to 200k entries per server search. I measured about 10-12 ms at 61k and 35-48 ms at 200k per keystroke, which is a different code path. There is no test of the over-cap path (selectShallowestFiles); the largest index test uses 30k paths.",
+  "implementationSketch": "Optional hardening, only worth doing for very large monorepos. In apps/server/src/workspace/Layers/WorkspaceEntries.ts: (1) Turn selectShallowestFiles into an Effect.fn that yields with Effect.yieldNow every WORKSPACE_INDEX_BUILD_CHUNK paths in both the bucketing loop and the selection loop. Better still, bucket by depth inside the existing chunked loop in indexListedFiles: compute workspaceEntryDepth there, push into byDepth, and add ancestors only when under budget, so there is no second full pass. (2) Chunk the entries construction loop at 513-519 the same way. (3) Add a test in WorkspaceEntries.index.test.ts with a listing that exceeds 200k entries (for example 210k paths across a few depths). Assert partial=true, entries.length <= 200_000, all depth-0/1 entries present, and every kept file's ancestor directories present. For the separate search-scan cost, consider a per-index prefix/basename trigram or first-char bucket to skip non-matching entries, or chunked ranking with yieldNow. That belongs to finding 169 or a search-cost finding, not this one.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local CPU scheduling only. No auth, E2EE, hosted lifecycle, Hub protocol or product behavior change.",
+  "repos": "ryco",
+  "correction": "The classification is right. Minor line-number slips: WORKSPACE_INDEX_MAX_ENTRIES (200_000) is at line 76, not 69 (line 70 is the 300k WORKSPACE_INDEX_ENTRY_BUDGET), and WORKSPACE_INDEX_BUILD_CHUNK is at line 82, not 75. The auditor's leftover list also misses the larger unchunked tail past the 200k cap (selectShallowestFiles plus entry construction, about 60-90 ms at about 540k listed paths)."
+}

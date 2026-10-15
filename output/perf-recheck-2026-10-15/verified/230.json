@@ -1,0 +1,67 @@
+{
+  "id": "hub-connection:dpop-native-connect-overhead",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL holds. (a) The ath memoization is implemented and tested in createDpopProofSigner (60633eff3, #710). The mobile signer is memoized per key, so the single-slot cache persists across requests. (b) Nothing persists a Hub-confirmed enrollment or treats it as provisionally ready. start() is unchanged since f1be4abc7 apart from the new settled-wait helper, so every native launch still runs the blocking DPoP-signed upsert before any relay ticket. Since #710 the upsert is more exposed than the report says. The directory read now rides beside session restore, while the upsert only starts after restore publishes 'authenticated', so on a cold launch it runs serially (restore, then ensureIdentity and prekey, then the signed upsert RTT, then the ticket). The gate also blocks verified-pin/pairing ('local') relay contexts that never use the enrollment. No Hub change is needed: ticket issuance validates the enrollment itself and does not require an upsert in the current session. The auditor's sketch is directionally right but has gaps (see correction).",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/relay/dpop.ts:123-136",
+      "note": "Part (a) is done. athCache {token, ath} is replaced when the token changes and dropped when the digest is rejected. sign() awaits accessTokenHash(token) (line 145). The per-proof hardware signature (line 149) is inherent to DPoP. Tests are at packages/client-runtime/src/relay/dpop.test.ts:79-125: hash once per token, rehash on rotation, failed digest not remembered."
+    },
+    {
+      "location": "apps/mobile/src/platform/dpopSigner.ts:41-62",
+      "note": "The signer is memoized per key (signerPromise), so the cache lives across requests. The expo-crypto digest now runs once per token."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:357-364",
+      "note": "On every authenticated launch the coordinator is 'idle', so ensure(accountId) starts the full upsert. Nothing marks a cached enrollment ready first."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeEnrollment.ts:356-452",
+      "note": "start() is unchanged since f1be4abc7. git diff shows only the new awaitNativeE2eeEnrollmentSettled helper at 135-171. It awaits upsertE2eeDeviceEnrollment (429) and publishes 'ready' only at 451. previousRevision (392-396) comes from in-memory state.ready, which is null on a fresh launch."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:749-773",
+      "note": "Since 60633eff3 (#710), restoreSession and #prefetchDirectory are issued together. accountStatus 'authenticated' is published only when restore resolves, and only that triggers ensure(). On a cold launch the upsert therefore runs after the directory read rather than beside it, so its signature plus RTT sits fully on the path to the first ticket. The comment at apps/mobile/src/hostedHub/accountE2eeAttempt.ts:105-109 ('upsert runs beside the directory read') is stale."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/accountE2eeAttempt.ts:113-136",
+      "note": "prepareMobileRelaySocketContext awaits the settled state (up to MOBILE_ENROLLMENT_GATE_WAIT_MS = 10 s) and throws unless the status is 'ready'. This applies before the trust-record branch, so 'local' verified-pin/pairing contexts (144-150) also wait for the upsert, although issueMobileRelayAttempt's local branch (246-249) never uses the enrollment."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/accountE2eeAttempt.ts:251-254",
+      "note": "The account-grant issue path also requires status 'ready' with a matching generation."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:343-357",
+      "note": "The early relay socket (94ec18751) opens beside prepare, but the ticket/grant request waits for prepareSocketContext, and therefore for the enrollment upsert."
+    },
+    {
+      "location": "apps/mobile/src/platform/nativeE2ee.ts:231-249",
+      "note": "Only the enrollment id (and, elsewhere, the prekey certificate) is persisted. There is no Hub-confirmed summary. clearEnrollment is a deliberate no-op. The secure-store key set is in apps/mobile/src/platform/e2eeSecureStore.ts:80-106."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/nativeE2eeTrustResolver.ts:231-241",
+      "note": "The ticket request carries ready.enrollment.enrollmentRevision and clientPrekeyCertificateDigest. Grant verification (350-357) binds accountAuthEpoch, enrollmentRevision, deviceAuthEpoch and status from ready.enrollment. packages/shared/src/relayE2eeHubDeviceGrant.ts:388-391 checks them. A mismatch returns invalid() (around line 404), which is a non-retryable 'channel_rejected'."
+    },
+    {
+      "location": "ryco-hub:src/e2ee/accountE2eeService.ts:854-877",
+      "note": "origin/main 5f656ad. activeEnrollment, used by the account-grant ticket route (src/http/accountE2eeRoutes.ts:117-160), requires an active record with the exact revision and certificate digest and an unexpired certificate. It answers 'enrollment_revoked' for a revoked record. No per-session upsert is required, so a provisional-ready client needs no Hub change."
+    },
+    {
+      "location": "ryco-hub:src/e2ee/accountE2eeService.ts:590-603",
+      "note": "A same-identity renew keeps enrollmentRevision and deviceAuthEpoch, and stamps ensureAccountEpoch(). advanceAccountEpoch has no non-test callers. So in the normal case a cached summary's grant bindings stay valid. Identity replacement and post-revocation re-creation bump the revision."
+    }
+  ],
+  "remaining": "The per-launch enrollment upsert (nativeE2eeEnrollment.ts:429, ready published only at :451) is still a hard prerequisite of every mobile relay attempt (accountE2eeAttempt.ts:117-130 and 251-254), local verified-pin contexts included. Since #710 it runs serially after session restore on a cold launch (state.ts:749-773): one hardware DPoP signature, one Hub RTT and secure-store reads before the first ticket or grant. Nothing persists a Hub-confirmed summary (nativeE2ee.ts:231-249). The auditor's fix proposal is incomplete in four ways. (1) It must persist the full AccountE2eeDeviceSummary, not a subset, because grant verification binds accountAuthEpoch, deviceAuthEpoch, enrollmentRevision and status. (2) 'Clear on sign-out' is not enough. A device removed elsewhere loses its sessions, the cold-launch restore then gets 401 and never reaches the coordinator with a namespace, so clearEnrollment is never called and a stale summary would survive into the next sign-in. The summary must be bound to the Hub session id that confirmed it. (3) A provisional ticket answered 'enrollment_revoked' calls invalidate('revoked') (accountE2eeAttempt.ts:273-275). That bumps the generation, which discards the background upsert's result (which, for a session signed in after the revocation, would create revision+1), and leaves the coordinator 'revoked' until the next foreground. (4) A grant-binding mismatch during the provisional window returns a non-retryable invalid(). Minor, unverified side note: nativeE2eeEnrollment.ts:383 still starts refreshDirectory after ensureIdentity. Since #710 the restore already reads the directory, so this may add a second DPoP-signed directory read on launch that queues on the keystore ahead of the upsert's proof. Confirm with a trace before acting. The ath part needs no further work.",
+  "fixDefects": "None in the ath memoization. It is single-slot, keyed by token, drops a rejected digest (the .catch handler does not swallow the caller's rejection), and has tests for all three behaviours. The memoized mobile and desktop signers both benefit.",
+  "implementationSketch": "1) Platform persistence. Extend NativeE2eePlatformService (packages/client-runtime/src/platform/index.ts:238) with optional readConfirmedEnrollment(namespace), writeConfirmedEnrollment(record) and clearConfirmedEnrollment(). The record is {hubOrigin, accountId, hubSessionId, enrollment: AccountE2eeDeviceSummary}. Mobile: add E2EE_ACCOUNT_ENROLLMENT_CONFIRMED_KEY to apps/mobile/src/platform/e2eeSecureStore.ts (key union and the exhaustive E2EE_SECURE_STORE_KEY_SET, so reinstall purges it). Implement read/write in apps/mobile/src/platform/nativeE2ee.ts under exclusive(), decode with the contracts schema, and treat any decode failure as null. Desktop (apps/desktop/src/desktopNativeE2ee.ts) returns null or no-ops.\n2) Coordinator (packages/client-runtime/src/authorization/nativeE2eeEnrollment.ts). Add input currentSessionId(): string | null; mobile wires hostedHubStore.getState().session?.id in apps/mobile/src/hostedHub/runtime.ts:264. In start(), after validateMaterial (391) and building the request, and only for non-retry, non-recovery starts: read the record. Require all of: same namespace, hubSessionId === currentSessionId(), enrollment.enrollmentId === enrollmentId, exactEnrollmentResponse(record.enrollment, request) true, and prekey.expiresAt outside the prekey renewal window. If they hold, publish {status: 'ready', ready: {namespace, enrollment: record.enrollment, identity, prekey}} immediately with an internal provisional flag, and send the upsert with expectedEnrollmentRevision = cached revision in the background under the same issued generation. On success, write the record. If accountAuthEpoch, deviceAuthEpoch or enrollmentRevision changed, bump the generation and republish ready so in-flight attempts fail their generation checks and retry; otherwise keep the generation. On 409 enrollment_revoked or a non-active same-id summary: clear the record and markHubRevoked(). On 409 enrollment_revision: clear the record and re-run a blocking upsert without expectedEnrollmentRevision. On a transient error, keep provisional ready (the Hub re-validates at ticket issuance) and retry in the background. Also write the record after every exact upsert (448-451), and clear it in invalidate() for every reason and in markHubRevoked.\n3) Revocation and binding races. In issueMobileRelayAttempt (apps/mobile/src/hostedHub/accountE2eeAttempt.ts:273-275), when the current ready is provisional, clear the record and trigger an immediate blocking re-ensure instead of the foreground-only revoked recovery. In nativeE2eeTrustResolver.ts, when verifyHubDeviceGrant fails on an enrollment binding while the enrollment is provisional, await the background upsert and re-resolve once instead of returning invalid().\n4) Optional narrower step (needs a decision). In prepareMobileRelaySocketContext, resolve trustedRecord(selection) first and skip the enrollment wait for 'local' verified-pin/pairing contexts.\n5) Tests. In nativeE2eeEnrollment.test.ts: a matching record publishes ready before the upsert resolves; a different session id, different material or near-expiry certificate falls back to the blocking path; background revoked leads to 'revoked' with the record cleared; a revision or epoch change bumps the generation; invalidate clears the record; a transient background failure keeps ready. In accountE2eeAttempt.test.ts: prepare does not wait for the upsert when provisional, and a provisional 'enrollment_revoked' recovers without a foreground transition. In nativeE2ee.test.ts: round trip, corrupt record returns null, reinstall purge.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "This changes when a native E2EE enrollment counts as 'ready'. A Hub-confirmed record from an earlier launch would authorize account-grant ticket requests before this launch's upsert, which changes the semantics of expectedEnrollmentRevision, revocation and epoch handling in the E2EE/auth path. That needs a security review even though the Hub still validates at ticket and grant issuance. Skipping the enrollment gate for 'local' verified-pin contexts is a separate policy decision.",
+  "correction": "The classification is right. The auditor understated and under-specified the remaining work. (a) Since #710 the directory read rides beside session restore, while the upsert starts only after restore publishes 'authenticated'. On a cold launch the upsert is therefore serial on the critical path, not overlapped with the directory read, so the report's 'Low impact' undersells it. The gate also blocks 'local' verified-pin contexts. (b) The persisted-field list misses accountAuthEpoch, deviceAuthEpoch and status, which grant verification binds (relayE2eeHubDeviceGrant.ts:388-391); persist the full AccountE2eeDeviceSummary. (c) 'Clear on revoke, sign-out and account change' does not cover a cold-launch 401 after device removal, because the coordinator never had a namespace and clearEnrollment is never called. The record must be bound to the confirming Hub session id. (d) The sketch does not handle the provisional-ticket 'enrollment_revoked' path, where invalidate('revoked') discards the background upsert and waits for the next foreground, or grant-binding mismatches, which return a non-retryable invalid().",
+  "repos": "ryco"
+}

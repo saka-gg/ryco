@@ -1,0 +1,63 @@
+{
+  "id": "projects-loading:sidebar-visibility-resubscribe-churn",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (all in 60633eff3, #710). Sidebar and inbox rows share one IntersectionObserver per rootMargin. Row visibility has 150 ms enter and 60 s exit hysteresis, so a fling-scroll never subscribes and a short scroll-out keeps the stream. Rows also subscribe to the cheap 'summary' view, which runs no git status, diff or fetch. The server caches refSummary for 30 s, keyed by the branch read from disk, so the 9-20-spawn local recompute the finding described no longer happens on the sidebar path. I tried to refute this and found only negligible gaps: rows unmounted by virtualization or by collapsing a project skip the exit delay, and the command palette subscribes to the summary view without visibility gating. Neither brings back the described cost.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:12-15",
+      "note": "SOURCE_CONTROL_VISIBILITY_HYSTERESIS = { enterDelayMs: 150, exitDelayMs: 60_000 }, exactly the proposed values."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:23-77",
+      "note": "One shared IntersectionObserver per rootMargin, with a Map from Element to a Set of listeners. When a node's last listener goes it is unobserved, and when the last node goes the observer disconnects. A replaced global ctor (test stubs) is handled. Every caller (thread rows, inbox rows, project headers, favicons) uses root=null and the default margin, so they all share one observer."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useHasIntersectedViewport.ts:149-176",
+      "note": "Each observer entry cancels the pending timer. Re-entering view before the exit delay is a no-op because isIntersectingRef already says true. Timers are cleared on cleanup. Ref elements are stable (SidebarThreadRow.tsx:479, InboxThreadRow.tsx:365), so the effect does not re-run in a way that resets hysteresis."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarThreadRow.tsx:133-145",
+      "note": "useIsIntersectingViewport(undefined, SOURCE_CONTROL_VISIBILITY_HYSTERESIS) plus useGitStatus(..., { enabled: isActive || isIntersecting, view: 'summary' }). This is the only VCS subscription in apps/web/src/components/sidebar."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxThreadRow.tsx:195-221",
+      "note": "Same hysteresis and summary view. The full-status subscription (workingTreeStatus) is opened only on hover or focus intent, with a 120 ms dwell and 20 s linger (useInboxRowPreviewIntent.ts:4-6). Change-request detail is gated by the same visibility state."
+    },
+    {
+      "location": "apps/web/src/lib/gitStatusState.ts:103-113,137-168,328-341",
+      "note": "The summary view has its own state and watch key (`${targetKey}#summary`). The refCount is per watch key, so a cwd shared by many rows has one RPC stream. A disabled row returns NOOP, and unsubscribe happens only at refCount 0, which is now reached only after the 60 s exit delay."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:699-748",
+      "note": "streamRefSummary only reads workflow.refSummary in the background process lane. It has no remote poller and no git status, diff or fetch. The 5 s HEAD tick is readCheckoutHead, a file read, not a spawn."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1709-1828",
+      "note": "refSummaryCache has a 30 s TTL, keyed by `${cwd}\\0${branch from disk}`. On a cache miss the work is a config snapshot, at most one for-each-ref when there is no upstream, and a PR lookup through the per-repository PR index. Re-subscribing within 30 s is a cache hit."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarThreadRow.browser.tsx:188-262",
+      "note": "Browser tests with fake timers cover the shared per-cwd demand, an active offscreen row, no subscription on a fling (re-exit before enterDelay), keeping the stream through a scroll-out shorter than exitDelay, and release after the full exit window. They also assert view: 'summary'."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectThreadList.tsx:210-219",
+      "note": "Lists of more than 20 threads are virtualized with LegendList (recycleItems={false}). Rows that scroll out of LegendList's render window unmount, which drops their subscription immediately and skips the 60 s exit delay. Re-mounting goes through the 150 ms enter delay and then the 30 s server summary cache, so the cost is negligible."
+    },
+    {
+      "location": "apps/web/src/components/ThreadStatusIndicators.tsx:145-151; apps/web/src/components/CommandPaletteDialog.tsx:1045,1076",
+      "note": "Adjacent caller: command-palette thread rows subscribe to the summary view with no visibility gating, and subscribe and unsubscribe as search results change. It is the same cheap summary stream, shares the sidebar's watch key, and hits the 30 s server cache. It is not the described sidebar cost."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No material defects. Minor observations: (1) Exit hysteresis applies only while a row stays mounted. Rows unmounted by LegendList windowing (SidebarProjectThreadList.tsx:210-219) or by collapsing a project release their stream at once. Because of the 30 s refSummary cache this costs only an RPC stream re-open. (2) The proposal's server-side 'stat HEAD/index mtime instead of a 5 s TTL' was not implemented. It is moot for this finding: sidebar and inbox rows no longer use the full view, and LOCAL_STATUS_CACHE_TTL_MS (VcsStatusBroadcaster.ts:57) only affects full-view consumers such as ChatView, DiffPanel and the inbox hover card. (3) The hook's own unit test (useHasIntersectedViewport.browser.tsx) does not cover hysteresis or multiple nodes, but SidebarThreadRow.browser.tsx does.",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco",
+  "correction": ""
+}

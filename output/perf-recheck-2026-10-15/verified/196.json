@@ -1,0 +1,51 @@
+{
+  "id": "dedicated-pages:usage-transcript-reader-throughput",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The parse half is done and measured. PR #710 (60633eff3) moved readTranscript to 1 MiB reads, a sha256 update per chunk, byte-level marker tests and array-pending long lines. On real files the current module beats the f1be4abc7 code: a 125 MB codex rollout drops from 197 to 62 ms and a 63 MB Claude transcript from 81 to 37 ms. Records, skipped counts and malformed counts are identical, and checkpoint resume reuses all 2,332 lines. The listing half falls short of the finding's target. lstat now runs in per-directory Promise.all batches, but directories are still walked one at a time (await lstat, then opendir, then flush). Real layouts hold about 4 .jsonl files per directory (Claude: 2,274 files in 528 dirs, median 4), so the batches are tiny. Listing ~/.claude/projects went from 63 to 57 ms median, about 10%, against the finding's ~25 ms target. Serial directory traversal alone costs about 39 ms. Listing runs on every usage summary, memo hits included, so it is now the main cost of a warm Usage refresh.",
+  "evidence": [
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:28",
+      "note": "TRANSCRIPT_CHUNK_BYTES = 1 MiB. The read buffer at :338 is min(1 MiB, size), replacing the old 64 KiB buffer."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:403-411",
+      "note": "One hash update per chunk, through the chunk's last newline, after the pending pieces. This matches per-line hashing whenever a checkpoint is kept (discarded lines and the record cap set limited). Checkpoints are memory-only, so no old digest has to stay compatible."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:287-315",
+      "note": "Markers are tested on Buffers. toString('utf8') runs only for lines that carry a marker. usageLineMarker (usageRecord.ts:69-71) returns the same strings as the old mightCarryUsage."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:380-389,424-429",
+      "note": "pending is a Buffer[]. Each unfinished piece is copied once, and the line is concatenated once in takeLine. A line inside one chunk is a zero-copy subarray, consumed synchronously before the next read reuses the buffer."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:44-59",
+      "note": "Extra: lines of at least 1 KiB whose codex envelope is inert are skipped. This is safe for records because parseCodexTranscriptLine (codexTranscript.ts:60-95) acts only on session_meta, turn_context, thread_settings_applied and token_count. The only difference is diagnostic: a large inert line that carries only a context marker now increments skippedLineCount."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:117-162",
+      "note": "Remaining gap. The directory loop is still serial: await lstat at :125, opendir at :130, and the stat batch flushed per directory at :161. Batches therefore hold only a directory's few files, about 4 at the median."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:767-793",
+      "note": "listUsageTranscriptFiles runs for every root on every summary, before the sourceMemos fingerprint check, so even a memo hit pays the full listing."
+    },
+    {
+      "location": "measurement (read-only node one-offs, warm cache, this machine)",
+      "note": "Parse, old vs current, medians of 5: codex 125 MB 197 -> 62 ms, Claude 63 MB 81 -> 37 ms, outputs identical. Listing ~/.claude/projects, medians of 12: old serial 63 ms, current 57 ms, traversal only (lstat+opendir, no file stats) 39 ms, 16-worker directory pool keeping lstat+opendir 28-31 ms with an identical sorted file list, readdir BFS 18 ms. opendir bufferSize made no difference."
+    }
+  ],
+  "remaining": "In listUsageTranscriptFiles (apps/server/src/usage/usageTranscriptReader.ts:117-162), directories are still visited one at a time: lstat :125, opendir :130, then the stat flush at :161. Concurrency only exists inside a directory, and real directories are small (Claude ~/.claude/projects: 528 dirs, median 4 .jsonl each). Listing therefore went only from ~63 to ~57 ms for 2,274 files, not to the ~25 ms the finding projected. It runs on every usage summary, memo hits included (UsageService.ts:767-793).",
+  "fixDefects": "",
+  "implementationSketch": "In apps/server/src/usage/usageTranscriptReader.ts, change listUsageTranscriptFiles from a serial pop loop to a bounded directory worker pool, about 8-16 directory visits in flight over a shared queue. Each visit keeps the current checks: lstat for directory and symlink, then opendir, pushing subdirectories with the depth check and collecting .jsonl candidates. Candidates are stat'ed with Promise.all per directory, or through a shared limiter capped at about 32-64 lstats in flight. Keep the shared count and files limits, checked before each push; overshoot is bounded by the number of workers. Keep the errorCount accounting identical, because UsageService only adds walkedRootKeys when errorCount === 0 and stale cache pruning depends on that. Keep signal.throwIfAborted: on abort, stop scheduling, let in-flight visits settle so their opendir handles close, then reject once. Keep the final localeCompare sort so output stays deterministic. Tests in usageTranscriptReader.test.ts: (1) about 200 nested dirs with 3 files each; assert the full sorted list, the window skips and errorCount 0. (2) Entries and files limits still set errorCount > 0 when wide directories are walked concurrently. (3) Abort during a walk rejects without unhandled rejections. (4) The existing symlink and depth tests stay unchanged. A local read-only prototype gave ~28-31 ms against the current ~57 ms on 2,274 files in 528 dirs.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local server-side refactor of filesystem traversal only. No auth, E2EE, Hub protocol or product behaviour trade-off.",
+  "repos": "ryco",
+  "correction": "The auditor called per-directory batching 'still a large cut from fully serial'. Measured on the real layout it is about 10% (63 to 57 ms), because serial per-directory lstat and opendir (~39 ms) dominates and directories hold about 4 files each. The listing target in the finding (~25 ms) is not met. The parse throughput part is done and verified."
+}

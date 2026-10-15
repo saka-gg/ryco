@@ -1,0 +1,51 @@
+{
+  "id": "persistence-boot:hub-read-cache-full-shell",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the case the finding measured, a node with many threads. The cloud index is now patched from domain events by threadReadCacheShellMirror (502adfd1e). The full schema re-decode became a row-limit check (502adfd1e), and a shell over 2 MiB is cut down to its most recently updated threads (60633eff3). Nodes with 1.6k to 10k threads now upload. On a synthetic 4.5k-thread shell, the remaining work per shell publish measured about 15 ms, down from the reported 140 ms. While agents stream, shell publishes alternate with content batches. The auditor missed two edge defects in the cut-down approach. A node with more than 10,000 threads (archived and trashed included) still fails every upload. A node whose project and worktree rows take up most of the 2 MiB, about 2.1k worktree rows at roughly 800 B each, gets into a Hub 409 loop: begin, conflict, a new generation that wipes the cloud cache, and again. Both are rare, and the feature is opt-in.",
+  "evidence": [
+    {
+      "location": "apps/server/src/hubConnector/threadReadCacheShellMirror.ts:78-103,117-191,193-222",
+      "note": "Records rows per event and patches them with getThreadShellById, getProjectShellById and getWorktreeShellById. It rebuilds on unmodeled events, failures, more than 256 rows, and every 60 s. I checked the edge cases. The domain PubSub is bounded with backpressure, so no events are dropped (OrchestrationEngine.ts:180). Projection runs inside the commit transaction before publish (OrchestrationEngine.ts ~461-463, 517). No thread event writes another aggregate's row in ProjectionPipeline. Deleted rows are filtered the same way (deleted_at IS NULL) in the list query and the by-id queries. The ordering-changing events worktree.manualPositionSet, worktree.relocated and worktree.deleted fall through to a rebuild."
+    },
+    {
+      "location": "apps/server/src/hubConnector/ThreadReadCacheSync.ts:121,128,211-218",
+      "note": "readShell reads from the mirror. notifyChanged records the event, and HubConnectorLive.ts:714-719 passes each event in. The feature is still opt-in (HubConnectorLive.ts:692-694)."
+    },
+    {
+      "location": "apps/server/src/hubConnector/ThreadReadCachePublisher.ts:51-76,101-112,196",
+      "note": "boundThreadReadCacheShell cuts the shell down to its newest threads. checkThreadReadCacheShellLimits (three length checks) replaced Schema.decodeUnknownSync(ThreadReadCacheShell). The limit check at :196 runs on the full shell, before bounding."
+    },
+    {
+      "location": "apps/server/src/hubConnector/ThreadReadCachePublisher.ts:107 + ThreadReadCachePublisher.test.ts:272-280",
+      "note": "Defect: a shell with more than 10,000 threads throws 'row limits' before boundThreadReadCacheShell runs, and a test pins this. In a simulation of the current publisher code, a 10,001-thread shell threw and a 9,999-thread shell uploaded. The bounded index would hold about 1.5k threads, well under the Hub's 10k filter, so the refusal is not needed for threads."
+    },
+    {
+      "location": "apps/server/src/hubConnector/ThreadReadCachePublisher.ts:224-240",
+      "note": "Defect: recentThreads is the 512 newest threads of the full shell. Thread content is limited to indexed threads only when the shell yields (:240). When the bounded shell keeps fewer than 512 threads, a normal batch uploads bodies for threads missing from the index. In a simulation of the current code with 2,100 worktrees (795 B each) and 1,000 threads, 413 threads were kept and batch 27 sent bodies for thread-586 and others that the index does not list."
+    },
+    {
+      "location": "ryco-hub:src/threadReadCache/service.ts:124 (origin/main)",
+      "note": "The Hub rejects a thread body that the current or uploaded shell does not list with node_conflict, which is HTTP 409 (identity/errors.ts:24). The node's sync answers a 409 by calling publisher.reset() (ThreadReadCacheSync.ts:172), and the next begin clears every cached projection (docs/thread-read-cache.md:16-18). The result is a loop of begin, conflict and wipe, paced only by the 10-60 s backoff."
+    },
+    {
+      "location": "apps/server/src/hubConnector/ThreadReadCachePublisher.ts:84-87",
+      "note": "This still throws when projects and worktrees alone exceed 2 MiB. Archived worktrees are included (ProjectionSnapshotQuery.ts listActiveProjectWorktreeRows has no archived filter). In the simulation, 2,600 worktrees threw 'exceeds the upload limit'."
+    },
+    {
+      "location": "/tmp/perf3-056-scratch/bench.mjs (synthetic)",
+      "note": "Remaining cost per shell publish at 4.5k threads of about 1.4 KB each: bound (full stringify, sort, partial stringify) 11-13 ms, a second sort 1.2 ms, body stringify about 2 ms (2.09 MB), mirror patch about 0.5 ms. Total about 15 ms, against about 140 ms before."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1. Thread bodies can reach the Hub before the index lists them (ThreadReadCachePublisher.ts:224-240). recentThreads comes from the full shell, and only yield batches skip threads missing from the index. When the bounded index keeps fewer than 512 threads, normal batches upload bodies the Hub rejects with 409 (Hub service.ts:124). The node then resets, begins a new generation that wipes the cloud cache, and repeats indefinitely. This happens when project and worktree rows fill most of the 2 MiB, about 2.1k worktree rows at roughly 800 B, archived ones included. I reproduced it by simulating the current code.\n2. More than 10,000 non-deleted threads (archived and trashed included) still fails every upload. checkThreadReadCacheShellLimits runs on the full shell at :196 before bounding, and the test at ThreadReadCachePublisher.test.ts:272 pins it. This undercuts the fix's own goal of showing the most recent work instead of failing.\n3. As the auditor noted, the upload still throws when projects and worktrees alone exceed 2 MiB (:85-87), about 2.6k worktree rows. That is not a regression, since the old code threw for any shell over 2 MiB.\n4. Behaviour trade-off, as the auditor noted: above about 1.5k threads the cloud index omits older and archived threads. The Hub treats a shell as the authoritative set of threads and drops bodies for threads it does not list.\n5. Residual cost, measured: about 15 ms per shell publish at 4.5k threads, plus about 2 MB uploaded per shell publish while agents stream.\nAdjacent and pre-existing, not caused by this fix: THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS is 1 s (ThreadReadCacheSync.ts:24) and every POST needs a fresh node challenge (HubNodeProofClient.ts:253). The Hub limits node challenges to 30 per minute per client IP (Hub identityRoutes.ts:261), and its docs ask nodes to pace batches at 5 s or slower. Sustained streaming can therefore hit challenge_limit and consume the same IP's challenge budget that relay reconnects use.",
+  "implementationSketch": "All changes are on the node side, in apps/server/src/hubConnector/ThreadReadCachePublisher.ts. No Hub change is needed.\n(a) Limit content to indexed threads in every batch. After the shell decision in synchronize(), set `const indexed = shellThreadIds ?? publishedThreadIds;`. In the content loop, replace the yield-only check at :240 with `if (!indexed.has(thread.id)) continue;`. The first batch always carries the shell, because publishedSequence is -1 and that batch never yields, so `indexed` is never empty when it matters. Alternatively, build recentThreads from the bounded snapshot rather than the full shell. Test: give the upload mock a membership check that mirrors the Hub (it throws for a thread item missing from the last uploaded or in-batch shell). Feed a shell with about 2,100 worktrees of about 800 B each and 1,000 threads, run synchronize until idle, and assert that nothing threw and every thread item was indexed.\n(b) Apply the thread-count limit after bounding. Make checkThreadReadCacheShellLimits check only projects and worktrees on the raw shell. Have boundThreadReadCacheShell also cap threads at THREAD_READ_CACHE_SHELL_LIMITS.threads, keeping the newest. Change the test at :272 to expect that a 10,001-thread shell publishes a bounded index, and keep the refusal for projects and worktrees.\n(c) Optional, needs a product call: when projects and worktrees crowd the batch, also bound worktrees. Drop archived worktrees that no kept thread references, oldest first.\n(d) Optional CPU work: sort shell.threads once per publish and share the order between boundThreadReadCacheShell and recentThreads. Cache each thread's JSON byte size in a WeakMap keyed by the thread object, since the mirror reuses unchanged thread objects across patches. Then skip the full-shell stringify when the summed size is already over the limit.\nSeparately, as a follow-up for the adjacent pacing issue: raise THREAD_READ_CACHE_MIN_PUBLISH_INTERVAL_MS to 5 s or more to match the Hub's documented pacing and its 30-per-minute challenge limit, and adjust the test 'limits sustained streams to one read per second' in ThreadReadCacheSync.test.ts.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Fixes (a) and (b) are local corrections to node-side batching, with no Hub protocol, crypto or auth change. Two optional parts would need a decision: making the index complete above about 1.5k threads (a paged or compact index means a new Hub item kind, so a Hub protocol change and deploy), and dropping archived worktrees from the cloud index (a product trade-off).",
+  "correction": "The auditor's DONE stands, but they missed two defects in the bounding approach. First, the 10,000-thread row-limit check still runs on the full shell, so nodes above 10k threads never upload. Second, thread content is limited to indexed threads only in yield batches. When the bounded index keeps fewer than 512 threads (a large project and worktree section), the Hub's membership check returns 409, and the node responds with begin/reset loops that wipe the cloud cache. They also listed the leftover per-tick serialization as 'a few ms'; I measured about 15 ms per shell publish at 4.5k threads.",
+  "repos": "ryco"
+}

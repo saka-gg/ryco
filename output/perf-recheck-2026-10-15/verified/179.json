@@ -1,0 +1,63 @@
+{
+  "id": "gap-composer-pickers:skills-project-scope",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. bb8d23c7c, on main and in the Hub's vendored 7bc39eec3, adds lazy discovery per (instance, cwd) on the first / or $. Codex calls skills/list for the thread cwd over the shared read-only app-server. Claude runs the capabilities probe with cwd. The server caches results stale-while-revalidate for 5 min, the client keeps its own cache, and the results merge into the snapshot lists. Nothing runs on thread open, so the finding's correctness gap (missing project skills and commands) is closed. The auditor's 'no defects in the core fix' is wrong, though. Failures are cached as successful empty lists, which can wipe a good list. The global probes still run in the server's own cwd, so that directory's project-scoped items still show up in every project. All residuals are low severity.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:1344-1366",
+      "note": "SWR cache (fresh 5 min, capacity 128). The load includes timeout(20 s) and catchCause→EMPTY_PROJECT_COMMANDS, so a failure is stored as a successful value. A failed background revalidation overwrites a previously good list with empty for another 5 min."
+    },
+    {
+      "location": "apps/server/src/provider/staleWhileRevalidateCache.ts:1-6,30-45",
+      "note": "By design, the load 'returns a fallback itself'. The fallback is written into entry.value and readAtMs, so errors are indistinguishable from real empty results. Tests cover only the success paths."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:6677-6681",
+      "note": "readProjectCommands maps probe?.slashCommands ?? [] to a success. probeClaudeCapabilities returns undefined on failure or on its 8 s timeout (ClaudeProvider.ts:215, 382-386), so a cold or slow Claude CLI start yields a cached empty list."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/projectProviderCommands.ts:12,86-100",
+      "note": "The client's 30 s RETRY_AFTER_FAILURE_MS only fires on a transport rejection. A server-side failure arrives as a successful empty result, which replaces `data` and is treated as fresh for 5 min. Worst case after one transient failure: about 5-10 min without project commands."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexProvider.ts:516-520",
+      "note": "The global snapshot probe still uses cwd: process.cwd(), and parseCodexSkillsListResponse keeps repo-scoped skills."
+    },
+    {
+      "location": "apps/server/src/provider/Drivers/ClaudeDriver.ts:174",
+      "note": "The global Claude probe still runs without a cwd and with settingSources user/project/local (ClaudeProvider.ts:349-355). A CLI node started inside a repo leaks that repo's project commands into every project. mergeProjectProviderCommands makes the snapshot entry win on name collisions (projectProviderCommands.ts:104-131)."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatComposer.tsx:748-766,901-912",
+      "note": "The fix is wired correctly. Discovery is lazy (only on a slash-command or skill trigger), keyed on gitCwd (worktree path or project cwd), and the merged status feeds the menus and the editor skills prop (line 2926). Covered by ChatView.ProjectCommands.browser.tsx."
+    },
+    {
+      "location": "apps/server/src/ws/providerProjectCommandsRpc.ts:13-37",
+      "note": "Reads only active project roots or active worktree paths. The RPC is operator-gated via rpcAccessPolicy.ts:232. Tested in providerSessionRpcs.test.ts."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5831",
+      "note": "Timeline skill chips (SkillInlineText) still use the snapshot-only activeProviderStatus.skills. A project-only $skill renders as plain text in sent messages."
+    },
+    {
+      "location": "apps/web/src/components/chat/ComposerAttachmentMenus.tsx:252",
+      "note": "The skill item id is `skill:${provider}:${skill.name}`. The merge dedupes by path, so a same-named skill at a different path (e.g. the server-cwd repo and a worktree of it, or a project skill shadowing a user skill) yields duplicate ids and keys."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:2563-2580",
+      "note": "skills/list is sent without forceReload. If the stored-thread reader app-server stays alive (60 s idle timeout, CodexStoredThreadReader.ts:59), a refresh may return Codex's cached list. Very minor."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "(1) Failure masking, the main defect. ProviderService.ts:1349-1366 caches the EMPTY fallback as a real value. ClaudeAdapter.ts:6677-6681 turns a probe timeout (8 s) or failure into a successful empty list. So a transient failure during revalidation replaces a good project list with empty. The client then caches that empty success for 5 min, and its 30 s failure retry (projectProviderCommands.ts:12) never engages for server-side failures. Result: project commands can disappear for about 5-10 min after a single slow Claude CLI start. (2) The global snapshot probes still run in the server's start directory (CodexProvider.ts:519 process.cwd(); ClaudeDriver.ts:174 has no cwd but uses project/local setting sources). Project-scoped skills and commands from that directory still appear in every project, and the snapshot entry wins name collisions in the merge. This doesn't affect desktop; it does affect a CLI node started inside a repo. (3) Timeline skill chips use snapshot-only skills (ChatView.tsx:5831). (4) Duplicate skill item ids when names collide across paths (ComposerAttachmentMenus.tsx:252). (5) Codex skills/list is sent without forceReload (CodexAdapter.ts:2565). None of these is a performance issue. All are low-severity correctness/UX issues.",
+  "implementationSketch": "1) Stop caching fallbacks. Generalize makeStaleWhileRevalidateCache to Effect<A, E>. On a failed refresh, keep the previous value (the tap is already skipped, so entry.value survives once the fallback is no longer in the load); on a failed first read, the entry is already deleted. Add an optional short negative TTL (about 30 s) so a broken CLI isn't re-probed on every keystroke. In ProviderService.readProjectCommands, move timeout plus catchCause→EMPTY outside projectCommands.get(...) so only real results are cached. In ClaudeAdapter.readProjectCommands, fail with ProviderAdapterRequestError when probeClaudeCapabilities returns undefined. Either let the RPC fail, so the client keeps stale `data` and sets failedAtMs (the 30 s retry now applies), or keep returning EMPTY and have the server hold the stale value. Tests: SWR cache test for 'failed revalidation keeps old value' and 'failed first read is not cached'; ProviderService.test with an adapter that fails once and then succeeds; projectProviderCommands.test checking that a rejected call keeps previous data. 2) Optional scope fix: run the global snapshot probes in a neutral directory (os.homedir() or the server state dir) instead of process.cwd() at CodexProvider.ts:519, and give the Claude global probe at ClaudeDriver.ts:174 that same neutral cwd or settingSources ['user']. Snapshots then carry only user/system items, and project items come solely from readProjectCommands. 3) Extract a shared hook (e.g. useProjectMergedProviderStatus(environmentId, instanceId, cwd, snapshot)) from ChatComposer.tsx:748-766 and use it in ChatView for the timeline skills prop at line 5831. 4) Make the skill menu id path-based: `skill:${provider}:${skill.path || skill.name}`. 5) Pass forceReload: true on the stale refresh path of the Codex skills/list call. Focused validation: vitest for apps/server/src/provider (SWR, ProviderService), packages/client-runtime composer tests, and the ChatView.ProjectCommands browser test.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Item 1 is a pure correctness fix. Item 2 (moving the global probe out of the server's cwd) is a small behaviour change: a node started inside a repo would stop showing that repo's commands outside of it. Arguably the intended behaviour, but optional.",
+  "correction": "The auditor said there are no defects in the core fix. They missed the failure masking: fallbacks are cached as successful empty lists, a failed revalidation overwrites good data, and the client's 30 s retry never fires for server-side failures. They also missed that the global snapshot probes still run in process.cwd(), so the server directory's project-scoped items keep leaking into all projects. DONE status still stands.",
+  "repos": "ryco"
+}

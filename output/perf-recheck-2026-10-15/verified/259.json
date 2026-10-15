@@ -1,0 +1,55 @@
+{
+  "id": "gap-logging-io:logger-effect-spans",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The DONE status holds, but the auditor's 'no fix defects' claim misses other callers. 60633eff3 changed only the shared logger and the Claude and Codex adapters. Two other adapters still use the same per-event named-span pattern. OpenCode wraps every subscribed event in handleSubscribedEvent, and every text-part update in emitAssistantTextDelta; both are named spans that reach server.trace.ndjson. Copilot still has the named handleCopilotEvent plus logCopilotNativeEvent around the logger write. Those Copilot spans run through a bare Effect.runPromise without the server context, so they cost a little CPU but never reach the trace file.",
+  "summary": "The finding is fixed as described. In EventNdjsonLogger, write is now a single span-free Effect.suspend over a synchronous writeRecord: a mode check, a Map lookup with lazy writer creation, one JSON.stringify, and a buffer push. Records are flushed every 200 ms as one writev per batch. The write, toLogMessage and resolveThreadWriter spans are gone, and so is the SynchronizedRef lock. Every Claude helper the finding measured is now a plain function or Effect.fnUntraced: logNativeSdkMessage, ensureThreadId, routeSteerFrame, handleSdkMessage, routeSdkMessage, plus handleStreamEvent and ensureAssistantTextBlock. Codex writeNativeEvent is a plain function. Because every provider shares the logger, the logger-side gain covers all of them. What remains is low-value and outside the finding's measured scope: OpenCode still makes 1 or 2 exported named spans per streamed event, and Copilot still has named spans that are not exported.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:594",
+      "note": "write = Effect.suspend(() => writeRecord(...)). No Effect.fn, so no span. It returns a logWarning or recordDropped effect only on the error and drop paths."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:311",
+      "note": "resolveWriter is a synchronous Map.get with lazy createWriter (line 274). No SynchronizedRef or semaphore remains in the file. The AsyncRotatingFileSink constructor only starts async initialization (packages/shared/src/logging.ts:161), so creating a writer on the caller does no sync I/O."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:430",
+      "note": "writeRecord applies the mode policy, then the writer lookup, delta coalescing and enqueue, all synchronous. File I/O happens in the timer-driven flushWriter (line 457) as a single writeBatch (writev)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.test.ts:173",
+      "note": "Tests cover concurrent first writes, eviction with predecessor ordering (574), close draining (605, 641) and queue bounds (268, 518). These are the races the old lock guarded against."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:2106",
+      "note": "logNativeSdkMessage is a plain function (it was Effect.fn at f1be4abc7:2104). ensureThreadId (2357), routeSteerFrame (4771), handleSdkMessage (4864), routeSdkMessage (4898), handleStreamEvent (2900) and ensureAssistantTextBlock (2178) are all Effect.fnUntraced."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:2791",
+      "note": "writeNativeEvent is a plain arrow function (it was Effect.fn(\"writeNativeEvent\") at f1be4abc7). It is called per event from the Effect.gen loop at line 2077."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/OpenCodeAdapter.ts:1468",
+      "note": "Uncovered caller: handleSubscribedEvent is still Effect.fn(\"handleSubscribedEvent\"), runs for every OpenCode SSE event (line 2075), and is forked in server context, so its spans are exported. emitAssistantTextDelta (line 1370) is also named and runs for every text-part update (lines 1572 and 1679). Neither changed since f1be4abc7."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CopilotAdapter.ts:123",
+      "note": "Uncovered caller: logCopilotNativeEvent (line 123) and handleCopilotEvent (line 175) are still named Effect.fn around the logger write for every Copilot SDK event. They run through a bare Effect.runPromise (CopilotAdapter.session.ts:344), so the context-scoped LocalFileTracer (Observability.ts:85) is absent and the spans are never written to the trace file. The only cost is a small amount of CPU."
+    },
+    {
+      "location": "apps/server/src/provider/acp/AcpNativeLogging.ts:9",
+      "note": "The ACP and Cursor native logging (writeNativeAcpLog, plus logNative in AcpAdapter.ts:264 and CursorAdapter.ts:395) uses plain Effect.gen and adds no spans. The canonical logger write in ProviderService.ts:643 also adds no spans."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No bugs or regressions were found in the logger rewrite. There are uncovered callers of the same per-event named-span pattern that 60633eff3 did not touch: (1) OpenCodeAdapter.ts:1468 handleSubscribedEvent and :1370 emitAssistantTextDelta are named Effect.fn that run for every streamed OpenCode event or part. Their spans are exported to server.trace.ndjson, roughly 1 or 2 records of about 380 B each per delta. (2) CopilotAdapter.ts:123 logCopilotNativeEvent and :175 handleCopilotEvent are named per event, but they run through a bare Effect.runPromise without the server tracer, so they cost only CPU. Both are minor and outside the finding's measured Claude and Codex scope.",
+  "implementationSketch": "Optional follow-up. In apps/server/src/provider/Layers/OpenCodeAdapter.ts, change handleSubscribedEvent (line 1468) and emitAssistantTextDelta (line 1370) from Effect.fn(\"...\") to Effect.fnUntraced. Add the same comment the Claude adapter uses: these run once per streamed event, so a span each inflates the local trace. In apps/server/src/provider/Layers/CopilotAdapter.ts, turn logNativeEvent (line 123) into a plain function that returns `nativeEventLogger ? nativeEventLogger.write(...).pipe(Effect.ignoreCause({ log: true })) : Effect.void`, and make handleEvent (line 175) Effect.fnUntraced. No behaviour change. Verify with the existing focused tests (`bun run test` scoped to OpenCodeAdapter.test.ts and the CopilotAdapter*.test.ts files) and typecheck the server package. A separate issue for later: Copilot's handleEvent runs via a bare Effect.runPromise (CopilotAdapter.session.ts:344), so it loses the server context (tracer, log annotations). That is a different finding.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

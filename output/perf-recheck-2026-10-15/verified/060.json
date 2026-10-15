@@ -1,0 +1,75 @@
+{
+  "id": "web-bootstrap:dialogs-in-shell-graph",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor's DONE stands, and so does their duplication note. They checked only at source level. I also checked the existing production dist (apps/web/dist, built 2026-10-14 21:45, contains #728 code), and it confirms the cut. They missed one reliability defect: the sidebar's new lazy mounts do not handle a failed chunk load, so the error goes to the root route error boundary. ChatView mounts the same two dialogs with onLoadError, a toast and a Retry. They also missed a small leftover: editor-only logos from Icons.tsx still ship in the shell's Icons chunk, which conflicts with the guard test's 'editor icons out of the app shell' claim. Both are low severity.",
+  "decisionReason": "No decision needed. The work is shell-local UI loading and error handling: no auth, E2EE, hosted lifecycle or Hub changes, and no product trade-off beyond showing a toast instead of the root error screen.",
+  "summary": "The finding's four cuts from #710 (60633eff3) are in place: CommentAvatar has its own module, getEditorLabel moved to an icon-free module, and the two sidebar dialogs load lazily (preloadableLazy, mounted via useLazyComponentReady) with preload on intent. On the source graph, RootAppShell reaches none of MarkdownView, react-markdown, CommentThread, LinkedWorktreeItemDialog, NewWorktreeDialog, the WorkItem/PR/Issue detail views or JetBrainsIcons. The built dist shows the same: RootAppShell-DOCTs5qH.js has a 103-chunk static closure with no markdown-stack, CommentThread, LinkedWorktreeItemDialog, NewWorktreeDialog or JetBrains chunk, and no JetBrains SVG paths. Shell bytes beyond boot are now 1,198 KiB raw / 406 KiB gzip (the finding measured 1,681 KiB raw). The CI dist budget and a source graph test guard both. Two minor defects remain in the fix. First, the sidebar dialogs pass no onLoadError, so a failed chunk replaces the whole app with RootRouteErrorView. Second, the sidebar keeps duplicate preloadableLazy wrappers instead of using the shared worktrees/lazyWorktreeDialogs module, whose comment wrongly says the sidebar uses it.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/pullRequests/primitives.tsx:8",
+      "note": "Imports CommentAvatar from projectExplorer/CommentAvatar. That module imports only CommentThread.logic, with no MarkdownView."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/hooks/useThreadMenuActions.ts:17",
+      "note": "Imports getEditorLabel from settings/editorLabels.logic.ts. That file (:10) has no icon imports. SettingsPanels.editor re-exports it."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarWorktreeList.tsx:141",
+      "note": "useLazyComponentReady(LinkedWorktreeItemDialog, linkedItemDialogWanted) is called with no onLoadError. It mounts at :233-243. A local preloadableLazy at :253 duplicates LazyLinkedWorktreeItemDialog."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectDialogOwner.tsx:82",
+      "note": "useLazyComponentReady(NewWorktreeDialog, newWorktreeTarget !== null) is also called with no onLoadError. A local preloadableLazy at :25 duplicates LazyNewWorktreeDialog."
+    },
+    {
+      "location": "apps/web/src/lib/preloadableLazy.ts:115",
+      "note": "Documented behaviour: without onLoadError, a failed load reports ready (:161), so the mount throws to the nearest error boundary."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:435",
+      "note": "RootRouteErrorView is the nearest boundary for RootAppShell children. It replaces the whole app with 'Something went wrong'. Before #710 these dialogs were static, so this failure mode did not exist."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5355",
+      "note": "ChatView mounts the same two dialogs (LazyNewWorktreeDialog, LazyLinkedWorktreeItemDialog) with onLoadError. On failure it closes the surface and calls notifyChatSurfaceLoadFailure (chat/chatViewLazySurfaces.ts:72), which shows a toast with Retry. The sidebar is inconsistent with this."
+    },
+    {
+      "location": "apps/web/src/components/worktrees/lazyWorktreeDialogs.ts:6",
+      "note": "Its comment says the wrappers are shared by 'the chat's toolbar and header, the sidebar' and that 'a preload from any of them serves all'. Only BranchToolbar and ChatView import it."
+    },
+    {
+      "location": "apps/web/src/perf/webBundleSplitting.test.ts:202",
+      "note": "Pins the sidebar's local import() strings and preload-on-intent. It also locks in the duplicate wrappers and does not check failure handling."
+    },
+    {
+      "location": "apps/web/src/perf/standardBootGraph.test.ts:192",
+      "note": "Source graph guard. RootAppShell may not reach MarkdownView, react-markdown, LinkedWorktreeItemDialog, NewWorktreeDialog or JetBrainsIcons."
+    },
+    {
+      "location": "scripts/perf/model.ts:276",
+      "note": "Dist budget for the RootAppShell closure: 420 KiB gzip, with MARKDOWN_SOURCES forbidden (react-markdown, micromark, parse5 at :235). CI runs it at .github/workflows/_validation.yml:213."
+    },
+    {
+      "location": "apps/web/dist/assets/RootAppShell-DOCTs5qH.js",
+      "note": "Read-only walk of static imports in the existing dist: 103 chunks. None are markdown-stack, CommentThread, LinkedWorktreeItemDialog, NewWorktreeDialog or JetBrains chunks, and 0 of 28 JetBrainsIcons SVG paths are present. Those names appear only in __vite__mapDeps preload lists. Beyond boot (main closure): 1,198 KiB raw / 406 KiB gzip."
+    },
+    {
+      "location": "apps/web/src/components/Icons.tsx:284",
+      "note": "Small adjacent leftover. The editor-only logos (Trae, Kiro, VisualStudioCode, Insiders, VSCodium, Zed at :284-553, plus Antigravity at :714) are used only by SettingsPanels.editor, but they ship in the shell's Icons-Dp1YFag9.js chunk. The shell loads that chunk via ProviderUpdateLaunchNotification -> providerIconUtils -> Icons.tsx. That is about 14 KB of source, a few KiB gzip."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarWorktreeList.tsx:908",
+      "note": "Optional and outside the finding's proposal: WorkspacePullRequestsPopover is still static and mounted closed for each worktree row. About 106 KB of source (the popover, gitAtoms, useGit, StackLayerList, primitives, CommentAvatar) is reachable only through it."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1) Reliability regression, low probability. The sidebar's lazy LinkedWorktreeItemDialog (SidebarWorktreeList.tsx:141) and NewWorktreeDialog (SidebarProjectDialogOwner.tsx:82) pass no onLoadError to useLazyComponentReady. If the chunk fails to load (offline or flaky hosted link, or a server/node update replacing hashed chunks while a tab is open), the mount throws into RootRouteErrorView (__root.tsx:435), and clicking a PR/issue badge or 'New workspace' replaces the whole app with 'Something went wrong'. Before #710 these dialogs were static, so this could not happen. ChatView handles the same dialogs with a toast and Retry (ChatView.tsx:5355-5385). The linked-item chunk now carries the markdown stack, so it is one of the larger on-demand downloads. 2) Maintainability. The sidebar defines its own preloadableLazy wrappers (SidebarWorktreeList.tsx:253, SidebarProjectDialogOwner.tsx:25) instead of the shared worktrees/lazyWorktreeDialogs.ts, whose comment wrongly says the sidebar shares it. The result is two module states per dialog: a sidebar preload does not mark ChatView's wrapper as loaded, which costs an extra commit with no extra network. webBundleSplitting.test.ts:202 locks this duplication in. 3) Minor guard imprecision. The guard is titled 'editor icons out of the app shell', but editor-only logos from Icons.tsx still ship in the shell's Icons chunk, about 14 KB of source.",
+  "implementationSketch": "(a) Export preloadLinkedWorktreeItemDialog() and preloadNewWorktreeDialog() from apps/web/src/components/worktrees/lazyWorktreeDialogs.ts. Delete the local preloadableLazy definitions in SidebarWorktreeList.tsx (:253-259) and SidebarProjectDialogOwner.tsx (:25-31), and import LazyLinkedWorktreeItemDialog and LazyNewWorktreeDialog plus the preload helpers instead. Keep the re-export of preloadNewWorktreeDialog for SidebarProjectItem.tsx:492, or import it from the shared module. (b) Move notifyChatSurfaceLoadFailure from chat/chatViewLazySurfaces.ts:72 into a neutral module, e.g. lib/lazySurfaceLoadFailure.ts (toast plus Retry, optional threadRef). ChatView and the sidebar then share it, and the sidebar does not import a chat module. (c) Pass onLoadError in the sidebar. For the linked item: capture the context, call setLinkedItemContext(null) and setLinkedItemDialogWanted(false) (the hook clears its parked failure when wanted turns false), then notify with a Retry that restores the context. For NewWorktreeDialog: capture the target, call setNewWorktreeOpen(false) and setNewWorktreeTarget(null), then notify with a Retry that calls openNewWorktree(target.project, target.initialTab). (d) Tests: update webBundleSplitting.test.ts:202 to assert that the sidebar imports from worktrees/lazyWorktreeDialogs and passes onLoadError. Add a vitest browser test: mock lazyWorktreeDialogs with a loader that rejects once, click the badge, and assert that a toast appears, RootRouteErrorView does not render, and Retry mounts the dialog. Run standardBootGraph.test.ts and the bundle splitting tests to confirm the shell graph is unchanged. (e) Optional, low value: move the editor-only logos (Trae, Kiro, VisualStudioCode, Insiders, VSCodium, Zed, Antigravity) out of Icons.tsx into an EditorLogos.tsx that only SettingsPanels.editor imports. Optionally mount WorkspacePullRequestsPopover lazily, the first time its toggle opens, with preload on badge intent. Then confirm with bun run perf:bundle-budget that the RootAppShell gzip drops.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "repos": "ryco"
+}

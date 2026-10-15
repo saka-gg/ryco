@@ -1,0 +1,58 @@
+{
+  "id": "thread-and-draft:split-chat-route-chunk",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The heavy parts of the finding are fixed and confirmed by my own source-graph walk and a dist closure walk at HEAD. The overview, crown, notes, PlanSidebar and GitActionsControl now ship as a lazy ChatOverviewPanel chunk (220 KB, 237 KB with deps). Shiki/@pierre/diffs loads through a dynamic import in codeHighlightQueue, and DiffWorkerPoolProvider is gone from the chat routes. SideChatPanel, ContextHandoffInspectionPanel, ComputerBetaPreview, AgentControlApprovals, ExpandedImageDialog, the PR dialog and the worktree dialogs are separate chunks too. Neither route's static closure reaches any of them. Drafts and empty threads never load the overview. About 620 KiB raw left the first-frame graph, roughly what the finding estimated. Three things keep this from being DONE. (1) Proposal item 4 is only partly done. HtmlRenderDialog/Frame/Cards and the Phone* sheets, both named in the proposal, are still static, as are ContextHandoffMarkerRow and the agent roster: about 54 KiB min / 18 KiB gz. The one phone sheet that was made lazy (LazyPhoneOverviewSheet) saves nothing, because both route views import PhoneWorkSurface statically. (2) The proposed route-closure guard covers @pierre/diffs only, at source level. Nothing forbids the overview stack in the route closure, and the dist bundle-budget rule for ChatThreadRouteView forbids only the hosted runtime. Its 880 KiB gzip budget sits about 157 KiB above today's 723 KiB, so statically re-absorbing the overview (~70 KiB gz) would pass CI. (3) The auditor's 1,115 -> 637 KiB ChatRightPanel comparison overstates the removal. The new codeSplitting groups moved lexical (now a 197 KiB chunk) and vendor modules into separate chunks that are still static.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/chat/chatViewLazySurfaces.ts:19",
+      "note": "LazyChatOverviewPanel and the other conditional surfaces are preloadableLazy, and ChatView imports ChatOverviewPanel type-only (ChatView.tsx:269). My oxc-based static walk of ChatThreadRouteView.tsx and DraftChatThreadRouteView.tsx reaches no ChatOverviewPanel, CrownOverview, PlanSidebar, GitActionsControl, SideChatPanel, ComputerBeta UI, AgentControlApprovals, DiffWorkerPool, shiki or @pierre/*."
+    },
+    {
+      "location": "apps/web/src/components/chat/codeHighlightQueue.ts:77",
+      "note": "import('@pierre/diffs') runs on the first highlight job. In dist, the @pierre/diffs chunk (dist-buke7dsV.js) and shiki-engine (176 KB) are dynamic deps only. ThreadLinkList-CqUEemNg.js is now 1,568 B."
+    },
+    {
+      "location": "apps/web/dist/assets/ChatThreadRouteView-DDyBEGY8.js",
+      "note": "My dist static-closure walk puts the thread route at 723 KiB gzip / 2,140 KiB raw beyond the main closure, or 1,427 KiB raw beyond boot+RootAppShell. ChatOverviewPanel-Du311ByZ.js (219,899 B), SideChatPanel (14 KB), ContextHandoffInspectionPanel (14 KB), ComputerBetaPreview (9 KB), AgentControlApprovals (27.5 KB) and NewWorktreeDialog (38 KB) are all outside it. lexical-QUdX8PvF.js (201,561 B) and the markdown-stack chunks are inside it as separate chunks, so the ChatRightPanel 1,115 -> 637 KiB drop is partly relocation, not removal."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5307",
+      "note": "The overview loads in an effect once the rail is wanted. overviewOpensByDefault (ChatView.tsx:425) is true on wide desktop, so most non-empty desktop threads still fetch the 237 KB overview chunk, just after the first commit. The rail slot width is reserved, so there is no transcript shift. Drafts and empty threads never load it."
+    },
+    {
+      "location": "apps/web/src/components/routeViews/ChatThreadRouteView.tsx:44",
+      "note": "This file (and DraftChatThreadRouteView.tsx:30) statically imports PhoneWorkSurfaceSheet from shell/phone/PhoneWorkSurface. That makes LazyPhoneOverviewSheet (chatViewLazySurfaces.ts:52-54) a no-op split: PhoneWorkSurface-DalEivEW.js sits in the route's static closure. The lazy wrapper only adds a ready gate, an extra commit and a load-failure toast path (ChatView.tsx:5416-5422)."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:79",
+      "note": "HtmlRenderCards, HtmlRenderOpenerProvider (from HtmlRenderDialog) and HtmlRenderFrame are static (lines 79-81), and so is ContextHandoffMarkerRow (line 116). With oxc minify: HtmlRender UI is 17.2 KiB min / 6.4 KiB gz, handoff marker + chip 8.8 / 2.6, AgentSpawnRow + agentRoster 10.6 / 3.6."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatComposer.tsx:124",
+      "note": "PhoneThreadDock is static, as are PhoneSessionPolicySheet (ComposerFooter.tsx:27) and PhoneModelSheet (ProviderModelPicker.tsx:18). Phone-tier code in every desktop route load comes to 17.7 KiB min / 5.7 KiB gz."
+    },
+    {
+      "location": "scripts/perf/model.ts:286",
+      "note": "The ChatThreadRouteView dist closure forbids only HOSTED_RUNTIME_SOURCES (not DIFF_RENDERER_SOURCES or the overview stack). Its 880 KiB gzip budget, with a stale '813 KiB on 2026-10-12' comment, leaves about 157 KiB slack over the measured 723 KiB. There is no DraftChatThreadRouteView closure."
+    },
+    {
+      "location": "apps/web/src/perf/standardBootGraph.test.ts:214",
+      "note": "The route-closure guard forbids DiffWorkerPoolProvider, diffWorkerPool, ThreadWorkspacePanel/DiffPanel/PreviewPanel and pkg:@pierre/diffs, but not overview/crown/GitActionsControl/PlanSidebar or a direct pkg:shiki. chatViewBundleSplitting.test.ts:13 greps only ChatView.tsx and BranchToolbar.tsx direct imports, so a transitive re-import would go unnoticed."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatOverviewPanel.tsx:249",
+      "note": "useOverviewPanelControls/GitThreadSync now run inside the lazy panel, matching the base behaviour (sync mounted only while the overview is). One small difference on the frozen phone tier: the base keepMounted phone sheet always rendered the panel, while now it mounts after the first open."
+    }
+  ],
+  "remaining": "(a) Guards. scripts/perf/model.ts:286-290: the ChatThreadRouteView closure lacks DIFF_RENDERER_SOURCES and any overview rule, and its 880 KiB budget has ~157 KiB of slack, so re-adding the overview chunk statically would pass. standardBootGraph.test.ts:214-224 forbids @pierre/diffs but no overview/crown/GitActionsControl/PlanSidebar modules or pkg:shiki in the route closures. (b) LazyPhoneOverviewSheet (chatViewLazySurfaces.ts:52-54, ChatView.tsx:5416-5422, 6390-6426) is a no-op split because ChatThreadRouteView.tsx:44 and DraftChatThreadRouteView.tsx:30 import PhoneWorkSurface statically. (c) Conditional timeline/composer UI is still static, ~54 KiB min / ~18 KiB gz in total: HtmlRenderCards/Dialog/Frame (MessagesTimeline.tsx:79-81), ContextHandoffMarkerRow (MessagesTimeline.tsx:116), PendingContextHandoffChip, phone-only PhoneThreadDock (ChatComposer.tsx:124), PhoneSessionPolicySheet (ComposerFooter.tsx:27), PhoneModelSheet (ProviderModelPicker.tsx:18), and AgentSpawnRow/agentRoster.",
+  "fixDefects": "LazyPhoneOverviewSheet saves zero bytes, since PhoneWorkSurface is statically imported by both chat route views. It still costs an extra commit on the first phone overview open and a load-failure toast path, and chatViewBundleSplitting.test.ts asserts a split that does not exist. The dist bundle budget for the thread route was not tightened after 451f35925, so it no longer blocks growth as its comment claims. It also does not forbid the Shiki/@pierre stack this fix removed.",
+  "implementationSketch": "1) Guards (do first, ~30 min). In scripts/perf/model.ts, give the ChatThreadRouteView closure forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...DIFF_RENDERER_SOURCES, ...CHAT_OVERVIEW_SOURCES]. Define CHAT_OVERVIEW_SOURCES as patterns on ^apps/web/src/components/(?:chat/ChatOverviewPanel|GitActionsControl|PlanSidebar|SideChatPanel|chat/ContextHandoffInspectionPanel|chat/ComputerBetaPreview|agent-control/AgentControlApprovals)\\.tsx$ and ^apps/web/src/components/overview/(?!crown/crownLayout\\.ts$). Add a matching DraftChatThreadRouteView closure, re-measure with RYCO_WEB_SOURCEMAP=hidden bun run build --filter=@ryco/web && bun run perf:bundle-budget, then set maxGzipBytes to roughly today + 5% (~760 KiB) and fix the stale comment. In apps/web/src/perf/standardBootGraph.test.ts:214, extend the route forbid list with /^pkg:shiki$/, /^pkg:@shikijs\\//, and the same overview/side-chat/handoff/computer/agent-control file patterns. That turns chatViewBundleSplitting's direct-import grep into a transitive check. 2) Make LazyPhoneOverviewSheet honest: drop it, import PhoneOverviewSheet statically in ChatView (PhoneWorkSurface is already in the route graph), remove phoneOverviewSheetReady and its toast, and drop './shell/phone/PhoneWorkSurface' from the chatViewBundleSplitting list. This is a simplification of the frozen web phone tier, not an extension. Alternatively make the route views lazy-load PhoneWorkSurfaceSheet, but at 2.6 KB that is not worth it. 3) Optional, low value. Move HtmlRenderOpenerProvider/context into a light module (e.g. chat/htmlRenderOpener.tsx), lazy-load HtmlRenderDialog via preloadableLazy + useLazyComponentReady on open, and lazy-load HtmlRenderFrame/Cards and ContextHandoffMarkerRow. Use a fixed-height placeholder and usePreloadWhenIdle when MessagesTimeline.logic reports any turnHtmlRenders or handoff markers in the window, so LegendList row heights stay stable. Gate PhoneThreadDock/PhoneModelSheet/PhoneSessionPolicySheet behind a phone-tier-only lazy component. Add each to the guard lists and to chatViewBundleSplitting.test.ts, and run bun run --cwd apps/web test src/perf plus the MessagesTimeline browser tests.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Bundle-guard tightening and a code-split cleanup only. Nothing touches auth/E2EE, hosted lifecycle or the Hub, and removing a no-op lazy wrapper on the frozen phone tier does not extend that tier. The optional HtmlRender lazy frame adds a small pop-in trade-off that can stay at the engineer's discretion.",
+  "repos": "ryco"
+}

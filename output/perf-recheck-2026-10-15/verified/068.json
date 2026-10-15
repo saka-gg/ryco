@@ -1,0 +1,59 @@
+{
+  "id": "web-bootstrap:hosted-hub-boot-waterfall",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Most of the finding is fixed. The hosted gate's state and read-cache modules are now static, so the logging chunk round trip is gone. HostedHubRoot starts loading when the root beforeLoad begins. An authenticated boot waits only for the account answer, with the directory read sent alongside it. Both hosted surfaces are preloadableLazy and are loaded before commit, so the reveal throttle no longer applies. Brotli is also done on the Hub side. Two serializations remain in the same gate. (1) The workspace shell is the RootAppShell graph. In the current standard dist it is about 343 KiB gz of the roughly 475 KiB gz that the finding counted as the HostedHubRoot closure. It still starts loading only after the account answer, although the gate comment says otherwise. (2) Signed-out and expired-session boots still wait for two sequential Hub requests: the session 401, then bootstrap-status. Each costs up to one Hub RTT, so the remaining worth is low.",
+  "evidence": [
+    {
+      "location": "apps/web/src/hostedHub/bootGate.ts:1-2",
+      "note": "Confirmed: readCache and state are static imports. The root imports the gate statically (__root.tsx:21), and standard builds resolve it to the inert sibling (clientModeSeams.ts:29-37). webBundleSplitting.test.ts:77-96 pins this."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:163",
+      "note": "Confirmed: HostedHubRoot.preload() starts at the beginning of beforeLoad, and :199 hands the same promise to the gate. HostedHubRoot is a preloadableLazy (:41-43), and withRootSurfaceLoaded (:127-137) holds the context until it is loaded."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:749-773",
+      "note": "Confirmed for authenticated boots: restoreSession and the directory prefetch go out together. accessSettled at :772 releases bootstrapAccess (:659-662) before the directory commit."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:776-788",
+      "note": "Not fixed for signed-out or expired sessions. On a 401, getBootstrapAvailability (:784) is sent only after the session answer, and accessSettled is never called on this path. bootstrapAccess therefore settles through bootstrap()'s finally (:628-633) after the second Hub request. The code at f1be4abc7 was the same. The sign-in surface still waits two sequential Hub RTTs."
+    },
+    {
+      "location": "apps/web/src/hostedHub/bootGate.ts:23-31",
+      "note": "The comment says the workspace shell downloads while the access check is on the wire. Only the small hostedRootAppShell wrapper module is imported there. LazyRootAppShell's import (hostedRootAppShell.tsx:15-17, :28-30) runs from :52, after the await at :45, and only when the account is authenticated or a read preview is possible."
+    },
+    {
+      "location": "apps/web/dist/assets (standard build of HEAD, read-only closure walk)",
+      "note": "HostedHubRoot beyond boot: 28 files, 132 KiB gz. RootAppShell adds 83 files, 1,025 KiB raw and 343 KiB gz beyond boot plus HostedHubRoot. For thread deep links, prefetchHostedRouteCode (hostedWorkspaceOwners.ts:69-72) covers all but 22 files (151 KiB gz) of that. For a '/' landing nothing prefetches it before the account answer."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:56-62",
+      "note": "The read cache is opt-in (default false). Most returning users therefore wait on the network side of the race at :624-674, not on the local restore."
+    },
+    {
+      "location": "apps/web/src/pwa/buildArtifacts.ts:331-350",
+      "note": "The service worker serves the boot document and fingerprinted chunks cache-first. For installed returning users, the shell residual is the service-worker fetch plus evaluation of about 1 MiB of raw JS after the access check. A full network download only happens without a service worker."
+    },
+    {
+      "location": "ryco-hub:scripts/build-static-manifest.ts:57-131",
+      "note": "Hub origin/main (5dc12a4) precompresses JS and CSS with brotli q11 and gzip. src/http/staticAssets.ts:119ff negotiates br, then gzip (docs/coolify-deployment.md:297-304). The brotli part of the proposal is implemented in code. Whether it is deployed is unknown."
+    },
+    {
+      "location": "apps/web/src/viteBuild/modulePreload.ts:15-20",
+      "note": "Leaving HostedHubRoot out of the index.html modulepreload list is deliberate: earlier preloads caused measured contention. Accepted as not needed."
+    }
+  ],
+  "remaining": "(1) For a cold authenticated boot that lands on '/' with no read cache, the RootAppShell graph is loaded only after the account answer. It is about 343 KiB gz, or about 1 MiB raw JS to fetch from the service worker and evaluate. The load starts at apps/web/src/hostedHub/bootGate.ts:46-53, after the await at :45, so it does not overlap the session request. The cost is up to one Hub RTT, or the shell's fetch and evaluation time if that is shorter. (2) For a signed-out or expired-session boot, the gate waits for GET /api/auth/session (401) and then GET /api/auth/bootstrap-status, at packages/client-runtime/src/authorization/state.ts:776-788. This adds one Hub RTT to the sign-in surface. That matters most for returning signed-out visitors whose chunks are already cached by the service worker. Optional and not needed: adding HostedHubRoot to the index.html modulepreload list (rejected on measured contention).",
+  "fixDefects": "Documentation defect only. apps/web/src/hostedHub/bootGate.ts:23-27 says the workspace shell downloads while the access check is on the wire. Only the hostedRootAppShell wrapper module is imported there, and the RootAppShell import starts at :52 after the account answer. No functional bugs found. Prefetch failures are swallowed and then reported again by the route's own preload or render. The workspace owners only call into the single hostedHubController. The read-cache race still holds bootstrapPending correctly now that the network leg settles at the account answer.",
+  "implementationSketch": "(1) Shell overlap for likely-authenticated boots. Add a non-secret localStorage boolean hint, for example 'ryco:hosted-signed-in:v1'. Set it from a hostedHubStore subscription when accountStatus becomes 'authenticated'. Clear it on 'signing-out', 'session-expired', or a published 'signed-out'. Extract the existing subscription in readCache.ts:630-652 or add a small hostedHub/bootHints.ts. In runHostedBootGate, when the hint is set or a remembered read-cache account exists, call hostedRootAppShell.then(s => s?.preloadHostedRootAppShell()) before the await at :45. Keep the call after the check for boots without the hint, so first-time visitors still never fetch the shell on the sign-in path. Correct the comment at :23-27. Tests: a vitest for bootGate.ts with the dynamic imports and hostedHubController.bootstrapAccess mocked. Assert that with the hint the shell preload starts before bootstrapAccess resolves, and that without the hint it starts only after an authenticated answer. Check the root-before-load-ready mark on a hosted build at 150 ms RTT. (2) Signed-out RTT. In packages/client-runtime/src/authorization/state.ts #restoreAccess, start the bootstrap-status read next to restoreSession in cookie mode, the same way #prefetchDirectory works: hold getBootstrapAvailability(operation.signal) as a promise with a catch that returns null. On isSessionFailure, use the held answer, and fall back to a fresh read when it is null. On success, ignore it. Bearer mode keeps the sequential read to avoid an extra DPoP mint on native. Tests in state.test.ts: a signed-out cookie boot sends both requests concurrently and bootstrapAccess settles without a second sequential request; an authenticated boot publishes the same state as today; an aborted operation publishes nothing. Cost: one extra public, in-memory GET per cookie-mode boot (Hub rate limit is 60 per minute per IP, authRoutes.ts:535-538).",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Neither change alters auth decisions, E2EE, the Hub protocol, or hosted lifecycle ownership. (1) is a code-only prefetch keyed on a non-secret boolean hint. (2) sends an existing public read earlier inside the single owner (#restoreAccess), and the session answer still decides the outcome. One alternative would need a decision: having the Hub return bootstrapAvailable in the session 401 body is a Hub protocol change. It is not recommended.",
+  "repos": "ryco",
+  "correction": "The auditor says the boot now waits one Hub RTT instead of two. That holds only for authenticated boots. Signed-out and expired-session boots still wait for the session 401 and then bootstrap-status (state.ts:776-788). The auditor says the HostedHubRoot download overlaps the access check. That is true, but the RootAppShell graph, which the finding counted inside the 1.8 MiB, was split out and starts only after the account answer (bootGate.ts:45-53), contrary to the gate's own comment. Brotli is not unverified: Hub origin/main precompresses brotli q11 and negotiates br (5dc12a4); only deployment is unknown."
+}

@@ -1,0 +1,55 @@
+{
+  "id": "mobile-boot:no-react-compiler-on-mobile",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL holds. #710 (60633eff3) turned on React Compiler for mobile via experiments.reactCompiler and a babel-preset-expo sources filter, and the wiring works. I ran the repo's real babel.config.js in memory: HomeScreen, InboxScreen, InboxThreadRow, ProjectsScreen and WorktreeRow come out with memo caches (_c(n)). ThreadDetailScreen does not, and neither does anything else in features/threads, components, or the remaining feature directories. Two things the auditor missed. (1) Widening the regex alone will not compile the two hottest thread components. The root ThreadDetailScreen and ThreadComposer both bail on try/finally and on try without catch, so only the row components (TimelineRow, ThreadMessage, ThreadActivityFoldRow) would get compiled. (2) A small defect in the integration: metro.config.js NON_INLINED_REQUIRES names 'react-compiler-runtime', but with target '19' the compiler emits 'react/compiler-runtime'. Inline requires therefore turns every compiled render into (0, require(\"react/compiler-runtime\").c)(n).",
+  "evidence": [
+    {
+      "location": "apps/mobile/app.config.ts:167-171",
+      "note": "experiments.reactCompiler is true. @expo/cli metroOptions.js:120/203 (export:embed for release builds) and @expo/metro-config rewriteRequestUrl.js:85 (dev server) pass it as transform.reactCompiler. babel-transformer.js:84 then sets supportsReactCompiler."
+    },
+    {
+      "location": "apps/mobile/babel.config.js:6-7",
+      "note": "REACT_COMPILER_SOURCES = /apps/mobile/src/features/(home|inbox|projects)/. I transformed every file in those three directories in memory with this exact config. HomeScreen, HomeRouteScreen, InboxScreen (2 sites), InboxThreadRow, ProjectsScreen (3), WorktreeRow (2) and others contain _c(n). ThreadDetailScreen.tsx contains no compiler-runtime import."
+    },
+    {
+      "location": "node_modules/.bun/babel-preset-expo@57.0.11+88441c62a747ee83/node_modules/babel-preset-expo/build/configs/expo.js:121-160",
+      "note": "The preset passes target '19' and spreads the user options, sources included. Release builds use panicThreshold 'NONE', so a function that cannot be compiled is skipped instead of failing the build."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx:375",
+      "note": "In a simulation that compiles all sources, the root ThreadDetailScreen component bails with 'Handle TryStatement with a finalizer' and 'TryStatement without a catch'. The causes are try/finally inside its callbacks at :1041-1049 (applyPolicy), :1329-1396 (send) and :1404-1409. TimelineRow (:206), ThreadCachedBanner, ThreadDeliveryBanner and HeaderActions in the same file do compile."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/ThreadComposer.tsx:37",
+      "note": "ThreadComposer bails because of the try/finally at :103-109 in its send handler, so widening the regex alone leaves it uncompiled."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/ThreadMessage.tsx:117",
+      "note": "AudioAttachmentRow mutates the useVideoPlayer return value, which the compiler reports as 'This value cannot be modified' (a real rules-of-React diagnostic). It would be skipped. ThreadMessage, ImageAttachment and VideoAttachmentRow compile cleanly."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/useThreadChecks.ts:21",
+      "note": "Bails with 'Support value blocks ...'. Simulated totals for features/threads: 47 functions compile, 10 bail. Of the bails, 7 are try/finally or try without catch, 2 are the AudioAttachmentRow mutation, and 1 is this value-block issue."
+    },
+    {
+      "location": "apps/mobile/src/components/OverlayPortal.tsx:36",
+      "note": "This is the only bail in src/components ('UpdateExpression' on the module-level nextKey++). Simulated totals for components: 47 functions compile, 1 bails. Widening to this directory is close to free."
+    },
+    {
+      "location": "apps/mobile/metro.config.js:86-93",
+      "note": "NON_INLINED_REQUIRES lists 'react-compiler-runtime', the npm polyfill for React 17/18. The compiler emits `import { c as _c } from \"react/compiler-runtime\"`. Running the Metro worker's import-export plus inline-requires plugins in memory on InboxThreadRow gives `var $ = (0, require(\"react/compiler-runtime\").c)(79);`, so the runtime lookup is inlined into every compiled render. Added in 1b8bfd183."
+    }
+  ],
+  "remaining": "(a) Compiler scope. apps/mobile/babel.config.js:6-7 still excludes src/features/threads, src/components and every other feature directory. Nothing under those paths gets compiled, including ThreadDetailScreen.tsx, ThreadMessage.tsx, ThreadActivityFoldRow.tsx and ThreadComposer.tsx, which re-render during live streaming. (b) Widening the regex is not enough for the hottest components. ThreadDetailScreen (ThreadDetailScreen.tsx:375) bails because of try/finally in callbacks at :1041-1049, :1329-1396 and :1404-1409. ThreadComposer (ThreadComposer.tsx:37) bails because of try/finally at :103-109. useThreadChecks.ts:21 bails on a value block. With a widened regex alone, only the row components (TimelineRow, ThreadMessage, ThreadActivityFoldRow and the cards) would be compiled. (c) Nobody has measured the gain on a device yet.",
+  "fixDefects": "Minor: apps/mobile/metro.config.js:91 keeps 'react-compiler-runtime' eager. Compiled code imports 'react/compiler-runtime' (babel-preset-expo forces target '19'), so the entry does nothing. Metro inline-requires then rewrites every compiled render to `(0, require(\"react/compiler-runtime\").c)(n)`. That costs one metroRequire lookup per render per compiled component. Each lookup is negligible, but the count grows with the scope. The fix is a one-word change. Also minor, and already noted by the auditor: the sources regex is hard-coded to the path segment apps/mobile/src/features, with no test or lint guard. Mobile Vitest does not run the compiler, so existing tests do not cover compiled behaviour.",
+  "implementationSketch": "1) apps/mobile/metro.config.js:91: replace 'react-compiler-runtime' with 'react/compiler-runtime' (or keep both). Check: transform a compiled file and confirm the output keeps a single top-level `var _c = ...` binding instead of an inline require at each use. 2) apps/mobile/babel.config.js: widen REACT_COMPILER_SOURCES in two steps, profiling on a device after each one as the existing comment requires. Step A: add src/components, e.g. /[\\\\/]apps[\\\\/]mobile[\\\\/]src[\\\\/](components|features[\\\\/](home|inbox|projects))[\\\\/]/. AppText, GlassSurface, StatusPill and the others all compile, and only OverlayPortal bails. Step B: add features/threads. 3) To compile the thread roots, move try/finally out of component and callback bodies. Options: a module-level async helper such as `async function withBusy(setBusy, fn) { setBusy(true); try { return await fn(); } finally { setBusy(false); } }` called from the useCallback, or promise .catch/.finally chains. Apply this to ThreadDetailScreen.tsx applyPolicy (:1038-1050), the send handler (:1325-1396) and the block at :1404-1409, and to ThreadComposer.tsx :100-110. Optionally restructure useThreadChecks.ts:21, and leave AudioAttachmentRow uncompiled (or add 'use no memo'), since it mutates the player by design. 4) Verify. Add a small Node check script or Vitest test under apps/mobile that runs @babel/core with babel.config.js and caller { supportsReactCompiler: true, isDev: false } over the targeted files. It should use the compiler's `logger` option to assert zero CompileError events for ThreadDetailScreen, ThreadComposer, ThreadMessage and TimelineRow, and assert that the output contains `react/compiler-runtime`. That also guards against the path regex silently going stale. Then run the existing mobile tests and profile thread detail during a live streaming turn with the React DevTools profiler or Hermes sampling profiler, before and after (render counts and commit durations of TimelineRow and ThreadMessage).",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Rendering and build configuration only. Nothing touches auth, E2EE, Hub protocol or hosted lifecycle. The rollout gating (profile before widening) is already the documented engineering policy in babel.config.js.",
+  "repos": "ryco",
+  "correction": "The classification and the wiring analysis are correct. Two corrections. (1) fixDefects should not say 'None seen'. metro.config.js:91 keeps the wrong module name ('react-compiler-runtime' instead of 'react/compiler-runtime') eager, so the compiler runtime is inline-required on every compiled render. (2) The proposed remedy, widening REACT_COMPILER_SOURCES to threads, does not compile ThreadDetailScreen or ThreadComposer. Both bail on try/finally (and try without catch) inside their callbacks, so those blocks need refactoring before the thread-detail hot path benefits beyond the row components."
+}

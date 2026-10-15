@@ -1,0 +1,54 @@
+{
+  "id": "startup-hang:hub-connector-in-serve-gap",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE by 11bfda63e, which is on main and also in the Hub-vendored 7bc39eec3. HttpRouter.serve now gets only HubConnectorDeferredLive (a Deferred-backed HubConnectorReady plus HubConnectorStart). The real HubConnectorLive (process lock, identity runtime, OS credential-store probe) is dynamically imported and built in a fiber forked into the layer scope. That only happens after handlers attach, the http-serving frame is written and markHttpServing runs. Every production consumer of the connector awaits the Deferred: the routes in http.ts, localIntroductionHttp.ts, desktopNativeNodeClaimHttp.ts and desktopHubReachabilityHttp.ts. No WS RPC, auth, environment or startup-phase code touches the connector or the identity, and owner auth runs before the await. So keychain and identity I/O are off time-to-first-response and off the desktop http-serving and ready signals. Shutdown order is unchanged: connector finalizers still run after the serve layer's. Build failure and mid-build interruption are handled, and HubConnectorDeferred.test.ts covers both. Spans server.startup.hub.connector, server.startup.hub.process-lock and server.startup.hub.identity-runtime, with per-phase annotations, reach the local file tracer. I could not refute the auditor, but it missed one point: there is no composition-level test for the start call. The remaining nits are cosmetic or optional.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:805-809",
+      "note": "httpServingLayer is provided with HttpRouter.serve(makeRoutesLayer).pipe(Layer.provideMerge(HubConnectorDeferredLive)). HubConnectorLive is no longer imported statically by server.ts."
+    },
+    {
+      "location": "apps/server/src/server.ts:715-727",
+      "note": "After serve, httpServingLayer writes the http-serving lifecycle frame, runs startup.markHttpServing (line 723) and only then calls hubConnector.start (line 726). markHttpServing (serverRuntimeStartup.ts:1153-1158) completes a Deferred and releases the provider boot gate without waiting."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.ts:43-88",
+      "note": "Uses a lazy import('./HubConnectorLive.ts') and Layer.buildWithScope in the layer scope with the captured serve-time context. start is idempotent and fire-and-forget (forkIn). A defect is logged and the Deferred dies with HubConnectorStartupError. An interrupt-only exit interrupts the Deferred."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorService.ts:160-177",
+      "note": "HubConnectorReady and awaitHubConnector are Deferred-backed. hubConnectorReadyLayer exists for tests."
+    },
+    {
+      "location": "apps/server/src/hubConnector/http.ts:41-49",
+      "note": "Hub routes run authenticateOwner and then awaitHubConnector, so only Hub routes wait on custody. git grep shows that awaitHubConnector, in http.ts, localIntroductionHttp.ts, desktopNativeNodeClaimHttp.ts and desktopHubReachabilityHttp.ts, is the only production path to the connector. There are no WS RPC consumers."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorLive.ts:365-411",
+      "note": "The process lock (span at line 370) and makeIdentityRuntime (span at line 408, per-phase annotations through onStartupPhase) are built only inside the deferred build. HubConnectorLive is a plain Layer.effect with no sub-layers (line 767), so the fresh memo map in buildWithScope duplicates nothing."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.test.ts:41-106",
+      "note": "Tests cover: nothing loads before start; a waiting route is answered after start; start runs once; the serve context is used; finalizers run on scope close; a build failure fails only the waiting routes; shutdown mid-build interrupts the waiters."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorLive.ts:381-382",
+      "note": "Stale comment, 'Identity custody is built before the router serves'. It is now built after."
+    },
+    {
+      "location": "apps/server/src/server.test.ts:724-731",
+      "note": "Server route tests provide hubConnectorReadyLayer directly. No test exercises makeServerLayer's call to HubConnectorStart.start, so removing line 726 would make every Hub route hang without any test failing."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. Minor: (1) The comment at apps/server/src/hubConnector/HubConnectorLive.ts:381-382 is stale; it says custody is built before the router serves. (2) awaitHubConnector (HubConnectorService.ts:169-173) has no timeout or 503. While an OS keychain prompt is pending, /api/hub/*, the local-introduction routes, native-claim and desktop reachability hang, and the desktop hub control fetch (apps/desktop/src/desktopHubControl.ts:119) has no timeout either. This only affects Hub surfaces, and it was strictly worse before (the whole server was held), so it is not a regression. (3) Test-coverage gap: nothing asserts that the real makeServerLayer composition calls HubConnectorStart.start after serve. (4) The connector module graph (relay, E2EE, noble) is still imported on every boot, now right after serve, even for nodes with the Hub disabled. It is off the critical path but competes with early requests on the main thread. That is outside this finding's scope, which covers keychain and identity I/O in the listen-to-handler gap.",
+  "implementationSketch": "Optional cleanups only. (a) Reword HubConnectorLive.ts:381-382 to say custody is built in the deferred build after the router serves. (b) Optionally wrap awaitHubConnector, or the route helpers in http.ts, localIntroductionHttp.ts, desktopNativeNodeClaimHttp.ts and desktopHubReachabilityHttp.ts, in Effect.timeoutOption of about 10-15 s and map a timeout to an HTTP 503 with a 'hub_connector_starting' error and a Retry-After header. Keep the auth check before the wait. Add a test in HubConnectorDeferred.test.ts or http.test.ts that uses a never-resolving load and asserts the 503. Also check that desktopHubControl and the web HubSection treat 503 as retryable, not as local_control_unavailable. (c) Add a server-level test that builds makeServerLayer, or a reduced composition of HttpRouter.serve plus HubConnectorDeferredLive plus httpServingLayer, with a stub load, then asserts that GET /api/hub/status resolves after serving. (d) If profiling shows import cost after serve on Hub-disabled nodes, skip start() when config.hubConnector?.enabled is false and build lazily on the first awaitHubConnector instead (start inside ready.await).",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

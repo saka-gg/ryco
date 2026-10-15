@@ -1,0 +1,55 @@
+{
+  "id": "dedicated-pages:getconfig-n-plus-one",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The finding's measured costs are gone. useAutomationCentre (Projects map per checkout, AutomationsSummary, useProjectAutomations) reads providers from the live per-environment config store. getUsageSummary sends one request with no getConfig preflight, and contract mismatches are recognised from the answer. The server memoizes resolveAvailableEditors by platform+PATH with a 5-minute TTL, so loadServerConfig no longer runs the PATH and bundle scan per call. All three landed in 60633eff3 (#710), which the Hub vendor pin 7bc39eec3 includes. The other loadServerConfig inputs are cached already (keybindings via Cache, providers and settings from refs), so not adding the optional assembled-config cache costs little. Two small ad hoc getConfig callers the finding named in passing are still there. Both are per click and low value. See the correction field.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/automations/useAutomationCentre.ts:71-78",
+      "note": "providers = useEnvironmentServerConfig(environmentId)?.providers. bind() (93-136) makes no getConfig call and returns early when the connection client is unchanged. The old f1be4abc7 code called next.server.getConfig() on every bind."
+    },
+    {
+      "location": "apps/web/src/components/automations/data/useAutomationCentre.browser.tsx:31",
+      "note": "The browser test pins the rule that providers come from the live config and never from a getConfig read."
+    },
+    {
+      "location": "apps/web/src/hooks/useChatsAvailability.ts:37-71",
+      "note": "The store reads the primary serverConfigAtom or the saved-environment runtime store. The saved env's onConfigUpdated keeps it current (environments/runtime/service.ts:1352-1359, 1581-1586). A hosted node switch clears the primary atom (hostedHub/environment.ts:54), so a previous node's providers cannot linger."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:900-915",
+      "note": "getUsageSummary checks only the caller's input.contractVersion and sends one serverGetUsageSummary request with signal support. isUsageContractRejection (usage/compatibility.ts:30-40) maps three answers to UsageContractMismatchError: a client decode error on contractVersion, the node's UsageReadError (its message getter returns detail = USAGE_UPDATE_MESSAGE, see contracts usage.ts:150-158 and UsageService.ts:935-939), and an unknown request tag. Covered by wsRpcClient.usage.test.ts."
+    },
+    {
+      "location": "apps/server/src/open.ts:273-311",
+      "note": "resolveAvailableEditors caches the default process.env scan under the key platform+PATH with AVAILABLE_EDITORS_CACHE_TTL_MS = 5 min. Explicit env or darwin overrides bypass the cache. #716 (2f1a62260) later added more bundle-CLI paths, which makes the scan more expensive, but the cache still covers it. open.test.ts:754-757 tests cache hit and invalidation."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:1173-1209",
+      "note": "loadServerConfig still assembles the config per call, but every input is now cheap: keybindings.loadConfigState is Cache-backed (keybindings.ts:438,603) and resolveAvailableEditors() is a cache hit."
+    },
+    {
+      "location": "apps/web/src/editorPreferences.ts:60-66",
+      "note": "Residual: openInPreferredEditor, used by ChatMarkdown.tsx:454 on file-link clicks, still fetches the full primary config only to read availableEditors. That costs about 1 RTT plus decoding an 85-130 KB config per click. OpenInPicker, SettingsPanels and DiagnosticsPanel already read availableEditors from the store."
+    },
+    {
+      "location": "apps/web/src/components/pullRequests/agentHandoff.ts:176-199",
+      "note": "Residual: readDraftDefaults always calls getConfig and then readEffectiveProjectPreferences, one after the other. It runs in parallel with the context fetch (line 289-292). It duplicates readNewDraftDefaults (hooks/newDraftDefaults.ts:99-136), which uses the cached config outside hosted mode and remembered preferences."
+    },
+    {
+      "location": "apps/web/src/hooks/newDraftDefaults.ts:99-136",
+      "note": "useHandleNewThread keeps the deliberate fresh getConfig only for hosted targets, as the verifier's caveat requires."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defects found in the implemented fixes.",
+  "implementationSketch": "Optional low-value follow-ups. Neither is needed for the finding's measured costs. (1) In editorPreferences.ts openInPreferredEditor, take availableEditors from getServerConfig() (client-runtime rpc/serverState.ts:74), falling back to api.server.getConfig() only while the store is null. This removes about 1 RTT and the full config decode per markdown file-link click, and matches what OpenInPicker already does. Update ChatMarkdown.browser.tsx mocks if needed and add a unit test that a non-null store makes no getConfig call. (2) In agentHandoff.ts readDraftDefaults, replace the inline getConfig + readEffectiveProjectPreferences with readNewDraftDefaults({ api, environmentId: projectRef.environmentId, cachedConfig: readEnvironmentServerConfig(projectRef.environmentId), requireFreshConfig: nodeIdForHostedEnvironment(envId) !== null || isHostedHubMode(), projectId }). Then map config.settings.defaultAgentTokenMode and initialDraftModelSelection as today. This removes duplicate logic and saves 1 RTT per non-hosted handoff. Do not add a blanket lint guard against getConfig: the hosted fresh reads in newDraftDefaults/executeChatSendTurn and the connect-time fallback in environments/runtime/service.ts:1239 are deliberate.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Client-only read-path changes. Hosted fresh-read semantics stay as they are, so no auth, E2EE, Hub protocol or lifecycle ownership is touched.",
+  "repos": "ryco",
+  "correction": "The auditor's DONE stands. One nuance: the proposal's 'read config from the store instead of getConfig RPCs' is not fully applied. editorPreferences.openInPreferredEditor is still a pure probe (it fetches the full config for one field per click), and agentHandoff duplicates the uncached version of readNewDraftDefaults. Both are per user action and outside the finding's expected-gain scope. They are low-value cleanup, not a reason to downgrade."
+}

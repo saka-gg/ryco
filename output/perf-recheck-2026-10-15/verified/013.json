@@ -1,0 +1,63 @@
+{
+  "id": "desktop-boot:renderer-v8-code-cache-heat",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor reported no concrete defect. There is one small one. On every version change the prune clears the whole V8 code cache with clearCodeCaches({}). That includes entries for content-hashed chunks the web build keeps stable across app-only deploys on purpose (boot-vendor, ~707 KB of a ~1.6 MB boot graph, plus the lexical, markdown and Shiki groups). Those entries would still be valid: the URL is the same, the persisted port keeps the origin stable, and the retained immutable HTTP cache entry keeps the same response time. So the first launch after each nightly now compiles ~44% of the boot graph cold that used to be warm. The auditor's own reasoning for keeping the HTTP cache ('content-hashed assets stay valid') applies just as much to the code cache, but the code cache is wiped anyway. Smaller misses: the did-fail-load fallback loadURL(backendHttpUrl) does not wait for rendererCacheMaintenance, and the prune and timeout logic in main.ts has no tests.",
+  "summary": "The core fix is in place. The main window sets v8CacheOptions \"bypassHeatCheck\". A packaged-only, version-keyed prune clears the renderer code cache with a 1.5 s bound before the first app load. It works on the user's install: Code Cache is 46 MB (the finding saw 310 MB) and the marker reads 0.1.31. The main window is created by a single function and denies child windows, so no other window loads the Ryco boot graph with default options. Changed chunks now warm one launch earlier, as the finding proposed. Defect: the prune clears the whole code cache, which partly cancels that gain. On the first launch after each update, stable vendor chunks that used to load warm now compile cold, while the boot chunk compiles cold either way. The skipped HTTP-cache clear is reasonable: Chromium bounds that cache (773 MB now), and keeping it is what lets stable chunks stay valid. The defect is low impact, so the status stays DONE.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/main.ts:4397-4406",
+      "note": "createWindow() webPreferences set v8CacheOptions: \"bypassHeatCheck\". createWindow is the only factory for Ryco app windows (callers at 1691, 1712, 2225, 2268), and setWindowOpenHandler (4488) denies child windows, so no other window runs the boot graph with default options."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4747-4771",
+      "note": "pruneRendererCachesOnVersionChange() calls session.defaultSession.clearCodeCaches({}) on any app.getVersion() change, an unfiltered wipe that includes still-valid entries for unchanged hashed chunks. The marker is written only after success, so a failed clear is retried on the next launch."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4811-4815",
+      "note": "The prune runs only when app.isPackaged, starts at the top of bootstrap and is bounded by boundedRendererCacheMaintenance (1.5 s, 4774-4783)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1752-1758",
+      "note": "loadPackagedBackendAppWindow waits for rendererCacheMaintenance before loadURL(backendHttpUrl)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4580-4588",
+      "note": "The did-fail-load fallback (the boot page failed to load) calls window.loadURL(backendHttpUrl) without waiting for rendererCacheMaintenance. This is a rare path with trivial impact."
+    },
+    {
+      "location": "apps/web/src/viteBuild/codeSplitting.ts:18-23",
+      "note": "boot-vendor (React, router, Effect, Base UI) is deliberately kept byte-stable across app-only deploys, and lexical, markdown and Shiki get their own stable groups (lines 28-31). Their code-cache entries stay valid across such updates, but the blanket prune discards them."
+    },
+    {
+      "location": "apps/web/dist/assets/boot-vendor-BQ6g4P2-.js",
+      "note": "In the local build, boot-vendor is 707,326 bytes and boot-D36cWeP2.js is 894,988 bytes. Stable vendor code is about 44% of the boot graph that the prune makes cold on the first launch after each update."
+    },
+    {
+      "location": "apps/server/src/http.ts:50",
+      "note": "Hashed assets are served with 'public, max-age=31536000, immutable' (applied at line 121). The HTTP cache is not cleared, so an unchanged chunk keeps its URL and response time, and its V8 code-cache entry would still validate."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4676-4709",
+      "note": "selectDesktopBackendPort keeps a persisted port, so the renderer origin (part of the code-cache key) is stable across launches and updates. The bypassHeatCheck gain therefore holds."
+    },
+    {
+      "location": "~/Library/Application Support/ryco (outside repo, read-only du)",
+      "note": "Packaged userData shows 'Code Cache' at 46 MB (310 MB in the finding), 'Cache' at 773 MB (Chromium-bounded; 890 MB in the finding), and renderer-cache-version = 0.1.31. The prune runs in production."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4754",
+      "note": "pruneRendererCachesOnVersionChange and boundedRendererCacheMaintenance are referenced only in main.ts, and no test covers them. All of this landed in 60633eff3 (#710)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "On every version change, the unfiltered session.defaultSession.clearCodeCaches({}) at apps/desktop/src/main.ts:4760 also discards V8 code-cache entries for chunks whose content hash did not change. The web build deliberately keeps these stable across app-only deploys: boot-vendor is ~707 KB of the ~1.6 MB boot graph (codeSplitting.ts:18-23), plus the lexical, markdown and Shiki groups. Those entries would still validate: same URL, the persisted port keeps the origin stable, and the retained immutable HTTP cache keeps the same response time. Effect on the first launch after each nightly: the vendor half of the boot graph compiles cold where it used to load warm. Estimated at roughly 10-20 ms (not measured), which partly offsets the finding's gain for that launch; the gain on the second launch is unaffected. Minor: the did-fail-load fallback loadURL(backendHttpUrl) at main.ts:4587 does not wait for rendererCacheMaintenance, and the prune and bounded-maintenance logic has no unit tests.",
+  "implementationSketch": "Replace the blanket clear with a targeted one, extracted into a testable module such as apps/desktop/src/rendererCodeCachePrune.ts.\n1. Write the marker as JSON {version, electron: process.versions.electron, origin, assets: string[]} instead of a bare version. assets lists the hashed /assets/*.js|*.mjs|*.wasm names from resolveDesktopStaticDir() (main.ts:2119). Read the directory once with FS.promises.readdir; it holds about 200 files. origin is the backendHttpUrl origin, so the marker is written after port selection, or the previously persisted port is recorded.\n2. On launch, read the old marker and decide:\n   - Missing or unparsable (legacy plain-text marker): clearCodeCaches({}), the current behaviour.\n   - prev.electron !== current: clearCodeCaches({}). V8 rejects cached data from another V8 version anyway, so this costs nothing.\n   - prev.version !== current version: compute removed = prev.assets minus current assets and call session.defaultSession.clearCodeCaches({ urls: removed.map(name => `${prev.origin}/assets/${name}`) }). Electron matches the resource URL exactly, and Chromium's remover keys by resource URL. Skip the call when removed is empty.\n   - If the origin changed, the old origin's entries are dead; clear everything.\nKeep boundedRendererCacheMaintenance and the loadURL gate as they are. Also wrap the did-fail-load fallback at main.ts:4587 in rendererCacheMaintenance.then(...).\nTests (vitest, in the new module): a pure decide(prevMarker, current) function returning 'none' | {kind:'all'} | {kind:'urls', urls}. Cover legacy-marker migration, Electron bump, app-only bump with partial asset overlap (only removed URLs are listed), identical asset sets (no clear), origin change, and the timeout helper resolving after the bound.\nTo validate in a packaged build: install build N, launch twice, then install N+1 with only app changes (boot-vendor hash unchanged). On N+1's first launch, check chrome://tracing or performance 'v8.compile' / the boot-report script (apps/desktop/scripts/boot-report.mjs): boot-vendor should consume its cache (v8.compile with consume) while boot produces one. The Code Cache directory should stay bounded over several updates.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local desktop cache housekeeping only. No auth, E2EE, hosted lifecycle or Hub protocol impact, and no product behaviour trade-off beyond disk use, which Chromium already bounds.",
+  "repos": "ryco"
+}

@@ -1,0 +1,75 @@
+{
+  "id": "gap-composer-pickers:ls-files-timeout-fallback",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The bug as described is gone in 60633eff3 (#710). A slow or failing `git ls-files` no longer leads to a readdir walk with check-ignore at every level. Cold '@' reads wait at most 4 s and then get a tracked-only stand-in flagged partial/refreshing, which the full build replaces in the background. Inside a detected work tree there is no readdir walk and no check-ignore. A failed full listing falls back to tracked files. Total failures back off for 5 s, warnings are logged, and the web menu shows partial and error states with a retry and re-asks refreshing answers. All the auditor's evidence and line numbers check out. One correction to the residual: the stand-in is not the index-only `ls-files -c` the finding measured at 28-32 ms. trackedOnly mode also waits on `ls-files --cached --ignored --exclude-standard`, which opens `<dir>/.gitignore` in every tracked directory. That listing is fast on local disks but scales with directory count on slow or network volumes, one of the finding's named triggers. So the 4 s bound holds for huge untracked trees on fast disks, but on very slow volumes the stand-in can arrive late, or time out and leave readers parked for about 40 s before an error.",
+  "evidence": [
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:64",
+      "note": "WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS = 4_000. awaitColdIndex (887-906) waits for the full build with Effect.timeoutOption, then starts the degraded build."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:864",
+      "note": "startDegradedBuild runs listVcsIndex(..., 'tracked') in the background with no build permit and logs a warning with cwd and deadlineMs. Its failure is swallowed by Effect.option (878), so readers are not told."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:905",
+      "note": "After the deadline the reader does an unbounded `Deferred.await(waiters)`. With no stand-in it waits for the full build's outcome, including the tracked retry in buildWorkspaceIndex (675-687): up to 20 s + 20 s."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:668",
+      "note": "buildWorkspaceIndex: a VCS root never walks the tree, and a failed full listing falls back to tracked files with a log. The walk (583) runs only when detectVcsDriver returns null and has no check-ignore."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:560",
+      "note": "trackedOnly still runs `--cached` and `--cached --ignored --exclude-standard` together, and Effect.all waits for both. The second loads per-directory .gitignore from the work tree (git prep_exclude/add_patterns open() per directory), so the stand-in is not index-only. Locally on ryco (7.7k files, 475 dirs): -c 0.01 s, -c -i 0.03 s, --others 0.02 s."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:529",
+      "note": "Every ls-files, the stand-in's included, uses the shared WORKSPACE_FILES_TIMEOUT_MS = 20_000 (319)."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:631",
+      "note": "filterIgnoredPaths (chunked check-ignore) has no production callers left. Only VcsDriverContractHarness uses it."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsDriverRegistry.ts:146",
+      "note": "Pre-existing, unchanged: a failed detection (rev-parse over its 5 s timeout, GitVcsDriver.ts:503) is cached with TTL 0 and mapped to null by detectVcsDriver (WorkspaceEntries.ts:549). That still sends a git work tree on a hung volume to the readdir walk, which has no deadline. Narrow."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:704",
+      "note": "isBackingOff with WORKSPACE_INDEX_FAILURE_RETRY_MS = 5_000 (66). readIndex (938) returns the cached failure. Covered by the test at WorkspaceEntries.index.test.ts:481."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1274",
+      "note": "search() returns partial and refreshing (contracts project.ts:63,70)."
+    },
+    {
+      "location": "apps/web/src/rpc/projectAtoms.ts:354",
+      "note": "The web client does not cache refreshing answers and re-asks them up to 5 times at 400 ms (constants at 27-28), so the full index replaces the stand-in in the menu."
+    },
+    {
+      "location": "apps/web/src/components/chat/composerPathMenu.ts:68",
+      "note": "'Couldn't search workspace files.' with a retry (70), the partial footnote (73), and 'Indexing workspace…' while the first build runs."
+    },
+    {
+      "location": "apps/mobile/src/rpc/projectFilesAtoms.ts:368",
+      "note": "Outside composer scope (mobile has no '@' picker): the mobile files-screen search caches every searchEntries result for 15 s (40), including refreshing stand-ins, and ignores partial/refreshing."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.index.test.ts:400",
+      "note": "Tests cover the deadline stand-in (400), the full build replacing it (424), the tracked fallback (454) and the failure backoff (481). No test has a slow or hanging trackedOnly listing."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Narrow, slow-volume only. (1) The stand-in and fallback 'tracked' listing (GitVcsDriver.ts:560-569) also waits on `ls-files --cached --ignored --exclude-standard`. That opens .gitignore in every tracked directory, so it is not the index-only `ls-files -c` that WorkspaceEntries.ts:60-62 documents and the finding measured. On network or cloud volumes it scales with directory round-trips. If it passes 20 s, the stand-in fails silently (WorkspaceEntries.ts:878) and the tracked fallback fails too, so a cold '@' waits about 40 s (WorkspaceEntries.ts:905) and then errors, retried every 5 s. An index-only listing would have answered in milliseconds. (2) The same unbounded second wait applies when git hangs outright (auditor's residual). (3) Minor background cost: if the full listing keeps timing out, every revalidation (on read, at least 15 s after the last build) runs another doomed 20 s `--others` scan, then a second tracked listing, although the stand-in already holds that data. (4) Pre-existing, unchanged: a detection timeout (rev-parse over 5 s) still sends a git work tree to the deadline-free readdir walk. On huge untracked trees on fast disks, the finding's other trigger, the fix fully bounds latency.",
+  "implementationSketch": "Optional hardening, small: (a) GitVcsDriver.listWorkspaceFiles: in trackedOnly mode, give `--cached` a short timeout (e.g. 5 s), and run `--cached --ignored --exclude-standard` with a short timeout (about 1.5 s) or skip it, treating a timeout as no ignored-tracked paths. The result is already flagged partial, so a rare force-added ignored file showing briefly is harmless. With a short timeout, the existing test 'lists only tracked files when asked' (GitVcsDriver.listWorkspaceFiles.test.ts:66) stays valid. Fix the WorkspaceEntries.ts:60-62 comment either way. (b) WorkspaceEntries.awaitColdIndex: bound the second `Deferred.await(waiters)` (e.g. another 4-6 s). Past that, fail this reader with a WorkspaceEntriesError such as 'still indexing' without writing slot.failure, so the menu shows 'Couldn't search workspace files' with a retry that joins the in-flight single-flight build. Or have startDegradedBuild complete a per-refresh 'degradedFailed' deferred that the reader races. (c) buildWorkspaceIndex: when the full listing fails and a stand-in for the same generation is already in slot.index, reuse it instead of re-listing. Optionally remember a full-listing timeout per slot for a few minutes and skip repeat `--others` scans on revalidation. Tests in WorkspaceEntries.index.test.ts using the existing fake driver and TestClock: full listing Effect.never plus trackedOnly Effect.never makes the cold search settle by about 10 s; trackedOnly ignored-listing slow still yields a stand-in at about 4 s; full listing fails after the stand-in is published means no second tracked call.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local index behaviour only. No auth, E2EE, Hub protocol or hosted-lifecycle impact. Showing a force-added ignored file in a partial stand-in is a trivial presentation detail, not a product trade-off.",
+  "repos": "ryco",
+  "correction": "The auditor's residual assumes the stand-in is the index-only `ls-files -c` the finding measured (28-32 ms). In fact trackedOnly mode also waits on `ls-files --cached --ignored --exclude-standard` (GitVcsDriver.ts:563), which does per-directory work-tree I/O. So on slow or network volumes, one of the finding's named triggers, the stand-in can arrive late or time out even when git is not hung. The DONE classification and every cited line number are otherwise correct."
+}

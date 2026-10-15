@@ -1,0 +1,63 @@
+{
+  "id": "gap-first-turn-latency:checkpointreactor-redundant-detail-loads",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All four parts landed in 60633eff3 (#710). (1) Baseline, completion and placeholder paths read getThreadCheckpointContext, a thread-and-project join plus checkpoint rows, instead of getThreadDetailById. Messages, activities and plans are no longer decoded. (2) The runtime turn.started handler is kept but goes through ensurePreTurnBaseline, which skips git through a per-thread known-ref memo. Only the first trigger of a turn start can reach the VCS detect and rev-parse, and only on a memo miss. (3) start() drops assistant, streaming, turn-bound and inherited thread.message-sent events before enqueue. (4) The worker is a KeyedSerialWorker with one lane per thread. The rare revert path is now the only CheckpointReactor caller of full thread detail. There are 4 triggers per turn start, not 3: message-sent, turn-start-requested, the baseline that ProviderCommandReactor awaits, and runtime turn.started. Triggers 2 to 4 cost two indexed SQLite reads plus an existsSync. One small residual, not worth reopening: getThreadCheckpointContext decodes every checkpoint's checkpoint_files_json, and no caller reads it. That costs about 9 ms per call on the user's largest checkpoint and is negligible for typical threads.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:365-380",
+      "note": "resolveThreadDetail is now limited to reverts. resolveCheckpointContext calls projectionSnapshotQuery.getThreadCheckpointContext."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:759-797",
+      "note": "ensurePreTurnBaseline uses the narrow context and checks the knownCheckpointRefs memo before checkpointStore.hasCheckpointRef, which runs vcsRegistry.resolve (the 'detect') plus rev-parse. The memo is filled at 796 and also at 536 after a completion capture, so turn N's capture covers turn N+1's baseline. It is cleared on revert at 1010."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:432-466",
+      "note": "When the thread's own workspace resolves and preferSessionRuntime is false, no session lookup runs. The git check is isGitRepository, an existsSync of .git (apps/server/src/git/Utils.ts:4)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:638-697",
+      "note": "Completion reads getThreadShellById plus the narrow context. The placeholder check and the next turn count come from context.checkpoints, so the 70 ms detail load per completion is gone."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:382-392",
+      "note": "The reply id comes from listThreadMessagesByTurn with a limit of 200. The Live layer exports it (ProjectionSnapshotQuery.ts export list), so the full-detail fallback only runs for test doubles."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:107-114,1636-1663",
+      "note": "isTurnStartingUserMessage filters before enqueue: only non-streaming user messages with turnId null that are not inherited fork history pass. The runtime stream enqueues only turn.started and turn.completed."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:1615-1625",
+      "note": "makeKeyedSerialWorker keys the lanes per thread. Capacity 1,024 is global across lanes (packages/shared/src/KeyedSerialWorker.ts:10-14). With about 4 to 5 items per turn, a single thread cannot realistically fill it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1944-1951,2073",
+      "note": "Every turn start also enqueues and awaits a 'baseline' item in the same thread lane. That makes 4 triggers per turn start, and after the first trigger all of them hit the memo."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1481-1498,1808-1827,3401-3445",
+      "note": "The context is an indexed thread-and-project join plus all checkpoint rows. That includes checkpoint_files_json, decoded with Schema.fromJsonString(Array(OrchestrationCheckpointFile)) (line 274-278). The query plan uses the index (thread_id=? AND checkpoint_turn_count>?)."
+    },
+    {
+      "location": "apps/server/src/provider/threadSessionLookup.ts:16-24",
+      "note": "findThreadSession uses providerService.getSessionForThread (ProviderService.ts:2297-2323): one binding read plus one instance's sessions. It does not use listSessions. The auditor's residual (2) overstated this."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.test.ts:689-747",
+      "note": "Tests cover per-thread lane independence and the memo skipping the second git probe ('remembers the newest checkpoint ref instead of probing git on every turn start')."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Minor residuals: (1) getThreadCheckpointContext (ProjectionSnapshotQuery.ts:1808-1827, 3433-3441) decodes the full checkpoint_files_json of every checkpoint row, but no caller reads .files. Callers checked: CheckpointReactor, CheckpointDiffQuery.ts:71, ProviderRuntimeIngestion.ts:1855 and :3123 (on every Codex turn.diff.updated), attachmentTools.ts:95, htmlRenderTools.ts:364, computerBetaTools.ts:178. A read-only query of the user's DB found one checkpoint with 23,376 files (3.6 MB JSON) and 7 rows over 100 KB. A warm Schema decode of that row takes about 9 ms (JSON.parse alone about 3 ms). It runs synchronously 4 times per turn start, plus completion and Codex diff updates, so about 40-60 ms of event-loop time per turn start on that one thread. Typical threads stay under 1 ms. (2) Memo trust: knownCheckpointRefs assumes a remembered ref still exists. If refs are removed outside Ryco (repo re-initialised at the same path, or a manual update-ref -d), the next baseline is skipped. Completion then logs 'missing pre-turn baseline' and appends a capture-failure activity for that one turn. It self-heals on the next turn. Low likelihood. (3) captureAndDispatchCheckpoint still runs hasCheckpointRef(fromRef) (VCS resolve plus rev-parse) on every completion, even when the memo already holds that ref. That is one probe per turn, so it is minor.",
+  "implementationSketch": "Optional cleanup, low priority: stop decoding checkpoint file lists in the checkpoint context. In apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts, add listCheckpointHeadRowsByThread. It selects turn_id, checkpoint_turn_count, checkpoint_ref, checkpoint_status, assistant_message_id and completed_at, with no checkpoint_files_json, from projection_turns WHERE thread_id=? AND checkpoint_turn_count IS NOT NULL, using the existing idx_projection_turns_thread_checkpoint_order. Use it in getThreadCheckpointContext. Change ProjectionThreadCheckpointContext.checkpoints (Services/ProjectionSnapshotQuery.ts:147) to ReadonlyArray<Omit<OrchestrationCheckpointSummary, 'files'>> and let the compiler find any caller that reads files (none today). Update test doubles that build the context. Optionally, also check the memo in captureAndDispatchCheckpoint before probing fromCheckpointRef. Tests: a ProjectionSnapshotQuery test showing that the context returns checkpoint heads for a thread whose files JSON is large or invalid, without decoding it. Run the CheckpointReactor.test.ts and CheckpointDiffQuery.test.ts suites with bun run test, filtered to apps/server.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-internal read-model query narrowing. It does not touch auth, E2EE, hosted lifecycle or the Hub protocol.",
+  "correction": "There are 4 turn-start triggers, not 3: ProviderCommandReactor also enqueues an awaited 'baseline' item. Residual (2) is wrong: the session lookup uses the scoped getSessionForThread, not listSessions. The checkpoint_files_json residual applies to all getThreadCheckpointContext callers, including ProviderRuntimeIngestion on every Codex turn.diff.updated, not just CheckpointReactor. It is measurable only on threads with very large checkpoint file lists (about 9 ms per call at 23k files).",
+  "repos": "ryco"
+}

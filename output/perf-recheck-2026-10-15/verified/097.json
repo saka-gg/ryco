@@ -1,0 +1,59 @@
+{
+  "id": "browser-measure:chunk-waterfalls-no-modulepreload",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The fix removes the measured cost. The current web dist (built at HEAD, untracked) has 531 relative import() sites. 530 of them are wrapped by Vite's preload helper, and each one preloads its target's full static closure beyond what the host already loaded (0 uncovered, checked independently). The thread route import preloads 146 files, including ChatRightPanel. The statistics route import preloads useStatistics. index.html modulepreloads the boot chain. Deep-linked routes start their chunks in root beforeLoad alongside auth. The thread chunk starts at the WS welcome, before the shell-snapshot wait, or at idle after the shell paints. Proposals 1 and 3 are fully done, and 2 is done except for the '/' landing. One real defect is in the guard (proposal 4): the coverage regex only reads import() calls that are directly followed by the map. So it silently skips the .then()/async-wrapped forms, which are 147 of the 530 wrapped sites (129 distinct targets), including RootAppShell, SettingsPage, CommandPaletteDialog and every preloadableLazy dialog and settings panel.",
+  "evidence": [
+    {
+      "location": "apps/web/vite.config.ts:211-217",
+      "note": "build.modulePreload = { polyfill: false, resolveDependencies: resolveWebModulePreloadDependencies }. At f1be4abc7 it was modulePreload: false. createBootPreloadPlugin() is wired at :127. The Hub Dockerfile builds with this same config (VITE_RYCO_CLIENT_MODE=hosted-hub), and the vendored 7bc39eec3 contains 60633eff3, 3ce80cee6 and 451f35925."
+    },
+    {
+      "location": "apps/web/src/viteBuild/modulePreload.ts:22-28",
+      "note": "For hostType 'js' the resolver returns all deps, so each dynamic import preloads its whole static closure in one round. HTML gets [], and the boot chain comes from bootPreloadTags (:38-83)."
+    },
+    {
+      "location": "apps/web/dist/index.html:28-33",
+      "note": "The built document has modulepreload for boot, rolldown-runtime, boot-vendor and main, plus a style preload for main CSS. The boot graph is flattened."
+    },
+    {
+      "location": "apps/web/dist/assets/boot-*.js (__vite__mapDeps table)",
+      "note": "Independent read-only analysis of every chunk: 531 relative import() sites, 530 helper-wrapped, 0 with closure files missing from the preload map. The only unwrapped site is worker -> wasm, inside a self-contained worker. ChatThreadRouteView preloads 146 files including ChatRightPanel. StatisticsRouteView preloads useStatistics. RootAppShell preloads 102 files. Worker chunks have no static imports, so no waterfall exists there."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:160-165",
+      "note": "Outside /pair and native-authorize, beforeLoad starts RootAppShell/HostedHubRoot.preload() and preloadMatchedRouteChunks(pathname) (apps/web/src/lib/routeChunkPreload.ts:53-63) in parallel with auth. Deep links to a thread, draft, statistics or settings URL fetch the body chunk early."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:283-288",
+      "note": "handleWelcome calls preloadRouteChunk(THREAD_ROUTE_ID) when the welcome names a bootstrap thread, before the awaited ensureEnvironmentConnectionBootstrapped at :290. The chunk now overlaps the snapshot instead of following the redirect."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:175-186",
+      "note": "ShellIdlePreloads warms the thread and draft routes first. apps/web/src/lib/shellIdlePreload.ts:36-75 gates this on the primary-shell-painted phase (the cached shell from 45f7a9be6 can paint before the welcome) and skips it on save-data or <4g links."
+    },
+    {
+      "location": "scripts/perf/preloadCoverage.ts:51-52",
+      "note": "Guard defect. PRELOADED_IMPORT requires `import(\"./x.js\")` to be immediately followed by `,__vite__mapDeps([..])` or `,[]`. Vite emits `t(()=>import(`./RootAppShell-x.js`).then(e=>e.RootAppShell),__vite__mapDeps([..]))` and the async-destructuring form for named-export lazies, and the regex skips both. Against the current dist it reads 383 of 530 wrapped sites. The 'no readable import' fallback (bundleBudget.ts:131-137) does not fire because other imports parse."
+    },
+    {
+      "location": "scripts/perf/preloadCoverage.test.ts:33-46",
+      "note": "The parser test covers only the bare `t(()=>import(x),map)` and `[]` shapes. It has no `.then(...)` or `async()=>{await import(x)}` case, so the gap is untested."
+    },
+    {
+      "location": ".github/workflows/_validation.yml:207-213",
+      "note": "perf:bundle-budget, which includes the preload-depth check (scripts/perf/bundleBudget.ts:130-145), runs in CI on the standard build only. The hosted-hub build's preload maps are not checked."
+    }
+  ],
+  "remaining": "This does not block DONE. For the '/' landing the thread route chunk starts at the WS welcome (apps/web/src/components/RootAppShell.tsx:286) or at idle after the shell paints (:180), not in root beforeLoad alongside auth (apps/web/src/routes/__root.tsx:160-165). The residual is about auth + ws-token + WS upgrade. During that window the link is already downloading the RootAppShell closure (~409 KB gzip), and modulePreload.ts:15-20 records that preloading later phases at document start delayed beforeLoad through contention. So this was a measured choice, not an omission.",
+  "fixDefects": "The preload-depth guard (proposal 4) has a coverage hole. scripts/perf/preloadCoverage.ts:51-52 only parses import() calls that are directly followed by the preload map. It skips Vite's `.then(...)` and async-destructuring wrappers: 147 of 530 helper-wrapped import sites (129 distinct targets) in the current build. These include RootAppShell, SettingsPage, PhoneHome, HostedHubRoot, CommandPaletteDialog, ForkThreadDialog, AutomationsDialog, OnboardingDialog, all settings sub-panels and the ChatRightPanel lazies. Today all of them are fully covered, so users see no regression. But if one of those closures loses coverage, for example from a different resolveDependencies filter or a rolldown chunking change, the measured 3-5 level waterfall comes back on the shell and settings graphs and CI stays green. The test file has no case for these shapes.",
+  "implementationSketch": "Guard fix only (scripts/perf/preloadCoverage.ts plus its test). (1) Replace the single PRELOADED_IMPORT regex with a two-step parse. Match each relative `import(`./X.js`)`. Then scan forward, bounded by the next `import(` or a balanced-paren walk from the preload helper call, for the first `__vite__mapDeps([..])` or `,[])` that closes the same wrapper call. Attribute that map to the import. This covers `t(()=>import(x),map)`, `t(()=>import(x).then(e=>e.Y),map)` and `t(async()=>{const{a}=await import(x);return{a}},map)`. (2) Make format drift fail loudly. Count every relative import() in chunks that carry an `m.f=` table, and add a violation if any of them is neither parsed as preload-managed nor on an explicit allowlist (worker chunks, imports Vite leaves alone), instead of only failing when zero imports parse. (3) In preloadCoverage.test.ts, add parser cases for the `.then(e=>e.X)` and async-destructuring shapes copied from real dist output (for example the RootAppShell and SettingsPage call sites in boot-*.js), and a coverage case where a `.then`-form import misses a level and is reported. (4) Optionally run perf:bundle-budget against a hosted-hub build too, or document that only standard is guarded. Validate with `bun run test scripts/perf/preloadCoverage.test.ts`, then run `bun run perf:bundle-budget` on a RYCO_WEB_SOURCEMAP=hidden standard build: it should report 530 checked imports and 0 uncovered. Optional and separate: preloadRouteChunk('/_chat/$environmentId/$threadId') in resolveRootBeforeLoadContext for pathname '/' on non-phone tiers. Gate it on allowsSpeculativePreload() and measure contention against root-before-load-ready first. No thread id is needed because the chunk is the same for every thread.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The guard fix is test tooling only. The optional '/' beforeLoad preload is a perf trade-off: earlier thread chunk versus contention with auth and the shell graph, which the code says was measured. It can be decided by measurement and does not touch auth semantics or hosted lifecycle ownership.",
+  "repos": "ryco",
+  "correction": "The auditor's status and remaining gap are right. They said fixDefects 'None seen' and treated scripts/perf/preloadCoverage.ts as the proposal-4 guard. That guard does not see the .then()/async-wrapped dynamic imports: about 28% of preload-managed sites, including RootAppShell and SettingsPage, the exact graphs the finding measured. Their line references are accurate (RootAppShell welcome preload is at :286 inside :283-288)."
+}

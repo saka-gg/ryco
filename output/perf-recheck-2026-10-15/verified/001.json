@@ -1,0 +1,58 @@
+{
+  "id": "desktop-boot:spawn-backend-before-main-bundle",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The packaged desktop spawns the backend in desktopEntry.ts before desktopMain.cjs is required, and desktopMain adopts the child and writes the envelope later. The single-instance lock moved into the entry, the envelope wait is 10 s, the spawn args come from one shared launcher, and the computer-use bridge is loaded lazily. Real launch logs from the installed 0.1.31 app (~/.ryco/userdata/logs/desktop-main.log, five launches on 2026-10-14) show 'desktop.backend.spawn ... early=1' about 56-65 ms before the desktop.launch mark. That is roughly 80-100 ms after process start, against about 320 ms before. Backend 'listening' now lands 246-383 ms after desktop.launch on warm launches, against a 1.59 s p50 spawn-to-listening before (compile-cache work also contributed). I found no fix defects. One leftover, not a defect: the envelope arrives about 170-190 ms after the early spawn on warm launches. It needs Electron ready, the main-bundle load, the port probe and computer-use start. The backend reaches its envelope read about 130-170 ms after spawn with the compile cache (measured standalone with `bin.mjs --version`). So the backend now waits roughly 0-50 ms for the envelope instead of the envelope hiding behind a 550 ms module load. Envelope-to-first-backend-log gaps of 23-35 ms on every launch fit that.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:150-177",
+      "note": "Packaged launch: enable the compile cache, claimPrimaryInstance(), applyCachedShellEnvironment(), startEarlyBackend(), publishDesktopLaunchRecord(), then require desktopMain.cjs. A failed require discards the early child."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:55-60",
+      "note": "setPath(userData) runs before requestSingleInstanceLock(). A refused instance calls app.exit(0) before loading the main bundle. main.ts:4635-4641 skips its own request via hasSingleInstanceLock()."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:32-54,70-114,129-152",
+      "note": "desktopBackendSpawnArgs, createDesktopBackendChildEnv and spawnDesktopBackend are the shared launcher used by both the entry (desktopEntry.ts:99-114) and main.ts launchBackendChild (3186-3202). Early spawn errors and EPIPE on fd 3/4 are recorded, not thrown. The args include --mode desktop --no-browser."
+    },
+    {
+      "location": "apps/desktop/dist-electron/main.cjs",
+      "note": "The built entry (5.9 KB) requires only electron, node builtins and small shared chunks (desktopPaths, shellEnvironment, compileCacheDirectory, rolldown runtime). The launch record and launcher live in the shared desktopPaths chunk, so the entry and desktopMain see one module instance. Symbol.for on globalThis would also cover duplication."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3204-3289",
+      "note": "startBackend adopts via takeEarlyDesktopBackend() and replaces a child older than 8 s (isEarlyDesktopBackendStale). It handles a child that errored or exited before adoption (goneBeforeAdoption, then handleChildGone), and writes the envelope through writeBackendBootstrapEnvelope (3135-3184)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:2166-2180,3370-3374,4877-4882",
+      "note": "handleFatalStartupError, stopBackendAndWaitForExit and before-quit all call discardEarlyDesktopBackend(), so an unadopted early child is not orphaned. If the parent dies, the closed fd 3 pipe makes the server exit with BootstrapEnvelopeUnavailableError."
+    },
+    {
+      "location": "apps/server/src/bootstrap.ts:42-57; apps/server/src/cli.ts:497-509",
+      "note": "readBootstrapEnvelope defaults to 10_000 ms. With no envelope on an explicit fd, the server fails with BootstrapEnvelopeUnavailableError instead of booting on defaults. applyBootstrapShellEnvironment runs right after, before any layer is built. No top-level process.env captures were found in apps/server/src or packages/shared/src."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4803-4870",
+      "note": "bootstrap(): port probe and startDesktopComputerUse() run in parallel, then exposure mode, then the shell environment (cache hit already applied by the entry), then startBackend. The window opens inside startBackend. IPC, menu, protocol and updater are deferred after it."
+    },
+    {
+      "location": "~/.ryco/userdata/logs/desktop-main.log + server-child.log (runs 2713c0d2abd7, d2e02080aa02, 2c9d7783bd64, 5e1dd6a776c6, b1b8af618599)",
+      "note": "Every packaged launch logs early=1 with spawn at elapsedMs -56..-65 (-199 on a loaded post-login launch). The envelope (APP SESSION START) is at +117..+126 ms, and the first backend log line follows 23-35 ms later (72 ms on the loaded launch). Listening is at +246..+383 ms (+955 on the loaded launch)."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.test.ts:126-202; apps/desktop/src/backendLauncher.test.ts:151-205; apps/desktop/src/desktopMainBundleSplitting.test.ts:110",
+      "note": "Tests cover a refused second instance (no bundle, no backend), early spawn with and without a cached shell environment, a missing server entry, single adoption, discard, stale replacement, and keeping the entry free of the main bundle and heavy dependencies."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None verified. Checked these and found them clean: identical env, cwd, executable and compile-cache hook between the early spawn and launchBackendChild for packaged builds; no process.env mutation in main.ts before startBackend except the shell environment, which the envelope covers on a cache miss; child stdout/stderr and telemetry buffered until adoption; cleanup on fatal error, quit and parent death; the 8 s adoption limit against the server's 10 s wait. Minor, harmless: on Windows the entry now takes the singleton lock before configureAppIdentity() calls app.setName(), so the lock name is the package default rather than 'Ryco (<stage>)'. Every new instance does the same, so this is consistent. The refused second instance also no longer writes the 'second instance refused' log line.",
+  "implementationSketch": "Nothing required. An optional follow-up, low value: on warm launches the envelope (about 170-190 ms after spawn) now slightly trails the backend's compile-cached module load (about 130-170 ms), so the backend can idle 0-50 ms on fd 3. To close that gap, compute port and token in desktopEntry with node:net and node:crypto. Then either move computerUseBridge out of the envelope into a later control-token call, or send a two-phase envelope: core fields first, desktop-only bindings over the control channel. A cheaper first step is to measure first: add a server-side startup mark when readBootstrapEnvelope starts and resolves (cli.ts:497-500) and log its wait. Act only if the median wait is over about 30 ms.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

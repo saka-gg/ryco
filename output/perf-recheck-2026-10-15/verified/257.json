@@ -1,0 +1,70 @@
+{
+  "id": "gap-logging-io:shared-loggers-never-closed",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE by 60633eff3 (#710). ProviderEventLoggersLive registers a finalizer that closes both shared loggers after they are built. It sits below the provider registry, drivers and ProviderService in the server.ts provideMerge chain, so it runs after ProviderService.stopAll and after the instance scopes close. EventNdjsonLogger.close drains every writer and any in-flight evicted closes, then drops later writes as queue_closed. Idle writers are flushed, closed and evicted after 2 minutes, which bounds the writer map and the held file handles. The queue has per-thread and per-stream character budgets on top of the record cap. The shutdown path really releases the layer: NodeRuntime.runMain interrupts on SIGTERM/SIGINT, and desktop sends SIGTERM with a 3 s grace before SIGKILL. A test checks that the finalizer flushes records that are still inside the batch window. I found no defect in the fix, only non-production nits.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderEventLoggers.ts:197-204",
+      "note": "Effect.addFinalizer closes native and canonical in parallel. It is registered after both loggers are built and after the forkScoped retention/settings fibers, so it runs before those fibers are interrupted."
+    },
+    {
+      "location": "apps/server/src/server.ts:536-541",
+      "note": "Layer.provideMerge(ProviderEventLoggersLive) sits below ProviderInstanceRegistryHydrationLive, ProviderRegistryLive and ProviderRuntimeLayerLive, so the loggers are built first and released last."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts:564-571",
+      "note": "Instance scopes are forked from the registry's layer scope and closed in parallel when that layer is released, so adapters stop before the logger finalizer runs. ProviderService.stopAll is the finalizer at ProviderService.ts:2509."
+    },
+    {
+      "location": "apps/server/src/cliMain.ts:74-75",
+      "note": "NodeRuntime.runMain interrupts the program on SIGTERM/SIGINT, which releases the layer scopes and runs the finalizer. No process.exit bypasses it in apps/server/src."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:218-256",
+      "note": "Desktop sends SIGTERM and waits a 3 s grace before SIGKILL. The comment measures backend exit at 1.0-1.6 s, which leaves room for the logger drain."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:605-613",
+      "note": "close() sets loggerClosed, clears writers, stops the eviction timer, and awaits closeWriter for live writers plus closingWriters. writeRecord drops later records as queue_closed at line 435."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:527-554",
+      "note": "closeWriter: flush (closing the delta run), mark closed, flush again, await any predecessor close, then sink.close(). All errors are caught, so close never rejects."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:556-590",
+      "note": "Eviction only takes writers that have been idle past the TTL and have an empty buffer, no open run and no activeFlush. A replacement writer's first batch and its close wait for the predecessor's close (lines 307, 486-493 and 542-544), so the two sinks never rotate or compress at the same time. The eviction interval is unref'd and stops once the map is empty."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:131-136,335-356,514-518",
+      "note": "Per-thread record cap (2048), per-thread char budget (8M) and per-stream char budget (32M) are enforced on enqueue and released in the flush finally. Idle TTL is 2 minutes."
+    },
+    {
+      "location": "packages/shared/src/logging.ts:157,203-219,272-274,349-355",
+      "note": "AsyncRotatingFileSink now holds a FileHandle and does one writev per batch. close() drains the write tail and any compression, then closes the handle."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderEventLoggers.test.ts:120-140",
+      "note": "Writes inside the 200 ms batch window, closes the layer scope, and checks that both per-thread files contain the record."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.test.ts:518-662",
+      "note": "Covers size-bounded queues, idle eviction with reopen, predecessor ordering, close waiting for evicted writers, and drain-on-close then drop-after-close."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1896-1902; apps/server/src/provider/Layers/CopilotAdapter.ts:69-75",
+      "note": "Nit, not production: the fallback logger these adapters build from nativeEventLogPath is never closed. Codex, Acp, Cursor and OpenCode close their managed fallback. No production caller passes nativeEventLogPath (every driver injects eventLoggers.native); only ClaudeAdapter.test.ts and CodexAdapter.test.ts do."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None material. Non-production or edge nits: (1) The finalizer drain has no time bound. A hung fs write or gzip would stall graceful shutdown. Desktop caps this with SIGKILL after 3 s, but a CLI `ryco serve` stopped with SIGTERM would wait indefinitely. This is unlikely on local disks. (2) ClaudeAdapter and CopilotAdapter never close the logger they build themselves from nativeEventLogPath. That path is test-only. (3) As proposed, there is no explicit release(threadId) on session stop or reap. The idle TTL bounds the writer map instead, so a stopped session's writer and file handle live about 2-3 minutes. The finding allowed this alternative.",
+  "implementationSketch": "Optional hardening only. (a) In ProviderEventLoggers.ts, wrap the finalizer's Effect.all in Effect.timeoutOption (or Effect.timeout plus ignore) at about 1.5 s, so a wedged fs op cannot block CLI shutdown. Extend the existing 'drains both loggers' test with a stub logger whose close never resolves and assert that scope close finishes. (b) In ClaudeAdapter.makeClaudeAdapter and CopilotAdapter.makeCopilotAdapter, mirror the Codex/Acp pattern: compute managedNativeEventLogger = options?.nativeEventLogger === undefined ? nativeEventLogger : undefined and close it in the adapter's scope finalizer.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local observability logging only. No auth, E2EE, hosted lifecycle or Hub involvement.",
+  "repos": "ryco"
+}

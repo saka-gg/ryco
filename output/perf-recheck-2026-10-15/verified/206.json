@@ -1,0 +1,79 @@
+{
+  "id": "projects-loading:no-global-child-process-limiter",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The core of the proposal landed in #710 (60633eff3), and the projects-sidebar git burst is gone. A process-wide ProcessGovernor has a git pool (min(8, cores)), a forge pool (4) for gh, glab and az, interactive and background lanes, and a queue-wait timer. It is wired into VcsProcess.run, the git driver's executeRaw and processRunner.runProcess. The identity probe now runs through VcsProcess with no shell, and queue time no longer counts toward its 1 s timeout. Sidebar ref summaries, identity sync, worktree reconcile and the linked-worktree sweeps run in the background lane.\n\nThe auditor's DONE overstates it, for three reasons:\n1. The lane is chosen per call site and defaults to interactive, which is unbounded. The inbox sidebar's per-row PR detail query still fires one `gh pr view` plus up to three `gh api` children for every visible row with a linked PR, in the interactive lane. That is the same many-row forge burst, and the forge pool does not bound it.\n2. The proposal's in-flight metric was never exported. processGovernorStats() has no production caller.\n3. Interactive callers can still wait behind the background queue. Effect's Cache runs a lookup in the first caller's context, so when a background fiber starts a shared single-flight lookup (git config snapshot, PR index, status upstream fetch), an interactive caller that joins it inherits the background queue position.",
+  "evidence": [
+    {
+      "location": "apps/server/src/processGovernor.ts:29-38,95-137",
+      "note": "ProcessLaneRef defaults to interactive. GIT_PROCESS_LIMIT = min(8, max(2, cores)) and FORGE_PROCESS_LIMIT = 4. Interactive requests are always granted at once and only count toward the pool. Background requests queue FIFO when the pool is full or has waiters."
+    },
+    {
+      "location": "apps/server/src/processGovernor.ts:165-207",
+      "note": "processGovernorStats() exists, but only tests call it (git grep finds no production caller). The only real metric is the ryco_process_governor_queue_wait_duration timer, and it is recorded only when the wait is above 0. There is no in-flight gauge, although the proposal asked for one."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsProcess.ts:159-160,214-233",
+      "note": "run() is governed, with queue time outside the timeout. The public withProcess() is not governed. Today only run() calls it, so this is a latent hole."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1050-1054",
+      "note": "Every git child is wrapped in governChildProcess(\"git\")."
+    },
+    {
+      "location": "apps/server/src/processRunner.ts:168-176",
+      "note": "runProcess is governed through governChildProcessPromise. The new `lane` option is never passed by any caller, so these spawns are always interactive."
+    },
+    {
+      "location": "apps/server/src/project/Layers/RepositoryIdentityResolver.ts:113-136,195-207",
+      "note": "The identity probe goes through vcsProcess.run with no shell and READ_ONLY_GIT_ENV. refresh() probes outside the caches on purpose, so an interactive resolve() does not wait behind background git."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:522,706",
+      "note": "The background fetch-and-republish and the sidebar `summary` stream run in the background lane. The web sidebar rows use view:\"summary\" (SidebarThreadRow.tsx:144, InboxThreadRow.tsx:208)."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxThreadRow.tsx:199,219-224",
+      "note": "Every visible inbox row whose row.pullRequest is set (the persisted link is available at boot, with no wait for the summary) calls useSourceControlChangeRequestDetail. Nothing limits this on the client side."
+    },
+    {
+      "location": "apps/server/src/ws/sourceControlRpc.ts:585-603",
+      "note": "The sourceControlGetChangeRequestDetail handler runs provider.getChangeRequestDetail in the default interactive lane. It is not wrapped in inBackgroundProcessLane."
+    },
+    {
+      "location": "apps/server/src/sourceControl/GitHubSourceControlProvider.ts:657-701",
+      "note": "Each detail is `gh pr view` followed by stack, merge-capabilities and required-checks lookups, run with concurrency 3 and none cached. That is up to 4 or more gh children per row, all interactive, so N visible PR rows launch about 4N concurrent gh processes. This repeats on every poll."
+    },
+    {
+      "location": "apps/server/node_modules/effect/src/Cache.ts:216-218,638,671",
+      "note": "A Cache lookup is forked from the first caller's fiber with the caller's context merged over the construction context. ProcessLaneRef is therefore inherited from whichever caller arrives first."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1145-1173,1666",
+      "note": "The configSnapshotCache is shared by full status (interactive, line 1666) and the sidebar refSummary (background, GitManager.ts:1739). An interactive status that joins a lookup a background fiber started waits behind the background git queue."
+    },
+    {
+      "location": "apps/server/src/sourceControl/pullRequestIndex.ts:96-111",
+      "note": "The per-repository PR index Cache is shared by the background refSummary (GitManager.ts:1799) and the interactive readRemoteStatus (GitManager.ts:960). The focused thread's PR badge can wait for a queued background gh call."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1267-1287,1319-1343",
+      "note": "statusFetchPermits (2) is acquired before the governed fetch, so a background fetch keeps one of these permits while it sits in the git-pool queue. The statusRemoteRefreshCache single-flight is shared with interactive refreshes (VcsStatusBroadcaster.ts:497)."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:513-528,553-554; apps/server/src/ws/context/worktreeOperations.ts:964; apps/server/src/project/repositoryIdentitySync.ts:117",
+      "note": "The linked sweep (concurrency 2, detached), worktree reconcile and identity sync are in the background lane, as the auditor said."
+    }
+  ],
+  "remaining": "1. Lane coverage gap, which matters most. The inbox sidebar's per-row PR detail is still an unbounded forge burst. InboxThreadRow.tsx:219-224 queries detail for every visible row with a linked PR. The server handler at ws/sourceControlRpc.ts:585-603 runs it in the default interactive lane, and GitHubSourceControlProvider.ts:657-701 spawns 1 `gh pr view` plus up to 3 `gh api` calls per row with no cache. The forge pool (FORGE_PROCESS_LIMIT = 4) never bounds this, at boot or on polls. The finding's goal of about 4 concurrent gh/glab children does not hold in inbox mode.\n2. The proposal's in-flight metric is missing. processGovernorStats() (processGovernor.ts:165) is not exported to metrics or diagnostics, and only the queue-wait timer exists.\n3. 'Interactive never waits behind background' does not fully hold. Shared single-flight caches inherit the lane of the first caller: configSnapshotCache (GitVcsDriverCore.ts:1145-1173, used at 1666 and at GitManager.ts:1739), the pullRequestIndex Cache (pullRequestIndex.ts:96-111, used at GitManager.ts:960 and 1799), and statusRemoteRefreshCache plus statusFetchPermits (GitVcsDriverCore.ts:1267-1343). An interactive caller that joins a lookup a background fiber started waits behind that fiber's position in the background queue. The delay is bounded by how long the background queue takes to drain, typically under a second at boot.",
+  "fixDefects": "1. Priority inversion through shared Cache single-flights, described in remaining item 3. A background-lane fiber owns the lookup, and interactive joiners inherit its queue position. statusFetchPermits is also held while the governed fetch is queued in the background lane, so an interactive status fetch for another repository can block on that semaphore.\n2. VcsProcess.withProcess (VcsProcess.ts:55,159-160) is a public spawn entry point that is not governed. It has no external caller today, so this is latent.\n3. processRunner's `lane` option has no callers, and the Promise path cannot be cancelled while queued. That is harmless today because every caller is interactive.\n4. No correctness bugs in ProcessPool itself. Release is idempotent, cancel on interrupt both withdraws the request and releases a permit already granted, and the tests cover queuing and cancellation.",
+  "implementationSketch": "A. Inbox PR detail in the background lane (S, highest value).\n- Add an optional schema-only field to the change-request-detail RPC input in packages/contracts, for example `priority: \"background\"`.\n- In apps/server/src/ws/sourceControlRpc.ts:585-603, wrap the provider.getChangeRequestDetail(...) effect in inBackgroundProcessLane when the field is set. Apply the same to any other per-row passive read handlers.\n- In apps/web/src/components/inboxSidebar/InboxThreadRow.tsx:219, pass the flag for non-active rows (`!props.active`). The selected row and PullRequestDetail stay interactive.\n- Cheaper alternative with no contract change: have the inbox glyph use the summary stream's pr/state, which already comes from the PR index, and fetch full detail only on hover or for the active row.\n- Tests: a server test like RepositoryIdentityResolver.test.ts:300-335 that fills the forge pool with interactive holders, issues a background-flagged detail, and asserts processGovernorStats().forge.queued === 1. Add a browser test that a non-active InboxThreadRow sends the flag.\n\nB. In-flight metric (S).\n- In processGovernor.ts, add a Metric.gauge(\"ryco_process_governor_in_flight\") with pool and lane attributes, plus a queued gauge.\n- Update both from ProcessPool grant, release and enqueue through an onChange hook, or sample processGovernorStats() in LocalDiagnosticsMetrics or Diagnostics.\n- Unit test: the gauges follow inFlight and queued across request and release.\n\nC. Priority inversion (M, optional).\n- Give ProcessPool waiters a promote() that moves a queued background request to an immediate grant.\n- Add a small `sharedLookupScope` Context.Reference (a mutable record of pending permit requests plus a promoted flag) that governChildProcess registers queued requests into.\n- Wrap the lookups of configSnapshotCache, pullRequestIndex and statusRemoteRefreshCache so that a joining caller whose ProcessLaneRef is interactive marks the owner's scope as promoted and promotes its queued requests. Later requests in a promoted scope are then admitted as interactive.\n- In fetchRemoteForStatus, acquire the governor permit before statusFetchPermits, for example by moving the semaphore inside a governChildProcess call, so a queued background fetch does not hold a fetch slot.\n- Test: a background fiber starts Cache.get, which queues behind full pool holders, and an interactive joiner then completes without waiting for the holders to be released.\n\nD. Govern withProcess (S).\n- Wrap withProcess's spawn and use in governChildProcess(input.command, ...) and keep an internal ungoverned variant for run(), so nothing is governed twice.\n- Test: withProcess in the background lane queues when the pool is full.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "No E2EE, auth, Hub or hosted-lifecycle surface is involved. Moving the inbox per-row PR detail to the background lane is a minor latency trade-off within existing policy: inbox glyphs may update slightly later at boot. A schema-only contract field, if used, is local to Ryco.",
+  "repos": "ryco",
+  "correction": "The auditor marked this DONE. Three things were missed. (1) The interactive lane is the default and is unbounded, and the inbox sidebar's per-row change-request-detail RPC (sourceControlRpc.ts:585-603, InboxThreadRow.tsx:219) was never tagged as background, so it still launches about 4 gh children per visible PR row with no limit. (2) The in-flight metric was not implemented. (3) Shared Effect Cache single-flights inherit the first caller's lane, so interactive status can still wait behind background queues through configSnapshotCache, the PR index and the status-fetch cache plus statusFetchPermits."
+}

@@ -1,0 +1,58 @@
+{
+  "id": "projects-loading:status-remote-load-fetches-network",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Mostly fixed for the default setting, but not on every path. With gitStatusPollIntervalMs=0, a full-view stream with a stale cache now reads remote status from the current tracking refs (statusDetailsLocal plus the indexed PR lookup) with no fetch. It then forks the shared fetch into the background lane, behind a 2-permit semaphore and a 15 s cache per (gitCommonDir, remote), and republishes if the fingerprint changes. Sidebar, inbox and PR-page rows use the summary view, which never fetches. So the 'R fetches at boot' cost and the blocking first load at the default are gone. The auditor missed the poll>0 path. The proposal said that path should also serve immediately and fetch in the background, but it was left unchanged. When the poller is retained, streamFullStatus skips the no-fetch load. The poller's first iteration is refreshRemoteStatus, which runs the git fetch (up to 5 s plus semaphore wait) inside the remote single-flight before computing anything. So users who turned polling on still wait on the network for the first ahead/behind and PR badge. A no-fetch 'load' that arrives while such a fetch-first refresh is in flight also waits for it. The rare turn-start worktree-recovery path still awaits a fetching refreshStatus.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:686",
+      "note": "With poll=0 and a stale cache, the stream emits getOrLoadRemoteStatus (no fetch), then taps refreshRemoteStatusAfterFetch (line 689). With retainedRemotePoller=true the remote branch is Stream.empty, so the first remote status comes only from the poller's publication."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:548",
+      "note": "makeRemoteRefreshLoop runs refreshRemoteStatus immediately on its first iteration (Effect.repeat at line 571 runs once before any delay). So for poll>0 the first remote status waits for the fetch."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:497",
+      "note": "refreshRemoteStatus calls workflow.remoteStatus({cwd},{fetch:true}) inside coalesceRemoteStatus(cwd,'refresh'), so the network fetch holds the per-cwd remote single-flight."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:278",
+      "note": "A 'load' arriving while any flight is in progress awaits it, so a no-fetch initial load can wait behind an in-flight fetch-first refresh (poller, window-focus refreshGitStatus, or git-action refresh) for the same cwd."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:942",
+      "note": "readRemoteStatus uses takeRecentLocalStatusDetails or statusDetailsLocal, with no refreshStatusUpstream. remoteStatus (line 1693) fetches only when options.fetch is set. This confirms the default path is fixed."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1265",
+      "note": "fetchRemoteForStatus is wrapped in a Semaphore(STATUS_UPSTREAM_REFRESH_CONCURRENCY=2). The cache keyed by (gitCommonDir, remote) at line 1320 holds results 15 s; the fetch uses allowNonZeroExit, so a failed fetch with a non-zero exit also counts as 'fetched' and triggers a recompute."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:699",
+      "note": "streamRefSummary (view:'summary') does no git status and no fetch. It is used by SidebarThreadRow.tsx:144, InboxThreadRow.tsx:208, ThreadStatusIndicators.tsx:150/211 and usePullRequestsModel.ts:80."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxThreadRow.tsx:214",
+      "note": "The inbox hover card mounts a full-view stream, so hovering a row whose remote cache is stale starts a background fetch at poll=0. It is non-blocking and deduped per repo, but it is not limited to the focused thread's folder."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:734",
+      "note": "ensureRecordedWorktreeAvailable, called on turn start at lines 786 and 1844, awaits refreshStatus, which fetches first. A turn that has to recreate a missing worktree therefore waits up to about 5 s on git fetch. ws/context.ts:1257 and ThreadFork.ts:699 fork the same call instead."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1684",
+      "note": "After a fetch, only this cwd's localStatusDetailsByCwd entry and remote cache are invalidated. A readLocalStatus that started before the fetch can re-set stale details at line 861 just before the republish reads them. This is a narrow race."
+    }
+  ],
+  "remaining": "1) When polling is on (gitStatusPollIntervalMs>0, opt-in), the first remote status per stream still blocks on the network fetch. At VcsStatusBroadcaster.ts:686 the no-fetch load is skipped when a poller is retained. The poller's first iteration (line 548, then 497) runs the fetch inside the remote single-flight before computing. A second client attaching to an already-retained poller with a stale cache (poll 60 s or 300 s) gets remote:null and waits until the next poll tick, up to about 270 s. That problem predates the fix and is on the same path. 2) Any no-fetch 'load' that arrives while a fetch-first refresh for the same cwd is in flight awaits that fetch (line 278). 3) The rare turn-start recovery path (ProviderCommandReactor.ts:734) awaits refreshStatus, including the fetch, before the provider turn starts.",
+  "fixDefects": "No significant bugs in the poll=0 fix. Minor issues: (a) refreshStatusUpstreamIfStale reports 'fetched' whenever a fetch process completed, including non-zero-exit failures and fetches that moved nothing. Each background fetch therefore re-runs git status and the PR-index lookup for the republish, which only publishes if the fingerprint changed. That costs work but is not wrong. (b) A fetch run for one checkout invalidates only that checkout's GitManager caches (GitManager.ts:1684-1688). An already-open poll=0 stream on another worktree of the same repo keeps its pre-fetch ahead/behind until its own refresh or until it reattaches. (c) There is a narrow race where a concurrent readLocalStatus re-sets pre-fetch details (GitManager.ts:861) right after the fetch invalidation, so the republish can reuse stale ahead/behind.",
+  "implementationSketch": "VcsStatusBroadcaster.ts: (1) Move the network fetch out of the remote single-flight. In refreshRemoteStatus (line 487), first run `workflow.refreshRemoteTrackingRefs(cwd)` outside coalesceRemoteStatus. Then do the coalesced 'refresh' with invalidateRemoteStatus + `workflow.remoteStatus({cwd})` (no fetch option) + updateCachedRemoteStatus(publish). Version ordering stays as it is, so a refresh still sees mutations that completed before its caller, and a concurrent 'load' never waits on the network. (2) In streamFullStatus (line 686), drop the `retainedRemotePoller ||` term so a stale cache always gets the no-fetch getOrLoadRemoteStatus. Tap refreshRemoteStatusAfterFetch only when !retainedRemotePoller, because the poller fetches. Together with (1), the poller's first fetch no longer blocks the first remote status, and a second subscriber on a retained poller no longer waits for the next poll tick. (3) ProviderCommandReactor.ts:734: fork the refreshStatus (forkIn the reactor scope or forkDetach, like ws/context.ts:1257 refreshGitStatus) so worktree recovery does not delay turn start on a fetch. Optional: in GitVcsDriverCore refreshStatusRemoteCacheEntry, return true only for exitCode 0, so a failed fetch neither counts as a ref move nor gets a 15 s success TTL; move the generation bump to successful fetches. Tests in VcsStatusBroadcaster.test.ts: (a) with automaticRemoteRefreshInterval=10s and a refreshRemoteTrackingRefs mock blocked on a Deferred, the stream yields remoteUpdated from remoteStatus before the fetch is released, and a second remote update arrives after release; (b) using TestClock, a second stream attaching to a retained 60 s poller with a remote cache older than 30 s receives remote status without advancing to the next tick; (c) a stream attaching while refreshStatus is blocked in its fetch gets its initial remote status without waiting. Update the existing poller tests near lines 817 and 904 that count remoteStatus calls or assume the poller is the first loader. Run focused checks only: `bun run test` filtered to VcsStatusBroadcaster.test.ts, GitManager.test.ts and ProviderCommandReactor tests, plus typecheck for apps/server.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "No auth, E2EE, Hub or lifecycle change. Applying the already-accepted poll=0 trade-off (show current tracking refs first, republish after the fetch) to poll>0 users stays within the original proposal's scope.",
+  "repos": "ryco"
+}

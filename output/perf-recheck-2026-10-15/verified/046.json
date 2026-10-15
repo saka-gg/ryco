@@ -1,0 +1,91 @@
+{
+  "id": "persistence-boot:shell-snapshot-cost",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "Confirmed PARTIAL. Parts (a) to (d) all landed in #710 (60633eff3). (a) The whole-snapshot decodeShellSnapshot is gone; rows are decoded once. (b) Shell-only queries filter deleted_at IS NULL, and updatedAt comes from SQL MAX. (c) coalesceConcurrentRuns makes concurrent builds single-flight, and joinPriorityLoad shares one load per priority ranking across all connections. (d) Web and mobile both opt into thread-priority deltas. Part (e) did not land. Every non-deleted archived thread is still built, Schema-encoded, relayed and decoded in each full or paged snapshot. Null and default thread-shell fields are still emitted. I found no alternative implementation: no lazy-archive capability, no archived-thread RPC, nothing on the Hub side. The client assembler also holds every page until snapshot-end, so sending archived threads last does not get the shell on screen any sooner. Small correction to the auditor: the decoded-form safety net was kept as a test, not lost.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:110-112",
+      "note": "(a) Comment: the shell snapshot is never decoded again as a whole. Shell row schemas apply the wire normalizations per field. decodeShellSnapshot no longer exists anywhere in apps or packages; git log -S shows it was removed in 60633eff3."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.shell.test.ts:81-156",
+      "note": "(a) The safety net survives as a test: it asserts Schema.decodeUnknownSync(OrchestrationShellSnapshot)(shell) deepEquals shell and that encode succeeds, using padded inputs. The auditor's 'minor loss of a test safety net' is therefore not accurate."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:814-835",
+      "note": "(b) The unfiltered listProjectRows and listThreadRows remain, but only for getSnapshot and getCommandReadModel (:2403, :2419, :2720, :2736)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:865-889",
+      "note": "(b) and (e) listActiveProjectShellRows and listActiveThreadShellRows filter deleted_at IS NULL. Neither filters archived_at, so archived threads are always read."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:909-924",
+      "note": "(b) readShellUpdatedAt is a single SQL MAX over whole tables instead of scanning decoded rows."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1298-1385",
+      "note": "The session and latest-turn shell subqueries filter only deleted threads, so they also load archived threads' sessions and latest turns."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:664-700",
+      "note": "(c) coalesceConcurrentRuns provides read-your-writes single-flight with detached runs. It is tested at ProjectionSnapshotQuery.shell.test.ts:460."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3198-3215",
+      "note": "(c) getShellSnapshot is coalesced; callers inside a transaction bypass it. getScopedShellSnapshot is not coalesced, which is fine because those reads are small."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:518-548",
+      "note": "(c) subscribeShell passes the coalesced projectionSnapshotQuery.getShellSnapshot() to makeReplayableShellStream."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:49-101",
+      "note": "(c) joinPriorityLoad keeps one flight per projection query service, shared across connections."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:755-781",
+      "note": "(d) Delta subscribers get a thread-priorities item. Legacy subscribers get one shared snapshot load but per-subscriber paging and encoding."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:294",
+      "note": "(d) The client sends threadPriorities: \"delta\" whenever applyThreadPriorities is wired, and both web (apps/web/src/environments/runtime/service.ts:888) and mobile (apps/mobile/src/connection/environmentDriver.ts:514) wire it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3133-3172",
+      "note": "(e) Every live thread, archived included, is mapped into a shell. Explicit nulls and defaults are emitted: worktreeId, manualStatusBucket, manualPosition 0, snoozedUntil, snoozedAt, usageLimit, goal, settledOverride, settledAt, session, backgroundLiveness. These are roughly 200-300 of about 1.3 KB per thread."
+    },
+    {
+      "location": "apps/server/src/ws/context/shellSnapshotPages.ts:26-79",
+      "note": "(e) Archived threads are only reordered to come last, starting a new message. Their full bodies are still shipped. jsonBytes (:10, :61) also JSON.stringifies every thread for each subscriber, so a coalesced build is still re-stringified once per paged subscriber."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/shellSnapshotAssembly.ts:51-67",
+      "note": "The assembler emits the snapshot only at snapshot-end. The contract claim (packages/contracts/src/orchestration.ts:1271) that a client can show unarchived threads before archived ones arrive is not used, so archived bytes stay on the critical path to the first shell."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:1145-1191",
+      "note": "(e) The OrchestrationThreadShell wire shape is unchanged. Many fields are optional(NullOr) without decoding defaults, so omitting them on encode would change client-observed values from null to undefined."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:1345-1368",
+      "note": "OrchestrationSubscribeShellInput has resumeFromSequence, threadPriorities and snapshotDelivery, but no archived or lazy or compact capability."
+    },
+    {
+      "location": "apps/web/src/components/settings/SettingsPanels.tsx:1062-1075",
+      "note": "ArchivedThreadsPanel derives archived threads from the shell store (selectThreadShellsAcrossEnvironments). About 20 other web, mobile and client-runtime modules also read archivedAt from shell threads (sidebar worktree lists, projectsModel, workItemLocalLinks, desktopRelaunchGuard, terminal cleanup, mobile homeGrouping and environmentSnapshotCodec). Lazy archived loading is therefore a cross-client change."
+    }
+  ],
+  "remaining": "Proposal item (e) is the remaining work. (1) Archived threads are still read, built, Schema-encoded per subscriber, relayed and client-decoded in every full or paged shell snapshot: listActiveThreadShellRows at ProjectionSnapshotQuery.ts:878-889 has no archived_at filter; the session and latest-turn subqueries at :1298-1385 have none either; mapping happens at :3133-3172 and shipping at shellSnapshotPages.ts:55-66. The client assembler (packages/client-runtime/src/rpc/shellSnapshotAssembly.ts:51-67) waits for snapshot-end, so even the archived-last ordering does not get the shell on screen sooner. There is no capability flag, count-only mode or paged archived-thread RPC. (2) Null and default thread-shell fields are still emitted (ProjectionSnapshotQuery.ts:3133-3172), and contracts orchestration.ts:1145-1191 keeps the wire shape. With permessage-deflate on non-loopback links the wire savings are small; the CPU saving in encode, stringify and parse is roughly 15-20%. (3) Not a numbered proposal item: coalescing shares the build but not the per-subscriber work. Each subscriber still pays one JSON.stringify per thread to measure page size (shellSnapshotPages.ts:10, :61), then a Schema encode and a stringify in the RPC layer. Sequential builds are not memoized per snapshotSequence; I judge that acceptable because resumes skip the build.",
+  "fixDefects": "None that matter. coalesceConcurrentRuns is correct: detached runs, failures and interrupts propagate to every joiner, and in-transaction callers bypass it. joinPriorityLoad is correct: a flight can only be joined before its read starts, and a completed flight stays reading=true so later rankings start a fresh load. Both are tested. One correction to the auditor: the decoded-form guard was not lost. It is the test 'builds shell snapshots that are already in their decoded form' (ProjectionSnapshotQuery.shell.test.ts:81), which decodes, compares and encodes the built snapshot.",
+  "implementationSketch": "Archived-lazy (main item):\n(1) Contracts (packages/contracts/src/orchestration.ts ~1345): add archivedThreads: Schema.optional(Schema.Literal(\"lazy\")) to OrchestrationSubscribeShellInput. Add an RPC orchestration.listArchivedThreadShells {projectId?, worktreeId?, cursor?, limit} -> {threads: OrchestrationThreadShell[], nextCursor} to ORCHESTRATION_WS_METHODS and rpc.ts. Leave OrchestrationShellSnapshotBeginItem.archivedThreadCount as is, but in lazy mode it holds a count.\n(2) Server (ProjectionSnapshotQuery.ts): give buildShell an includeArchived flag. Add AND archived_at IS NULL to listActiveThreadShellRows and to the thread subqueries of listActiveThreadSessionShellRows and listActiveLatestTurnRows; extending scopedThreadFilter is enough. Add a COUNT query for archived live threads. Keep two coalesceConcurrentRuns instances, one per variant. Implement listArchivedThreadShells with keyset pagination on (archived_at DESC, thread_id), backed by a partial index migration on projection_threads(archived_at, thread_id) WHERE deleted_at IS NULL AND archived_at IS NOT NULL.\n(3) orchestrationStreams.ts makeReplayableShellStream: thread the option into the snapshot effect and the legacy priority snapshot path (prioritySnapshotFlights must be keyed per variant). In lazy mode, map thread.archived to a thread-removed item and thread.unarchived to a full upsert. pageShellSnapshot takes the count from the query.\n(4) Clients: wsRpcClient.subscribeShell sends archivedThreads: \"lazy\". Add a client-runtime archived-threads domain (paged fetch, invalidated by archive and unarchive events). Migrate the consumers: ArchivedThreadsPanel, sidebar worktree lists and archived counts, projectsModel, projectMapModel, workItemLocalLinks, desktopRelaunchGuard, sessionTabs deep links to archived threads (fetch by id), client-runtime terminal cleanup and threadNotifications, mobile homeGrouping, projectsModel, ThreadDetailScreen and environmentSnapshotCodec.\n(5) Tests: shell.test (lazy excludes archived, count correct, cursor paging), shellSnapshotPages.test, orchestrationStreams archive and unarchive transitions under lazy, a compatibility test that a subscriber without the flag still gets archived threads, a client store test, and a browser test of the archived panel and an archived deep link.\n\nCompact fields (optional):\n(1) First add Schema.withDecodingDefault(null) (0 for manualPosition) to the optional(NullOr) fields of OrchestrationThreadShell, and ship those clients.\n(2) Then gate server-side key omission on a subscribeShell capability (compactThreadShells: true) in the mapper at ProjectionSnapshotQuery.ts:3133-3172 and in the thread-upsert path.\n(3) Add a round-trip test that compact and full decode to equal values.\n\nCheap independent win (S):\n(1) Memoize pageShellSnapshot results per snapshot object with a WeakMap in shellSnapshotPages.ts, so paged subscribers that share a coalesced build do not each re-stringify every thread.\n(2) Add a test asserting reuse.",
+  "worth": "medium",
+  "effort": "L",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Lazy archived threads change the subscribeShell protocol (a new capability plus a new RPC) and product behaviour across web, desktop and mobile. Archived threads would no longer be in the client store for the archived panel, sidebar counts, deep links or offline mobile snapshots, and an old-client compatibility path is needed. Omitting null or default fields changes the client-observed wire shape (null becomes undefined) and needs client-first rollout or capability gating. An alternative that only applies the unarchived part early on the client would make the shell ready from a partial snapshot, which touches the AGENTS.md rule that mutation readiness requires accepting a current shell snapshot. No Hub or E2EE change is needed.",
+  "correction": "The auditor said the decodeShellSnapshot safety net was lost. It survives as the test 'builds shell snapshots that are already in their decoded form' (ProjectionSnapshotQuery.shell.test.ts:81-156), which decodes, compares and encodes the built snapshot. Their remaining-work list also missed three points. The client assembler waits for snapshot-end, so archived-last paging brings no time-to-first-shell benefit (shellSnapshotAssembly.ts:51-67). The session and latest-turn subqueries also include archived threads. pageShellSnapshot adds a per-subscriber JSON.stringify of every thread that coalescing does not share. Minor line drift: listActiveProjectWorktreeRows is at :988.",
+  "repos": "ryco"
+}

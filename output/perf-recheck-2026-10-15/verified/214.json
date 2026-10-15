@@ -1,0 +1,59 @@
+{
+  "id": "hub-connection:session-and-directory-serial",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "correction": "The main part is done as the auditor says, and it is done in bearer mode too (9adb0372c, which is also in the Hub pin 7bc39eec3). But the finding lists two separate gains, and the early Hub-session socket is one of them. That part was not implemented. On a cold start in the hosted web app, every node relay stream waits for that socket's `ready`, and the socket still opens only after the restore answers. So the second RTT is still on the cold-start connect path. Under the 'keep DONE only if the described cost is removed' rule this is PARTIAL, not DONE. Smaller point: the auditor's line refs have shifted a little (#resumeBrowser is now 2048-2073 and the hubSession gate is 55-63).",
+  "decisionReason": "The remaining early-socket work changes hosted lifecycle ownership (AGENTS.md: one authoritative owner, and nothing may publish readiness or mutation authority before the session revalidates). It also opens an authenticated socket before the session is validated. The Hub's `ready` frame does not carry account or session ids, so an adopted socket cannot prove it matches the restored session without a Hub protocol change. Deciding whether the ambient-cookie race is acceptable, or whether the Hub needs to add ids to `ready`, is a security and lifecycle call.",
+  "summary": "Checked independently: the directory read now goes out beside the session restore on cold start (#restoreAccess) and on every foreground or online resume (#resumeBrowser), in both cookie and bearer mode. Its answer is held and committed only after the restore validates, under the session fence. A failed, aborted or 401 speculative read is never authoritative and falls back to an ordinary read. The tests cover this, and the Hub never rotates the token on GET /api/auth/session, so the bearer overlap is safe. The fix is also in the Hub's vendored Ryco. Not done: the optional early Hub-session socket. On web cold starts the socket still opens one restore RTT late, and node relay streams wait for it. No functional defect in the fix. There is a stale API doc comment, and a signed-out cookie-mode cold start now sends one speculative GET /api/nodes that 401s.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:449-486",
+      "note": "HostedDirectoryPrefetch / prefetchHostedDirectory runs listNodes on its own AbortController, which is aborted with the access operation. The result is held, and failure or abandonment resolves to null. It uses the default deadline."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:749-774",
+      "note": "#restoreAccess sends restoreSession, then the prefetch at once. It patches authenticated on the answer and then calls #refreshDirectoryWith(check.directory). The prefetch is abandoned on abort or error. This covers bootstrap, the access-retry backoff and adoptSessionCredential, because all three go through this function."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2048-2073",
+      "note": "#resumeBrowser does the same. The prefetch is abandoned on a generation change, on abort, or when the account id differs from expectedAccountId (which expires the session), and it is committed via #refreshDirectoryWith."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2147-2160",
+      "note": "#refreshDirectoryWith drops the held read if a directory read is already in flight and joins that read instead. A push-triggered read that lands during the restore therefore wins over the older held read."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2239-2259",
+      "note": "#refreshDirectory awaits prefetch.nodes, and null falls back to listNodes. The commit is fenced on abort, accountStatus and session.id."
+    },
+    {
+      "location": "ryco-hub:src/http/authRoutes.ts:706-720",
+      "note": "On Hub origin/main, GET /api/auth/session only reads the account and session and never mints or rotates a token or cookie. That makes the bearer-mode overlap (commit 9adb0372c) safe."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.test.ts:3907",
+      "note": "Tests: parallel send with the held read not published early (3907), a 401 on the restore discards the held read (~3938), a failed held read is not authoritative (~3960), bearer mode (4056, 4087), and a resume for a different account drops the held read (4209)."
+    },
+    {
+      "location": "apps/web/src/hostedHub/hubSession.ts:55-63",
+      "note": "Still a gap: watchWebHostedHubSession creates the HostedHubSession only once accountStatus is authenticated, which is after the restore RTT. The initial state while the check runs is 'signed-out', and sync() disposes on that."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/hostedHubSession.ts:103-149",
+      "note": "createSocket() opens logical node relay streams only after the session's `ready`. On cold start, a new non-H2 WebSocket (TCP+TLS+upgrade, about 3 RTT) that starts at restore+1 RTT is therefore the critical path for the first node connection. The relay ticket only needs about 1 RTT after the directory commits. The web side wires this in apps/web/src/hostedHub/runtime.ts:92."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:873-881",
+      "note": "Stale doc on credentialMode: it says overlapping a restore with other authenticated reads is allowed only in cookie mode, but state.ts now overlaps in bearer mode too."
+    }
+  ],
+  "remaining": "Only the early Hub-session socket is left. apps/web/src/hostedHub/hubSession.ts:55-63 still starts the account socket only after accountStatus becomes authenticated. On a hosted-web cold start the socket therefore begins one restore RTT after bootstrap starts, and every node relay stream waits for its `ready` (packages/client-runtime/src/relay/hostedHubSession.ts:103-149, 286-297). Without WebSocket-over-H2 that leaves about 1 RTT (50-150 ms) on the cold-start node-connect path. Foreground resume is unaffected, because the socket survives suspension.",
+  "fixDefects": "No functional defect found in the implemented fix. Minor items: (1) The doc comment on HostedHubApi.credentialMode (packages/client-runtime/src/authorization/api.ts:873-881) is stale. It says overlapping a restore is cookie-only, but state.ts:449-463 now overlaps in bearer mode as well. (2) The web CSRF token is held only in memory (apps/web/src/platform/sessionCredentials.ts:7), so there is no 'probably signed in' hint. Every signed-out cookie-mode cold start now also sends a speculative GET /api/nodes that the Hub answers with 401. It is harmless and non-authoritative, but it is one wasted request per signed-out page load. (3) The doc block at state.ts:455-463 has a run-on line ('...clears nothing. Its answer is held...'). This is cosmetic only.",
+  "implementationSketch": "Early socket, web only (web is always cookie mode): (a) In apps/web/src/hostedHub/hubSession.ts, add a 'pending' session with authority === null. Inside sync(), when accountStatus is not authenticated but hostedHubController.accessCheckPending() is true (the hook already exists, state.ts:655), and optionally only when the hosted read cache holds a last account as a 'likely signed in' hint, create the HostedHubSession early. (b) While it is pending: onStatus records the status but does not set the module `status` to online; onInvalidate buffers events, including the directory/threadCache invalidation that `ready` emits (hostedHubSession.ts:296); an onFailure of kind authentication only disposes it and never calls expireSession; and a non-retryable failure disposes it without calling hostedHubController.failure. (c) When the store reaches authenticated, adopt the pending session: set authority to [account.id, session.id, activeSpaceId], then flush the buffered invalidations so notifyDirectoryInvalidated still runs after the held directory read. On signed-out, session-expired or unavailable, dispose the pending session. Keep the existing authority-change path for every other change. (d) Security note: the Hub's `ready` frame carries no account or session id, so the adopted socket is trusted on the same ambient-cookie basis as today's post-restore socket (the same cookie-swap race, a slightly different window). If that is not acceptable, the Hub would add sessionId to `ready` and the client would adopt only on a match (Hub protocol change). (e) Tests in apps/web/src/hostedHub/hubSession.test.ts: a pending socket is reused on authenticated, with no second createSocket; a restore 401 disposes it without calling expireSession; a 4401 before the restore settles does not call expireSession; buffered `ready` invalidations reach notifyDirectoryInvalidated after adoption; nothing is created with no access check pending. Also correct the stale credentialMode doc in api.ts:873-881 (doc-only).",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "repos": "ryco"
+}

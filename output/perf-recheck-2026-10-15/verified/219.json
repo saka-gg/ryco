@@ -1,0 +1,79 @@
+{
+  "id": "hub-connection:ticket-rtt-hub-session",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "I could not refute NOT_DONE. On the web hub-session path every logical relay attempt still awaits POST /api/relay/tickets (CSRF) before the stream is created. The ticket then travels in the stream's first relay auth frame. Neither repo has a v2 hub-session open, a server-minted ticket, a ticket prefetch, or a parallel-with-directory ticket. Hub origin/main (5f656ad) has no ticketless stream auth: openLogicalStream only reserves an unauthenticated connection that waits for the auth frame. Three related changes since f1be4abc7 shrink the problem but do not remove the RTT. (1) 94ec18751 overlaps the ticket with the socket upgrade, but only on mobile's native /v1/relay/client. (2) a38ecac4b adopts the transport's reconnected channel, so a relay drop buys one ticket instead of two. (3) ea96462d1 means that when the account socket itself died, the transport's ticket POST now runs alongside the account-socket reconnect: the pending stream waits for the replacement READY, so the ticket RTT is already hidden in that case. Foregrounding a healthy connection starts no new attempt. The RTT is still exposed on reload or deep-link route restore, on node select or switch, and on relay-level reconnects where the account socket stays healthy.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:343-372",
+      "note": "nextUrl: the early socket is mobile-only (#openEarlySocket, :646). It awaits prepareSocketContext (:345), then awaits issueRelayAttempt or issueRelayTicket (:349-358), and only then returns the URL. createSocket (:396) runs after that."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:224-233",
+      "note": "The web path actually goes through the default binding's issueRelayAttempt. Web configures no runtime issueRelayAttempt, so it falls through to getHostedHubApi().issueRelayTicket(nodeId) at :228."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2683-2729",
+      "note": "issueRelayTicket still sends POST /api/relay/tickets with csrf:true. It offers protocolMinor 3 and falls back once to 2 (latched per session)."
+    },
+    {
+      "location": "apps/web/src/hostedHub/runtime.ts:66-94",
+      "note": "Web sets prepareRelaySocketContext (E2EE chunk load) and createRelaySocket via createWebHubRelaySocket. It sets no openEarlyRelaySocket and no issueRelayAttempt, so nothing overlaps the ticket."
+    },
+    {
+      "location": "apps/web/src/hostedHub/hubSession.ts:111-116",
+      "note": "createWebHubRelaySocket just calls session.createSocket(). The account socket is opened independently, on authentication (watchWebHostedHubSession)."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/hostedHubSession.ts:103-151,368-379",
+      "note": "createSocket and #openStream send an empty `open` and flip the stream to open without an ack. The open is pipelined, so the only extra serial cost is the HTTP ticket RTT."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/relayEngine.ts:487-499",
+      "note": "The client relay engine still builds the auth frame with relayTicket from options.ticket. There is no server-authenticated mode."
+    },
+    {
+      "location": "packages/contracts/src/hubSession.ts:5,19",
+      "note": "HUB_SESSION_PROTOCOL_VERSION = 1. The `open` frame is {type, streamId} only."
+    },
+    {
+      "location": "packages/shared/src/hubSessionCodec.ts:28-30",
+      "note": "The codec encodes `open` as an empty payload. The auditor cited :34; the case is at :28."
+    },
+    {
+      "location": "docs/hub-session-protocol.md:9-11,23",
+      "note": "The doc says each logical stream consumes a fresh single-use node ticket and that `open` is empty."
+    },
+    {
+      "location": "docs/hosted-hub-client.md:200-203,242-245",
+      "note": "The documented restore order is directory refresh, then node validation, then ticket. Ticket custody: the ticket is requested over authenticated Hub HTTP for every logical attempt."
+    },
+    {
+      "location": "ryco-hub:src/relay/hubSession.ts:361-420,515-516",
+      "note": "On origin/main, `case \"open\"` calls openStream(socket, streamId). That re-authorizes the cookie session per open and calls relay.openLogicalStream. No node or ticket minting happens there."
+    },
+    {
+      "location": "ryco-hub:src/relay/websocketRuntime.ts:1367-1407",
+      "note": "openLogicalStream reserves an unauthenticated client connection with authenticated:null. Auth still requires the client's ticket-bearing auth frame."
+    },
+    {
+      "location": "ryco-hub:src/relay/ticketService.ts:27",
+      "note": "RELAY_TICKET_LIFETIME_MS = 60_000. Tickets are issued by ticketService behind /api/relay/tickets (src/http/relayRoutes.ts:39)."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/hostedHubSession.ts:55-62",
+      "note": "Since ea96462d1, a never-opened stream waits across an account-socket loss for the replacement READY. The ticket POST and the account-socket reconnect therefore overlap in that case, so the finding's \"every foreground resume\" is overstated."
+    }
+  ],
+  "remaining": "Web hosted connects still serialise the HTTP ticket RTT, then the hub-session stream open plus the relay auth frame, then the node READY. This covers reload/deep-link restore, node select and switch, and relay-level reconnects over a healthy account socket. The sequence is transport.ts:349-358 (via :228), api.ts:2683, then relayEngine.ts:487-499. The Hub has no ticketless or server-minted stream open: ryco-hub src/relay/hubSession.ts:515, websocketRuntime.ts:1367. The hub-session protocol is still v1 (contracts/src/hubSession.ts:5,19; shared/src/hubSessionCodec.ts:28). The one case already hidden is resume over a dead account socket, where the ticket overlaps the account-socket reconnect.",
+  "fixDefects": "",
+  "implementationSketch": "Preferred: hub-session protocol v2 with a server-minted ticket (both repos, coordinated release, then a Hub deploy). The steps are below.\n\n(1) Contracts and codec. In packages/contracts/src/hubSession.ts, accept ready protocolVersion 1|2. Add a new frame kind 8 `openNode` {streamId, nodeId: RelayNodeId, capability: \"ryco.rpc\", protocolMajor: 1, protocolMinor: 2|3}. Use a new kind rather than overloading `open`: a v1 Hub then fails closed on an unknown kind, and the v1 `open` stays byte-identical. In packages/shared/src/hubSessionCodec.ts, encode the payload as [minor u8][capability u8][nodeId len u8][nodeId UTF-8]. Validate the nodeId with the RelayNodeId schema. Add round-trip and fail-closed tests: bad length, unknown capability, minor out of range, and kind 8 under v1.\n\n(2) Client session. In packages/client-runtime/src/relay/hostedHubSession.ts, record the negotiated version from READY. Expose serverTicketAvailable() (ready && version >= 2 && no armed probe). createSocket takes an optional {nodeId, protocolMinor}. #openStream sends `openNode` when that option is set and negotiated v2; it otherwise sends `open`. A pending stream that ends up on a v1 replacement after a reconnect must close with a retryable code, so the transport retries via the HTTP ticket.\n\n(3) Transport. In packages/client-runtime/src/relay/transport.ts nextUrl, add a binding hook serverMintedAttempt?(nodeId). Web wires it to the hub session's serverTicketAvailable(). When it is true, skip issueRelayAttempt and store a PendingTicket with ticket:null and serverMinted:true. createSocket passes {serverMinted:true, nodeId, protocolMinor} through createRelaySocket into BrowserHostedRelaySocket and createWebHubRelaySocket. Keep the existing HTTP path unchanged for v1, mobile and desktop. Keep the 400 invalid_request minor-3 to minor-2 fallback semantics: the Hub answers an unsupported minor with a typed close reason, and the client latches minor 2.\n\n(4) Relay engine. In relayEngine.ts, add a serverAuthenticated mode that sends no auth frame. It keeps the same 5 s authentication deadline and requires the Hub/node READY plus channel.accept as today. E2EE capability validation, the shell snapshot gate and the generation fencing do not change.\n\n(5) Hub (ryco-hub). In src/relay/hubSession.ts, add `case \"openNode\"`. It runs the same per-open cookie re-authorization already in openStream. It then calls a new ticketService.issueAndConsumeForSession(session, {nodeId, capability, protocolMajor, protocolMinor}). That function must apply exactly the /api/relay/tickets checks: browser session kind, space scoping, node authorization and revocation, node presence and live protocol binding (d21f9c8), rate limits and audits. Minting and consumption happen in one transaction, so no ticket row outlives the call. Then call openLogicalStream with a pre-authenticated RelayWebSocketData, and let the node handshake answer READY on the stream. Advertise ready version 2 only behind a config flag for rollout.\n\n(6) Docs. Update docs/hub-session-protocol.md (v2 table, negotiation, fail-closed rules) and docs/hosted-hub-client.md §Relay transport and ticket custody (a server-minted ticket for v2 sessions, with HTTP tickets kept for v1, native and desktop).\n\nTests: transport.test.ts must assert that issueRelayTicket is not called when the session is v2-ready and is called for v1, not-ready or probe-armed sessions. hostedHubSession.test.ts covers version negotiation and a v2 pending stream crossing to a v1 replacement. relayEngine.test.ts covers no auth frame in server mode and the timeout. Hub tests prove authorization parity with /api/relay/tickets for every refusal reason, rate limiting, audit events, and v1 clients unaffected. A browser-suite hosted connect should show one fewer POST /api/relay/tickets.\n\nCheap client-only interim (also a decision, because it changes the documented restore order at hosted-hub-client.md:200-203). In HostedHubController restore (packages/client-runtime/src/authorization/state.ts, around refreshDirectory/selectNode :2358), start issueRelayTicket(routedNodeId) in parallel with refreshDirectory when the routed id is in the last known directory. Hand the result to the attempt factory as a one-shot pre-issued ticket bound to {nodeId, generation}. Discard it if validation fails or the generation moves. This saves the RTT only on reload/deep-link restore, and a failed validation wastes a persisted ticket row.",
+  "worth": "medium",
+  "effort": "L",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "The full fix is a Hub protocol change: a new hub-session version and frame kind, plus server-side ticket minting and consumption over the WebSocket instead of a CSRF-protected HTTP POST. That changes the ticket-custody and authorization surface the docs define, needs a security review for parity with /api/relay/tickets, and needs a coordinated Hub release and deploy. The client-only interim reorders the documented fail-closed restore pipeline (a ticket before directory validation) and can waste single-use tickets, which is a product and security trade-off.",
+  "repos": "both",
+  "correction": "No change to the auditor's classification. Small corrections: the web ticket call goes through the default binding's issueRelayAttempt (transport.ts:224-233, issueRelayTicket at :228), not :356. The codec `open` case is at hubSessionCodec.ts:28, not :34. The auditor missed three nuances that shrink but do not remove the cost: a38ecac4b halved tickets per relay drop (one instead of two), ea96462d1 already hides the ticket RTT when the account socket itself is being reconnected, and a healthy foreground resume starts no attempt. So the finding's \"every foreground resume\" is overstated. The remaining gain is concentrated on route restore, node select or switch, and relay-only reconnects."
+}

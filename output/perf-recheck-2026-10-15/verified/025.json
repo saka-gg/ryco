@@ -1,0 +1,71 @@
+{
+  "id": "server-boot:web-mode-registry-on-critical-path",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "The auditor is right that the main fix landed (60633eff3). But they understated fix-defect (1). They said a pre-gate getInstance 'only matters for early provider-intent recovery'. In fact any startup housekeeping that stops a provider session trips it: the reaper's immediate first sweep, and the orphaned-session reconcile, which runs on every restart while a turn is running. That call releases the gate before HTTP serves and builds all drivers on the listen path. This has already happened on the user's machine. In the first post-#710 boot (2026-10-12T15:16:16Z), all 6 drivers were built at .39-.445 and a session was reaped at .446, while 'Listening on' only came at .633.",
+  "summary": "Verified that the core fix is in place. Every mode now starts with an empty registry and seeds the provider list from persisted per-instance status caches (no drivers built). Drivers are built only after markHttpServing releases ProviderInstanceBootGate. Real boot logs confirm it: in 15 of 16 desktop boots and 7 of 7 dev boots since the fix, the initial reconcile completes after 'Listening on'. The fix does have one hole. The hydrated getInstance has an on-demand fallback: a configured but unbuilt instance calls awaitInitialReconcile, which releases the gate early and waits for ALL drivers. The startup fiber and the provider session reaper both run before the router serves. Their stop paths (stopSession, stopSessionBinding, findExactAdapterSession) call getByInstance just to learn that a fresh process has no live session. So on a restart with a running turn (orphan reconcile), or after an unclean shutdown with a non-stopped binding idle for more than 5 minutes (the reaper's immediate first sweep), all provider SDKs are imported and CopilotClient is spawned on the listen critical path again. That is the cost the finding wanted removed, and it was observed once in the user's logs. First-run boots without cache files show no provider rows until drivers arrive. This is cosmetic and first-run only: disabled instances are persisted too (e.g. cursor.json).",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:124-150",
+      "note": "In every mode, the registry is created with an empty configMap. Settings are read once, and identities are resolved through resolveConfiguredProviderIdentities (schema decode only, no driver built). The desktop-only branch and the 100 ms sleep are gone."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:174-213",
+      "note": "Both the initial reconcile and the settings-stream reconciles wait on gateReleased. awaitInitialReconcile = release + wait for the WHOLE initial reconcile."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:218-226",
+      "note": "Defect source. A getInstance call for a configured instance that is not built yet calls awaitInitialReconcile, which releases the gate even if HTTP is not serving yet, and builds every configured driver, not just the one requested."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1153-1158",
+      "note": "markHttpServing releases the boot gate. This is the intended release point. server.ts:710-724 calls it after HttpRouter.serve."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:804-828",
+      "note": "startOrchestrationRuntime (reactors.start, then provider-sessions.reconcile, then provider-intents.recover) runs in the startup fiber, forked while the layer graph is still being built. The logs show 'startup command gate ready' before 'Listening on' in every boot, so these phases run before the gate's intended release."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:714-726",
+      "note": "For every thread whose projected session is still starting/running or has an active turn (any restart during a turn, including graceful ones: runStopAll only marks bindings stopped), this calls providerService.stopSessionBinding."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:910-917",
+      "note": "findExactAdapterSession (used by stopExactBinding/stopSessionBinding at :939-983) calls registry.getByInstance, which reaches the hydrated getInstance fallback and builds all drivers just to call listSessions on a fresh adapter that cannot have the session."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderSessionReaper.ts:33-150",
+      "note": "start() forks the sweep with Effect.repeat(Schedule.spaced), so the first sweep runs immediately at reactors.start. For every non-stopped binding idle for more than 5 min, it calls providerService.stopSession (:103), and resolveRoutableSession calls getByInstance (ProviderService.ts:~1161)."
+    },
+    {
+      "location": "/Users/laurinfrank/.ryco/userdata/logs/server.log:3-18",
+      "note": "Observed regression on a post-#710 boot (2026-10-12T15:16:16Z; both the new 'hydration config resolved' and 'initial reconcile complete' messages are present). Command gate ready at .370, all 6 drivers resolved .441-.445 (initial reconcile 55 ms), provider.session.reaped at .446 (idleDurationMs 345701), and 'Listening on' only at .633. Later boots (e.g. lines 766-776) show the intended order: Listening, then drivers."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:265-330",
+      "note": "Persisted status-cache snapshots are seeded per configured identity (listConfigured) before any driver exists, then published at :931-934. This addresses the verifier's 'lost cached provider list' regression."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:724-758",
+      "note": "settleBootArrival adopts the persisted snapshot or keeps it without probing. The placeholder is upserted with persist:false. Cache files still get written by later probes, including for disabled instances (~/.ryco/caches/cursor.json is current)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.test.ts:1600-1720",
+      "note": "Tests cover building only after the gate opens, building from the current settings at release, and on-demand building before the gate. There is no test that startup stop/reaper paths leave the gate closed. The on-demand test actually codifies the full-build fallback."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.ts:72-76",
+      "note": "Side note, not a defect: on hosted nodes, driver construction (SDK evaluation, Copilot spawn) now starts at the same moment as the Hub connector module load and key custody (server.ts:723-726). Relay readiness still contends with the provider build, even though listen no longer does."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The on-demand fallback in ProviderInstanceRegistryHydration.ts:218-226 lets boot-time housekeeping release the boot gate before HTTP serves, and it then builds ALL configured drivers on the listen critical path. The finding's 95-140 ms cost comes back in exactly these boots. Triggers: (a) reconcileOrphanedProviderSessions (serverRuntimeStartup.ts:714-726) calls stopSessionBinding, which reaches findExactAdapterSession and getByInstance (ProviderService.ts:917), for every thread that had a turn running at shutdown, including graceful restarts and node updates mid-run. (b) The ProviderSessionReaper's immediate first sweep (ProviderSessionReaper.ts:103,150) calls stopSession and resolveRoutableSession (getByInstance) for non-stopped bindings idle more than 5 min, e.g. after a crash, kill or force quit. (c) Provider intent recovery or pending goal-sync replays that touch an adapter. For (a) and (b) the build is pure waste: a freshly built adapter has no sessions, so the stop returns not-found. Observed in ~/.ryco/userdata/logs/server.log on 2026-10-12T15:16:16Z: drivers built about 190 ms before 'Listening on'. Minor: before the first probe, instances with no cache file have no provider row (first run only).",
+  "implementationSketch": "1) Add a non-building lookup. Add an optional `peekInstance(instanceId)` to ProviderInstanceRegistryShape (Services/ProviderInstanceRegistry.ts). In ProviderInstanceRegistryHydration.ts it returns the raw `registry.getInstance` with no awaitInitialReconcile fallback; in ProviderInstanceRegistryLive it equals getInstance. Expose it on ProviderAdapterRegistry as `peekByInstance` (Layers/ProviderAdapterRegistry.ts). 2) In ProviderService.ts, make the stop-only paths use it. In findExactAdapterSession (:910) / stopExactBinding (:939), when peek returns undefined, return 'not-found' (forget the stale binding and runtime activity), because an adapter not built in this process cannot hold the session. In stopSession (:2134), take the provider for metrics/annotation/directory.upsert from the binding when the adapter is not built, and skip adapter.stopSession. Keep getByInstance (building on demand) for start/send/recover paths. 3) In ProviderSessionReaper.start, delay the first sweep by one interval or until command readiness, e.g. `Effect.delay(Duration.millis(sweepIntervalMs))` before the repeat. This also removes a 700-binding listBindings scan from boot. 4) Optional: change the hydrated getInstance fallback before the gate to build only the requested instance, via a mutator method that reconciles a single entry, instead of releasing the whole gate. Turn-start intent replays then pay one SDK import, not six. Tests: in ProviderRegistry.test.ts or a new hydration test, build ProviderInstanceRegistryHydrationLive + ProviderAdapterRegistryLive + ProviderServiceLive with the gate closed. Call stopSessionBinding / stopSession for a binding on a configured instance and assert that `listInstances` stays [] and the result is 'not-found'. Add a serverRuntimeStartup.test case: an orphaned running thread at boot must not build drivers before markHttpServing (count driver create calls with a stub driver list). Add a reaper test that the first sweep does not run at start(). Validate with the focused vitest files only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-internal boot ordering and stop-path routing only. No auth/E2EE, no Hub protocol, no hosted lifecycle ownership change. Skipping the adapter for stops of sessions this process never built is semantically equivalent, because a fresh adapter has no sessions.",
+  "repos": "ryco"
+}

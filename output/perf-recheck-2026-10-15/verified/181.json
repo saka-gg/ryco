@@ -1,0 +1,58 @@
+{
+  "id": "dedicated-pages:usage-scan-limits-truncate-cached-data",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710; e5e676f95 moved the cache to per-file aggregates). All three proposal items are in. (1) Only fresh parses are charged to SOURCE_SCAN_BYTES/RECORDS/DURATION. Cached files are bounded only by a separate 2M SOURCE_CACHED_RECORDS cap, and a record-cap hit now uses `continue` instead of the old `break`. (2) The 250k decodedRecordCount cliff is gone. The cache is 64 v6 shards with only structural per-shard limits. A 1M-record in-memory cap evicts oldest-mtime files first, and the 120-day retention prune runs on load as well as after requests. (3) Budget-limited files are tallied separately and get diagnosticCode transcript-scan-budget plus a 'Refresh to continue' message, which web and mobile both render. Checked against the live cache at ~/.ryco/userdata/usage/scan-cache: 262k records (claude 128.7k, codex 133.2k). That is already over the old 250k decode cap, and both the codex 90d window (~123k) and the claude 30d window (~126k) are over the old 100k cap. All of it now decodes and aggregates without truncation. I found only minor leftovers, none user-visible at today's volumes.",
+  "evidence": [
+    {
+      "location": "apps/server/src/usage/UsageService.ts:96-101",
+      "note": "SOURCE_SCAN_* is documented as fresh-parse-only. SOURCE_CACHED_RECORDS = 2_000_000 is a separate cap for cached records."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:819-853",
+      "note": "On a cache hit, only cachedRecords grows. The byte/record/duration checks, parsedBytes (840) and parsedRecords (845) apply only to non-cached files. Every limit uses `continue`, so later cached or small files are still included."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:866-888",
+      "note": "budgetLimitedFileCount feeds status partial and diagnosticCode transcript-scan-budget, separate from failedFileCount/transcript-read-partial."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:276-281",
+      "note": "Budget-specific coverage message. Rendered at apps/web/src/components/statistics/usage/UsageView.tsx:566 and apps/mobile/src/features/settings/statistics/UsageStatistics.tsx:152."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCache.ts:254-311",
+      "note": "decodeUsageScanCache has no running record-total cap any more. Only per-shard structural limits remain: 10k files, 250k sessions, and 100k records per file (MAX_RECORDS_PER_FILE, line 31). Compare git show f1be4abc7:apps/server/src/usage/usageScanCache.ts, which had `decodedRecordCount + entry.r.length > 250_000`."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCache.ts:509-522",
+      "note": "capUsageScanCache sorts by mtime and evicts the oldest files first."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.ts:32,173-181",
+      "note": "USAGE_SCAN_CACHE_RECORD_LIMIT = 1_000_000. On load, the retention prune runs, then the cap."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:1077-1087",
+      "note": "Prune and cap run again after each request, before the coalesced persist."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.test.ts:265-330",
+      "note": "The byte-budget test asserts partial status with transcript-scan-budget, then a complete second pass with reusedCacheFileCount 2, so cached files are not charged again. No test seeds more than 100k cached records, but the code path is simple."
+    },
+    {
+      "location": "apps/server/src/usage/usageTranscriptReader.ts:362",
+      "note": "Minor residual: a read resumed from a checkpoint returns the retained records plus the new ones. UsageService.ts:845 charges the file's full recordCount to SOURCE_SCAN_RECORDS even though only the tail was parsed. The byte charge is fair, because the old prefix is re-read for hashing."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None material. Minor residuals, all low impact today: (a) Checkpoint-resumed reads of active transcripts charge the whole file's records to SOURCE_SCAN_RECORDS (UsageService.ts:845 with usageTranscriptReader.ts:362). The cap is only reached if more than about 100k records of concurrently changing files exist; the biggest live codex file has 9.7k. Files are processed in path order, so the same last file would then be budget-limited on every refresh. (b) The 1M in-memory cap is re-applied after every request (UsageService.ts:1085). Once a user's 120-day history exceeds 1M records, all-time and other long windows would re-parse the evicted oldest files and evict them again on every request. If that evicted set is over 100k records, those views stay partial permanently. The cap has about 4x headroom over today's 262k. (c) When failed reads and budget limits happen together, the diagnostic is transcript-read-partial and the budget hint is hidden. If every file is budget-limited and nothing is accepted, the status is failed rather than partial. Both are cosmetic or edge cases.",
+  "implementationSketch": "Optional polish only. (a) In usageTranscriptReader, return freshlyParsedRecordCount (records.length minus previous.records.length when resumed) in UsageTranscriptReadResult. Pass it through CachedReadResult in UsageService.readFileRecords and charge parsedRecords with it instead of aggregate.recordCount. Test: spy on the reader so it returns a resumed result with large retained records, and assert the next file is not budget-limited. (b) Have the post-request capUsageScanCache never evict files whose keys are in this request's liveFileKeys, or derive the cap from measured aggregate memory (slots + keys) rather than recordCount. Test: an all-time summary over a cache larger than the cap stays complete on a second call. (c) Make diagnosticCode a sorted comma-joined list (the cursor path already does this), and treat budget-only incompleteness as partial. Test in UsageService.test.ts.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local usage scan bookkeeping only. No auth, E2EE, hosted lifecycle or Hub protocol impact.",
+  "repos": "ryco"
+}

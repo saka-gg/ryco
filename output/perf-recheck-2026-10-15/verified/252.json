@@ -1,0 +1,71 @@
+{
+  "id": "gap-logging-io:native-delta-coalescing",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the Claude and Codex scope. Commit 60633eff3 (#710) added per-writer delta-run coalescing to EventNdjsonLogger on the native and canonical streams. Consecutive deltas of one content stream become one {kind:'delta-run', count, chars, firstAt, lastAt, text} record, closed on a key change, any non-delta record, the 8192-char cap, a run age of 1 s, or close. thinking_tokens and ping are dropped before the run logic, so they do not break runs. The packaged default is lifecycle, which writes no deltas at all. Real logs agree: in the dev log, 23 Codex agentMessage deltas became one ~540 B native record and one canonical record, and the packaged userdata logs from Oct 15 contain no delta records. The code is correct: ordering is preserved, the run is flushed before every non-delta record, idle eviction skips open runs, close drains runs, and secret redaction runs on the concatenated text. What the auditor missed: coalescing only recognises Claude and Codex native shapes. OpenCode, Copilot and the ACP family (Cursor, Grok, registry agents) still write one native record per streaming delta in full mode. ACP writes three per chunk: protocol raw, protocol decoded, and the adapter's session/update. This only matters in full mode (the dev default or an opt-in) and was outside the finding's measured scope.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:398",
+      "note": "appendDelta accumulates parts per key. On a key change or the 8192 cap (PROVIDER_EVENT_LOG_STRING_CAP) it calls closeRun (:379)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:430",
+      "note": "writeRecord applies the mode filter first, so noise records never close a run. It coalesces only in full mode (:447-451). Any other record closes the open run before being enqueued (:453-454), which keeps file order."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:462",
+      "note": "flushWriter closes runs at least DELTA_RUN_MAX_AGE_MS (1 s, :138) old or when closing. Otherwise it reschedules (:475, :519). evictIdleWriters skips writers with an open run (:562), and closeWriter drains late runs (:532)."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:195",
+      "note": "extractProviderEventDelta handles canonical *.delta for all providers. Its native branch (:221-249) keys on envelope.method and recognises only Claude content_block_delta (:225) and Codex */delta|*Delta (:235)."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:266",
+      "note": "providerEventDeltaRunRecord writes only identifying fields, so the per-delta id/uuid, createdAt, providerThreadId/session_id and full payload are gone. For Codex, the duplicated textDelta and payload.delta go too."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:156",
+      "note": "NATIVE_NOISE_NAMES drops claude/system/thinking_tokens and claude/stream_event/ping (check at :171-174). In lifecycle mode NATIVE_STREAMING_NAME (:134) excludes delta and stream_event names. The auditor cited :160 for this; the correct line is :134."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderEventLoggers.ts:104",
+      "note": "Mode resolution is env override, then the setting, then the build default: full in dev, lifecycle when packaged. packages/contracts/src/settings.ts:711 defaults providerEventLogs to null."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:2106",
+      "note": "logNativeSdkMessage is now a plain function (no span) and no longer writes createdAt. The payload goes through the per-message cached secretRedactor (:2137), which is shared with the canonical raw.payload."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.test.ts:358",
+      "note": "A test covers Claude native runs split by content_block_stop and by index or type, and a canonical content.delta run of 3. providerEventLogRecords.test.ts:147 covers key extraction for Codex native and canonical."
+    },
+    {
+      "location": "local:~/.ryco/dev/logs/provider/5176f8dd-45c3-416d-bc39-e3ebaea44d79.native.log:5548",
+      "note": "A real post-fix record: a Codex item/agentMessage/delta run with count 23 (105 chars) in one line, matched by one CANON delta-run (count 23) in the canonical file. The packaged ~/.ryco/userdata/logs/provider files from Oct 15 contain only lifecycle records."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/OpenCodeAdapter.ts:1500",
+      "note": "Uncovered caller: every OpenCode SSE event, including each message.part.delta, is written as {observedAt, event:{type, payload:event}}. It has no `method`, so extractProviderEventDelta returns undefined and every delta stays its own record in full mode."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CopilotAdapter.ts:123",
+      "note": "Uncovered caller: logCopilotNativeEvent (an Effect.fn span) writes every SessionEvent, including assistant.message_delta and assistant.reasoning_delta (called at :180 and :225). Those are not coalesced, and the per-event span is created even in lifecycle mode (tracked separately under finding 259, logger-effect-spans)."
+    },
+    {
+      "location": "apps/server/src/provider/acp/AcpNativeLogging.ts:60",
+      "note": "Uncovered caller: ACP protocol logging (logIncoming and logOutgoing true) writes a 'raw' and a 'decoded' protocol record for every incoming frame (packages/effect-acp/src/protocol.ts:424-455). The adapters also log session/update per ContentDelta and ThoughtDelta (AcpAdapter.ts:717, CursorAdapter.ts:930). That is three uncoalesced native records per streamed chunk in full mode. In lifecycle mode they are dropped, but only after redactAgentControlSecrets and envelope construction."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects in the implemented coalescer. The auditor's 'No real defects' missed one coverage gap. The native branch of extractProviderEventDelta (providerEventLogRecords.ts:221-249) only matches Claude content_block_delta and Codex */delta methods. OpenCode message.part.delta (OpenCodeAdapter.ts:1500), Copilot assistant.message_delta and assistant.reasoning_delta (CopilotAdapter.ts:123/180/225), and ACP chunks (Cursor, Grok, registry) are still one native record per delta in full mode. ACP is triple-logged: protocol raw plus protocol decoded (AcpNativeLogging.ts:60-73, effect-acp protocol.ts:424-455) plus the adapter's session/update (AcpAdapter.ts:717, CursorAdapter.ts:930). The canonical stream is coalesced for every provider. Minor items: (1) Non-delta Claude native records still duplicate id with payload.uuid and providerThreadId with session_id (ClaudeAdapter.ts:2117-2137). ACP native envelopes still carry createdAt equal to observedAt (AcpNativeLogging.ts:25, CursorAdapter.ts:411, AcpAdapter.ts:276). (2) In lifecycle mode, adapters still build and redact a native envelope per delta before the logger drops it. This is cheap for Claude (cached redactor) but uncached for ACP protocol frames and Copilot events. (3) The auditor cited :160 for the lifecycle streaming-name exclusion; it is NATIVE_STREAMING_NAME at :134.",
+  "implementationSketch": "Optional follow-up for full-mode coverage of the remaining providers. All changes are in apps/server/src/provider/providerEventLogRecords.ts. (a) In the native branch of extractProviderEventDelta, also key on envelope.type. OpenCode: type 'message.part.delta' uses text = payload.properties.delta and key = deltaKey(type, turnId, properties.sessionID, properties.partID). Copilot: type 'assistant.message_delta' or 'assistant.reasoning_delta' uses text = envelope.data.deltaContent and key = deltaKey(type, data.messageId ?? data.reasoningId, data.parentToolCallId). ACP: method 'session/update' with payload.update.sessionUpdate equal to agent_message_chunk or agent_thought_chunk and update.content.type === 'text' uses text = content.text and key = deltaKey(sessionUpdate, payload.sessionId). (b) In providerEventDeltaRunRecord's native branch, carry the matching identifying fields: type, sessionID/partID, messageId/reasoningId, sessionUpdate. (c) Stop ACP double-logging. In AcpNativeLogging, drop incoming stage 'decoded' when 'raw' was logged, or skip protocol frames whose method is session/update, since the adapter already logs those. Alternatively, add a full-mode filter in shouldWriteProviderEventRecord for kind 'protocol' records that carry session/update. (d) Optionally add a cheap `accepts(record-name)` or `mode()` accessor to EventNdjsonLogger. Adapters could then skip envelope construction and redaction when lifecycle mode would drop the record. For ACP, install protocolLogging only when it can be written, checking mode per call because the mode is live. Tests: add cases to providerEventLogRecords.test.ts (the extractProviderEventDelta describe at :147) for each new shape. Add an OpenCode and an ACP sequence to the EventNdjsonLogger.test.ts coalescing test (:358) and assert one delta-run per part or session. Run `bun run test` scoped to apps/server for these two files.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local observability logging only, with no auth, E2EE, Hub or hosted-lifecycle impact. The uncovered providers only matter in full mode, which is the dev default or an explicit opt-in. Packaged builds default to lifecycle and write no deltas.",
+  "repos": "ryco",
+  "correction": "Auditor's DONE stands, but its 'No real defects' missed that native coalescing only recognises Claude and Codex shapes. OpenCode (message.part.delta), Copilot (assistant.*_delta) and ACP chunks are still one native record per delta in full mode, and ACP is triple-logged via protocol raw, protocol decoded and session/update. Its cited providerEventLogRecords.ts:160 for the lifecycle delta exclusion should be :134 (NATIVE_STREAMING_NAME)."
+}

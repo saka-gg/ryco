@@ -1,0 +1,67 @@
+{
+  "id": "client-runtime-sync:client-store-identity-churn-and-unbatched-detail-events",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The structural sharing part is done: syncEnvironmentShellSnapshot reuses unchanged projects, worktrees, shells, sessions, turn states, summaries, id lists and record containers, and the equality helpers cover every field. Web thread-detail events are frame-batched through createEnvironmentEventBatcher (#710). The batching turned on a latent bug, though. coalesceOrchestrationUiEvents in web applyRecoveredEventBatch used to be an identity function because every call had one event. It now merges a streaming delta and the following empty-text completion of the same message into one non-streaming event that carries only the delta text. The reducer treats non-streaming text as a replacement, so the assistant message loses all earlier text in the live view. Mobile, the intended phone app, still commits once per detail event.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:2064-2213",
+      "note": "syncEnvironmentShellSnapshot reuses each previous object through plainDataEqual, sidebarWorktreesEqual, threadShellsEqual, threadSessionsEqual, threadTurnStatesEqual and sidebarThreadSummariesEqual. reuseUnchangedRecord, reuseUnchangedIds and reuseUnchangedIdsByKey keep the containers. Checked against types.ts:196-334 and the contract schemas: no compared field is missing. environmentId is not compared on summaries, but it is constant per environment. The snapshot-identity part of the finding is done."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/eventBatching.ts:42-143",
+      "note": "createEnvironmentEventBatcher batches per frame with a 100 ms fallback and a 512-event bound. It is registered as a store mutation barrier. Added by 60633eff3 (#710) and tested in storeStructuralSharing.test.ts:287-442."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:804-814",
+      "note": "threadDetailEventBatcher sends N detail events into one applyRecoveredEventBatch call. The web per-event commit is gone."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:679-713",
+      "note": "REGRESSION. When two consecutive message-sent events share a messageId, coalesceOrchestrationUiEvents builds {...event, text: (!event.streaming && event.text.length>0) ? event.text : previous.text + event.text}. For [delta 'tail' streaming:true, complete '' streaming:false] it emits {text:'tail', streaming:false}. Before #710 the function only ever saw one event (f1be4abc7 service.ts:768), so it did nothing."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:736",
+      "note": "The coalesced uiEvents, not the raw events, go to environmentStateSink.applyOrchestrationEvents."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1663-1682",
+      "note": "mergeMessageUpdate: if message.streaming is false and its text is non-empty, that text replaces existing.text. The coalesced event {text:'tail', streaming:false} therefore wipes the text already stored for the message. A node simulation of both functions (/tmp/verify119/sim.mjs) gives 'Earlier streamed text. tail chunk' when applied event by event and 'tail chunk' when frame-batched."
+    },
+    {
+      "location": "apps/server/src/orchestration/decider.ts:2907-2932",
+      "note": "thread.message.assistant.complete emits message-sent with text `command.text ?? \"\"` and streaming:false. Without an attachment delivery the text is empty."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:2461-2464",
+      "note": "Legacy token streaming mode (user toggle, settings.ts:618): every non-delta runtime event, including item.completed, first flushes the live tail delta. finalizeAssistantMessage (1813-1901) then dispatches the empty complete right after it. The two events arrive back to back and land in one client frame, so the message is cut down to its last chunk."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:1685-1702",
+      "note": "Default buffered mode: past MAX_BUFFERED_ASSISTANT_CHARS (24,000, line 176) the buffer spills as a streaming delta in an earlier frame. At completion, finalize sends delta(remainder) followed by complete(''). The coalescer merges these two, so any assistant message over 24k chars is cut to the remainder until a resubscribe or reload."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadDetailEvents.ts:16-19",
+      "note": "The mobile comment says coalesceOrchestrationUiEvents 'is identity for the single-event detail path'. That assumption broke on web when #710 batched the detail path."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadDetailEvents.ts:62",
+      "note": "Mobile still applies one event per batch: `(environmentId, event) => applyRecoveredEventBatch([event], environmentId)`, wired at environmentDriver.ts:259 and :646. Each detail event costs one zustand set plus projectionChanged/markEnvironmentSnapshotDirty. Mobile's shell events, by contrast, are batched by the shared supervisor (supervision.ts:1067)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/orchestration/orchestrationRecovery.ts:88",
+      "note": "createOrchestrationRecoveryCoordinator is still exported and used only by its test. The optional cleanup was not done."
+    }
+  ],
+  "remaining": "(1) Fix defect, see fixDefects: apps/web/src/environments/runtime/service.ts:679-713 coalesceOrchestrationUiEvents now runs on multi-event detail batches and cuts assistant message text when a streaming delta and an empty-text completion of the same message share a frame. (2) Mobile thread-detail events still commit once per event: apps/mobile/src/connection/threadDetailEvents.ts:62, wired at apps/mobile/src/connection/environmentDriver.ts:259/:646. (3) Optional: delete the dead createOrchestrationRecoveryCoordinator (packages/client-runtime/src/state/orchestration/orchestrationRecovery.ts:88) and its test.",
+  "fixDefects": "Correctness regression from #710 (60633eff3). The web threadDetailEventBatcher (service.ts:804) now passes multi-event batches into applyRecoveredEventBatch, which runs coalesceOrchestrationUiEvents (service.ts:679-713, used at :736). For consecutive thread.message-sent events with the same messageId, where the earlier one is a streaming delta and the later one is the non-streaming completion with empty text (decider.ts:2907-2932), the coalescer produces one event with streaming:false and text set to just the delta. mergeMessageUpdate (store.ts:1663-1682) reads non-streaming non-empty text as a full replacement, so all text applied in earlier frames is dropped. With legacy token streaming on (a user toggle), almost every assistant message is cut to its last chunk at completion, because the server flushes the live tail and dispatches the complete back to back (ProviderRuntimeIngestion.ts:2461-2464, 1813-1901). In the default buffered mode, any message over 24,000 chars is cut to the post-spill remainder (ProviderRuntimeIngestion.ts:176, 1685-1702). Server snapshots stay correct, so a reload or resubscribe repairs the view. No test covers coalesceOrchestrationUiEvents, and the batcher tests do not exercise message coalescing. Confirmed by a node simulation that copies both functions (/tmp/verify119/sim.mjs).",
+  "implementationSketch": "A. Fix the regression (do this first). In apps/web/src/environments/runtime/service.ts:679-713, either (preferred) remove coalesceOrchestrationUiEvents and pass the raw events to environmentStateSink.applyOrchestrationEvents, or restrict it. Removal is safe because applyOrchestrationEvents in store.ts:3192 already shares one owned message map across consecutive message-sent events via ownedMessageMaps, so a batch costs one commit anyway. To restrict it instead: merge only streaming+streaming pairs (concatenate text, keep previous createdAt, attachments = event ?? previous). Let a non-streaming event with empty text pass through unmerged. A non-streaming event with non-empty text may replace the previous delta, as it does today. Add tests to apps/web/src/environments/runtime/service.test.ts, exporting the helper or going through applyEnvironmentThreadDetailEvent + flushEnvironmentThreadDetailEvents with a seeded store: (a) existing assistant text 'Earlier ' plus batch [delta 'tail' streaming, complete '' non-streaming] gives 'Earlier tail' with streaming false; (b) [delta, complete with full text] gives the full text; (c) [delta 'a', delta 'b'] appends 'ab'; (d) a message with no existing text plus [delta 'x', complete ''] gives 'x'. B. Mobile batching, which also removes duplication: move the shared part of applyRecoveredEventBatch (batch effects, applyOrchestrationEvents, draft promotion, draft/terminal cleanup, eviction reconcile) into client-runtime, e.g. packages/client-runtime/src/state/orchestration/applyThreadDetailEventBatch.ts, with web-only hooks (projectSearchInvalidations, syncProjects/syncThreads) as optional sink calls. Both apps then build createEnvironmentEventBatcher({ apply }) around it. In apps/mobile/src/connection/threadDetailEvents.ts, return batcher.enqueue in place of the per-event closure, use the default runtime frameScheduler (mobileFrameScheduler is already configured in apps/mobile/src/state/threadsRuntime.ts:17), and call batcher.dispose when the driver is torn down. Extend apps/mobile/src/connection/environmentDriver.test.ts to check that N detail events within one frame produce one applyOrchestrationEvents call and keep their order relative to a following snapshot (the barrier flush). C. Optional: delete createOrchestrationRecoveryCoordinator and orchestrationRecovery.test.ts if nothing else in that module needs them. Checks: focused vitest for apps/web service tests, client-runtime state/threads tests and apps/mobile connection tests, plus typecheck of the touched packages.",
+  "worth": "high",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "A client-side reducer/coalescer bug fix plus reuse of an existing batcher on mobile. It does not touch auth, E2EE, hosted lifecycle ownership or the Hub protocol, and there is no product trade-off: the fix restores the pre-#710 behaviour.",
+  "repos": "ryco",
+  "correction": "The auditor marked this DONE and saw no defect in the web fix. However, #710's web batching made coalesceOrchestrationUiEvents active on multi-event detail batches. A streaming delta followed by the empty-text completion of the same message now coalesces into a non-streaming replacement, which drops earlier message text. That always affects legacy token streaming and affects default-mode messages over 24k chars. The auditor also listed mobile's unbatched detail path only as a side note, but it is the same problem in the intended phone app, so the status is PARTIAL rather than DONE. The structural-sharing half of the finding is done as the auditor described."
+}

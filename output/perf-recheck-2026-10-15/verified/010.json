@@ -1,0 +1,26 @@
+{
+  "id": "desktop-boot:shell-env-stale-while-revalidate",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed as DONE. readShellEnvironmentCache has no TTL. A cache of any age is a hit, and only version, platform, capturedAt, an empty environment or a shell change cause a miss. The packaged entry applies the cache synchronously before the early backend spawn. main.ts applies it on hits (dev and fallback) without waiting and schedules a refresh in the worker 5 s after handleBackendReady. A failed capture keeps the PATH already in effect. A first launch with no cache waits for one capture, but the early backend loads its modules meanwhile and gets the environment through the bootstrap envelope, which cli.ts applies before any layer builds. No other caller of the login shell on the desktop path still blocks the backend on a stale cache.",
+  "evidence": [
+    {"location": "packages/shared/src/shellEnvironment.ts:390-447", "note": "No age-based invalidation. ageMs is only reported. The miss reasons are unreadable, version, platform, capturedAt, environment and shell."},
+    {"location": "apps/desktop/src/desktopEntry.ts:66-80,160-166", "note": "The packaged entry applies the cache to process.env before startEarlyBackend."},
+    {"location": "apps/desktop/src/main.ts:737-760", "note": "A hit, whether applied by the entry or here, sets shellEnvironmentRefreshScheduled and returns at once. Only a miss awaits the capture."},
+    {"location": "apps/desktop/src/main.ts:767-774,1618-1620", "note": "A delayed stale-while-revalidate refresh runs from handleBackendReady and is skipped while quitting."},
+    {"location": "apps/desktop/src/main.ts:695-728", "note": "A failed or aborted capture leaves the existing PATH and cache in place. A successful one rewrites the cache. Probes start from the inherited PATH, so stale cache entries are not carried forward."},
+    {"location": "apps/desktop/src/main.ts:4848-4856,3165", "note": "On a packaged miss the boot window is shown, the early backend is already loading, and the captured environment goes into the envelope."},
+    {"location": "apps/server/src/cli.ts:509", "note": "applyBootstrapShellEnvironment (bootstrap.ts:33-40) applies the envelope environment before layers build."},
+    {"location": "packages/shared/src/shellEnvironment.test.ts:57", "note": "Test covers an aged record still returning a hit with ageMs. desktopEntry.test.ts and bootstrap.test.ts cover the entry and envelope paths."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Already implemented. No decision needed.",
+  "repos": "none"
+}

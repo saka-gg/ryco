@@ -1,0 +1,74 @@
+{
+  "id": "browser-measure:connection-and-thread-data-start-late",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Both late starts are fixed at HEAD. The root beforeLoad now prefetches the ws-token alongside the session check. Once the session is authenticated, it opens the primary connection, and with it the shell subscription, while the RootAppShell chunk is still loading. This happens only in standard mode, so hosted Hub ownership is respected. The RootAppShell effect stays the idempotent owner: createPrimaryEnvironmentConnection returns the registered connection, so no duplicate is built. The thread route loader retains the thread detail subscription synchronously at navigation time. A retain taken before the connection exists is deferred via watch/attach and starts on register. Sidebar and inbox press/hover intents and the welcome bootstrap-thread redirect retain early as well. On a cold deep link the window request now overlaps the shell snapshot instead of waiting for it, which is better than the finding asked for. One minor defect is in the press/hover intent extension. An intent retain is released with {immediately:true} after 10 s. Its doc comment assumes the route's navigation retain is still held then, but ChatThreadRouteView releases that retain as soon as ChatView mounts. So a never-loaded thread that the user opens and leaves within about 10 s is disposed at the intent deadline instead of entering the 5-minute idle cache. The store keeps the detail, so a revisit still renders immediately. The cost is a fresh window snapshot (not a resume) and no live detail events in the meantime. Impact is low.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/__root.tsx:163",
+      "note": "RootAppShell.preload() and the matched route chunks start at the top of beforeLoad, so the early connect below overlaps the shell chunk download."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:249-256",
+      "note": "The ws-token prefetch overlaps ensurePrimaryEnvironmentReady and the session check. If authenticated and not a native-authorize path, startPrimaryConnectionEarly() runs; otherwise the prefetched token is discarded. Hosted-hub and hosted-static return earlier (lines 197-226), so hosted lifecycle ownership is not touched."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:342-348",
+      "note": "startPrimaryConnectionEarly dynamically imports the runtime and calls connectPrimaryEnvironment()."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:1282-1285",
+      "note": "createPrimaryEnvironmentConnection returns the already registered connection, so start() -> connectPrimary() (supervision.ts:1235, 894-905) re-uses the early connection and builds no candidate to dispose."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:258",
+      "note": "subscribeShell is issued at connection creation, so the shell snapshot request also moves into beforeLoad."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:179-210,303-311",
+      "note": "The prefetched ws-token is consumed by the first socket attempt within a max age; a failure or stale result falls back to a normal request."
+    },
+    {
+      "location": "apps/web/src/routes/_chat.$environmentId.$threadId.tsx:17-30",
+      "note": "The non-preload loader calls prewarmThreadDetailSubscription. onEnter, onStay and onLeave release superseded retains. preloadStaleTime is 0 so hover preloads do not replace the navigation's loader run."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:540-551,695-701,805-808",
+      "note": "attach() subscribes as soon as the connection exists, even before the shell snapshot (isMissingFromShell is false while the shell set is undefined). Without a connection, watch() defers until register(). On a cold deep link the window request therefore no longer waits for bootstrapComplete, which gated ChatView before."
+    },
+    {
+      "location": "apps/web/src/components/routeViews/ChatThreadRouteView.tsx:149-156",
+      "note": "The navigation retain is released (non-immediately) once canRenderRouteThread is true and ChatView holds its view retain (ChatView.tsx:2750)."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:283-288",
+      "note": "On a / boot, the welcome bootstrap-thread redirect also prewarms the thread subscription (non-hosted only)."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/threadNavigationIntent.ts:15-35",
+      "note": "Press/hover intents (SidebarThreadRow.tsx:459/471, InboxThreadRow.tsx:379/386) retain the detail subscription before navigation, which extends proposal 2."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/threadNavigationIntent.logic.ts:62-70,85-91",
+      "note": "Defect: the intent retain is released with {immediately:true} at its 10 s deadline. The comment says the route's navigation retain is 'held as long', but that retain is dropped when ChatView mounts (ChatThreadRouteView.tsx:155) or when the route settles elsewhere."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:876-887",
+      "note": "With immediately:true, refCount 0 and an idle thread, release calls disposeByKey at once instead of reconcileEntry (the 5-minute idle eviction, supervision.ts:43). So a thread visited for under ~10 s after the press drops out of the idle cache."
+    },
+    {
+      "location": "apps/web/src/lib/threadDetailPrewarm.test.ts:47-111",
+      "note": "Tests cover the prewarm module and the route loader lifecycle. threadNavigationIntent.logic.test.ts covers intents with a fake retain only; nothing covers intent retain plus view retain plus immediate release against the real supervisor."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor: the sidebar/inbox navigation intent (apps/web/src/components/sidebar/threadNavigationIntent.logic.ts:85-91) releases its retain with {immediately:true} 10 s after a press or hover dwell. It assumes the route's navigation retain still holds the subscription (comment at lines 62-70). That retain is actually released once ChatView mounts (ChatThreadRouteView.tsx:155) or when the route settles elsewhere. Scenario: the user presses a never-loaded thread A, reads it for 3 s, then opens B. A's ChatView releases normally, so refCount drops to 1 (intent only). At t+10 s the intent releases immediately, and supervision.ts:880 calls disposeByKey(A) instead of scheduling the 5-minute idle eviction. A revisit within 5 minutes still renders from the store (selectThreadDetailLoaded stays true), but it re-requests a full window snapshot rather than resuming, and A gets no live detail events in between. History pagination state is also invalidated. Users mostly won't see it; the cost is extra network and server work when flipping quickly through new threads. Separately, start() calls resetProviderInvalidation() (supervision.ts:1229) after the early connection may already have flagged an invalidation, so that flag is dropped. At boot there are no checkpoint-diff or project-search caches to invalidate, so this is a latent ordering quirk with no user-visible effect.",
+  "implementationSketch": "Only the minor intent defect needs work. Option A, preferred because it stays in the supervisor: in packages/client-runtime/src/connection/supervision.ts retain(), record viewedSinceRetain per retain handle. Either set a local flag when entry.viewCount rises while this handle is outstanding, or store entry.lastViewedAt (updated on each view retain and view release) and capture retainedAt = input.now() at retain time. In the returned release, change the immediate path to `if (options?.immediately === true && shouldEvict(entry) && !(entry.lastViewedAt >= retainedAt)) { disposeByKey(key); return; }`; otherwise fall through to reconcileEntry plus evictToCapacity. Then an intent or prewarm that actually led to a view hands the stream to the normal idle cache, while a dwell, scroll or drag without navigation is still disposed immediately. useSidebarThreadPrewarm's immediate releases get the same semantics. Option B, web-only: extend ThreadNavigationIntentDeps with wasViewedSince(ref, sinceMs), backed by a supervisor read, and release with { immediately: !wasViewed }. Also fix the comment in threadNavigationIntent.logic.ts:62-70. Tests: add a supervision unit test (retain -> retain {view:true} -> release view -> release {immediately:true} must leave the entry with an eviction timer; retain -> release {immediately:true} with no view must dispose). Optionally add an apps/web service.threadSubscriptions test that drives noteThreadPressIntent, a view retain and release, and fake timers past THREAD_NAVIGATION_INTENT_RETAIN_MS, asserting the window subscription is not unsubscribed. Validation: focused vitest runs for client-runtime supervision and the web sidebar intent/prewarm tests only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Both early starts are client-side, standard-mode only, and leave hosted lifecycle ownership and auth semantics unchanged. The ws-token prefetch only reorders an existing cookie-authenticated request. The remaining intent-release fix is a local cache-policy correction.",
+  "repos": "ryco"
+}

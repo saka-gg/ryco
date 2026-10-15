@@ -1,0 +1,83 @@
+{
+  "id": "desktop-boot:startup-measurement-blind-spots",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL holds. (1) and (2) are implemented, and the user's own production desktop-main.log confirms it: launches on 2026-10-14 log processUptimeMs, entryStartMs, mainModuleLoadMs, then desktop.window.app.shell-usable and shell-painted with every ryco:startup:* mark. (5) also exists as perf:boot-report. (3) covers only 4 coarse frames (http-bound, command-gate-ready, http-serving, complete). Migrations, per-instance provider create and the server.startup.* phases never reach desktop-main.log. The user's own logs show why that matters: on 2026-10-13 one launch had an 18.2 s gap between backend.http-bound (serverMs=208) and backend.http-serving (serverMs=18405) with nothing attributing it in desktop-main.log. The cause (persistence.migrations.ledger 18036 ms, migrations 87/88) appears only in server-child.log, and only because a 1.3 s event-loop stall warning happened to list the in-flight phases. (4) requires shell-usable, but nothing integrates a seeded DB or a packaged run. The auditor said nothing seeds a large DB, which is wrong: perf:fixture-home exists. The smoke script also has two practical defects when run against a packaged build or a fixture.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/main.ts:220-233",
+      "note": "(1) DONE. desktop.launch now logs processUptimeMs (the performance.now origin at process start), entryStartMs, mainModuleLoadMs and compileCache. In the user's packaged logs (16 launches) processUptimeMs has p50 150 ms and max 3781 ms, and mainModuleLoadMs has p50 63 ms and max 205 ms."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:30",
+      "note": "entryStartedAtMs is taken first thing in the entry and published at desktopEntry.ts:163. mainModuleLoadMs therefore also counts the entry's own pre-require work (lock, compile cache, early spawn). Measured, that is about 3 ms, so the label is effectively accurate."
+    },
+    {
+      "location": "apps/desktop/src/startupMarks.ts:84-160",
+      "note": "(2) DONE in a different form. A PerformanceObserver in the preload (preload.ts:95-99) reports on every launch with no env flag, at primary-shell-usable and again at primary-shell-painted, bounded by a 5 s timeout. There is a unit test in startupMarks.test.ts."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3412-3423",
+      "note": "The IPC handler validates the report and always calls markDesktopStartupPhase('desktop.window.app.<phase>'). That writes to desktop-main.log in packaged builds (main.ts:1510-1516, 1885-1902). In the real log, shell-usable carries primary-ws-open, primary-shell-frame-received, primary-shell-snapshot-*, primary-shell-usable and more."
+    },
+    {
+      "location": "apps/server/src/desktopLifecycle.ts:39-45",
+      "note": "(3) PARTIAL. recordDesktopStartupPhase sends only {name, ms-at-end}. It has 4 callers: server.ts:296 (http-bound), server.ts:722 (http-serving), serverRuntimeStartup.ts:1030 (command-gate-ready) and serverRuntimeStartup.ts:1145 (complete). desktopLifecycle.ts did not exist at f1be4abc7."
+    },
+    {
+      "location": "packages/shared/src/desktopResourceTelemetry.ts:123",
+      "note": "The startup-phase frame is {name, ms} with no duration field. Forwarding phase durations needs an optional durationMs, or a start and end pair of frames."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:60",
+      "note": "trackStartupPhase('persistence.migrations') and Migrations.ts:665-669 (ledger, repairs) are only stall-attribution registry entries (startupStallMonitor.ts:77-86). Their duration reaches no log unless a stall of at least 250 ms (event loop) or 500 ms (threadpool) fires during them. 'startup sqlite setup complete' is logDebug."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts:268",
+      "note": "Per-instance create is wrapped in trackStartupPhase with no fd-4 frame. Correction to the auditor: its duration is already logged at INFO ('provider instance registry entry resolved ... durationMs', lines 306-312, also present at f1be4abc7) into server.log and server-child.log. It is not in desktop-main.log, so boot-report cannot aggregate it."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:509-516",
+      "note": "runStartupPhase spans (server.startup.*) and the runMigrations span are persisted to the always-on server.trace.ndjson. On this machine those files rotate through about 110 MB in about 2 hours, so per-launch startup spans are gone within hours and are not tied to the desktop run id."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:545",
+      "note": "trackStartupPhase is also used for provider.probe:<id> on refreshes long after startup. A blanket forwarding hook in trackStartupPhase would flood fd 4 and desktop-main.log, so it needs a startup-window gate."
+    },
+    {
+      "location": "apps/desktop/scripts/startup-timing-smoke.mjs:23-31",
+      "note": "(4) Half done. REQUIRED_PHASES now includes desktop.window.app.shell-usable, SUMMARY_PHASES adds backendBound, shellUsable and shellPainted, --max-shell-usable-ms was added, and TIMING_RE accepts negative elapsed times."
+    },
+    {
+      "location": "apps/desktop/scripts/startup-timing-smoke.mjs:182-195",
+      "note": "Defect (pre-existing, but it blocks the seeded-DB use case). readNewFileContent starts every log at offset 0 (fileOffsets is a new Map at line 275). With a reused --base-dir, such as a fixture home run twice or a real ~/.ryco, the previous run's desktop-main.log lines satisfy REQUIRED_PHASES on the first 100 ms poll (line 284). finish(0) then reports stale timings."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:55-57",
+      "note": "The packaged single-instance lock is keyed by resolveDesktopUserDataPath (desktopPaths.ts:49-66): ~/Library/Application Support/ryco, regardless of RYCO_HOME. 'startup-timing-smoke --app /Applications/Ryco.app' therefore exits immediately (app.exit(0)) whenever the user's own Ryco is running. Pre-existing; f1be4abc7 main.ts:2035 had the same key."
+    },
+    {
+      "location": "apps/server/scripts/generate-fixture-home.ts:1-16",
+      "note": "Correction to the auditor: a large seeded home generator exists. It is wired as perf:fixture-home (package.json:78), added 2026-10-12 after the report, and defaults to 30 projects and 2000 threads. It writes <out>/userdata/state.sqlite (line 126-129), which matches the desktop RYCO_HOME layout (desktopPaths.ts:30), so it can feed --base-dir by hand today. But the smoke script does not copy it, so the app mutates it (migrations, logs), and a second run hits the stale-log defect."
+    },
+    {
+      "location": "apps/desktop/scripts/boot-report.mjs:17-27",
+      "note": "(5) DONE as perf:boot-report (apps/desktop/package.json:19). I ran it read-only against the user's logs and it works: shellUsable n=16, p50 693 ms, p90 16637 ms. Gaps: PHASES ignores the desktop.launch details and all backend.* phases, and line 169 reports 'ms since desktop.launch'. The p50 therefore leaves out pre-main time (about 150 ms typical, 3.8 s on a cold launch), and the 15-18 s p90 backend stalls are not attributed."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:2539-2600",
+      "note": "The old executeJavaScript renderer dump (nav and resource timing) is still gated on RYCO_DESKTOP_STARTUP_TIMING_STDOUT. It is a debug extra now; the ryco:startup:* marks no longer depend on it."
+    }
+  ],
+  "remaining": "(3) Server phases are still missing from desktop-main.log.\n- persistence.migrations, .ledger and .repairs (Sqlite.ts:60, Migrations.ts:665-669) are not forwarded over fd 4.\n- Neither is provider.instance.create:<id> (ProviderInstanceRegistryLive.ts:268), nor the server.startup.* phases (serverRuntimeStartup.ts:509-516).\n- Only http-bound, command-gate-ready, http-serving and complete are forwarded (server.ts:296/722, serverRuntimeStartup.ts:1030/1145).\n- The frame schema has no duration (desktopResourceTelemetry.ts:123).\n- Real impact: an 18 s bound-to-serving gap on 2026-10-13 was unattributed in desktop-main.log.\n\n(4) No seeded or packaged integration.\n- The fixture generator exists (perf:fixture-home), but startup-timing-smoke.mjs has no option to copy a fixture into a fresh RYCO_HOME.\n- It re-reads existing logs from offset 0, which gives stale results with a reused --base-dir (lines 182-195, 275, 284).\n- A packaged --app run fails while the user's Ryco is running, because the single-instance lock is keyed to ~/Library/Application Support/ryco (desktopEntry.ts:55-57).\n- Nothing runs it in CI or release.\n\n(5) Minor gaps in boot-report.mjs.\n- PHASES (lines 17-27) omits processUptimeMs and mainModuleLoadMs from desktop.launch and every backend.* phase.\n- Its percentiles are relative to desktop.launch (line 169), not process start.",
+  "fixDefects": "There are no functional defects in (1), (2) or (5). The always-on reporting works in the user's production logs.\n\nTwo startup-timing-smoke defects undermine the 'packaged build with a seeded large DB' goal of (4). Both are pre-existing, not regressions.\n(a) Stale-log parsing from offset 0 when --base-dir already holds logs. The script finishes instantly with the previous run's numbers and exit code 0.\n(b) A packaged run cannot start while the installed Ryco is running, because the single-instance lock ignores RYCO_HOME. The script reports only 'exited before startup completed (code=0)'.\n\nboot-report percentiles exclude pre-main time (processUptimeMs). On a cold launch that was 3.8 s that the report does not show.",
+  "implementationSketch": "1. Forward server phase durations (apps/server, packages/shared, apps/desktop):\n- packages/shared/src/desktopResourceTelemetry.ts: add an optional `durationMs` to the startup-phase frame. Parse it as an optional counter so older frames still parse. Extend desktopResourceTelemetry.test.ts.\n- apps/server/src/desktopLifecycle.ts: add `recordDesktopStartupPhaseDuration(name, startedAtPerfMs, endedAtPerfMs)` that writes {type:'startup-phase', name, ms: end, durationMs}.\n- Add a module-level `startupForwardingOpen` flag, closed by recordDesktopStartupPhase('complete') or after a 60 s cap. Also cap frames per process (e.g. 128), so provider.probe refreshes and hot-reload creates after startup are not forwarded.\n- apps/server/src/startupStallMonitor.ts: in trackStartupPhase, take performance.now() at begin and end. In the release step, call the duration recorder when forwarding is open and the name matches an allowlist: 'persistence.migrations', 'persistence.migrations.*', 'provider.instance.create:*', 'provider.registry.*' / hydration phases, and 'server.startup.*'. This covers Sqlite.ts:60, Migrations.ts:665-669, ProviderInstanceRegistryLive.ts:268, ProviderInstanceRegistryHydration.ts:131/191 and runStartupPhase without touching each caller.\n- apps/desktop/src/main.ts handleBackendFrame (~3029): append `durationMs=` when present. sanitizeStartupPhaseName already maps ':' to '_' and caps names at 64.\n- Tests: in apps/server/src/startupStallMonitor.test.ts, attach a PassThrough through attachDesktopLifecycleChannel or detachDesktopLifecycleChannelForTests. Assert that one frame is emitted per allowlisted phase, none after 'complete', and none for provider.probe.\n\n2. boot-report.mjs (apps/desktop/scripts):\n- Parse desktop.launch details (processUptimeMs, mainModuleLoadMs).\n- Add rows for preMain and mainModuleLoad, and a derived shellUsableFromProcessStart = processUptimeMs + shellUsable.\n- Aggregate backend.* durationMs by phase name. Collapse provider.instance.create_* into one row plus the worst instance, and print the top phases by p90.\n- Add a small fixture-log test, e.g. scripts/boot-report.test.mjs next to the existing *.test.mjs scripts.\n\n3. startup-timing-smoke.mjs:\n- Before spawning, set each log's offset in fileOffsets to its current size, or track the run id from the first new desktop.launch line and ignore other runs.\n- Add `--fixture-home <dir>`, which copies the fixture (fs.cpSync, including state.sqlite -wal/-shm) into a fresh temp RYCO_HOME per run. Document using it with `bun run perf:fixture-home --out <dir>`.\n- When the child exits with code 0 before launch on macOS with --app, print a hint that an installed Ryco instance holds the single-instance lock. Do not add a user-data override to the app; that would be a behaviour change.\n- Optionally add a workflow_dispatch macOS job that builds the desktop app, generates a fixture and runs the smoke with --max-shell-usable-ms.\n\nValidation (focused):\n- `bun run --cwd packages/shared test -- desktopResourceTelemetry`\n- `bun run --cwd apps/server test -- startupStallMonitor`\n- `bun run --cwd apps/desktop test -- startupMarks`\n- Run boot-report against a sample log.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is instrumentation and dev-script work only. The fd-4 frame is an internal desktop/server channel shipped in the same build. There is no auth, E2EE, Hub or hosted-lifecycle impact.",
+  "repos": "ryco",
+  "correction": "The auditor's PARTIAL is right, but parts of their (3) and (4) notes are wrong. (a) 'Nothing seeds a large DB' is false. apps/server/scripts/generate-fixture-home.ts (perf:fixture-home, added 2026-10-12) produces a 30-project / 2000-thread home whose layout fits --base-dir. What remains is integration: copy per run and avoid re-reading stale logs, not building a seeder. (b) Per-instance provider create durations are already logged at INFO in the server log, and the server.startup.* and runMigrations spans are in the always-on server.trace.ndjson. They are just not in desktop-main.log, not per run id, and rotate out within hours. Migration duration is the real blind spot: it is logged only incidentally inside stall warnings. (c) The auditor missed two smoke-script defects: stale-log parsing from offset 0, and the single-instance lock conflict with an installed Ryco. (d) The boot-report omission of pre-main time is larger than 'minor' on cold launches (3.8 s observed), though typical launches add about 150 ms."
+}

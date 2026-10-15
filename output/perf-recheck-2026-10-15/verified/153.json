@@ -1,0 +1,63 @@
+{
+  "id": "gap-right-panel-first-open:worker-inlined-unused-wasm",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Both proposal parts landed in #710 (60633eff3). (a) worker.format \"es\" means the diff worker no longer inlines the Oniguruma WASM: the built worker is 213 KB and loads ./wasm-*.js on demand. (b) The pool prefers shiki-wasm and claims the main-thread singleton for shiki-js. On local and desktop (no CSP) this works as the auditor described. But (b) regresses the hosted Hub. The Hub builds the pinned client (vendor/ryco = 7bc39eec3, which contains #710) and sends `script-src 'self' 'sha256-…'` on every response, with no 'wasm-unsafe-eval'. supportsWasmHighlighter() only checks that the WebAssembly global exists. Under that CSP every diff worker fails to initialize with a CompileError after fetching the 622 KB wasm chunk. The pool sets workersFailed, and all hosted diff and file highlighting falls back to JS tokenization on the main thread. That is worse than before the fix, when the JS engine ran off-thread. I reproduced it in Playwright Chromium with the Hub's CSP: both `new WebAssembly.Module` on the main thread and `WebAssembly.instantiate` in a module worker throw CompileError (\"violates the following Content Security Policy\"). The proposed bundle guard in webBundleSplitting.test.ts is also missing. Side note: the Playwright MCP wrote one snapshot file into the gitignored /Users/laurinfrank/Code/ryco/.playwright-mcp/ (page-2026-10-14T22-10-58-583Z.yml, 250 B). git status is still clean, and I left the file in place per the no-delete rule.",
+  "evidence": [
+    {
+      "location": "apps/web/vite.config.ts:231-235",
+      "note": "worker: { format: \"es\" } is set (part a, 60633eff3). The built dist/assets/worker-DLI31svb.js is 213,046 B, starts with ES module code, not an IIFE, and calls import(`./wasm-S0UXjx1m.js`) only on the shiki-wasm path."
+    },
+    {
+      "location": "apps/web/src/lib/diffWorkerPool.ts:25-27",
+      "note": "supportsWasmHighlighter() returns true whenever the WebAssembly global and instantiate exist. It does not detect a CSP that blocks WebAssembly compilation."
+    },
+    {
+      "location": "apps/web/src/lib/diffWorkerPool.ts:34-58",
+      "note": "The pool is created with preferredHighlighter \"shiki-wasm\" whenever that probe passes. The main-thread singleton is claimed for shiki-js first (:35-45). That claim is what lets the main-thread fallback still work under CSP."
+    },
+    {
+      "location": "ryco-hub:src/http/securityHeaders.ts:30",
+      "note": "On origin/main the hosted CSP is `script-src 'self' 'sha256-<inline>'[ turnstile]` with no 'wasm-unsafe-eval' or 'unsafe-eval', so browsers refuse WebAssembly compilation."
+    },
+    {
+      "location": "ryco-hub:src/http/app.ts:428",
+      "note": "withSecurityHeaders(response, csp) applies to every response, static assets included. The worker-*.js response therefore carries the CSP, and the dedicated worker inherits it from that response."
+    },
+    {
+      "location": "ryco-hub:Dockerfile:10",
+      "note": "The Hub builds vendor/ryco (pinned at 7bc39eec3; `git merge-base --is-ancestor 60633eff3 7bc39eec3` is true) with VITE_RYCO_CLIENT_MODE=hosted-hub, so the hosted client ships the shiki-wasm workers."
+    },
+    {
+      "location": "apps/web/node_modules/@pierre/diffs/dist/worker/WorkerPoolManager.js:258-286",
+      "note": "If any worker's initialize rejects (the engine import, then the WASM CompileError), the pool sets workersFailed=true, terminates the workers and rejects queued render tasks."
+    },
+    {
+      "location": "apps/web/node_modules/@pierre/diffs/dist/renderers/DiffHunksRenderer.js:382-409",
+      "note": "When isWorkingPool() is false, renderers tokenize on the main thread through getSharedHighlighter. That singleton was claimed as shiki-js, so it works, but all tokenization is then main-thread JS (the report measured 337-460 ms per 1,600 lines)."
+    },
+    {
+      "location": "apps/web/src/components/DiffWorkerPoolProvider.browser.tsx:10-24",
+      "note": "The browser test asserts shiki-wasm and workersFailed=false, but runs without a CSP, so it cannot catch the hosted failure."
+    },
+    {
+      "location": "apps/web/src/perf/webBundleSplitting.test.ts",
+      "note": "There are no worker or wasm assertions. The proposed guard that the worker chunk contains no wasm-inlined source was never added. viteConfig.test.ts:122 only checks the format flag."
+    },
+    {
+      "location": "(empirical) Playwright Chromium, in-memory node server on 127.0.0.1 with the Hub CSP",
+      "note": "Main thread: `new WebAssembly.Module(<8-byte empty module>)` gave \"CompileError: WebAssembly.Module(): Compiling or instantiating WebAssembly module violates the…\". Module worker: `WebAssembly.instantiate` gave the same CompileError. This also shows that the synchronous probe detects the block."
+    }
+  ],
+  "remaining": "Hosted regression from part (b): apps/web/src/lib/diffWorkerPool.ts:25-27 selects shiki-wasm in CSP environments that forbid WebAssembly, such as the hosted Hub (ryco-hub src/http/securityHeaders.ts:30). Diff workers then fail to initialize and hosted highlighting runs on the main thread. Missing guard: apps/web/src/perf/webBundleSplitting.test.ts has no assertion that the built worker chunk is free of inlined WASM.",
+  "fixDefects": "The shiki-wasm switch (60633eff3, diffWorkerPool.ts:25-34) has no CSP awareness. Under the Hub's production CSP (no 'wasm-unsafe-eval'), each diff worker downloads the 622 KB wasm chunk (230 KB gz), fails Oniguruma instantiation with a CompileError, and the pool goes to workersFailed. Queued renders reject with console.error, and every later diff or file highlight runs as JS tokenization on the main thread. Before the fix, the JS engine ran inside the workers. The failure repeats every time the owner recreates the pool after its idle grace, and each attempt logs CSP violations. The browser test cannot catch this because it runs without a CSP. The code comment's measured warm gain is only 25-30% (36 -> 27 ms per 200 lines), so falling back to shiki-js in CSP-restricted contexts costs little.",
+  "implementationSketch": "1) apps/web/src/lib/diffWorkerPool.ts: make supportsWasmHighlighter() a memoized real probe: `try { new WebAssembly.Module(Uint8Array.of(0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00)); return true } catch { return false }`. Under a CSP without 'wasm-unsafe-eval' this throws synchronously; verified in Chromium. A worker gets its CSP from its own script response, and on the Hub that is the same header as the document, so the main-thread probe is a valid proxy. Keep the existing main-thread shiki-js claim. 2) Optional extra safety: when a pool created with shiki-wasm reports workersFailed (subscribeToStatChanges, or a .catch on pool.initialize()), record a module-level downgrade flag. Then terminate the pool and recreate it with shiki-js, through createDiffWorkerPoolOwner so DiffWorkerPoolProvider's pool state is refreshed, for example via a pool-replaced listener. This covers proxies that add CSP only to JS responses. 3) Tests: a unit test (vitest, stubbed globalThis.WebAssembly.Module that throws) asserting the pool is built with shiki-js. Keep DiffWorkerPoolProvider.browser.tsx for the no-CSP path. If feasible, add a Hub browser-qualification or Playwright check that opens a diff under the production CSP and asserts getStats().workersFailed === false. 4) apps/web/src/perf/webBundleSplitting.test.ts: add the missing guard. The built worker-*.js must stay under about 400 KB and must not contain the base64 WASM magic 'AGFzbQ' or reference wasm-inlined, while a separate wasm-*.js chunk exists. 5) Hub, optional and needing a decision: add 'wasm-unsafe-eval' to script-src in src/http/securityHeaders.ts (and update the spec doc and CSP tests) if hosted users should get the WASM engine. In any case, bump the vendored Ryco pin and deploy so hosted users get the client fix.",
+  "worth": "high",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": true,
+  "decisionReason": "The client-side probe and fallback is a plain Ryco bug fix that needs no decision. Getting it to hosted users requires a Hub vendored-pin bump and deploy. Giving hosted users the faster WASM engine instead would mean adding 'wasm-unsafe-eval' to the Hub CSP, a security-policy change: the Hub spec says CSP failures stop deployment rather than broadening script-src.",
+  "repos": "both",
+  "correction": "The auditor marked this DONE after checking only the local and no-CSP path. They missed that the hosted Hub serves this client under a CSP without 'wasm-unsafe-eval'. There, shiki-wasm makes every diff worker fail to initialize, and highlighting moves to the main thread, a regression against the pre-fix off-thread JS engine. They also counted the missing webBundleSplitting guard as cosmetic. It is an unimplemented proposal item, though minor."
+}

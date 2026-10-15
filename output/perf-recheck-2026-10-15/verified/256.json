@@ -1,0 +1,62 @@
+{
+  "id": "gap-logging-io:uncapped-large-items",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. #710 (60633eff3) moved every provider log stream (the shared native and canonical loggers, used by all drivers) onto serializeProviderEventLogRecord. That serializer caps strings at 8,192 chars (6 KB head and 1 KB tail), replaces inline base64 with a mime/size/sha256 marker, redacts Agent Control secrets, and turns canonical raw.payload into a reference, so the 3 MB double copy is gone. The writer queue now has 8 MiB per-writer and 32 MiB per-stream character budgets, and drops are counted in providerEventLogRecordsDroppedTotal. Packaged builds also default to 'lifecycle' mode, where item.* and native item/* records are filtered out before serialization, so large items are not even stringified there. Log volume, the memory bound and the privacy goals are met. The one claimed gain that did not materialize is 'removes 2-6 ms stringify stalls': in full mode an over-cap record is still stringified in full, walked, stringified again with a replacer, and sha256-hashed. Measured on a ~1.47 MB base64 image record, the sync cost is about the same as before or slightly higher. This is a minor optimization limited to full mode, not a functional gap.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:315",
+      "note": "PROVIDER_EVENT_LOG_STRING_CAP = 8_192, head 6_144 and tail 1_024. This is the capActivityData approach the finding proposed."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:327",
+      "note": "serializeProviderEventLogRecord runs a fast path: an uncapped JSON.stringify (line 337). Only when that output is over the cap and containsOverCapString finds a long string (line 355), or the secret marker is present, does it run a second JSON.stringify with the capLogValue replacer (line 345)."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:380",
+      "note": "capProviderEventLogString redacts secrets, then summarizes inline base64 (summarizeInlineBase64, line 393: sha256 over the whole string) or keeps head + '…[N chars omitted]…' + tail. Attachment payloads no longer reach disk."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.ts:414",
+      "note": "withRawReference turns canonical raw.payload into {source, method, messageType, nativeId}, which removes the 'present twice per line' duplicate."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:134",
+      "note": "DEFAULT_MAX_QUEUE_CHARS = 8 MiB per writer, DEFAULT_MAX_TOTAL_QUEUE_CHARS = 32 MiB per logger stream."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:335",
+      "note": "enqueueLine enforces the record count plus both char budgets and returns queue_full. Both char checks are skipped when this writer's own queue is empty (line 345), so each writer can always add one line, even past the global budget. Lines are now capped, so this is bounded and negligible."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:257",
+      "note": "recordDropped increments providerEventLogRecordsDroppedTotal (queue_full / queue_closed)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:358",
+      "note": "Every record goes through serialize(), which calls serializeProviderEventLogRecord synchronously on the provider event path. The adapters' own makeEventNdjsonLogger calls only run when nativeEventLogPath is passed; production drivers pass the shared ProviderEventLoggers.native instead (e.g. CodexDriver.ts:180)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderEventLoggers.ts:104",
+      "note": "The default mode is 'full' in development and 'lifecycle' when packaged. In lifecycle mode, shouldWriteProviderEventRecord (providerEventLogRecords.ts:161) rejects canonical item.* and native item/* records (the 'item' token is in NATIVE_STREAMING_NAME, line 134) before serialization."
+    },
+    {
+      "location": "apps/server/src/provider/providerEventLogRecords.test.ts:60",
+      "note": "Tests cover capping, base64 summary, redaction, the canonical raw reference (line 22) and long-record fast paths (line 83). EventNdjsonLogger.test.ts:518 covers the per-writer char budget. No test covers maxTotalQueueChars."
+    },
+    {
+      "location": "/tmp/perf3/verify256/bench.mjs",
+      "note": "Node 24 measurement on a 1.47 MB base64 image record: serialize native 1.92 ms (old pipeline stringify+line+Buffer.from 1.29 ms); serialize canonical 1.99 ms (old plain stringify alone 1.70 ms + copy); serialize 1.5 MB text record 1.09 ms (old 1.07 ms + copy); replacer-only stringify 0.71 ms, of which sha256 is 0.47 ms. Output sizes: 218 B / 302 B / 7.5 KB instead of 1.47 MB / 2.93 MB / 1.58 MB."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor and limited to full mode (the development default, or an explicit opt-in; packaged builds default to lifecycle and never serialize these records). (1) The finding's 'removes 2-6 ms stringify stalls per large item' gain was not delivered. For an over-cap record, serializeProviderEventLogRecord (providerEventLogRecords.ts:337-345) does a full uncapped JSON.stringify, then the containsOverCapString walk, then a second replacer stringify that sha256-hashes the whole base64 payload (line 405). Measured on a 1.47 MB base64 item: native 1.92 ms vs 1.29 ms for the old stringify+Buffer pipeline; canonical 1.99 ms vs about 1.7 ms + copy. Large text items cost about the same as before (1.09 ms). The four records per large item still cost about 4-8 ms of synchronous time on the provider event path. The downstream 3 MB Buffer copies, writev, rotation and gzip are gone. (2) The per-string cap does not bound total line size: a record with many strings each under 8 KB is written in full. The empty-queue bypass in enqueueLine (EventNdjsonLogger.ts:345) also lets every writer exceed both char budgets by one line. Both are theoretical: no such multi-MB record was observed. (3) The maxTotalQueueChars (global) budget has no test.",
+  "implementationSketch": "Optional micro-fix in apps/server/src/provider/providerEventLogRecords.ts, serializeProviderEventLogRecord. Avoid the wasted full stringify for over-cap records. Run containsOverCapString(value, 0) first; it is allocation-free, O(nodes), and never reads string contents. If it returns true, go straight to JSON.stringify(value, capLogValue). Otherwise do the plain stringify and fall back to the replacer only when it contains AGENT_CONTROL_SECRET_MARKER. To keep small records cheap, gate the pre-walk behind a node budget, or keep the current order and pre-walk only when a cheap first-level size hint (e.g. a payload.item / payload.data presence check) suggests an item. In summarizeInlineBase64, replace sha256 over the whole value with a digest of length + head/tail samples (e.g. the first and last 4 KB), or drop the digest; this saves about 0.47 ms per 1.5 MB. Measured result: native base64 record 1.92 ms -> about 0.25-0.7 ms. Tests: extend providerEventLogRecords.test.ts to assert the reordered path gives byte-identical output for capped, base64, secret-bearing and long-but-short-strings records. Add an EventNdjsonLogger.test.ts case with maxTotalQueueChars set low across two thread writers, asserting queue_full drops. If wanted, add a per-line ceiling: after capping, when json.length exceeds e.g. 256 KB, replace the record with a {truncated:true, type/method, chars} stub, and count it.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local serializer/test change in the server's observability path; no security, auth, Hub, or product-behaviour trade-off.",
+  "repos": "ryco"
+}

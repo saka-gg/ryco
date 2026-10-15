@@ -1,0 +1,55 @@
+{
+  "id": "web-boot-cpu:react-compiler-bailouts-hot-components",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the six components the finding names. I ran babel-plugin-react-compiler read-only with a logger, using the same default options as the build's reactCompilerPreset(). At HEAD, Sidebar, SidebarProjectItem, InboxSidebar, ConnectedInboxSidebar, ChatComposer and BranchToolbarBranchSelector all report CompileSuccess with zero CompileError, and their output imports react/compiler-runtime. Run against the f1be4abc7 sources, the same harness reproduces every original bailout at the finding's own lines: Sidebar:248 hook referenced as a value, SidebarProjectItem:72 ref accessed during render, InboxSidebar:57 value block inside try, ConnectedInboxSidebar ref writes, ChatComposer:425 ref writes, BranchToolbarBranchSelector:104 value block inside try. So the source-level guard test added in 60633eff3 (#710) is a faithful detector, and it fails CI on any CompileError or PipelineError in the listed files. The fixes are semantically sound: the moved ref syncs (useLayoutEffect) are only read from event callbacks, never during render. The auditor missed one thing. The report's file-level sourcemap heuristic could not see bailouts of single functions in files where other functions do compile. The same render-time ref pattern still silently disables the compiler for the streaming hot path: MessagesTimeline itself, UserMessageBody, useStableRows and ChatMarkdown's RenderedChatMarkdown. These predate the report and the guard does not cover them.",
+  "correction": "Status DONE is right for the finding's scope. The auditor's caveat that the test compiles source rather than build output matters little: the build preset passes default compiler options, exactly what the test uses, and the source-level run reproduces the report's build-level bailouts line for line. The auditor did not notice that the same bailout class (render-time ref writes/reads) remains in MessagesTimeline.tsx and ChatMarkdown.tsx, the per-delta streaming hot path. Those files were counted as compiled by the report's file-level heuristic because other functions in them compile.",
+  "evidence": [
+    {
+      "location": "apps/web/src/perf/reactCompilerCoverage.test.ts:14-54",
+      "note": "The guard list covers all six named components plus sidebar rows/lists, ProjectFavicon, InboxThreadRow, useThreadMenuActions and useSettings. Lines 102-110 fail on any CompileError/PipelineError in the file, require CompileSuccess per listed function, and require react/compiler-runtime in the output."
+    },
+    {
+      "location": "apps/web/vite.config.ts:52-62",
+      "note": "REACT_COMPILER_INCLUDE/EXCLUDE keep all six files in scope. Lines 111-124 use reactCompilerPreset() with default options, which matches the test harness options (panicThreshold none is the default)."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarProjectItem.tsx:155-159",
+      "note": "The ref sync moved to useLayoutEffect. All reads of sidebarThreadByKeyRef are inside callbacks (sidebar/hooks/useSidebarThreadActions.ts:208-236,324; sidebar/hooks/useThreadMenuActions.ts:179,264,350), so moving the write after commit introduces no stale render reads."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/ConnectedInboxSidebar.tsx:59-62",
+      "note": "Same fix. The renaming lookup now reads threadByKey directly instead of the ref."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatComposer.tsx:450",
+      "note": "useSetPromptFromTraits pulls the ref-writing callback out of the component body. The menu and stash ref syncs moved into useLayoutEffect (:1099, :1376, :2396). The compiler logger reports ChatComposer and useSetPromptFromTraits as CompileSuccess."
+    },
+    {
+      "location": "apps/web/src/components/BranchToolbarBranchSelector.tsx:441",
+      "note": "The conditional inside try/catch was replaced with a resolveSwitchedRefName() helper call. The component now compiles."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:368-371",
+      "note": "Uncovered, same bailout class. revertTurnCountRef/undoTurnCountRef are written during render and read inside the rawRows useMemo (:403-404). The compiler reports 'Cannot access refs during render' and skips the whole memo-wrapped MessagesTimeline (:304). UserMessageBody (:2409, render-time cursor mutation at :2419) and useStableRows (:2561-2569) also bail. All of these already bailed at f1be4abc7."
+    },
+    {
+      "location": "apps/web/src/components/ChatMarkdown.tsx:645-650",
+      "note": "Uncovered, same class. The search-highlight cursor/ref is written during render, so RenderedChatMarkdown (:624) is not compiled. It re-renders on every streaming delta of the active assistant message. It bailed at f1be4abc7 too."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:586",
+      "note": "Explicit 'use no memo' with a rationale comment. This is a deliberate opt-out the finding acknowledged, not a regression."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defects in the implemented fixes. Coverage gap of the same class, not caught by the report or the guard: render-time ref writes/reads still make the React Compiler silently skip MessagesTimeline (apps/web/src/components/chat/MessagesTimeline.tsx:304, writes at :368-371, reads in useMemo at :403-404), UserMessageBody (:2409/:2419), useStableRows (:2561-2569) and RenderedChatMarkdown (apps/web/src/components/ChatMarkdown.tsx:624, writes at :645-650). These are on the per-delta streaming path. They are pre-existing, and the report missed them because its sourcemap check was file-level and these files contain other compiled functions. A repo-wide compile shows 127 of 1132 in-scope files with at least one bailout. Most are try/finally in cold dialogs and settings and do not matter. The reactCompilerCoverage guard is a hand-maintained allowlist, so new hot components are not guarded automatically.",
+  "implementationSketch": "Optional follow-up for the adjacent streaming-path bailouts: (1) MessagesTimeline.tsx: drop revertTurnCountRef/undoTurnCountRef (:368-371) and pass revertTurnCountByUserMessageId/undoTurnCountByTurnId as real inputs. Either feed them straight into deriveMessagesTimelineRows and rely on useStableRows/computeStableMessagesTimelineRows structural sharing to keep unchanged rows' identity, or split the count annotation into a cheap second pass over rawRows so the expensive derivation does not rerun. This also fixes today's latent staleness, where changed revert/undo counts do not refresh rows until another dependency changes. (2) useStableRows (:2561): either mark it 'use no memo' with a comment (it is a deliberate hand-memoized prev-state hook; its bailout does not block the caller from compiling) or rewrite it with the derive-from-previous-render useState pattern. (3) UserMessageBody (:2409) and RenderedChatMarkdown (ChatMarkdown.tsx:624): the mutable searchHighlightCursorRef is reset and consumed by children during render, so moving the write into useLayoutEffect would break numbering. Replace the cursor with a pure pre-pass that computes occurrence indices per text segment (a useMemo keyed on text and query) and passes them down via props or context. If the cursor design stays, mark the functions 'use no memo' explicitly. (4) Add MessagesTimeline (MessagesTimeline, UserMessageBody) and ChatMarkdown (RenderedChatMarkdown) to HOT_COMPONENTS in apps/web/src/perf/reactCompilerCoverage.test.ts. Optionally add a ratchet test that compiles every file matching REACT_COMPILER_INCLUDE/EXCLUDE and compares the set of bailing functions to a checked-in allowlist, so new bailouts anywhere need explicit acknowledgement. Validate with `bun run --cwd apps/web test src/perf/reactCompilerCoverage.test.ts`, the MessagesTimeline/ChatMarkdown unit tests, and the MessagesTimeline.browser.tsx / ChatMarkdown.browser.tsx browser tests (search highlighting, revert/undo counts, fold state).",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "No E2EE/auth, hosted lifecycle, Hub protocol or product trade-off involved. This is a local web rendering change.",
+  "repos": "ryco"
+}

@@ -1,0 +1,66 @@
+{
+  "id": "server-boot:hub-identity-gates-router",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. HttpRouter.serve no longer depends on HubConnectorLive. It is provideMerged with HubConnectorDeferredLive, which only gives the routes a HubConnectorReady access tag and a HubConnectorStart handle. httpServingLayer calls startup.markHttpServing, a fast Deferred.succeed plus a provider boot-gate release, and then hubConnector.start. That forks a fiber which dynamic-imports HubConnectorLive and builds it with Layer.buildWithScope in the layer's scope. So the process lock, identity custody, the keychain probe and the roughly 690 KB relay/E2EE/identity module graph are all off the bind-to-handler path. Every Hub route (http.ts, desktopNativeNodeClaimHttp.ts, localIntroductionHttp.ts, desktopHubReachabilityHttp.ts) goes through awaitHubConnector. Nothing else in the router, ws.ts or the runtime graph needs HubConnectorService. Inside makeHubIdentityRuntime the state and retirement stores open in parallel. The protected-store selection (keychain) runs at the same time as the E2EE record loads: 5 records in one Promise.all, then 3 dependent ones, joined with allSettled. The shared continuity anchor has its own single-writer leaf lock, so the parallel continuity and policy constructors are safe. Spans server.startup.hub.connector, server.startup.hub.process-lock and server.startup.hub.identity-runtime exist, the last annotated with hub.identity.{state,protected-store,e2ee-records}Ms. Three caveats, none of which reopen the finding. (1) Hub routes wait on the Deferred rather than answering 503. (2) There is a stale comment. (3) A smaller related pre-bind path remains: the desktop standby check imports the whole identity chunk before config resolves.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:809",
+      "note": "HttpRouter.serve(makeRoutesLayer).pipe(Layer.provideMerge(HubConnectorDeferredLive)). The router no longer waits for the connector build."
+    },
+    {
+      "location": "apps/server/src/server.ts:716-727",
+      "note": "httpServingLayer runs startup.markHttpServing and then hubConnector.start, which forks the build once handlers are attached."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1153-1158",
+      "note": "markHttpServing only succeeds a Deferred and releases the provider boot gate, so the connector start is not held behind slow work."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.ts:43-88",
+      "note": "The connector module is dynamically imported and built in the layer scope from Effect.forkIn under the span server.startup.hub.connector. A Deferred is resolved on success, died with HubConnectorStartupError on failure, and interrupted on shutdown. start is idempotent."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.test.ts:42-106",
+      "note": "Tests cover no load until start, a single build in the serve context, finalizers running with the server scope, a failed build failing only the waiting routes, and interruption on shutdown mid-build."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorService.ts:169-173",
+      "note": "awaitHubConnector awaits the Deferred. It is the only way routes reach the connector, and grep finds no other server consumer of HubConnectorService."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubIdentityRuntime.ts:844-943",
+      "note": "The state and retirement stores load in parallel. Protected-store selection overlaps the E2EE record loads (Promise.all of 5, then 3 dependent), joined by Promise.allSettled at :943."
+    },
+    {
+      "location": "apps/server/src/hubIdentity/NodeContinuityAnchor.ts:51-63",
+      "note": "The anchor takes its own single-writer leaf lock, so constructing the continuity and policy stores concurrently cannot race on the shared anchor."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorLive.ts:370,408",
+      "note": "Spans server.startup.hub.process-lock and server.startup.hub.identity-runtime. The latter is annotated with per-phase durations from onStartupPhase."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorLive.ts:381-382",
+      "note": "Stale comment: 'Identity custody is built before the router serves'."
+    },
+    {
+      "location": "apps/server/src/cli.ts:738-749",
+      "note": "Desktop standby resolution runs during config resolution, before the port binds, on default desktop settings (hubOrigin defaults to DEFAULT_HOSTED_APP_ORIGIN at apps/desktop/src/desktopSettings.ts:65, standby at :294)."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorStandby.ts:34-38",
+      "note": "Dynamically imports the whole HubIdentityRuntime module (built chunk about 483 KB: @noble curves, hashes and ciphers, relay E2EE shared code, every hubIdentity store) only to call hubIdentityHoldsKeyMaterial. That function reads two small files, and on a fresh install readOrCreate writes them."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defect in the fix. Three minor points. (1) The comment at apps/server/src/hubConnector/HubConnectorLive.ts:381-382 ('Identity custody is built before the router serves') is stale. (2) Hub routes block on Deferred.await until custody finishes instead of answering 503/Retry-After as proposed (HubConnectorService.ts:169-173). A stuck OS credential prompt now hangs only Hub routes, and only the settings panel and desktop main use them, so this is acceptable. (3) There is an adjacent pre-bind Hub-identity cost the fix did not cover. On desktop standby launches, which is the default for a fresh desktop whose connector was never toggled, cli.ts:738-749 calls resolveStandbyHubConnectorConfig before ServerConfig exists. HubConnectorStandby.ts:34-38 then dynamic-imports the full HubIdentityRuntime chunk (about 483 KB including noble and the E2EE handshake code) just for hubIdentityHoldsKeyMaterial, which takes the state-file lock and reads two small JSON files. This happens before the HTTP port binds. It has no keychain and no process lock and was never measured, likely single-digit to about 15 ms of module parse/eval, and it predates the report. The cost is small, but it is the same class of problem. There is also no server-level test asserting that the router serves before the connector builds; only the unit test of makeDeferredHubConnectorLive covers the semantics.",
+  "implementationSketch": "Optional cleanup, all low priority. (a) Rewrite the stale comment at HubConnectorLive.ts:381-382 to say custody is built after the router serves (HubConnectorDeferred), and that the per-phase trace makes key-store stalls visible to Hub routes waiting on it. (b) Make the standby probe light. Move hubIdentityHoldsKeyMaterial together with its helpers allIdentitySecretNames and identitySecretNames out of apps/server/src/hubConnector/HubIdentityRuntime.ts into a small module, e.g. apps/server/src/hubIdentity/HubIdentityKeyMaterial.ts, that imports only LocalHubIdentityState.ts and NodeIdentityKeyRetirementStore.ts. Both of those are light: node:crypto randomBytes, @ryco/shared/nodeIdentity and ProtectedStateFile. HubIdentityRuntime.ts imports the helpers back from there, and HubConnectorStandby.ts:37-38 dynamic-imports the light module. Optionally add a non-creating read on the state store so the probe never writes hub-identity.json before bind. A missing file means no key material, which is the same answer readOrCreate gives for a fresh state. To test, keep the existing HubConnectorStandby and hubIdentityHoldsKeyMaterial unit tests. After `bun run build --filter=@ryco/server`, check that the chunk the standby path loads no longer contains @noble regions (grep '//#region' in the dist chunk). Measure with a desktop standby launch trace (server.trace.ndjson or the desktop startup phases) before and after. (c) Optionally add a server.test.ts case that wires makeDeferredHubConnectorLive with a never-resolving loader and asserts that a non-Hub route such as /api/server/environment answers while a Hub route is still pending.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The finding is resolved. The optional follow-ups are a comment fix and a pure module split of a read-only probe. Neither changes key custody, E2EE, auth semantics, Hub protocol or hosted lifecycle ownership.",
+  "repos": "ryco"
+}

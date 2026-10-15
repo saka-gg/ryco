@@ -1,0 +1,71 @@
+{
+  "id": "gap-right-panel-first-open:panel-intent-preload",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The core proposal is in place and works on the main wide desktop layout. workspacePanelPreload.ts holds shared memoized preloadableLazy surfaces and load thunks. The header toggle, terminal drawer toggle, launcher cards, tab bar and workspace.* shortcuts all preload on intent. A closed inline sidebar runs a 4 s idle preload of the last mode. Vite modulePreload is on for dynamic imports, so each panel chunk brings its static closure in one round, and the shell and surface start in parallel on mount. The 3-level waterfall is gone everywhere. Three things are still missing. (1) Only RightPanelInlineSidebar sets the mode hint and schedules the idle preload. The desktop-tier sheet layout (768-980 px: iPad portrait, narrow windows) gets neither, so a header hover preloads only the shell, and touch tablets have no early start at all. (2) The idle preload goes around the speculative-preload policy that the same PR (#710) added in shellIdlePreload.ts: wait for primary-shell-painted or a 5 s cap, and skip unless effectiveType is 4g. It can therefore pull about 200 KiB gz of review code while a hosted cached-shell boot is still connecting. (3) The default mod+D diff.toggle shortcut does not preload before navigating. Data prefetch, which the proposal marked optional, is also not done.",
+  "evidence": [
+    {
+      "location": "apps/web/src/workspacePanelPreload.ts:40-76",
+      "note": "Shared preloadableLazy panel components and memoized load thunks. ThreadWorkspacePanel, ChatTerminalShell and ChatRightPanel reuse them, as proposed."
+    },
+    {
+      "location": "apps/web/src/workspacePanelPreload.ts:115-140",
+      "note": "preloadWorkspacePanel starts the shell and the mode surface in parallel. For review it also fetches diffWorkerPool, and starts the workers only on intent. For files it preloads the icon resolver."
+    },
+    {
+      "location": "apps/web/src/workspacePanelPreload.ts:154-172",
+      "note": "The idle preload is a bare scheduleIdleTask with a 4 s timeout. Its only gate is saveData: no effectiveType check and no wait for the shell to paint."
+    },
+    {
+      "location": "apps/web/src/lib/shellIdlePreload.ts:15-23,36-77",
+      "note": "The repo policy from the same PR #710. allowsSpeculativePreload skips on saveData or any effectiveType other than 4g. scheduleShellIdlePreloads starts only after primary-shell-painted or the 5 s cap, so speculative chunks do not compete with the shell snapshot or the first thread render. The panel idle preload ignores both."
+    },
+    {
+      "location": "apps/web/src/components/routeViews/ChatThreadRouteView.tsx:115-117",
+      "note": "The route renders from a cached thread before bootstrapComplete. hostedHub/readCache.ts and threadReadCache.ts hydrate it on hosted. So RightPanelInlineSidebar mounts, and its idle preload can fire while the hosted relay and shell snapshot are still loading."
+    },
+    {
+      "location": "apps/web/src/components/ChatRightPanel.tsx:138-145",
+      "note": "setWorkspacePanelPreloadHint and scheduleIdleWorkspacePanelPreload live only in RightPanelInlineSidebar. The module-global hint is never cleared on unmount."
+    },
+    {
+      "location": "apps/web/src/components/routeViews/ChatThreadRouteView.tsx:359-370",
+      "note": "The sheet layout (shouldUseDiffSheet, RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY '(max-width: 980px)' in rightPanelLayout.ts:3) renders LazyRightPanel in RightPanelSheet with no hint and no idle preload. DraftChatThreadRouteView.tsx:290 is the same. The phone tier is <768 px (presentationTier.ts:12-13), so 768-980 px desktop-tier viewports miss the idle preload the proposal asked for."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatHeader.tsx:127-128",
+      "note": "The header toggle preloads on hover and focus through preloadWorkspacePanelForIntent. With a null hint (sheet layout) this loads only the shell, not the surface."
+    },
+    {
+      "location": "apps/web/src/components/chat/useChatGlobalShortcuts.ts:116-121",
+      "note": "diff.toggle (default mod+d, packages/shared/src/keybindings.ts:29) calls onToggleDiff with no preload. workspace.files, review, terminal and simulator at :123-153 do preload."
+    },
+    {
+      "location": "apps/web/vite.config.ts:214-217",
+      "note": "modulePreload is on with resolveWebModulePreloadDependencies (viteBuild/modulePreload.ts:22-28 returns deps for hostType js). In the Oct 14 dist, the DiffPanel import carries useDiffFileNavigation, useDiffLayout, toggle-group and so on in __vite__mapDeps, so the 3-level waterfall is flattened."
+    },
+    {
+      "location": "apps/web/dist/assets (Oct 14 build, read-only measurement)",
+      "note": "The review idle preload (shell + DiffPanel + diffWorkerPool closures) is about 200 KiB gz beyond the thread route and boot closure. That is about 1 s of a 1.6 Mbps link."
+    },
+    {
+      "location": "apps/web/src/rpc/projectPreviewAtoms.ts:15,112-127",
+      "note": "listEntries has staleTime 0 and nothing prefetches it. The optional data prefetch is not implemented, and a hover prefetch would be refetched on mount as things stand."
+    },
+    {
+      "location": "apps/web/src/components/ThreadWorkspacePanel.tsx:500-514",
+      "note": "The terminal PTY prepare runs only when the terminal tab mounts (explicit open), never on hover. This honours the verifier's caveat."
+    }
+  ],
+  "remaining": "1) The desktop-tier sheet layout (viewport 768-980 px) has no idle preload and no mode hint. ChatThreadRouteView.tsx:359 and DraftChatThreadRouteView.tsx:290 render RightPanelSheet + LazyRightPanel, but the hint and idle scheduling live only in RightPanelInlineSidebar (ChatRightPanel.tsx:138-145). A header hover there loads only the shell, and touch tablets (no hover) get no early start: the first open waits for one round plus about 200 KiB gz for review. 2) The diff.toggle shortcut branch (useChatGlobalShortcuts.ts:116-121, default mod+d) does not preload review before navigate(). 3) Optional, not implemented: intent data prefetch for files (listEntries, staleTime 0 at projectPreviewAtoms.ts:15) and the simulator device list.",
+  "fixDefects": "scheduleIdleWorkspacePanelPreload (workspacePanelPreload.ts:154-172) uses a bare rIC with a 4 s timeout and checks only saveData. It does not use allowsSpeculativePreload (effectiveType must be 4g) or the primary-shell-painted / 5 s gate that the same PR set up in lib/shellIdlePreload.ts for every speculative chunk download. ChatThreadRouteView renders from a cached thread before bootstrapComplete (:115-117, hosted read cache), so on a slow hosted link the ~200 KiB gz review closure can download alongside the relay connect and the shell snapshot, and ahead of the shell's own ordered idle preloads. The module-global hint (workspacePanelPreload.ts:142-147) is never reset when the inline sidebar unmounts. This is harmless but stale. There is no test that a closed RightPanelInlineSidebar schedules the idle preload, or that the ChatHeader toggle preloads on hover.",
+  "implementationSketch": "1) In workspacePanelPreload.ts, add a hook useWorkspacePanelPreloadScheduling({ open, panelMode, enabled }). It sets the hint, clears it on unmount if the value is unchanged, and schedules the idle preload while the panel is closed. Call it once per route view for every non-phone tier: in ChatThreadRouteView and DraftChatThreadRouteView, next to the existing presentationTier branch, with enabled = presentationTier !== 'phone'. Remove the two effects from RightPanelInlineSidebar so the inline and sheet layouts share one path. 2) Gate the idle preload with the shell policy. In lib/shellIdlePreload.ts, export a single-task helper such as scheduleAfterShellIdle(task) that reuses the primary-shell-painted / SHELL_IDLE_PRELOAD_START_CAP_MS start and allowsSpeculativePreload(). Make scheduleIdleWorkspacePanelPreload use it and drop the local prefersReducedData. 3) In useChatGlobalShortcuts' diff.toggle branch, call preloadWorkspacePanel('review', { intent: true }) when the diff is not open: pass diffOpen in, or add an onBeforeOpenDiff hook. 4) Tests. workspacePanelPreload.test.ts: the idle preload waits for the startup phase or cap and is skipped for effectiveType '3g'. ChatRightPanel.browser.tsx or a route-view browser test: a closed panel in both inline and sheet layouts schedules the idle preload of the last mode (stub requestIdleCallback and mark primary-shell-painted). useChatGlobalShortcuts.browser.tsx: diff.toggle preloads review before navigate. 5) Optional: prefetch listEntries on files intent only after giving projectListEntriesQuery a short staleTime (around 2 s), so the mount watch does not refetch. Measure first.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "These are local web-client changes in line with existing repo policy (shellIdlePreload). They touch no auth, hosted lifecycle ownership, Hub protocol or security semantics. Idle preloading on 768-980 px tablets is the same speculative-download trade-off the proposal already accepted for non-phone tiers.",
+  "correction": "The auditor called the RightPanelSheet gap minor and kept DONE. It is a whole desktop-tier layout (768-980 px, including touch tablets with no hover) where the proposal's idle preload and the mode-aware hover preload are missing, so the hidden-download benefit does not reach it. The auditor also missed that the idle preload goes around the same PR's speculative-preload gate (shellIdlePreload.ts: start after primary-shell-painted or the 5 s cap, and only on 4g), and that the default mod+D diff.toggle shortcut has no pre-navigate preload. The waterfall part of the finding is fully fixed.",
+  "repos": "ryco"
+}

@@ -1,0 +1,62 @@
+{
+  "id": "gap-composer-pickers:workspace-index-swr",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PR #710 (60633eff3) replaced the Cache.makeWith index with a per-root stale-while-revalidate store. It has single-flight builds, a global build semaphore of 2, debounced background rebuilds for hot roots, in-place patching of new files and a 300k-entry / 32-root budget. The idle (>15 s) case is fully fixed. The 'after every agent turn' case is fixed only when the root was read in the last 10 minutes. markRootChanged deletes the index of any colder root that is not refreshing, and the client re-queries only while a path menu is open, so nothing warms it again. A turn that ends more than 10 minutes after the last '@' in that checkout (common for long agent runs, and for users who rarely type '@') still makes the next '@' wait for a full cold build: 210 ms on this repo, ~0.7-0.9 s on a 60k-file repo, capped at 4 s before a tracked-files stand-in.",
+  "evidence": [
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1001",
+      "note": "markRootChanged: if isHot (read within WORKSPACE_INDEX_HOT_WINDOW_MS, 10 min, :56) it calls scheduleRebuild. Otherwise, if the root is not refreshing, it runs slots.delete(slot.cwd) at :1013 and drops the index entirely."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:938",
+      "note": "With no index, readIndex takes the cold path: startRefresh plus awaitColdIndex, which blocks the reader on the full build for up to WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS (4 s, :64). This is the cost the finding wanted removed after agent turns."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:540",
+      "note": "invalidate runs once per turn completion, inside captureAndDispatchCheckpoint (called from :686 and :743). The hot window counts from the last '@' read, not from turn start, so turns longer than 10 minutes always hit the drop branch."
+    },
+    {
+      "location": "apps/web/src/rpc/projectAtoms.ts:485",
+      "note": "invalidateProjectSearchEntries only re-requests a scope when observerCount > 0 (:501-503), and useProject.ts:33-36 says only an open path menu observes. Nothing re-warms a dropped server index after a turn."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1012",
+      "note": "The policy is inconsistent. A cold root that happens to be refreshing keeps its dirty index, and later reads serve it immediately with superseded=true. A root idle for hours without an invalidation is also served instantly (:928-936). Only a cold root invalidated while idle is dropped."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:918",
+      "note": "Confirms the auditor: readIndex returns slot.index without waiting. It starts a background startRefresh when the index is dirty or older than 15 s (:51) and reports superseded for dirty or degraded indexes."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:813",
+      "note": "Confirms the auditor: startRefresh is single-flight per root and runRefresh holds buildPermits (Semaphore of 2, :696, :774). runRefresh re-schedules when an invalidation raced the build (:785). Note: startDegradedBuild (:864) runs outside the permits, apparently on purpose."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1025",
+      "note": "recordFileWrite patches new files and their missing ancestors in place, then calls markRootChanged. For a cold root that same call drops the patched index right away."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:728",
+      "note": "enforceBudget (300k entries at :70, 32 roots at :71, evicts by lastReadAt) already bounds memory. Dropping cold roots on invalidate is not needed for memory."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.index.test.ts:236",
+      "note": "The tests cover burst collapse (:236), non-blocking age revalidation (:267), write patching (:293), single-flight cold reads (:347) and the budget (:516). No test covers invalidating a root outside the hot window."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:557",
+      "note": "The cold build is cheaper now (3 concurrent ls-files, no check-ignore chunks), but it still blocks in the residual case."
+    }
+  ],
+  "remaining": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:1010-1014: markRootChanged deletes the index of a root that is not hot (no read in 10 min, :56) and not refreshing. CheckpointReactor.ts:540 invalidates at every turn completion, and the web client re-requests only for open path menus (projectAtoms.ts:501-503). So the first '@' after any turn that ended more than 10 minutes after that checkout's last '@' read goes through the cold path (readIndex :938-946) and blocks on a full rebuild (210 ms here, ~0.7-0.9 s on 60k files, up to the 4 s deadline). That is the 'after every agent turn' cost the finding targeted, now limited to long turns and occasional '@' users. Lower-value leftovers from the proposal: (a) no fs.watch or .git/index+HEAD mtime revalidation, so external changes such as a terminal git checkout are seen only by the first read past 15 s; (b) answers from an index that is only age-stale are not flagged refreshing, so the client caches them for 15 s (DEFAULT_PROJECT_SEARCH_ENTRIES_STALE_TIME_MS) while the server is already replacing the index.",
+  "fixDefects": "No correctness bugs found in the SWR store. The generation, refreshing and refreshDone handshakes, slot-identity checks in scheduleRebuild and startDegradedBuild, and budget eviction (skips refreshing slots) hold up. Minor: (1) the cold-root drop described in 'remaining' makes the in-place patch in recordFileWrite useless for cold roots. (2) A write that races a running refresh can briefly lose the patched file when the refresh publishes a listing taken before the write. The generation bump keeps the slot dirty and a hot root rebuilds 250 ms later, so it is only a short flicker while reads are flagged refreshing. (3) recordFileWrite scans index.entries linearly (up to 200k) per user write. That is negligible at the rate users write. (4) startDegradedBuild runs outside buildPermits, so more than 2 git listings can run at once during a slow cold build. This looks intentional.",
+  "implementationSketch": "1) apps/server/src/workspace/Layers/WorkspaceEntries.ts markRootChanged (:1001): remove the `else if (!slot.refreshing) slots.delete(slot.cwd)` branch. A cold root keeps its index with dirty=true and generation bumped, and no rebuild is scheduled, so it costs no git work. readIndex (:928-936) already returns that index immediately with superseded=true and calls startRefresh with no debounce. The client already shows the answer without caching it and re-asks every 400 ms up to 5 times (projectAtoms.ts scheduleRefreshingRefetch :302), so the menu settles on the rebuilt index in about a second. listEntries already waits through awaitPendingChanges for dirty roots (:1288), so the files tree stays fresh. Memory stays bounded by enforceBudget. If very old cold indexes are a concern, drop only when `now - index.builtAt` exceeds a generous cap such as 1 h. 2) Optional: in readIndex, also report superseded when this read started an age-based revalidation, so the client does not cache an answer the server is already replacing. This costs at most 5 extra small requests per 15 s of typing. 3) Optional freshness work: stat the repository metadataPath (`.git/index`, `HEAD`, available from VcsDriverRegistry.detect) on read and mark the slot dirty when an mtime changes. Keep the 15 s age revalidation, because untracked files do not touch .git/index. 4) Tests in apps/server/src/workspace/Layers/WorkspaceEntries.index.test.ts: search a root, TestClock.adjust(10 * 60_000 + 1), change the fake listing, invalidate, then expect search to return the old entries immediately with refreshing: true, the build count to rise by exactly 1 (started by the read), and after settle the new entries without refreshing. Also add a recordFileWrite-on-cold-root case where the patched file is visible immediately.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local cache policy only, with no auth, E2EE, Hub or hosted-lifecycle impact. Serving a dirty index flagged refreshing is what the code already does for hot roots and for roots that are refreshing, so keeping cold indexes adds no new behaviour trade-off.",
+  "repos": "ryco"
+}

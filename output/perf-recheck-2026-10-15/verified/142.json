@@ -1,0 +1,59 @@
+{
+  "id": "gap-first-turn-latency:listsessions-n-plus-one",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710; also in the Hub's vendored 7bc39eec3). listSessions no longer calls listThreadIds plus getBinding per persisted row. It reads bindings only for the distinct threadIds that adapters report live. The new getSessionForThread does one getBinding and lists one adapter's in-memory sessions. Every per-turn and per-completion caller named in the finding goes through findThreadSession: PCR x3, ingestion turn.started and the ready reconcile, CheckpointReactor resolveSessionRuntimeForThread and revert relocation, and the newer ProviderSessionPrewarm. resolveCheckpointCwd skips the lookup when preferSessionRuntime is false and the thread workspace resolves. The old listSessions call sites at f1be4abc7 match the current ones one for one, and no new per-turn listSessions or full-binding scan was added since. The semantics hold or improve: the same reportedSession override logic is applied. A broken binding on another thread can no longer fail a single-thread lookup. Only the bound instance is consulted, where the old code could relabel a same-thread session from another instance. A test asserts that only the live thread's binding is read when 20 stopped history rows exist. The optional pruning was not done, but no per-turn cost remains that grows with history.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:2268-2295",
+      "note": "listSessions now reads adapter sessions first, then readBindingOrUndefined for each distinct live threadId: k reads, no listThreadIds. At f1be4abc7:2160-2228 it ran listThreadIds plus getBinding per row with unbounded concurrency."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:2297-2323",
+      "note": "getSessionForThread: one getBinding, then the bound instance's adapter.listSessions (in-memory Effect.sync in the Claude, Cursor, ACP and OpenCode adapters). It filters through the shared reportedSession (2239-2266). An instance-less legacy binding falls back to listSessions, which is now O(live)."
+    },
+    {
+      "location": "apps/server/src/provider/threadSessionLookup.ts:16-25",
+      "note": "findThreadSession prefers getSessionForThread and falls back to listSessions only for test doubles. The production layer exports getSessionForThread (ProviderService.ts:2572), and no production wrapper rebuilds the shape without it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:792",
+      "note": "Turn-start lookup (old 723-728) uses findThreadSession. Also :1339 (old 1226-1230) and :2489 (goal resume, old 2208)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts:2100-2105",
+      "note": "getExpectedProviderTurnIdForThread uses findThreadSession. It is used on turn.started (:2538 to :2114) and on the session ready reconcile (:2434)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:356-363",
+      "note": "resolveSessionRuntimeForThread uses findThreadSession. resolveCheckpointCwd at 435-447 only looks up the session when preferSessionRuntime is true or the thread workspace does not resolve, so the proposal's last bullet is in. Revert relocation at :492 also uses it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:875",
+      "note": "The only remaining reactor listSessions call is the checkpoint restore neighbours. It is off the per-turn path and now O(live sessions)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.test.ts:3852-3916",
+      "note": "Test with 20 stopped history bindings and one live thread. It asserts that listSessions and getSessionForThread each read only the live thread's binding, return the same session, and return none for a stopped history thread."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderSessionReaper.ts:55",
+      "note": "Remaining full-table reads are background only: the reaper's single listBindings SELECT every 2 min (DEFAULT_SWEEP_INTERVAL_MS, :14), plus the user-action paths in WorkspaceLifecycle.ts:1083, managedWorktreeMigration.ts:141 and StorageService. Each is one query, not N+1, and none is per turn."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:2460-2506",
+      "note": "Out of scope and pre-existing (f1be4abc7:2362): on shutdown, runStopAll upserts every historical binding (~701 x getByThreadId+upsert). Each upsert resets lastSeenAt to now (ProviderSessionDirectory.ts:142), which would defeat any age-based pruning. listThreadIds is read only for the analytics sessionCount (:2505), which counts history rather than live sessions."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. Two trivial nits. (1) The module doc in apps/server/src/provider/threadSessionLookup.ts:4-6 still says listSessions 'reads every adapter and every persisted binding'. That stopped being true in the same commit. (2) getSessionForThread sits next to the pre-existing getSession (ProviderService.ts:1231-1242, via findExactAdapterSession at :910). That is a near-duplicate targeted lookup that differs only in applying the binding overrides and in the error channel, a small maintainability smell and not a perf issue.",
+  "implementationSketch": "Nothing is required for this finding. Optional low-value follow-ups. (a) In runStopAll (ProviderService.ts:2460-2506), upsert only the bindings that were not already status 'stopped', or that were live adapter sessions, and report sessionCount from activeSessions.length instead of listThreadIds. This cuts ~1,400 shutdown SQL statements to O(live) and stops resetting lastSeenAt on history rows. Test: extend the ProviderService.test stopAll case with stopped history rows and assert they are not rewritten. (b) Only after (a), optionally prune provider_session_runtime rows that are stopped and older than N days, in the reaper sweep, with a WHERE status='stopped' AND last_seen_at < ? DELETE. (c) Fix the stale doc comment in threadSessionLookup.ts. Consider expressing getSession and getSessionForThread through one shared exact-session helper.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local provider session lookup. It does not touch auth, E2EE, hosted lifecycle or the Hub protocol. The optional pruning would discard old resume cursors for stopped threads, a minor product trade-off, but it is not needed for this finding.",
+  "correction": "",
+  "repos": "ryco"
+}

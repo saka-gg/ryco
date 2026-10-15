@@ -1,0 +1,58 @@
+{
+  "id": "client-runtime-sync:no-permessage-deflate-remote",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PARTIAL is confirmed. Since 60633eff3 the Node server enables permessage-deflate with exactly the proposed parameters, and desktop-mode backends skip it for direct loopback peers. Three gaps remain. (1) The fix applies one WebSocketServer config to every route, so the H.264 /ws/device-frames socket now negotiates deflate too. deviceFrame.ts says that path is 'deliberately excluded from per-message deflate', and that is no longer true, which is a small regression. (2) The iOS app gets no compression on direct connections because RN iOS uses SocketRocket, which has no permessage-deflate, so the cellular benefit the finding cites is not realized. (3) The hosted relay still has no compress-before-encrypt. The Bun branch also has no compression option, but it only runs the desktop dev backend over loopback, so that gap does not matter.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:265",
+      "note": "The NodeHttpServer layer now gets websocket: { perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE }. This one ws WebSocketServer (platform-node NodeHttpServer.ts:143, noServer) handles upgrades on every route: /ws, /ws/device and /ws/device-frames."
+    },
+    {
+      "location": "apps/server/src/webSocketCompression.ts:19",
+      "note": "Threshold 16 KiB, level 1, server and client no context takeover, as proposed. ws applies the threshold per message (ws/lib/sender.js:382), and Effect's writer calls send with the default compress: true, so RPC frames of 16 KiB or more are deflated."
+    },
+    {
+      "location": "apps/server/src/server.ts:257",
+      "note": "In desktop mode, skipWebSocketCompressionForLoopbackPeers deletes sec-websocket-extensions for direct loopback upgrades. It is registered before installHttpStartupGate (httpStartupGate.ts:101-104 ignores earlier listeners), and held upgrades replay the same mutated request, so the order is correct. Covered by webSocketCompression.test.ts:76-82."
+    },
+    {
+      "location": "packages/shared/src/deviceFrame.ts:15",
+      "note": "This comment says the device-frame socket is 'deliberately excluded from per-message deflate (H.264 is already compressed)'. It was written when deflate was globally off (ec9571c2f). Nothing in webSocketCompression.ts or deviceFrameRoute.ts:97 strips the offer for DEVICE_FRAME_WS_PATH, so browsers watching the simulator remotely (or via loopback on a web-mode node) now have every frame of 16 KiB or more (keyframes, many P-frames) deflated at level 1 for no size gain."
+    },
+    {
+      "location": "node_modules/.bun/ws@8.21.3/node_modules/ws/lib/permessage-deflate.js:70",
+      "note": "ws uses one process-wide zlib Limiter (default concurrency 10) for all sockets. A 30-60 fps video stream deflating incompressible frames competes with RPC snapshot compression and adds latency to both."
+    },
+    {
+      "location": "apps/server/src/server.ts:240",
+      "note": "BunHttpServer.layer still has no websocket option, although platform-bun supports websocket.perMessageDeflate (BunHttpServer.ts:84). The only Bun runtime is the desktop development backend (apps/desktop/src/main.ts:3189 resolveDevelopmentBunExecutable). Packaged desktop runs Electron as Node (backendLauncher.ts:111), and the CLI runs under node (apps/server/package.json:20,23). So this gap is loopback/dev-only and negligible."
+    },
+    {
+      "location": "apps/mobile/src/platform/socket.ts:9",
+      "note": "The mobile app uses the RN global WebSocket. In RN 0.86.3, iOS backs it with SocketRocket (react-native/scripts/cocoapods/rndependencies.rb:30, React/CoreModules/RCTWebSocketModule.mm:16), which does not implement permessage-deflate. iOS direct saved-environment connections over LAN, Tailscale or cellular therefore stay uncompressed. Android's OkHttp 4.9.2 does negotiate it."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/relayEngine.ts:538",
+      "note": "The relay send entry dispatches straight to the negotiating buffer, the E2EE seal or the plaintext chunker, with no compression step. Receive delivery at :1230 has no inflate step either. Node side: apps/server/src/hubConnector/RelayChannelRegistry.ts:748 chunks raw RPC bytes. A grep for deflate, gzip, CompressionStream, fflate or pako across client-runtime, shared relay, hubConnector and apps/mobile finds no compression."
+    },
+    {
+      "location": "packages/contracts/src/relay.ts:49",
+      "note": "RELAY_MAX_RPC_MESSAGE_BYTES = 4 MiB applies to uncompressed relay messages. A 2k-thread shell snapshot (3.2 MiB) is close to this hard ceiling, so compression would also add headroom, not just save bytes."
+    },
+    {
+      "location": "ryco-hub:src/relay/websocketRuntime.ts:1066",
+      "note": "On Hub origin/main, relay sockets use perMessageDeflate: false (also hubSession.ts:453). That is correct for ciphertext, so any relay compression has to be end-to-end inside the opaque payload."
+    }
+  ],
+  "remaining": "(a) Regression: /ws/device-frames negotiates permessage-deflate (deviceFrame.ts:15 says it must not; deviceFrameRoute.ts:97 upgrades through the same deflate-enabled server configured at server.ts:265). (b) iOS app: SocketRocket (RN 0.86.3) never offers permessage-deflate, so direct saved-environment traffic to iOS stays uncompressed. (c) Hosted relay: no compress-before-encrypt at relayEngine.ts:538/1230 or RelayChannelRegistry.ts:748, and the Hub correctly cannot help. Large shell snapshots, ServerConfig and thread windows cross the relay at full size, pay full ChaCha cost, and count against the 4 MiB RELAY_MAX_RPC_MESSAGE_BYTES ceiling. Negligible: the Bun branch (server.ts:240) has no websocket compression option, but only the loopback desktop dev backend uses it.",
+  "fixDefects": "The fix enables deflate for every upgrade route through the single shared ws WebSocketServer. That silently drops the documented exclusion of the H.264 device-frame socket (packages/shared/src/deviceFrame.ts:13-16). For remote browser viewers, and loopback viewers of web-mode nodes, simulator frames of 16 KiB or more are now deflated at level 1 for no gain. This costs threadpool CPU and per-frame latency, and the frames compete with RPC compression in ws's process-wide zlib limiter (concurrency 10). No test covers the exclusion. The stale comment is now misleading. Nothing else is wrong: loopback detection, header-based proxy detection, listener ordering against the startup gate, and the parameters all look correct.",
+  "implementationSketch": "1. Device-frame exclusion (S, low risk). In apps/server/src/webSocketCompression.ts, replace skipWebSocketCompressionForLoopbackPeers with a general installWebSocketCompressionPolicy(server, { skipDirectLoopback: boolean }). Register it in all modes at server.ts:257 (skipDirectLoopback = config.mode === 'desktop'). It deletes request.headers['sec-websocket-extensions'] when the upgrade path (new URL(request.url, 'http://x').pathname) equals DEVICE_FRAME_WS_PATH from @ryco/shared/deviceFrame, or when skipDirectLoopback && isDirectLoopbackUpgrade(request). Extend webSocketCompression.test.ts negotiatedExtensions to accept a path, and assert that '/ws/device-frames' from a non-loopback-skipped peer negotiates '' while '/ws' still negotiates permessage-deflate. Keep the deviceFrame.ts comment accurate.\n2. Optional, trivial: add websocket: { perMessageDeflate: true } to BunHttpServer.layer at server.ts:240 for parity. Low value because only the dev desktop backend runs there.\n3. Application-level compression for relay and iOS direct (M, needs a decision). Compress at the RPC-message seam, above both E2EE and chunking. Client: packages/client-runtime/src/relay/relayEngine.ts send() before the mode dispatch at :543, and #deliver at :1230 after reassembly. Node: apps/server/src/hubConnector/RelayChannelRegistry.ts before prepareRelayMessage at :748, and in its inbound reassembly path. Use a framing marker inside the opaque payload, following the RELAY_CHUNK_CAPABILITY_PRELUDE pattern in packages/shared/src/relayMessageChunks.ts: a leading NUL-prefixed header (JSON never starts with 0x00) with magic, version and a deflate-raw flag, plus a whitespace-prelude capability advertisement so mixed-version peers stay compatible. This needs no Hub or wire change. Compress only messages of 16 KiB or more, at level 1, and keep the result only if it shrinks the message. Cap the inflated size at RELAY_MAX_RPC_MESSAGE_BYTES and fail the channel with transfer_limit beyond it (zip-bomb guard). Put the codec in packages/shared (new relayMessageCompression.ts) so client and node share it. Use node:zlib deflateRawSync on the node side, and on clients either DecompressionStream('deflate-raw') (web) or a small pure-JS inflater such as fflate (Hermes has no CompressionStream). That one codec also covers iOS direct if a later step applies it to WsTransport, or the iOS socket could be swapped for a native module whose WebSocket supports compression. Tests: shared codec round-trip and bomb-cap tests, relayEngine and RelayChannelRegistry tests that legacy peers without the prelude get uncompressed payloads, and E2EE-mode tests confirming compression happens before submit/seal and sizes are checked post-compression in planRelayMessage.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "The device-frame exclusion (item 1) needs no decision. Relay compression (item 3) does. It is compress-before-encrypt inside the E2EE channel, so ciphertext lengths would depend on content. When attacker-influenced text (agent output, repo content) and secrets share one RPC message, that gives a CRIME/BREACH-style length side channel to the Hub, which is the party E2EE protects against. This needs a security review and possibly per-RPC opt-out. It also changes the opaque relay payload format (client-runtime and the node's hubConnector, and the Hub vendors Ryco), even though the Hub itself never parses it.",
+  "repos": "ryco"
+}

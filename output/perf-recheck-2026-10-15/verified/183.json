@@ -1,0 +1,63 @@
+{
+  "id": "dedicated-pages:pr-list-triggers-unbounded-worktree-sweep",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is correct. The first-open burst the finding describes is gone. The old code (f1be4abc7 context.ts:366) ran one forkDetach per worktree. Now there is one Effect.forEach at concurrency 2, detached in the background process lane. Discovery answers from a shared repo-wide index (limit 100, TTL 60 s) through a cached refSummary (30 s). Open links are skipped when the list rows or the index already report them. All other link states come from one batched GraphQL call (GitHub only). getPullRequestState now asks for the lean summary field set. Per-link re-reads wait for the 5-minute sweep interval. What remains: every project-wide sweep that passes the 5 s debounce still makes the batched GraphQL call, before the per-worktree link-refresh gate. While the PR page is open, its lists poll every 30 s, so that is about one gh api graphql every 30 s. Roughly 9 of every 10 of those calls are discarded, because no worktree is due for a link refresh. I checked the live DB (16 live non-main ryco worktrees, 14 linked, every current link a merged PR in the range #678-#728, inside the index window). Today the steady-state sweep costs exactly that one batch call per poll plus the shared index list. The auditor's evidence and line numbers hold. One fixDefects note was wrong (see correction), and the auditor missed three minor residuals, listed under remaining.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context.ts:495-498",
+      "note": "batched = yield* batchedPullRequestStates(input.cwd, refreshed) runs on every project-wide sweep (not lifecycle, no checkout scope, at least one worktree) that passes the 5 s debounce at :458-462. It does not consult lastLinkRefreshAtByWorktree."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:403-416",
+      "note": "The batch's number set: every non-dismissed link of every swept worktree, plus the current link even when it is merged. One forge call whenever there are 2 or more such numbers. It does not drop open links the list rows or the index already cover."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:155-160,213-216",
+      "note": "The batched states are consumed only when linkRefreshDue (5 min per worktree for sweeps). When no worktree is due, the batch result is thrown away."
+    },
+    {
+      "location": "apps/web/src/rpc/sourceControlRefreshPolicy.ts:6",
+      "note": "AUTOMATIC_ACTIVE_REFRESH_MS = 30_000. The PR page polls 3 change-request lists for the project root (prefetchPullRequestLists.ts) with ±8% jitter. One sweep per poll round passes the shared 5 s debounce, so about 2 batch calls per minute against 1 useful batch per 5 min."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:517-528",
+      "note": "Proposal 1 is implemented. The sweep is Effect.forEach(refreshIds, refresh, {concurrency: LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY=2}). Non-lifecycle sweeps run as sweep.pipe(inBackgroundProcessLane, Effect.forkDetach). The background lane queues behind interactive work in the forge pool (processGovernor.ts:33-38, FORGE_PROCESS_LIMIT 4). The sweep is not explicitly deferred until the list group settles."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1221-1284",
+      "note": "Proposal 3 is implemented. findLatestPr asks findLatestPrInIndex first and falls back to one gh pr list --head <sel> --state all --limit 20 per head selector only when lookupIndexedChangeRequest (pullRequestIndex.ts:166-195) is unresolved. Unresolved means the branch's PR is older than the 100 most recent, or the branch is published but has no PR and the repo has 100 or more PRs. Nothing caches 'no match' beyond the 30 s refSummary TTL, so such a worktree costs one gh pr list per 5-minute sweep. Today none of the live ryco worktrees is in that state."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:285-333",
+      "note": "When a discovered PR is rejected (finished before the workspace's createdAt, or no forge close time), it is never linked or remembered. Every discovery pass (5 min in sweeps, 1 min for the on-screen checkout) repeats readPullRequestStateFromForge (gh pr view) for it. The batch covers link numbers only. Test 'ignores a reused branch's pull request that finished before the workspace' (refreshWorktreeSourceControlState.test.ts:527) checks the rejection but not the repeated reads."
+    },
+    {
+      "location": "apps/server/src/sourceControl/GitHubSourceControlProvider.ts:1153-1198",
+      "note": "Proposal 4 is implemented: fields 'summary' maps to GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS (GitHubCli.ts:134-150, 2812-2820). getPullRequestStates is implemented only for GitHub (grep: GitHubCli.ts and GitHubSourceControlProvider.ts only). GitLab, Azure DevOps and Bitbucket still read each link separately, once per 5 min."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:381-391",
+      "note": "Proposal 2, first half: knownPullRequestStatesFor merges the list rows the RPC just returned (sourceControlRpc.ts:542-548 passes knownPullRequests: items) with gitWorkflow.indexedPullRequestStates (GitManager.ts:1830-1844, peek only, never asks the forge)."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:531-555",
+      "note": "Related sibling path, not this finding's: on every change-request or issue detail read, refreshStateForLinkedReference calls refreshWorktreeSourceControlState without linkRefreshIntervalMs (default 0) and without knownPullRequestStates. Each detail poll (30-60 s while active or watching) re-runs gh pr view for that worktree's links, even though the detail RPC just read that PR's state."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.test.ts:672-760",
+      "note": "Unit tests cover the known-open skip, batched 'reported' adoption and the per-interval link re-read gate. No test covers the sweep in context.ts: the concurrency bound, the background lane, or how often batchedPullRequestStates runs."
+    }
+  ],
+  "remaining": "1) apps/server/src/ws/context.ts:495-498 (with :398-438) runs the batched GraphQL state read on every project-wide sweep that passes the 5 s debounce. That is about one `gh api graphql` per 30 s PR-page poll round, but the per-worktree link refresh it feeds is gated to 5 min (refreshWorktreeSourceControlState.ts:155-160). About 90% of these calls are discarded, and the number set at :403-413 also includes open links the list rows already cover. 2) A rejected discovered PR (refreshWorktreeSourceControlState.ts:285-333) gets gh pr view on every discovery pass, not once. This is rare: it needs a reused branch name, or a host with no close time. 3) The index fallback (GitManager.ts:1253-1275): a published branch the index cannot answer for still costs one gh pr list per head selector per 5-minute sweep, with no negative caching. It is bounded (concurrency 2, background lane) and none of the current live ryco worktrees hits it. 4) Batching exists only for GitHub; other forges read each link separately, gated to 5 min. Everything above is polish. The burst and the 12+ gh pr view calls per poll that the finding measured are gone.",
+  "fixDefects": "No correctness defect. One efficiency defect: the batch runs before the interval gate it serves (context.ts:495-498 vs refreshWorktreeSourceControlState.ts:155-160), so most batch results are computed and thrown away. The batching, concurrency bound and lane placement in context.ts have no test.",
+  "implementationSketch": "Gate the batch (S, ryco only): (a) In apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts, export `isWorktreeLinkRefreshDue(worktreeId, intervalMs, nowMs = Date.now())`, a read-only wrapper over intervalDue(lastLinkRefreshAtByWorktree, ...). Also extract the per-link decision now inline at :241-261 (skip dismissed, skip finished non-current links, skip an open link whose known state is open with the same isDraft) into an exported `linkNeedsForgeRead(link, current, known)`. The per-worktree loop and the batch number collection then share one rule. (b) In apps/server/src/ws/context.ts refreshLinkedWorktreeSourceControlStates, compute the batch only over `refreshed.filter(w => isWorktreeLinkRefreshDue(w.worktreeId, intervalMs))`. Build its number set with linkNeedsForgeRead against the known map (list rows plus the index peek, i.e. knownPullRequestStatesFor(input.knownPullRequests)(input.cwd)). If you want an even smaller change, wrap the batch in `Effect.cached` and call it lazily from `knownStates`. knownStates only runs for worktrees whose link refresh is due, so with no worktree due there is no forge call. (c) Optional: in refreshWorktreeSourceControlState, remember rejected discovered PRs in a module Map keyed by worktreeId to {number, state}. Skip the forge re-read while discovery still reports the same finished number and state, and clear the entry on reopen or in resetWorktreePullRequestDiscoveryForTests. Tests: in refreshWorktreeSourceControlState.test.ts, cover isWorktreeLinkRefreshDue and the rejected-discovery memo (two runs with discoveryIntervalMs 0 give one getPullRequestState call). In apps/server/src/ws/sourceControlRpc.test.ts or a context-level test, use a stub provider that counts getPullRequestStates. Call listChangeRequests on the project root twice, more than 5 s apart (TestClock), and assert one batch call. Advance past 5 min and assert a second. Validate with focused vitest runs of those two files and `bun typecheck` scoped to apps/server.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Internal server-side scheduling of forge reads. It does not touch auth, E2EE, hosted lifecycle or the Hub protocol, and does not change product behaviour (link states still refresh every 5 min in sweeps).",
+  "correction": "The auditor's fixDefects says a discovered PR that is not yet linked goes through readPullRequestStateFromForge 'once per newly discovered PR'. That holds for open PRs, which then get linked. A discovered finished PR that is rejected (finished before the workspace was created, or no forge close time) is never linked or remembered. It is re-read with gh pr view on every discovery pass. The auditor also missed three residuals: the index's per-branch fallback (no negative caching), GitHub-only batching, and the missing tests for the context.ts sweep. None of these changes the PARTIAL status.",
+  "repos": "ryco"
+}

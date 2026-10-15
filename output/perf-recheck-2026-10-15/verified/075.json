@@ -1,0 +1,62 @@
+{
+  "id": "web-boot-cpu:hidden-sidebar-pane-mounted",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "The core problem is fixed in 60633eff3 (#710). Sidebar now mounts a pane only the first time it is shown (mountedSidebarModes starts as the persisted mode, read synchronously from localStorage, so boot mounts only the active pane). Each mounted pane is wrapped in React 19.2 <Activity mode=visible|hidden> plus FrozenWhileHidden, so a hidden pane neither re-renders on parent commits nor keeps effects or store subscriptions alive. buildInboxSidebarModel runs only inside InboxSidebar, and no other caller builds it. What remains is the proposal's last bullet, mode-specific parent inputs. In inbox mode (the default) Sidebar still derives sidebarChatRows (used only by the projects pane) and the project tree (sortedProjects, projectTreeRows, and per-project tree structures via visibleSidebarThreadKeys). The tree cannot simply be gated on sidebarMode: visibleSidebarThreadKeys also drives thread traversal and Cmd+N jump shortcuts in inbox mode, which today follow the invisible project-tree order. Also, SidebarThreadJumpHintController still re-renders the Sidebar on modifier-key hint flips in inbox mode, although no labels are shown there. The remaining cost is small: a one-off structure pass at boot plus incremental per-project recomputes, and the hidden-pane row/model cost the finding was about is gone.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1462-1474",
+      "note": "mountedSidebarModes = new Set([sidebarMode]); the other pane mounts only on first switch. sidebarMode comes from readPersistedState() at store creation (uiStateStore.ts:430-466, 1620), so no async hydration mounts both panes at boot."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1505-1570",
+      "note": "Both panes are wrapped in <Activity> + <FrozenWhileHidden>. The f1be4abc7 className=\"hidden\"/inert wrappers were removed in 60633eff3."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:269-286",
+      "note": "FrozenWhileHidden returns the element captured at hide time, so hidden subtrees bail out. The context providers above them (projectTreeCache from useState, the SidebarProjectDialogProvider actions useMemo) are stable, so no context propagation reaches the hidden pane on ordinary commits."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxSidebar.tsx:123-125",
+      "note": "This is the only buildInboxSidebarModel call site outside tests (grep). It is not reached while the inbox pane is unmounted or frozen."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:669-679",
+      "note": "Remaining: sidebarChatRows (filters all 2,000 threads with a scopedProjectKey each) is built in every mode but consumed only at :1530 in the projects pane."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:845-892",
+      "note": "Remaining: sortedProjects (spreads every visible thread; the sortProjectsForSidebar comparator re-reduces per-project threads) and projectTreeRows run in inbox mode."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1015-1050",
+      "note": "Remaining: visibleSidebarThreadKeys calls projectTreeCache.structure for every expanded project in inbox mode. At boot in inbox mode this is the full structure pass, which c64c1a29f measured as part of 6.2 ms at 2,000 threads/30 projects. After that, the per-project caches limit it to changed projects."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1123-1245",
+      "note": "In both modes, threadJumpThreadKeys and orderedSidebarThreadKeys (= visibleSidebarThreadKeys) feed the window keydown handler for traversal and jump. So in inbox mode the shortcuts use the hidden project-tree order. The list is therefore not purely mode-specific."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:1573-1578",
+      "note": "SidebarThreadJumpHintController is mounted in both modes. Hint flips re-render the Sidebar body even in inbox mode, where visibleThreadJumpLabelByKey is consumed only by renderProjectRow (projects pane)."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:466",
+      "note": "inboxEnvironments is not mode-specific. SidebarPrimaryActions passes it to SidebarOmnifield in both modes (SidebarPrimaryActions.tsx:97-101, SidebarOmnifield.tsx:105)."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.logic.ts:432-434",
+      "note": "Thread prewarm is already limited to projects mode."
+    }
+  ],
+  "remaining": "Parent-level derivations for the inactive (projects) mode still run in the default inbox mode. (1) Sidebar.tsx:669-679: sidebarChatRows is computed although only the projects pane (:1530) reads it. (2) Sidebar.tsx:845-892 and :1015-1050: sortedProjects, projectTreeRows and visibleSidebarThreadKeys (a full per-project tree-structure pass at boot) run eagerly. In inbox mode their only consumer is the keydown handler (:1170-1245) for thread traversal and jump shortcuts, so they could be computed lazily. (3) Sidebar.tsx:1573: the jump-hint controller re-renders the Sidebar on modifier hint flips in inbox mode, where no hint labels render. All of this is low impact now that the hidden pane's model build, row renders and effects are gone and the per-project caches absorb repeat commits.",
+  "fixDefects": "No real defects found. Minor or by-design points: (a) after both modes have been visited, the inactive pane stays in the DOM as a display:none subtree. This costs memory only; it is not styled or laid out. (b) In the render that hides a pane, FrozenWhileHidden returns that render's children once before freezing, so the hidden pane can reconcile one last time with fresh props. Harmless. (c) Consumers of rarely changing outer contexts (for example the useSidebar context on open/close) can still re-render inside the hidden Activity at offscreen priority. Negligible. No test asserts that the inactive pane is not mounted at boot or is not re-rendered while hidden. Sidebar.renders.browser.tsx only counts Sidebar renders for streaming events and picker toggles.",
+  "implementationSketch": "In apps/web/src/components/Sidebar.tsx:\n1. Move the mountedSidebarModes/projectsPaneVisible block (now at :1462-1474) above the derivations.\n2. Gate sidebarChatRows on projectsPaneVisible: `projectsPaneVisible ? buildSidebarChatRows(...) : EMPTY_CHAT_ROWS`. A hidden projects pane keeps its frozen props, so the empty value never reaches it.\n3. Make the project-tree traversal list lazy outside projects mode. Extract the body of visibleSidebarThreadKeys (plus its sortedProjects/projectTreeRows inputs) into a pure helper in sidebar/sidebarVisibleThreadKeys.ts, e.g. computeVisibleSidebarThreadKeys({sidebarProjects, visibleThreads, maps, folders, expanded, caches, ...}). In projects mode keep the eager useMemo, because jump labels, the thread-list auto-animate threshold and prewarm need it. In inbox mode skip the memo and have the keydown handler call the helper on demand: put the inputs in a ref synced in a layout effect, or use a small memo cell keyed on input identity, so repeated keypresses reuse the result. threadJumpThreadKeys is derived the same way (first N of the lazy list). The existing per-project caches keep the on-demand call cheap. sortedProjects.length in shouldAnimateProjectLists/ThreadLists can use sidebarProjects.length, or be computed only when projects mode is active.\n4. Render SidebarThreadJumpHintController only when projectsPaneVisible, or make it a no-op outside projects mode.\nTests: extend Sidebar.renders.browser.tsx. With sidebarMode='inbox' and 2,000 threads, assert that no SidebarProjectItem or project-tree row renders at boot (for example via a perf-mark or Profiler id on SidebarProjectsContent) and that thread traversal and jump shortcuts still navigate in the same order as before (compare against the projects-mode order). Add a test that toggling to projects and back keeps InboxSidebar local state (settledOpen and similar) and does not re-render the hidden pane on a store commit. Unit-test the extracted helper in sidebarVisibleThreadKeys.test.ts. Validate with focused vitest and browser tests for apps/web only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The lazy-evaluation approach keeps current behaviour, so no decision is needed. The fact that inbox-mode thread traversal and Cmd+N jumps follow the invisible project-tree order is a separate UX question. Making visibleSidebarThreadKeys mode-specific (for example, following inbox order in inbox mode) would be a product behaviour change and would need a decision.",
+  "repos": "ryco"
+}

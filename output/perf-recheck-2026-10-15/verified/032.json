@@ -1,0 +1,63 @@
+{
+  "id": "startup-hang:shutdown-blocked-20s-by-open-websocket",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The described bug is fixed. With a normal WebSocket client open, shutdown no longer waits the 20 s gracefulShutdownTimeout. The patched @effect/platform-node sends 1001 to every wss client before awaiting server.close(), Ryco bounds the HTTP stage at 750 ms, and the desktop now waits 3 s before SIGKILL. The patch is registered in package.json and bun.lock, and node_modules resolves to the patched 4.0.2 build. A scratch repro against the installed patched package showed a responsive ws client: the whole scope closed in 4 ms. The fix has one gap in its fallback path. server.closeAllConnections() does not close upgraded WebSocket sockets, because Node drops them from its connection list on upgrade. A client that never answers the close frame (frozen, or half-open after a network drop) is therefore not force-closed. The final wss.close() layer finalizer then waits out ws's 30 s closeTimeout. Measured: HTTP stage done at 755 ms, full scope close at 30,002 ms. Runtime finalizers (restart hints, providers, SQLite) run before that, so the reliability fix holds. Only the tail is affected: Observability trace-sink flush, logger and platform layers.",
+  "evidence": [
+    {
+      "location": "patches/@effect%2Fplatform-node@4.0.2.patch:96",
+      "note": "closeWebSockets sends client.close(1001) to every wss client, then timeoutOrElse(shutdown). On timeout the orElse calls only server.closeAllConnections(). The comment says 'past the timeout, connections are closed', but upgraded WS sockets are not in Node's connection list, so they stay open. Same hunk in src (:153-171)."
+    },
+    {
+      "location": "package.json:156",
+      "note": "@effect/platform-node@4.0.2 is in patchedDependencies, and bun.lock:429 records it. apps/server/node_modules/@effect/platform-node symlinks to the patched .bun store entry, whose dist/src contain closeWebSockets."
+    },
+    {
+      "location": "apps/server/src/server.ts:205",
+      "note": "HTTP_GRACEFUL_SHUTDOWN_TIMEOUT = 750 ms, passed to the Node layer (:264) and the Bun layer (:243). This is the only NodeHttpServer/BunHttpServer layer in apps and packages. The doc comment at :199-204 still says the desktop grace is '2 s'; it is now 3 s."
+    },
+    {
+      "location": "apps/server/src/server.ts:824",
+      "note": "Layer order: the HTTP drain (serve's preemptive finalizer) runs first, then the http-drained marker, RuntimeServicesLive and runtime-services-closed. HttpServerLive's own finalizers (wss.close(), then the cached server.close()) run after that, followed by StartupStallMonitor, ObservabilityLive and Platform layers. The residual 30 s wait sits in the HttpServerLive stage."
+    },
+    {
+      "location": "node_modules/.bun/ws@8.22.0/node_modules/ws/lib/websocket-server.js:196",
+      "note": "In noServer mode with clientTracking, WebSocketServer.close() emits 'close' only once clients.size reaches 0 (_shouldEmitClose). A client still CLOSING is destroyed only by setCloseTimer (websocket.js:1323) after closeTimeout, default 30000 ms. @types/ws 8.18.2 has no closeTimeout field, so it can't be passed cleanly through the typed websocket options."
+    },
+    {
+      "location": "node_modules/.bun/@effect+platform-node@4.0.2+8fabb152f7781780/node_modules/@effect/platform-node/src/NodeHttpServer.ts:314",
+      "note": "The upgrade release is a synchronous ws.close(code), so interrupting WS fibers does not block. It also does not force-destroy a socket already in CLOSING."
+    },
+    {
+      "location": "apps/server/src/httpShutdown.test.ts:28",
+      "note": "The regression test covers only a responsive ws client (close code 1001, under 2 s, 10 s graceful timeout). It has no case for a client that never answers the close frame."
+    },
+    {
+      "location": "apps/desktop/src/backendLauncher.ts:218",
+      "note": "DESKTOP_BACKEND_SIGTERM_GRACE_MS = 3000. terminateDesktopBackendChild (:231) sends SIGTERM, then SIGKILL after the grace, with a 5 s exit wait. stopBackendAndWaitForExit (main.ts:3370-3386) uses it for quit (before-quit :4890), relaunch (:1466) and update install (:2829)."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:859",
+      "note": "The recordShutdownHints finalizer is still in the startup layer, inside RuntimeServicesLive. It runs before the HttpServerLive tail, so it is reached on both the responsive and unresponsive paths."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:226",
+      "note": "The 'hung startup sockets' part of the finding is also covered. The gate holds early requests and upgrades, and on close-while-gated it answers them with 503 instead of letting server.close() wait on them."
+    },
+    {
+      "location": "apps/server/src/agentControl/Mcp/listener.ts:388",
+      "note": "The other loopback HTTP listeners call closeAllConnections() before close(): Agent Control MCP, External MCP (ExternalMcp/listener.ts:269), and publicProxy, which destroys its tracked sockets. One exception: deviceToolGateway.close (providerTools/deviceToolGateway.ts:722) awaits server.close() without closeAllConnections. An in-flight device tool call at quit can hold the DeviceService finalizer. That is outside this finding's scope."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "(1) The timeout fallback in patches/@effect%2Fplatform-node@4.0.2.patch (orElse -> server.closeAllConnections()) does not close upgraded WebSocket sockets. Node removes them from its connection list on upgrade (freeParser -> parser.remove()). If a client never answers the 1001 close frame (frozen app, phone that left Wi-Fi, other half-open TCP), the socket stays until ws's 30 s closeTimeout. HttpServerLive's wss.close() finalizer waits for it. Reproduced against the installed patched package with a raw upgraded client that pauses and never replies, gracefulShutdownTimeout 750 ms: HTTP stage done at 755 ms, Scope.close returned at 30,002 ms. Ryco's runtime finalizers (restart hints, providers, SQLite) run before this tail and are unaffected. But a CLI or service Ctrl-C/restart then takes about 30 s, and the desktop backend ends by SIGKILL at 3 s, skipping the later ObservabilityLive trace-sink flush, logger and platform finalizers. (2) Nit: the server.ts:199-204 comment says the desktop SIGTERM->SIGKILL grace is 2 s; it is 3 s (DESKTOP_BACKEND_SIGTERM_GRACE_MS). The auditor's edge case (closeWebSockets creating the WebSocketServer during shutdown when no WS ever connected) is real and harmless.",
+  "implementationSketch": "Edit the @effect/platform-node patch (regenerate it with `bun patch @effect/platform-node@4.0.2` + `bun patch --commit`, keeping both the dist/NodeHttpServer.js and src/NodeHttpServer.ts hunks and the bun.lock entry in sync). (a) In preemptiveShutdown's timeoutOrElse, make orElse `Effect.flatMap(wss, (wss) => Effect.sync(() => { server.closeAllConnections(); for (const client of wss.clients) client.terminate() }))`. The HTTP stage then frees every socket once the graceful timeout passes. (b) As a backstop, have the wss acquireRelease release terminate any remaining clients before `wss.close(cb)`, so the final layer finalizer can never wait out ws's closeTimeout. (Passing `closeTimeout` through `websocket:` options in server.ts also works at runtime, since ws 8.22 supports it, but @types/ws 8.18.2 lacks the field, so it would need a cast. Prefer the patch.) Test: add a case to apps/server/src/httpShutdown.test.ts. Open a raw node:net client, send a valid Upgrade request, wait for the 101, then pause() and never answer the close frame. Use gracefulShutdownTimeout '200 millis' and assert Scope.close(scope) finishes under 2 s (currently about 30 s) and the raw socket gets 'close'. Also update the stale 2 s wording in the server.ts:199-204 comment to point at DESKTOP_BACKEND_SIGTERM_GRACE_MS (3 s). Validation: focused `bun run test` on apps/server/src/httpShutdown.test.ts plus typecheck of apps/server.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Only a dependency patch and test change inside the server's own shutdown path. It forcibly drops WS clients that already ignored a 1001 close past the graceful timeout. No auth, E2EE, Hub protocol or hosted-lifecycle semantics change.",
+  "correction": "The auditor found no functional defect. There is one: the timeout fallback's closeAllConnections() does not cover upgraded WebSocket sockets. An unresponsive WS client still delays final shutdown about 30 s (measured 30,002 ms), now after the runtime finalizers instead of before them. The described 20 s stall with a normal client is fixed, so DONE stands.",
+  "repos": "ryco"
+}

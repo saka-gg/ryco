@@ -1,0 +1,71 @@
+{
+  "id": "browser-measure:disabled-agent-control-subscription",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is correct. #710 (60633eff3) added a per-environment config gate (agentControlSyncGate.ts) and applied it to MissedAutomationRunsNotice, AgentControlApprovals and useAutomationCentre. The sidebar Automations badge (useWaitingAutomationRuns) is still ungated. It mounts on every desktop-tier load and on every route, /settings included, so a default node (agentControl.enabled defaults to false) still gets the refused agentControl.subscribeProposals and the 'WebSocket RPC subscription failed' warning on every load. The auditor missed three things. (1) The Automations dialog also sends an ungated agentControl.listProposals per checkout device, through useLapsedScheduleProposals and retainScheduleProposalHistory. (2) The gate admits environments whose config is unknown, and at cold boot the primary config is always unknown when the boot-mounted gated caller first subscribes. So even with every caller gated, the refused subscribeProposals still goes out once per cold boot. Only later mounts are saved. (3) Read from the code, not reproduced: the shared retain registry keeps a refused, dead subscription entry alive while the ungated sidebar holds it. When the user then turns Agent Control on, the gated callers re-retain that dead entry and no new stream opens. Approval cards, the waiting badge and missed-run notices stay empty until reload. That breaks the gate's documented 're-admits on enable' behaviour.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/agent-control/agentControlSyncGate.ts:31-58",
+      "note": "The gate from 60633eff3. It excludes only environments whose config says enabled === false (lines 55-56). Unknown (null) config is admitted. The primary's flag comes from useServerConfigSelector (line 35), which also honours SettingsTargetProvider. That is latent only: no gated caller renders inside a settings target today."
+    },
+    {
+      "location": "apps/web/src/components/automations/useWaitingAutomationRuns.ts:17-23",
+      "note": "Still ungated: useAutomationProposalSync(environmentIds) runs over every connected environment. The file is byte-identical to f1be4abc7 and to the Hub-vendored 7bc39eec3."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarPrimaryActions.tsx:67,130,196",
+      "note": "showAutomations = automationsCapability.allowed && !phone. The capability is always allowed outside hosted mode (client-runtime authorization/capabilities.ts:43). AutomationsEntry calls useWaitingAutomationRuns() unconditionally."
+    },
+    {
+      "location": "apps/web/src/components/AppSidebarLayout.tsx:297-310",
+      "note": "ThreadSidebar (Sidebar.tsx:1484 mounts SidebarPrimaryActions) is rendered on every desktop-tier route, including the /settings page where Agent Control is enabled. The ungated retainer is therefore held throughout."
+    },
+    {
+      "location": "apps/web/src/components/automations/data/useAutomationProposalSync.ts:35-37,88-99",
+      "note": "retainAgentControlProposalSync reuses an existing entry and only increments count (line 98). bindEnvironmentProposalSync rebinds only when the connection's client object changes (line 37). A subscription refused by the server, which wsTransport.ts:381-394 does not retry, stays dead for the life of the entry. Later retainers (the gated callers after the feature is turned on) get no stream."
+    },
+    {
+      "location": "packages/client-runtime/src/state/agentControl/sync.ts:50-62",
+      "note": "On a terminal refusal, onError clears the environment's queue, and nothing triggers a resubscribe. A settings change does not replace the client."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:90,100 + apps/web/src/components/ServerStateBootstrap.tsx:22-25 + packages/client-runtime/src/rpc/serverState.ts:63,162-171",
+      "note": "serverConfigAtom starts as null with no hydration. It is filled only by startServerStateSync, which starts in an effect in the same commit in which the primary connection first appears. MissedAutomationRunsNotices sees the primary with a null config, the gate admits it, and subscribeProposals is sent next to subscribeConfig. The refusal goes out on every cold boot whatever the gating."
+    },
+    {
+      "location": "apps/web/src/components/automations/data/useLapsedScheduleProposals.ts:156-165 + apps/web/src/components/automations/data/scheduleProposalHistory.ts:131-150",
+      "note": "Missed by the auditor. The Automations dialog (AutomationsDialog.tsx:283) retains schedule history for every checkout environment, and that calls agentControl.listProposals ungated. A disabled server refuses it (AgentControlProposalService getQueue requires enabled). The failure is swallowed and retried on the next hold."
+    },
+    {
+      "location": "apps/web/src/components/automations/data/useProjectAutomations.tsx:67",
+      "note": "Ungated useAutomationProposalSync([environmentId]) runs when the dialog opens. It cannot simply be removed: useProjectAutomations.browser.tsx:266-272 mocks useAutomationCentre and asserts this retain. Gate it instead."
+    },
+    {
+      "location": "apps/web/src/components/automations/data/useAutomationProjectCounts.ts:15-25",
+      "note": "Ungated automationCentre.snapshot for every checkout, only when the project switcher asks. Minor."
+    },
+    {
+      "location": "apps/web/src/components/automations/useAutomationCentre.ts:78,89,140",
+      "note": "Gated correctly. When off it reads nothing and holds no retain. The useAutomationCentre.browser.tsx:114-128 test covers re-admission only with no other retainer mounted."
+    },
+    {
+      "location": "packages/contracts/src/settings.ts:509",
+      "note": "AgentControlSettings.enabled defaults to false, so the default install is the affected configuration."
+    },
+    {
+      "location": "apps/mobile/src/state/agentControlSync.ts:14-37 + apps/mobile/src/features/threads/ThreadDetailScreen.tsx:527",
+      "note": "Mobile already gates, and treats unknown config as off. Out of scope for this browser finding."
+    }
+  ],
+  "remaining": "1. apps/web/src/components/automations/useWaitingAutomationRuns.ts:19. The sidebar badge subscribes ungated on every desktop load, so the refused subscribeProposals and its console.warn persist. It also holds a dead entry that stops the gated callers from reopening the stream when Agent Control is turned on, until the page is reloaded.\n2. apps/web/src/components/automations/data/useProjectAutomations.tsx:67: ungated retain on dialog open.\n3. apps/web/src/components/automations/data/useLapsedScheduleProposals.ts:161, which calls scheduleProposalHistory.ts:131-150: ungated agentControl.listProposals per checkout device on dialog open.\n4. apps/web/src/components/automations/data/useAutomationProjectCounts.ts:19: ungated automationCentre.snapshot from the switcher (minor).\n5. The gate admits unknown config (agentControlSyncGate.ts:55), and the primary config is always null at cold boot. MissedAutomationRunsNotice therefore still sends one refused subscribeProposals per cold boot even after items 1-4 are fixed. The finding's '-1 failing stream RPC per load' needs either deferral while config is pending, or acceptance of the boot-time attempt.\n6. Robustness: useAutomationProposalSync.ts:88-99 never rebinds a refused entry, so any retainer held across a refusal blocks re-admission.",
+  "fixDefects": "The gate code is correct for what it checks. Its documented promise, 'turning the feature on re-admits the environment', fails in the real app. The shared retain registry (useAutomationProposalSync.ts:88-99) keeps the refused subscription's entry alive while the ungated sidebar retainer holds it, and bindEnvironmentProposalSync rebinds only on a client change (line 37). After the user turns Agent Control on in Settings (the sidebar stays mounted on /settings), MissedAutomationRunsNotice, AgentControlApprovals and useAutomationCentre re-retain the dead entry and no stream opens. Chat approval cards, the waiting badge and missed-run notices stay empty until reload, and proposals can expire unseen. This is derived from the code and was not reproduced. It is pre-existing from f1be4abc7 and was not fixed by #710. Separately, the boot-time attempt is not prevented because the primary config is null when the boot-mounted gated caller subscribes. Latent: the gate reads the primary flag through useServerConfigSelector, which follows SettingsTargetProvider, so inside a ProjectNodeSettingsScope it would read the targeted node's flag as the primary's. No gated caller renders there today.",
+  "implementationSketch": "1. useWaitingAutomationRuns.ts: `const syncIds = useAgentControlSyncEnvironmentIds(environmentIds); useAutomationProposalSync(syncIds);`. Keep the waiting-count selector on environmentIds.\n2. useProjectAutomations.tsx:67: `const ids = useMemo(() => [environmentId], [environmentId]); useAutomationProposalSync(useAgentControlSyncEnvironmentIds(ids));`. Unknown config in the browser fixtures still retains, so useProjectAutomations.browser.tsx:266-272 keeps passing.\n3. useLapsedScheduleProposals.ts:157-165: build environmentsKey from useAgentControlSyncEnvironmentIds(checkout environment ids) so retainScheduleProposalHistory (listProposals) skips disabled devices.\n4. useAutomationProjectCounts.ts: use the gate hook over the checkouts' environment ids and drop disabled checkouts in `request` before loader.request.\n5. Make re-admission robust whatever the callers do. In bindEnvironmentProposalSync, pass onError to startAgentControlProposalSync and mark the binding refused (reset currentClient and stopSync). In retainAgentControlProposalSync, when a new retainer finds a refused entry, stop it and bind again, for example with an entry.rebind(). Alternatively, give the entry a refused flag that retain checks.\n6. Small and optional: in agentControlSyncGate.ts, read the primary flag with useEnvironmentServerConfigSelector(primaryEnvironmentId, selector) or the serverConfigAtom directly, not the settings-target-aware useServerConfigSelector.\n7. Optional, needs owner sign-off (see decisionReason). Treat 'connected but config not yet known' as pending, not admitted. Every connection kind supplies a config: the primary through ServerStateBootstrap, saved and Hub connections through onConfigUpdated into the runtime store (environments/runtime/service.ts:1350-1360,1552-1590). The gate can then exclude environments whose config is null while a connection exists, which removes the per-cold-boot refusal at the cost of one config round trip of approval latency.\nTests: (a) a browser test that mounts AutomationsEntry or useWaitingAutomationRuns with primary config enabled:false and expects zero subscribeProposals, then flips to true and expects exactly one; (b) in useAutomationProposalSync.test.ts, retain, fire onError (refused), retain again, and expect a second subscribeProposals; (c) a lapsed-history test expecting no listProposals for a disabled device. Run focused vitest on those files plus the touched *.browser.tsx files with bun run --cwd apps/web test:browser.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Items 1-6 are client hygiene and bug fixes inside the existing per-target-environment policy. They involve no auth, E2EE, Hub protocol or hosted-lifecycle change. Only optional item 7 (defer while config is pending) changes the documented 'unknown config attempts' rule in agentControlSyncGate.ts and AgentControlApprovals.tsx:33-36. It trades about one round trip of approval latency at boot, and the risk of never syncing an environment whose config never arrives, for removing the last per-boot refusal. The owner should approve that one.",
+  "repos": "ryco",
+  "correction": "The auditor's 'no defects in the implemented gate' is too generous. (1) The ungated sidebar retainer breaks the gate's reactive re-admission through the shared retain registry: turning Agent Control on does not reopen the queue until reload. (2) The gate admits unknown config, and the primary config is always null when the boot-mounted MissedAutomationRunsNotice first subscribes. The refused boot subscribeProposals therefore remains even after all callers are gated. (3) The auditor missed the ungated agentControl.listProposals from useLapsedScheduleProposals / retainScheduleProposalHistory on dialog open. (4) Removing useProjectAutomations.tsx:67 outright would break useProjectAutomations.browser.tsx:266-272, which mocks useAutomationCentre. Gate the line instead."
+}

@@ -1,0 +1,67 @@
+{
+  "id": "mobile-boot:project-icon-refetch-per-connection",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "The status is right: the per-reconnect refetch and the per-render JSON.stringify are gone. The auditor was wrong that the fix has no defects that matter. The peek-on-first-render path added in #710 leaves a row with no latched artwork state. Once the 5-minute TTL passes, the next re-render of that row loses its icon and nothing fetches it again. Mobile also never clears the now environment-keyed cache on hosted sign-out, which web does.",
+  "decisionReason": "No decision is needed for the defect fix. It is a client-local display and state bug, with no change to auth, E2EE, Hub protocol or hosted lifecycle ownership. Separately, keeping cached artwork visible while a node reconnects (to avoid the expo-image remount and decode) would be a product trade-off, because current tests assert that artwork clears while disconnected. That part is optional and not required here.",
+  "summary": "Confirmed. #710 (60633eff3) removes the described cost: the cache moved from a WeakMap<EnvironmentApi,{generation}> to a module-level Map keyed by environment, then project plus avatar revision, with a 5-minute TTL. Reconnects and remounts no longer re-issue projects.readIcon, the request key is built from plain strings in useMemo, and web and mobile share one helper. However, the fix added a user-visible regression. Both ProjectFavicon components render a cache hit through peekProjectIconSource during render, and their effect returns early on a hit without copying the value into component state. A row that only ever displayed a peeked icon (new inbox rows, rows remounted by FlatList virtualization, NewTaskComposer, ProjectDetail and Projects screens; on web, later-mounted ProjectHero, ProjectBar, InboxRowPreview, NewThreadHero and so on) still shows the icon until the TTL passes. On the first re-render after that (any thread update on a memoized InboxThreadRow, a status or config write, typing in the composer), peek returns undefined and faviconUrl becomes null, so the folder or monogram fallback replaces the icon. The effect deps (api, environmentId, projectId, requestKey, revision, plus visible on web) have not changed, so nothing refetches. The fallback stays until a reconnect or remount. Before #710 every row stored its own fetch result in state, so this did not happen. No test covers TTL expiry for a peek-mounted instance. Minor: mobile never calls clearAllProjectIconCaches on hosted sign-out or Hub change. Web does this at apps/web/src/hostedHub/environment.ts:98. The old WeakMap was GC'd with its API objects, but the new cache keeps up to 16 environments × 8 MiB in memory until the process exits. Display is still gated on a live api for that environment, so this is not a leak.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/connection/projectIconSource.ts:25",
+      "note": "Module-level Map<EnvironmentId, EnvironmentIconCache>. Reconnects with a new API object reuse it, so the described refetch per reconnect is fixed (60633eff3)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/projectIconSource.ts:77",
+      "note": "peekProjectIconSource returns undefined once expiresAt <= Date.now(). It does the same for an entry evicted by the 64-entry or 8 MiB per-environment LRU."
+    },
+    {
+      "location": "apps/mobile/src/components/ProjectFavicon.tsx:43",
+      "note": "cached = peek(...) is computed on every render. It is the only display source for a row whose artwork state is null."
+    },
+    {
+      "location": "apps/mobile/src/components/ProjectFavicon.tsx:47",
+      "note": "On a peek hit the effect returns early and never calls setArtwork, so the displayed value is never latched into component state."
+    },
+    {
+      "location": "apps/mobile/src/components/ProjectFavicon.tsx:59",
+      "note": "Effect deps do not change when the TTL expires, so no refetch is scheduled after expiry."
+    },
+    {
+      "location": "apps/mobile/src/components/ProjectFavicon.tsx:60",
+      "note": "faviconUrl = artwork?.key === requestKey ? artwork.source : (cached ?? null). After expiry this is null, ProjectFaviconImage is re-keyed to 'fallback' and the folder replaces the icon until a reconnect or remount."
+    },
+    {
+      "location": "apps/mobile/src/features/inbox/InboxThreadRow.tsx:55",
+      "note": "The row is memo'd but re-renders on every thread update (line 108 renders ProjectFavicon). A new thread row for an already-cached project mounts on the peek path and loses its icon after 5 minutes of activity."
+    },
+    {
+      "location": "apps/mobile/src/features/newTask/NewTaskComposer.tsx:107",
+      "note": "Mounted after the inbox filled the cache, so it uses the peek path. It is exposed to the same expiry and re-render loss."
+    },
+    {
+      "location": "apps/web/src/components/ProjectFavicon.tsx:91",
+      "note": "Web has the same pattern: peek at line 91, early return at line 95, display at lines 117-119. Later-mounted instances lose artwork after the TTL on any re-render."
+    },
+    {
+      "location": "apps/web/src/components/ProjectFavicon.browser.tsx:161",
+      "note": "The remount test checks only the first-pass cached render. No test advances time past PROJECT_ICON_TTL_MS and re-renders a peek-mounted instance."
+    },
+    {
+      "location": "apps/web/src/hostedHub/environment.ts:98",
+      "note": "Web drops all icon caches on account teardown. Mobile has no clearAllProjectIconCaches call; it only clears per environment in environmentActions.ts:155 and deviceCache.ts:56."
+    },
+    {
+      "location": "apps/web/src/components/ProjectFavicon.browser.tsx:147",
+      "note": "Clearing artwork while disconnected is asserted behaviour. Each reconnect therefore still unmounts and remounts the expo-image (cachePolicy none) and decodes again, so the 'less decode churn' part of the expected gain is not realized by design. The RPCs are saved."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "(1) Regression from #710: a ProjectFavicon instance that rendered artwork via peekProjectIconSource never latches it into state (apps/mobile/src/components/ProjectFavicon.tsx:43-60, apps/web/src/components/ProjectFavicon.tsx:91-119). After PROJECT_ICON_TTL_MS, or after LRU eviction, the next re-render shows the folder or monogram fallback, and the effect never refetches because its deps did not change. The icon stays gone until a reconnect or remount. This affects new or virtualized mobile inbox rows, the new-task composer, project screens, and later-mounted web surfaces. (2) Minor parity and hygiene gap: mobile does not clear the environment-keyed icon cache on hosted sign-out or Hub domain change, unlike web hostedHub/environment.ts:98. The artwork stays in memory, bounded at 16 environments × 8 MiB, until the process exits.",
+  "implementationSketch": "Fix (1) once for both clients. In packages/client-runtime/src/connection/projectIconSource.ts, split freshness from display. Add readCachedProjectIcon(environmentId, projectId, revision): { source: string | null; fresh: boolean } | undefined, which ignores the TTL for display; or keep peek and add a stale variant. In apps/mobile/src/components/ProjectFavicon.tsx and apps/web/src/components/ProjectFavicon.tsx: (a) seed artwork state lazily from the cache (useState(() => hit ? { key: requestKey, source } : null)). (b) In the effect, on a cache hit, latch it with setArtwork(prev => prev?.key === requestKey && prev.source === hit.source ? prev : { key: requestKey, source: hit.source }) and refetch only when the entry is not fresh (stale-while-revalidate: keep showing the old value until the RPC answers). (c) Derive display from artwork state first, then the cache. Display then no longer depends on Date.now() at render time, and LRU eviction cannot blank a mounted row. The effect logic is duplicated verbatim in both apps, and client-runtime has no React dependency. So either move the state machine into a small framework-free helper in client-runtime (e.g. resolveProjectIconDisplay plus a subscribe API consumed with useSyncExternalStore), or accept two thin hooks that call the same helpers. Tests: in apps/web/src/components/ProjectFavicon.browser.tsx, render instance A to fill the cache, mount instance B, mock Date.now or use vi.setSystemTime to pass PROJECT_ICON_TTL_MS + 1, re-render B with an unrelated prop change, and assert the img src is still the data URL. Assert readIcon is called at most once more if stale-while-revalidate refetches. Add a client-runtime unit test for the stale read. For (2), call clearAllProjectIconCaches() from the mobile hosted account teardown path (hostedHubController sign-out or expireSession handling and SettingsHubRouteScreen clearLocalHubState), or better from the shared client-runtime hosted teardown so web and mobile cannot diverge, and add a test in the mobile hosted teardown suite. Validate with focused vitest on client-runtime projectIconSource.test.ts, the web ProjectFavicon browser test, and the mobile environmentActions and deviceCache tests.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "repos": "ryco"
+}

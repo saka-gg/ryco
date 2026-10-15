@@ -1,0 +1,67 @@
+{
+  "id": "desktop-boot:backend-fatal-crash-loop",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710). The scenario from the finding now stops. A downgraded binary meets a newer DB, fails migrations with Migrator.MigrationError kind BadState, and the error reaches cliMain unwrapped through Sqlite setup and Layer.launch. cliMain classifies it, prints one line, writes {type:'fatal',code,message} on fd 4 and sets process.exitCode = 78. NodeRuntime's default teardown leaves a successful exit alone, so 78 survives. The desktop halts at once on exit 78 or a fatal frame. Any other pre-ready exit restarts at most twice (500 ms, then 1 s) and halts on the third. On halt, windows that loaded early are sent back to the boot page and a Retry / Open Logs / Quit dialog appears. Readiness cannot be marked early: the http-serving frame is written only after the runtime graph (migrations) builds, 'Listening on' is never logged, and the gate holds /.well-known/* until the router attaches. I found no defect in the core fix. The leftover gaps are small: two pre-spawn restart paths that skip the policy (as the auditor said), a dev-only bug in readiness bookkeeping, and the CLI node service units, which do not respect exit 78.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Migrations.ts:655",
+      "note": "Schema-too-new still fails with Migrator.MigrationError kind BadState. It is the only BadState producer in the repo."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:60",
+      "note": "runMigrations runs inside the setup layer through trackStartupPhase (acquireUseRelease). The error is not remapped and not orDie'd, so the Fail cause reaches Layer.launch (server.ts:844) and then cliMain unchanged."
+    },
+    {
+      "location": "apps/server/src/cliMain.ts:40",
+      "note": "catchCause classifies with classifyFatalStartupError, prints 'Error: <message>' and sets process.exitCode = reportFatalStartupFailure(...) = 78. The effect then succeeds. NodeRuntime.runMain (platform-node-shared 4.0.2) calls process.exit only when code !== 0, and defaultTeardown returns 0 on success, so 78 is kept. No other server code overrides process.exitCode."
+    },
+    {
+      "location": "apps/server/src/startupFailure.ts:28",
+      "note": "BadState maps to database-schema-newer, ConfigError to invalid-config, and BootstrapEnvelopeUnavailableError to bootstrap-envelope-missing. Line 55 writes the fatal frame and returns 78. Covered by startupFailure.test.ts."
+    },
+    {
+      "location": "apps/server/src/diagnostics/DesktopResourceTelemetry.ts:88",
+      "note": "fd 4 is an unref'd Socket, so it cannot keep a failed backend alive, and it is attached as the lifecycle channel. A small pending pipe write still flushes. Exit 78 alone is enough for the desktop to halt."
+    },
+    {
+      "location": "apps/server/src/server.ts:833",
+      "note": "HttpServerLive (bind) is built before RuntimeServicesLive (line 830, migrations), so http-bound arrives before the failure. The http-serving frame (server.ts:721) is written only after the router serves. httpStartupGate.ts:258 holds /.well-known/* until the router attaches. The desktop's 3 s HTTP fallback probe therefore cannot mark a migrating backend ready, and the gate's patched close() answers held requests with 503 Connection: close so server.close() completes."
+    },
+    {
+      "location": "apps/desktop/src/backendStartup.ts:138",
+      "note": "createBackendFailurePolicy halts on a fatal frame or exit 78 (lines 154-161). Otherwise it halts after 3 consecutive pre-ready exits (lines 166-173). A post-ready exit restarts and resets the count. Unit tests are in backendStartup.test.ts:93-137."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3299",
+      "note": "handleChildGone returns early-loaded windows to the boot page (line 3313) and consults the policy (line 3314). It restarts only on 'restart'; otherwise it calls haltBackendStartup (line 3326). A fatal frame that arrives after the exit event still fills readiness.fatal, because handleFrame sets fatalFrame before fail() and the telemetry cleanup does not remove the data listener."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3061",
+      "note": "haltBackendStartup sets backendStartupHalted, cancels the readiness wait and clears the restart timer, then shows the dialog after the child closes (500 ms fallback). showBackendStartupFailure (line 3081) offers Retry / Open Logs / Quit; Retry resets the policy and backoff. scheduleBackendRestart (line 3000) and startBackend (line 3205) both honour the halt flag."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3222",
+      "note": "Remaining gap (auditor was right). A missing server entry (line 3222) and a missing bootstrap pipe (line 3273) call scheduleBackendRestart directly. They skip backendFailurePolicy, so they retry every 10 s with no limit."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1796",
+      "note": "Gap the auditor missed, dev only. ensureInitialBackendWindowOpen returns under isDevelopment, and ensureDevelopmentInitialWindowOpen (line 1666) runs only when no window exists. After the first dev backend, restarted children never reach waitForBackendWindowReady (line 1599), so recordReady() and backendReadyChild are not updated. Their crashes, even hours after serving, count as pre-ready failures. The third such crash halts with a misleading 'stopped 3 times in a row before it was ready' dialog."
+    },
+    {
+      "location": "apps/server/src/service/nodeService.ts:137",
+      "note": "Related gap outside desktop scope. The CLI node launchd plist uses KeepAlive=true with ThrottleInterval=10 (lines 137-140), and the systemd unit uses Restart=always with RestartSec=10 (lines 170-171) and no RestartPreventExitStatus=78. A downgraded CLI node still respawns every 10 s, although startupFailure.ts:4-8 says service managers can stop on EX_CONFIG."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The core fix has no defect for the desktop loop described in the finding. Minor leftovers: (1) apps/desktop/src/main.ts:3222 (missing server entry) and main.ts:3273 (missing bootstrap pipe) call scheduleBackendRestart and skip backendFailurePolicy, so a corrupted install retries every 10 s behind the splash forever. (2) Dev only: restarted backend children are never recorded as ready, because ensureInitialBackendWindowOpen no-ops under isDevelopment (main.ts:1796) and the dev path runs only with no window (main.ts:1666). backendReadyChild stays on the first child, so later post-ready crashes count toward the pre-ready limit, and the third such crash, however far apart, shows a misleading halt dialog. (3) Hardening only: when a fatal frame arrives, the desktop relies on the child exiting by itself. Nothing kills a child that wrote 'fatal' but hangs in teardown, and in that case the readiness rejection is only logged (main.ts:1817). I judge this unlikely: the startup gate answers held requests on close and fd 4 is unref'd. (4) Outside the desktop scope: the CLI node service units (service/nodeService.ts:137-140 launchd KeepAlive=true, :170-171 systemd Restart=always) ignore exit 78 and keep respawning every 10 s after a downgrade, contrary to the startupFailure.ts header comment.",
+  "implementationSketch": "Optional cleanup, no product decision needed. (a) In apps/desktop/src/main.ts startBackend, send the missing-entry and missing-pipe cases through the policy instead of calling scheduleBackendRestart directly. Example: a helper recordPreSpawnFailure(details) that calls backendFailurePolicy.recordExit({reachedReady:false, exitCode:null, fatal:false}) and either schedules the restart or calls the halt path. haltBackendStartup needs a variant that takes no child, e.g. make child optional and show the dialog immediately. A missing server entry can also be treated as fatal at once. (b) Dev readiness bookkeeping: at the end of startBackend, under isDevelopment, start a lightweight wait, e.g. backendReadiness.promise.then(() => { backendFailurePolicy.recordReady(); backendReadyChild = child; backendRestartBackoff.reset(); }). Better, move recordReady/backendReadyChild out of waitForBackendWindowReady into a per-child readiness hook, so packaged and dev share it. (c) Optional hardening: in handleBackendFrame case 'fatal', arm a 5 s timer that SIGTERMs the child (it is not marked expected, so handleChildGone still halts with reason fatal), and clear the timer on exit. (d) Separate change, low priority: add RestartPreventExitStatus=78 to renderSystemdUserUnit (service/nodeService.ts:170). For launchd, which has no equivalent, either accept the 10 s throttle or raise ThrottleInterval. Tests: extend backendStartup.test.ts for a no-child halt helper; add a nodeService test asserting RestartPreventExitStatus=78 in the rendered unit; the dev-mode bookkeeping can be covered by extracting the per-child readiness hook into backendStartup.ts and unit-testing it.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The leftovers are local desktop restart bookkeeping and service-unit options. None of them touches auth, E2EE, hosted lifecycle ownership or the Hub protocol.",
+  "correction": "The auditor's DONE is correct and their two noted gaps (main.ts:3222 and :3273 skipping the policy; a native dialog instead of an in-page error) check out. They missed a dev-only bookkeeping bug: restarted dev backends never call recordReady or set backendReadyChild (main.ts:1796), so post-ready crashes count toward the 3-failure halt. They also did not note that the CLI node service units (nodeService.ts:137-140, 170-171) ignore exit 78, despite the startupFailure.ts comment about service managers. I also confirmed what they asserted without proof: the MigrationError reaches cliMain unwrapped, runMain keeps exitCode 78, and readiness cannot be marked before migrations finish.",
+  "repos": "ryco"
+}

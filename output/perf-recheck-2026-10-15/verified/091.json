@@ -1,0 +1,24 @@
+{
+  "id": "browser-measure:statistics-direct-load-missed-connection",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed fixed (56fbe263a). The Statistics view now gets its connections from useSyncExternalStore(subscribeEnvironmentConnections, readConnections) with a cached, reference-stable snapshot. React re-reads the snapshot after subscribing, so a register() emit fired by EnvironmentConnectionManagerBootstrap before the listener attached is no longer lost. A 'connecting' flag (no connections yet, primary id known) shows a skeleton instead of the empty state, and browser tests reproduce the race. Other subscribers that read and then subscribe inside one effect (useRepositoryReadLifecycle, useAutomationCentre, useWorktreeNotes, scheduleProposalHistory, useAutomationProposalSync, gitStatusState) or use useSyncExternalStore (useProject, ServerStateBootstrap, useConnectedEnvironmentIds) are safe. Two hooks still have the old lazy-useState plus later-useEffect pattern: ThreadPriorityRefreshBridge and AiFocusSettings. Both are outside the finding's scope and have little exposure.",
+  "evidence": [
+    {"location": "apps/web/src/components/statistics/useConnectedEnvironments.ts:9-29", "note": "Cached snapshot (keeps the same array while connection identities are unchanged) plus useSyncExternalStore."},
+    {"location": "apps/web/src/components/statistics/useUsageSummary.ts:67,164", "note": "Uses the shared hook; connecting = connections.length === 0 && primaryEnvironmentId !== null."},
+    {"location": "apps/web/src/components/statistics/usage/UsageView.tsx:80", "note": "Skeleton shown while loading or connecting, so the empty state does not appear."},
+    {"location": "apps/web/src/rpc/useRepositoryReadLifecycle.ts:32-33", "note": "Reads, then subscribes synchronously in the same effect: safe."},
+    {"location": "apps/web/src/components/ThreadPriorityRefreshBridge.tsx:24-33", "note": "Leftover hand-rolled pattern (lazy useState read, subscribe in a later useEffect, no re-read). Hygiene only."},
+    {"location": "apps/web/src/components/settings/AiFocusSettings.tsx:109-119", "note": "Same leftover pattern. Hygiene only."}
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Optional hygiene: move useConnectedEnvironments from components/statistics/ to a shared spot (e.g. apps/web/src/environments/runtime/useEnvironmentConnections.ts). Replace useConnections in ThreadPriorityRefreshBridge.tsx:24-33 and useEnvironmentConnectionSnapshot in AiFocusSettings.tsx:109-119 with it. Existing browser tests cover the primitive.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

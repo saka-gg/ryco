@@ -1,0 +1,50 @@
+{
+  "id": "persistence-boot:projector-replay-per-event-tx",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. #710 (60633eff3, an ancestor of HEAD and of the Hub-vendored 7bc39eec3) rewrote bootstrapProjectors, and no later commit touched it. Replay now reads only the event types routed to lagging projectors, filtered in SQL so skipped rows are never decoded. It applies 500 events per sql.withTransaction and writes cursors with one multi-row upsert per batch. A single tail transaction moves cursors past unread events, and progress is logged at start, every 5 s and at completion. The batching gain is real: Sqlite.ts keeps the default synchronous (FULL) in WAL mode, so the old code paid a WAL sync on every event. I tried to refute the fix and found no regression. Cursor tracking is per projector and updated only after commit. The type filter matches the exhaustive routing table, which uses satisfies Record<OrchestrationEventType>, and applyProjectorsForEvent applies the same routing. A failed batch rolls back whole. Post-commit effects keep their order and run after the batch commits. readThroughSequence has only this one caller, and no other boot path replays the log per event. No migration since the report resets projection_state, so nothing forces a dense replay today. The skipped optional proposal parts (seeding cursors in a migration, running catch-up after the listener starts) were alternatives, not requirements, and are not needed for the cost this finding describes. A separate, older issue that this finding does not cover: replay re-runs filesystem post-commit side effects against today's disk. Replaying thread.reverted prunes attachments of messages sent later, and replaying project.avatar-set(null) removes the current avatar. Both behave the same in the old per-event code and only trigger if the threadMessages or projects projector lags.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2607-2721",
+      "note": "bootstrapProjectors: lagging projectors, projectorEventTypes(lagging), readThroughSequence(..., { eventTypes }), Stream.grouped(BOOTSTRAP_REPLAY_BATCH_SIZE), one sql.withTransaction per batch, advanceCursors once per batch (:2677), tail cursor transaction (:2702-2715), progress logs (:2628, :2688-2694, :2716)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:210-224",
+      "note": "BOOTSTRAP_REPLAY_BATCH_SIZE = 500. projectorEventTypes is the inverse of the exhaustive ORCHESTRATION_EVENT_PROJECTORS table (:114-208, satisfies Record<OrchestrationEventType,...>)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts:2510-2559",
+      "note": "applyProjectorsForEvent: advanceCursors:false skips the per-event cursor upsert during replay. The live path (:2723-2741) still advances per event inside the append transaction."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:278-302",
+      "note": "The SQL appends AND event_type IN (...) when eventTypes is set. readThroughSequence (:421-475) decodes only the returned rows. Its only caller is ProjectionPipeline.ts:2655."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:45-55",
+      "note": "WAL with the default synchronous (FULL), so the old per-event commit paid a WAL sync per event. Batching cuts that about 500x."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionPipeline.bootstrap.test.ts:61-186",
+      "note": "Test with 1001 project events plus 3 unconsumed events. It asserts every replay read has event_type IN, ceil(N/500)+1 cursor writes, the tail cursor stamped with the head event time, and that a second boot reads nothing."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:601-604",
+      "note": "Catch-up still runs before the engine forks its worker and before the listener starts (an optional proposal alternative). With type filtering, a sparse new projector such as worktrees reads only its own events."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts:8-42",
+      "note": "No event_type index, so the filtered query scans the sequence range. event_type sits early in the row record and payload overflow pages are not read, so this is cheap compared with decode and commit."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

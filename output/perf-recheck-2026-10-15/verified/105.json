@@ -1,0 +1,75 @@
+{
+  "id": "client-runtime-sync:connect-gated-on-rootappshell-chunk",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is confirmed. Since 60633eff3 (#710) and 65af92766, the root beforeLoad prefetches the ws-token in parallel with the session check. Once the session is authenticated, it opens the primary connection, which issues the shell subscription at creation, without waiting for the lazy RootAppShell. This is standard mode only; hosted-hub and hosted-static return earlier. The supervisor's start() adopts the early connection without tearing it down. The server-state half is still missing. startServerStateSync, which opens the lifecycle/welcome subscription and the config subscription, has one web caller, ServerStateBootstrap, inside the lazy shell. The primary connection itself observes neither stream. I found no other implementation: no Hub-side change, no renamed module, and no onWelcome/onConfigUpdated handlers on the primary connection. Separately, the finding's premise that startServerStateSync is 'ref-counted or idempotent today' is wrong. Each call opens new lifecycle and config subscriptions, so an early start needs an explicit adopt/take handoff.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/__root.tsx:245-265",
+      "note": "connectsEarly = !isNativeAuthorizationPath(pathname). prefetchPrimaryWebSocketToken() runs before Promise.all([ensurePrimaryEnvironmentReady(), resolveInitialServerAuthGateState()]). On 'authenticated' it calls startPrimaryConnectionEarly(); otherwise it calls discardPrefetchedPrimaryWebSocketToken(). This part of the proposal is implemented."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:334-349",
+      "note": "startPrimaryConnectionEarly() only does import('../environments/runtime').then(connectPrimaryEnvironment). It does not call startServerStateSync, so config and welcome are not started early."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:195-201",
+      "note": "The hosted-hub branch returns before any early-connect or prefetch code. Hosted-static (about :213-222) also returns early, so the AGENTS.md single-owner rule for hosted lifecycle is respected."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:236-238",
+      "note": "attachProviderCatalogPersistence() (IndexedDB load into providerCatalogCache) is started but not awaited. The comment says it must land 'ahead of the first config subscription'. An early config start has to respect this ordering."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:979-993",
+      "note": "subscribeConfig calls providerCatalogCache.pin() when the subscription is sent, to name knownProviderCatalogs. If config sync starts before the catalog store attaches, the snapshot includes the full catalogs (a larger payload)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:178-179",
+      "note": "shouldObserveLifecycle and shouldObserveConfig are true only for kind 'saved' or when onWelcome/onConfigUpdated are passed. The primary connection passes neither."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:1276-1299",
+      "note": "createPrimaryEnvironmentConnection builds a kind 'primary' connection with only createEnvironmentConnectionHandlers (shell, resubscribe and priority handlers, :856-900) and no welcome or config hooks. Compare the desktop-workspace saved connection at :1353-1366."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/serverState.ts:162-180",
+      "note": "startServerStateSync opens a new subscribeLifecycle and subscribeConfig on every call, with no adoption or ref-counting. Two callers would mean two ~100 KB config snapshots."
+    },
+    {
+      "location": "apps/web/src/components/ServerStateBootstrap.tsx:15-26",
+      "note": "This is the only web caller: startServerStateSync(connection.client.server) runs in the effect, keyed on connection identity. The browser test at ServerStateBootstrap.browser.tsx:50-78 asserts that it restarts when the connection is replaced."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:90",
+      "note": "ServerStateBootstrap is rendered inside the lazy RootAppShell, so the welcome and config requests leave only after the shell chunk loads and commits."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:262-289",
+      "note": "EventRouter.handleWelcome waits for the welcome payload before it calls setActiveEnvironmentId, preloadRouteChunk(THREAD_ROUTE_ID), prewarmThreadDetailSubscription and the '/' to last-thread redirect. On a cold '/' load this whole chain therefore starts at mount plus the lifecycle-subscribe RTT. The welcome atom is subscribed with immediate:true (rpc/serverState.ts useLatestAtomSubscription), so a welcome received before mount would be handled on first mount."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:894-905",
+      "note": "connectPrimary() returns the already-registered connection. createPrimaryEnvironmentConnection (service.ts:1282-1285) also short-circuits on an existing one, so the shell adopts the early connection."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:1209-1213",
+      "note": "stopActive(), which start() runs before connectPrimary() at :1227, does not dispose connections. The early connection survives the shell's startEnvironmentConnectionService() at RootAppShell.tsx:236."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:175-200",
+      "note": "takePrefetchedWebSocketToken is used by issuePrimaryWebSocketToken. A failed or stale prefetch (older than 60 s) falls back to a fresh request. Prefetch and discard are at :303-311 and are covered in primaryAuth.test.ts."
+    }
+  ],
+  "remaining": "The primary server-state sync (subscribeLifecycle for welcome, plus subscribeConfig) is still started only from ServerStateBootstrap's effect (apps/web/src/components/ServerStateBootstrap.tsx:21-24), which is rendered inside the lazy RootAppShell (RootAppShell.tsx:90). apps/web/src/routes/__root.tsx:342-349 starts the connection and shell subscription early but not startServerStateSync. Consequences: the welcome-driven work in EventRouter (RootAppShell.tsx:262-289: setActiveEnvironmentId, thread-route chunk preload, thread-detail prewarm, '/' to last-thread redirect) and config-dependent UI (providers/models, tracing) start at RootAppShell mount plus one subscribe RTT and server compute, instead of being ready at mount. The gain is small on loopback desktop (a few to tens of ms) and about one RTT on remote web links. There is also no test covering the early-connect path in __root.tsx.",
+  "fixDefects": "No functional defects in the implemented half. Minor points: (1) For an unauthenticated /pair load, connectsEarly is true (__root.tsx:245), so it always fires one ws-token POST that returns 401 and is discarded at :258. This is harmless but nearly always wasted on /pair; excluding pathname === '/pair' would cost only the rare authenticated /pair-to-'/' redirect. (2) startPrimaryConnectionEarly swallows errors (.catch at :348). If it fails, the fallback is the shell's own start(), and the ServerStateBootstrap extra commit returns, which is acceptable. (3) No unit or browser test asserts that the root beforeLoad connects early in standard mode and never in hosted-hub or hosted-static mode, so a regression there would go unnoticed. (4) The finding's own premise that startServerStateSync is 'ref-counted or idempotent today' is false (serverState.ts:162-180). Any follow-up must add an explicit handoff rather than calling it twice.",
+  "implementationSketch": "1) In apps/web/src/rpc/serverState.ts, or in client-runtime rpc/serverState.ts so mobile can reuse it, add a take/adopt handle that mirrors the ws-token prefetch pattern. prestartServerStateSync(server) stores {server, stop} in a module slot, ignoring repeat calls. startOrAdoptServerStateSync(server) checks the slot: if slot.server === server it clears the slot and returns slot.stop; if it holds a different server, it calls slot.stop() and starts fresh; if the slot is empty it calls startServerStateSync(server). Add discardPrestartedServerStateSync() for the unauthenticated or never-mounted case, with an optional safety timeout of about 60 s like PREFETCHED_WS_TOKEN_MAX_AGE_MS. 2) In apps/web/src/routes/__root.tsx startPrimaryConnectionEarly(), take the connection returned by connectPrimaryEnvironment(). If it is non-null, start the lifecycle subscription immediately; it is tiny and lets EventRouter's immediate:true atom subscription see the welcome on first mount. Start the config subscription only after the providerCatalogs promise from attachProviderCatalogPersistence (:238) resolves, so pin() names the persisted catalogs. Optionally also wait for connection.ensureBootstrapped(), so the ~100 KB config snapshot does not compete with the shell snapshot on slow links (the reason getConfig was removed in #710). The simplest version calls prestartServerStateSync(connection.client.server) after `await providerCatalogs`, without blocking beforeLoad. Pass providerCatalogs into startPrimaryConnectionEarly. Keep this standard-mode only; hosted-hub and hosted-static already return earlier. 3) Change ServerStateBootstrap.tsx:24 to `return startOrAdoptServerStateSync(connection.client.server)`, so hosted-hub keeps its current path (nothing is prestarted there) and connection replacement still restarts. 4) Optional, larger gain on slow links: when the early welcome arrives on '/', call preloadRouteChunk(THREAD_ROUTE_ID) and prewarmThreadDetailSubscription from a shared helper extracted from EventRouter.handleWelcome (RootAppShell.tsx:276-288), guarded by shouldApplyBootstrapThreadRedirect from RootAppShell.logic. The thread chunk and thread window would then overlap the RootAppShell download. Keep EventRouter as the owner of the actual navigation. 5) Tests: unit tests for the take/adopt handle (adopt with the same server gives no second subscribeConfig or subscribeLifecycle call; a different server stops the old sync; discard stops it). Extend ServerStateBootstrap.browser.tsx so a prestarted sync is adopted, not duplicated. Add a __root beforeLoad test asserting early connect plus prestart in standard authenticated mode and none in hosted-hub, hosted-static or unauthenticated mode. Measure with the existing markStartupPhase marks plus new 'server-welcome-received' and 'server-config-received' marks, on loopback and on the throttled profile (4x CPU, 150 ms RTT).",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Standard-mode client-side reordering only. It changes no auth, E2EE, Hub protocol or hosted lifecycle ownership; hosted modes return before the early path. The bandwidth-ordering choice (config immediately or after the shell snapshot) is an engineering detail to settle by measurement, not a product decision.",
+  "repos": "ryco",
+  "correction": "No substantive error in the auditor's classification. Small refinements: the hosted-hub early return is at __root.tsx:195-201 (not 200-208), and the RootAppShell preload is at :159-165. The auditor's suggestion to 'make startServerStateSync idempotent' is right, and it is needed because the function is not idempotent today, contrary to the finding's premise. The auditor's sketch omitted two ordering constraints for an early config start: the provider-catalog cache must be attached before subscribeConfig pins catalogs (__root.tsx:236-238, wsRpcClient.ts:989), and an early config snapshot can compete with the shell snapshot on slow links. Starting lifecycle immediately and config after catalogs (and optionally after the shell snapshot) avoids both."
+}

@@ -1,0 +1,66 @@
+{
+  "id": "gap-first-turn-latency:attachment-instructions-per-turn",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The per-turn cost is gone. Since #710 (60633eff3), ProviderService.sendTurn no longer prefixes ~230 tokens to every message. Claude /compact and other slash commands now reach the provider verbatim, Codex carries the text in collaboration-mode developer_instructions, and first-turn adapters get it once per runtime session. The Claude replacement channel does not work, though. ClaudeAdapter passes the text as a top-level `appendSystemPrompt` query option, cast past the type. The pinned Claude Agent SDK (0.3.296, also 0.3.263) ignores that option and reads only `systemPrompt: {type:'preset', preset:'claude_code', append}`. The result is that real Claude sessions now get no attachment-delivery instructions at all, where before they got them on every turn. The same dropped field also carries the project custom system prompt and token-reduction instructions, which were already silently lost before #710. The unit test passes only because it checks the mocked createQuery input instead of what the SDK uses.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:1747-1760",
+      "note": "The per-turn prefix is removed. It applies only when capability !== 'session', the input is not a slash command, and the tracker needs it. markDelivered runs after submitTurn. The per-turn cost removal is really done."
+    },
+    {
+      "location": "apps/server/src/provider/attachmentInstructionDelivery.ts:17-58",
+      "note": "isSlashCommandInput, withAttachmentInstructions and a bounded per-thread tracker keyed by runtimeSessionId. runtimeSessionId is always set, because ProviderService generates it at start and requires adapters to echo it back (ProviderService.ts:1392-1394, 1533-1538)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:5572-5579",
+      "note": "appendSystemPrompt = [ASSISTANT_ATTACHMENT_INSTRUCTIONS, tokenReductionInstructions, customSystemPrompt].join."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:5612-5613",
+      "note": "DEFECT: the options pass `systemPrompt: { type: \"preset\", preset: \"claude_code\" }` with no `append`. The text goes in as a top-level `appendSystemPrompt`, forced in with `as Partial<ClaudeQueryOptions>` because Options has no such field."
+    },
+    {
+      "location": "node_modules/.bun/@anthropic-ai+claude-agent-sdk@0.3.296+0d0f8d729a8f3b25/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs (query option builder yT)",
+      "note": "The builder destructures `{systemPrompt:s,settings:i,managedSettings:a,settingSources:l,sandbox:c,...d}` and sets `f` only from `s.type===\"preset\" -> f=s.append`. The initialize config uses `appendSystemPrompt:f`. Nothing reads `d.appendSystemPrompt`. The only other `.appendSystemPrompt` read is in claimSession (ClaimOptions), which Ryco does not use (no prewarm/claim calls). 0.3.263 behaves the same."
+    },
+    {
+      "location": "node_modules/.bun/@anthropic-ai+claude-agent-sdk@0.3.296+0d0f8d729a8f3b25/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:2422-2433",
+      "note": "Options.systemPrompt preset is `{ type: 'preset'; preset: 'claude_code'; append?: string; ... }`. The `appendSystemPrompt?: string` entries at :364 and :4534 belong to ClaimOptions and the internal initialize request, not to query Options."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.test.ts:619-639",
+      "note": "The test asserts `options.appendSystemPrompt` on the mocked createQuery input. That top-level field is the one the real SDK drops, so the test passes while the feature does not work."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:6660-6661",
+      "note": "Claude declares attachmentInstructions: 'session', so ProviderService never adds the first-turn fallback either. Claude ends up with no attachment instructions unless the Agent Control ryco_attach_file tool description happens to be installed (AgentControlMcpServer.ts:136; Agent Control is optional, ClaudeDriver.ts:162)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexSessionRuntime.ts:513-555",
+      "note": "Codex works. The attachment text is appended to collaborationMode.settings.developer_instructions on every turn/start (line 2320). Codex adds a developer message only when the collaboration mode changes. The per-turn prompt fallback (lines 597-603) needs interactionMode === undefined, which the orchestration paths never produce: the reactor uses event.payload.interactionMode with a decoding default, and the handoff uses thread.interactionMode."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:2397-2399",
+      "note": "The tracker is forgotten on rollback. Nothing forgets it after provider-side compaction ('compacted' thread state, packages/contracts/src/providerRuntime.ts:74), so first-turn adapters can lose the instructions in long threads that auto-compact."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CopilotAdapter.ts:279-292",
+      "note": "Copilot has an unused session-level systemMessage append channel. OpenCode promptAsync also accepts `system?: string` (@opencode-ai/sdk v2 types.gen.d.ts:8676) and does not use it. Both stay on the first-turn fallback."
+    },
+    {
+      "location": "apps/server/src/assistantAttachments.ts:27",
+      "note": "The fence is parsed provider-agnostically in ProviderRuntimeIngestion. Every adapter supports the fence, so the proposal's 'gate on fence support' part is moot."
+    }
+  ],
+  "remaining": "Claude: ClaudeAdapter.ts:5612-5613 sends the composed instructions as a top-level `appendSystemPrompt`. The Claude Agent SDK 0.3.296 drops that option; it honours only `systemPrompt.append`. Since #710, real Claude sessions therefore get no attachment-delivery instructions. The project customSystemPrompt and token-reduction instructions joined into the same string are also never applied (a pre-existing bug since 6fceb686c and ba08d1f55). ClaudeAdapter.test.ts:619-639 asserts the wrong field and hides this. Minor: first-turn adapters (Copilot, Cursor, OpenCode, Grok, ACP) can lose the one-time instructions after provider-side auto-compaction, because the tracker is only forgotten on rollback (ProviderService.ts:2399). Copilot (systemMessage append) and OpenCode (promptAsync `system`) have session/system channels that would avoid this.",
+  "fixDefects": "(1) Main defect: the Claude 'session' channel is a no-op. ClaudeAdapter.ts:5612-5613 passes `{ appendSystemPrompt }` through a type cast, and the SDK reads only `systemPrompt: {type:'preset', preset:'claude_code', append}`. Because Claude declares attachmentInstructions:'session' (ClaudeAdapter.ts:6661), ProviderService also skips the fallback. Claude went from per-turn instructions to none. Fenced ryco-attachments delivery works for Claude only if the model guesses it, or partly through the ryco_attach_file tool description when Agent Control is enabled. The ClaudeAdapter test checks the mock input field the real SDK ignores. (2) Minor: the first-turn tracker is never reset on provider compaction, so long Copilot/OpenCode/Cursor threads can lose the instructions once the provider summarizes the first message. (3) Minor and outside this finding: OpenCodeAdapter.ts:2516-2519 prefixes <ryco_host_context> on the first turn even for slash-command input. This is the same pattern the fix avoided in ClaudeAdapter.",
+  "implementationSketch": "1) ClaudeAdapter.ts around 5608-5613: build `systemPrompt: appendSystemPrompt ? { type: \"preset\", preset: \"claude_code\", append: appendSystemPrompt } : { type: \"preset\", preset: \"claude_code\" }` and delete the `({ appendSystemPrompt } as Partial<ClaudeQueryOptions>)` spread. Without the cast, tsgo will reject any future top-level misuse. Update the comment at 6660 and the module doc in attachmentInstructionDelivery.ts:6 to say `systemPrompt.append`. 2) ClaudeAdapter.test.ts:619-639: assert `(options.systemPrompt as { append?: string }).append` includes ASSISTANT_ATTACHMENT_INSTRUCTIONS and that `'appendSystemPrompt' in options` is false. Add cases showing that a project customSystemPrompt and token-mode instructions also land in `systemPrompt.append`. Run only `bun run test` focused on apps/server ClaudeAdapter.test.ts and ProviderService.test.ts, plus the server typecheck. 3) Be aware of the SDK's default system-prompt snapshot: sessions created since #710 may keep their recorded prompt (without the append) on resume until the next compaction. Either accept that, or set `systemPrompt.snapshot`/`systemPromptSnapshot` deliberately; do not prefix again. 4) Optional hardening: give Copilot the attachment text in its systemMessage.content and declare attachmentInstructions:'session'. Do the same for OpenCode by passing `system: ASSISTANT_ATTACHMENT_INSTRUCTIONS` in session.promptAsync, after checking that OpenCode does not store `system` as conversation text. Add adapter tests. For the remaining ACP adapters, call attachmentInstructionTracker.forget(threadId) in ProviderService when a thread.state.changed 'compacted' runtime event arrives, with a ProviderService.test.ts case.",
+  "worth": "high",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is a plain bug fix that makes the existing Claude system-prompt channel actually reach the SDK. One caveat: it will also start applying the project custom system prompt and token-reduction instructions to Claude, which users already configured and expect but have never actually received. Mention that in the PR; it does not need a product decision.",
+  "repos": "ryco"
+}

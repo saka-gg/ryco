@@ -1,0 +1,59 @@
+{
+  "id": "browser-measure:settings-idle-prefetch-competes",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PR #710 (60633eff3) removed the boot-time requestIdleCallback(preloadSettingsPage) from SettingsRouteBridge. It added a hover/focus intent preload on the Settings button and moved the speculative preload into ShellIdlePreloads. That scheduler gates on saveData and effectiveType, starts at primary-shell-painted or a 5 s cap, and runs settings last. The route loader now awaits the lazyRouteComponent, so a warmed chunk is no longer wasted by the Suspense reveal throttle. In the common case the preload no longer overlaps the WS shell snapshot. Three gaps remain. (1) The payload is unchanged: about 210 KB raw / 69 KB gz beyond the shell, thread and palette chunks in today's dist. (2) The idle tasks are fire-and-forget, so the downloads are not serialized and the settings graph still downloads alongside the thread route chunk and the thread detail. (3) The 5 s start cap is unconditional, so on a slow link whose shell snapshot lands after 5 s, every preload starts before the snapshot. The NetInfo gate does not cover these cases: Safari and Firefox lack navigator.connection, and Chromium most likely reports '4g' for the report's 150 ms / 1.6 Mbps profile. All of this is low impact.",
+  "correction": "The auditor says the lazy section bodies shrank the old 4-level, about 200 KB graph. They did not. At f1be4abc7 the section bodies were already React.lazy (SettingsPage.tsx:237-285), and the old idle preload never pulled them. preloadSettingsPage still pulls the same static graph: SettingsRouteView -> SettingsPage -> SettingsPanels -> ProjectDefaultsSection -> ProjectPreferenceSettings -> TraitsPicker, plus LifecycleSettings -> lifecycleSuggestionPolicy. Only the timing, the gating and the value of the preload changed. The auditor also takes at face value the doc claim that the per-task idle periods mean none of the preloads competes with the first thread render. requestIdleCallback tracks main-thread idleness, not network idleness, and every task returns before its download finishes. So the thread, palette and settings downloads all start within a few frames of each other. The proposal's 'plus the first thread render' deferral is not implemented.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/SettingsRouteBridge.tsx:27-80",
+      "note": "The boot-time requestIdleCallback(preloadSettingsPage, {timeout:4000}) effect (f1be4abc7 lines 33-43) is gone. Removed in 60633eff3."
+    },
+    {
+      "location": "apps/web/src/components/sidebar/SidebarChrome.tsx:86-89",
+      "note": "Intent preload as proposed: the Settings button calls preloadSettingsPage on onPointerEnter and onFocus."
+    },
+    {
+      "location": "apps/web/src/settingsRoute.ts:21-30",
+      "note": "SettingsRouteComponent is a lazyRouteComponent shared with the route, and preloadSettingsPage warms that same component. routes/settings.tsx:29-30 awaits the loader and the component, so no Suspense reveal throttle applies and an earlier preload is not wasted."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:175-185",
+      "note": "ShellIdlePreloads skips the phone tier and orders the tasks: thread and draft route chunks, then the palette, then settings. Every task is fire-and-forget ('void preloadRouteChunk', and preloadCommandPaletteDialog / preloadSettingsPage return void), so nothing waits for the previous download."
+    },
+    {
+      "location": "apps/web/src/lib/shellIdlePreload.ts:49-58",
+      "note": "runFrom calls the task synchronously and then immediately schedules the next idle callback. The downloads overlap on the network, which contradicts the doc claim at lines 29-34 that none competes 'with the first thread render'."
+    },
+    {
+      "location": "apps/web/src/lib/shellIdlePreload.ts:25-26,68-69",
+      "note": "The comment says the 5 s cap is for sessions without a primary shell (hosted-static), but the cap timer is armed for every session. If the live shell snapshot arrives more than 5 s after RootAppShell mounts, which is plausible at 1.6 Mbps, all preloads start before it."
+    },
+    {
+      "location": "apps/web/src/lib/shellIdlePreload.ts:15-23",
+      "note": "The gate checks only saveData and effectiveType === '4g', and returns true when navigator.connection is missing (Safari, Firefox). Chromium's DevTools/CDP emulation most likely derives effectiveType from RTT alone (>= ~272 ms is 3g), so the report's 150 ms RTT / 1.6 Mbps profile reads as '4g' and is not gated."
+    },
+    {
+      "location": "apps/web/src/components/settings/SettingsPage.tsx:73",
+      "note": "SettingsPanels (72 KB raw in dist) is still statically imported, and through it ProjectDefaultsSection -> ProjectPreferenceSettings -> TraitsPicker and LifecycleSettings -> lifecycleSuggestionPolicy."
+    },
+    {
+      "location": "apps/web/dist/assets (built 2026-10-14)",
+      "note": "Static-import closure of SettingsRouteView-*.js minus the RootAppShell + ChatThreadRouteView + DraftChatThreadRouteView + CommandPaletteDialog closures: 12 chunks, 210,048 B raw / 68,685 B gz. Largest: SettingsPanels 72 KB, api 66 KB, SettingsPage 42 KB, lifecycleSuggestionPolicy 12 KB. That matches the finding's ~200 KB raw, so the payload is unchanged. The server now serves precompressed assets (apps/server/src/http.ts:270-299), so it costs about 0.35 s of link time at 1.6 Mbps."
+    },
+    {
+      "location": "apps/web/src/lib/shellIdlePreload.test.ts:38-62",
+      "note": "The tests cover phase gating, ordering of synchronous calls and the cap firing when the shell never paints. They do not test download serialization or a late-painting shell."
+    }
+  ],
+  "remaining": "(a) Download serialization: apps/web/src/lib/shellIdlePreload.ts:49-58 and RootAppShell.tsx:178-185 fire each preload without awaiting it. The settings graph (about 69 KB gz) still overlaps the thread/draft route chunk download and the thread detail stream on bootstrap-redirect and thread-URL boots. (b) The proposal's 'first thread render' deferral is not implemented. Start is gated only on primary-shell-painted (the sidebar). (c) The unconditional 5 s cap (shellIdlePreload.ts:68) lets preloads start before the shell snapshot on slow links where the NetInfo gate (lines 15-23) does not apply: Safari, Firefox, or Chromium reporting '4g' at about 150 ms RTT with low bandwidth.",
+  "fixDefects": "The doc comment at shellIdlePreload.ts:29-34 claims the per-task idle periods keep the preloads from competing with the first thread render. The code does not enforce that, because the tasks return before their downloads finish. The cap comment at line 25 scopes the cap to hosted-static sessions, but line 68 arms it for every session. Neither is a correctness bug. Both are performance gaps against the stated intent.",
+  "implementationSketch": "1) apps/web/src/lib/shellIdlePreload.ts: change the task type to () => void | Promise<unknown>. In runFrom, await the task's promise, capped by a per-task timeout (e.g. 8 s via Promise.race, catch-all), before calling scheduleIdleTask for the next index. Check the cancelled flag after the await. Make preloadSettingsPage (settingsRoute.ts) and preloadCommandPaletteDialog (CommandPalette.tsx) return their preload promise; the void callers in SidebarChrome are unaffected. In RootAppShell.tsx ShellIdlePreloads, have task 1 return Promise.all([preloadRouteChunk(THREAD_ROUTE_ID), preloadRouteChunk(DRAFT_ROUTE_ID)]). 2) Add an option like scheduleShellIdlePreloads(tasks, { startCapMs }). From ShellIdlePreloads, pass 5_000 only when no primary shell is expected (authGateState hosted-static, or getPrimaryKnownEnvironment() null). Otherwise pass a long safety cap (e.g. 30_000). 3) Optional: also wait for a 'first-thread-painted' phase when the initial route is a thread route. Add a StartupPhase marked from ChatThreadRouteView's first committed thread detail (layout effect plus markStartupPhaseAfterPaint), and start on that phase or on primary-shell-painted when no thread is routed. 4) Optional: tighten allowsSpeculativePreload to also return false when connection.downlink < ~2 (Mbps) or connection.rtt > ~250. Serialization (1) remains the main protection for browsers without NetInfo. Tests: extend shellIdlePreload.test.ts so that a task returning a pending promise blocks the next task until it resolves or the per-task timeout passes; with startCapMs 30_000 nothing runs at 5 s before primary-shell-painted; allowsSpeculativePreload({effectiveType:'4g', downlink:1.5}) is false. Manual check: scripts/perf/browserProbe at 150 ms / 1.6 Mbps should show the SettingsPage chunk request starting only after the ChatThreadRouteView chunk response ends.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Web-client preload scheduling only. It does not touch auth, E2EE, Hub protocol or hosted lifecycle ownership, and has no product-visible trade-off beyond slightly later speculative warming on slow links.",
+  "repos": "ryco"
+}

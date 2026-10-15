@@ -1,0 +1,55 @@
+{
+  "id": "server-boot:login-shell-sync-path",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the described cost and bug. PR #710 (60633eff3) moved the login-shell logic into @ryco/shared/shellEnvironment, shared with desktop. The server now applies a cached PATH synchronously (measured 0 ms) and refreshes it asynchronously 3 s after start. A cache miss runs a bounded sync probe: SIGKILL, 1.5 s, cwd = homedir, stdin ignored. I measured it killing a TERM-ignoring interactive zsh at 1,503 ms (ETIMEDOUT, SIGKILL). A hanging rc can no longer stop the server from listening. Two gaps remain. (1) A shell that always takes longer than 1.5 s never produces a cache entry, so every boot repeats the blocking 1.5 s probe and still gets no login PATH. This regresses service-managed servers whose rc takes 1.5 to 5 s: they used to get PATH and now never do. (2) The win32 branch still runs PowerShell synchronously on every boot, with no cache.",
+  "correction": "The auditor says only the very first start (an empty cache) runs a blocking probe. That is wrong when the probe keeps failing. remember() skips empty results (os-jank.ts:118), and the miss branch (os-jank.ts:144-150) schedules no background retry. On darwin the launchctl fallback is usually empty (`launchctl getenv PATH` prints nothing on this machine). So a persistently slow shell gives a cache miss, a blocking 1.5 s probe and no PATH on every boot. The auditor also did not mention the uncached synchronous win32 PowerShell branch (os-jank.ts:109-112). Some line refs are slightly off: inheritedFromDesktop is at os-jank.ts:83, not 38-39, and the cache read/write is at shellEnvironment.ts:396-469.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:710",
+      "note": "fixPath is still called synchronously at the top of makeServerLayer, before any layer is built. On a cache hit it only reads a small JSON file."
+    },
+    {
+      "location": "apps/server/src/os-jank.ts:129-142",
+      "note": "Cache hit: applyShellEnvironmentCache runs synchronously. The refresh uses resolveShellEnvironmentAsync (non-blocking) via setTimeout(3000).unref() (lines 28, 52-54). Measured: the cache read on this machine took 0 ms and hit a record captured today."
+    },
+    {
+      "location": "apps/server/src/os-jank.ts:144-150",
+      "note": "Cache miss: the bounded sync probe runs, then remember(). remember() returns early for an empty environment (line 118), and nothing is scheduled. os-jank.test.ts:297-315 asserts that no refresh is scheduled on a miss. So a probe that always times out never writes a cache, and every boot blocks 1.5 s again."
+    },
+    {
+      "location": "packages/shared/src/shellEnvironment.ts:69,289-307",
+      "note": "SHELL_PROBE_TIMEOUT_MS=1500, killSignal SIGKILL, cwd homedir(), stdio ['ignore','pipe','pipe']. The executor drops the caller's options (timeout 5000/2000 in shell.ts), so the bound always applies. Measured: `zsh -ic 'trap \"\" TERM; sleep 6'` returned ETIMEDOUT/SIGKILL after 1,503 ms. The real probe took 319 ms sync and 176 ms async."
+    },
+    {
+      "location": "packages/shared/src/shellEnvironment.ts:239-281,309-324",
+      "note": "The async refresh runs off the critical path but uses the same 1.5 s bound. An rc file taking 1.5 to 5 s used to yield PATH (old 5 s timeout) and now never does."
+    },
+    {
+      "location": "apps/server/src/os-jank.ts:109-112",
+      "note": "win32 still calls resolveShellEnvironmentSync, which runs PowerShell (pwsh.exe, then powershell.exe, possibly a second pass with the profile loaded) on the main thread on every non-desktop boot, with no cache. It is now bounded at 1.5 s per spawn, down from 5 s."
+    },
+    {
+      "location": "packages/shared/src/shellEnvironment.ts:396-469,481-489",
+      "note": "Cache read/write and the worker body are shared. apps/desktop/src/shellEnvironmentCache.ts is deleted. apps/desktop/src/shellEnvironmentWorker.ts only calls runShellEnvironmentWorker(). Desktop applies the cache and refreshes with the same helpers (apps/desktop/src/main.ts:695-771, desktopEntry.ts:66-80). The cache path matches the server's <RYCO_HOME>/userdata/shell-environment-cache.json."
+    },
+    {
+      "location": "apps/server/src/service/nodeService.ts:25",
+      "note": "Service units still carry no PATH, so service-managed servers rely on the probe or cache. This is the population hurt by gap (1)."
+    },
+    {
+      "location": "packages/shared/src/shellEnvironment.test.ts:346-359",
+      "note": "Tests cover the async executor's SIGKILL bound, homedir cwd and closed stdin. The sync executor has no direct test, but I checked its behaviour empirically."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "(1) No background retry or negative cache after a failed miss probe (apps/server/src/os-jank.ts:117-150). If the user's interactive login shell always takes longer than 1.5 s, the sync probe is killed, the environment is empty, and remember() skips it (line 118). No refresh is scheduled, so every boot pays the full 1.5 s per candidate shell. The server also never gets the login PATH. A terminal launch still has the inherited PATH and only loses time. A launchd/systemd service (units carry no PATH) runs without nvm/homebrew/~/.local entries, so provider CLIs are reported missing. Before the fix, an rc taking 1.5 to 5 s did yield PATH. The async refresh does not need the 1.5 s bound because it is off the critical path, but it uses it (shellEnvironment.ts:309-324). (2) The win32 branch (os-jank.ts:109-112) still runs one or two synchronous PowerShell spawns before listen on every non-desktop boot, with no cache. Desktop on Windows already uses the cache plus a worker. Minor and not worth reopening: a cached PATH can sit ahead of a fresher inherited terminal PATH for about the first 3 s, until the refresh, so boot-time provider probes may see a stale binary. Provider snapshots re-probe within 5 minutes.",
+  "implementationSketch": "Gap 1 (S): in packages/shared/src/shellEnvironment.ts, give createBoundedShellExecFile and resolveShellEnvironmentAsync an optional timeoutMs. Add SHELL_REFRESH_TIMEOUT_MS (e.g. 10_000) and keep SIGKILL, homedir cwd and closed stdin. In apps/server/src/os-jank.ts fixPath, factor the hit-path refresh closure into a local refresh(). Use it on the hit path as today, and also on the miss path whenever the sync result has no PATH (timed out or failed). Pass the longer timeout in both cases. A slow-rc user then pays the 1.5 s block once, the background refresh writes the cache, and later boots hit it. Optionally use the same longer bound for desktop's stale-while-revalidate refresh: pass a timeout through workerData in captureShellEnvironment/runShellEnvironmentWorker, and raise captureShellEnvironment's overall timeoutMs for the refresh call only (apps/desktop/src/main.ts:695-725). Tests: in os-jank.test.ts, the sync readEnvironment throws while the injected async reader returns a PATH. Assert scheduleRefresh is called on the miss, env.PATH is updated after refresh() and the cache file is written. Replace the 'probes once' test expectation only for the failed-probe case. In shellEnvironment.test.ts, assert createBoundedShellExecFile honours a custom timeout. Gap 2 (M, low priority): on win32 in fixPath, read the cache (platform win32), apply it and refresh off the main thread. Either add an async Windows resolver in packages/shared/src/shell.ts, using createBoundedShellExecFile for PowerShell and resolveCommandPathAsync for the node check, or ship a server worker entry that calls runShellEnvironmentWorker. Keep the current bounded sync path for a miss. Add a win32 cache-hit test to os-jank.test.ts with injected readers.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco"
+}

@@ -1,0 +1,75 @@
+{
+  "id": "hub-connection:relay-payload-compression",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed NOT_DONE. I searched for any relay compression path, including Hub-side ones, and found none. Since f1be4abc7, no commit adds CompressionStream, deflate-raw, a compressed inner type or an RPC-level compression flag; `git log -S` and `--grep=compress` only turn up the report HTML. Relay RPC is still JSON (RpcSerialization.json in apps/server/src/ws/RpcByteSession.ts), and both directions seal raw bytes under E2EE_INNER_TYPE_RPC. The permessage-deflate policy from #710 covers only the server's direct WebSocket. The Hub keeps perMessageDeflate: false, which would not help anyway because the ciphertext does not compress. Screenshots still travel as base64 JSON. I have four corrections or additions to the auditor's result. (1) The auditor's send-side evidence (relayE2eeChannel.ts:811, relayEngine.ts:561) is the client-to-node path, which the proposal deliberately leaves out. The node-to-client seal that matters is NodeE2eeChannelSession.ts:1610. The client receive point where inflation would go is relayEngine.ts:1230-1238. (2) Mobile runs on Hermes, which has no CompressionStream, and apps/mobile has no compression library. Mobile therefore needs fflate (or a native module), or it must simply not advertise the capability. (3) The Hub's 50 MiB transfer budget is a lifetime counter per channel that never resets, covers both directions, and is enforced in ryco-hub forwarder.ts:245-248. The client treats transfer_limit as non-retryable (relayEngine.ts:376-382). Compressing roughly 8x-compressible JSON would therefore also make each hosted channel last proportionally longer, not just speed up transfers. (4) The hosted screenshot sampler already spaces frames by their payload size (useDeviceScreenshotStream.ts:6-28: 512 KiB/s target, so about 5.8 s per phone frame). That code predates the report. It slows the drain on the budget but does not change the frame count: about 17 phone frames per channel still exhaust it, now over roughly 100 s instead of 13 s.",
+  "evidence": [
+    {
+      "location": "apps/server/src/hubConnector/NodeE2eeChannelSession.ts:1610",
+      "note": "Node-to-client emit() seals the raw RPC bytes with protectRecord(session, E2EE_INNER_TYPE_RPC, bytes). There is no compress step. The legacy branch at :1587 sends the raw bytes too."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeSession.ts:1214",
+      "note": "#protectCommitted: plaintext = encodeE2eeInnerRecord(request.innerType, request.body), then aead.seal. No compression."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeWire.ts:107",
+      "note": "The inner-type registry is still RPC 0x01, CLOSE 0x02, ERROR 0x03 and CLOSE_ACK 0x04. There is no compressed variant."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/relayEngine.ts:1230",
+      "note": "#deliver hands the result of channel.intercept() (disposition.message), or the legacy bytes, straight to events.onData. No inflate step. A decompressor would go here."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/relayE2eeChannel.ts:779",
+      "note": "On the client send side, the ceiling check and submit under E2EE_INNER_TYPE_RPC (line 811) use the uncompressed size. This is the client-to-node direction."
+    },
+    {
+      "location": "apps/server/src/ws/RpcByteSession.ts:171",
+      "note": "Relay RPC is serialized with RpcSerialization.json, so plain JSON goes into the E2EE record."
+    },
+    {
+      "location": "apps/server/src/webSocketCompression.ts:19",
+      "note": "WEBSOCKET_PER_MESSAGE_DEFLATE (16 KiB threshold, level 1, no context takeover) from #710 applies only to the server's direct WS (server.ts:265). Its parameters could be reused for relay compression."
+    },
+    {
+      "location": "ryco-hub:origin/main:src/relay/hubSession.ts:453",
+      "note": "The Hub sets perMessageDeflate: false (also websocketRuntime.ts:1066). Merged Hub code has no relay payload compression."
+    },
+    {
+      "location": "ryco-hub:origin/main:src/relay/forwarder.ts:245",
+      "note": "state.transferBytes counts data payloads in both directions over the channel's lifetime and never resets. The default is 50 MiB (forwarder.ts:22, config.ts:148). Fewer bytes on the wire means the channel lasts longer."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/relayEngine.ts:376",
+      "note": "transfer_limit is classified as a non-retryable protocol failure, so hitting the lifetime budget ends the channel."
+    },
+    {
+      "location": "packages/contracts/src/device.ts:583",
+      "note": "DeviceScreenshotResult.bytesBase64 is still base64 PNG over JSON RPC (44 MiB max). computer.ts:559 and :782 are the same at 88 MiB."
+    },
+    {
+      "location": "apps/web/src/components/device/useDeviceScreenshotStream.ts:20",
+      "note": "This mitigation predates the report. hostedScreenshotDelayMs spaces frames to about 512 KiB/s (5.8 s for a phone frame), which lowers the rate but not the bytes per frame or the frame count per channel budget."
+    },
+    {
+      "location": "docs/relay-e2ee-protocol.md:244",
+      "note": "§2.5 already says frame sizes are visible to the Hub, and §2.6 disclaims protection against traffic analysis. Compression would make sizes depend on content, so the CRIME/BREACH-class review is still needed. §5.2 fixes the exact field set of the signed capability statement, so negotiating there would be a spec change."
+    },
+    {
+      "location": "apps/mobile/package.json",
+      "note": "There is no fflate, pako or zlib dependency, and Hermes has no CompressionStream. Mobile cannot inflate without adding one."
+    }
+  ],
+  "remaining": "Nothing from the proposal is implemented. (1) Node-to-client relay RPC bodies are sealed uncompressed at apps/server/src/hubConnector/NodeE2eeChannelSession.ts:1610 (E2EE) and :1587 (legacy). The client receive path at packages/client-runtime/src/relay/relayEngine.ts:1230-1238 has no inflate step. There is no negotiation or marker for it, either in E2EE inner types (packages/shared/src/relayE2eeWire.ts:107) or at the RPC layer. (2) Screenshot results remain base64 PNG in JSON: packages/contracts/src/device.ts:583-590 and computer.ts:559 and :782, consumed by apps/web/src/components/device/useDeviceScreenshotStream.ts. Even with the existing adaptive cadence, a hosted preview exhausts the Hub's lifetime 50 MiB channel budget after about 17 phone frames or 9 tablet frames.",
+  "fixDefects": "",
+  "implementationSketch": "Compression without touching the E2EE wire or the Hub. Put it inside the encrypted payload, at the RPC byte layer, so the Hub sees only opaque ciphertext and needs no change.\n(a) Add packages/shared/src/relayPayloadCompression.ts with a pure codec. A compressed payload is the byte 0x00, then a 4-byte big-endian uncompressed length, then a deflate-raw body. JSON RPC payloads never start with 0x00, so the marker cannot be mistaken for an uncompressed payload. Include encode/decode helpers and a hard maxInflatedBytes guard. Reuse the 16 KiB threshold and level 1 from apps/server/src/webSocketCompression.ts:19, and use a fresh context per message.\n(b) Node side: compress in the relay RPC output path before emit(), meaning NodeE2eeChannelSession emit() at :1586 or the RpcByteSession relay writer. Use zlib.deflateRaw on the threadpool, or deflateRawSync for bodies under about 1 MiB. Do it only when the peer advertised support and the body is at least 16 KiB. Keep the original if compression saves less than about 10%. Check the compressed size against plaintextCeiling.\n(c) Client side: inflate in relayEngine #deliver (relayEngine.ts:1230) after channel.intercept, and on the legacy branch. Chain through the existing #e2eeInbound promise so message order is kept even though the inflate is async. Browsers and desktop use DecompressionStream('deflate-raw'), reading chunk by chunk and aborting once maxInflatedBytes (for example the 4 MiB message limit or an explicit 16 MiB bound) is exceeded. Treat overflow or a corrupt stream as fatal for the channel (fatal_post_key on E2EE). Mobile needs fflate's streaming inflate, or it does not advertise the capability.\n(d) Negotiation: the client opts in with an in-band first application message or an RPC hello flag inside the encrypted channel. This avoids changing the signed §5.2 capability statement and the Hub's channel.open schema. The node compresses only after seeing the opt-in. Old clients keep getting uncompressed bytes. Client-to-node stays uncompressed.\n(e) Security: document in docs/relay-e2ee-protocol.md §2.5 and §4.5 that compressed lengths are visible. Exclude message kinds that mix Hub-influenced input with secrets (auth, pairing, tokens, credential-bearing settings). The simplest version is an allowlist: compress only shell, thread-window and server-config streams.\nTests: codec unit tests (round trip, marker discrimination, threshold, incompressible skip, truncated or corrupt input, inflate-bomb cap). relayEngine ordering test with mixed compressed and plain messages under slow async inflate. RelayRpcIntegration test where a large shell snapshot crosses the compressed path. Interop tests: a non-opted-in client gets plain bytes, and a compressed payload sent to a legacy client is never emitted.\nScreenshots (separate, bigger win per byte): stop shipping base64 PNG over JSON for hosted previews. Either route the existing H.264 deviceFrame stream (packages/shared/src/deviceFrame.ts) over the relay, or add a hosted-only lossy downscaled JPEG/WebP screenshot variant in DeviceScreenshotResult (device.ts:583) consumed by useDeviceScreenshotStream.ts. A binary RPC field alone saves only about 25%. Test by checking that bytes per frame and frames per 50 MiB budget improve in useDeviceScreenshotStream.test.ts.",
+  "worth": "medium",
+  "effort": "L",
+  "risk": "high",
+  "needsDecision": true,
+  "decisionReason": "Compressing before encrypting makes record lengths depend on content in a way the Hub can observe. The Hub is the adversary in the E2EE threat model (§2.1, §2.5), so this needs an explicit security and crypto review and an allowlist of message kinds that may be compressed. It also needs a negotiation design: an in-band RPC opt-in avoids changing the signed capability statement (§5.2) and the Hub protocol, but it is still a client/node wire compatibility decision. Mobile support needs a new dependency (fflate) or must be explicitly deferred. The screenshot part is a product trade-off: lossy or downscaled frames, or routing H.264 over the relay.",
+  "repos": "ryco",
+  "correction": "The status is right, but parts of the auditor's evidence and sketch were off. (1) relayE2eeChannel.ts:811 and relayEngine.ts:561 are the client-to-node send path, which the proposal excludes. The node-to-client seal site is apps/server/src/hubConnector/NodeE2eeChannelSession.ts:1610, and inflation belongs in relayEngine.ts:1230-1238. (2) The auditor proposed CompressionStream for mobile, but Hermes does not provide it and apps/mobile has no compression library. (3) The auditor did not note that the Hub's 50 MiB budget is a lifetime counter per channel (ryco-hub forwarder.ts:245) and that transfer_limit is non-retryable on the client. This raises the value of compression beyond transfer latency. (4) The auditor did not mention the existing adaptive screenshot cadence (useDeviceScreenshotStream.ts:20), which predates the report and reduces the rate but not the frames per budget. (5) Negotiating through the E2EE inner-type registry or the signed capability statement would be a spec change. An in-band RPC-layer opt-in needs no Hub change, so repos=ryco only."
+}

@@ -1,0 +1,54 @@
+{
+  "id": "projects-loading:status-takes-optional-index-lock",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Commit 60633eff3 (#710) added the central readOnly flag. It sets GIT_OPTIONAL_LOCKS=0 and is applied as the auditor described, so `git status` no longer rewrites the index or takes index.lock. The fix still misses the main case. The next command in the same status read is a porcelain `git diff HEAD --numstat`, and porcelain `git diff` ignores GIT_OPTIONAL_LOCKS. In git's builtin/diff.c, cmd_diff calls refresh_index_quietly() (lock the index, refresh, write it) with no use_optional_locks() check whenever a tracked file has changed stat data but identical content, and diff.autoRefreshIndex defaults to true. The repo knows this already: GitIndexReview.ts:172 says diff paths refresh the index even with optional locks disabled. So after an agent or tool touches files (formatter rewrites, reverts, checkout), the index write and index.lock window that `git status` used to cause now comes from the numstat diff. The fix does remove the status-only writes (fsmonitor token, untracked cache, racy timestamps), but the finding's core claim, no index.lock contention from background reads, only partly holds.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:985",
+      "note": "readOnly adds READ_ONLY_GIT_ENV (GIT_OPTIONAL_LOCKS=0) to the spawn env before input.env. The central option exists as proposed."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1619-1628",
+      "note": "`git status --porcelain=2 --branch` uses readOnly: true. This part is fixed, because cmd_status honours use_optional_locks."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1651-1656",
+      "note": "The hot-path `git diff HEAD --numstat` has readOnly: true, but porcelain git diff ignores GIT_OPTIONAL_LOCKS. It still takes index.lock and rewrites .git/index when any tracked file has changed stat data but identical content."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1675-1677",
+      "note": "The fallback `git diff --numstat` (worktree vs index) has the same problem. The `diff --cached` sibling at 1678-1683 never refreshes the worktree, so it is fine."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:172",
+      "note": "The repo's own comment says some git diff paths refresh index stat data even with optional locks off. It works around this with a disposable index copy. The status path has no such workaround."
+    },
+    {
+      "location": "git/git master builtin/diff.c refresh_index_quietly + cmd_diff",
+      "note": "refresh_index_quietly() calls repo_hold_locked_index, refresh_index and repo_update_index_if_able. It runs when `1 < rev.diffopt.skip_stat_unmatch`, where skip_stat_unmatch = !!diff_auto_refresh_index. use_optional_locks does not appear in the file. The local git is 2.55.0."
+    },
+    {
+      "location": "apps/server/src/workspace/WorkspaceChangeSummary.ts:113-123",
+      "note": "On-demand summary reads `git diff HEAD --stat` and `git diff HEAD --patch` with readOnly. It has the same porcelain-diff index write, on a less hot path."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1765-1784",
+      "note": "Every numstat row becomes a workingTree file, including rows not in the status output. Turning off the diff's auto-refresh would surface stat-only files as 0/0 rows, so a filter against the status path set is needed."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.test.ts:427-428",
+      "note": "The only test asserts call.readOnly === true on mocked calls. Nothing checks that the real index is left untouched or that the env reaches git."
+    }
+  ],
+  "remaining": "The two worktree numstat diffs on the status hot path still take .git/index.lock and rewrite the index whenever a tracked file has changed stat data but identical content: `diff HEAD --numstat` at apps/server/src/vcs/GitVcsDriverCore.ts:1651-1656 and the fallback `diff --numstat` at 1675-1677. readOnly/GIT_OPTIONAL_LOCKS=0 has no effect on porcelain `git diff`, which calls refresh_index_quietly unconditionally when diff.autoRefreshIndex is true. Agent `git add`/`commit` can therefore still hit 'index.lock: File exists' against Ryco's per-row/per-event status refresh after agents or tools touch files. Same on a cold path at apps/server/src/workspace/WorkspaceChangeSummary.ts:113-123.",
+  "fixDefects": "(1) The readOnly contract in GitVcsDriver.ts:69-74 says 'must never take optional locks'. It is not upheld for porcelain `git diff`, yet it is applied to the status-path diffs and WorkspaceChangeSummary diffs as if it were. The comment and the test give false confidence. (2) The test (GitVcsDriverCore.test.ts:427-428) checks only the flag on mocked calls. It does not cover env propagation (GitVcsDriverCore.ts:985) or real index immutability. (3) Unrelated pre-existing nit seen while reading: parseNumstatEntries (GitVcsDriverCore.ts:156-158) mishandles git's brace rename syntax (`src/{a => b}.ts` becomes `b}.ts`). Not part of this finding.",
+  "implementationSketch": "1) apps/server/src/vcs/GitVcsDriverCore.ts readStatusDetailsLocal: prefix both worktree numstat diffs with `-c diff.autoRefreshIndex=false`: [\"-c\",\"diff.autoRefreshIndex=false\",\"diff\",\"HEAD\",\"--numstat\"] and the same for the `diff --numstat` fallback. This sets skip_stat_unmatch=0 in cmd_diff, so refresh_index_quietly never runs and the live index and index.lock are untouched. The plumbing diff-index/diff-files commands are equivalent. Optionally make it central instead: when input.readOnly is set in executeRaw (GitVcsDriverCore.ts:~985), also inject GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n=diff.autoRefreshIndex/GIT_CONFIG_VALUE_n=false (git >= 2.31), merging with any caller GIT_CONFIG_* env. Then every readOnly porcelain diff, including WorkspaceChangeSummary.ts:113-123, honours the documented contract. 2) Side effect to handle: with auto-refresh off, files with only stat changes appear as `0\\t0\\tpath` rows. In readStatusDetailsLocal, after parseNumstatEntries (~1765), drop entries with insertions===0 && deletions===0 whose path is not in the status-derived set (changedFilesWithoutNumstat, built at ~1723-1727; collect it into a separate statusPaths set before the merge). Keep binary '-\\t-' rows that are in status. WorkspaceChangeSummary may show empty 'diff --git' headers for such files; that is acceptable for summary input, or the --stat/--patch output can be filtered the same way. 3) Trade-off to note in a comment: Ryco then never heals stat-only entries, so each poll re-hashes them (status already does that lock-free) until an agent or user git command refreshes the index. This is the robustness-over-convenience choice AGENTS.md asks for. 4) Tests in GitVcsDriverCore.test.ts using a real temp repo (that file already has real-git tests): commit a file, utimes() it forward without changing content, snapshot .git/index bytes and mtime, call statusDetailsLocal, assert the index is byte-identical with the same mtime, workingTree.files is empty and hasWorkingTreeChanges is false. Second case: pre-create .git/index.lock, touch a file, call statusDetailsLocal, assert it succeeds and the lock file still exists unchanged. Add a mocked unit case where diff returns `0\\t0\\tsrc/touched.ts` with empty status, and assert files is []. Validate with `bun run test` scoped to apps/server/src/vcs and apps/server/src/workspace, plus `bun typecheck` for the server package.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is an internal git-invocation change with no auth, E2EE, Hub or hosted-lifecycle impact. The only trade-off, Ryco no longer opportunistically refreshing stale stat data, is an engineering perf-versus-robustness choice already settled by AGENTS.md's correctness-first priority.",
+  "repos": "ryco"
+}

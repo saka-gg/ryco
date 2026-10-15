@@ -1,0 +1,67 @@
+{
+  "id": "gap-composer-pickers:prewarm-on-at",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor reported no fix defects, but there is one minor one. The ban on the bare listing standing in for a typed search is checked against the debounced query, not the typed one. For the 120 ms after the first character following a bare '@', the menu still shows the unfiltered top-level listing, and Enter or Tab inserts its first entry. It then flickers: listing, then an empty 'Searching workspace files…', then results. This does not change the DONE classification.",
+  "summary": "Independently confirmed DONE (commit 60633eff3, #710). The contract now accepts an empty query (TrimmedString, max 256). The server ranks an empty query by depth, directories first, and marks the result truncated when more than the limit matched, so the client never wrongly narrows from a partial bare listing. The client sends the bare-'@' request at once, without the debounce, when the server advertises capabilities.projectSearchEmptyQuery. That request warms the single-flight server index while the user types. The menu shows 'Indexing workspace…' or 'Searching workspace files…' while loading, 'Couldn't search workspace files.' with a Retry button on failure, and a footnote for partial results. A typed query's results never stand in for the bare listing. Unit tests and browser tests cover both the capable-server and legacy-server paths. Not done: the optional prewarm on composer focus (onComposerIntent only prewarms the provider session). That part was optional, and adding it carries a server-load cost: any read of an index older than 15 s starts a background rebuild. Minor fix defect: during the debounce window after a bare '@', the bare listing still stands in for the typed character (see fixDefects).",
+  "evidence": [
+    {
+      "location": "packages/contracts/src/project.ts:38",
+      "note": "ProjectSearchEntriesInput.query is TrimmedString with max length 256. Its comment says an empty query lists the shallowest entries and warms the index."
+    },
+    {
+      "location": "packages/contracts/src/environment.ts:72",
+      "note": "Declares projectSearchEmptyQuery as an optional capability. The server sets it to true at apps/server/src/environment/Layers/ServerEnvironment.ts:104, and the hosted descriptor field-set test is updated (apps/server/src/agentControl/Mcp/hostedBoundaries.test.ts:54)."
+    },
+    {
+      "location": "packages/shared/src/workspaceEntrySearch.ts:62",
+      "note": "scoreWorkspaceEntry scores an empty query by depth*2 plus 1 for files. The server search at apps/server/src/workspace/Layers/WorkspaceEntries.ts:1264-1279 sets truncated = index.partial || matchedCount > limit, so a bare listing of a workspace with more than 80 entries is never used by narrowFromCache (apps/web/src/rpc/projectAtoms.ts:262-289)."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:917",
+      "note": "readIndex is single-flight: only the first read of a root waits, for at most the cold-build deadline. Later typed queries reuse the build the bare-'@' request started."
+    },
+    {
+      "location": "apps/web/src/rpc/projectAtoms.ts:150",
+      "note": "resolveInput no longer requires query.length > 0. commitError (lines 227-236) records the error, and the state exposes dataQuery and error."
+    },
+    {
+      "location": "apps/web/src/components/chat/ComposerAttachmentMenus.tsx:124",
+      "note": "effectivePathQuery uses the raw query for a bare '@' (no debounce) and for queries answerable from the cache. Otherwise it uses the trailing-only debounced value. @tanstack/pacer 0.22.0 defaults to leading:false, trailing:true."
+    },
+    {
+      "location": "apps/web/src/components/chat/ComposerAttachmentMenus.tsx:141",
+      "note": "The check that keeps a stale bare listing out (isRelatedPathQuery) compares against normalizedEffectivePathQuery, the debounced value, not the typed pathTriggerQuery. That is the source of the minor defect."
+    },
+    {
+      "location": "apps/web/src/components/chat/composerPathMenu.ts:39",
+      "note": "The design intent is in the comment: 'nothing stands in between the bare trigger's listing and a typed search'. The code breaks this for about 120 ms after the first typed character."
+    },
+    {
+      "location": "apps/web/src/components/chat/ComposerAttachmentMenus.tsx:302",
+      "note": "isComposerMenuLoading covers a debounce in progress and any bare or typed request while it is loading or fetching. The empty state comes from resolveComposerPathMenuEmptyState (composerPathMenu.ts:54-77) and is rendered by ComposerCommandMenu.tsx:208-256: error row with Retry, loading text, and footnote."
+    },
+    {
+      "location": "apps/web/src/components/chat/ChatComposer.tsx:1925",
+      "note": "Enter or Tab with the menu open selects activeComposerMenuItem, or else items[0]. During the debounce window that is the first entry of the unfiltered bare listing, which may not match the typed character."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5258",
+      "note": "onComposerIntent only prewarms the provider session. The optional workspace-index prewarm on composer focus was not implemented."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.Composer.browser.tsx:1482",
+      "note": "Browser tests check both paths: a legacy server sends no empty query and shows 'Type to search files and folders.', and a capable server lists the workspace for a bare '@'. Unit tests are in apps/web/src/components/chat/composerPathMenu.test.ts."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor, low severity. In apps/web/src/components/chat/ComposerAttachmentMenus.tsx:141-146, the check that keeps the bare listing from standing in for a typed search compares against normalizedEffectivePathQuery, the trailing debounced value. Take a workspace with more than 80 entries, so the bare listing is truncated and cannot be narrowed locally. After a bare '@' has shown its listing, typing the first character (e.g. '@s') leaves effectivePathQuery at '' for 120 ms. During that window: (1) the menu keeps showing the unfiltered top-level listing for a query it does not answer; (2) Enter or Tab (ChatComposer.tsx:1925-1935) inserts the first listing entry (e.g. '.github/') instead of a match for 's'; (3) when the debounce fires, the listing turns into an empty 'Searching workspace files…' row for one round trip, then the results appear. So the menu flickers listing → blank → results, which typed-to-typed transitions do not. Not a perf regression. The optional composer-focus prewarm (ChatView.tsx:5258) was also not implemented. It was optional, so it is not a defect.",
+  "implementationSketch": "Defect fix in useComposerAttachmentMenus (apps/web/src/components/chat/ComposerAttachmentMenus.tsx). Base the empty-versus-typed decision on what the user typed. Option A (minimal, matches the stated design): when pathTriggerQuery is non-empty and workspaceEntriesQuery.dataQuery === '', treat the data as unrelated, i.e. pathResults = isRelatedPathQuery(dataQuery, normalizedEffectivePathQuery) && !(dataQuery === '' && normalizeWorkspaceEntryQuery(pathTriggerQuery).length > 0) ? data : null. Simpler: pass normalizeWorkspaceEntryQuery(pathTriggerQuery) as the second argument when one side is empty. The menu then shows the 'Searching workspace files…' loading row during the debounce, and Enter/Tab have no stale item to select. Option B (smoother, no flicker): when dataQuery === '' and the typed query is non-empty, rank the cached bare listing locally with rankWorkspaceEntries(listing, typedQuery, limit) from @ryco/shared/workspaceEntrySearch and show that subset as an interim stand-in until the real result commits. Every shown item then matches the typed query, and the menu goes straight from listing to matching subset to full results. If B is chosen, update the composerPathMenu.ts:39 comment. Tests: add a browser case in apps/web/src/components/ChatView.Composer.browser.tsx under 'bare @ workspace listing'. Use a capable server whose resolveSearch returns more than 80 entries or truncated:true for '' and a distinct entry for 's'. Fill '@', wait for the listing, then fill '@s' and assert at once that the listing's first item id is not rendered (A) or that only matching items are (B). Optional, separate, product trade-off: workspace-index prewarm on composer focus. In ChatView.tsx's prewarmProviderSessionRef or a sibling ref, call requestProjectSearchEntries({environmentId, cwd: gitCwd, query: '', limit: 80}) when gitCwd is non-null, the capability is advertised and dispatch is allowed. The 15 s client staleTime dedupes repeat focuses. Caveat: on the server, any read of an index older than WORKSPACE_INDEX_REVALIDATE_AFTER_MS (15 s, WorkspaceEntries.ts:51) starts a background rebuild. A focus prewarm would therefore add rebuild churn for users who never type '@'. Measure that before shipping.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The defect fix is a local UX consistency change that follows the code's own documented intent. Only the optional composer-focus prewarm would be a product/perf trade-off (extra server index revalidations on every focus), and it is not required for this finding.",
+  "repos": "ryco"
+}

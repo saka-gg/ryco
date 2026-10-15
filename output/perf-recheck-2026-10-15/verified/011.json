@@ -1,0 +1,54 @@
+{
+  "id": "desktop-boot:sync-ipc-primary-target",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Both layers of the proposal shipped in 60633eff3 (#710). The preload caches a frozen bootstrap after the first complete answer. The web layer memoizes the desktop primary target per bridge in a WeakMap. Every renderer caller is covered: node HTTP URLs through webEndpoint and clientTracing, auth bootstrap credential, ChatView render, BrowserPanel and local onboarding. After the first complete answer none of them reaches the sync IPC again. The cached values cannot go stale: port and token are assigned once in bootstrap(), backend restarts reuse them, localHttpUrl is always loopback, and an exposure change relaunches the app. No other code path still issues the sync IPC repeatedly.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/preload.ts:86-92",
+      "note": "Module-level cachedLocalEnvironmentBootstrap (and cachedAppBranding), with a comment that the values are fixed for the page lifetime."
+    },
+    {
+      "location": "apps/desktop/src/preload.ts:183-195",
+      "note": "getLocalEnvironmentBootstrap returns the cache on a hit. On a miss it calls sendSync once and caches only when httpBaseUrl is set. An incomplete answer is asked again, which is correct. The only other sendSync in the desktop sources is getAppBranding (line 176), and it is cached the same way."
+    },
+    {
+      "location": "apps/web/src/environments/primary/target.ts:14-17,120-128",
+      "note": "WeakMap desktopPrimaryTargetByBridge. resolveDesktopPrimaryTarget memoizes non-null targets only. readPrimaryEnvironmentTarget (173) and resolvePrimaryEnvironmentHttpUrl (153) go through it."
+    },
+    {
+      "location": "apps/web/src/environments/primary/target.test.ts:20-47",
+      "note": "One test asserts a single bootstrap read across repeated URL and target reads. Another asserts re-asking while the URL is null. The preload cache itself has no test, but it is a 10-line guard."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:1235-1238",
+      "note": "The render still calls readPrimaryEnvironmentTarget() when localEnvironmentId is null. On desktop this is now a WeakMap hit with no IPC. On plain web it builds one or two URL objects. Microsecond cost, not a blocking IPC."
+    },
+    {
+      "location": "apps/web/src/environments/primary/auth.ts:33",
+      "note": "Calls the bridge directly. The preload cache serves it with no IPC. The same holds for apps/web/src/browser/BrowserPanel.tsx:39."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4823-4825",
+      "note": "backendPort and backendBootstrapToken are assigned only here, once per app run. There is no other assignment, so a backend restart reconnects in place (main.ts:1741-1744) with the same URL and token, and the cached bootstrap stays valid."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1335",
+      "note": "backendHttpUrl is set only in applyDesktopServerExposureMode. That runs in bootstrap() before any window is created (4831, 4853). A runtime exposure change also goes through it, then calls relaunchDesktopApp (3597-3602). localHttpUrl is always loopback (serverExposure.ts:89)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3430-3438",
+      "note": "The ipcMain.on sync handler is unchanged. It is now hit once per page load."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None verified. Three minor notes, none of them a defect. (1) No unit test covers the preload-level cache. Only the web-layer memo is tested. (2) ChatView's render still calls readPrimaryEnvironmentTarget(), but the cost is a WeakMap lookup on desktop, or a couple of URL constructions on web, not a blocking IPC. (3) A sync IPC on every call can come back only while backendHttpUrl is empty. That cannot happen for app windows, because exposure is applied before any window is created.",
+  "implementationSketch": "Nothing is required. Optional hygiene: add a small preload test that stubs ipcRenderer.sendSync and asserts one call across repeated getLocalEnvironmentBootstrap() calls after a complete answer, and a re-ask after a null-URL answer. Optionally hoist ChatView's readPrimaryEnvironmentTarget()?.source === 'desktop-managed' into a module-level constant or a useMemo. Neither change has measurable perf value.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

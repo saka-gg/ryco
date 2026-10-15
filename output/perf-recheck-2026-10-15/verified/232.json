@@ -1,0 +1,54 @@
+{
+  "id": "mobile-boot:tabler-barrel-6k-modules",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Fixed in #710 (60633eff3). Nothing in the repo imports the @tabler/icons-react-native package root as a value any more. That covers apps/mobile/** (src, modules, index.ts) and packages/*. All ten files the finding named now import from components/icons.ts, which holds 25 deep per-icon re-exports. ForkDestinationSheet.tsx, added after the report, uses it too. The Android fallback table stays in AppSymbol.tsx with 77 deep imports. A new AppSymbol.ios.tsx renders ExpoSymbolView with no Tabler imports, so iOS never loads the fallback table. Both platform files export the same names (SymbolView, AppSymbolName, SFSymbol), matching the old file, so no iOS caller gets undefined. All 91 distinct deep specifiers resolve through the package's ./* export to existing dist/cjs/icons/*.cjs files (checked with Node require.resolve) and matching .mjs files. Metro 0.87 enables package exports by default. Each per-icon CJS module requires only createReactNativeComponent, not the barrel. The only remaining root references are type-only and erased by Babel's TS transform before Metro collects dependencies (icons.ts:40 and the ambient shim tablerIconModules.d.ts:5). An oxlint no-restricted-imports override (allowTypeImports) and a guard test enforce the boundary. The guard test also walks the iOS launch graph and asserts AppSymbol.ios.tsx is reachable and AppSymbol.tsx is not. I found no missed caller and no regression. Two hardening nits below are not defects.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/components/icons.ts:14",
+      "note": "25 deep re-exports (lines 14-38), e.g. @tabler/icons-react-native/IconActivity. Line 40 is a type-only re-export of Icon, removed at transform time."
+    },
+    {
+      "location": "apps/mobile/src/components/AppSymbol.tsx:5",
+      "note": "77 deep per-icon imports (lines 5-81) for the Android fallback table. Icon is a type-only import from ./icons (line 82)."
+    },
+    {
+      "location": "apps/mobile/src/components/AppSymbol.ios.tsx:1",
+      "note": "iOS-only implementation that imports only expo-symbols. Its exports match AppSymbol.tsx and the old f1be4abc7 file: SFSymbol, AppSymbolName, SymbolView."
+    },
+    {
+      "location": "apps/mobile/src/components/tablerIconModules.d.ts:4",
+      "note": "Ambient wildcard module typing deep imports, needed because the package's ./* types targets (dist/cjs/icons/*.d.cts) are not shipped (0 .d.cts files found)."
+    },
+    {
+      "location": "apps/mobile/node_modules/@tabler/icons-react-native/package.json",
+      "note": "v3.46.0. exports ./* maps require to dist/cjs/icons/*.cjs and import to dist/esm/icons/*.mjs. Node require.resolve resolved all 91 specifiers used in apps/mobile to .cjs files."
+    },
+    {
+      "location": "apps/mobile/metro.config.js:53",
+      "note": "The custom resolveRequest only rewrites @ryco/* and client-runtime .js specifiers, so Tabler deep paths use Metro's standard exports resolution (unstable_enablePackageExports: true by default in metro-config 0.87.0)."
+    },
+    {
+      "location": "vite.config.ts:158",
+      "note": "The apps/mobile/**/*.{ts,tsx} override bans the bare @tabler/icons-react-native specifier (allowTypeImports: true). A second override for mobile tests repeats the ban (:176)."
+    },
+    {
+      "location": "apps/mobile/src/perf/mobileStartupImports.test.ts:190",
+      "note": "Guard: no non-test file under src statically imports the root (190-198). AppSymbol.ios.tsx has no tabler or icons imports (200-204). The iOS launch graph contains AppSymbol.ios.tsx and not AppSymbol.tsx (241-247)."
+    },
+    {
+      "location": "apps/mobile/src/features/inbox/InboxThreadRow.tsx:1",
+      "note": "All 10 files that imported the root at f1be4abc7 now import components/icons. AppSymbol.tsx uses deep imports instead. The new ForkDestinationSheet.tsx:1 also uses icons.ts, and its test mocks ../../components/icons."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None that affect behaviour or startup cost. Two hardening nits, neither a regression. (1) The guard test scans only apps/mobile/src and matches only static import/export ... from forms. A require(\"@tabler/icons-react-native\") or an import under apps/mobile/modules would not fail the test. oxlint no-restricted-imports also does not cover require(). The lint rule does cover static imports in all of apps/mobile/**, and no such require exists today. (2) The test regex flags an all-inline-type import such as import { type Icon } from the root, while lint allows it. That is a stricter false positive, not a gap. On Android the bundle still carries 91 icon modules (the 77 fallbacks plus the shared 25), which is the intended cost. I did not run the guard test, lint or a Metro bundle, because the task is read-only.",
+  "implementationSketch": "No work required. Optional hardening: in apps/mobile/src/perf/mobileStartupImports.test.ts, make the root-import check use the same launchSpecifiers()/parseSync path the graph walker already uses, including its column-0 require() regex. Extend the scan to apps/mobile/index.ts and apps/mobile/modules as well as src.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Bundle-only refactor with no product, security, auth or Hub implications, and it is already merged.",
+  "repos": "none"
+}

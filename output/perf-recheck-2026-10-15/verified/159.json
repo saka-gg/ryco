@@ -1,0 +1,46 @@
+{
+  "id": "gap-right-panel-first-open:local-changes-git-n-plus-1",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "summary": "The perf finding is fixed. In 60633eff3 (#710), GitIndexReview.read() replaced the per-file `diff --no-index` loop with one `git add --intent-to-add --pathspec-from-file=- --pathspec-file-nul` in the disposable GIT_INDEX_FILE, followed by one working-tree diff. Branch is now read from the HEAD file by fs, so `symbolic-ref` is skipped, and the index and HEAD git-paths come from one rev-parse. A local review now costs 7 spawns, or 8 with untracked files, down from 10+N. The auditor's 'no fix defects' is wrong, though. `git add` always uses ADD_CACHE_OK_TO_REPLACE, so an intent-to-add path that clashes file-vs-directory with a tracked entry silently removes that entry from the temp index, and the unstaged review then hides the tracked deletion. Also, the stdoutTruncated checks are dead code (`run` never sets truncateOutputAtMaxBytes). Untracked content over 2 MB, which used to get the friendly 'Local changes exceed the 2 MB review limit', now surfaces as a raw GitCommandError.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:214-238",
+      "note": "One `add --intent-to-add --pathspec-from-file=- --pathspec-file-nul` spawn (GIT_LITERAL_PATHSPECS=1, core.hooksPath=/dev/null, core.splitIndex=false) runs on the temp index, then a single `diff --`. The per-file loop at :269-279 runs only when Git refuses the batch. The 200-file cap is still enforced at :205."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:83-97,115-146",
+      "note": "One rev-parse returns both `--git-path index` and `--git-path HEAD`. readHeadFileBranch reads the HEAD file by fs and falls back to `symbolic-ref` for a symlinked HEAD, an unparseable file or the reftable `.invalid` stub. identity() is now one `rev-parse --verify HEAD` per call. The before/after comparison is kept at :282-287."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:171-282",
+      "note": "Spawn count: show-toplevel, rev-parse git-paths, rev-parse HEAD, ls-files --unmerged, diff --cached, ls-files --others, [add -N], diff, rev-parse HEAD. That is 7, or 8 with untracked files, down from 10+N at f1be4abc7."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:217-233",
+      "note": "DEFECT. Git's read-cache.c add_to_index always passes `ADD_CACHE_OK_TO_ADD|ADD_CACHE_OK_TO_REPLACE` (plus NEW_ONLY for -N). With OK_TO_REPLACE, check_file_directory_conflict, has_file_name and has_dir_name remove conflicting entries instead of failing; I checked this against upstream git master read-cache.c. Case 1: tracked file `foo` is replaced in the worktree by a directory `foo/` holding untracked `foo/bar`, and `add -N foo/bar` drops `foo` from the temp index. Case 2: tracked `dir/x` is replaced by an untracked file `dir`, and `add -N dir` drops `dir/x`. Either way, the single `diff --` at :238 never reports the tracked deletion, so the unstaged review silently omits it. The old code ran `diff --` on the unmodified temp index and showed it. The vanish lstat check at :248-265 does not catch this."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.ts:191-193,238-245",
+      "note": "MINOR DEFECT. `run` (:61-77) never sets truncateOutputAtMaxBytes. In GitVcsDriverCore.ts:757-768 collectOutput then fails with a raw `git diff ... output exceeded 2000000 bytes and was truncated.` GitCommandError, and stdoutTruncated is always false, so these checks are dead. The old per-file loop gave the friendly 'Local changes exceed the 2 MB review limit.' when cumulative untracked output passed 2 MB. The batched diff now gives the raw error."
+    },
+    {
+      "location": "apps/server/src/vcs/GitIndexReview.test.ts:247-384",
+      "note": "Tests cover a constant command count, no --no-index or symbolic-ref, new-file mode headers (100644, 100755, empty, glob names), an untouched live index, applying a batched untracked file, the refused-batch fallback, the partially refused sparse batch, hooks, a vanished path and reftable HEAD. No test covers a file/directory conflict between an untracked path and a tracked entry."
+    },
+    {
+      "location": "apps/server/src/vcs/GitReadWorkspace.ts:33-40",
+      "note": "The authorization `rev-parse --show-toplevel` spawn is unchanged, as the proposal intended. A test (GitIndexReview.test.ts:385-402) expects it to be the only command before authorization fails."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1) File/directory regression from the intent-to-add batch (GitIndexReview.ts:217-238). `git add` always uses ADD_CACHE_OK_TO_REPLACE, so marking an untracked path intent-to-add removes any tracked temp-index entry it clashes with as file vs directory. Examples: tracked file `foo` replaced by directory `foo/` with untracked `foo/bar`, or tracked `dir/x` replaced by an untracked file `dir`. The single working-tree diff then never shows the tracked deletion, so the unstaged review silently omits a real change and the user cannot stage it from review. The pre-#710 code showed it. This is an edge case and untested. I verified it against Git's read-cache.c source, not with a live repo, because writing scratch repos was not allowed. 2) Minor: the stdoutTruncated checks at :192 and :244 are dead because `run` does not pass truncateOutputAtMaxBytes, and GitVcsDriverCore fails the command instead. Untracked content over 2 MB in the batched diff now surfaces as a raw `git diff ... output exceeded 2000000 bytes` GitCommandError instead of 'Local changes exceed the 2 MB review limit.'",
+  "implementationSketch": "In apps/server/src/vcs/GitIndexReview.ts read(): (a) Restore a tracked-only view so intent-to-add can never hide tracked changes. Run `readRun([...diffArgs, \"--\"])` on the unmodified temp index before the add step, as the old code did. Then, only when untracked.length > 0 and the add succeeded, run a second `readRun([...diffArgs, \"--diff-filter=A\", \"--\"], true)`. In diff-files only intent-to-add entries can be status A, so it emits only the untracked files. Set unstaged = tracked + untrackedPatch. This restores the old tracked-then-untracked order and costs +1 spawn only when untracked files exist (9 instead of 8, still constant). Keep the refused-batch fallback and the vanish lstat check unchanged. A vanished intent-to-add path is filtered out by A, so the lstat check still catches it. (b) Map the output-limit failure to the friendly message. Wrap the diff runs with Effect.catchIf/mapError on a GitCommandError whose detail contains `output exceeded`, and return error(root, \"Local changes exceed the 2 MB review limit.\"). Better: make GitVcsDriverCore emit a typed output-limit error to match on. Drop the dead stdoutTruncated checks, or pass truncateOutputAtMaxBytes, which is worse because git would keep producing output to the end. Tests in GitIndexReview.test.ts: (1) commit file `foo`, `rm foo`, `mkdir foo`, write `foo/bar`, read(). Expect unstaged.patch to contain `diff --git a/foo b/foo\\ndeleted file mode 100644` and `diff --git a/foo/bar b/foo/bar\\nnew file mode`. (2) The reverse: commit `dir/x`, remove dir, write file `dir`. Expect the deletion of dir/x and the new file dir. (3) Keep the constant-command-count test and update its expected count. (4) Untracked files totalling more than 2 MB give the friendly limit message.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local Git read semantics only. No auth, E2EE, Hub or hosted-lifecycle impact, and the fix restores the pre-#710 behaviour for the edge case.",
+  "repos": "ryco"
+}

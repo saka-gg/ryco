@@ -1,0 +1,59 @@
+{
+  "id": "gap-right-panel-first-open:terminal-remount-replays-history",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor said the fix has no defects that matter. It missed one gap in the fix: the cache holds 3 views, but a split group can hold 4 terminals (MAX_TERMINALS_PER_GROUP=4), and stash evicts immediately. React runs every layout-effect cleanup in a commit before any layout-effect mount, so all outgoing views are stashed before any incoming view is taken. Closing or re-switching a 4-way split, or moving focus between split chat panes that hold 2 or more terminals each, evicts a view that is needed right away. That terminal is rebuilt, and its full history is downloaded and parsed again on every such transition. These layouts are rare, so this does not change DONE.",
+  "summary": "Confirmed DONE. Commit 60633eff3 (#710) removed the described cost. Unmounting a hydrated, still-open terminal (drawer close, workspace tab switch, terminal tab switch, pane focus loss) now stashes the live xterm element in a module LRU instead of calling dispose(). Remounting re-appends that element, fits, catches up from the client event buffer, and calls terminal.open with sinceCursor. The server answers with only the history after the cursor (historySince), and the client appends it with no reset. Event handler disposables are disposed and re-registered on every mount, so a reattached view does not get duplicate onData or link handlers. The prepared-open shortcut (full answer) only runs while the xterm chunk is not yet loaded, so it never coincides with a cached view. The history sanitizer strips only query and response sequences, so the delta reproduces the live stream (including alt-screen switches). The Hub does not inspect terminal.open. Remaining defect, minor: the LRU bound of 3 with immediate eviction is too small for a 4-way split group or for a pane-focus swap between panes with split terminals. Those transitions still do one full rehydrate each. Adjacent, outside this finding: running a project script on an idle existing terminal calls terminal.open without sinceCursor, downloads the full history, and discards it.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/terminalViewCache.ts:15",
+      "note": "MAX_CACHED_TERMINAL_VIEWS = 3. stash() evicts synchronously in the while loop at line 56, so the bound is enforced before any same-commit take()."
+    },
+    {
+      "location": "apps/web/src/components/ThreadTerminalDrawer.tsx:499",
+      "note": "On mount, take() the cached view keyed by (environmentId, threadId, terminalId) plus launchKey. Line 515 re-appends the kept element instead of constructing a new Terminal."
+    },
+    {
+      "location": "apps/web/src/components/ThreadTerminalDrawer.tsx:1001",
+      "note": "sinceCursor = appliedCursor, unless the open was prepared or this is a snippet. The historySince answer is appended without \\u001bc at line 1039. An older server's full answer is skipped through isTerminalViewCurrent."
+    },
+    {
+      "location": "apps/web/src/components/ThreadTerminalDrawer.tsx:1213",
+      "note": "Cleanup keeps the view when it is hydrated or awaiting a delta, has not exited, and the terminalId is still in the store. onData, selection and link-provider disposables are disposed before the stash at line 1242, so a reattach registers them once."
+    },
+    {
+      "location": "apps/web/src/components/ThreadTerminalDrawer.tsx:1853",
+      "note": "A split view mounts up to MAX_TERMINALS_PER_GROUP (4) TerminalViewports at once. Closing the drawer stashes all 4, which evicts the first, and that one fully rehydrates on reopen."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/types.ts:43",
+      "note": "MAX_TERMINALS_PER_GROUP = 4, which is above the cache bound of 3."
+    },
+    {
+      "location": "apps/web/src/components/chat/PaneFocus.tsx:46",
+      "note": "usePaneEffect is a useLayoutEffect keyed on focus. A pane-focus swap stashes the outgoing pane's views in the same commit, before the incoming pane takes its views. ChatPanes.tsx:267 scopes each pane to its own thread, so outgoing plus incoming views can exceed 3."
+    },
+    {
+      "location": "apps/server/src/terminal/Layers/Manager.ts:241",
+      "note": "openSnapshot returns only the history after sinceCursor through TerminalHistoryCursorIndex.since (apps/server/src/terminal/historyCursorIndex.ts). It falls back to the full history after a generation change, a reset, or trimming. Tested in Manager.test.ts around line 1990."
+    },
+    {
+      "location": "apps/web/src/components/ThreadTerminalDrawer.browser.tsx:352",
+      "note": "Browser tests cover reattach without rebuild or rewrite, delta-only append, a failed delta open, and re-hydration after a reconnect replay. No test covers the cache bound against a 4-way split or a pane-focus swap."
+    },
+    {
+      "location": "apps/web/src/components/chat/useChatProjectScripts.ts:162",
+      "note": "Adjacent, not this finding: a project script run on an idle existing terminal calls terminal.open without sinceCursor. The full history (up to about 2 MiB) is downloaded, decoded and thrown away."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor. MAX_CACHED_TERMINAL_VIEWS=3 (apps/web/src/components/terminalViewCache.ts:15) is below MAX_TERMINALS_PER_GROUP=4, and stash() evicts synchronously (line 56). React runs all layout-effect cleanups of a commit before its mounts. Two cases follow. (a) Closing or reopening a 4-way split drawer, or switching a workspace tab away from and back to a 4-way split, evicts the first terminal every time. (b) A focus swap between split chat panes that hold 2+2 or more terminals stashes the outgoing views before the incoming views are taken, which evicts an incoming one. In both cases that terminal is rebuilt, its full history is downloaded, and it is parsed with \\u001bc on every transition. That is the exact cost the finding describes, limited to these uncommon layouts.",
+  "implementationSketch": "1) apps/web/src/components/terminalViewCache.ts: make stash() trim lazily. Keep the insertion-ordered Map, and on stash schedule one queueMicrotask (deduplicated with a flag) that evicts the oldest entries beyond maxEntries. Takes that happen in the same React commit (the incoming mounts) are then served before the trim, and the steady-state bound still applies. Also raise MAX_CACHED_TERMINAL_VIEWS to at least MAX_TERMINALS_PER_GROUP (import from @ryco/client-runtime state/threads types, or the apps/web/src/types re-export), so a full split group survives a drawer close. 4 is enough; memory is about 4 detached xterms of up to 5,000 lines. Keep clear() and discard() synchronous. 2) Tests: in terminalViewCache.test.ts, assert that stashing 4 views into a bound-3 cache and taking one in the same tick returns a hit, and that after `await Promise.resolve()` size() is at most the bound and the oldest is disposed. In ThreadTerminalDrawer.browser.tsx, mount a 4-way split group, unmount, remount, and assert that terminalConstructorSpy was called 4 times (not 5) and that no \\u001bc or full-history write happened. 3) Optional adjacent fix: in useChatProjectScripts.ts:142-162, pass sinceCursor from useTerminalStateStore.getState().terminalEventReconciliationByKey[key]?.cursor when reusing an existing terminal, so the discarded open answer is a delta and not the full scrollback.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is client-only cache tuning inside apps/web. It does not touch auth, E2EE, hosted lifecycle ownership or Hub protocol. Hosted account teardown still clears the cache through the store-reset watch.",
+  "repos": "ryco"
+}

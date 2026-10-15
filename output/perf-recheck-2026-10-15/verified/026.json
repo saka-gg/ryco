@@ -1,0 +1,54 @@
+{
+  "id": "server-boot:server-build-config",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "All three parts of the proposal are on main. effect, @effect/platform-node(-shared), @effect/platform-bun, @effect/sql-sqlite-bun, mime and @pierre/diffs are bundled, and ws and undici come in with them. JSDoc is stripped while legal and annotation comments stay. A generateBundle plugin escapes everything above U+00FF, and the output is ESM only. I checked the local dist, built after HEAD (21:45 vs. the 21:40 commit). It has 104 files and 0 .cjs. Across 11.76M chars of .mjs there are 0 non-Latin-1 chars and 0 JSDoc blocks. effect is a single copy of 214 modules. The static boot closure from cliMain is 49 chunks, 6.61M one-byte chars, with no external package imports. Before, it was an 8.3M-char two-byte bin.mjs plus about 800 node_modules files. The only remaining externals are native packages, provider SDKs, open (which needs its own xdg-open file) and bun:sqlite. The fix does remove the described costs, so DONE stands. There are two follow-up gaps. First, the built-bundle guards never run in CI. Second, the bundled packages are still published and staged as runtime dependencies.",
+  "evidence": [
+    {
+      "location": "apps/server/tsdown.config.ts:18-28,41-50",
+      "note": "BUNDLED_RUNTIME_PACKAGES and deps.alwaysBundle (@ryco/*, effect-acp, bundled runtime packages, @pierre/diffs via isBundledPatchedPackageImport). neverBundle covers /^bun:/."
+    },
+    {
+      "location": "apps/server/tsdown.config.ts:34",
+      "note": "format: [\"esm\"]. The CJS output is gone and dist has 0 .cjs files."
+    },
+    {
+      "location": "apps/server/tsdown.config.ts:51-58",
+      "note": "comments { legal: true, annotation: true, jsdoc: false }. latin1OutputPlugin runs unless sourcemaps are enabled. In dist, the only comments left are //#region markers and PURE annotations."
+    },
+    {
+      "location": "apps/server/scripts/latin1Output.ts:108-176",
+      "note": "AST-based escaping runs in generateBundle. It keeps chars inside tagged-template quasis and chars after an odd number of backslashes, and uses \\u{...} for astral identifiers. I reviewed the edge cases: regex u/v flags, surrogate pairs, shorthand properties and directives. I found no meaning-changing bug. The tests in latin1Output.test.ts:27-94 use rolldown's real parseAst, so they also prove the offsets are UTF-16."
+    },
+    {
+      "location": "apps/server/dist (local, built 2026-10-14 21:45, after HEAD ec250e386)",
+      "note": "11,757,915 chars of .mjs with 0 chars above U+00FF and 0 '/**' blocks. Static imports from cliMain reach 49 chunks of 6,611,560 chars, with no external package imports. Each of effect, undici, ws, @effect/* and mime is bundled once, under the effect@4.0.2 path. The only external imports are @anthropic-ai/claude-agent-sdk and @github/copilot-sdk (static, in the driver chunks), dynamic imports of sharp, node-pty, @github/keytar, open and @opencode-ai/sdk, bun:sqlite, and ws's optional __require of bufferutil and utf-8-validate."
+    },
+    {
+      "location": "apps/server/src/serverBundleBoundaries.test.ts:210-215,236-261",
+      "note": "The assertions that effect, mime, ws and undici are bundled, and the 7 MB boot-chunk budget, are in describe.skipIf(!hasCurrentBuild). They only run when apps/server/dist exists."
+    },
+    {
+      "location": "turbo.json:112-118 + scripts/ci/test-matrix.ts:22-30 + .github/workflows/_validation.yml:156",
+      "note": "CI server test shards run `bun run test --filter=ryco-cli`. The test task depends only on ^build, so ryco-cli's own dist is never built and the built-bundle suites skip in CI. Nothing in CI asserts one-byte output, no JSDoc or no .cjs after `bun run build`. The latin1 plugin only warns when it has to keep characters."
+    },
+    {
+      "location": "apps/server/package.json:28-44 + apps/server/scripts/cli.ts:253 + scripts/build-desktop-artifact.ts:1224-1227",
+      "note": "The bundled packages (effect, @effect/platform-*, @effect/sql-sqlite-bun, mime, @pierre/diffs) are still runtime dependencies. They go into the published ryco-cli package.json and into the desktop stage install, although no dist chunk imports them. Unpacked sizes are about 54M for effect, 9.5M for @pierre/diffs plus about 17M of shiki/@shikijs, and about 3.5M for @effect/*."
+    },
+    {
+      "location": "scripts/lib/validate-runtime-dependencies.ts:87; scripts/lib/validate-runtime-dependencies.test.ts:133-136",
+      "note": "Comments and the test still mention an 'unused server CJS variant' that is no longer emitted. Cosmetic only."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "I found no functional defect: the bundle is correct and smaller at boot. There are two follow-up gaps. (1) The structural guards never run in CI. The 'built server bundle' suites in apps/server/src/serverBundleBoundaries.test.ts:215,264 skip without a dist, and CI never builds ryco-cli before its tests (turbo.json:116 dependsOn ^build only). Two kinds of regression would merge unnoticed: a new pure-JS dependency left external, or a tagged template with an em dash making a chunk two-byte again (that only produces a build warning). No test checks the one-byte, no-JSDoc or no-CJS invariants on built output. (2) The packages that are now bundled are still in apps/server/package.json dependencies. So `npx ryco-cli` still downloads effect (about 54 MB unpacked) and @pierre/diffs with shiki (about 26 MB), and the desktop stage installs @pierre/diffs/shiki, @effect/platform-bun, @effect/sql-sqlite-bun and mime, which nothing loads at runtime. effect and @effect/platform-node remain legitimately needed by the desktop main through apps/desktop/package.json.",
+  "implementationSketch": "(a) CI guard. Move BUNDLED_RUNTIME_PACKAGES out of apps/server/tsdown.config.ts into a new module, apps/server/scripts/bundledRuntimePackages.ts, and import it from the config and from the test. Extend the 'built server bundle' suite in apps/server/src/serverBundleBoundaries.test.ts with checks that run on every dist .mjs: no .cjs in dist, no char above U+00FF, no '/**' blocks, and no static or dynamic import of a bundled runtime package. Then run it in CI after the build. Either add a step to the Build job in .github/workflows/_validation.yml after `bun run build` (`bun run --cwd apps/server vp test run src/serverBundleBoundaries.test.ts scripts/latin1Output.test.ts`), or add a ryco-cli `test:bundle` turbo task that depends on build. Optionally have latin1OutputPlugin call this.error instead of this.warn when RYCO_STRICT_BUNDLE=1 (set in CI) and preserved > 0. (b) Trim dependencies. Move effect, @effect/platform-node, @effect/platform-node-shared, @effect/platform-bun, @effect/sql-sqlite-bun, mime and @pierre/diffs from dependencies to devDependencies in apps/server/package.json. tsdown bundles devDependencies by default, and alwaysBundle stays for clarity. The desktop keeps effect and @effect/platform-node through its own dependencies. createStagePatchedDependencies drops the @pierre/diffs patch automatically. Check @anthropic-ai/sdk separately (no dist chunk imports it, but it may be a peer dependency of claude-agent-sdk). Add a test that every external specifier in dist is a published dependency, a node builtin, bun:*, or one of ws's optional bufferutil/utf-8-validate. Validate with `bun run build:desktop` (validateStagedRuntimeDependencies fails on any unresolvable dist import) and `node apps/server/scripts/package-smoke.mjs` (npm pack, install and boot). (c) Update the stale CJS wording in scripts/lib/validate-runtime-dependencies.ts:87 and its test at line 133.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The follow-ups are build and CI hygiene plus dependency-manifest trimming. They touch no auth, E2EE, hosted lifecycle or Hub protocol.",
+  "repos": "ryco"
+}

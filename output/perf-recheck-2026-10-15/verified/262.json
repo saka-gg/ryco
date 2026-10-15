@@ -1,0 +1,62 @@
+{
+  "id": "gap-logging-io:appendfile-per-record",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (fixed in 60633eff3, #710). AsyncRotatingFileSink now opens one append-mode FileHandle lazily and keeps it until rotation or close(). Each batch is written with one writev, and rotation splits a batch only at the maxBytes boundary. Overflow-backup pruning probes exact paths instead of reading the directory. EventNdjsonLogger hands each flush to one writeBatch call, records attribution once per batch, and closes writers idle for 2 minutes. TraceSink, serverLogger and the desktop main/backend logs use the same sink and close it on shutdown. I ran a copy of the current sink outside the repo (Node 24.21): 12,345 records of about 330 bytes, written in batches of 50, cost about 0.8 us/record of main-thread time with exactly one open() call. The report measured 52.9 us/record for the old per-record appendFile. Nothing else in production writes logs with per-record appendFile: the sync RotatingFileSink is no longer used, and computerAuditLog's appendFile is a deliberate low-rate audit path. The fix has no regressions; the remaining items are minor and the auditor already listed them.",
+  "evidence": [
+    {
+      "location": "packages/shared/src/logging.ts:157",
+      "note": "The sink keeps a FileHandle and opens it lazily with fs.promises.open(path, \"a\") at logging.ts:273. The old per-record fs.promises.appendFile is gone (it was at logging.ts:173-191 in f1be4abc7)."
+    },
+    {
+      "location": "packages/shared/src/logging.ts:185",
+      "note": "writeBatch serializes a whole batch on writeTail. writeNow (logging.ts:234) appends segments with one handle.writev each (logging.ts:274) and tracks currentSize from the buffer lengths. libuv's write-all loop handles more than IOV_MAX buffers (maxQueueSize is 2048) and short writes."
+    },
+    {
+      "location": "packages/shared/src/logging.ts:290",
+      "note": "rotate() closes the handle, waits for any gzip still in flight, shifts the backups and renames the file. The next append reopens it. close() (logging.ts:211) drains the queue and compression, then releases the handle."
+    },
+    {
+      "location": "packages/shared/src/logging.ts:327",
+      "note": "pruneOverflowBackups rm's the exact paths maxFiles+1..maxFiles+3, plus their .gz files. readdir is gone. Defaults are unchanged (maxFiles 3), so no older deeper backups are left behind, and the hourly sweepLogDirectory reclaims any stragglers anyway."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:481",
+      "note": "flushWriter splices the buffer and makes a single writer.sink.writeBatch(lines) call (line 491). recordResourceAttribution runs once per batch with count=lines.length (line 496). The per-message await loop and the per-line Buffer.byteLength from f1be4abc7:EventNdjsonLogger.ts:246-256 are gone."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/EventNdjsonLogger.ts:556",
+      "note": "evictIdleWriters closes writers idle for 2 minutes (DEFAULT_IDLE_WRITER_TTL_MS, line 136) through closeWriter -> sink.close(). A writer that replaces an evicted one waits on the old writer's close (predecessor chain, lines 196, 307, 486-492), so two sinks never rotate the same file at once."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderEventLoggers.ts:199",
+      "note": "The shared native and canonical loggers are closed by a layer finalizer. All production drivers pass this shared logger (Drivers/*Driver.ts nativeEventLogger), so production has one sink per file."
+    },
+    {
+      "location": "apps/server/src/observability/TraceSink.ts:152",
+      "note": "The trace file joins each batch into one sink.write (one writev on the held handle), attributes once per batch, and closes the sink in closeUnsafe (line 203)."
+    },
+    {
+      "location": "apps/server/src/serverLogger.ts:68",
+      "note": "The desktop server.log writes one batch per window or per 64 lines on the held handle, and sink.close() runs in the scope finalizer (line 86)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1846",
+      "note": "The desktop main log turns each stdio chunk into one writeBatch, one writev on the held handle. Backend stdout is copied only until ready (backendStartup.ts:236). closeDesktopLogs (main.ts:1498) closes both sinks with a 1 s cap."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1896",
+      "note": "Minor and confirmed: the Claude and Copilot (CopilotAdapter.ts:69) adapters build their own logger from nativeEventLogPath and never close it. Acp, Codex, Cursor and OpenCode do close theirs. Only tests take this path, since drivers inject the shared logger, and idle eviction (an unref'd timer) frees the handles."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defect or regression. Minor leftovers, none worth a follow-up. (1) The fd bound is an idle TTL only (2 min TTL, swept every 60 s, so an fd is held up to about 3 min after the last write), with no hard LRU cap. That costs 2 fds per recently active thread, far below the RLIMIT_NOFILE that Node raises at startup. (2) The Claude and Copilot adapters' nativeEventLogPath fallback (ClaudeAdapter.ts:1896, CopilotAdapter.ts:69) never closes its self-created logger. Only tests take that path. (3) Strings are still copied once per line by Buffer.from (logging.ts:188), as writev requires. (4) A sink created with throwOnError whose initialize() rejects leaves a rejected writeTail that can surface as an unhandled rejection through flush(). This pre-dates the fix (f1be4abc7 had the same initialize/flush code) and needs a mkdir or rm failure in a directory that was just created. (5) A held handle means that when something else unlinks or renames the active file, writes go to the orphaned inode until the next rotation or eviction. The only such actor is the sweep's 512 MB budget pass, which removes the oldest mtimes first, so in practice it never hits an active file.",
+  "implementationSketch": "Nothing required. Optional hygiene, if anyone touches these files: add the managedNativeEventLogger/close pattern used by CodexAdapter.ts:1927 and :2824 to ClaudeAdapter.ts (around line 1896) and CopilotAdapter.ts (around line 69). In AsyncRotatingFileSink's constructor, add `this.writeTail.catch(() => undefined)` as a no-op observer so an initialize() failure is never reported as an unhandled rejection. The rejection would still reach the first writeBatch, because the stored writeTail promise stays rejected. Test: a vitest in packages/shared/src/logging.test.ts with a filePath under an unwritable directory and throwOnError: true, asserting that no unhandledRejection fires and that the first writeBatch rejects.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Logging I/O implementation only. No E2EE, auth, hosted lifecycle, or Hub protocol or deploy surface is touched.",
+  "repos": "none"
+}

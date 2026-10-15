@@ -1,0 +1,27 @@
+{
+  "id": "dedicated-pages:usage-pricing-fetch-blocks-summary",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE by 60633eff3 (#710). The summary no longer awaits the LiteLLM download whenever any rates exist. startRatesRefresh starts at most one background fetch: a Deferred in ratesRefresh guards it, it is forked into serviceScope, and the check-then-set has no yield between check and assignment. ratesLastAttemptAtMs is stamped before the request, which gives a 1 h backoff for timeouts, errors and 200 responses that are not JSON (captive portals). With no rates at all, the summary waits at most 2 s instead of 10 s. A warm-up 30 s after boot refreshes stale rates, and it does run at boot because UsageServiceLive is built eagerly in server.ts. The revision is a sha256 of the raw text. Rates change only through ratesGeneration, which is part of the per-source memo fingerprint, and pricing is snapshotted once per summary, so a refresh that finishes mid-scan cannot mix rates or leave stale memos behind. e5e676f95, the only later commit to the file, did not touch this logic. I found no other network fetch on the usage-summary path. The trimmed rate table is not refetched on the summary path.",
+  "evidence": [
+    {"location": "apps/server/src/usage/UsageService.ts:86-93", "note": "RATES_TTL_MS 24 h, RATES_RETRY_MS 1 h, RATES_FETCH_TIMEOUT_MS 10 s, RATES_FIRST_FETCH_WAIT_MS 2 s, RATES_WARM_DELAY_MS 30 s."},
+    {"location": "apps/server/src/usage/UsageService.ts:399-437", "note": "fetchRates sets ratesLastAttemptAtMs before the GET. A null text or an empty parsed table keeps the cached rates. The generation is bumped only when the revision changes. The new fetchedAtMs is persisted."},
+    {"location": "apps/server/src/usage/UsageService.ts:444-465", "note": "startRatesRefresh: ratesRefresh is re-checked after the disk-load yield, and the TTL and backoff checks are done synchronously before ratesRefresh = done. fetchRates is forked into serviceScope, so the caller never runs or awaits it."},
+    {"location": "apps/server/src/usage/UsageService.ts:468-473", "note": "Boot warm-up, forked: after 30 s, if pricing-cache.json exists, call startRatesRefresh."},
+    {"location": "apps/server/src/server.ts:556-560", "note": "UsageServiceLive is in RuntimeCoreBaseWithSettingsLive, so it is constructed at boot and the warm-up actually fires."},
+    {"location": "apps/server/src/usage/UsageService.ts:965-990", "note": "readSummaryUnlocked (inside scanSemaphore, computeSummary at 1125) starts the refresh, runs discovery, and waits only when rates.size === 0, for at most 2 s minus the time already spent. It snapshots rates, generation, state and revision once."},
+    {"location": "apps/server/src/usage/UsageService.ts:793", "note": "The memo fingerprint includes pricing.generation, so rates that a background refresh changes invalidate memoized source results on the next summary."},
+    {"location": "apps/server/src/usage/UsageService.ts:241-243", "note": "The revision is a sha256 of the raw response text. The document is no longer re-stringified."},
+    {"location": "apps/server/src/usage/UsageService.test.ts:461-520", "note": "Tests: stale cache with a fetch that hangs forever, where two summaries take under 2 s, are priced from the cache, and make exactly 1 fetch. No cache and a failing fetch, where three summaries are unpriced and make exactly 1 fetch."}
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Minor deviations, all bounded: (1) With no rates at all (first-ever open or an unusable cache), the download overlaps only resolveTranscriptSources and planSources, not the directory walk or parse (UsageService.ts:967-973). The rates snapshot is taken before scanSource, so the first-ever summary waits for the download for up to 2 s, then returns unpriced if it is slower, even when the scan takes longer than the download. Pricing is applied after collection in UsageSlotAggregator (usageFileAggregate.ts:268-297), so a later snapshot is possible, but the Cursor record aggregator prices at add time. (2) When no rates exist and the first attempt fails, pricing stays 'unavailable' for the full RATES_RETRY_MS (1 h), even if the network comes back a minute later. The old code retried on every summary, which was the bug, so this is a deliberate trade-off. (3) While ratesFetchedAtMs is null, loadRatesFromDisk re-reads pricing-cache.json on every summary. That costs an ENOENT, or a re-parse of an invalid file, until a fetch succeeds. This is negligible.",
+  "implementationSketch": "Optional polish only, not required to close the finding. (a) In UsageService.ts readSummaryUnlocked, take the pricing snapshot after the scans when rates.size === 0: pass a getter instead of a fixed snapshot to scanSource and UsageSlotAggregator, which already price at finalize. Keep Cursor exports on the per-record path, or defer their pricing too, and await the refresh (capped) just before aggregation rather than before scanning. (b) Use a shorter backoff when rates.size === 0, for example 2-5 min with exponential growth up to RATES_RETRY_MS. Extend the 'no rates' test in UsageService.test.ts with TestClock to check that a retry happens after the short backoff.",
+  "worth": "low",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains. The optional polish (a shorter retry when no rates exist) is a small behaviour trade-off but does not need a decision to close this finding.",
+  "repos": "ryco"
+}

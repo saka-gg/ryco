@@ -1,0 +1,66 @@
+{
+  "id": "projects-loading:persist-repository-identity",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "#710 (60633eff3, also in the Hub's vendored 7bc39eec3) did what the finding asked. Identity is persisted in projection_projects (migration 086, plus a post-migrator repair). buildShell, listProjectShells, getProjectShellById, getActiveProjectByWorkspaceRoot and the command read model now decode the stored JSON with no resolver and no timeout. A background sync keeps the identity current: a startup sweep, a 30 min sweep, triggers on project.created and on root/kind changes, a spawn-free stat fingerprint of <commonDir>/config, a 24 h max age, and the background git lane. A changed identity is announced with an empty project.meta.update that keeps updatedAt. The resolver now goes through VcsProcess with cwd and no shell. The snapshot/lookup git cost and the snapshot-timeout null flips are gone. I agree with the auditor's main fix defect and found two more smaller ones. First, a failed or timed-out probe is persisted as null for up to 24 h. That was a 60 s negative TTL before. Second, remote changes, including Ryco's own publishRepository, now take up to 30 min to show up. Third, the shell stream sends null identity for new and moved projects until the background sync records one.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3007",
+      "note": "buildShell is labelled and implemented as pure SQL. Identity comes from decodePersistedRepositoryIdentity at :3129, :3227, :3267, :3364, :3384 and :2646. Nothing in this file references the resolver or uses timeoutOption."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:567",
+      "note": "resolveProject only calls getProjectShellById (SQL), so starting a turn no longer spawns git."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/086_ProjectionProjectRepositoryIdentity.ts:24",
+      "note": "Adds the repository_identity_json, _fingerprint and _checked_at columns idempotently. It is registered at Migrations.ts:230 and repaired at :742-743."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/ProjectionProjects.ts:78",
+      "note": "The upsert keeps the identity columns only while workspace_root is unchanged. The projector's meta-updated path (ProjectionPipeline.ts:692-720) rewrites the same root, so the sync's announcements never reset the identity. recordRepositoryIdentity (:161-174) is guarded by project_id and workspace_root."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentitySync.ts:101",
+      "note": "syncProject skips the probe when the fingerprint matches and the identity is under 24 h old. Otherwise it records whatever resolveFresh returns, null included, with the new fingerprint and checked_at (:115-127). It announces when the stored identity differs (:129-147). There is no failed state."
+    },
+    {
+      "location": "apps/server/src/project/Layers/RepositoryIdentityResolver.ts:113",
+      "note": "makeGitIdentityProbe maps a 1 s run-time timeout, a spawn failure and a non-zero exit all to null (:129, :135). refresh (:195-207) cannot tell 'not a repository' apart from 'probe failed'. VcsProcess.ts:214-217 confirms that queue time is excluded from the timeout."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentityPersistence.ts:71",
+      "note": "The fingerprint is stat-only: it walks to .git, follows .git files and commondir, and uses the config path, size and mtime. It returns null for a missing root, which keeps the last identity."
+    },
+    {
+      "location": "apps/server/src/orchestration/decider.ts:655",
+      "note": "An empty project.meta.update keeps updatedAt. toShellStreamEvent (orchestrationStreams.ts:268-279) re-reads the row and sends project-upserted. enrichProjectEvent (:444-469) sends the persisted identity on the full event stream."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:268",
+      "note": "On project.created and root moves, the shell stream (used by the sidebar) reads the persisted row, which is still null at that point. The full event stream resolves live (:435, :459). The sidebar therefore shows null until the background sync records the identity and announces it."
+    },
+    {
+      "location": "apps/server/src/ws/sourceControlRpc.ts:338",
+      "note": "publishRepository runs git.ensureRemote (SourceControlRepositoryService.ts:521) and only refreshes git status. Nothing triggers an identity sync, so the new remote waits for the 30 min sweep. Before #710, the next snapshot picked it up within the 60 s TTL."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1070",
+      "note": "runRepositoryIdentitySync is started after the ready gate."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentitySync.test.ts:136",
+      "note": "Tests cover the fingerprint, staleness, chat/missing/deleted skips, the moved-root guard, event backpressure and triggers. Nothing tests a probe that fails or times out."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "1. Main defect, confirming the auditor: a transient probe failure is persisted as 'no repository'.\n   - makeGitIdentityProbe (RepositoryIdentityResolver.ts:113-136) turns a timeout (1 s of run time), a spawn error and any non-zero exit into null. refresh returns that null, and syncProject (repositoryIdentitySync.ts:115-127) writes it with the current fingerprint and checked_at.\n   - The identity then stays null until the git config changes or 24 h pass. That holds across restarts, because the startup sweep sees 'fresh'. Before #710, the same failure was cached for only 60 s (negative TTL).\n   - If a good identity existed, the null is announced live (:129-147), so every client regroups the project.\n   - If the failure happens on the very first resolution, for example the first sweep after the upgrade on a slow Dropbox/CloudStorage root or a loaded Windows box, null is stored silently.\n   - The effect goes beyond grouping. Everything keyed on project.repositoryIdentity disappears for that period: the sidebar remote link (apps/web/src/components/sidebar/sidebarProjectRemoteLink.ts:123), the logical project key (packages/client-runtime/src/state/workspace/logicalProjects.ts:57), the project repository section and the project map.\n   - The trigger is now rarer than the old snapshot-wide timeout, but each failure lasts much longer.\n2. Freshness regression for remote changes. Only project.created, root/kind changes and the 30 min sweep re-resolve an identity.\n   - Ryco's own sourceControl.publishRepository adds a remote (SourceControlRepositoryService.ts:521; RPC at sourceControlRpc.ts:338-345) and never requests a sync, so a just-published project keeps a null identity for up to 30 min.\n   - The same applies to an external `git remote add` or `set-url`.\n   - Before #710, the next snapshot or priority refresh picked these up after at most the 60 s TTL.\n3. Minor: the shell stream sends a null identity for new or moved projects. toShellStreamEvent (orchestrationStreams.ts:268-279) reads the persisted row, which is still null for project.created and is reset by a root move. enrichProjectEvent, on the full stream, resolves live instead.\n   - The sidebar shows the non-repository grouping until the background sync records the identity and announces it.\n   - That sync runs in the background lane behind the sync lock. After an upgrade it can sit behind the whole first git sweep.\n   - Before #710, getProjectShellById resolved live.\n4. Optional proposal items not done, and not needed to close the finding: identity still uses two spawns (rev-parse --show-toplevel, then remote -v), and pickPrimaryRemote (RepositoryIdentityResolver.ts:32-45) ignores project.preferredRemoteName.",
+  "implementationSketch": "1. Persisted failure.\n   - In RepositoryIdentityResolver.ts, make the probe return a three-way result: { kind: 'ok', stdout } | { kind: 'none' } | { kind: 'failed' }.\n     - rev-parse exit 128 with 'not a git repository' in stderr counts as 'none'.\n     - A timeout (VcsProcessTimeoutError), a spawn error or any other non-zero exit counts as 'failed'.\n     - remote -v exit 0 with no remotes counts as 'none'; a non-zero exit counts as 'failed'.\n   - Have `refresh` fail with a typed RepositoryIdentityProbeError, or return a tagged union, on 'failed'. Keep `resolve` returning null for compatibility, but do not cache failures: let the cache lookup fail so the existing onFailure: Duration.zero TTL applies, then catch it into null in `resolve`.\n   - In repositoryIdentitySync.ts:syncProject, when refresh fails, do NOT call recordRepositoryIdentity and do NOT announce. Log at debug or warn and return a new 'failed' outcome. The stored identity, fingerprint and checked_at stay unchanged, so the next sweep retries.\n   - Optionally keep an in-memory Map<projectId, failures> and schedule a retry for failed projects (for example after 1-2 min, with exponential backoff up to the 30 min sweep) through worker.enqueue.\n   - Tests in repositoryIdentitySync.test.ts:\n     (a) a stored identity plus a failing resolver: the identity is kept and no dispatch happens;\n     (b) a never-resolved project plus a failing resolver: checked_at stays null and the next sync retries;\n     (c) the resolver recovers: the identity is recorded and announced.\n   - Resolver test: a timeout produces the failed state rather than null. Inject a VcsProcess double that fails with VcsProcessTimeoutError.\n2. Freshness after Ryco-initiated remote changes.\n   - Expose the sync as a small service, for example RepositoryIdentitySync with requestSyncForRoot(cwd). It maps cwd to projects whose workspaceRoot is inside the repository (listRepositoryIdentityStates plus a path-prefix match) and enqueues them on the existing DrainableWorker.\n   - Call it from sourceControlRpc publishRepository (next to refreshGitStatus), and from any other server flow that runs ensureRemote or set-url.\n   - The fingerprint changes because .git/config was rewritten, so the probe runs.\n   - Test: after publishRepository, the project's identity is recorded and a project.meta-updated is dispatched without waiting for the sweep.\n   - Optional: the sweep interval could drop to about 5 min, since a steady-state sweep is only a few stat calls per project.\n3. Shell-stream null window.\n   - In toShellStreamEvent, for project.created, and for project.meta-updated with payload.workspaceRoot, when the persisted identity is null, fill it from the cached resolver.resolve the same way enrichProjectEvent does. Pass the resolver in, or share a helper with enrichProjectEvent so the two stream paths agree.\n   - Alternatively, let the sync's per-project path for a project.created trigger run in the interactive lane and skip the lock queue when no sweep is running.\n   - Test: a project.created followed by a shell stream emits project-upserted with a non-null identity for a git root that has a remote.\n4. Optional.\n   - Collapse the probe into `git rev-parse --show-toplevel --git-common-dir` plus `git config -z --get-regexp '^remote\\..*\\.url$'`.\n   - Honour project.preferredRemoteName in pickPrimaryRemote. That needs the sync to pass the project's preferred remote and the stored identity to be invalidated when preferredRemoteName changes.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The fixes are internal server changes: failure semantics of a background cache, an extra sync trigger, and a stream fallback. They do not touch auth, E2EE, hosted lifecycle ownership or the Hub protocol. The Hub vendors this server code, but only a later Ryco pin bump picks the change up.",
+  "repos": "ryco"
+}

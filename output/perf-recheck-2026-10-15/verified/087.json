@@ -1,0 +1,59 @@
+{
+  "id": "web-boot-cpu:root-level-style-invalidation-cost",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. 60633eff3 removed the forced reflow between adding and removing the guard, gave the document a single theme controller (one apply per real change), and skips appearance style writes when the CSS is unchanged. caa5f8576 added the themeRecalcMs harness metric with a regression threshold. Two things remain. (1) registry.ts applyThemeToDocument still rewrites the theme <style> unconditionally. (2) The no-transitions guard on <html> is added on every suppressTransitions apply, even when nothing visual changes. Example: another window changes only diffLayout, or edits a custom theme that is not active. That costs two full-document restyles for nothing. The auditor's suggestion to swap the root guard for View Transitions or a scoped transition:none is not real remaining work. caa5f8576 measured the alternatives and kept the guard on purpose, and any global transition suppression needs an 'on' restyle and an 'off' restyle.",
+  "evidence": [
+    {
+      "location": "apps/web/src/hooks/useTheme.ts:117-127",
+      "note": "startThemeTransitionGuard: adds no-transitions, reads the browser chrome colour in rAF 1, removes the guard in rAF 2. No forced synchronous reflow any more (old code used offsetHeight at f1be4abc7 useTheme.ts:118-120)."
+    },
+    {
+      "location": "apps/web/src/hooks/useTheme.ts:129-139",
+      "note": "applyTheme starts the guard (line 132) before it knows whether the dark class, the theme CSS or the appearance CSS will change. Every suppressTransitions apply therefore costs a guard-on restyle and a guard-off restyle across the whole document."
+    },
+    {
+      "location": "apps/web/src/hooks/useTheme.ts:220-230",
+      "note": "handleThemeStorage calls applyThemeChange(getStored(), true) for the theme, active-theme, custom-themes and appearance keys. In another visible tab or window, a change that emits no CSS still toggles the guard: diffLayout via useDiffLayout.ts:9-12 (diffLayout is not part of the CSS text at appearancePreferences.ts:371), or an edit to an inactive custom theme. Result: two full-document recalcs with no visual change. setActiveTheme to the already-active id does the same (useTheme.ts:289-294, e.g. AppearanceSettings.tsx:184)."
+    },
+    {
+      "location": "apps/web/src/themes/registry.ts:299-310",
+      "note": "applyThemeToDocument still assigns style.textContent unconditionally (line 309) for any non-default theme. The text is ':root{light} :root.dark{dark}' and does not depend on the dark class, so a light/dark/system flip rewrites identical CSS. Unchanged since f1be4abc7 (60633eff3 only added the custom-themes parse cache and registry listeners)."
+    },
+    {
+      "location": "apps/web/src/components/settings/ThemeEditor.tsx:197-199",
+      "note": "The live-preview effect depends on [draft, resolvedVariant], so every light/dark flip while the editor is open calls applyThemeToDocument again with identical CSS. The registry guard would cover this too."
+    },
+    {
+      "location": "apps/web/src/themes/appearancePreferences.ts:367-380",
+      "note": "The appearance CSS is built first and written only when style.textContent differs (lines 374-376). ensureAppearancePreferencesStyleElement (lines 745-759) moves the element only when it is not already the last child of <head>. This proposal part is done."
+    },
+    {
+      "location": "apps/web/src/index.css:10",
+      "note": "@custom-variant dark (&:is(.dark, .dark *)): toggling .dark on html re-matches the whole document. This is inherent to the design; the one required restyle per real theme change cannot be avoided."
+    },
+    {
+      "location": "apps/web/src/index.css:495-501",
+      "note": "The .no-transitions, .no-transitions * guard is still a root descendant selector, so adding it and removing it each invalidate the whole subtree."
+    },
+    {
+      "location": "scripts/perf/browserProbe.ts:61-130",
+      "note": "measureThemeRecalc (caa5f8576, an ancestor of HEAD) toggles no-transitions plus dark over 4,400 cloned elements and reports the median. It is wired at browserProbe.ts:1301 and model.ts:108/407/446/506 with a 20% / 10 ms comparison floor. The commit message records guard+theme at 28 ms plus 17 ms for guard removal. Letting transitions run cost 215 ms, and the theme class alone cost 49 ms because transitions started. That is why the guard was kept on purpose."
+    },
+    {
+      "location": "apps/web/src/themes/themeController.browser.tsx:32-71",
+      "note": "Covers one apply per change and the guard lifting without a reflow. It only uses the default theme (no theme style element), so the unconditional theme rewrite and the guard on no-op storage events are not tested."
+    }
+  ],
+  "remaining": "(1) apps/web/src/themes/registry.ts:309 writes the theme style text unconditionally. Compare it with the current text first. (2) apps/web/src/hooks/useTheme.ts:132 starts the transition guard (the guard-on and guard-off full-document restyles) before checking whether anything will change. Same-tab examples: setActiveTheme(sameId). Cross-tab examples via handleThemeStorage, useTheme.ts:220-230: a diffLayout change or an inactive custom-theme edit in another window. These still toggle no-transitions on <html> twice and change nothing. The remaining cost of the guard on a real theme change (about 17 ms synthetic, one frame later) is a deliberate, measured trade-off from caa5f8576, not open work.",
+  "fixDefects": "None that break anything. Minor: the chrome-colour sync and the guard removal run in rAF, so in a hidden tab they wait until the tab is visible again. That is harmless because nothing paints while the tab is hidden. One caveat on wording only: the appearance comment and the auditor say an identical textContent rewrite always forces a full recalc. In Chromium the inline-sheet text cache can make an identical rewrite close to free, so the gain from item (1) is mostly consistency, WebKit/Safari for hosted users, and the no-visual-change paths. On a real light/dark flip the dark-class toggle already forces the full recalc in the same style pass.",
+  "implementationSketch": "1) registry.ts: extract buildThemeDocumentCss(theme): string | null (null for DEFAULT_THEME_ID). applyThemeToDocument(theme) returns a boolean 'changed'. It removes the element only if it exists, and writes style.textContent only when it differs from the built text. Optionally cache the built text keyed by theme object identity, since findTheme returns cached objects. 2) appearancePreferences.ts: have applyAppearancePreferencesToDocument() return whether it wrote, or export buildAppearancePreferencesCss() so the caller can compare before writing. Keep dispatching the change event either way. 3) useTheme.ts applyTheme: compute isDark, darkChanged = root.classList.contains('dark') !== isDark, and the pending theme and appearance CSS against the current textContent. Only if suppressTransitions && (darkChanged || themeChanged || appearanceChanged) call startThemeTransitionGuard(root), then do the writes in the same synchronous task (no style reads in between). When nothing changed, skip the guard and the chrome sync. 4) Tests: in themeController.browser.tsx, add (a) with a non-default built-in theme active, a light-to-dark setTheme produces no characterData/childList mutations on the theme style element; (b) a StorageEvent for the appearance key that only changes diffLayout, and setActiveTheme(currentId), produce no class mutations on document.documentElement (MutationObserver on attributes) and leave no no-transitions class behind. In registry.test.ts, add unit coverage of the changed boolean. Run only `bun run test` for the web package's theme tests and the focused browser test file. Do not try View Transitions or a scoped guard: caa5f8576's measurements favour the current guard.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Purely local client-side style-write gating. It changes no auth, hosted lifecycle, Hub protocol or visible behaviour, and transitions stay suppressed whenever something actually changes.",
+  "repos": "ryco",
+  "correction": "Status PARTIAL is correct, but the remaining-work list needs two adjustments. (a) Drop 'replace the root guard with startViewTransition or a scoped transition:none'. Any global transition suppression needs an on-restyle and an off-restyle, a View Transition keeps live CSS transitions running under the snapshot and adds a capture, and caa5f8576 measured the alternatives (215 ms with transitions running, 49 ms for the class alone) and kept the guard on purpose. (b) The auditor missed that the guard is applied even when nothing changes (useTheme.ts:132 together with handleThemeStorage :220-230 and setActiveTheme :289-294). That causes two pointless full-document restyles in other visible windows, for example on diffLayout or inactive custom-theme edits. Also, an identical theme-style rewrite is not necessarily a full re-parse in Chromium (inline-sheet text cache), so item (1) is a consistency and WebKit fix rather than a measured hot spot."
+}

@@ -1,0 +1,58 @@
+{
+  "id": "hub-connection:redundant-ready-invalidation",
+  "auditorStatus": "PARTIAL",
+  "status": "DONE",
+  "verdict": "corrected",
+  "summary": "The fixable part is done: #710 (60633eff3) added structural directory reconciliation and a no-op patch guard, so a re-read that changes nothing no longer publishes a new nodes array or re-renders anything. The auditor's remaining item, skipping the first-ready invalidation with an #everReady flag, rests on a wrong premise and would cause a regression. The first ready is not redundant. On a cold start the directory read (state.ts:752-753) and the routed thread-cache prefetch are sent beside the session restore. The Hub session socket is only created after the store becomes authenticated (hubSession.ts:63,73-99). The Hub adds the socket to its invalidation fan-out (indexSession) only when the upgrade opens, just before it sends ready. Every cold-start read is therefore answered before this browser is subscribed, and a change in that window reaches the browser only through the ready-time re-read. It is the subscribe-then-read barrier. Removing it would save almost nothing. On the directory side, the cold-start read normally finishes before the socket is online, so it schedules the next poll at the unsubscribed 20 s cadence, and nothing reschedules that poll when the subscription comes online. Skipping the ready re-read would only move the same GET /api/nodes to t+20 s and leave the race open until then. On the thread-cache side, the re-reads already present the held version (If-None-Match, so 304/null in the common case). While the subscription is online there is no time-based shell or thread refresh, so dropping the barrier could leave a node's cached shell stale until some other thread-cache invalidation arrives. The existing test (hostedHubSession.test.ts:145-161) and docs/hub-session-protocol.md:54 treat the ready invalidation as intended. Nothing valid remains for this finding.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/relay/hostedHubSession.ts:297",
+      "note": "Still calls #notifyInvalidation({directory:true, threadCache:true}) on every ready, the first one included. This is unchanged and serves as the barrier (see below), not waste."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:752",
+      "note": "#restoreAccess sends restoreSession and #prefetchDirectory together (752-753). The prefetched directory is committed at 773, after the authenticated patch at 765. #resumeBrowser does the same at 2055-2072. The directory read leaves before any Hub session socket exists."
+    },
+    {
+      "location": "apps/web/src/hostedHub/hubSession.ts:63",
+      "note": "sync() creates and starts the HostedHubSession only once accountStatus is authenticated (63, 73-99), which is after the cold-start directory and thread-cache prefetch reads were sent. onInvalidate at 84-88 forwards to notifyDirectoryInvalidated and to the listeners."
+    },
+    {
+      "location": "ryco-hub:src/relay/hubSession.ts:471",
+      "note": "origin/main: the open handler calls indexSession(socket) (471) and then sends ready (473). The fan-out at 278-307 reaches only sockets in sessions/sessionsByScope, so a change made after the Hub answered a cold-start read but before indexSession is never pushed to this browser. The ready-time re-read is the only thing that closes that gap."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:2317",
+      "note": "The poll is scheduled at DIRECTORY_SUBSCRIBED_REFRESH_MS (120 s) only if hasLiveHubSubscription() is true when the read completes. Otherwise it is DIRECTORY_REFRESH_MS (20 s, line 488). The only #scheduleDirectory callers are 2223, 2317 and 2352, so nothing reschedules on subscription online. The cold-start read usually finishes before ready, so skipping the ready re-read would only move the GET /api/nodes to t+20 s, not remove it."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/threadReadCache.ts:484",
+      "note": "With the subscription online, shells are refreshed only when nextShellRefresh === 0 (484-488), and the 15 s interval re-reads the thread only when !isSubscriptionOnline (521-524). Invalidations are the only refresh trigger while subscribed, so the ready invalidation (514-519) is the thread cache's only barrier against reads answered before the subscription existed. The prefetch at 332-397 is sent beside the access check."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/threadReadCache.ts:246",
+      "note": "The barrier re-reads are conditional: readShell gets shells.get(node.id) as held, and readThread gets details...get(threadId) at 294. api.ts:2451/2468 sends If-None-Match. The thread-cache part of the cost is therefore N+1 cheap not-modified round trips, not full bodies."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2474",
+      "note": "listNodes has no If-None-Match, so the barrier directory re-read (like every poll) returns a full body of a few KB at most 16 nodes. That is the only non-trivial residual cost, and it is not specific to this finding."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/state.ts:429",
+      "note": "Fixed part from 60633eff3 (#710). reconcileDirectoryNodes keeps unchanged node objects and returns the previous array when nothing changed. The guard at 2306-2315 publishes no patch when every key is Object.is-equal, and refreshedSelection reuses the selected object (2277-2280). Its doc comment (423-428) names 'the reconnect re-read' as a case it makes cheap, so the authors deliberately kept the barrier and made it cheap."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/hostedHubSession.test.ts:145",
+      "note": "The test expects onInvalidate twice (161), from the first ready plus one explicit invalidate, so first-ready invalidation is pinned as intended behaviour. docs/hub-session-protocol.md:54 also documents that reconnection invalidates both domains."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None found in the implemented part. reconcileDirectoryNodes handles reordering by id, keeps per-node identity, and returns the previous array when nothing changed. The patch guard compares every key with Object.is. The auditor's own closing change (an #everReady flag that skips the first ready) would itself be a defect if implemented, for the reasons in the summary.",
+  "implementationSketch": "No change for this finding. Do NOT add an #everReady flag or a reconnect-only invalidation in packages/client-runtime/src/relay/hostedHubSession.ts. The first ready is the barrier for reads the Hub answered before indexSession, and a client-side 'read started after connect began' heuristic cannot prove ordering against the Hub's indexSession either. A correct reduction would need either (a) a Hub-side ETag/If-None-Match on GET /api/nodes so the barrier re-read and the 120 s polls become 304s (Hub API change plus listNodes in packages/client-runtime/src/authorization/api.ts:2474 passing the held tag), or (b) domain revisions in the ready frame (Hub protocol change). Both are general optimisations outside this finding and low value (one body of a few KB per connect). Optionally, a small test in threadReadCache.test.ts or state.test.ts could pin that a ready-time invalidation after a read sent before the subscription triggers exactly one conditional re-read, so a future 'optimisation' does not silently remove the barrier.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing to implement. The optional ETag or ready-revision alternatives would be Hub API or protocol changes needing a Hub deploy, and would need their own decision if anyone pursued them.",
+  "repos": "none"
+}

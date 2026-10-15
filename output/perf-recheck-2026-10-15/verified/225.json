@@ -1,0 +1,63 @@
+{
+  "id": "hub-connection:ticket-minor-fallback-memo",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "summary": "The performance finding is fixed. Since 60633eff3, HostedHubApi.issueRelayTicket remembers a minor-3 refusal per instance in #relayTicketMinorFallback, so later tickets against a Hub that rejects minor 3 cost one POST. The memo is cleared by clearSessionMaterial(), and every ticket caller (web/mobile runtime singleton, desktop coordinator #api) holds one long-lived instance. Origin is fixed per instance: mobile builds a new instance after a Hub profile change. On the current Hub, a minor-3 request gets 400 invalid_request only for body/schema errors, and those would also fail the minor-2 retry, so the memo cannot be set falsely. The fix has one real defect the auditor dismissed. The memo never expires, and the current Hub answers a minor-2 offer for a node live at minor 3 with 426 unsupported_version. The client classifies that as a non-retryable 'incompatible' failure. A session that memoised minor 2 and then sees the Hub upgraded (or rolled back and forward again) is therefore cut off from minor-3 nodes until sign-out or restart. Before the fix, each attempt offered minor 3 first and recovered on its own.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:833",
+      "note": "#relayTicketMinorFallback memo field, per HostedHubApi instance."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2694",
+      "note": "offeredMinor starts at 2 when the memo is set. Nothing ever probes minor 3 again for this instance."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2701-2711",
+      "note": "The 3->2 retry only runs when offeredMinor===3 and the error is 400 invalid_request. The memo is set after the minor-2 POST resolves. A memoised minor-2 request that fails (e.g. 426) is rethrown and the memo stays set."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:2713-2722",
+      "note": "The check that result.protocolMinor > offeredMinor is rejected already existed at f1be4abc7. It is not new in the fix, contrary to the auditor's wording."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.ts:897-902",
+      "note": "clearSessionMaterial() resets the memo. This is the only reset path."
+    },
+    {
+      "location": "packages/client-runtime/src/authorization/api.test.ts:408-451",
+      "note": "Tests cover the [3,2,2] sequence, a minor-2 rejection that is not retried, and the reset after clearSessionMaterial. No test covers a memoised minor-2 request getting 426."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:117-138",
+      "note": "ticketFailure maps unsupported_version to { kind: 'incompatible', retryable: false }, so a 426 on the ticket POST is terminal. shouldReconnect also stops on terminal-failure (transport.ts:239-247)."
+    },
+    {
+      "location": "packages/client-runtime/src/relay/transport.ts:228",
+      "note": "Ticket callers (here, transport.ts:356, mobile accountE2eeAttempt.ts:247, desktop desktopHostedIdentity.ts:431) all go through one long-lived HostedHubApi, so the memo persists for the whole app/session lifetime."
+    },
+    {
+      "location": "ryco-hub:src/relay/ticketService.ts:358-368",
+      "note": "origin/main Hub rejects a ticket with 426 unsupported_version when the node's live minor (presence.protocol.protocolMinor, ticketService.ts:251) is above the offered minor. The rejection happens inside the issuance transaction, before any ticket exists."
+    },
+    {
+      "location": "ryco-hub:src/http/relayRoutes.ts:14-20,74-75",
+      "note": "The current Hub accepts minor 2|3. Its only 400 invalid_request on this route is body/schema/content-type (httpSecurity.ts:160-185). DPoP and CSRF failures use session_invalid or csrf_rejected, so a false memo is effectively impossible against the current Hub."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:470-484",
+      "note": "A mobile Hub profile change sets configured=false. The next configureHostedRuntime builds a fresh HostedHubApi, so the memo does not cross Hub origins. Desktop pins the origin per instance (desktopHostedIdentity.ts:64-95)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The memo is sticky for the instance lifetime and has no recovery path. Proposal: 'reset on a successful minor-3 issuance'. That reset is unreachable because minor 3 is never offered again once memoised. Scenario: a native (desktop/mobile) client on a self-hosted Hub that rejects minor 3 sets the memo. The Hub is then upgraded, or rolled back and forward, while the app keeps running, and nodes reconnect at minor 3. The client keeps offering minor 2. The Hub answers 426 unsupported_version (ryco-hub ticketService.ts:358-368), and ticketFailure turns that into a terminal, non-retryable 'incompatible' failure (transport.ts:137-138). The user loses relay access to those nodes until sign-out or app restart. Before the fix, every attempt offered minor 3 first and recovered automatically. The window is narrow (the official Hub already accepts minor 3, and web-tier JS is served by the Hub itself), but the consequence is a connectivity failure, not just a missed optimisation, so the auditor's 'None that matter' is too generous.",
+  "implementationSketch": "packages/client-runtime/src/authorization/api.ts, issueRelayTicket (~2694-2712): extend the catch block. When offeredMinor===2 because the memo was set (track `const memoised = this.#relayTicketMinorFallback` before the first request), and the error is a HostedHubApiError with status 426 and code 'unsupported_version', clear #relayTicketMinorFallback and retry once with minor 3. This is safe because the Hub rejects inside the issuance transaction before creating a ticket, which fits the existing 'never retry an uncertain issuance' rule. Leave the existing 3->2 path on 400 invalid_request as is. Optional hardening: give the memo a TTL (e.g. record the timestamp and re-offer minor 3 after ~15-30 min) so a Hub upgrade is picked up even for nodes still at minor 2. Tests in packages/client-runtime/src/authorization/api.test.ts: (1) memoise via [3->400 invalid_request, 2->201 minor 2], then [2->426 unsupported_version, 3->201 minor 3], and assert the offered sequence [3,2,2,3] and that the next call offers 3; (2) a non-memoised minor-3 request that gets 426 is rethrown without retry; (3) a memoised minor-2 request that gets 400/403 is not retried. Validation: focused `bun run test` on the client-runtime api.test.ts only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Client-only change in the existing ticket negotiation. It relies on the Hub's existing pre-issuance 426 semantics, needs no Hub protocol change or deploy, and does not touch auth/E2EE semantics or hosted lifecycle ownership.",
+  "correction": "The status DONE stands for the performance cost. The auditor understated the fix defect: a session that keeps offering minor 2 after a mid-session Hub upgrade does not just miss an optimisation. The current Hub returns 426 for minor-3 nodes, which the client treats as a terminal 'incompatible' failure, a regression from the old behaviour that recovered on its own. Also, the 'returned minor > offeredMinor' response check is not new; it already existed at f1be4abc7.",
+  "repos": "ryco"
+}

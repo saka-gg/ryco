@@ -1,0 +1,67 @@
+{
+  "id": "projects-loading:status-pipeline-redundant-git-calls",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The local half is fixed. A feature-branch local status resolves the base once, reads config from one cached `git config -z --list` snapshot and caches results by commit pair: 8 spawns cold and 6 warm, which the GitVcsDriverCore test pins. The remote half is only partly fixed. GitManager reuses the local details only if they are under 5 s old and no fetch completed in that call. Branches with an upstream usually do complete a fetch: the background fetch after a stream opens, refreshStatus after agent or git actions once 15 s have passed since the last fetch, and opt-in polling. In those cases readRemoteStatus re-runs the full local pipeline (6-8 spawns, including the working-tree scans `git status --porcelain=2` and `git diff HEAD --numstat`) where the proposal asked for a single `rev-list --left-right --count`. Each fetch-enabled remote read also spends 3 serial spawns resolving the upstream and common dir, and the snapshot already holds that data. Totals are still roughly halved: first load about 44 to about 22 spawns, with only about 10 on the critical path. The auditor treated the re-run after a fetch as intended and missed three things: a failed fetch also counts as a completed one, a narrow race in the reuse, and the missing test coverage.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1649-1755",
+      "note": "Confirmed fixed. The status wave runs status, diff HEAD, symbolic-ref origin/HEAD and the config snapshot. The base is resolved once (needsBase, statusBaseBranchContext, one for-each-ref, one rev-parse) and shared by the ahead count, the ahead-of-default count and the committed diff."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.test.ts:365-436",
+      "note": "This test pins the cold feature-branch local status at 8 spawns, all read-only, and checks that rev-list and the three-dot diff are skipped on a warm commit pair. That matches the proposal's target of about 6."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:942-947",
+      "note": "readRemoteStatus uses takeRecentLocalStatusDetails(cwd). If that returns null (older than 5 s, or dropped by a fetch) it calls gitCore.statusDetailsLocal, which is the full local pipeline including the working-tree scans. The remote result only needs hasUpstream, ahead/behind, aheadOfDefault, branch, upstreamRef and isDefault."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1679-1690",
+      "note": "When refreshStatusUpstream returns true, the reused local details are deleted. So every completed fetch makes the next remote read re-run the whole local pipeline, not just recompute the counts that depend on the upstream."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:508-523",
+      "note": "On first stream load, refreshRemoteStatusAfterFetch forks a background fetch. If a fetch completed, it republishes through remoteStatus, which re-runs the full local pipeline. This runs on every stream open for an upstream-tracked branch when the last fetch was over 15 s ago, even if the fetch moved nothing."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsStatusBroadcaster.ts:487-501",
+      "note": "refreshRemoteStatus (used by refreshStatus after agent turns and git actions, the RPC, and polling) always passes fetch:true, so on upstream-tracked branches the local details are usually dropped and the pipeline re-runs."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1268-1318",
+      "note": "fetchRemoteForStatus uses allowNonZeroExit, and the generation is bumped in `ensuring`. A fetch that fails with a non-zero exit (offline, auth error) still reports fetched=true, drops the reuse and triggers a full-pipeline republish. It is also cached with the 15 s success TTL instead of the failure cooldown."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1241-1263,1290-1298,1330-1344",
+      "note": "Each fetch:true remote read runs `rev-parse --abbrev-ref @{upstream}`, then `git remote`, then `rev-parse --git-common-dir`: 3 serial spawns even when the fetch cache is warm. The config snapshot (branch.<b>.remote, remoteNames) and the already-read `# branch.upstream` line hold the same data, and the common dir never changes for a given cwd."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:854-861",
+      "note": "Race: readLocalStatus stores the details with atMs = Date.now() after the read finishes. A read that started before a fetch completed (its `git status --branch` saw the old tracking refs) can finish after the delete at :1686. Its pre-fetch ahead/behind then look fresh for 5 s, and a later remote read that does not complete a fetch itself (for example the next poll with the 15 s fetch cache warm) reuses them and caches them for 30 s. This window is narrow and is new in #710."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1076-1082,2598-2601",
+      "note": "Any execute without readOnly runs Cache.invalidateAll on the config snapshot and branch listing for every cwd. That includes status fetches, checkpoint rev-parse and ls-files reads, and many reads that never set readOnly. This is correct but coarse: with many open folders the 5 s snapshot rarely survives, so each status pays its own `config --list`."
+    },
+    {
+      "location": "apps/server/src/sourceControl/SourceControlProviderRegistry.ts:682-699",
+      "note": "Not done from the proposal. Provider detection still spawns `git remote -v` through GitVcsDriver.listRemotes (GitVcsDriver.ts:590-597, 5 s TTL), and RepositoryIdentityResolver.ts:149 spawns it again under its own 60 s cache. No RepoFacts per gitCommonDir exists, and the snapshot is cached per cwd."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.test.ts:1425-1461",
+      "note": "No test covers remote status reusing local details, dropping them after a fetch, or the in-flight race. The only status-cache test counts gh calls, not git spawns."
+    }
+  ],
+  "remaining": "(1) After a completed fetch, or once the local details are over 5 s old, GitManager.readRemoteStatus (GitManager.ts:942-947) re-runs gitCore.statusDetailsLocal. That is 6-8 spawns including `git status --porcelain=2` and `git diff HEAD --numstat`, where the proposal asked for `rev-list --left-right --count @{upstream}...HEAD` plus a re-resolved ahead-of-default count. This happens on every stream-open background republish (VcsStatusBroadcaster.ts:508-523), on refreshStatus after agent or git actions for upstream-tracked branches when the last fetch was over 15 s ago (:487-501, GitManager.ts:1684-1688), and on every opt-in poll. (2) A fetch with a non-zero exit still counts as fetched (GitVcsDriverCore.ts:1268-1318), which drops the reuse and causes a republish for nothing. (3) refreshStatusUpstreamIfStale spends 3 serial spawns per fetch:true read (GitVcsDriverCore.ts:1241-1263, 1290-1298) on data the snapshot and the status details already hold. (4) `git remote -v` is still spawned separately by SourceControlProviderRegistry.detectProviderContext (:682-699) and RepositoryIdentityResolver (:149). There is no RepoFacts per common dir and no base-branch memo per (commonDir, refName). (5) The snapshot invalidation is global (invalidateAll on any non-readOnly execute, GitVcsDriverCore.ts:1076-1082, 2598-2601).",
+  "fixDefects": "(a) Race in the local-details reuse, new in #710. readLocalStatus (GitManager.ts:860-861) stamps the details when the read completes, not when it starts, and records no fetch generation. A local read in flight when a fetch completes can store pre-fetch ahead/behind after refreshRemoteTrackingRefsForKey (GitManager.ts:1686) deleted the entry. A later remote read within 5 s that does not complete a fetch itself reuses them, and the stale behind count is then cached for 30 s and published. invalidateLocalStatusResultCache (GitManager.ts:885-893) has the same delete-then-repopulate problem. (b) A failed fetch (non-zero exit) is reported as completed (GitVcsDriverCore.ts:1306-1318), so offline or unauthenticated repos re-run the full local pipeline on each fetch cycle and skip the failure cooldown. (c) No tests cover the remote reuse path, its invalidation after a fetch, or the race.",
+  "implementationSketch": "1) Lean upstream counts. In GitVcsDriverCore add `readTrackingCounts(cwd, { branch, upstreamRef, isDefaultBranch })` and expose it on GitVcsDriverShape. It runs `git rev-list --left-right --count @{upstream}...HEAD` (readOnly) for ahead/behind. For aheadOfDefaultCount it reuses the snapshot-based statusBaseBranchContext, resolveBaseBranchForNoUpstream, resolveBaseCommitPair and the aheadCountCache (1 for-each-ref, 1 rev-parse, rev-list cached by pair). It never runs status or diff HEAD. 2) In GitManager, replace delete-on-fetch with generations. Keep `fetchGenerationByCwd` and `localGenerationByCwd` maps. readLocalStatus captures both generations before calling statusDetailsLocal and stores them with the details. refreshRemoteTrackingRefsForKey bumps the fetch generation instead of deleting, and invalidateLocalStatusResultCache bumps the local generation. In readRemoteStatus: if the entry's local generation is current and it is under 5 s old, reuse the whole entry when the fetch generation also matches. If only the fetch generation differs, and readCheckoutHead(cwd) (spawn-free, vcs/gitCheckoutHead.ts) still shows the same branch, overlay readTrackingCounts on the cached details. Otherwise fall back to statusDetailsLocal. This fixes the race and removes the post-fetch pipeline re-run. 3) Make fetchRemoteForStatus return the exit code, and bump the generation and return true only when exitCode === 0. Optionally compare the upstream oid before and after so a no-op fetch skips the republish. Non-zero exits should get the failure cooldown. 4) refreshStatusUpstreamIfStale: take the upstream remote from readConfigSnapshot (`branch.<b>.remote`, with b from readCheckoutHead) plus snapshot.remoteNames, instead of `rev-parse @{upstream}` and `git remote`. Cache `rev-parse --git-common-dir` per resolved cwd with a long TTL or take it from the VcsDriverRegistry detection. 3 spawns become 0 in steady state. 5) Optional: build listRemotes and RepositoryIdentityResolver remotes from readConfigSnapshot (remote.<n>.url and pushurl). Caveat: `git remote -v` applies `url.<base>.insteadOf` and `pushInsteadOf` rewrites and raw config does not, so apply those rewrites from the snapshot or keep `remote -v` for those two callers. Narrow invalidateReadCaches to the command's cwd or common dir, and mark pure reads readOnly (CheckpointStore rev-parse and ls-files, runGitStdout reads). Tests: GitManager.test.ts with a counting executeOverride or spy. (i) localStatus then remoteStatus runs exactly one `status --porcelain=2`. (ii) After a simulated successful fetch, remoteStatus issues `rev-list --left-right` and no `status` or `diff HEAD`. (iii) A fetch that completes while a local read is in flight is not reused (use a Deferred to hold the read). (iv) A fetch with exit 128 does not invalidate. GitVcsDriverCore.test.ts: refreshStatusUpstream spawns no `git remote` or `rev-parse @{upstream}` when the snapshot is warm. Validate with the existing VcsDriverContractHarness and focused `bun run test` on apps/server's git and vcs test files.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Internal server performance and correctness only. It does not touch auth, E2EE, the hosted lifecycle, the Hub protocol or product behaviour. The one caveat is the insteadOf rewrite if `remote -v` is replaced by snapshot data, and that is an engineering detail.",
+  "repos": "ryco",
+  "correction": "The auditor rated the remote half done ('reuses the local details', 0 to 2 git spawns plus gh). That holds only when no fetch completed during the call and the local details are under 5 s old. On upstream-tracked branches a fetch usually completes: the stream-open background republish, refreshStatus after agent or git actions once 15 s have passed since the last fetch, and polling. Then readRemoteStatus re-runs the full 6-8-spawn local pipeline with working-tree scans, not the proposed single `rev-list --left-right --count`, and refreshStatusUpstream adds 3 serial spawns per read. The auditor also missed that a failed fetch counts as completed, the in-flight race where pre-fetch local details get a post-fetch timestamp (GitManager.ts:860-861 vs :1686), and that no test covers the reuse."
+}

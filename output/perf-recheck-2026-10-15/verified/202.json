@@ -1,0 +1,55 @@
+{
+  "id": "projects-loading:reconcile-worktrees-snapshot-amplification",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The DONE status is right, but two details are off. (1) Repo detection is no longer up to 3 rev-parse calls. Since #710 (60633eff3) it is a single combined `rev-parse --is-inside-work-tree --show-toplevel --git-common-dir` (GitVcsDriver.ts:493-520), and VcsDriverRegistry.ts:20 keeps positive detections for 2 min. The first sweep after a restart therefore costs at most 2 spawns per project (often about 1), not about 4P. (2) The auditor reported no fix defects. There is a small one: an empty `git worktree list` answer gets cached under a valid fingerprint (see fixDefects).",
+  "summary": "Verified on main at ec250e386. The sweep no longer does 2P+1 whole shell snapshots. reconcileAllWorktrees reads listProjectShells once, then per project does one primary-key project read and one transaction with two indexed, column-narrow reads (getProjectWorkspaceRows). It passes those rows to both ensureProjectMainWorktree and the planner. The sweep starts 15 s after subscribeShell and runs its git in the background process lane. An in-memory registration fingerprint skips detection and `git worktree list` for unchanged repos, so a later sweep costs 0 git spawns. An architecture ratchet test bans new getShellSnapshot callers, and worktreeOperations.ts is not on its allow-list. Semantics match the old code: live non-deleted threads, live project worktrees, and a main row created mid-pass has a null path, which the planner ignores. One minor defect: an empty (\"git could not answer\") listing is cached and reused while the fingerprint stays the same.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:910-964",
+      "note": "reconcileAllWorktrees: 5-min throttle, Effect.sleep(RECONCILIATION_START_DELAY_MS=15s, line 74), readProjectShells (listProjectShells, no snapshot), concurrency 4, whole effect wrapped in inBackgroundProcessLane. The lane only affects child-process admission (processGovernor.ts:33-35, 109-124), so no permit is held during the sleep."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:733-805",
+      "note": "reconcileProjectWorktrees: getProjectShellById, then the fingerprint, then git only on a fingerprint miss, then getProjectWorkspaceRows once. rows.worktrees go to ensureProjectMainWorktree (no extra read) and the same rows feed planWorktreeReconciliation."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:749-760",
+      "note": "Defect: the tap caches `paths` even when it is [] (listWorktreePaths returns [] when the exit code is non-zero or detection says not-a-repo, GitVcsDriverCore.ts:3289-3305 and GitWorkflowService.ts:445-453). The planner treats [] as 'git could not answer' (worktreeReconciliation.ts:166-171)."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeListFingerprint.ts:22-69",
+      "note": "Fingerprint = realpath(commonDir) + sorted worktrees/<name> + gitdir size and mtime. It returns null when <root>/.git is absent (subfolder projects, non-repos), so those always take the git path. When the worktrees dir is absent the value is `${commonDir}\\0-`, so a .git dir that exists while git fails gets a stable non-null fingerprint."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1001-1027,3592-3626",
+      "note": "listProjectWorktreeRows plus listProjectThreadWorkspaceRows (5 columns, project_id = ? AND deleted_at IS NULL) in one transaction. Index idx_projection_threads_project_deleted_created (migration 019) and idx_projection_worktrees_project_archived (migration 030). Same thread set as the old snapshot filter deletedAt === null."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:491-520",
+      "note": "Detection is one combined rev-parse since 60633eff3, not three. VcsDriverRegistry.ts:13-20 sets a 2-min positive and 2-s negative detection TTL."
+    },
+    {
+      "location": "apps/server/src/orchestration/Services/ProjectionSnapshotQuery.callers.test.ts:21-81",
+      "note": "Exact-count ratchet over getShellSnapshot callers. ws/context/worktreeOperations.ts is not allowed, so reintroducing a snapshot read here fails the test."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.test.ts:149-281",
+      "note": "Tests cover: one project's rows instead of snapshots; git skipped while registrations are unchanged and re-run after a new worktrees/<name>/gitdir; 15 s delay via TestClock; background lane; chat and missing roots skipped. There is no test for an empty listing."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:518-552",
+      "note": "subscribeShell still forkDetaches reconcileAllWorktrees. Because of the delay and the narrow reads, it no longer competes with the shell snapshot that the subscription loads."
+    }
+  ],
+  "remaining": "Nothing required. Optional residuals, all low value: (a) knownWorktreeListings (worktreeOperations.ts:91-94) is in-memory. The first sweep after each restart still spawns up to 2 git processes per repo (combined rev-parse unless detection is cached, plus `git worktree list`), 15 s after the first subscribe and in the background lane. (b) reconcileProjectWorktrees re-reads each project via getProjectShellById (line 736) although the sweep already holds the shells from line 919: P cheap PK reads. (c) Projects whose root has no own .git (monorepo subfolders) never get a fingerprint and run git on every sweep. A non-repo project with no main row also costs 1 detection spawn per sweep via localStatus (line 306). (d) knownWorktreeListings never evicts deleted projects. The memory is trivial. (e) The sweep is still triggered by subscribeShell rather than a startup phase. For load the effect is the same.",
+  "fixDefects": "Minor: worktreeOperations.ts:749-760 caches an empty `git worktree list` answer whenever the fingerprint is non-null. That happens when <root>/.git exists but git exits non-zero or detection returns null. Examples: 'detected dubious ownership' before the user fixes safe.directory, or a .git dir that is partial or corrupt during a clone. The planner treats [] as 'git could not answer' and plans nothing. With no worktree churn, the fingerprint (`${commonDir}\\0-`) stays the same after the repo becomes healthy, so reconciliation for that project stays a silent no-op until the server restarts or a worktree is added or removed. Before the fix it was retried every sweep. Timeouts and spawn errors fail the effect and are not cached, so only non-zero-exit and not-a-repo answers are affected. Nothing is corrupted (an empty plan does nothing), but the self-healing is lost.",
+  "implementationSketch": "1) Fix the defect (S). In reconcileProjectWorktrees (worktreeOperations.ts:750-759), store the entry only when `fingerprint !== null && paths.length > 0`, otherwise delete it. A real repository always lists at least its own root, so [] is never a trustworthy answer. Add a test in worktreeOperations.test.ts next to 'skips git worktree list while a repository's registrations are unchanged': run `git init` on a temp dir, make the listWorktreePaths stub return [] the first time and [root] the second, and assert git is called on both runs. 2) Optional (S): let reconcileProjectWorktrees take the OrchestrationProjectShell from the sweep's listProjectShells result (keep a projectId overload for other callers) to drop P getProjectShellById reads. 3) Optional (S): remove knownWorktreeListings entries for project ids missing from the current project list in reconcileAllWorktrees, next to the missingProjectRoots cleanup. 4) Optional (M, low value): persist {projectId, root, fingerprint, paths} (a small projection table or a JSON file under the server state dir) so the first post-restart sweep is also spawn-free. Load it lazily in the sweep and keep the same validation (root equality plus fingerprint match, and never persist []).",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local caching and read-path change. No auth, E2EE, hosted lifecycle, Hub protocol or product trade-off is involved.",
+  "repos": "ryco"
+}

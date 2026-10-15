@@ -1,0 +1,63 @@
+{
+  "id": "client-runtime-sync:duplicate-server-config-loads",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "correction": "PARTIAL is the right status, but the auditor got the scope of the remaining work wrong. They called the 'primary/mobile connect path' DONE, and it is not for mobile. On mobile the active environment's EnvironmentConnection already runs its own subscribeServerConfig stream: kind 'saved' always observes config, and the hosted primary passes onConfigUpdated. ServerStateBootstrap (useServerStateSync) then calls startServerStateSync(connection.client.server) on the same client, which opens a SECOND subscribeServerConfig stream (and a second lifecycle stream for saved environments). wsRpcClient.subscribeConfig does not multiplex, and mobile has no persisted provider-catalog cache. So a cold mobile connect still gets two full config snapshots, the server runs loadServerConfig twice, and every later delta arrives twice. Before the fix it was three loads; now it is two. The auditor also missed that the saved-environment fallback getConfig is always the full payload: its contract has no knownProviderCatalogs. On web the snapshot it races against may have its catalogs elided through the IndexedDB-persisted catalog cache, so the fallback is usually the bigger and slower of the two and almost never wins.",
+  "summary": "Fixed: the startServerStateSync getConfig is gone, the usage getConfig preflight is gone, and the server editor scan is cached for 5 minutes. Two duplicate loads remain. (1) Mobile: the active connection's own config stream plus ServerStateBootstrap's startServerStateSync give two subscribeServerConfig streams per connection. That means two full snapshots on a cold connect (mobile has no catalog persistence), two server config builds and doubled deltas. The auditor missed this. (2) Web saved environments: awaitSavedEnvironmentConfig waits 1 s (was 150 ms), then sends a full getConfig over the same socket beside the snapshot and never cancels the loser. On slow links (the report measured about 1.3 s for the first snapshot) this still doubles the load on connect and on every reconnect, and the getConfig nearly always loses the race because it queues behind the snapshot on the same socket.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/rpc/serverState.ts:156-179",
+      "note": "startServerStateSync only subscribes to lifecycle and config. The getConfig call is gone. On the web primary this is the only config stream, because the web primary connection has no onConfigUpdated (apps/web/src/environments/runtime/service.ts:1276-1299)."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:900-914",
+      "note": "getUsageSummary has no serverGetConfig preflight. A contract mismatch is mapped by isUsageContractRejection. Mobile useStatisticsData has no getConfig either."
+    },
+    {
+      "location": "apps/server/src/open.ts:273-311",
+      "note": "resolveAvailableEditors caches the scan for 5 minutes, keyed on platform and PATH. loadServerConfig (apps/server/src/ws/context.ts:1173-1210) no longer runs the synchronous stat sweep on every build."
+    },
+    {
+      "location": "apps/mobile/src/state/serverStateSync.ts:27-34",
+      "note": "Mobile ServerStateBootstrap (mounted at apps/mobile/src/features/access/AppAccessGate.tsx:163) calls startServerStateSync(connection.client.server) on the active environment's connection. That opens another subscribeConfig (and subscribeLifecycle) on a client that already has one."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/connection.ts:179,223-249",
+      "note": "shouldObserveConfig = kind === 'saved' || onConfigUpdated !== undefined. The connection opens its own subscribeConfig stream."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/primaryConnection.ts:244-251",
+      "note": "The mobile hosted primary passes onConfigUpdated, so it observes config itself. The mobile direct saved connection (apps/mobile/src/connection/environmentDriver.ts:491-503) is kind 'saved' and also observes config. Combined with ServerStateBootstrap this gives two concurrent config streams."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:979-1020",
+      "note": "subscribeConfig opens an independent transport.subscribe for each caller. There is no fan-out. The catalog pin comes from providerCatalogCache, which is persisted only on web (apps/web/src/routes/__root.tsx:279-286) and not on mobile, so both cold mobile snapshots carry full catalogs."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:692-718",
+      "note": "Each subscribeServerConfig runs loadServerConfig and its own provider delta tracker. Duplicate subscriptions double the server build and every later update."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/savedEnvironmentSession.ts:25,70-96",
+      "note": "SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS is 1_000. After it expires, Promise.race([snapshot, readConfig()]) runs both loads, and the loser is not cancelled."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:1239-1249,1558-1567,1629-1639",
+      "note": "The fallback readConfig is client.server.getConfig() over the same socket. It is used on the initial saved connect and on every reconnect through refreshMetadata."
+    },
+    {
+      "location": "packages/contracts/src/rpc.ts:810-814",
+      "note": "The serverGetConfig payload is an empty Struct with no knownProviderCatalogs. The fallback read always returns full catalogs, while the snapshot it races against can be catalog-elided on web."
+    }
+  ],
+  "remaining": "1) Mobile double config stream. apps/mobile/src/state/serverStateSync.ts:29 opens a second subscribeServerConfig (plus lifecycle) on the active connection, which already observes config (packages/client-runtime/src/connection/connection.ts:179,223; apps/mobile/src/hostedHub/primaryConnection.ts:248; apps/mobile/src/connection/environmentDriver.ts:499). Every cold mobile connect gets two full snapshots (about 100 KiB each with no persisted catalogs), the server runs loadServerConfig twice (providerRpc.ts:718), and every delta arrives twice. 2) Web saved-environment fallback. packages/client-runtime/src/connection/savedEnvironmentSession.ts:91-95 still sends a full getConfig beside the snapshot when the snapshot takes longer than 1 s. That covers ws-token, upgrade, subscribe and transfer, and the report measured about 1.3 s throttled. It applies on connect and on every reconnect (apps/web/src/environments/runtime/service.ts:1558-1567,1629-1639), and the losing load is never cancelled. Optional: there is no 'refresh editors' invalidation for the 5-minute editor cache (open.ts:279). Adjacent and outside this finding, not counted here: per-action full getConfig reads remain in apps/web/src/editorPreferences.ts:61 (on each open-in-editor), apps/web/src/hooks/newDraftDefaults.ts:125-131 (hosted new drafts), apps/web/src/hooks/executeChatSendTurn.ts:617-621 (hosted worktree sends) and apps/web/src/components/pullRequests/agentHandoff.ts:183-185.",
+  "fixDefects": "Nothing is broken in the shipped parts. The one gap is in the saved-environment fallback. It now fires only after 1 s instead of 150 ms, so it happens less often, but it still runs beside the snapshot. Both requests go over the same socket and the getConfig is queued behind the snapshot, so on exactly the slow links that trigger it, it almost never wins. It adds a full-catalog payload and a main-thread decode, and its result is thrown away. The usage-mismatch detection works by matching substrings in the error message (usage/compatibility.ts), so it can break if that wording changes.",
+  "implementationSketch": "A. Mobile double stream (preferred, generic fix): in packages/client-runtime/src/rpc/wsRpcClient.ts, change server.subscribeConfig (around line 979) so all listeners on one client share one transport subscription. Keep a Set of listeners with a refcount. Keep the projected config, using projectServerConfigEvent, the same projection as connection.ts:238. A listener that joins after the first item gets a synthetic {type:'snapshot', config} so its projection starts from a full config. Pass onResubscribe to every listener. Close the underlying stream when the last listener unsubscribes. Do the same for subscribeLifecycle and replay the last welcome to late joiners. Narrower alternative: add EnvironmentConnection.observeConfig(listener), which replays observedConfig and then forwards later events, and have mobile useServerStateSync feed serverConfigAtom from it (for example a client-runtime startServerStateSyncFromConnection) instead of calling startServerStateSync(client.server). Tests: a wsRpcClient unit test that two subscribeConfig listeners cause exactly one subscribeServerConfig request, a late listener receives a snapshot, and unsubscribing one listener keeps the stream alive. A mobile test that mounting ServerStateBootstrap on an active saved or hosted connection sends one subscribeServerConfig request. B. Saved-environment fallback: in savedEnvironmentSession.ts awaitSavedEnvironmentConfig, stop running readConfig beside the snapshot. Await only input.snapshot, bounded by SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS. Keep configSnapshotUnlessRejected (service.ts:1514) so a credential rejection still fails fast. If a read fallback is still wanted for robustness, start it only when the config stream reports an error or a resubscribe without a snapshot (expose this through the connection's subscribeConfig onError), or after a much longer grace period (5-8 s), and never while the snapshot is still in flight. Update the tests in savedEnvironmentSession.test.ts (lines 90-130) and add a service-level test: with a snapshot delayed by 1.5 s, client.server.getConfig is never called on connect or on reconnect. C (optional): pre-warm resolveAvailableEditors at server start, and let an explicit refreshProviders or settings action invalidate availableEditorsCache.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "These are client-runtime and mobile wiring changes only. They do not touch auth, E2EE, Hub protocol or hosted lifecycle ownership. Removing the parallel getConfig fallback is a small robustness trade-off for internal connect logic, and the existing 20 s bound and credential-rejection race stay in place.",
+  "repos": "ryco"
+}

@@ -1,0 +1,78 @@
+{
+  "id": "server-boot:boot-provider-probes",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "Most of the fix is real. Construction and boot no longer probe. Persisted snapshots carry a probe fingerprint and are adopted for 6 h. Background revalidation is demand-driven, starts after the first config snapshot, runs at concurrency 2 and staggers starts by 250 ms. The Claude probe is MCP-free, OpenCode reuses its verified version, the npm latest-version cache is on disk, and the Claude OAuth refresh/writeback is deleted. Proposal 1 is not met for the most common accounts, though. Any snapshot that carries rateLimits is adopted for only 5 minutes, and the full rich probe then reruns instead of a cheap usage refresh. That covers Claude with a claude.ai login, Codex with a ChatGPT login and OpenCode with Go usage. The usage probe in the original measurement read the keychain, so the measured Claude had such a login. On that machine, any restart more than 5 minutes after the last probe still cold-probes the Claude SDK session and codex app-server once the first client subscribes. In desktop that client is the renderer at launch. Non-ready outcomes and Ryco updates also force full probes. The auditor's DONE overstates this: the fan-out is much smaller, but it is not gone for these accounts.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/makeManagedServerProvider.ts:45-50,82-87,320-331",
+      "note": "Construction never probes: lastRefreshAttemptAtMs starts null, the settings stream is Stream.never for every driver, and refreshInterval is null in all six built-in drivers (ClaudeDriver.ts:213, CodexDriver.ts:209, CopilotDriver.ts:109, CursorDriver.ts:149, GrokDriver.ts:128, OpenCodeDriver.ts:177). The old fork at :272-275 is gone."
+    },
+    {
+      "location": "apps/server/src/provider/makeManagedServerProvider.ts:291-318",
+      "note": "adoptPersistedSnapshot uses the 6 h window only when snapshot.rateLimits is undefined (:302-305). Otherwise it uses the 5-minute snapshotFreshness. After that, revalidate reruns the whole checkProvider (models, slash commands, account and usage). Proposal 1 wanted rich data fresh for hours, with at most a cheap check at boot."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeProvider.ts:538-552",
+      "note": "rateLimits are attached whenever the instance uses a claude.ai login (resolveClaudeLoginStore), which covers the typical Pro/Max subscriber, so that Claude snapshot gets only the 5-minute window."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexProvider.ts:371-396",
+      "note": "ChatGPT-backed Codex accounts always carry rateLimits, so they also get the 5-minute window and re-spawn codex app-server on a restart after 5 minutes."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/OpenCodeProvider.ts:514-520",
+      "note": "OpenCode with Go usage carries rateLimits, so it gets the 5-minute window and re-runs opencode --version and opencode serve (739 MiB in the measurement)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:100-101",
+      "note": "Only ready and disabled outcomes are persisted as fresh. An installed but unauthenticated Copilot (error) re-runs copilot --headless on every first subscribe. So does OpenCode with zero connected providers (warning), which re-runs opencode serve."
+    },
+    {
+      "location": "apps/server/src/provider/providerProbeFingerprint.ts:120-131",
+      "note": "The fingerprint includes packageJson.version, so every Ryco update invalidates every persisted snapshot. The first launch after an update probes every provider, at concurrency 2 and without MCP."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderRegistry.ts:88-94,583-607,725-758,840-868",
+      "note": "Boot reads persisted snapshots, and settleBootArrival adopts a snapshot when its fingerprint matches. Stale sources are probed only by a background pass at concurrency 2 with 250 ms staggered starts. Instances added or rebuilt by a settings change still probe at once, at concurrency 4."
+    },
+    {
+      "location": "apps/server/src/ws/providerRpc.ts:755-766",
+      "note": "revalidateStale is forked after the subscribeServerConfig snapshot has been pulled. The desktop renderer and every reconnecting web or mobile client subscribe right away, so stale providers (including the 5-minute rate-limited ones) are probed during desktop launch and on every reconnect more than 5 minutes after the last probe. Proposal 2 said 'never at boot in desktop', and that is not met for these providers."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1153-1158",
+      "note": "The boot gate is released in markHttpServing. Drivers are built after the listener serves, which replaces the desktop-only 100 ms sleep."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeProvider.ts:341-356",
+      "note": "The capability probe passes mcpServers: {} and strictMcpConfig: true. SDK 0.3.296 sdk.d.ts:2313-2320 documents that this also excludes plugin and agent-frontmatter MCP servers, so proposal 3 is done."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeUsage.ts:255-277",
+      "note": "Expired tokens yield undefined. No refresh and no keychain or file writeback remain; grep finds no refresh_token or writeCredentials in apps/server/src. Proposal 6 is done."
+    },
+    {
+      "location": "apps/server/src/provider/opencodeRuntime.ts:488-501,673-677",
+      "note": "verifiedBinaryVersion is threaded from OpenCodeProvider.ts:459 through connectToOpenCodeServer, so the second --version spawn is skipped. Proposal 4 is done."
+    },
+    {
+      "location": "apps/server/src/provider/providerMaintenance.ts:34,550-636",
+      "note": "The latest-version cache is loaded once from _provider-latest-versions.json and written atomically, with the 1 h TTL. Proposal 5 is done."
+    },
+    {
+      "location": "apps/mobile/src/features/settings/statistics/useStatisticsData.ts:42-45,124-137",
+      "note": "This is a related path, not a boot path. The mobile Limits tab calls api.server.refreshProviders() for every node each time the request key changes (tab, range, connection state). That forces a cold probe of every provider on each node at concurrency 4, ignoring freshness, just to read rate limits."
+    }
+  ],
+  "remaining": "1. On a typical restart, rate-limited providers still get a full cold probe. adoptPersistedSnapshot (makeManagedServerProvider.ts:302-305) gives any snapshot with rateLimits only the 5-minute window, and revalidate then reruns the whole checkProvider. For Claude with a claude.ai login (ClaudeProvider.ts:543-552) that means claude --version, a Claude SDK session process, a security spawn and an HTTPS call. For Codex with a ChatGPT login (CodexProvider.ts:371-386) it is a codex app-server. For OpenCode with Go usage (OpenCodeProvider.ts:514) it is opencode --version plus opencode serve. These start 250 to 500 ms after the first client's config snapshot (providerRpc.ts:755-766, ProviderRegistry.ts:583-607): during desktop launch, and on every reconnect more than 5 minutes later. Proposal 1 (rich data fresh for hours, only a cheap check at boot) is not implemented for these accounts, and proposal 2's 'never at boot in desktop' is not met for them.\n2. Expensive non-ready outcomes re-probe on every first subscribe (ProviderRegistry.ts:100-101), for example an installed but unauthenticated Copilot (copilot --headless) or OpenCode with no connected providers (opencode serve).\n3. Every Ryco update invalidates all fingerprints (providerProbeFingerprint.ts:125), so the first launch after an update probes every provider.\n4. A related path outside boot: the mobile Limits tab (useStatisticsData.ts:43) force-refreshes every provider on every node at concurrency 4 just to read usage.",
+  "fixDefects": "No functional bug found in the implemented code. The adoption, single-flight, stagger, gate and fingerprint logic is consistent and covered by tests: makeManagedServerProvider.test.ts:613-760 and ProviderRegistry.test.ts:1131, 1601, 1710 and 3129-3173. Minor correctness gaps, not perf defects:\n- On macOS the Claude fingerprint's auth file (.credentials.json) does not change on a keychain login or logout, and the Copilot and Grok fingerprints have no auth inputs. An API-key or Copilot auth change can therefore show the old ready state for up to 6 h until an explicit refresh.\n- The Codex fingerprint ignores config.toml, so model or provider edits there are also not picked up for up to 6 h.\n- An adopted snapshot starts no enrichment, so the version advisory can be up to 6 h stale.",
+  "implementationSketch": "A. Decouple usage-limit freshness from capability freshness.\n- In makeManagedServerProvider, add an optional input refreshUsage: (snapshot) => Effect<ServerProvider | undefined>.\n- Track two windows in ProviderSnapshotState: capabilityFreshUntilMs (6 h for an adopted snapshot) and usageFreshUntilMs (checkedAt + 5 min).\n- adoptPersistedSnapshot always grants the capability window.\n- revalidateSnapshot: if capabilities are fresh but usage is stale and refreshUsage exists, run refreshUsage (single-flight, under refreshSemaphore) and publish snapshot+rateLimits instead of calling checkProvider. Otherwise keep the current behaviour.\n- Expose isFresh as 'capabilities fresh', plus a new isUsageFresh, so ProviderRegistry.revalidateOneSource (ProviderRegistry.ts:563-575) can choose the cheap path and skip probeSource. The cheap path must not change the persisted probeFreshness.\n- ClaudeDriver: refreshUsage = resolveClaudeLoginStore(makeClaudeEnvironment(...), account) followed by the existing cached probeUsage (keychain read plus one HTTPS call, no SDK session, no --version). This needs the probed tokenSource and subscriptionType persisted, either in the snapshot's auth metadata (claudeAuthMetadata already carries authMethod and subscriptionType) or as a small extra field.\n- Codex: there is no process-free usage path, so pick one:\n  (a) keep 5 minutes for ChatGPT accounts but strip stale rateLimits on adoption and let usage arrive from live turns or an on-open targeted refresh; or\n  (b) accept a codex app-server only when a usage surface asks for it.\n  Choosing between them is the product decision.\n- OpenCode: refreshUsage = probeUsage(environment) (Go usage over HTTP), with no opencode serve.\n- Tests:\n  - makeManagedServerProvider.test.ts: an adopted snapshot with rateLimits stays capability-fresh for 6 h; revalidate after 5 minutes calls refreshUsage, not checkProvider.\n  - ProviderRegistry.test.ts: the background pass over a usage-stale, capability-fresh source spawns no probe.\nB. Optionally persist non-ready outcomes with a short window (15-30 min) when every failing input is covered by the fingerprint (missing binary, auth files), so an unauthenticated Copilot or an OpenCode with no providers does not respawn its server on every first subscribe. Change isPersistableProbeOutcome (ProviderRegistry.ts:100-101) to return a window instead of a boolean.\nC. Mobile Limits: in useStatisticsData.ts:42-45, stop calling refreshProviders() for all instances. Read the current providers (config snapshot or getConfig), then refreshInstance only for instances that carry rateLimits, or call a new usage-only RPC backed by refreshUsage from A. Dedupe per node and keep range changes from re-triggering it. Add a unit test that the limits tab does not call the all-provider refresh.\nD. Optional: replace packageJson.version in the fingerprint (providerProbeFingerprint.ts:125) with PROBE_FINGERPRINT_FORMAT plus a hash of the snapshot schema, so updates that do not change probe semantics keep the persisted snapshots. This is low priority because it is one boot per update.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "This is a product trade-off over how fresh usage limits must be when the UI shows them. The current 5-minute rule is deliberate: the composer and the Limits panel render rateLimits as current, and the user explicitly wants per-subscription usage there. Decoupling them means either showing usage that can be up to 6 h old, hiding usage until a cheap refresh lands, or keeping a codex app-server spawn for ChatGPT usage. Persisting non-ready outcomes is a similar staleness trade-off.",
+  "repos": "ryco"
+}

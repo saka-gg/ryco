@@ -1,0 +1,55 @@
+{
+  "id": "mobile-boot:hosted-session-serial-local-steps",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for ensureMobileHostedSession, which is the finding's scope. #710 (60633eff3) overlapped the token keychain read, the trust-store load and the signer load. 4e07cee4c then made the signer load conditional. With a stored session it starts when the token read resolves and overlaps the trust read. With no stored session it is skipped and the runtime is configured with a deferred signer. Tests pin both behaviours. One small side effect, not a regression against the report baseline: on a signed-out launch the deferred hardware-key load now runs on NativeIdentityScreen's mount path. There it sits in series after two keychain reads and before an unauthenticated capability fetch that does not need it.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:418",
+      "note": "hydrateMobileHubProfile stays first because it resolves the origin. The config is re-resolved and checked before any secret is read (lines 422-423)."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:431",
+      "note": "tokenRead starts and is not awaited. signerLoad (lines 434-442) starts createMobileDpopSigner once the token read finds a stored session. The attempt is boxed and its rejection is caught, so there is no unhandled rejection."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:443",
+      "note": "Promise.allSettled([tokenRead, mobileE2eeTrustStore.hydrate()]) runs the token read and the trust read together. A token failure still maps to credential-storage (line 445), and trust still loads before configuration."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.ts:455",
+      "note": "Signed-out path: configureMobileHostedRuntime('deferred'), so no Secure Enclave load at launch. Stored-session path (line 456): the signer attempt already in flight is joined. Its failure maps to device-security (lines 216-223) and bootstrap runs only after configuration."
+    },
+    {
+      "location": "apps/mobile/src/hostedHub/runtime.test.ts:501",
+      "note": "'overlaps the stored session's key load with the trust read' and 'does not load the hardware key at launch when no session is stored' (line 546) pin the new behaviour. The ordering tests (lines 458-478) still require hydrate -> trust-hydrate -> configure -> bootstrap."
+    },
+    {
+      "location": "apps/mobile/src/platform/dpopSigner.ts:41",
+      "note": "createMobileDpopSigner is memoized and clears the memo on failure, so the early start and the later join (or a retry) share one attempt."
+    },
+    {
+      "location": "apps/mobile/src/platform/e2eeSecureStore.ts:242",
+      "note": "The install-marker KV read was never inside trustStore.hydrate. It is the memoized custody check (ensureDeviceCustody) that runs before the first E2EE secure-store get, and it still runs inside the trust read. It now overlaps the token read and is required by §6.3, so it is not a defect."
+    },
+    {
+      "location": "apps/mobile/src/features/identity/NativeIdentityScreen.tsx:443",
+      "note": "On a signed-out launch, the locked stack mounts this screen. Its effect reads the completion journal (keychain), then the transaction store (line 455), then calls refreshCapability (line 466)."
+    },
+    {
+      "location": "apps/mobile/src/features/identity/NativeIdentityScreen.tsx:395",
+      "note": "refreshCapability awaits waitForSessionSetup, which calls ensureMobileHostedDeviceKey (line 176). That deferred key load (expo-crypto import, device-key module, ensureKey; key creation on first install) finishes before the capability fetch at line 415 starts. The fetch is unauthenticated (hubCapability.ts:139, credentials: 'omit'), so the two are independent but run in series."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness bugs in the fix. Two small notes. (1) As the auditor said, on the stored-session path the signer load starts after the token read, not at t0, because the token read is what proves a session exists. The critical path is max(token+signer, trust), not max(token, trust, signer), so it is slower by at most one keychain read. (2) Side effect of 4e07cee4c: on a signed-out launch the hardware-key load moved out of the gate and into NativeIdentityScreen. It now runs after two keychain reads (lines 443, 455) and before an independent, unauthenticated capability fetch (lines 395 and 415). Against the f1be4abc7 baseline this is still faster to the capability fetch, by about min(token, trust). Against the #710 version it is slower by about min(signer, max(token, trust)), and the identity screen paints earlier. The key load could overlap the journal and transaction reads and the network probe. That would save up to one Secure Enclave round trip (larger on first install, when the key is created) before the sign-in form is ready.",
+  "implementationSketch": "Optional, low priority. In apps/mobile/src/features/identity/NativeIdentityScreen.tsx, start the memoized key load as soon as the mount effect at line ~440 begins: `const keyWarm = ensureMobileHostedDeviceKey();` (it never rejects, and createMobileDpopSigner memoizes, so refreshCapability's later waitForSessionSetup joins the same attempt). That lets the Secure Enclave load overlap completionJournal.read() and transactionStore.read(). Optionally, refreshCapability could also start checkHubCapabilityWithTimeout concurrently with waitForSessionSetup and only evaluate the result after both settle. Keep the existing order of error checks: credential-storage, then device-security, then the capability result. Tests: extend the NativeIdentityScreen tests (or add a focused one) with a pending createMobileDpopSigner mock. Assert the key load starts before the journal and transaction reads resolve, that the capability fetch is not blocked behind it, and that the device-security message still wins when the key load fails. Run only the focused mobile vitest files.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The finding as scoped is fully implemented. The optional follow-up only changes when an already-required, fail-closed key load starts. It does not change DPoP, E2EE or hosted lifecycle semantics.",
+  "repos": "ryco",
+  "correction": "The auditor wrote that 'the old install-marker KV read is no longer in hydrate'. It was never directly in hydrate. It is the custody check inside mobileE2eeSecureStore.get (e2eeSecureStore.ts:242-256), and it still runs as part of the trust read on first access, now overlapped with the token read. The auditor also missed that the deferral moves the signed-out key load to NativeIdentityScreen, where it runs in series. This does not change the DONE classification for the finding's scope."
+}

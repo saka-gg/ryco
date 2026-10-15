@@ -1,0 +1,67 @@
+{
+  "id": "gap-first-turn-latency:codex-shared-app-server",
+  "auditorStatus": "NOT_DONE",
+  "status": "NOT_DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed NOT_DONE. Each live Codex session still spawns its own `codex app-server` in a per-session scope, runs `initialize`, then thread/start or thread/resume. Nothing owns a shared app-server per instance, and #710 even widened stopAll to unbounded with the comment 'Sessions own independent app-server processes'. The only sharing is CodexStoredThreadReader (cd0b163e9, extended by bb8d23c7c for skills/list): one read-only process for thread/read and skills/list, no thread start. Two things the auditor missed. (1) Session prewarm (440c42224, 65c7e6f2d, a8a683529, 3cbe9a677) now starts the session on composer focus or first keystroke. That hides most of the ~140 ms spawn+initialize, so the latency value is lower than the finding claims. Prewarm still spawns a full app-server per prewarmed thread, up to 2 per instance and 4 overall, idling for 2 min. (2) Sharing is harder than the sketch suggests. The runtime treats every non-root conversation on its process as a collab child. The client keeps one request handler per method (last wins) and has no way to remove notification handlers. The remaining value is mainly about 125 MiB RSS per concurrently live Codex thread. The ProviderSessionReaper stops sessions after 5 min idle, which bounds how many are live. Per-thread MCP children (about 730 MiB per thread) are unaffected.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/CodexSessionRuntime.ts:1276",
+      "note": "makeCodexSessionRuntime still calls spawner.spawn(ChildProcess.make(binaryPath, [\"app-server\"], { cwd: options.cwd, env })) once per runtime, in the per-session runtimeScope. The client is built on that child (1294-1301). Each runtime has its own queues: events 2048 (1252), serverNotifications 512 (1302)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexSessionRuntime.ts:2222",
+      "note": "start() sends initialize under a startup deadline and the initialized notify (2224-2228), then openCodexThread (thread/start or thread/resume) on every session."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:2036",
+      "note": "startSession creates a per-session Scope.make and calls createRuntime = options.makeRuntime ?? makeCodexSessionRuntime (2049-2050). No shared owner on this path."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:2813",
+      "note": "Comment added in #710 (60633eff3): 'Sessions own independent app-server processes; stop them all at once.' stopAll concurrency changed to unbounded. This confirms per-session processes are the intended model."
+    },
+    {
+      "location": "apps/server/src/provider/Drivers/OpenCodeDriver.ts:135",
+      "note": "OpenCode builds makeOpenCodeServerOwner per instance and passes it to the adapter and to text generation. CodexDriver.ts has no counterpart; its only 'shared' hits are the header comment (line 14) and sharedHomePath (153)."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexAdapter.ts:1938",
+      "note": "makeCodexStoredThreadReader (cd0b163e9): one lazy read-only app-server per adapter in process.cwd(), closed after 60 s idle. It serves readThreadHistory (2610-2611) and, since bb8d23c7c, readProjectCommands skills/list (2564). It starts no thread and is not used for session start."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexSessionRuntime.ts:1192",
+      "note": "readStoredCodexThread (spawn per read) has no production callers left. Its only use is CodexCollabRuntime.integration.test.ts:99, so the auditor's 'partly rerouted' understates this: history reads are fully rerouted."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderSessionPrewarm.ts:74",
+      "note": "Prewarm (440c42224 and later) starts the exact session the next send would start, through providerService.startSession (line 277). For Codex that is a full app-server spawn+initialize+thread/start per prewarmed thread. Limits: 2 min idle, perInstanceLimit 2, totalLimit 4. The web composer triggers it on focus or first keystroke (65c7e6f2d). This hides first-turn spawn latency in the common path, but each prewarm is a full process."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexSessionRuntime.ts:1763",
+      "note": "handleRawNotification treats any notification whose threadId is not this runtime's root as a foreign or child conversation. It suppresses it and records its live turns in collabChildLiveTurnsRef (1775-1800), and interruptTurn (2373-2436) interrupts those child turns. On a shared process, another Ryco thread's turns would be classified as this thread's children and interrupted on Stop. Routing must therefore happen above the runtime."
+    },
+    {
+      "location": "packages/effect-codex-app-server/src/client.ts:94",
+      "note": "requestHandlers is a Map with one handler per method, last registration wins (251-254). notificationHandlers are append-only arrays with no removal (255-260). Several runtimes calling handleServerRequest or handleServerNotification on one shared client (CodexSessionRuntime.ts:1898-2130) would overwrite each other's approval handlers and leak closures. A shared owner needs one demultiplexing router."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderSessionReaper.ts:13",
+      "note": "Sessions are reaped after 5 min of inactivity (sweep every 2 min). This bounds how many idle Codex processes coexist, and with it the RSS saving."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/CodexProvider.ts:325",
+      "note": "Other one-off app-server spawns remain, each with its own initialize: the status probe (CodexProvider.ts:325), CodexResetCredits.ts:140, CodexMcpService.ts:680 and codexIsolatedAppServer.ts:75. None of them is on the first-turn path."
+    }
+  ],
+  "remaining": "Live sessions are not shared. makeCodexSessionRuntime spawns its own process (CodexSessionRuntime.ts:1276-1301) and runs initialize (2224-2228) for every session. CodexAdapter.startSession (CodexAdapter.ts:2036-2062) creates one runtime per thread, and CodexDriver has no per-instance app-server owner. Prewarm (ProviderSessionPrewarm.ts) now hides most of the spawn+initialize latency for composer-driven sends. Session starts that are not prewarmed still pay it: Agent Control or automation-created threads, sends with no composer focus window, and prewarm misses. What remains is mainly memory: one ~125 MiB app-server per live Codex thread within the 5-min reaper window, plus up to 2 per instance for unclaimed prewarms.",
+  "fixDefects": "",
+  "implementationSketch": "Two options; take the lower-risk one first.\n\nOption A, recommended first step: a warm standby process with no multiplexing. Add apps/server/src/provider/CodexAppServerStandby.ts, built in CodexDriver.create next to the adapter and passed through makeCodexAdapter options.\n- It keeps 0 or 1 spare `codex app-server` per instance: spawned with the instance env and CODEX_HOME, already sent initialize/initialized, closed after idle (e.g. 2 min) and with the instance scope.\n- Split makeCodexSessionRuntime so it accepts an already-initialized { child, client, transportFailure } handle instead of always spawning at 1276. start() skips initialize when the handle is pre-initialized.\n- startSession takes the spare if there is one, otherwise spawns as today, then refills in the background.\n- This keeps one process per thread, so failure isolation, collab-child classification and handler registration are unchanged. It removes about 140 ms from every non-prewarmed start and turns prewarm into thread/start only.\n- Open question: the spare's process cwd is neutral rather than the thread's. Verify against a real codex-cli that project config (.codex/config.toml), AGENTS.md discovery and sandbox roots all follow the thread/start `cwd` param, not the process cwd. If they do not, keep a spare only for the most recent project cwd.\n- Tests in CodexAdapter.test.ts with makeRuntime or a fake spawner: a spare is adopted, a dead spare is discarded, refill happens, and close happens on adapter teardown.\n\nOption B, the full finding: a shared multiplexed owner (CodexAppServerOwner, modelled on OpenCodeServerOwner.ts).\n(1) The owner spawns lazily, initializes once and refcounts sessions. It registers exactly one handler per server-request method and one notification fan-out on the client. It routes by params.threadId to registered per-thread views. It registers collab children through thread/started source.subAgent.thread_spawn.parentThreadId and the collabAgentToolCall receiverThreadIds. It must buffer or resolve notifications for unknown thread ids, because CodexSessionRuntime.ts:1763 notes that child thread/status/changed arrives before registration.\n(2) Refactor CodexSessionRuntime into a view. It takes notifications and requests from the owner's per-thread queue instead of client.handleServer*, and drops the 'any non-root conversation is my child' rule (1763-1800) in favour of explicit child ownership.\n(3) On process exit or transport failure the owner fans session/exited out to every view and settles their pending approvals. The next acquire restarts it.\n(4) Each view still gets its own queue capacity, so one busy thread cannot fill another thread's queue.\n(5) Fold CodexStoredThreadReader into the owner, or keep it separate so reads do not contend with live turns.\n(6) Tests: two threads on one fake app-server (codexCollabMockPeer) with interleaved notifications. Stop on thread A must not interrupt thread B. Approvals route to the right thread. A process crash ends both sessions with session.exited. Collab children still group under the right parent.\n\nFor either option, measure RSS and the time from send to first token, with and without prewarm.",
+  "worth": "low",
+  "effort": "L",
+  "risk": "high",
+  "needsDecision": true,
+  "decisionReason": "Option B trades per-thread failure isolation for memory. With a shared process, one crashed or wedged codex app-server ends or blocks every Codex thread on the instance. AGENTS.md lists reliability first and says correctness and robustness win tradeoffs. Since prewarm already hides most of the latency, the remaining gain is mostly about 125 MiB RSS per concurrent thread. Someone needs to decide whether that memory justifies a shared failure domain, or whether the isolation-preserving standby (Option A) is enough.",
+  "repos": "ryco",
+  "correction": "Minor corrections, the NOT_DONE classification stands. (1) readStoredCodexThread is fully rerouted, not partly: it has no production callers and is used only in CodexCollabRuntime.integration.test.ts:99. CodexStoredThreadReader also serves skills/list since bb8d23c7c. (2) The auditor missed the session prewarm feature (440c42224, 65c7e6f2d, a8a683529, 3cbe9a677). It hides most of the spawn+initialize latency on composer-driven first turns, which lowers this finding's latency value further, while adding up to 4 speculative full app-server processes. (3) The auditor's sketch understates two blockers: the runtime classifies any foreign thread on its process as a collab child and interrupts it on Stop (CodexSessionRuntime.ts:1763-1800, 2373-2436), and the Codex client only allows one handler per server-request method with no way to remove notification handlers (packages/effect-codex-app-server/src/client.ts:94-95, 251-260). Risk is high, not medium. Codex has no computer-use lease (unlike OpenCode), so the proposal's 'dedicated process for computer-use' exception does not apply to Codex."
+}

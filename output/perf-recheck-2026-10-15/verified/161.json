@@ -1,0 +1,58 @@
+{
+  "id": "gap-right-panel-first-open:vscode-icons-third-party-cdn",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710). The jsdelivr CDN is gone. Icons now come from the app's own origin at /vscode-icons/v12.17.0/*.svg, and a slim generated lookup replaces the full manifest plus language-associations JSON: 128 KB on disk, a 90 KB raw / 24 KB gzip chunk, down from 285 KB. Opening, hovering or focusing the Files panel, its keyboard shortcut, and the idle preload (when Files is the hinted mode) all preload the resolver. I tried to refute this. I compared the new resolver with the old one over 6,026 inputs: every fileNames, fileExtensions and folderNames key and every language association, in both themes. There were 0 differences, so behaviour did not regress. All 1,121 icons the lookup can return are shipped, and a test enforces that. All six VscodeEntryIcon callers (file tree via ChangedFilesTree, composer menu, composer editor, timeline, markdown) go through the same hook. No other third-party CDN reference exists in apps/, packages/ or scripts/. The web build and server bundle copy the icons into dist/client, and the desktop app is served from the same static root. The Hub (vendors 7bc39eec3, which contains the fix) serves /vscode-icons/v*/ as explicitly immutable and brotli/gzip precompressed, under CSP img-src 'self'. That CSP would have blocked the old jsdelivr URLs on hosted. Only low-value hardening remains.",
+  "evidence": [
+    {
+      "location": "apps/web/src/vscode-icons.ts:32",
+      "note": "Base URL is `${import.meta.env.BASE_URL}vscode-icons/v${lookup.version}`, a same-origin, version-pinned path. Vite base defaults to '/', so the path is absolute on nested routes."
+    },
+    {
+      "location": "apps/web/src/vscode-icons.ts:1",
+      "note": "Imports only the slim vscode-icons-lookup.json. The old vscode-icons-manifest.json and language-associations JSON are deleted, and no source imports them."
+    },
+    {
+      "location": "apps/web/src/vscode-icons-lookup.json",
+      "note": "Old and new resolvers were run side by side on the f1be4abc7 manifest/associations against the current lookup: 6,026 file and folder inputs, dark and light, 0 differences. The light-theme default `_file_light`/`_folder_light` have an empty iconPath upstream, so dropping them from the lookup matches the old fallback to default_file/default_folder."
+    },
+    {
+      "location": "apps/web/src/vscode-icons.test.ts:65",
+      "note": "Test asserts every lookup icon exists under public/vscode-icons/v<version>. :59 asserts the URL is same-origin (no '://'). I reproduced it: 1,121 icons, 0 missing, 0 extra."
+    },
+    {
+      "location": "scripts/sync-vscode-icons.mjs:20",
+      "note": "Dev-time sync (root script `sync:vscode-icons`) generates the slim lookup and copies only the referenced SVGs and the MIT LICENSE into apps/web/public/vscode-icons/v<version> (:24). It needs no network at build or run time."
+    },
+    {
+      "location": "apps/web/src/workspacePanelPreload.ts:128",
+      "note": "preloadWorkspacePanel('files') calls preloadVscodeIconResolver(). Callers: ThreadWorkspacePanel.tsx:787/1315 (intent), useChatGlobalShortcuts.ts:126 (shortcut), ChatRightPanel.tsx:88/144 (open and idle with the hinted mode). The lookup chunk now loads alongside the surface chunk, not after listEntries."
+    },
+    {
+      "location": "apps/web/src/hooks/useVscodeIconUrl.ts:27",
+      "note": "preloadVscodeIconResolver shares the single in-flight import. The hook seeds state synchronously from loadedResolver, so tree rows paint icons on first render once the chunk is in."
+    },
+    {
+      "location": "apps/server/src/http.ts:120",
+      "note": "Ryco server: the broad basename regex marks all 1,121 icon names `public, max-age=31536000, immutable` (verified 0 misses). This is incidental: the regex predates f1be4abc7 (4864e68b7), is not path-based, and http.test.ts has no vscode-icons case."
+    },
+    {
+      "location": "ryco-hub:scripts/build-static-manifest.ts:33",
+      "note": "Hub origin/main: `immutablePath = /^(?:assets\\/|vscode-icons\\/v[^/]+\\/)/`. Icons are precompressed (br q11 + gzip 9) and covered by tests/http/static-assets.integration.test.ts:116-128. securityHeaders.ts:32 sets img-src 'self' data: blob:."
+    },
+    {
+      "location": "apps/server/scripts/cli.ts:195",
+      "note": "The server build copies apps/web/dist, which includes vscode-icons/v12.17.0 (1,122 files present in the current dist), into dist/client. Both the npm package and the desktop app therefore ship the icons."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defect or regression. The resolver output matches the old one exactly, every icon is shipped, and all callers are covered. Non-blocking hardening gaps: (1) Immutable caching of the icons on the Ryco server rests on the pre-existing heuristic regex at apps/server/src/http.ts:120, not on the version-pinned path, and no test covers it. If someone tightens that regex to Vite's real `-<8 chars>.` hash pattern, which it should be (it currently also marks non-hashed public files such as apple-touch-icon.png, favicon-96x96.png, web-app-manifest-*.png and mockServiceWorker.js immutable for a year), the icons would silently drop to no-cache. (2) The Ryco server only serves build-time .gz siblings for content-hashed Vite outputs (apps/web/src/viteBuild/precompressAssets.ts:31-43), so it serves icon SVGs uncompressed. Common icons are under 1 KB and unaffected, but a few rare ones are large (file_type_shellcheck.svg 249 KB, about 178 KB gz; file_type_lerna.svg 220 KB, about 65 KB gz). The Hub precompresses them. (3) apps/web/vercel.json sets no headers for /vscode-icons, but the hosted SPA is served by the Hub, so this looks legacy.",
+  "implementationSketch": "Optional hardening, none needed to close this finding. (a) In apps/server/src/http.ts resolveStaticCacheControl, add an explicit path rule mirroring the Hub (`/^(?:assets\\/|vscode-icons\\/v[^/]+\\/)/` means immutable) and narrow the basename hash heuristic to Vite's `-[\\w-]{8}\\.[a-z0-9]+$` pattern (share it with HASHED_ASSET_PATTERN in apps/web/src/viteBuild/precompressAssets.ts or move it to packages/shared/src/precompressedAssets.ts). Add http.test.ts cases: 'vscode-icons/v12.17.0/default_file.svg' gives immutable; 'apple-touch-icon.png' and 'favicon-96x96.png' give no-cache. (b) Optionally let createPrecompressedAssetsPlugin also emit .gz siblings for public/vscode-icons/v*/ files of at least 1 KiB (walk the outDir subtree in writeBundle, or generate siblings in scripts/sync-vscode-icons.mjs), so direct remote access gets compressed bodies for the few large icons. Running svgo during the sync is an alternative. Check the size budget in scripts/measure-web-bundle.ts. Low value: the large icons are rare and cached as immutable after the first fetch.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Pure static-asset caching and compression hardening in the Ryco server and web build. It does not touch auth, E2EE, hosted lifecycle ownership or the Hub protocol, and the Hub already handles the hosted path.",
+  "repos": "ryco"
+}

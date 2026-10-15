@@ -1,0 +1,51 @@
+{
+  "id": "mobile-boot:eager-screen-registration",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "correction": "DONE holds for the launch cost the finding describes. The auditor got two things wrong. (1) They said there were no functional defects, but the Thread prewarm does nothing. 1b8bfd183 (Oct 13, the day after #710) turned on Metro inlineRequires, so ThreadRouteScreen.preload() now evaluates only the 35-line wrapper module. ThreadDetailScreen and everything under it are still evaluated synchronously on the first thread tap, which the proposal wanted to avoid. (2) They said no test guards the launch graph. apps/mobile/src/perf/mobileStartupImports.test.ts:206-251 does: it checks the Stack.tsx and AppAccessGate imports and the lazyRouteScreens requires, and its index.ts graph walk asserts ThreadRouteScreen is not reachable. Minor: there are 23 lazy screens, not 22.",
+  "summary": "The launch-graph part is fixed. Stack.tsx and the locked stack in AppAccessGate now register all 23 non-Home screens through lazyScreen(), which defers a function-scoped require() to first render. My static walk from index.ts, resolved like Metro's iOS bundle, went from 633 repo files / 5,869 KiB at f1be4abc7 to 413 / 3,738 KiB. That drop also includes other #710 changes. None of the screen modules, shiki, @pierre/diffs, react-native-webview or expo-camera are still reachable, and mobileStartupImports.test.ts guards this. The defect is the proposed Thread prewarm. It was written when imports were evaluated eagerly. Since 1b8bfd183 turned on inlineRequires, preload() evaluates only ThreadRouteScreen.tsx: running Metro's importExportPlugin and inlineRequiresPlugin on it shows require(\"./ThreadDetailScreen\") inlined into the render function. So the first thread open after launch still evaluates the thread detail graph on the tap. Its static upper bound beyond the launch graph is 136 repo files / ~1.6 MiB of source, plus react-native-webview, expo-video, expo-file-system, @noble and cborg. The shiki highlighter prewarm does work, because it calls a function.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/Stack.tsx:20",
+      "note": "HomeRouteScreen is the only route screen imported statically. Every other screen comes from ./navigation/lazyRouteScreens (lines 21-45)."
+    },
+    {
+      "location": "apps/mobile/src/features/access/AppAccessGate.tsx:11",
+      "note": "The locked stack (lines 23-33) uses the lazy NativeIdentityScreen and ConnectionsNewRouteScreen, so the WebView and camera graphs are no longer evaluated at launch."
+    },
+    {
+      "location": "apps/mobile/src/navigation/lazyScreen.ts:24",
+      "note": "lazyScreen caches load() on first render or preload. preload() evaluates only the module the loader requires."
+    },
+    {
+      "location": "apps/mobile/src/navigation/lazyRouteScreens.ts:199",
+      "note": "The prewarm calls ThreadRouteScreen.preload(). Under inline requires this evaluates only the wrapper module. The comment at 186-194 still says the Thread route is warmed so the tap stays fast."
+    },
+    {
+      "location": "apps/mobile/metro.config.js:99",
+      "note": "inlineRequires: true, added in 1b8bfd183 after 60633eff3. Every module's imports are evaluated at their first use site, not at module evaluation."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/ThreadRouteScreen.tsx:5",
+      "note": "ThreadDetailScreen is imported here but only used inside the component (line 29). Running the Metro import-export and inline-requires plugins outputs `_jsx(require(\"./ThreadDetailScreen\").ThreadDetailScreen, ...)` inside the render function, so preload() never evaluates it."
+    },
+    {
+      "location": "apps/mobile/src/perf/mobileStartupImports.test.ts:206",
+      "note": "Guard tests the auditor missed: only Home is eager in Stack.tsx (206), AppAccessGate has no identity/connection imports (217), lazyRouteScreens has no static feature imports (222), and the graph walk asserts ThreadRouteScreen is not reachable from index.ts (248). The header comment at 12-13 ('no inline requires') is stale."
+    },
+    {
+      "location": "apps/mobile/src/features/home/HomeRouteScreen.tsx:9",
+      "note": "The prewarm is scheduled from Home's mount effect through requestIdleCallback, which RN 0.86 provides in both bridgeless and legacy modes."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The Thread route prewarm is a no-op. apps/mobile/src/navigation/lazyRouteScreens.ts:199 calls ThreadRouteScreen.preload(). Since 1b8bfd183 enabled inlineRequires (apps/mobile/metro.config.js:99), that evaluates only apps/mobile/src/features/threads/ThreadRouteScreen.tsx: its ThreadDetailScreen import (line 5) is inlined into the render function (line 29). The first thread open after launch therefore still evaluates the whole thread detail graph synchronously on the tap. The static upper bound is 136 repo source files / ~1.6 MiB beyond the launch graph, plus react-native-webview, expo-video, expo-file-system and the @noble/cborg packages. The code comment says this cost is moved into idle time, and it is not. lazyScreen.test.ts only checks that load() is called, so nothing catches this. Minor issues: ThreadRouteScreen.preload() runs inside an idle callback with no try/catch, while the shiki prewarm has .catch. The comment in mobileStartupImports.test.ts:12-13 still says Metro has no inline requires.",
+  "implementationSketch": "1) Measure first, on a release iOS build (Hermes): time from thread tap to the ThreadDetailScreen first commit, or count evaluated modules the way 1b8bfd183 did, with and without a working warm-up. 2) Make the prewarm actually evaluate the thread render graph. Preferred: add apps/mobile/src/features/threads/prewarmThreadRoute.ts exporting an ordered list of thunks. Each thunk does a function-scoped require of a heavy render-path module: ./ThreadDetailScreen, ./ThreadMessage, ./ThreadComposer, ../../native/SelectableMarkdownText, ./ThreadHtmlRender and HtmlRenderWebView (react-native-webview), the approval/user-input cards and the model/composer menus. Pick the modules from the profile. Each module's own imports stay inline-lazy, so list the heavy leaves explicitly. In scheduleWorkspaceRoutePrewarm, run the thunks a few per runWhenIdle slice, each in try/catch, then run the shiki warm-up. Alternative: return `inlineRequires: { blockList }` from getTransformOptions in metro.config.js. Metro 0.84 supports this (metro/src/lib/transformHelpers.js:99-103). Generate the blockList as absolute paths of the thread feature modules, so that requiring ThreadDetailScreen evaluates its imports eagerly again. That is less explicit, and any launch-path import of those files would become eager, so mobileStartupImports.test.ts must keep them out of the index.ts graph. 3) Tests: a unit test that every prewarm specifier resolves to an existing source file. Extend mobileStartupImports.test.ts so that no require target in lazyRouteScreens.ts and no prewarm module is reachable from index.ts (today only ThreadRouteScreen is asserted). Extend metroStartupConfig.test.ts if blockList is used. 4) Fix the stale comments at lazyRouteScreens.ts:186-194 and mobileStartupImports.test.ts:12-13.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is mobile client perf tuning only. It does not touch auth, E2EE, Hub protocol or hosted lifecycle ownership, and it has no product trade-off beyond when module evaluation happens.",
+  "repos": "ryco"
+}

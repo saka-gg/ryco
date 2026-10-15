@@ -1,0 +1,70 @@
+{
+  "id": "startup-hang:early-static-serving-desktop-overlap",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "I tried to refute the DONE classification and could not. All three proposal parts are on main at ec250e386. (a) One shared serveStaticRequest is used by both the router catch-all and the startup gate's early handler. Only GET non-upgrade requests for /, /index.html, /assets/* and root-level files are served early. (b) The Node backend writes an 'http-bound' frame after the early handler is installed. (c) Packaged desktop calls loadURL on that frame. The window exists by then, because startBackend opens it synchronously before any frame can arrive. The overlap also recovers from failures. The desktop HTTP readiness fallback probes /.well-known/ryco/environment, which stays held, so readiness is never reported early. Held API calls are released when the router attaches. Any held 503s are retried by the renderer for 15 s (502-504 and timeouts). If bind-to-ready takes 9 s or more, desktop reloads or reconnects the window. A backend that dies before serving sends early-loaded windows back to the boot page. The router has no middleware the early path skips (CORS is the only router-wide middleware, and the early handler adds it too). No router path is shadowed by the early allow-list. I found no regressions. Non-blocking notes: (1) No server-level test runs the real earlyStaticServingLayer. The gate tests use a stub early handler and test the predicates separately. (2) The saving is still unmeasured. #710 also moved provider drivers and the Hub connector after serving, so the runtime window to overlap is smaller than the 145-280 ms in the finding. (3) The Bun backend (desktop dev, which loads the Vite devUrl) has no gate or early serving. In non-desktop modes the browser opens at serving and / stays held on purpose. Both are outside this desktop finding.",
+  "evidence": [
+    {
+      "location": "apps/server/src/httpStartupGate.ts:122-146",
+      "note": "gateRequest calls the optional early handler while gated. A throwing or declining handler falls back to holding the request (256 max, 10 s, then 503)."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.ts:263-291",
+      "note": "The early allow-list is GET non-upgrade requests for /, /index.html, /assets/* (rejecting '..' and '\\') and root-level files with an extension. isEarlyStaticAssetRequest drops the document outside desktop mode."
+    },
+    {
+      "location": "apps/server/src/http.ts:852-940",
+      "note": "One serveStaticRequest holds the devUrl redirect, traversal checks, cache headers, desktop-loopback identity encoding and SPA fallback. It is the router catch-all at :940 and also the early path, so this security-sensitive logic exists only once."
+    },
+    {
+      "location": "apps/server/src/server.ts:249-299",
+      "note": "The gate is installed in the createServer callback before listen. earlyStaticServingLayer wraps serveStaticRequest with HttpMiddleware.cors through NodeHttpServer.makeHandler, sets the early handler (document too in desktop mode, assets only otherwise), clears it in a finalizer, and only then writes the 'http-bound' frame."
+    },
+    {
+      "location": "apps/server/src/server.ts:807-839",
+      "note": "Layer order: HttpServerLive (bind plus early serving) is built below RuntimeServicesLive, and HttpRouter.serve attaches last. The early path therefore runs for the whole runtime build. The router's only router-wide middleware is browserApiCorsLayer (:704), which the early handler also applies."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3035-3040",
+      "note": "On an 'http-bound' frame for the current readiness tracker and port, desktop calls loadPackagedBackendAppWindowOnBind."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1717-1793",
+      "note": "loadPackagedBackendAppWindow(…, 'bound') records an AppLoadRequest and runs loadURL from the boot page. returnEarlyLoadedWindowsToBootPage restores the boot page if the child dies before serving. It runs from handleChildGone at :3313."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3357-3367",
+      "note": "startBackend opens the bootstrap window synchronously, before any async lifecycle frame can arrive, so a window always exists at 'http-bound'."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1599-1608",
+      "note": "The desktop HTTP readiness fallback probes /.well-known/ryco/environment, which is never served early. Early serving cannot cause premature readiness."
+    },
+    {
+      "location": "apps/desktop/src/backendAppWindowLoad.ts:30-82",
+      "note": "At 'bound' a window loads only from the boot page or a blank window. A 'bound' load is not repeated at 'ready' unless it failed or 9 s or more passed (EARLY_APP_LOAD_MAX_HOLD_MS < the gate's 10 s), so 503s from a slow build are recovered."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:86-139",
+      "note": "The renderer retries bootstrap control-plane requests that fail with 502-504, abort/timeout or a network error for 15 s at 500 ms steps. A held request answered with the gate's 503 therefore recovers as soon as the router serves."
+    },
+    {
+      "location": "apps/server/src/httpStartupGate.test.ts:140-236",
+      "note": "Tests cover a stub early handler answering a static path while /api is held and then replayed, the allow/deny path lists (including traversal, /.well-known, /ws and deep links), and the asset-only predicate. No test runs the real earlyStaticServingLayer."
+    },
+    {
+      "location": "apps/desktop/src/backendAppWindowLoad.test.ts:39-95",
+      "note": "Tests cover the 'bound' load from the boot page only, no repeat at ready, the hold window lapsing, and a failed navigation re-arming the load."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "",
+  "implementationSketch": "Optional hardening only; nothing in the finding is left to do. Add one server-level test that builds HttpServerLive's earlyStaticServingLayer with a temp staticDir. It could live in apps/server/src/server.test.ts, or extract earlyStaticServingLayer into an exported helper in httpStartupGate.ts or server.ts. With config.mode='desktop' and the router not yet attached (as in the existing 'startup gate with the Effect Node HTTP server' test), check that: GET / and GET /assets/x-abcdefgh.js return 200 with the file bytes, Cache-Control and CORS headers; GET /api/auth/session stays held (gate.pendingCount()===1) and is answered by the router once it attaches; with a non-desktop mode, GET / is held. Optionally capture the desktop lifecycle channel and check that 'http-bound' is written after the early handler is installed. To measure the gain, compare desktop startup marks 'desktop.window.app.load-request reason=backend-bound' against 'desktop.backend.http-serving' and the renderer's first startup report on a cold launch.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Already implemented. The only optional follow-up is a test, which needs no product, security, hosted-lifecycle or Hub decision.",
+  "repos": "ryco"
+}

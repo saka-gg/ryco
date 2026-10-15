@@ -1,0 +1,55 @@
+{
+  "id": "persistence-boot:activities-kind-index",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Migration 085 (60633eff3) creates the full kind-led index idx_projection_thread_activities_kind_order(kind, thread_id, sequence, created_at, activity_id) and drops the redundant 008 index. It is registered, re-run as an idempotent post-ledger repair and covered by EXPLAIN guard tests. Nothing references the dropped index any more. On the user's real 9.8 GB DB (626,820 activities, migration 90, no sqlite_stat tables) EXPLAIN shows every whole-table kind query as SEARCH on the kind index. Opened read-only (immutable): actionable hydration 482 rows in about 1.5 ms, boot revert scan about 0.8 ms (covering index), statistics tool uses 55 ms for 121k tool.completed rows, and the token-activities projection branch also searches the kind index. The finding measured 69-168 ms, 53-103 ms and 100-577 ms warm. The only leftover is outside the finding's scope: a per-thread pending-request query on the provider history-repair path still walks the whole thread via the 029 index because of its ORDER BY. The optional longer-term step (deriving pending requests from projection_pending_approvals and projection_thread_user_input_requests) was not done and is not needed for the stated cost.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.ts:41",
+      "note": "CREATE INDEX IF NOT EXISTS idx_projection_thread_activities_kind_order ON (kind, thread_id, sequence, created_at, activity_id), then DROP INDEX IF EXISTS idx_projection_thread_activities_thread_sequence at :45. Idempotent early return at :35-40. Added in 60633eff3, the only commit touching the file."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations.ts:229",
+      "note": "[85, ProjectionThreadActivityKindIndex] is registered. The repair wrapper at :516-522 runs from runMigrations at :739-741, which covers a later id being recorded first. Per-boot cost is two sqlite_master lookups."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1247",
+      "note": "listActionableThreadActivityRows uses kind IN COMMAND_READ_MODEL_ACTIVITY_KINDS (:372-383) and is called from getCommandReadModel at :2752. Real DB plan: SEARCH USING INDEX idx_projection_thread_activities_kind_order (kind=?) + TEMP B-TREE FOR ORDER BY. 482 rows, about 1.5 ms."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1193",
+      "note": "The boot revert scan listCheckpointRevertActivityRows (kind = checkpoint.revert, :1211) is called by listPendingCheckpointReverts (:4461) from CheckpointReactor.recover (CheckpointReactor.ts:1516). Real DB plan: SEARCH a USING COVERING INDEX kind_order (kind=?) then SEARCH t by autoindex, under 1 ms. The per-thread variant at :1222 now uses kind_order (kind=? AND thread_id=?)."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:149",
+      "note": "On the real DB the tool-uses query (kind = 'tool.completed') uses the COVERING kind_order index plus a temp b-tree for GROUP BY: 55 ms over 121k rows. The context-window projection branch (:126) also searches kind_order, and its NOT EXISTS uses idx_orch_events_statistics_usage. Unit plan guards are at StatisticsQuery.test.ts:945/958 and 085 test :62-101."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.shell.test.ts:431",
+      "note": "This EXPLAIN guard captures the real hydration and revert SQL through a SqlStatement transformer. It asserts SEARCH ... kind_order (kind=?) and no SCAN of activities. The planner has no sqlite_stat1 in tests or in production (Sqlite.ts:53-54 deliberately skips ANALYZE/optimize), so the test plan matches production."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/085_ProjectionThreadActivityKindIndex.test.ts:23",
+      "note": "Tests the index swap, column order, unchanged index count, idempotence, that thread-only queries still search by thread_id, and the unscoped and scoped statistics plans."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1665",
+      "note": "The only INDEXED BY names the kept 029 index. A grep finds no remaining reference to the dropped 008 index outside 008 and 085. f1be4abc7 also only used INDEXED BY on 029, so older binaries running against a 085-migrated DB do not break."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1965",
+      "note": "Out-of-scope leftover, not a regression. listThreadPendingRequestActivityRows (kind IN PENDING kinds AND thread_id = ? ORDER BY sequence, created_at, activity_id) is planned on idx_..._thread_sequence_created_id (thread_id=?) to avoid a sort, so it walks the whole thread. On the user's largest thread (36,673 activities) it took 500 ms cold and 15 ms warm, versus 0.09 ms with INDEXED BY kind_order. Its only caller is getThreadHistoryRepairContext (:4426), used by provider history recovery."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects found. Cosmetic: two comments are stale now that the kind index exists. delegatedRunStatus.ts:34-37 says the provider.turn.start.cancelled lookup scans the thread's activities, but it now SEARCHes kind_order (kind=? AND thread_id=?). ProjectionSnapshotQuery.ts:1221 says thread_id = ? keeps the per-thread revert query on the thread index, but the planner now uses kind_order (kind=? AND thread_id=?). Both plans are faster than the comments imply.",
+  "implementationSketch": "Optional and low priority, beyond the finding. In ProjectionSnapshotQuery.ts listThreadPendingRequestActivityRows (:1965-1984), make the per-thread pending-request read use the kind index: either add `INDEXED BY idx_projection_thread_activities_kind_order`, or drop the ORDER BY and sort the few rows in JS (derivePendingThreadRequests input order must be preserved: sequence, created_at, activity_id). Extend the shell EXPLAIN guard test (ProjectionSnapshotQuery.shell.test.ts:431) to capture getThreadHistoryRepairContext's statement and assert SEARCH ... kind_order (kind=? AND thread_id=?). While there, update the stale comments at delegatedRunStatus.ts:34-37 and ProjectionSnapshotQuery.ts:1221. The longer-term idea of deriving pending approvals and user-input from projection_pending_approvals and projection_thread_user_input_requests is not needed for performance now, since actionable hydration is about 1.5 ms on a 626k-row DB.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local SQLite index and query-plan work only. It does not touch auth, E2EE, hosted lifecycle, the Hub protocol or product behaviour.",
+  "repos": "ryco",
+  "correction": "No correction to the auditor's DONE. Two additions. (1) The auditor's 'second path at :1980' is per-thread and runs only on provider history repair. Unlike the auditor's description, it does not use the kind index: the planner picks the 029 thread index to satisfy the ORDER BY, so on large threads it is 15 ms warm / 500 ms cold instead of under 1 ms. (2) The auditor did not check real-data plans. On the user's 626k-row production DB every whole-table kind query in the finding uses the new index, and boot hydration plus revert recovery together cost about 2 ms."
+}

@@ -1,0 +1,71 @@
+{
+  "id": "projects-loading:listrefs-six-spawns",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (60633eff3, #710). The six-process listRefs pipeline (branch, branch --remotes, remote, symbolic-ref origin/HEAD, worktree list, for-each-ref recency) is now one read-only `git for-each-ref --format=%(refname)%00%(committerdate:unix)%00%(HEAD)%00%(symref)%00%(worktreepath) refs/heads refs/remotes`. Remote names come from the shared 5 s config-snapshot cache, origin/HEAD comes from the symref field, and worktree paths are de-duplicated and stat'ed at concurrency 8. The parsed listing sits in a per-cwd 5 s cache, so pages, query variants and the several web pickers that call listRefs (BranchToolbar, NewThreadSourcePicker, NewWorktreeDialog, WorkItems, PR remote presence) share one read. Old helpers are gone (readBranchRecency, worktree-list parsing), and `git worktree list` survives only as a fallback for git without %(worktreepath). Repository detection before listRefs is cached in VcsDriverRegistry (2 min positive), so a cache hit costs no spawn. I checked behaviour: symref entries such as origin/HEAD are skipped, %(worktreepath) includes the main worktree (checked on git 2.55: main -> /Users/laurinfrank/Code/ryco), the sort order is unchanged, and hasPrimaryRemote is unchanged. Effect's Cache.invalidate removes the entry and does not re-insert an in-flight lookup, so a write cannot be masked by a read that started before it. Measured read-only on this repo (1,143 refs, 37 worktrees): the single for-each-ref takes 22-29 ms and `git config -z --list` about 9 ms, against the report's 63-85 ms for the old pattern. What is not met: the proposal's 'unchanged polls cost about 0' via packed-refs/refs mtime validation. The cache is a 5 s TTL, so each 60 s client poll per mounted controller still costs one for-each-ref, plus a config spawn if that snapshot expired. That is 1-2 spawns where there were 6. Getting it to 0 is low value and error-prone to do with mtimes.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:190-226",
+      "note": "LIST_REFS_FIELDS (refname, committerdate:unix, HEAD, symref, worktreepath), the NUL-separated format, and parseListedRefs."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2402-2413",
+      "note": "readListedRefs runs a single for-each-ref over refs/heads and refs/remotes (readOnly, 15 s timeout, 16 MiB output cap)."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2445-2456",
+      "note": "readBranchListing makes one call. The worktree list fallback (2416-2438) runs only on an 'unknown field name' error from old git."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2471-2486",
+      "note": "Remote names come from readConfigSnapshot (cached, 1145-1173) and the default branch from the origin/HEAD symref, so the `git remote` and `git symbolic-ref` spawns are gone. The config read is sequential after for-each-ref, which costs about 9 ms extra on a cold miss."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2489-2508",
+      "note": "Worktree paths are de-duplicated and stat'ed with Effect.forEach at concurrency 8, replacing the old sequential yield* stat inside the parse loop."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2594-2604",
+      "note": "branchListingCache (capacity 256, 5 s TTL, failures not cached), keyed by path.resolve(cwd). invalidateReadCaches clears it and the config cache. invalidateRefListing clears one key."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2606-2643",
+      "note": "listRefs serves filtering, dedupe and pagination from the cached listing. fetchOrigin fetches and then invalidates the key."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:1076-1082",
+      "note": "Every execute without readOnly runs invalidateAll on the config and branch caches for all repos. This is safe, but more than needed, because invalidation is tied to the GIT_OPTIONAL_LOCKS readOnly flag. Pure reads such as runGitStdout (1183-1191: readConfigValue 2241, listRemoteNames 1389, originRemoteExists 1384), branchExists (1205) and the status fetch (1268-1286, at most once per 15 s per watched repo) also clear every repo's listing."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1852-1887",
+      "note": "invalidateLocalStatus and invalidateStatus call gitCore.invalidateRefListing(cwd) after git actions and agent turns, which covers ref moves made outside the driver."
+    },
+    {
+      "location": "apps/server/src/git/GitWorkflowService.ts:418-427",
+      "note": "registry.detect runs before listRefs. It is cached (VcsDriverRegistry.ts:14-20: 2 min positive, 2 s negative), so no extra spawn per page."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.test.ts:461-576",
+      "note": "parseListedRefs unit test, plus effect tests that check one forEachRef across limit/cursor/query variants, a re-read after createRef, and a re-read after invalidateRefListing."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:105-107",
+      "note": "The client still uses a 15 s stale time, a 60 s poll and 100-item pages. Each poll per mounted controller is one server call, which is a cache hit within 5 s and otherwise 1 for-each-ref (plus about 1 config spawn)."
+    },
+    {
+      "location": "apps/web/src/rpc/gitAtoms.ts:224-229",
+      "note": "Stale comment that still says 'Each listRefs runs several git processes on the server'. Documentation only."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness bug in the fix. Minor gaps, none needing action now: (1) The proposal's mtime-validated cache is not implemented, so the 60 s poll is not free. Each mounted branches controller costs about 23 ms of for-each-ref (plus about 9 ms config if that snapshot expired) per minute, against about 70 ms before. (2) Cache invalidation is tied to the readOnly (GIT_OPTIONAL_LOCKS) flag, so pure reads that are not flagged readOnly (runGitStdout helpers, branchExists, originRemoteExists) and the periodic status fetch run invalidateAll across every repo's listing and config snapshot. This lowers the hit rate for later pages but never causes staleness. (3) On a cold miss, readConfigSnapshot runs after for-each-ref rather than alongside it, about 9 ms of avoidable latency. (4) The cache key is the cwd, not the gitCommonDir, so a branch an agent creates in worktree W invalidates only W's key. The project-root listing can lag by up to the 5 s TTL. This is bounded and deliberate. Out of scope and pre-existing since f1be4abc7: GitManager.ts:2035 and 2047 call gitCore.listRefs({ cwd }) with no limit, so paginateBranches truncates to 100 refs (GitVcsDriverCore.ts:250). In repos with more than 100 branches, PR worktree prep can miss an existing local PR branch. That belongs in a separate correctness item.",
+  "implementationSketch": "Optional polish, low priority. (a) In readBranchListing (GitVcsDriverCore.ts:2445), start readConfigSnapshot(cwd) concurrently with readListedRefs using Effect.all([...], { concurrency: 2 }), so a cold miss costs max(23, 9) ms rather than the sum. (b) Separate cache invalidation from the optional-locks flag: add an explicit `mayWrite`/`invalidatesReadCaches` option, or mark pure reads (readConfigValue, listRemoteNames, originRemoteExists, branchExists, rev-parse/ls-remote/merge-base helpers) readOnly. For the status fetch, invalidate only branch-listing keys that share its gitCommonDir. Test by extending the existing executeOverride test to assert that a readConfigValue call between two listRefs leaves the forEachRef count at 1. (c) Update the stale comment in apps/web/src/rpc/gitAtoms.ts:228. (d) Only if polls ever show up in profiles: before re-running for-each-ref on TTL expiry, compare a cheap fingerprint (stat mtime/size of <commonDir>/packed-refs, the reftable dir or tables.list, refs/heads and refs/remotes directory mtimes, and the per-worktree HEAD) and extend the TTL on a match. Recursive loose-ref subdirectories and worktree-existence changes make this fragile, so it is not recommended now.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local git read caching only. No auth, E2EE, Hub protocol or hosted lifecycle impact.",
+  "repos": "ryco",
+  "correction": "Nothing material. The auditor's evidence and line numbers match the current code. Two additions: the readOnly-coupled global invalidation (non-readOnly pure reads and the 15 s status fetch clear every repo's listing), and the sequential config read on a cold miss. Both are efficiency nits, not defects, and the DONE classification stands."
+}

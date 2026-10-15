@@ -1,0 +1,58 @@
+{
+  "id": "startup-hang:mark-http-listening-races-serve",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "I tried to refute the auditor and could not. The fix holds on the current code. The old `httpListeningLayer` sat in `Layer.mergeAll` beside `HttpRouter.serve`, so it built at the same time as serve. Commit 60633eff3 (#710) replaced it with `httpServingLayer`, which receives the serve layer through `Layer.provide`. In effect 4.0.2, `Layer.provide` (via `provideWith`) builds the provided layer fully, then builds the dependent layer. The serve layer only finishes after `HttpServer.serve` returns, and on both Node and Bun that call attaches the request/upgrade handlers synchronously at its end. So `markHttpServing`, and with it 'startup http listener ready', the `ready` publish, headless pairing output and browser open, now always follow handler attachment and the 'Listening on' log. Nothing else calls the mark; the only other `markHttpServing` references are test mocks. Desktop also treats the `http-serving` frame, written in the same post-serve layer, as its authoritative readiness signal. In 11bfda63e, Hub connector construction moved after the mark: it is forked and does not block the layer. Hub routes wait for `HubConnectorReady`, and the headless output reads the Hub origin from config only, so this does not reintroduce the race. One related point, outside the finding's scope: the proposal deliberately left `tailscaleServeLayer` concurrent. On a first boot with Tailscale Serve enabled, the headless output may probe the MagicDNS HTTPS endpoint before `ensureTailscaleServe` has finished. The link would then be left out, or a loopback-only server would print a loopback connection string. That is low value, a trade-off rather than a defect of this fix.",
+  "evidence": [
+    {
+      "location": "apps/server/src/server.ts:715-728",
+      "note": "`httpServingLayer` writes the `http-serving` desktop frame, calls `startup.markHttpServing`, then forks `hubConnector.start`. A comment says it is built after `HttpRouter.serve`."
+    },
+    {
+      "location": "apps/server/src/server.ts:804-815",
+      "note": "`httpServingLayer.pipe(Layer.provide(HttpRouter.serve(makeRoutesLayer,...).pipe(Layer.provideMerge(HubConnectorDeferredLive))))` is the shape the proposal asked for. `runtimeStateLayer` and `tailscaleServeLayer` stay in `mergeAll`, as the proposal said."
+    },
+    {
+      "location": "node_modules/.bun/effect@4.0.2/node_modules/effect/src/Layer.ts:1951-1970",
+      "note": "`provideWith` does `flatMap(that.build(...), ctx => self.build(...))`, so the dependent mark layer is built strictly after the serve layer has finished building."
+    },
+    {
+      "location": "node_modules/.bun/effect@4.0.2/node_modules/effect/src/http/HttpRouter.ts:1340-1396",
+      "note": "`serve` builds the app layer, then `Layer.merge(HttpServer.serve(handler), ...)`, then `withLogAddress`. Its build completes only after `server.serve` returns and the address is logged."
+    },
+    {
+      "location": "node_modules/.bun/@effect+platform-node@4.0.2+8fabb152f7781780/node_modules/@effect/platform-node/src/NodeHttpServer.ts:172-198",
+      "note": "Node `serve` calls `server.on('request'/'upgrade')` synchronously at the end of the serve effect. Bun's `BunHttpServer.ts:224-226` likewise does `handlerStack.push` plus `server.reload` synchronously."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1032-1141",
+      "note": "The startup fiber awaits the `httpServing` Deferred before it logs 'startup http listener ready', publishes `ready`, prints headless output and opens the browser."
+    },
+    {
+      "location": "apps/server/src/serverRuntimeStartup.ts:1153-1158",
+      "note": "`markHttpServing` (renamed, as the proposal asked) resolves `httpServing` and releases the provider boot gate. It is the only producer; the other references are test mocks (server.test.ts:1004, threadFork.fixtures.ts:238)."
+    },
+    {
+      "location": "apps/desktop/src/backendStartup.ts:5,94",
+      "note": "Desktop treats only the `http-serving` frame, written in the post-serve layer, as authoritative backend readiness."
+    },
+    {
+      "location": "apps/server/src/hubConnector/HubConnectorDeferred.ts:62-80",
+      "note": "`start` only forks the connector build (it is not awaited in the layer), and Hub routes await `HubConnectorReady`. Moving it after the mark (11bfda63e) keeps the guarantee that requests are served or held, not dropped."
+    },
+    {
+      "location": "apps/server/src/startupAccess.ts:259-285",
+      "note": "Headless output reads the Hub origin from config only, so it does not depend on the connector. It does call `registry.list`, which probes the Tailscale MagicDNS URL live (AdvertisedEndpointRegistry.ts:164-176). That is the related, out-of-scope `tailscaleServeLayer` concurrency."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None verified. Minor gaps: (1) No test asserts the layer ordering in server.ts, meaning that `markHttpServing` runs only after handlers are attached. A future refactor that moves `httpServingLayer` back into `mergeAll` would pass every existing test. (2) Out of scope by the proposal's own terms: `tailscaleServeLayer` still builds alongside the mark. On a first boot with `--tailscale-serve`, the headless pairing output can probe the MagicDNS HTTPS endpoint before `ensureTailscaleServe` finishes, which leaves out the Tailnet link or falls back to a loopback connection string.",
+  "implementationSketch": "Optional hardening, not required to close this finding. Add a server.test.ts case that builds the `makeServerLayer` composition, or a reduced copy of it, with a stub `ServerRuntimeStartup` whose `markHttpServing` records `server.listenerCount('request') > 0`, or records the order against a fake `HttpServer.serve`. Assert that handlers were attached when the mark ran. If the Tailscale point ever matters, make the headless-output branch of the startup fiber wait for the Tailscale Serve layer: expose a Deferred, or put `tailscaleServeLayer` into the `Layer.provide` list of `httpServingLayer` so the mark follows it. Note that this delays readiness by the `tailscale` CLI call; that is a product trade-off.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Nothing remains for this finding. The optional Tailscale ordering tweak would trade readiness latency for pairing-output completeness, but it is out of scope.",
+  "repos": "none"
+}

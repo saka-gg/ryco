@@ -1,0 +1,62 @@
+{
+  "id": "projects-loading:identity-probe-windows-shell-unquoted-paths",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The reliability half is fixed. Since 60633eff3 the identity probe runs git through VcsProcess with no shell and with the root as cwd, so Windows roots with spaces resolve, and a test covers that case. The auditor's other claim is wrong for Windows: 'no cmd.exe, so the extra process-creation cost is gone'. VcsProcess adds an unconditional child.kill() finalizer (VcsProcess.ts:132). On win32, Effect's Node spawner turns every kill into an awaited `taskkill /pid N /T /F`, even after the process has already exited. So each probe still spawns a second process: taskkill.exe instead of cmd.exe. It now runs after git rather than alongside it, inside the git-pool slot and the 1 s probe timeout. A non-zero exit, such as rev-parse in a folder that is not a repo, costs two more taskkill runs: the spawner's release and its exit listener. Running taskkill /T /F against an exited PID cannot find that process's tree, and if Windows has reused the PID it can kill an unrelated process tree. Identity probes are now rare, because the same commit gated them behind a stat fingerprint and a 30-minute sweep. The identity-specific cost is therefore small, but the same redundant finalizer adds a taskkill to every VcsProcess git command on Windows.",
+  "evidence": [
+    {
+      "location": "apps/server/src/project/Layers/RepositoryIdentityResolver.ts:105-136",
+      "note": "makeGitIdentityProbe runs vcsProcess.run({command:'git', args, cwd}) with no `-C <root>`. A failure or timeout maps to null. The comment names the Windows shell/space bug."
+    },
+    {
+      "location": "apps/server/src/project/Layers/RepositoryIdentityResolver.ts:141-158",
+      "note": "`rev-parse --show-toplevel` runs with cwd=root and `remote -v` with cwd=cacheKey, so the path never goes into argv. Reliability bug fixed."
+    },
+    {
+      "location": "apps/server/src/project/Layers/RepositoryIdentityResolver.test.ts:260",
+      "note": "A test 'resolves roots whose path contains spaces' exists. It runs on POSIX only, but the design change makes the result independent of the platform."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsProcess.ts:111-120",
+      "note": "ChildProcess.make(command, args, {cwd, env}) sets no `shell`. buildSpawnOptions (apps/server/node_modules/@effect/platform-node-shared/src/internal/nodeChildProcessSpawner.ts:13) passes `shell: options.shell`, which is undefined, i.e. false. No cmd.exe."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsProcess.ts:132",
+      "note": "`Effect.addFinalizer(() => child.kill().pipe(Effect.ignore))` is unconditional and runs on every scope close, including normal completion after exit."
+    },
+    {
+      "location": "apps/server/node_modules/@effect/platform-node-shared/src/NodeChildProcessSpawner.ts:99-108,396-418,478-498",
+      "note": "handle.kill is terminateProcessGroup, which always calls signalGroup. On win32, killProcessGroup is an awaited execFile('taskkill', ['/pid', pid, '/T', '/F']). There is no is-running check, so an exited child still costs a taskkill.exe spawn and wait. Effect 4.0.2. The repo patch to this package only touches fd sinks."
+    },
+    {
+      "location": "apps/server/node_modules/@effect/platform-node-shared/src/NodeChildProcessSpawner.ts:548-573",
+      "note": "On exit 0 under win32 the spawner's own acquireRelease release deliberately skips the group kill, and VcsProcess's finalizer defeats that. On a non-zero exit the release (awaited) and the 'exit' listener (fire-and-forget) each run taskkill as well, so a failed probe means git plus three taskkill runs. The release already kills a child that is still running, which makes the VcsProcess finalizer redundant."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsProcess.ts:214-217",
+      "note": "Scope close, and with it the taskkill finalizer, happens inside governChildProcess and Effect.timeoutOption. taskkill latency holds a git-pool slot and counts toward the 1000 ms identity probe timeout (RepositoryIdentityResolver.ts:97)."
+    },
+    {
+      "location": "apps/server/src/project/repositoryIdentitySync.ts:1-8,43",
+      "note": "Identity is now persisted. Probes run only when a stat-based git-config fingerprint changes, with a 30-minute sweep, so the '2 probes per project per 60 s' cadence no longer applies. Same commit, 60633eff3, so no stale nulls from the old buggy code were persisted."
+    },
+    {
+      "location": "apps/server/src/processRunner.ts:44-48,187-198",
+      "note": "quoteWindowsShellArgument quotes only arguments that contain whitespace or are empty. Arguments without whitespace that contain cmd metacharacters (`&|<>^()`, e.g. `C:\\R&D\\proj`) and the command path itself are not quoted. This does not affect identity any more and only matters for other runProcess callers that keep shell:true."
+    },
+    {
+      "location": "apps/server/src/imports/claudeNativeFork.ts:39-41",
+      "note": "Out of scope, but the same bug class. runProcess(process.execPath, ['--input-type=module', '-e', <multi-line script>]) uses the default Windows shell:true. An unquoted `C:\\Program Files\\...` execPath and a multi-line script both break under cmd.exe. It should pass shell:false."
+    }
+  ],
+  "remaining": "Of the finding's two claims, only the process-cost one is not met. apps/server/src/vcs/VcsProcess.ts:132 kills the child unconditionally when the scope closes. On Windows this spawns and awaits `taskkill /pid N /T /F` after every git command, the identity probes included, even after the process has exited. A probe therefore still costs two processes (git plus taskkill, now serial and inside the governor slot and the 1 s timeout) instead of the old cmd.exe plus git. A non-zero exit costs two more taskkill runs from Effect's own spawner (NodeChildProcessSpawner.ts:553-571). Running taskkill /T /F on an exited PID is pure overhead, and if Windows has reused the PID it kills an unrelated tree. Probes are now fingerprint-gated, so the identity share is small. The finalizer adds the cost to every VcsProcess git call on Windows.",
+  "fixDefects": "The fix routes the probe through VcsProcess. On win32, VcsProcess's redundant unconditional `child.kill()` finalizer (VcsProcess.ts:132) replaces the cmd.exe the fix removed with an awaited taskkill.exe after each command, plus two more taskkill runs on non-zero exits from @effect/platform-node-shared 4.0.2. Smaller caveats outside the identity path: quoteWindowsShellArgument does not quote metacharacter-only arguments (`&`, `^`, `|`, `<`, `>`) or the command itself, and leaves arguments containing `\"` as they are. filesystem.ts:238-299 (git) and claudeNativeFork.ts:39 (execPath with a multi-line -e script) still use the default Windows shell:true. claudeNativeFork is likely broken outright on Windows. The optional combined `rev-parse --show-toplevel --git-common-dir` / `git config -z` probe was not adopted, and the fingerprint gating makes it largely moot.",
+  "implementationSketch": "1) apps/server/src/vcs/VcsProcess.ts:132: delete the `Effect.addFinalizer(() => child.kill()...)` line. The spawner's acquireRelease release (NodeChildProcessSpawner.ts:550-565) already terminates a referenced child that is still running when the scope closes, which covers interruption and Effect.timeoutOption. VcsProcess never unrefs. If an explicit intent is preferred, guard it instead: `Effect.addFinalizer(() => child.isRunning.pipe(Effect.flatMap((running) => running ? child.kill() : Effect.void), Effect.ignore))`. 2) Optional, larger: extend patches/@effect%2Fplatform-node-shared@4.0.2.patch (both src and dist) so that on win32, when the leader has already exited, the release branch (`code !== 0`) and the 'exit' listener's killProcessGroupOnExit skip taskkill. /T cannot walk the tree of a dead PID, and the PID may have been reused. Keep the POSIX behaviour. 3) Optional cleanup: pass `shell: false` for the git calls in apps/server/src/storage/filesystem.ts:238-299 and for process.execPath in apps/server/src/imports/claudeNativeFork.ts:39. Extend quoteWindowsShellArgument to also quote arguments containing `&|<>^()`. Tests: add a VcsProcess unit test with a stub ChildProcessSpawner whose handle counts kill() calls. Assert there is no kill after a normal exit (exit 0 and exit 1) and exactly one terminate on timeout or interrupt. Keep the RepositoryIdentityResolver tests, including 'resolves roots whose path contains spaces', and run the vcs and project tests (`bun run test` filtered to apps/server/src/vcs and apps/server/src/project). A manual Windows smoke check (Process Monitor, or counting taskkill.exe launches while polling git status) would confirm the saving.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is a process-lifecycle cleanup inside the server VCS process wrapper. It touches no auth, E2EE, hosted lifecycle or Hub code, and changes no product behaviour. The Effect patch is optional and follows the repo's existing patch mechanism.",
+  "repos": "ryco"
+}

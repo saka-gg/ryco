@@ -1,0 +1,62 @@
+{
+  "id": "projects-loading:pr-lookup-heavy-fields-per-worktree",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The auditor is right about the main GitHub path. #710 (60633eff3) added the lean GITHUB_PULL_REQUEST_SUMMARY_LIST_JSON_FIELDS set and a per-repository PR index (Effect Cache: single-flight, 60 s TTL, 10 s on failure). Status, refSummary (sidebar badges) and worktree discovery all use it, and a lean per-branch query runs only as a fallback. GitLab and Azure are also fine. But proposal item 3 (other providers) is not correctly done, and the auditor missed it. (a) Bitbucket regression: Bitbucket caps pagelen at 50, and the index marks a listing complete when items.length < 100. A 50-row Bitbucket page therefore always counts as complete, the open listing and per-branch fallback never run, and in a repo with 50+ PRs any branch whose PR is not among the 50 most recently updated shows no PR (status, sidebar badge, worktree discovery). Before the change, the per-branch query filtered server-side on source.branch.name and found it. (b) Forgejo: the index's repo-wide listing (empty headSelector) takes the page-list path. That path ignores includeStackSummary:false and fields:'summary' and runs withRowReadiness: up to 50 /commits/{sha}/status reads per index refresh, at concurrency 6, behind a 20 s row cache that has expired by each 60 s refresh. So the Forgejo index listing is heavier than the old per-branch lists. Forgejo also caps at 50, so it has the same complete-flag mislabel. That one is not a regression, because the old per-branch path already filtered only the 20 newest PRs client-side.",
+  "evidence": [
+    {
+      "location": "apps/server/src/sourceControl/pullRequestIndex.ts:79-92",
+      "note": "Index listing: headSelector '', limit PULL_REQUEST_INDEX_LIMIT (100), includeStackSummary false, fields 'summary'. complete = items.length < 100, regardless of the page size the provider actually honours."
+    },
+    {
+      "location": "apps/server/src/sourceControl/pullRequestIndex.ts:180-185",
+      "note": "When the 'all' listing is complete, the lookup resolves at once with recentMatch (possibly null). The open listing and per-branch fallback are skipped."
+    },
+    {
+      "location": "apps/server/src/sourceControl/BitbucketApi.ts:1127",
+      "note": "pagelen = min(limit ?? 20, 50) and no pagination is followed. A 100-limit index read returns at most 50 rows, so complete is always true. The old per-branch path (line 1122) filtered server-side with source.branch.name = \"X\" and found PRs of any age."
+    },
+    {
+      "location": "apps/server/src/sourceControl/ForgejoApi.ts:48",
+      "note": "DEFAULT_PAGE_LIMIT = 50. clampLimit (576-577) caps every list at 50, which gives the same always-complete mislabel. The old per-branch path filtered the newest 20 client-side (1089-1094), so this part is not a regression."
+    },
+    {
+      "location": "apps/server/src/sourceControl/ForgejoApi.ts:1069-1096",
+      "note": "An empty head selector means pageList=true, which runs page.withRowReadiness(input, list) on the index listing. ForgejoSourceControlProvider.ts:199-209 does not forward includeStackSummary or fields."
+    },
+    {
+      "location": "apps/server/src/sourceControl/ForgejoPullRequestPageApi.ts:581-617",
+      "note": "withRowReadiness reads the head commit status for up to FORGEJO_ROW_STATUS_MAX (50, line 202) open rows at READ_CONCURRENCY 6. The shared read TTL is 20 s (line 198), so every 60 s index refresh re-reads them. Status reads never use this readiness data."
+    },
+    {
+      "location": "apps/server/src/sourceControl/GitHubSourceControlProvider.ts:588-598",
+      "note": "On GitHub, fields==='summary' uses the lean set with no statusCheckRollup retry. The core of the finding is fixed here."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1221-1281",
+      "note": "findLatestPrInIndex resolves from the index first. The per-head-selector fallback runs only when the index is unresolved, and it uses fields:'summary' and limit 20. At line 1232 an index read error becomes null, which leads to a per-branch fallback."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:354-355",
+      "note": "discoverPullRequest = refSummary(cwd).pr, which goes through findLatestPr and the index, not a full remoteStatus."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.ts:1861-1873",
+      "note": "invalidateRemoteStatus drops the whole repository index. VcsStatusBroadcaster.ts:495 calls it on every explicit refresh and on every opt-in remote poll (gitStatusPollIntervalMs, default 0), so the 60 s sharing is defeated while polling is enabled."
+    },
+    {
+      "location": "apps/server/src/git/GitManager.test.ts:1576-1625",
+      "note": "Index tests cover only GitHub (gh). No test covers Bitbucket or Forgejo listing caps or Forgejo readiness on the index path, and pullRequestIndex.ts has no unit test file."
+    }
+  ],
+  "remaining": "Forgejo index listing is not lean. ForgejoSourceControlProvider.ts:199-209 and ForgejoApi.ts:1069-1096 run page.withRowReadiness on the index's repo-wide list, ignoring includeStackSummary:false and fields:'summary'. That adds up to 50 commit-status requests per index refresh (ForgejoPullRequestPageApi.ts:581-617).",
+  "fixDefects": "1) Correctness regression (Bitbucket): pullRequestIndex.ts:91 sets complete = items.length < 100, but BitbucketApi.ts:1127 caps pagelen at 50 with no pagination. Every Bitbucket index listing is therefore 'complete', and lookupIndexedChangeRequest (pullRequestIndex.ts:183-185) resolves with match null (or an older finished match) for any branch whose PR is outside the 50 most recently updated. The branch then loses its PR in status, sidebar badge and worktree discovery, whereas the pre-index per-branch query (server-side source.branch.name filter) found it. Forgejo has the same mislabel (ForgejoApi.ts:48/576, cap 50). That is not a regression there, but it means the 'open' listing is never consulted. 2) Minor: when the index read fails (offline, no auth), GitManager.ts:1232 maps the failure to null, so every branch still runs 1-3 failing per-branch calls; the 10 s failure TTL protects only the index call. 3) Minor and opt-in: with gitStatusPollIntervalMs > 0, each full-status poller's invalidateRemoteStatus (GitManager.ts:1861-1873, via VcsStatusBroadcaster.ts:495) drops the shared index every tick. In repos with 100+ PRs, a branch without a recent PR then costs an all-list, an open-list and 1-3 per-branch calls per poll, against 1-3 per-branch calls before.",
+  "implementationSketch": "A) Provider-aware completeness. Add an optional `listLimitCap?: number` to SourceControlProviderShape: Bitbucket 50, Forgejo 50, GitHub/GitLab/Azure unset or 100. Expose it through bindProviderContext in SourceControlProviderRegistry. In pullRequestIndex.ts listIndex, use `const limit = Math.min(PULL_REQUEST_INDEX_LIMIT, provider.listLimitCap ?? PULL_REQUEST_INDEX_LIMIT)`, pass it as the limit, and set `complete: items.length < limit`. Forgejo servers can cap below 50 (MAX_RESPONSE_ITEMS), so a stricter alternative is to have Bitbucket return `next` and Forgejo return the Link or X-Total-Count header, and mark complete only when there is no next page. With completeness fixed, Bitbucket falls back to the 'open' listing and then to the server-side source.branch.name per-branch query, which restores correctness. Optionally make Forgejo's per-branch fallback useful by querying GET /repos/{owner}/{repo}/pulls/{base}/{head} or by paginating. B) Lean Forgejo index listing. In ForgejoSourceControlProvider.listChangeRequests, forward `readiness: input.includeStackSummary !== false && input.fields !== 'summary'` into forgejo.listPullRequests. In ForgejoApi.listPullRequests, call page.withRowReadiness only when pageList && readiness; it is fine to keep sharedPullRequest.remember. C) Optional: in findLatestPrInIndex, propagate the index read error, or skip the per-branch fallback when the index failed within the failure TTL, instead of mapping it to null. Optional: let poll-driven refreshRemoteStatus invalidate the per-cwd remote status only and let the index's 60 s TTL govern, keeping the full index drop for explicit user refreshes, git actions and agent turns. Tests: pullRequestIndex unit test where a fake provider with listLimitCap 50 returns 50 rows, asserting complete=false and that the open listing is read. GitManager or Bitbucket integration test with 50 unrelated recent PRs plus an older open PR on the branch, asserting the PR is found. Forgejo provider test asserting that listChangeRequests({headSelector:'', includeStackSummary:false, fields:'summary'}) makes no /commits/{sha}/status requests.",
+  "worth": "medium",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Internal server-side change: provider list caps and skipping unused enrichment. No auth, E2EE, Hub protocol or product trade-off is involved.",
+  "repos": "ryco"
+}

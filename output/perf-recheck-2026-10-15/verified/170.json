@@ -1,0 +1,55 @@
+{
+  "id": "gap-composer-pickers:check-ignore-redundant",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Fixed in 60633eff3 (#710), which is in HEAD and in the Hub's vendored 7bc39eec3. GitVcsDriver.listWorkspaceFiles now runs `ls-files --cached`, `ls-files --cached --ignored --exclude-standard` and `ls-files --others --exclude-standard` concurrently and subtracts the tracked-but-ignored set. WorkspaceEntries no longer calls filterIgnoredPaths/check-ignore anywhere, and the K-chunk retry is gone. The old readdir-walk fallback inside a work tree, which also ran check-ignore (old line 479), was removed too. A failed full listing now falls back to one cheap tracked-only listing. listWorkspaceFiles has a single production caller (WorkspaceEntries), and git is the only registered VcsDriver, so no other path still pays for check-ignore. I ran a read-only equivalence check on this repo: old pipeline (ls-files -co then check-ignore) and new pipeline (-c minus -ci, plus -o) both gave 7678 paths, as identical sets.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:552-588",
+      "note": "listWorkspaceFiles: three concurrent ls-files runs (Effect.all, concurrency unbounded, fail-fast). Tracked paths in the --cached --ignored set are dropped and adjacent unmerged-stage duplicates are deduped. trackedOnly skips the untracked walk."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:528-547",
+      "note": "listVcsIndex passes driver.listWorkspaceFiles output straight to indexListedFiles. No check-ignore step."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:668-688",
+      "note": "buildWorkspaceIndex: if the full listing fails, it retries once with the tracked-only listing (2 cheap ls-files runs), replacing the old filterVcsIgnoredPaths K-chunk retry (old 359-362)."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.ts:59-64,859-885,889-903",
+      "note": "Two-phase build exists, but only as a deadline fallback. Readers wait up to WORKSPACE_INDEX_COLD_BUILD_DEADLINE_MS = 4000 for the full build, and only then is a tracked-only stand-in listed and published. It is not the proposal's 'answer first from ls-files -c (~30 ms), then merge -o'."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:318",
+      "note": "WORKSPACE_FILES_MAX_OUTPUT_BYTES is 32 MiB per ls-files run (raised from 16 MiB in the same commit), not 16 MiB as the auditor said."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.ts:348,631-676; apps/server/src/vcs/VcsDriver.ts:34",
+      "note": "filterIgnoredPaths and chunkPathsForGitCheckIgnore remain as dead API. Their only callers are tests and VcsDriverContractHarness.ts:141,158."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriver.listWorkspaceFiles.test.ts:33-74",
+      "note": "Real-git test: a tracked file under a newly ignored dir (generated/stale.json) is excluded in both full and trackedOnly modes."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.test.ts:220-237",
+      "note": "This contract test uses `.convex/`, which IGNORED_DIRECTORY_NAMES (WorkspaceEntries.ts:84-94) already strips by first segment. It would pass even without the -ci subtraction, so only the driver-level test exercises git-ignore subtraction."
+    },
+    {
+      "location": "apps/server/src/workspace/Layers/WorkspaceEntries.index.test.ts:400-480",
+      "note": "Covers the deadline stand-in, its replacement once the full build lands, and the tracked fallback when the full listing fails."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects found. Minor notes, none blocking:\n(1) The auditor's 'matches the optional proposal part' overstates it. The tracked-only stand-in only starts after the 4 s cold-build deadline (WorkspaceEntries.ts:64,889-903), so the report's 'first results in about 30 ms' is not realized for normal repos. The first cold '@' still waits for the untracked walk (~45-50 ms here, ~165-210 ms at 60k files). It is still well below the old check-ignore cost, and the proposal marked this part optional.\n(2) Past the deadline, startDegradedBuild re-spawns `ls-files --cached` and `--cached --ignored` (WorkspaceEntries.ts:878 -> GitVcsDriver.ts:562-563), although the still-running full build has usually already finished those two runs. That is two redundant processes, only on >4 s cold builds.\n(3) The output cap is 32 MiB, not 16 MiB. A truncated `--cached --ignored` run could leak a few ignored tracked paths, which is negligible.\n(4) The WorkspaceEntries-level test 'excludes tracked paths that match ignore rules' is weak: `.convex` is already in IGNORED_DIRECTORY_NAMES.\n(5) filterIgnoredPaths and chunkPathsForGitCheckIgnore are dead outside tests.",
+  "implementationSketch": "Nothing required for this finding. Optional cleanups:\n(a) Remove filterIgnoredPaths from VcsDriverShape (VcsDriver.ts:34), GitVcsDriver.ts (filterIgnoredPaths, chunkPathsForGitCheckIgnore, GIT_CHECK_IGNORE_MAX_STDIN_BYTES) and the test stubs (server.test.ts:632,3814; VcsProvisioningService.test.ts:50; WorkspaceEntries.index.test.ts:58). Replace the contract harness 'ignored path filtering' block with a listWorkspaceFiles case for tracked-but-ignored files.\n(b) Change WorkspaceEntries.test.ts:220-237 to use a directory name not in IGNORED_DIRECTORY_NAMES (e.g. `generated/`), so the layer test actually exercises the -ci subtraction.\n(c) If a faster first cold answer is wanted, build `--cached` and `--cached --ignored` once inside listWorkspaceFiles and expose them through an optional `onTracked` callback, or a two-stage result. buildWorkspaceIndex would publish a tracked stand-in immediately, or at a short deadline such as 250 ms, instead of re-spawning at 4 s. Test with WorkspaceEntries.index.test.ts TestClock cases. This trades a flicker of partial results for latency, which is a UX choice.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The core fix is a pure process-spawn optimization with an equivalent result set. Only optional item (c), serving tracked-only results immediately and then swapping in the full set, would be a product UX trade-off. It is not needed to close this finding.",
+  "correction": "Status and core conclusion are right. Two details are off. (1) The output cap is 32 MiB, not 16 MiB. (2) The two-phase build does not match the optional proposal: it is a 4 s deadline fallback, not an immediate ~30 ms tracked-first answer, and the fallback re-spawns two ls-files runs the full build has already done. Also, the cited WorkspaceEntries contract test (`.convex/`) passes from IGNORED_DIRECTORY_NAMES alone. Only GitVcsDriver.listWorkspaceFiles.test.ts truly covers the tracked-but-ignored subtraction.",
+  "repos": "ryco"
+}

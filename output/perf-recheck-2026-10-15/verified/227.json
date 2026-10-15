@@ -1,0 +1,57 @@
+{
+  "id": "hub-connection:e2ee-handshake-noble-cpu",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE, and now measured. #710 (60633eff3) shipped proposal (a): a once-per-process warmE2eePrimitives(), scheduled in an idle callback when the hosted account becomes authenticated. It also shipped proposal (c), in a more general form: a 128-entry MRU memo of true verdicts inside the single verifyE2eeSignature choke point. In fresh Node 24 (V8) processes, the handshake primitive set (2 keygen + 2 DH + 2 strict Ed25519 verifies) took 21-24 ms cold and 4.7-4.9 ms after the warm-up. The warm-up's own ~20 ms runs off the connect path. A memoized repeat verify took 0.12-0.27 ms against ~1.1 ms for a miss. The web hosted runtime is the only web path that runs the NX handshake, and every signature check goes through the memoized choke point. Only the optional WebCrypto fast path (b) is missing. It would save a few ms, needs the synchronous Noise DH made async, and needs crypto review.",
+  "evidence": [
+    {
+      "location": "packages/shared/src/relayE2eeKeys.ts:760",
+      "note": "warmE2eePrimitives(): runs once per process (primitivesWarmed guard). It does a throwaway x25519 keygen x2 plus getSharedSecret, then one strict Ed25519 verify of the RFC 8032 TEST 1 vector (:746-748) through verifyE2eeSignature, which also warms the validators and SHA-512/SHA-256. Errors are swallowed."
+    },
+    {
+      "location": "apps/web/src/hostedHub/e2eeAttempt.ts:430",
+      "note": "scheduleWebE2eeWarmUp() loads the E2EE chunk, then runs the warm-up in requestIdleCallback with a 2 s timeout (:436), or setTimeout 0 where that is missing (e.g. Safari). It is called from watchWebHostedSessionForE2ee (:396-410) on the initial authenticated state and on each later transition to authenticated. It is skipped when the §14.5 randomness check failed."
+    },
+    {
+      "location": "apps/web/src/hostedHub/runtime.ts:37",
+      "note": "The watch is registered when the hosted runtime is configured, so the warm-up trigger really runs in production. The warm-up's .then is registered before prepareWebRelayE2ee's continuation (:146), so it is queued before the ticket POST and the WS open."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeKeys.ts:659",
+      "note": "verifyE2eeSignature runs the §7.1 validators first, then the memo lookup (:664-667 Ed25519, :673-676 P-256). Only true verdicts are stored. The key (:704-717) is SHA-256 over the length-prefixed algorithm, key, message and signature. The MRU bound is 128 (:701, :719-731). No defect found. On a hit the validator still decompresses the point (~0.1 ms). That is redundant but harmless."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeCapabilityVerify.ts:303",
+      "note": "The statement signature goes through the memoized choke point. Time, origin, pin and policy checks (:331 onward) stay outside the memo, as proposal (c) required."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeTranscripts.ts:910",
+      "note": "Continuity-chain link signatures (:910) and the prekey cross-signature (:1854) also go through the memoized verifier. The initiator calls verifyNodeE2eeCapabilityStatement at packages/client-runtime/src/relay/relayE2eeInitiator.ts:619."
+    },
+    {
+      "location": "apps/server/src/hubIdentity/NodeE2eeCapabilityStatement.ts:333",
+      "note": "The node reuses a signed statement until expiresAt minus E2EE_MAX_CLOCK_SKEW. Validity is 600 s and skew is 300 s (relayE2eeConstants.ts:279-281), so a reconnect within ~5 min gets identical statement bytes and a memo hit. Later reconnects re-verify only the statement signature. The prekey and chain-link verdicts still hit."
+    },
+    {
+      "location": "packages/shared/src/relayE2eeNoise.ts:930",
+      "note": "The ephemeral keygen (:930) and DH (:971, inside the synchronous #mixDh) still run noble on the browser main thread on every handshake. Browsers and Hermes never install the §14.7 native seam (relayE2eeKeys.ts:333-337). This is the part only proposal (b) would remove."
+    },
+    {
+      "location": "apps/web/src/hostedHub/e2eeWarmUp.test.ts:91",
+      "note": "Tests pin the trigger: no warm-up while signed out or when randomness is unusable, exactly once after authentication, and none on later patches. relayE2eeKeys.test.ts:283-348 covers memo semantics (failures not stored, validation still enforced, bound of 128) and that the warm-up is idempotent."
+    },
+    {
+      "location": "measurement (read-only node one-off, fresh process each, Node v24.21.0)",
+      "note": "Cold: keygen x2 11.2-12.4 ms, DH x2 1.6-2.2 ms, verify x2 8.4-9.4 ms, total 21.3-24.1 ms. After warmE2eePrimitives (itself 20.3-20.4 ms): keygen x2 0.8-1.0 ms, DH x2 1.5-1.7 ms, verify x2 2.2-2.4 ms, total 4.7-4.9 ms. Repeat verify with a memo hit: 0.12-0.27 ms."
+    }
+  ],
+  "remaining": "Only optional proposal (b) remains. The WebCrypto fast path for X25519 and Ed25519 verify on the browser initiator is not implemented. One ephemeral keygen plus 2 DH (relayE2eeNoise.ts:930, :971), and any memo-miss verify (the statement signature on reconnects more than ~5 min apart, or the first connect), still run noble synchronously on the main thread. That is roughly 2-5 ms on desktop for the first connect, about 1.5 ms per reconnect, and an estimated 4-5x that on a phone. Minor gaps not in the proposal: the warm-up does not warm ChaCha20-Poly1305, HKDF or cborg decode (the finding measured ~0.9 ms cold AEAD). One warm-up pass leaves V8 only partly tiered: 4.7 ms after warm-up versus ~2.6 ms fully warm. The 2 s requestIdleCallback timeout means that on a very busy first load the warm-up can land after the first channel.accept. That first handshake then pays the cold cost and nothing breaks. apps/mobile (Hermes) has no warm-up, but finding 242 covers mobile JS crypto cost, not this one.",
+  "fixDefects": "",
+  "implementationSketch": "Optional, only if field measurement on phones shows the remaining few ms matter. (1) Cheap S polish: extend warmE2eePrimitives (packages/shared/src/relayE2eeKeys.ts:760) with a throwaway HKDF-SHA256 plus ChaCha20-Poly1305 seal/open on zero keys, and run its curve loop 2-3 times to reach higher JIT tiers. The extra ~5-10 ms stays in the idle callback. Optionally schedule with scheduler.postTask({priority:'background'}) where available instead of requestIdleCallback with a 2 s timeout, so it reliably runs during the ticket RTT. Add a relayE2eeKeys.test.ts assertion that it stays idempotent and swallows errors. (2) Proposal (b), M effort, needs crypto review: add an async browser provider module (e.g. packages/client-runtime/src/relay/webCryptoE2ee.ts, not imported by Hermes). It detects crypto.subtle X25519 and Ed25519 with a known-answer self-test, mirroring relayE2eeNodeCrypto.ts. Because E2eeNativePrimitives is synchronous and Noise #mixDh/#generateEphemeral are synchronous, either (i) add async variants of the Noise read/write steps that the initiator's already-async intercept awaits, or (ii) precompute the ephemeral key pair via WebCrypto (generateKey X25519, export raw public key) before channel.accept and keep the DH sync via noble. For Ed25519, add verifyE2eeSignatureAsync, which runs the same §7.1 validators plus ed25519NativeVerdictAdmissible, accepts only a WebCrypto true, and re-decides any false or throw with noble. Wire it into verifyNodeE2eeCapabilityStatement and the chain and prekey checks on the client initiator only. Tests: run the existing corpus with the provider installed and uninstalled in the Chromium browser suite (E2eeNxHandshake.browser.tsx, E2eeCodecParity.browser.tsx), plus forged, torsion-carrying and non-canonical signature vectors to prove the accepted set is unchanged.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Nothing is required: the finding's described cost (cold noble setup on the first connect, and repeat verifies on reconnect) is removed. The only remaining item, the optional proposal (b), changes which implementation computes E2EE verdicts and DH outputs in browsers (WebCrypto next to the pinned noble primitive under the §14.7 rules), and it would make the synchronous Noise DH path async. That needs crypto/security review and a decision that a few ms per handshake is worth it."
+}

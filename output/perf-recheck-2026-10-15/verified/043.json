@@ -1,0 +1,55 @@
+{
+  "id": "persistence-boot:reconcile-worktrees-n-plus-1",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The sweep no longer builds 2P+1 whole shell snapshots. It now reads the project list once (listProjectShells). Per non-chat project it does one PK project lookup, a stat-based fingerprint, and two indexed per-project reads that run in one short transaction. git runs only when the worktree registrations changed. The pass starts 15 s after the forking subscribeShell, its git calls run in the background process lane, and chat projects are skipped. The rows passed into ensureProjectMainWorktree remove the 2nd and 3rd per-project snapshots. Not re-reading after a main workspace is created is safe, because the planner ignores rows with a null path. There is only one production ProjectionSnapshotQuery layer, and it implements both narrow methods, so the whole-snapshot fallbacks only run in test doubles. One minor edge case is in the extra listing cache (not part of the proposal): it can store an empty listing, which can silently stop reconciliation for one repo for the rest of the process lifetime.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:916-920",
+      "note": "Effect.sleep(RECONCILIATION_START_DELAY_MS = 15_000, line 74) runs first. Then readProjectShells uses listProjectShells, a project-rows SELECT (ProjectionSnapshotQuery.ts:865-876, 3217), not getShellSnapshot. The throttle stamp is taken before the sleep (line 915), so reconnects within 5 min return at once."
+    },
+    {
+      "location": "apps/server/src/git/worktreeReconciliation.ts:56",
+      "note": "partitionReconcilableProjectRoots skips isChatProject before the existsSync check, so chats pay neither git nor DB work."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:258-271",
+      "note": "loadProjectWorkspaceRows prefers getProjectWorkspaceRows. The only production implementation (orchestration/Layers/ProjectionSnapshotQuery.ts:3592-3626, exported at 4538) provides it, so the readWorkspacePlacement fallback only runs in test doubles."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1001-1029",
+      "note": "Both reads filter WHERE project_id = ?. The thread read selects 5 columns with deleted_at IS NULL ORDER BY created_at, covered by idx_projection_threads_project_deleted_created (019_ProjectionSnapshotLookupIndexes.ts:13-14). Worktrees are covered by (project_id, archived_at) (030_Worktrees.ts:28). The filter semantics (deleted threads excluded, archived worktrees included) match the old whole-shell placement rows."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:767-771",
+      "note": "Rows are read once, after git answers, and passed to ensureProjectMainWorktree (288-296), so there are no extra snapshots. A main workspace it creates is not re-read. That is safe because planWorktreeReconciliation skips worktrees with worktreePath === null (worktreeReconciliation.ts:180-185)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3374-3388",
+      "note": "getProjectShellById now decodes the persisted repository_identity_json and runs no identity probe. The per-project re-read at worktreeOperations.ts:736 is a single PK lookup and negligible."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:964",
+      "note": "inBackgroundProcessLane only sets a context reference (processGovernor.ts:33-35) and holds no permit during the 15 s sleep. subscribeShell still forkDetaches the sweep (orchestrationRpc.ts:523), now cheaply."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.test.ts:234-292",
+      "note": "Tests assert that a per-project reconcile does [git, rows] with no 'shell' call, that git is skipped while the fingerprint is unchanged, and that the sweep does nothing before 15 s and then calls exactly [projects, git:repo, rows:repo]. Chat and missing projects are skipped, and git runs in the background lane."
+    },
+    {
+      "location": "apps/server/src/ws/context/worktreeOperations.ts:749-760",
+      "note": "Minor defect in the extra listing cache: paths are stored under a non-null fingerprint even when empty. GitWorkflowService.listWorktreePaths (GitWorkflowService.ts:445-453) returns [] when detection says 'not a repo'. Git detectRepository returns null on any non-zero rev-parse exit (vcs/GitVcsDriver.ts:493-510, allowNonZeroExit), for example on dubious ownership or a broken HEAD while <root>/.git still exists. The planner treats [] as 'git could not answer' (worktreeReconciliation.ts:158), so that project is never reconciled again until a worktree registration changes or the server restarts."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defect affects the finding's cost. One low-severity robustness edge exists in the extra worktree-listing cache added by 502adfd1e. worktreeOperations.ts:749-760 caches an empty `git worktree list` result under a valid fingerprint. An empty result only happens when git could not answer (detectRepository returns null on a non-zero rev-parse exit, for example dubious ownership or a corrupt HEAD, while .git still exists). planWorktreeReconciliation treats [] as a no-op (worktreeReconciliation.ts:158), so once the repo recovers, reconciliation for that project stays off until its worktree registrations change or the process restarts. Other negligible leftovers: the project row is read again per project (getProjectShellById, worktreeOperations.ts:736) even though listProjectShells already returned it, and knownWorktreeListings is never pruned of deleted projects (a tiny map). Projects rooted in a subdirectory of a repo always get a null fingerprint (no <root>/.git), so they still run `git worktree list` on every sweep, in the background lane only.",
+  "implementationSketch": "Optional hardening, done in one place: in reconcileProjectWorktrees (apps/server/src/ws/context/worktreeOperations.ts:749-760), change the Effect.tap so it caches only a non-empty listing: `if (fingerprint === null || paths.length === 0) knownWorktreeListings.delete(projectId); else knownWorktreeListings.set(...)`. A real repository always lists at least its own root, so an empty listing is never a valid cached answer. Optionally pass the project shell from the sweep into reconcileProjectWorktrees to skip the second getProjectShellById, and delete knownWorktreeListings entries for project ids missing from currentProjectIds in reconcileAllWorktrees (next to the existing missingProjectRoots cleanup). Test: in worktreeOperations.test.ts, use a git-initialized temp root with a listWorktreePaths stub that returns [] on the first call and [cwd] afterwards. Run reconcileProjectWorktrees twice and assert two 'git:' calls (the second is not served from cache).",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-local correctness hardening of a best-effort background sweep; no auth, E2EE, Hub protocol, hosted lifecycle or product trade-off involved.",
+  "repos": "ryco",
+  "correction": "No correction to the status. The auditor's 'no defects that matter' holds for the perf finding itself. I add one minor robustness edge in the listing cache: an empty listing can be cached under a valid fingerprint and disable reconciliation for that repo for the rest of the process lifetime. I also confirm that the 'thread rows' index the sweep actually uses is the composite idx_projection_threads_project_deleted_created (project_id, deleted_at, created_at), not only idx_projection_threads_project_id."
+}

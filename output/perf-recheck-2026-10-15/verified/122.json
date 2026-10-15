@@ -1,0 +1,71 @@
+{
+  "id": "thread-and-draft:suspense-300ms-throttle-route-lazy",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "corrected",
+  "summary": "The core finding is fixed. The thread and draft routes, along with statistics, projects, pull-requests, diagnostics, native-authorize, _chat, _chat.index and settings, use lazyRouteComponent. The router awaits the chunk before it commits (router-core load-client.js loadRouteChunk -> component.preload()), so no Suspense fallback commits and the 300 ms reveal throttle never starts. The root shell is a preloadableLazy that is resolved in the root beforeLoad. The workspace panel shell is gated by useLazyComponentReady. Settings preload warms the exact lazyRouteComponent wrapper. Thread and draft chunks are preloaded on hover, press, new-thread, bootstrap redirect and idle. The bundle-splitting and RouteRevealThrottle browser tests guard all of this. I keep the DONE status. I correct the auditor's 'fixDefects: None seen' and the claim that WorkspaceSurfaceGate covers every inner panel surface. Two instances of the same hazard remain. (1) The workspace Browser tab still renders a React.lazy inside its own Suspense. It has no preloader and no intent preload, so its first open in each document still waits on the 300 ms throttle. (2) #710 introduced a new Suspense lazy, hostedRootAppShell, for the hosted workspace shell. Nothing preloads it before an in-page sign-in flips accountStatus to authenticated. Before #710 this transition rendered RootAppShell synchronously because it was statically imported into HostedHubRoot. Now it commits AppBootLoadingSurface as a fallback and can wait up to ~300 ms after the chunk lands. Both are minor, one-time-per-document or per-sign-in costs. I verified them statically and did not measure them.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/_chat.$environmentId.$threadId.tsx:33",
+      "note": "component: lazyRouteComponent(() => import('../components/routeViews/ChatThreadRouteView'), 'ChatThreadRoute'). The export exists at ChatThreadRouteView.tsx:382. The route file has no Suspense."
+    },
+    {
+      "location": "apps/web/src/routes/_chat.draft.$draftId.tsx:10",
+      "note": "Uses lazyRouteComponent for DraftChatThreadRoute, exported at DraftChatThreadRouteView.tsx:311."
+    },
+    {
+      "location": "node_modules/.bun/@tanstack+router-core@1.171.28/node_modules/@tanstack/router-core/dist/esm/load-client.js:10-37,372-375",
+      "note": "loadRouteChunk -> loadComponents -> route.options.component.preload(), awaited per match before success. The installed react-router lazyRouteComponent.js sets comp before the promise resolves, so the committed render does not suspend."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:38-43,123-136",
+      "note": "RootAppShell and HostedHubRoot are preloadableLazy, resolved in the root beforeLoad (withRootSurfaceLoaded). The Suspense at lines 413/428 is only a safety net."
+    },
+    {
+      "location": "apps/web/src/settingsRoute.ts:21-30",
+      "note": "SettingsRouteComponent is the lazyRouteComponent that routes/settings.tsx:30 uses. preloadSettingsPage calls its .preload(), which fixes the old import()-only preload."
+    },
+    {
+      "location": "apps/web/src/components/ChatRightPanel.tsx:88-96",
+      "note": "useWorkspacePanelChunkReady(LazyThreadWorkspacePanel) renders 'Loading workspace...' as an ordinary commit instead of a Suspense fallback."
+    },
+    {
+      "location": "apps/web/src/lib/routeChunkPreload.ts:41-64",
+      "note": "preloadRouteChunk and preloadMatchedRouteChunks call router.loadRouteChunk. They are used by threadNavigationIntent.ts:18,37, useHandleNewThread.ts:146, RootAppShell.tsx:180 (idle) and RootAppShell.tsx:286 (bootstrap redirect). router.ts:15 sets defaultPreload 'intent'."
+    },
+    {
+      "location": "apps/web/src/components/perf/RouteRevealThrottle.browser.tsx:107-221",
+      "note": "Browser tests assert that the root shell and a lazyRouteComponent page commit within 50 ms of chunk resolution, with a React.lazy control that must exceed 150 ms. They also assert that every app route except /pair and the root has a preloadable component. webBundleSplitting.test.ts:9-51 rejects React.lazy and <Suspense in the route files."
+    },
+    {
+      "location": "apps/web/src/browser/LazyBrowserPanel.tsx:3-17",
+      "note": "REMAINING: the Browser surface is still React.lazy inside <Suspense fallback='Loading browser…'>, unchanged since f1be4abc7. It is rendered by WorkspaceBrowserPanel (ThreadWorkspacePanel.tsx:450-458, mounted at :1509) without a WorkspaceSurfaceGate, unlike review, files, pullRequest, simulator and terminal."
+    },
+    {
+      "location": "apps/web/src/workspacePanelPreload.ts:78-84",
+      "note": "SURFACE_LOADERS has no 'browser' entry, so preloadWorkspacePanel('browser') warms only the shell. The Browser launcher card (ThreadWorkspacePanel.tsx:798-805) has no onIntent, while the Review card does. useChatWorkspacePanels.ts:179-192 opens the tab directly, and ProjectBrowserPreview (sidebar and project overview) also mounts LazyBrowserPanel."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/hostedRootAppShell.tsx:15-39",
+      "note": "REGRESSION from #710: the hosted workspace shell is a preloadableLazy that renders inside <Suspense fallback={<AppBootLoadingSurface/>}>. It is preloaded only by bootGate.ts:46-53, when the account is already authenticated at boot or a read preview applies, and by the HostedHubRoot.tsx:218-222 effect, which runs after the commit that already renders the shell."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HostedHubRoot.tsx:282-320",
+      "note": "After an in-page sign-in (client-runtime authorization/state.ts:912 signIn sets accountStatus 'authenticated'), the next render returns <RootAppShell> (HostedRootAppShell) directly. The chunk is not loaded yet, so the fallback commits and the reveal throttle applies. At f1be4abc7, HostedHubRoot imported RootAppShell statically, so this path never suspended."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HubAccountPage.tsx:14-23,101",
+      "note": "Out of scope but the same pattern: the hosted account page panels use React.lazy inside Suspense with a Skeleton fallback. HostedNativeAuthorizationRoute.tsx:19,81 is similar."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "The auditor's 'None seen' is not accurate. (1) Uncovered caller: the workspace Browser tab (apps/web/src/browser/LazyBrowserPanel.tsx:3-17, rendered via ThreadWorkspacePanel.tsx:450-458/:1509) still uses React.lazy plus Suspense. It has no SURFACE_LOADERS entry (workspacePanelPreload.ts:78-84) and no launcher intent preload (ThreadWorkspacePanel.tsx:798-805). Its first open in each document commits 'Loading browser…' and waits on the 300 ms reveal throttle. This is the same hazard WorkspaceSurfaceGate removes for the other surfaces. (2) Regression introduced by #710: hostedRootAppShell.tsx:33-39 wraps the now code-split hosted workspace shell in a Suspense fallback. bootGate.ts:46-53 preloads it only when the account is authenticated at boot. After an in-page sign-in (signIn / redeemInvitation / bootstrapOwner), HostedHubRoot.tsx:318/320 renders it immediately, so AppBootLoadingSurface commits and the shell reveal can be held until ~300 ms after the fallback even when the chunk is HTTP- or SW-cached. Before #710 that transition was synchronous. Both are once per document or per sign-in, not per thread navigation.",
+  "implementationSketch": "(1) Browser tab: move the browser chunk into workspacePanelPreload.ts as `export const LazyBrowserPanelSurface = preloadableLazy(() => import('./browser/BrowserPanel').then(m => m.BrowserPanel))` plus `loadBrowserPanel = preloadOf(...)`, and add `browser: loadBrowserPanel` to SURFACE_LOADERS. Set LOADING_LABELS.browser to 'Loading browser...'. In ThreadWorkspacePanel.tsx, render `<WorkspaceSurfaceGate key=\"browser\" chunk={LazyBrowserPanelSurface} mode=\"browser\"><LazyBrowserPanelSurface .../></WorkspaceSurfaceGate>` and add `onIntent={() => preloadWorkspacePanel('browser', { intent: true })}` to the Browser LauncherCard. Rewrite browser/LazyBrowserPanel.tsx, which ProjectBrowserPreview uses, to gate on useLazyComponentReady(LazyBrowserPanelSurface, true) and render the 'Loading browser…' status as an ordinary render, keeping Suspense only as a safety net. Test: add a ThreadWorkspacePanel.browser.tsx case modelled on the simulator case (around line 241) that asserts the browser surface mounts with no committed fallback once preloaded and that preloadWorkspacePanel('browser') warms it. (2) Hosted shell: in hostedRootAppShell.tsx, make HostedRootAppShell call `useLazyComponentReady(LazyRootAppShell, true)` and return <AppBootLoadingSurface/> as an ordinary render until ready. This is the same pattern as ChatRightPanel and removes the throttle with no product change. Optionally also call preloadHostedRootAppShell() as a code-only prefetch on sign-in intent (passkey or submit press in HostedAuthenticationSurface), consistent with bootGate's code-only prefetch rule. It starts no session, relay or store work. Test: a HostedHubRoot.browser.tsx case that signs in without the preloadHostedRootAppShell() setup and asserts, using the RouteRevealThrottle observeCommit pattern, that the shell commits within ~50 ms of the chunk resolving. Validate with focused vitest and browser runs for these files only.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Code-split rendering changes only. The hosted shell fix is a render-gating change. The optional sign-in-intent prefetch is code-only (no session, ticket, relay or store work, nothing cached by the SW), so it does not touch hosted lifecycle ownership or auth semantics.",
+  "correction": "The auditor's evidence says WorkspaceSurfaceGate removes the 300 ms hazard for the inner panel surfaces, and fixDefects says 'None seen'. The Browser workspace surface (LazyBrowserPanel) is still React.lazy plus Suspense with no preloader. #710 also added a new Suspense-wrapped hosted workspace shell lazy that reintroduces the throttle on the in-page hosted sign-in -> workspace transition. The core thread/draft/route finding is DONE as claimed.",
+  "repos": "ryco"
+}

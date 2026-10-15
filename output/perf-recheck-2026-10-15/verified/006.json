@@ -1,0 +1,59 @@
+{
+  "id": "desktop-boot:main-process-eager-module-graph",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The status holds, but several details were wrong or missing. (1) Part of the remaining eager contracts code is not there because main needs it. It is there because rolldown places modules shared with the lazy chunks into the entry chunk. desktopMain.cjs has 143 `exports.*` for the lazy chunks, and 96 of them are used only by those chunks. They include the hostedIdentity NativeIdentity*/PublicSignup*/PasswordLogin*/ExternalIdentity* schemas, the relay RelayFrame/RELAY_* schemas from environment.ts, and the cborg decoder. So Hub/relay schema code still runs before ready, and the guard test cannot see it. (2) My measurements of effect/Schema are lower than the auditor's 80-120 ms: 46-66 ms uncached and about 40 ms with NODE_COMPILE_CACHE, in plain Node 24. It is still most of the residual cost. (3) The Computer-use chunk was moved after ready, not off the critical path. It is still awaited in the bootstrap Promise.all before startBackend, the IPC handlers and the first window.",
+  "summary": "Confirmed DONE. The finding's main cost is gone and the measured gain matches the estimate. In plain Node 24, everything evaluated before main.ts's own body now takes 78-85 ms uncached and about 53 ms with the compile cache, against 172-185 ms in the finding (whole bundle). Done: (a) the Hub/E2EE/workspace, SSH, tailscale, guide and Computer-use stacks sit behind import(), and SSH IPC uses deferred stubs; (c) electron-updater is a lazy require; (d) the port probe is plain node:net with the same EADDRNOTAVAIL semantics as before; (e) there is a source-graph guard test. What remains is about 50 ms (cached) of eager code. About 40 ms of it is effect/Schema, needed by the contracts schemas, clientPersistence and desktopHubControl. Another 10-15 ms is contracts module evaluation, about 3-7 ms of which is Hub-only and Computer-use-only schemas placed in the entry chunk. Proposal (b), narrow contracts imports, is only partly done. The guard test checks only the relative source graph. It does not follow @ryco/* packages, inspect the emitted chunks or set a size budget, so it passes while Hub-only schemas are evaluated before ready.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/main.ts:846",
+      "note": "loadDesktopHubStack = lazyAsyncResource(() => import(\"./desktopHubStack.ts\")). The 850 KB chunk loads on first use. For a user with a stored Hub session it loads right after startBackend via prepareDesktopHostedIdentityResume (main.ts:1279-1291, 4857), which is after ready. That costs about 30 ms cached and 48-66 ms uncached of main-thread time, in a microtask after window creation."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1991",
+      "note": "loadElectronUpdater() is a lazy CommonJS require. desktopMain.cjs:13268 is its only electron-updater require. Only `import type` remains at main.ts:50."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3572",
+      "note": "registerDeferredIpcHandlers(ipcMain, DESKTOP_SSH_INVOKE_CHANNELS, …) registers stub handlers that await the SSH chunk (deferredIpc.ts:20-48). This implements the proposal's 'register IPC eagerly with a stub' step. The SSH chunk still requires the effect barrel and platform-node, but only on the first SSH use."
+    },
+    {
+      "location": "apps/desktop/src/backendPort.ts:31",
+      "note": "canListenOnHost is plain Net.createServer().listen()/close() and treats EADDRNOTAVAIL as available. That matches the old shared/Net.ts:102-119 behaviour (git show f1be4abc7). No Effect runtime per probe any more."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4820",
+      "note": "await Promise.all([selectDesktopBackendPort(...), startDesktopComputerUse()]). startDesktopComputerUse (main.ts:4711-4744) does `await import(\"./computerUse/desktopStack.ts\")`, which costs about 11 ms cached and 18-26 ms uncached, plus runtime.start(). This happens before startBackend, registerIpcHandlers and the first window. The work is needed because the envelope carries computerUseBridge (main.ts:3166). The chunk cost moved from before ready to after ready but stays on the boot path."
+    },
+    {
+      "location": "apps/desktop/dist-electron/desktopMain.cjs:15291",
+      "note": "143 `exports.*` for the lazy chunks (built 21:45, after HEAD, clean tree). 96 are referenced nowhere in main's own body: all NativeIdentity*, PublicSignup*, PasswordLogin*, ExternalIdentity* and ActiveSpaceSwitch* schemas and paths, RelayFrame, RelayProtocolVersion, RELAY_SUPPORTED_VERSION_RANGE and cborg decode$1. desktopHubStack consumes 193 `require_desktopMain.*` references and desktopStack 51. These Hub-only schemas are evaluated before ready on every launch."
+    },
+    {
+      "location": "apps/desktop/src/desktopHubControl.ts:1",
+      "note": "This eager module value-imports DesktopNativeNodeClaim*/LocalIntroduction* response schemas from @ryco/contracts/desktop-native-node-claim and local-introduction, plus effect/Schema. That pulls contracts/hostedIdentity.ts into the entry chunk, and rolldown then hoists every hostedIdentity export the Hub chunk uses into desktopMain.cjs. It is created eagerly at main.ts:465."
+    },
+    {
+      "location": "apps/desktop/src/desktopMainBundleSplitting.test.ts:27",
+      "note": "staticGraph follows only relative `./` imports with a line-start regex. External specifiers are only checked against a 5-entry denylist (lines 74-81), and the emitted chunks and bundle bytes are not inspected. It cannot detect the shared-module hoisting above, or a new eager @ryco/shared, @ryco/client-runtime or contracts subpath import that pulls heavy code."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:34",
+      "note": "Residual for (b): main.ts value-imports EnvironmentId from the @ryco/contracts barrel. It is used only at main.ts:3823 (workspaceEnvironmentId, a Hub workspace handler). clientPersistence.ts:4-11 value-imports ClientSettingsSchema and AppKeybindings from the barrel, plus effect/Schema; readClientSettings serves the GET_CLIENT_SETTINGS IPC at main.ts:3493. settings.ts pulls the orchestration schema tree (the about 122 KB region labelled threadFork.ts in the bundle). Contracts total about 296 KB in desktopMain.cjs."
+    },
+    {
+      "location": "/tmp/perf3-v006/run2.cjs",
+      "note": "Measurement harness, outside the repo: a copy of desktopMain.cjs cut before the main.ts body, with electron stubbed, run in plain Node 24.21. Eager prefix: 78-85 ms uncached, about 53 ms with NODE_COMPILE_CACHE. Within it, effect/Schema takes 46 ms (about 40 ms cached), and all contracts regions about 10-15 ms (settings 2-4, orchestration/threadFork 2-4, environment about 1.5, hostedIdentity about 1.4). Effect barrel: 83-126 ms, against 48-55 ms for the 13 eager subpaths. Chunks: desktopStack 18-26 ms (11 ms cached), desktopHubStack 48-66 ms (30 ms cached), sshEnvironment 25-35 ms."
+    }
+  ],
+  "remaining": "Only polish remains; the finding's main cost and its estimated gain have been delivered. Leftovers: (1) Hub-only and Computer-use-only contract schemas are evaluated before ready. Rolldown hoists modules shared with the lazy chunks into desktopMain.cjs: 96 chunk-only exports, mainly hostedIdentity.ts native identity schemas and the relay frame schemas in environment.ts, pulled in through desktopHubControl.ts:1-23. Cost is about 3-7 ms. (2) Proposal (b) is only partly done. Barrel imports remain at main.ts:34 (EnvironmentId, used only at main.ts:3823) and clientPersistence.ts:4-11. settings.ts pulls the orchestration schema tree, about 296 KB of contracts eager, about 10-15 ms uncached. (3) effect/Schema, about 40 ms cached, is still required before ready by contracts, clientPersistence and desktopHubControl. This is the largest leftover, but removing it mostly shifts the cost after ready, so the gain is uncertain. (4) The guard test (desktopMainBundleSplitting.test.ts:27-45, 74-81) checks only the relative source graph. It has no emitted-bundle or byte-size check, so (1) passes unnoticed. (5) The Computer-use chunk (about 11-19 ms) is still awaited before the backend envelope at main.ts:4820, by design, because the envelope needs computerUseBridge.",
+  "fixDefects": "None that cause a behaviour problem. Gap in the guard (proposal e): desktopMainBundleSplitting.test.ts only walks relative source imports and denylists 5 externals. It passes even though desktopMain.cjs exports 96 Hub- or Computer-use-only schema bindings that the entry evaluates before ready. That is the shared-module hoisting from the eager desktopHubControl.ts import of @ryco/contracts/desktop-native-node-claim, which pulls in hostedIdentity.ts. It also has no byte budget, so 'fails if the eager graph grows' from the proposal is not implemented.",
+  "implementationSketch": "1) Bundle-output guard (S, the most useful item). Add a post-build check, apps/desktop/scripts/check-main-bundle.ts, run in the build:desktop CI job, or a vitest that skips when dist-electron is missing. It reads dist-electron/desktopMain.cjs and asserts four things: (a) top-level requires are only node:*, electron, an allowlist of effect/* subpaths and local shared chunks, with no `require(\"effect\")`, `ws`, `@effect/platform-node` or `electron-updater` at top level; (b) the file is under a byte budget, for example 650 KB; (c) no `exports.` name matches /^(NativeIdentity|PublicSignup|PasswordLogin|ExternalIdentity|RelayFrame)/; (d) the desktopHubStack, desktopStack and sshEnvironment chunks are reached only through `Promise.resolve().then(() => require(...))`. 2) Stop the Hub-only hoisting (S-M). Either load desktopHubControl lazily (it is used only for hub reachability and claim control calls, main.ts:465, 1398), or split packages/contracts/src/hostedIdentity.ts. With the split, the small types desktop-native-node-claim needs (DesktopInstallationId, HubAccountId and similar) live in a module the Hub HTTP schemas do not share; NativeIdentity*, PublicSignup*, PasswordLogin* and ExternalIdentity* move to hostedIdentityHttp.ts, re-exported from the hosted-identity subpath and the barrel. Similarly, move RelayFrame and RELAY_* out of environment.ts into relayProtocol.ts. Verify by rebuilding and checking that the chunk-only export count drops. 3) Narrow (b) (S). Move workspaceEnvironmentId (main.ts:3820-3824) into the lazily loaded desktopWorkspaceIpc, or brand it with a type cast, so main.ts:34 becomes type-only. Import ClientSettingsSchema and AppKeybindings in clientPersistence.ts from narrow contracts subpaths. Break the settings.ts to orchestration.ts edge by moving ModelSelection and the provider-option schemas into a small module both can import. 4) Optional (M, uncertain gain): take effect/Schema off the pre-ready path. Make clientPersistence, desktopHubControl and parsePersistedServerObservabilitySettings (main.ts:587) lazy, and start that load right after ready, while port probing and shell-environment capture are awaiting I/O. Measure desktop.ready and first reveal from startupMarks over 5 packaged launches before keeping it. Tests: the existing desktopMainBundleSplitting.test.ts, the new bundle check after `bun run build --filter=@ryco/desktop`, and focused contracts typecheck and tests for the split modules.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Bundling, module-split and test-only changes inside the Ryco desktop package and the contracts layout. No change to E2EE or auth semantics, Hub protocol or hosted lifecycle ownership. Moving schemas between contracts modules keeps the wire shapes identical.",
+  "repos": "ryco"
+}

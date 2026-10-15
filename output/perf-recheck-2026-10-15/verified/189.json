@@ -1,0 +1,59 @@
+{
+  "id": "dedicated-pages:usage-scan-cache-monolithic-persist",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The fix holds up under independent checking. The 22 MB scan-cache.json is gone. In its place are 64 hash shards (version 6, 8,099,126 B on this machine, largest 209 KB) holding per-file aggregates. Persist rewrites only dirty shards, debounced by 1 s and forked after the response under persistLock. The cache plus parser checkpoints are released after 10 idle minutes. I measured the real shards with a one-off node probe that imports the repo's decoder. Full load is 19.9 ms JSON.parse plus 19.1 ms decode, at most 2.0 ms per shard, spread over 64 async reads (before: one 80-115 ms sync block). Encoding one dirty shard takes at most 1.2 ms and writes about 130-210 KB (before: 50-55 ms sync and a 22 MB write on every active-session open). The decoded cache retains about 16.5 MiB while loaded (before: 62.9 MiB for the process lifetime) and nothing after the idle release. The Statistics UI has no polling, so the idle release really fires. Two races I looked for are not reachable. persist vs unload is serialised by persistLock. persist vs a concurrent summary is safe: the snapshot is synchronous and versions are captured per shard, so a shard that changes mid-persist stays dirty and a new persist is scheduled.",
+  "evidence": [
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.ts:27",
+      "note": "64 shards. usageScanCacheShardOf (:38) takes the first hex byte of the SHA-256 file key mod 64 (an exactly even spread). OpenCode file keys are hashed too (opencodeUsageReader.ts:215,222,361), so nothing piles up on shard 0."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.ts:190-228",
+      "note": "persist captures dirty versions, then snapshots entries per dirty shard synchronously and writes each shard atomically with Effect.yieldNow between shards. markPersisted uses the captured version, so a shard mutated mid-persist stays dirty. A failed write stays dirty. The legacy file is removed only after a clean pass."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.ts:134-183",
+      "note": "load reads and decodes shards with concurrency 8 (one small parse per shard). The legacy v4/v5 single document is migrated once (cache.set marks every shard dirty), then retention prune and cap run."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:325-337",
+      "note": "schedulePersist: 1 s debounce, coalesced, forked into serviceScope under persistLock. Called at :1086 only when store.isLoaded(). A shutdown flush finalizer is at :319."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:342-366",
+      "note": "watchIdle takes scanSemaphore and persistLock, then store.unload() and readTranscript.clear() after SCAN_CACHE_IDLE_MS = 10 min (:110). unload (usageScanCacheStore.ts:231-242) persists first and keeps the cache resident only if a write failed."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.ts:100-131",
+      "note": "No polling or interval refetch. Summaries come only from Statistics navigation, prefetch on route intent (routes/statistics.tsx:42) or a manual refresh, so the 10-minute idle release fires in practice."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCache.ts:181-243",
+      "note": "v6 encoding stores 15-minute slots plus keyed rows (16-hex dedupe key, slot index, 7 numbers) with interned models/sessions. On this machine: 2,598 files, 261,986 records become 7,792 slots plus 128,738 keyed rows. The keyed rows are 86% of the bytes, the cross-file dedupe keys that proposal item 4 explicitly keeps."
+    },
+    {
+      "location": "/Users/laurinfrank/.ryco/userdata/usage/scan-cache",
+      "note": "Measured with a read-only node probe that decodes the real shards using the repo's decodeUsageScanCache/encodeUsageScanCache. Parse 19.9 ms + decode 19.1 ms total, at most 2.03 ms per shard; encode of all shards 26.1 ms, at most 1.18 ms per shard; retained heap plus ArrayBuffers 16.5 MiB. The legacy scan-cache.json is gone."
+    },
+    {
+      "location": "apps/server/src/usage/usageScanCacheStore.test.ts:60",
+      "note": "Tests cover legacy migration, dirty-only rewrite, unload/reload, empty-shard removal, retention on load, shared concurrent load and partial-migration cleanup. UsageService.test.ts:629 covers the idle release."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:739-740",
+      "note": "Small correction to the auditor's 'memo hit never loads the cache'. That holds for transcript sources only. OpenCode database sources have no source memo and call loadScanCache() on every summary. For users with an OpenCode instance, the first summary after boot or an idle release always loads all shards (about 40 ms, sliced). That is a cost of memoization, not of monolithic persistence."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defect that needs action. Minor, non-blocking observations. (1) readText (usageScanCacheStore.ts:106-111) maps any read error (EMFILE, EACCES, oversize, or the file changing mid-read) to null, the same as a missing shard. A shard that fails to read transiently is then rewritten later with only its in-memory entries. Its other files are just rescanned, so the only cost is extra rescans, not wrong totals. (2) The OpenCode database is one cache entry whose aggregate keeps every response as a keyed row. With an active OpenCode session, that whole entry and its shard are re-encoded on each summary. This is proportional to the full DB rescan opencodeUsageReader already does, which belongs to a separate finding. (3) The SQLite table, lazy per-root loading and worker encoding from the proposal were not built. The measured cost no longer justifies them, and the finding itself named dirty-shard JSON as the alternative.",
+  "implementationSketch": "",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "ryco",
+  "correction": "The auditor's DONE stands. One clarification: 'a source-memo hit never loads the cache' applies to transcript sources only. OpenCode-DB sources call loadScanCache() unconditionally (UsageService.ts:740), so OpenCode users always load the shards on the first summary after boot or idle. With sharding this is about 40 ms spread over 64 slices, not a monolithic block. The auditor's resident-memory claim is now quantified at about 16.5 MiB while loaded, down from 62.9 MiB."
+}

@@ -1,0 +1,59 @@
+{
+  "id": "web-bootstrap:modulepreload-and-tiny-chunks",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL holds. Preloading is fully fixed. Dynamic imports now preload their whole static closure: the boot chunk's import of RootAppShell carries 102 deps and ChatThreadRouteView carries 146, which equal their closures. index.html also hints boot, rolldown-runtime, boot-vendor, main and main.css, so the CSS-before-main gap and per-phase level discovery are gone. Proposal part 2 (merging tiny chunks) is done only for the boot graph and for vendor, icon, lexical, markdown and Shiki groups. Application modules outside boot still use automatic chunking. In a fresh standard build (dist from today 21:45), the static closure of index, main, RootAppShell and ChatThreadRouteView is 173 JS files: 61 under 2 KiB, 43 under 1 KiB, 140 under 12 KiB. The finding counted 176 files with 90 under 2 KiB, and its target is under 60. The total request count to the composer has therefore barely moved, even though boot shrank from about 75 files to 5. #710 moved code out of the boot graph into the lazy phases, which now add 168 files (it was about 100). Part 3 (re-measure) was never recorded, and no test enforces a request budget.",
+  "evidence": [
+    {
+      "location": "apps/web/vite.config.ts:214-217",
+      "note": "modulePreload is { polyfill: false, resolveDependencies: resolveWebModulePreloadDependencies }. The finding's modulePreload:false is gone."
+    },
+    {
+      "location": "apps/web/src/viteBuild/modulePreload.ts:22-28",
+      "note": "hostType 'js' returns all deps and the HTML host returns []. The built boot-D36cWeP2.js imports RootAppShell with a 102-entry __vite__mapDeps list and ChatThreadRouteView with 146; my static-closure walk gives 103 and 147 files, the extra one being the chunk itself. The proposal's per-phase closure preload is in place."
+    },
+    {
+      "location": "apps/web/src/viteBuild/modulePreload.ts:38-83",
+      "note": "bootPreloadTags and createBootPreloadPlugin add the boot hints. dist/index.html:28-32 has modulepreload for boot, rolldown-runtime, boot-vendor and main, plus rel=preload as=style for main-*.css. The CSS-to-main serialization and the 4-level main-phase discovery are removed, and later phases are not preloaded at document start, which avoids the contention the finding observed."
+    },
+    {
+      "location": "apps/web/src/viteBuild/codeSplitting.ts:33-37",
+      "note": "This comment says app modules outside the boot graph keep automatic chunking because of possible top-level side effects. That is the root cause of the remaining tiny chunks. The auditor cited :27-31 for it."
+    },
+    {
+      "location": "apps/web/src/viteBuild/codeSplitting.ts:39,289-293,295-318",
+      "note": "The 12 KiB entriesAware threshold applies only to the icons, vendor, lexical, markdown-stack and shiki-engine groups, which all match node_modules paths. No group captures app modules except boot and boot-vendor (priorities 10 and 11)."
+    },
+    {
+      "location": "apps/web/dist/assets (static-closure walk of today's build, read-only)",
+      "note": "index+main+RootAppShell+ChatThreadRouteView: 173 files, 4,164 KiB raw. Sizes: 61 under 2 KiB, 33 at 2-4 KiB, 30 at 4-8 KiB, 16 at 8-12 KiB, 20 at 12-32 KiB, 13 larger. RootAppShell adds 100 files (29 under 2 KiB) and ChatThread adds 68 (29 under 2 KiB). The DraftChatThreadRouteView path is 171 files with 59 under 2 KiB. All tiny chunks are app modules: useMediaQuery, kbd, label, switch, textarea, spinner, formatCount, sidebarStatusText, workItemState, pathEntry, providerCapabilities (93 B), threadLinkActivity (84 B) and others."
+    },
+    {
+      "location": "apps/web/dist/assets (chunks over 400 KiB on the composer path)",
+      "note": "boot is 874 KiB, boot-vendor 691 KiB and ChatRightPanel 637 KiB. The finding's guardrail was 'no new chunk >400 KiB'. boot and boot-vendor are both new chunks over that line; the auditor mentioned only boot. Both are deliberate (codeSplitting.ts:299-311). ChatRightPanel is a separate finding."
+    },
+    {
+      "location": "apps/server/src (git grep node:http2|createSecureServer: no hits)",
+      "note": "The standard server still serves HTTP/1.1, so the roughly 168 lazy-phase requests still queue on Chromium's 6-connection pool for LAN, Tailscale and saved-environment clients. That is the user-visible cost that remains."
+    },
+    {
+      "location": "apps/web/src/viteBuild/buildPlugins.test.ts:113-307",
+      "note": "Tests cover the group matchers and preload resolver only. No test or CI budget checks the number of JS files or tiny chunks on the composer path."
+    },
+    {
+      "location": "git show -s 3ce80cee6 / 60633eff3",
+      "note": "3ce80cee6 records hosted sign-in timings and precache counts. 60633eff3 records cold load to composer as 795 to 310 ms and 6.1 to 1.5 MB. Neither records the composer-path request count or a re-run of graph/depth (part 3)."
+    }
+  ],
+  "remaining": "Part 2 for app code and part 3 are missing. Under 2 KiB, 61 app-module chunks remain, and 140 of the 173 JS files on the cold path to the composer are under 12 KiB (index → boot → RootAppShell → ChatThreadRouteView). Total requests are about 173 (171 via DraftChatThreadRouteView), against the target of under 60. apps/web/src/viteBuild/codeSplitting.ts:295-318 has no group for application modules outside the boot graph; the comment at :33-37 explains why. Merging only the sub-2 KiB chunks would leave about 112 requests. Reaching under 60 means folding most of the sub-12 KiB app subgroups too. No measurement or regression budget exists for this.",
+  "fixDefects": "None found in the preload fix. The resolver matches each import's real closure (102/146 deps against closures of 103/147 files). The HTML host gets [], and hints come from the real bundle graph with matching crossorigin mode. Preloading the full closure of every dynamic import, including idle-preloaded surfaces, is Vite's default behaviour and fires only when that import starts.",
+  "implementationSketch": "1) apps/web/src/viteBuild/codeSplitting.ts: add a group after shiki-engine (priority 0), for example { name: 'app-shared', test: isMergeableAppModule, minShareCount: 2, entriesAware: true, entriesAwareMergeThreshold: CODE_SPLITTING_MERGE_THRESHOLD_BYTES, or 24-32 KiB if needed to get under 60 }. isMergeableAppModule should reject: \\0 and ?query ids; node_modules; non-js/ts files; workers; Mermaid modules; Shiki grammar, theme and WASM entries; and boot-graph modules, which boot already captures at higher priority. Add 'app-shared' to MERGED_CHUNK_GROUP_NAMES (:257-265) so filenames stay short. 2) Side-effect safety is the real design question, because the merge threshold folds a module into a chunk that other entry sets also load and evaluate. Option (a), the conservative one: gate the test on a vetted allowlist of side-effect-free paths (components/ui/*, hooks/use*.ts, *.logic.ts, *Presentation.ts, pure lib/ helpers). Add a build-time assertion in a small plugin that fails if a captured module's code contains top-level statements other than import, export, const/let/function/class declarations, or calls to an allowlisted pure helper. Option (b): declare apps/web/package.json \"sideEffects\" as an explicit list of the side-effecting files and CSS, then gate the group on ctx.getModuleInfo(id).moduleSideEffects === false (ChunkingContext exposes ModuleInfo). This changes tree-shaking, so audit it first. Option (c): rolldown 1.2.7 output.strictExecutionOrder:true, which wraps module bodies so they run only when imported, regardless of chunk placement. This removes the hazard but grows every chunk with init wrappers, including boot. The cheaper experimental.onDemandWrapping is marked hidden/not ready, so use (c) only with measurements. 3) Add a regression budget to buildPlugins.test.ts or a post-build script reusing viteBuild/bundleGraph.ts. Walk the static closure of index → main → RootAppShell → ChatThreadRouteView and DraftChatThreadRouteView, and assert JS file count < 60 (or a calibrated ceiling) and sub-2 KiB count <= ~5. Also check that no chunk other than boot, boot-vendor and ChatRightPanel exceeds 400 KiB. 4) Re-measure cold load to the composer on the throttled HTTP/1.1 profile (40 ms RTT, 20 Mbit), and on loopback to confirm no regression from extra bytes evaluated per phase.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Build-only change with no auth, E2EE, Hub protocol or hosted-lifecycle impact. The side-effect strategy (allowlist, sideEffects declaration or strictExecutionOrder) is an engineering choice to validate with measurements, not a product decision.",
+  "repos": "ryco",
+  "correction": "The status is right, with five corrections. (1) The auditor's line numbers are off: the 'app modules keep automatic chunking' comment is at codeSplitting.ts:33-37 (not 27-31), the threshold constant is at :39 (not 52-53), and the groups are at :295-318. (2) Under 1 KiB, the count is 43, not 40. (3) Two new chunks over 400 KiB sit on the boot path, not one: boot is 874 KiB and boot-vendor 691 KiB. (4) The total request count to the composer is essentially unchanged (176 to 173) because #710 moved code from boot into the lazy phases; they now add 168 files instead of about 100. The HTTP/1.1 request-slot part of the finding's expected gain is therefore largely unrealised, not just a tail of 61 tiny files. (5) Merging only sub-2 KiB chunks cannot reach the under-60 target (about 112 would remain), so the app-shared group must fold sub-12 KiB subgroups. A safe way to do that needs an explicit side-effect strategy. rolldown 1.2.7's strictExecutionOrder (with the still-hidden onDemandWrapping) is an alternative to a path allowlist."
+}

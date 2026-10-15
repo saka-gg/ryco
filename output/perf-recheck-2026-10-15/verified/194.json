@@ -1,0 +1,54 @@
+{
+  "id": "dedicated-pages:palette-and-settings-section-preload",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The finding's proposal is implemented (PR #710, 60633eff3). The palette chunk is idle-preloaded after the shell paints, hasOpened is derived during render, and the dialog mounts only once its chunk is ready, so no Suspense fallback or reveal throttle applies. All 12 lazy settings section bodies are preloadableLazy. They are warmed on nav, menu and search-result pointerenter/focus, and the /settings route loader awaits the open section's body. The fix missed one code path with the same problem. IntegrationsSettingsPanel still wraps ComputerUseSettings in a plain React.lazy plus Suspense. On desktop, client-scope Integrations consists only of that component. So on the first visit each session, 'Loading device integrations…' still shows for about 300 ms (React's fallback-reveal throttle), even after the hover preload loaded the outer section chunk. The auditor's 'last-visited section' reasoning holds: the section is not persisted, and the route loader preloads store.section.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/CommandPalette.tsx:23",
+      "note": "CommandPaletteDialog is preloadableLazy. preloadCommandPaletteDialog (line 28) calls .preload()."
+    },
+    {
+      "location": "apps/web/src/components/CommandPalette.tsx:36",
+      "note": "hasOpened is derived during render (`if (open && !hasOpened) setHasOpened(true)`). useLazyComponentReady (line 39) gates the mount, and there is no Suspense fallback."
+    },
+    {
+      "location": "apps/web/src/components/RootAppShell.tsx:175",
+      "note": "ShellIdlePreloads schedules the thread/draft routes, then preloadCommandPaletteDialog, then preloadSettingsPage, after primary-shell-painted. Phone tier and non-4g/saveData opt out (shellIdlePreload.ts:15-23)."
+    },
+    {
+      "location": "apps/web/src/lib/preloadableLazy.ts:118",
+      "note": "useLazyComponentReady: when the chunk is preloaded, the dialog mounts in the same commit. Otherwise the load starts in a passive effect, which is flushed synchronously after the discrete keydown commit. A failed load throws to the error boundary, the same behaviour as React.lazy before."
+    },
+    {
+      "location": "apps/web/src/components/settings/SettingsPage.tsx:241",
+      "note": "12 section bodies are preloadableLazy. LAZY_SECTION_PANELS is at :279 and preloadSettingsSection at :294. pointerenter/focus preload is wired on the desktop nav (:495), the compact menu (:601) and search results (:647)."
+    },
+    {
+      "location": "apps/web/src/settingsRoute.ts:36",
+      "note": "preloadOpenSettingsSection loads store.section's body. routes/settings.tsx:29 runs it as the route loader, so openSettings(section) from outside settings commits with the body instead of PanelFallback."
+    },
+    {
+      "location": "apps/web/src/settingsDialogStore.ts:45",
+      "note": "section defaults to 'general', which is eager (GeneralSettingsPanel is imported statically at SettingsPage.tsx:73 and rendered at :312). The store is not persisted, so there is no cross-session last-visited section."
+    },
+    {
+      "location": "apps/web/src/components/settings/IntegrationsSettingsPanel.tsx:23",
+      "note": "Missed path: `const ComputerUseSettings = lazy(...)` with a <Suspense fallback='Loading device integrations…'> at :46. On desktop client scope it is the panel's only content (scope==='client' skips NodeIntegrationsSettingsPanel at :35). preloadSettingsSection('integrations') warms only the outer chunk, and a React.lazy always suspends on its first render, so the nested fallback commits and its reveal is held about 300 ms. preloadableLazy.ts:16-20 documents exactly this behaviour."
+    },
+    {
+      "location": "apps/web/src/components/settings/settingsSections.logic.ts:179",
+      "note": "Client-scope Integrations is shown only when desktopBridge.computerUse exists, so whenever that nav item is visible, its body is the nested lazy component."
+    }
+  ],
+  "remaining": "Desktop only: on the first visit each session to client-scope Settings → Integrations (and node scope on the local desktop device), the nested React.lazy ComputerUseSettings (apps/web/src/components/settings/IntegrationsSettingsPanel.tsx:23-25, Suspense at :46-56) still flashes 'Loading device integrations…' for about 300 ms. The hover/focus preload and the route loader do not warm it. Two minor edges are not covered either. On touch, pointerenter fires only just before the click, so a miss still shows PanelFallback. An openSettings(section) while already on /settings (for example a toast 'Settings' action) starts no route loader and no hover preload. Both are negligible.",
+  "fixDefects": "No bugs in the implemented code. The auditor's evidence has two small location errors: the store default is at settingsDialogStore.ts:45, not :50, and the eager GeneralSettingsPanel is at SettingsPage.tsx:73 (import) and :312 (case), not :1105.",
+  "implementationSketch": "1. In apps/web/src/components/settings/IntegrationsSettingsPanel.tsx, replace `lazy(...)` with `preloadableLazy(() => import('./ComputerUseSettings').then((m) => m.ComputerUseSettings))`. Export `preloadComputerUseSettings(): Promise<void>`, which returns `window.desktopBridge?.computerUse ? ComputerUseSettings.preload() : Promise.resolve()`. Keep the existing <Suspense> as a safety net. 2. In apps/web/src/components/settings/SettingsPage.tsx:253, chain the nested load into the section loader: `preloadableLazy(() => import('./IntegrationsSettingsPanel').then(async (m) => { await m.preloadComputerUseSettings(); return m.IntegrationsSettingsPanel; }))`. preloadSettingsSection('integrations'), the nav hover/focus handlers and the route loader then all warm both chunks, and the section mounts with no fallback. 3. Test: in IntegrationsSettingsPanel.browser.tsx or a SettingsPage browser test, stub window.desktopBridge.computerUse, `await preloadSettingsSection('integrations')`, render the Integrations section, and assert that the first commit contains the computer-use content and never the 'Loading device integrations…' text. Validation: focused vitest/browser tests for the settings panel, plus apps/web typecheck and lint.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "A web-only chunk-loading change inside the settings page. No auth, E2EE, hosted lifecycle or Hub protocol impact.",
+  "repos": "ryco"
+}

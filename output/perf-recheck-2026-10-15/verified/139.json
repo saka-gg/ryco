@@ -1,0 +1,51 @@
+{
+  "id": "gap-first-turn-latency:checkpoint-seeded-index",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor's one fix defect cannot happen through current code. They said a project cwd below the git toplevel would make ls-files miss skip-worktree entries and record staged changes outside the subdirectory. Both captureCheckpoint callers (CheckpointReactor.ts:532 and :784) get cwd from resolveCheckpointCwd. That function returns undefined unless <cwd>/.git exists (CheckpointReactor.ts:462 -> git/Utils.ts:4-5, existsSync(join(cwd, '.git'))). So the capture cwd is always a checkout root (main, linked worktree or nested repo), and `add -A -- .`, `ls-files` and `update-index` all cover the whole index. The auditor missed a different small semantic edge, described in fixDefects.",
+  "summary": "DONE holds. Commit 60633eff3 (#710) removes both costs in the finding. (1) captureCheckpoint seeds its temp GIT_INDEX_FILE from a copy of the checkout's real index, so `add -A` only rehashes files whose stat data changed. It no longer rehashes every tracked file after `read-tree HEAD`. The spawn count stays at 6. (2) Positive VCS detections are cached for 2 minutes instead of 2 s, and each read checks the dev:ino:kind identity of <root>/.git again. Negative detections stay at 2 s. The seeding code handles these cases: linked worktrees (`--git-path index`); racy git (the copy keeps the original mtime, truncated to ms, which only makes more entries racy; update-index later writes the temp index from that timestamp, so racy entries are still smudged); assume-unchanged entries (cleared on the copy); skip-worktree/sparse and split index (fall back to read-tree HEAD); listings over 64 MiB, no index yet and old git (non-absolute output) also fall back. It never fails: catchCause returns false. Both the turn-start baseline (:784) and the completion capture (:532) use it. No other code path rebuilds an index from HEAD and rehashes it. GitIndexReview already copied index bytes, and prepareCommitContext's `add -A` uses the real index. Two optional leftovers, neither a regression: sparse-checkout repos always fall back (no speedup, by design), and one detect spawn (about 45 ms) still runs once per 2-minute cache expiry.",
+  "evidence": [
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.ts:138-213",
+      "note": "seedIndexFromCheckout: rev-parse --path-format=absolute --git-path index; sharedindex.* check on the index's directory; stat, copyFile, utimes(orig mtime); ls-files -v -z with a 64 MiB cap; S/s tag -> false; lowercase tag -> update-index --no-assume-unchanged -z --stdin on the copy (env carries GIT_INDEX_FILE); catchCause -> false."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.ts:233-258",
+      "note": "Seeds first. Only when seeding fails does it remove the partial copy, then run hasHeadCommit and read-tree HEAD. add -A / write-tree / commit-tree / update-ref are unchanged. The old version always ran rev-parse plus read-tree HEAD into an empty index (git show f1be4abc7:...CheckpointStore.ts)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:432-466",
+      "note": "resolveCheckpointCwd returns a cwd only when isGitWorkspace(cwd), which is existsSync(<cwd>/.git) (apps/server/src/git/Utils.ts:4-5). So capture cwds are always checkout roots and the auditor's subdirectory defect cannot happen."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:532",
+      "note": "The completion capture (captureAndDispatchCheckpoint) uses the seeded captureCheckpoint."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/CheckpointReactor.ts:784",
+      "note": "The first-turn and pre-turn baseline capture uses the same path. The knownCheckpointRefs memo skips git entirely after the first baseline."
+    },
+    {
+      "location": "apps/server/src/vcs/VcsDriverRegistry.ts:12-20,138-190",
+      "note": "NEGATIVE TTL 2 s, POSITIVE TTL 2 min. detect() checks the <root>/.git identity (and a nested <cwd>/.git) again on every read and invalidates when it changes. Old code: one DETECTION_CACHE_TTL = 2 s for both. Covered by VcsDriverRegistry.test.ts ('keeps a detected checkout until its .git identity changes')."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.test.ts:179-297",
+      "note": "Tests: seeded tree equals referenceCaptureTree with staged, unstaged, untracked and deleted changes at once; real index untouched; racy same-size edit; assume-unchanged; skip-worktree fallback; linked worktree; repo with no commits. Untested: split-index fallback, and ignored paths whose tracked state differs between index and HEAD."
+    },
+    {
+      "location": "apps/server/src/checkpointing/Layers/CheckpointStore.ts:131-133",
+      "note": "The doc comment says the seeded tree equals read-tree HEAD + add -A. That is not exact for ignored paths that are tracked in only one of HEAD or the index, or for modes staged under core.fileMode=false (see fixDefects)."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Low severity, semantic only, no perf impact: the seeded tree is NOT always identical to read-tree HEAD + add -A, contrary to the doc comment at CheckpointStore.ts:131-133. `add -A` updates tracked entries even when ignored, but never adds untracked ignored files. So the result now follows the real index, not HEAD, for ignored paths whose tracked state differs between the two. (a) A file force-added with `git add -f` but not committed is now recorded; before, it was omitted. (b) A file untracked with `git rm --cached` while HEAD still has it and .gitignore matches it (for example .env) is now omitted; before, it was recorded with its worktree content. The same applies to modes staged with `update-index --chmod` under core.fileMode=false or core.symlinks=false. Effects: turn diffs show these index-only changes before they are committed. restoreCheckpoint (`git restore --source C --worktree --staged -- .`) removes tracked paths that are missing from C. Case (b) can therefore delete an ignored local file such as .env if that path is tracked in the index again by restore time, for example after a previous revert's `git reset -- .` put it back. Case (a) used to have the mirror-image risk, and seeding removes it. Both chains are narrow.",
+  "implementationSketch": "Optional polish, all in apps/server/src/checkpointing/Layers/CheckpointStore.ts (seedIndexFromCheckout). (1) Exact equivalence with the old algorithm: before copying, run `git diff-index --cached --no-renames --name-only -z --diff-filter=AD HEAD` against the real index (cheap, uses cache-tree; skip when there is no HEAD). Pipe those paths to `git check-ignore -z --stdin --no-index`. If any is ignored, return false (fall back to read-tree HEAD). Optionally do the same for mode-only staged changes (`diff-index --cached --raw` with old mode != new mode) when core.fileMode is false. Otherwise just correct the doc comment to describe the index-following semantics. (2) Sparse-checkout speedup (low value): when S entries exist, return false only if one of them differs between index and HEAD. Check this by intersecting the S paths with `git diff-index --cached --name-only -z HEAD`. Otherwise keep the seeded copy, because add -A leaves skip-worktree entries alone and they equal HEAD. (3) VcsDriverRegistry.ts:20: since every read checks .git again, POSITIVE_DETECTION_CACHE_TTL could be raised to 10-30 min to remove the remaining detect spawn after idle, but that saves only about 45 ms per expiry. Tests in CheckpointStore.test.ts, compared against referenceCaptureTree: a force-added ignored file, a `git rm --cached` ignored file, a sparse-checkout cone with an unmodified out-of-cone path, and a split index (`git update-index --split-index`) falling back.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "No auth, E2EE, Hub or hosted-lifecycle impact. The optional follow-up either restores the original HEAD-based semantics exactly (fall back on divergence) or only corrects the doc comment, so no product trade-off needs approval.",
+  "repos": "ryco"
+}

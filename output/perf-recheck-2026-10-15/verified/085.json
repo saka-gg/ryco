@@ -1,0 +1,51 @@
+{
+  "id": "web-boot-cpu:cross-env-selectors-allocate",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The main cost the finding measured is gone. #710 (60633eff3) memoizes the three cross-environment Sidebar selectors and the SidebarProjectItem per-project selectors on (id list, record) identity, so unrelated commits such as streaming deltas return the same array and useShallow short-circuits. One per-project selector inside the finding's own location range (old store.ts:3136-3200) was not converted: selectDelegatedChildThreadsForThreadRef. It still runs a 1-element-array flatMap over the parent project's threads, then a filter and a toSorted, on every store commit. It does this for every non-phone thread view, and for a draft thread view, where the parent has no shell, it scans every thread in the environment. The auditor's `?? []` defect in selectSidebarWorktreesForProjectRef is also real, and it is worse than described for multi-checkout projects: the combination cache misses on every commit there.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3309",
+      "note": "createSliceRowsSelector: a WeakMap keyed on the id array and checked against the record identity, with reuseIfSameElements (line 3305). This replaces the per-thread flatMap in the memoized selectors. Confirmed introduced by 60633eff3 (git log -S)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3329",
+      "note": "createAcrossEnvironmentsSelector compares the per-environment parts by identity and returns lastRows. Projects, shells, sidebar threads and sidebar worktrees across environments (3391-3416) are all built on it. Per-environment sidebar row selectors filter by environmentId (3359, 3374)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:1172",
+      "note": "sidebarThreadSummaryById is re-spread only when sidebarThreadSummariesEqual fails. Shell thread upserts are coalesced to 250 ms per thread on the server (apps/server/src/ws/context/constants.ts:35), so the memo hits on most frame-batched commits. Snapshot re-application keeps identity via reuseUnchangedIds and reuseUnchangedRecord (2187-2210). No in-place mutation of published id arrays or records was found: the push/assign sites at 2156, 2175 and 3884-3891 build fresh containers before publishing."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3499",
+      "note": "selectDelegatedChildThreadsForThreadRef is unchanged since f1be4abc7 (old 3173-3191, inside the finding's cited range 3136-3200). Line 3512 still runs candidateIds.flatMap(id => thread ? [thread] : []) and then selectDelegatedChildThreads (filter plus toSorted, threadLineage.ts:61) on every call. When the parent shell is missing, candidateIds is environmentState.threadIds, i.e. all threads in the environment (3509-3511)."
+    },
+    {
+      "location": "apps/web/src/components/threads/DelegatedThreadsSection.tsx:28",
+      "note": "useStore(useShallow(state => selectDelegatedChildThreadsForThreadRef(state, parentRef))) runs on every store commit. It is mounted in ChatView.tsx:6018 for every non-phone thread view. ChatView.tsx:948 sets activeThreadId to activeThread?.id, which includes local drafts (line 908, localDraftThread). A draft has no shell, so it takes the all-environment fallback. A node micro-benchmark of this exact pattern gives about 55 us per commit at 2,000 candidates and about 6.5 us at 300."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:3451",
+      "note": "`worktreeIdsByProjectId?.[ref.projectId] ?? []` allocates a new key array for every project without worktrees. upsertWorktreeState and removeWorktreeState (1278-1366) delete empty project keys, so this is the common case. The WeakMap at 3313 therefore never hits for those projects: each call adds a throwaway entry and returns a new []. In createProjectRefsRowsSelector (3460-3474), multi-ref projects then fail arraysEqual(cached.parts, parts) on every commit and redo parts.flat() plus the compare. The thread variant (3490) and the cross-environment worktree selector (3388) use the shared EMPTY_* constants correctly."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/storeStructuralSharing.test.ts:230",
+      "note": "The slice-memoized selector test asserts identity for the cross-environment selectors and selectSidebarThreadsForProjectRefs only. There is no identity test for selectSidebarWorktreesForProjectRef(s) (which would fail for a project without worktrees) or for selectDelegatedChildThreadsForThreadRef."
+    },
+    {
+      "location": "apps/web/src/components/Sidebar.tsx:346",
+      "note": "The Sidebar (346-348), ThreadPriorityRefreshBridge.tsx:44, SidebarProjectItem.tsx:121-138 (memoized on project.memberProjectRefs), CommandPaletteDialog, useLogicalProjectSnapshots and useHandleNewThread all consume the memoized selectors now, so the measured 0.3-0.5 ms per commit is removed. selectThreadsAcrossEnvironments (3395) still uses flatMap but has no subscribers; selectProjectsForEnvironment subscribers exist only in dialogs and settings."
+    }
+  ],
+  "remaining": "selectDelegatedChildThreadsForThreadRef at packages/client-runtime/src/state/threads/store.ts:3499-3517 is still unmemoized. It runs a flatMap with a 1-element array per candidate thread, then a filter and a toSorted, on every store commit, through DelegatedThreadsSection.tsx:28-35 (mounted at ChatView.tsx:6018 on every non-phone thread view). On draft thread views the candidate set is every thread in the environment (3509-3511). That costs about 55 us and about 2k short-lived allocations per commit at 2,000 threads, and is frame-rate during streaming. It was part of the finding's cited range (old store.ts:3136-3200) and matches its per-project proposal: it is keyed by threadIdsByProjectId[projectId] plus the summary record.",
+  "fixDefects": "store.ts:3451 selectSidebarWorktreesForProjectRef uses `?? []` instead of EMPTY_WORKTREE_IDS. For every project without worktrees, each call allocates a new key array, a new result array and a dead WeakMap entry, and returns a new identity. For multi-checkout projects (createProjectRefsRowsSelector, 3460-3474) the parts comparison then fails on every commit, so the flat-and-compare runs every time. This affects SidebarProjectItem.tsx:130-138, PhoneHome.tsx:439, ProjectWorkspacesSection.tsx:412, useProjectMapCheckouts.tsx:143, useProjectDiskUsage.ts:102, NewThreadWorkLocation.tsx:96 and AgentsSection.tsx:46. useShallow still sees [] equal to [], so nothing re-renders; the cost is allocation and GC churn only. Minor: the `!ref` and `refs.length === 0` branches (3447, 3485, 3466) also return a new [] on each call.",
+  "implementationSketch": "1) store.ts:3451: replace `?? []` with `?? EMPTY_WORKTREE_IDS`. Optionally add shared EMPTY_SIDEBAR_WORKTREES and EMPTY_SIDEBAR_THREADS row constants and return them from the `!ref` branches (3447, 3485) and the `refs.length === 0` branch in createProjectRefsRowsSelector (3466). The existing comment already says results are read-only. 2) store.ts:3499 selectDelegatedChildThreadsForThreadRef: build the candidates with the memoized slice selector instead of flatMap: `const candidates = selectSidebarThreadRows(candidateIds, environmentState.sidebarThreadSummaryById)`. For the no-shell fallback, use the existing env-filtered per-environment selector (selectEnvironmentSidebarThreadRows) or the same shared selector keyed on threadIds. Then memoize the filtered and sorted result on (candidates identity, parent key), for example `const delegatedChildrenCache = new WeakMap<readonly SidebarThreadSummary[], Map<string, SidebarThreadSummary[]>>()` keyed by candidates, with an inner map keyed by scopedThreadKey(ref). Pass the result through reuseIfSameElements against the previous entry, and return a shared empty constant when there are no children. An unrelated commit then costs O(1). 3) Optional: in apps/web/src/hooks/useCheckoutResolution.ts:37, add a `threads === lastThreads` fast path before the O(N) every(). 4) Tests in packages/client-runtime/src/state/threads/storeStructuralSharing.test.ts ('slice-memoized selectors'): assert toBe across the existing `unrelated` commit for (a) selectSidebarWorktreesForProjectRef on a project without worktrees, (b) selectSidebarWorktreesForProjectRefs with two refs where one has no worktrees, and (c) selectDelegatedChildThreadsForThreadRef with a fixture child whose lineage is {relationship:'delegated', parentThreadId}. Also assert the result changes when a child summary is archived. Run the focused check with `bun run --cwd packages/client-runtime test -- storeStructuralSharing`, plus apps/web/src/environmentGrouping.test.ts and DelegatedThreadsSection.browser.tsx if browser tests are available.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is a pure client-side selector memoization with no auth, E2EE, hosted lifecycle, Hub protocol or product behaviour change.",
+  "correction": "The auditor's DONE overlooks selectDelegatedChildThreadsForThreadRef. It sits inside the finding's own cited range (old store.ts:3136-3200), keeps the exact flatMap pattern with a 1-element array per thread, and is subscribed on every commit by DelegatedThreadsSection in every desktop/tablet thread view. In draft views it scans all threads in the environment. The `?? []` defect the auditor found also defeats the combination cache for multi-checkout projects (createProjectRefsRowsSelector misses on every commit), not just the single-ref case. The sidebar part of the finding, which is what was measured, is correctly done.",
+  "repos": "ryco"
+}

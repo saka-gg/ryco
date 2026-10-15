@@ -1,0 +1,32 @@
+{
+  "id": "persistence-boot:boot-command-read-model-3x",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The engine has one production implementation, and it exposes getReadModel as Effect.sync over the worker-maintained commandReadModel. No wrapper layer drops it, so the helper never falls back to SQL in production. All three redundant boot reads use it: restricted workspace.validate, orphan reconcile (one snapshot shared by settleStaleProjectedTurns, capture and the request sweep) and RestartContinuation.dispatchPending per page. workspace.validate returns before loading anything when unrestricted. The only remaining SQL getCommandReadModel callers are engine bootstrap, CLI offline and the HTTP debug endpoint, as the proposal said. Both runtime-recovery phases that run before validate dispatch through the engine, so the in-memory model is not stale against SQL. The projector keeps the command-model shape aligned with the hydrated one: user-message anchors only, plans without markdown, activities capped while keeping milestones. The callers' field use (session, latestTurn, user anchors, activities, worktree paths) is safe. The restart pre-check now reads the same model the decider fences against, which is stricter than before. Shipped in 60633eff3 (#710), present in HEAD and in the Hub-vendored 7bc39eec3. The separate kind-scan cost in the remaining bootstrap hydration is tracked as finding 042.",
+  "evidence": [
+    {"location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:602", "note": "Single remaining SQL hydration at engine bootstrap."},
+    {"location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:662", "note": "getReadModel: () => Effect.sync(() => commandReadModel). Lazy, so every read sees the latest immutable model. This is the only `satisfies OrchestrationEngineShape` in non-test code, so no decorator drops it."},
+    {"location": "apps/server/src/orchestration/currentCommandReadModel.ts:18", "note": "engine.getReadModel?.() ?? projections.getCommandReadModel(). The fallback only applies to test doubles."},
+    {"location": "apps/server/src/serverRuntimeStartup.ts:905", "note": "The isRestricted check runs before any load. The restricted path reads the in-memory model (line 907)."},
+    {"location": "apps/server/src/serverRuntimeStartup.ts:650", "note": "Reconcile reads the engine model once and feeds settleStaleProjectedTurns, restartContinuation.capture and the pending-request sweep."},
+    {"location": "apps/server/src/orchestration/Layers/RestartContinuation.ts:682", "note": "dispatchPending reads the in-memory model per page. That is now O(1) plus a Map build."},
+    {"location": "apps/server/src/workspace/managedWorktreeMigration.ts:197", "note": "worktree-relocations.recover (runs before workspace.validate) changes projections via engine.dispatch, not raw SQL, so the in-memory model reflects it. Project relocations also dispatch through the engine."},
+    {"location": "apps/server/src/orchestration/projector.ts:77", "note": "The command model holds user anchors only and plans without markdown, the same shape as the hydrated one. Activities are capped at 500 and keep milestones (line 1205), so derivePendingThreadRequests results are equivalent."},
+    {"location": "apps/server/src/cli.ts:1175", "note": "CLI offline getOfflineSnapshot keeps the SQL load, as proposed."},
+    {"location": "apps/server/src/orchestration/http.ts:45", "note": "HTTP debug snapshot keeps the SQL load, as proposed."},
+    {"location": "apps/server/src/serverRuntimeStartup.test.ts:1603", "note": "Real makeServerRuntimeStartup test: getCommandReadModel dies, and the command gate opens with exactly one engine read."},
+    {"location": "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts:514", "note": "getReadModel equals the SQL model at boot and advances after a dispatch."},
+    {"location": "apps/server/src/orchestration/restartContinuationPolicy.ts:225", "note": "Doc-only staleness: it still says capture and the dispatch pre-check use the hydrated SQL model (created_at order). Both now read the in-memory model, so they match the decider fence. No functional defect."}
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. Doc nit: the restartFenceUserMessageId docstring at apps/server/src/orchestration/restartContinuationPolicy.ts:221-228 (predates the fix) says capture and the dispatch pre-check read the hydrated SQL model. They now read the engine's in-memory model. getReadModel is optional on the shape, so a future engine wrapper that forgets to forward it would silently fall back to SQL hydration. Today there is no such wrapper, and the startup test would catch the gate path.",
+  "implementationSketch": "Nothing required. Optional cleanup: in apps/server/src/orchestration/restartContinuationPolicy.ts:221-228, reword the docstring so capture and the dispatch pre-check read the engine's in-memory model, the same order as the decider fence. Then the created_at-order caveat only applies to SQL-hydrated callers.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none",
+  "correction": ""
+}

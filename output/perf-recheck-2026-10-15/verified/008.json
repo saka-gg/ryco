@@ -1,0 +1,63 @@
+{
+  "id": "desktop-boot:server-trace-file-volume",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "correction": "The auditor's classification holds. One addition: the auditor described the leftover as 'the remaining ~25% of volume', but the live trace files measure it at about 56 KB/s (about 200 MB/h) under agent load. About 74% of that now comes from the per-command orchestration span chain (orchestration.command.thread.activity.append plus decide, applyProjectorsForEvent, 5 per-projector spans, runAttachmentSideEffects and sql.transaction). That is a separate follow-up, not a defect in this fix.",
+  "summary": "Fixed in 60633eff3 (#710), and the fix is confirmed on the running install. LocalFileTracer drops SQL statement spans (any span with db.query.text) that succeed in under 50 ms by default, before they reach either the NDJSON sink or in-memory diagnostics. Failed and slow statements are kept. db.query.text is collapsed to one line, and RYCO_TRACE_SQL_MIN_DURATION_MS=0 turns full SQL tracing back on. Effect's sql Statement sets db.query.text through span.attribute(), which goes through the override, so real SQL spans are matched. In the current ~/.ryco/userdata/logs trace files, server.trace.ndjson.1 has 25,613 records and 0 SQL spans (183 s, 55.8 KB/s); .4 also has 0, and .8 has 3 slow statements, which were kept as intended. The report measured ~250-280 KB/s with 75.8% sql.execute bytes, so the expected ~-200 KB/s and -75% is achieved. Two optional proposal items were not done: a statement hash or id, and a higher trace level or sampling for other high-frequency spans. The core cost the finding described is removed.",
+  "evidence": [
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.ts:27",
+      "note": "DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS = 50 is on by default. ObservabilityLive (server.ts:835) is the only tracer construction site, so the desktop-spawned backend gets it too."
+    },
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.ts:89-101",
+      "note": "end() calls spanToTraceRecord and push only when keepsLocalRecord() is true. A db.query.text span that succeeded under the threshold is dropped. Failure, including interruption, is kept. A threshold of 0 keeps everything."
+    },
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.ts:103-112",
+      "note": "attribute() stores db.query.text normalized to one line. The OTLP delegate still receives the original redacted value."
+    },
+    {
+      "location": "apps/server/src/observability/Layers/Observability.ts:48-57",
+      "note": "diagnosticsSink.push writes to both the file sink and diagnostics.recordTraceRecords. Dropped spans skip JSON.stringify and the in-memory push."
+    },
+    {
+      "location": "apps/server/src/observability/Layers/Observability.ts:23-25",
+      "note": "RYCO_TRACE_SQL_MIN_DURATION_MS (Config.Int, default 50) is the opt-in for full SQL tracing, documented at docs/observability.md:515. It is read directly here rather than through ServerConfig/cli.ts like the other RYCO_TRACE_* settings."
+    },
+    {
+      "location": "apps/server/node_modules/effect/dist/sql/Statement.js:738-745",
+      "note": "withConnectionSpan sets db.query.text with span.attribute() after creation, which goes through LocalFileSpan.attribute(). Spans are named 'sqlite' or 'sql.execute' depending on db.system.name, but the filter keys on the attribute, so it covers both."
+    },
+    {
+      "location": "apps/server/src/persistence/SqliteReadClient.ts:378-385",
+      "note": "The read-worker client builds Statements on the main thread through Client.make, so its spans pass through the same tracer and filter. No second tracer exists in a worker."
+    },
+    {
+      "location": "apps/server/node_modules/effect/dist/internal/effect.js:2709",
+      "note": "When TracerTimingEnabled is false, startTime and endTime are 0n (also line 2770). Every successful SQL span is then dropped regardless of threshold. The default is timing on (cli.ts:306), so this does not affect the default path."
+    },
+    {
+      "location": "apps/server/src/observability/LocalFileTracer.test.ts:119-181",
+      "note": "Tests cover fast SQL dropped, slow (40 ms against a 25 ms threshold) and failed SQL kept, whitespace normalization, and threshold 0 keeping everything."
+    },
+    {
+      "location": "(local, outside repo) ~/.ryco/userdata/logs/server.trace.ndjson.1",
+      "note": "Live check on the current install: 25,613 records, 10.48 MB, 0 db.query.text spans over 183 s (55.8 KB/s, 140 rec/s). .4 matches (57.6 KB/s, 0 SQL); .8 has 3 kept slow statements. The largest remaining spans are orchestration.command.thread.activity.append (1.35 MB), sql.transaction (1.21 MB, 2,292 records) and 7 per-command projector/decider spans of about 0.75 MB each."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:532",
+      "note": "The residual volume source (out of scope for this finding): each dispatched command creates orchestration.command.<type> plus decideOrchestrationCommand (decider.ts:516), applyProjectorsForEvent (ProjectionPipeline.ts:2510), per-projector spans (for example ProjectionPipeline.ts:828 and 2261) and runAttachmentSideEffects (ProjectionPipeline.ts:530). That is about 9 spans and about 3.8 KB per activity-append command."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects found. Minor notes: (1) normalizeSqlText runs eagerly in attribute() (LocalFileTracer.ts:103-110) on every statement, including ones dropped at end(). This is a microsecond-scale regex. (2) With RYCO_TRACE_TIMING_ENABLED=false, all successful SQL spans are dropped whatever the threshold, because durations are 0n. This is acceptable but undocumented. (3) The threshold is a bare Config.Int in Observability.ts:23 rather than part of ServerConfig, unlike the sibling RYCO_TRACE_* settings. An invalid value fails the observability layer at boot, as the sibling ints do. (4) sql.transaction spans carry no db.query.text, so the filter does not cover them. They are about 11.6% of the current trace bytes. (5) The proposal's statement hash or id, and the higher trace level or sampling for high-frequency non-SQL spans, were not implemented.",
+  "implementationSketch": "Optional follow-up for the residual ~56 KB/s (not required to close this finding). (a) In LocalFileTracer.ts, generalize keepsLocalRecord into a small local-record policy: drop successful sub-threshold sql.transaction spans the same way (match name 'sql.transaction' or attribute db.system.name), and defer normalizeSqlText to the kept path (normalize in end() before spanToTraceRecord). (b) For the per-command orchestration chain, either give the per-projector and decider spans a Debug trace level (Effect.withSpan or Effect.fn options { level: 'Debug' }) at ProjectionPipeline.ts:530/828/2261/2510 and decider.ts:516, so the default RYCO_TRACE_MIN_LEVEL=Info marks them unsampled while keeping the orchestration.command.* root span, or apply the same 'drop if successful and fast' rule to a small allowlist of child span names. (c) Consider moving RYCO_TRACE_SQL_MIN_DURATION_MS into ServerConfig (cli.ts:305-313, config.ts) for consistency. Tests: extend LocalFileTracer.test.ts with a fast sql.transaction-named span being dropped, and add an orchestration engine test asserting that a dispatched command writes only the root span to the trace file at the Info level. Logger and SDK spans are tracked separately in finding 259.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The core fix is done. The optional follow-up only changes local trace verbosity, which is a server-internal diagnostics detail with no security, protocol or product trade-off.",
+  "repos": "ryco"
+}

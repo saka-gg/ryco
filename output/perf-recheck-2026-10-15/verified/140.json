@@ -1,0 +1,75 @@
+{
+  "id": "gap-first-turn-latency:attachment-prefix-breaks-claude-slash-commands",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The bug the finding describes is fixed. ProviderService.sendTurn no longer prefixes attachment instructions per turn. Slash commands and '/compact' reach the Claude adapter verbatim, the Claude host-context and goal prefixes skip slash input, and buildPromptText still returns a bare '/compact'. The other half of the proposal, moving the instructions to Claude's session-level system prompt, does not actually work. ClaudeAdapter passes them as a top-level `appendSystemPrompt` query option, and the pinned @anthropic-ai/claude-agent-sdk 0.3.296 ignores that option: query() reads appended text only from `systemPrompt: {type:'preset', append}`. I confirmed this with a fake spawnClaudeCodeProcess. A top-level appendSystemPrompt marker never appears in the initialize request or the CLI args. The same marker passed as systemPrompt.append arrives as initialize.appendSystemPrompt. Since 60633eff3, Claude therefore receives no attachment instructions at all, which is a regression: before, they reached Claude through the prompt prefix. The same dead channel also drops the token-mode reduction instructions and the project custom system prompt for Claude, a pre-existing bug since 6fceb686c and ba08d1f55. The auditor's adjacent gaps (Ultrathink prefix, source-control contexts ahead of slash commands) cannot be reached today. The bundled model-manifest declares no promptInjectedValues, and thread.turn.start never forwards sourceControlContexts to the provider: the event payload has no such field.",
+  "evidence": [
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.ts:1747-1760",
+      "note": "Per-turn prefix removed. Adapters with the 'session' capability get no prefix, slash input is never prefixed, and other adapters get it once per runtime through the tracker."
+    },
+    {
+      "location": "apps/server/src/provider/attachmentInstructionDelivery.ts:17-60",
+      "note": "isSlashCommandInput guard plus the once-per-runtime tracker; ProviderService.ts:2399 forgets the thread on rollback."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ProviderService.test.ts:3778-3860",
+      "note": "/compact and hello pass through verbatim with a Claude double that declares 'session'. First-turn adapters get the prefix once, /init goes out verbatim, and the prefix is re-sent after rollback. The Claude double never exercises the real system-prompt channel."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:5572-5580",
+      "note": "appendSystemPrompt combines ASSISTANT_ATTACHMENT_INSTRUCTIONS, the token reduction instructions and the project custom system prompt."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:5612-5613",
+      "note": "DEFECT: the options set `systemPrompt: { type: \"preset\", preset: \"claude_code\" }` with no `append`, and `appendSystemPrompt` sits at the top level behind `as Partial<ClaudeQueryOptions>`. The cast is needed because the SDK Options type has no such field."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1917-1927",
+      "note": "createQuery calls the SDK query() directly with these options, and no wrapper translates appendSystemPrompt."
+    },
+    {
+      "location": "apps/server/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:1526-2464",
+      "note": "SDK 0.3.296 `Options` has no appendSystemPrompt. The documented way to append is systemPrompt {type:'preset', preset:'claude_code', append} (around :2330-2371). appendSystemPrompt exists only on ClaimOptions (:364) and the internal initialize request (:4534)."
+    },
+    {
+      "location": "apps/server/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs (function yT)",
+      "note": "`{systemPrompt:s,...,...d}=e; ... else if(s.type===\"preset\")f=s.append ...; WZ={systemPrompt:p,appendSystemPrompt:f,...}`. The append text comes only from systemPrompt.append, and options.appendSystemPrompt is never read. Probe with a fake spawnClaudeCodeProcess: the top-level marker gave initialize appendSystemPrompt undefined; systemPrompt.append gave the marker."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.test.ts:619-639",
+      "note": "The test only checks the options object handed to the fake createQuery (cast to {appendSystemPrompt}), so it cannot catch the SDK ignoring the field."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1351-1371",
+      "note": "buildPromptText returns a bare '/compact'. For other slash commands it can still prepend source-control contexts or 'Ultrathink:', but neither input reaches this code today (see the next two entries)."
+    },
+    {
+      "location": "apps/server/src/provider/model-manifest.json",
+      "note": "No profile declares promptInjectedValues, so resolvePromptInjectedEffort never returns 'ultrathink' with the bundled catalog. A remotely refreshed manifest could change that."
+    },
+    {
+      "location": "packages/contracts/src/orchestration.ts:2826-2845",
+      "note": "ThreadTurnStartRequestedPayload has no sourceControlContexts, and no server orchestration code forwards them. ProviderSendTurnInput.sourceControlContexts is never set on the turn-start path. This is a separate bug: context chips are dropped on normal sends and only inlined on queued steers (ChatView.tsx:3992-3995)."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1329-1376",
+      "note": "The goal prefix skips slash input (goalMode.ts:18). Native compaction is mapped to the bare '/compact' for Claude sessions."
+    },
+    {
+      "location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:6042-6049,6143-6148",
+      "note": "The host-context prefix is deferred for slash input, and steerTurn refuses slash commands so they stay queued."
+    }
+  ],
+  "remaining": "Session-level delivery of the attachment instructions to Claude has no effect. apps/server/src/provider/Layers/ClaudeAdapter.ts:5612-5613 passes appendSystemPrompt as a top-level SDK option, and @anthropic-ai/claude-agent-sdk 0.3.296 ignores it; only systemPrompt.append is read. Claude therefore gets ASSISTANT_ATTACHMENT_INSTRUCTIONS neither per turn nor in the system prompt. The same applies to the token-mode reduction instructions and the project custom system prompt.",
+  "fixDefects": "Regression from 60633eff3. Claude now declares attachmentInstructions: \"session\" (ClaudeAdapter.ts:6661), so ProviderService stopped prefixing the instructions. The replacement channel, appendSystemPrompt at ClaudeAdapter.ts:5613, is silently dropped by the SDK, as confirmed against sdk.mjs and a spawn probe. As a result Claude is no longer told about the ryco-attachments fence fallback or the attachment rules. File delivery from Claude threads now depends on the ryco_attach_file tool being installed. The unit test at ClaudeAdapter.test.ts:619-639 asserts the ignored field, which hides the problem. Pre-existing on the same line: since 6fceb686c and ba08d1f55, the project custom system prompt and the token-reduction instructions have never reached Claude either. Minor, not regressions: isSlashCommandInput also matches prompts that start with an absolute path ('/Users/...'), which only defers the first-turn prefix, host context and goal by one turn and keeps such a message from being steered into a running Claude turn. A context handoff still puts its context document ahead of a slash command, which is expected for a handoff.",
+  "implementationSketch": "1) In ClaudeAdapter.ts startSession (around :5608-5613), replace the top-level cast with `systemPrompt: { type: \"preset\", preset: \"claude_code\", ...(appendSystemPrompt ? { append: appendSystemPrompt } : {}) }` and delete the `appendSystemPrompt` spread. The removal of the `as Partial<ClaudeQueryOptions>` cast then lets the type checker enforce the shape. Add a span attribute such as claude.query.system_prompt_append_bytes for observability. 2) Update ClaudeAdapter.test.ts:619-639 to assert `options.systemPrompt` deep-equals {type:'preset', preset:'claude_code', append: <string containing ASSISTANT_ATTACHMENT_INSTRUCTIONS>}. Add cases for a project customSystemPrompt and a token-reduction mode landing in systemPrompt.append, and assert there is no top-level appendSystemPrompt key. 3) Optionally add a small SDK-contract test that calls the real SDK query() with a fake spawnClaudeCodeProcess (PassThrough stdin/stdout) and checks that the initialize control request's appendSystemPrompt contains the marker. That guards against future SDK option renames; the probe that confirmed this bug took about 30 lines. 4) Note on rollout: by default the SDK and CLI record the system prompt on the first request and reuse it on resume until compaction (systemPromptSnapshot). Resumed existing Claude sessions may therefore pick up the appended text only after their next compaction, while new sessions get it at once. That is acceptable; setting `snapshot: false` would trade prompt-cache stability and is not recommended. 5) Optional hardening, not needed today: make ClaudeAdapter.buildPromptText return `input.input.trim()` unchanged when isSlashCommandInput(input.input) and there are no attachments. That generalizes the /compact bypass so a future source-control-context or Ultrathink prefix cannot break /init, /review or custom commands. Validate with focused vitest runs only: `bun run test` filtered to ClaudeAdapter.test.ts and ProviderService.test.ts, plus `bun typecheck` for apps/server.",
+  "worth": "high",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "This is a bug fix inside the Claude adapter's own session-option mapping. It needs no auth, E2EE, Hub-protocol or hosted-lifecycle change. Side effect worth noting for the user: project custom system prompts and token-mode instructions that were silently inert for Claude will start to apply. That is the intended behavior those settings already promise, not a new product trade-off.",
+  "repos": "ryco",
+  "correction": "The auditor marked this DONE with no defect in the fix. That is wrong. The new 'session' channel for Claude (top-level appendSystemPrompt) is ignored by the pinned Claude Agent SDK 0.3.296, so the instructions never reach Claude: this is a regression from the old per-turn prefix. The auditor's ClaudeAdapter.test.ts:623,634 evidence only checks the options object, not what the SDK sends to the CLI. The adjacent gaps the auditor named (Ultrathink prefix, source-control contexts ahead of slash commands) cannot be reached today: the bundled manifest has no promptInjectedValues, and turn-start sourceControlContexts are never forwarded to ProviderSendTurnInput, which is itself a separate bug."
+}

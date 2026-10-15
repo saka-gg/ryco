@@ -1,0 +1,58 @@
+{
+  "id": "desktop-boot:pre-window-sync-work",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PARTIAL holds. Done: the backend is spawned before ready from desktopEntry, configureAppIdentity runs once at module scope, menu, protocol client (guarded by isDefaultProtocolClient) and updater are deferred (electron-updater is lazy-loaded 3 s after boot), both log sinks are AsyncRotatingFileSink, one writev per chunk, and backend output stops being copied once the backend serves. PlistBuddy runs only for binary plists. Two things remain. (1) app.dock.setIcon still runs synchronously in whenReady on packaged macOS. The local desktop logs show ready to bootstrap.start unchanged after the fix: p50 24 ms in 15 runs since 2026-10-13 vs p50 24 ms in 440 earlier runs (p90 36 to 28). setName + dock.setIcon + registerDesktopProtocol therefore still cost the full ~24 ms that the deferred items were thought to cost, and dock.setIcon is the likely bulk. This makes it the main remaining piece, not a small one. (2) startDesktopComputerUse() is still awaited in Promise.all with port selection. Logs show the port selected at +10 ms and the envelope and window at +27..34 ms, so the computer-use stack (343 KB lazy chunk, runtime construction, unix-socket and TCP listens) gates the envelope and window by ~17-24 ms. bootstrap.start to window.create is p50 34 / p90 39 ms. The auditor's third item (use the appId constant in beta.ts) is wrong advice: dev runs from Electron.app, whose bundle id differs, and the plist read is one small file read.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/main.ts:2425",
+      "note": "configureAppIdentityAfterReady() still calls app.dock.setIcon(resolveIconPath(\"png\")) on every darwin launch, packaged included. Called synchronously from whenReady at main.ts:4911, before registerDesktopProtocol (4913) and bootstrap()."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4323",
+      "note": "getIconOption already says 'macOS uses .icns from app bundle'. The packaged dock icon override is redundant."
+    },
+    {
+      "location": "assets/prod/ryco-macos-1024.png",
+      "note": "Byte-identical (sha1 d2529eb...) to assets/prod/ryco-macos.iconset/icon_512x512@2x.png. Same for nightly (63b62ba...). scripts/build-desktop-artifact.ts:557-567 builds icon.png as a 512 px sips downscale and icon.icns from that iconset. Skipping setIcon on packaged builds keeps the artwork and shows the 1024 px representation instead of the 512 px downscale."
+    },
+    {
+      "location": "~/.ryco/userdata/logs/desktop-main.log*",
+      "note": "Startup timing: ready to bootstrap.start p50 24 / p90 36 ms before 2026-10-12 (n=440) and p50 24 / p90 28 ms since 2026-10-13 (n=15). Run b1b8af618599: ready 66, bootstrap.start 90, 'selected backend port' at +10 ms (.433), 'resolved backend endpoint' at +27 ms (.450), backend.spawned (early=1) 118, window.create 119, boot.load-request 152, backend http-bound 217, first-reveal 552."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4819",
+      "note": "Promise.all([selectDesktopBackendPort, startDesktopComputerUse()]) gates the envelope (computerUseBridge at main.ts:3166) and the window. The warm-path window is created inside startBackend at main.ts:3367, right after the envelope write, not at 4872. createWindow itself is ~33 ms sync (window.create to boot.load-request)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4712",
+      "note": "startDesktopComputerUse does import('./computerUse/desktopStack.ts') (dist chunk desktopStack-*.cjs, 343 KB, requires ws), new DesktopComputerUseRuntime (sync reads of the computer-beta.json and computer-use-policy.json files), then await start(): CuaDriverHost.listen (mkdtemp, chmod, unix socket) plus the 127.0.0.1:0 HTTP listen (runtime.ts:327-340)."
+    },
+    {
+      "location": "apps/desktop/src/desktopEntry.ts:92",
+      "note": "startEarlyBackend spawns the packaged backend before ready (logs: spawn at -56/-65 ms). The backend-spawn part of the finding is done, and goes further than the proposal."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:2435",
+      "note": "registerDesktopAuthorizationProtocol returns early when isDefaultProtocolClient. It runs from configureDeferredDesktopIntegration (4784) together with configureApplicationMenu and the 3 s delayed ensureAutoUpdaterConfigured. electron-updater is lazy-required (1992)."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1832",
+      "note": "writeDesktopStreamChunk does one writeBatch, which is a single writev (packages/shared/src/logging.ts:185). desktopLogSink and backendLogSink are AsyncRotatingFileSink (1890-1899). captureBackendOutput copies backend output only until the backend serves (49d90708a)."
+    },
+    {
+      "location": "apps/desktop/src/computerUse/beta.ts:51",
+      "note": "readBundleIdentifier reads Info.plist and regex-matches it. PlistBuddy runs only for a binary plist (65). The constructor (119-125) falls back to the constant. In dev the bundle is node_modules Electron.app with a different id, so reading the plist is correct, not just cosmetic."
+    }
+  ],
+  "remaining": "1) apps/desktop/src/main.ts:2425-2433 configureAppIdentityAfterReady still runs app.dock.setIcon synchronously in whenReady (4911) on packaged macOS, although the bundle .icns has the same artwork. Post-fix logs show the ready to bootstrap.start gap unchanged at p50 24 ms, and this call is the most likely cost. Every later boot step (port select, envelope, window) shifts by it. 2) apps/desktop/src/main.ts:4819-4822: startDesktopComputerUse() (lazy stack import + runtime construction + two listens) is awaited before the envelope (3166) and before the window (created in startBackend at 3367). That is ~17-24 ms beyond port selection on warm launches. Whether the envelope is on the backend's critical path is unmeasured: the early backend loads its own modules meanwhile. First reveal waits for the app's dom-ready after backend bind, so the user-visible gain is uncertain.",
+  "fixDefects": "None found in the implemented parts. The protocol guard, the deferred menu and updater, the async sinks with a single writev, and the early backend spawn behave as intended. The deferred configureApplicationMenu leaves Electron's default menu (set at will-finish-launching) in place for ~50 ms before the window is visible, which is harmless. The auditor's suggested third change (use the appId constant instead of reading Info.plist) should not be made: it would give the wrong excluded bundle id in dev runs from Electron.app, and it saves under 1 ms.",
+  "implementationSketch": "1) apps/desktop/src/main.ts configureAppIdentityAfterReady (2425): change the guard to `if (process.platform === \"darwin\" && app.dock && !app.isPackaged)` so only dev builds (assets/dev/ryco-macos-1024.png via resolveIconPath) set the Dock icon. Update the doc comment: packaged builds use the bundle .icns, which has the same artwork as icon.png. Optionally move the dev-only call into configureDeferredDesktopIntegration so dev boots skip it as well. To confirm the cost first, wrap the call in markDesktopStartupPhase('desktop.identity.start'/'end') temporarily, or compare `node apps/desktop/scripts/boot-report.mjs --last 10` on a packaged build before and after: expect ready to bootstrap.start to drop from ~24 ms to a few ms. Check the Dock icon of a packaged build by eye; no change is expected because the assets are byte-identical. No unit test is needed beyond the existing desktop tests; main.ts whenReady is not unit-tested. 2) Optional, measure first: add a backend startup phase when the envelope is received and one when module load finishes (apps/server/src/cli.ts around readBootstrapEnvelope at ~500, via recordDesktopStartupPhase). This shows whether the envelope ever gates the backend. Only if it does: decouple the computer-use binding from the stack import. Create the bridge's HTTP listener and token in main.ts (cheap, no heavy imports) and choose the CuaDriverHost socket directory and endpoint up front. Write the envelope with that binding, then let DesktopComputerUseRuntime adopt the pre-bound server and endpoint when desktopStack loads, with requests before then waiting on a ready promise (runtime.ts start() and backendBinding(), beta.ts start(), cuaDriverHost.ts listen()). Tests: runtime/beta unit tests for adopting a pre-bound server, and a check that requests before stack load wait rather than fail. Do not change beta.ts readBundleIdentifier.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Item 1 is a local, non-security change with identical assets. Item 2's decoupled-binding variant would change how the computer-use control bridge's capability token and endpoint are created and delivered to the backend. That would need a security look before doing it, but it is optional and should only be pursued if measurement shows the envelope gates the backend.",
+  "correction": "1) The auditor called the remaining dock.setIcon one of 'three small pieces'. The local desktop-main logs show ready to bootstrap.start p50 unchanged at 24 ms after the fix (n=15 since 2026-10-13 vs n=440 before). So the deferred menu, LaunchServices and updater work cost little, and setName + dock.setIcon + registerDesktopProtocol still account for the whole gap. Assets verified: the prod and nightly icon.png sources are byte-identical to the iconset 512@2x, so skipping on packaged builds is visually safe. 2) The auditor's third item (use the appId build constant in beta.ts) is wrong: dev runs from Electron.app, whose bundle id differs, the plist read is correct and costs under 1 ms, and the code already falls back to the constant. 3) Minor: the warm-path window is created inside startBackend (main.ts:3367) right after the envelope write, not at ensureInitialBackendWindowOpen at 4872. Computer use gates the window in both the warm and cold shell-env paths, because the pre-backend boot window opens only after Promise.all. Measured gate: ~17-24 ms beyond port selection (bootstrap.start to window.create p50 34 / p90 39 ms)."
+}

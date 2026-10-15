@@ -1,0 +1,29 @@
+{
+  "id": "web-boot-cpu:loader-css-before-js-waterfall",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The CSS and JS for the boot chain now download in parallel from document start, so the waterfall the finding described is gone. Since 3ce80cee6, index.html carries modulepreload links for every chunk in the boot chain plus a style preload for main's stylesheet, with crossorigin set to match. Separately, build.modulePreload now hands every dynamic import its full static JS closure, so the preload helper starts the JS fetch alongside the CSS. Before, it fetched the CSS first and the JS only after it loaded. The current dist (built after HEAD) shows the hints. The Hub vendors 7bc39eec3, which contains 3ce80cee6, and builds with this same Vite config, so hosted gets the fix too. The one remaining serialization is deliberate: import(main) still waits for the stylesheet's load event (the FOUC guard). The CSS (515 KB raw) has been in flight since document start alongside about 1.6 MB of boot JS, so it is not on the critical path.",
+  "evidence": [
+    {"location": "apps/web/src/viteBuild/modulePreload.ts:38-58", "note": "bootPreloadTags: rel=modulepreload crossorigin for the boot-chain JS (entry excluded) and rel=preload as=style crossorigin for the stylesheets; hrefs come from the emitted bundle via resolveBootAssets."},
+    {"location": "apps/web/src/viteBuild/modulePreload.ts:22-28", "note": "resolveWebModulePreloadDependencies returns all deps for JS hosts. Every dynamic import (not just main) now preloads its JS closure in the same round as its CSS, so the same CSS-then-JS pattern is fixed for route and dialog chunks too."},
+    {"location": "apps/web/src/viteBuild/bundleGraph.ts:111-129", "note": "resolveBootAssets walks the entry's static imports plus the src/main.tsx chunk's static closure (no dynamic edges, no assets), splitting the result into modules and styles."},
+    {"location": "apps/web/vite.config.ts:127", "note": "createBootPreloadPlugin() is registered for both client modes; vite.config.ts:211-217 sets modulePreload {polyfill:false, resolveDependencies}."},
+    {"location": "apps/web/index.html:128-131", "note": "The loader still calls import('/src/main.tsx') right away. The boot-shell-first-paint intent is kept: the shell is inline and preload links do not block rendering."},
+    {"location": "apps/web/dist/index.html:27-33", "note": "Built Oct 14 21:45, after HEAD (21:40). Contains the entry script, then modulepreload for boot, rolldown-runtime, boot-vendor and main, then preload as=style for main-DQhFpc47.css."},
+    {"location": "apps/web/dist/assets/index-JRaxdGHD.js:1-2", "note": "The entry's helper deps are [main.js, rolldown-runtime, boot, boot-vendor, main.css]. The helper in dist/assets/boot-D36cWeP2.js skips JS deps whose link href already exists. For the CSS it needs an existing rel=stylesheet, so it adds one with crossOrigin='' and reuses the anonymous-mode preload response, with no second fetch."},
+    {"location": "apps/web/src/pwa/offlineDocument.ts:20-38", "note": "The hosted SW boot document comes from the built index.html (which already carries the hints) and dedupes its extra modulepreloads against it."},
+    {"location": "ryco-hub:Dockerfile:10 (origin/main)", "note": "The Hub builds vendor/ryco (submodule at 7bc39eec3, which contains 3ce80cee6) with VITE_RYCO_CLIENT_MODE=hosted-hub, so hosted gets the hints. Its CSP (src/http/securityHeaders.ts:30-31) allows 'self' for scripts and styles; the hints are link tags only, so the single-inline-script check still passes."},
+    {"location": "apps/web/src/viteBuild/buildPlugins.test.ts:31-108", "note": "Unit tests cover the resolver (JS vs HTML host) and the boot hints, including the matching style-preload crossorigin and link-only tags."}
+  ],
+  "remaining": "",
+  "fixDefects": "None found. Two non-blocking observations. (1) resolveBootAssets finds the app chunk only by facadeModuleId ending in src/main.tsx (bundleGraph.ts:22, 114-116), and nothing at build time checks it found one. If the entry module were renamed, the main/CSS hints would quietly disappear and the waterfall would come back with no failing test, because the tests use synthetic graphs. Today's output is correct. (2) docs/research/performance-efficiency-size-improvements.md:97,252 still says modulePreload is disabled. That is stale documentation, not a perf issue.",
+  "implementationSketch": "Nothing required. Optional hardening: in createBootPreloadPlugin's transformIndexHtml handler (apps/web/src/viteBuild/modulePreload.ts:77-80), call this.error or this.warn when resolveBootAssets finds no chunk for APP_ENTRY_MODULE or no style, and add a unit test with an unmatched graph.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Already implemented and shipped in both standard and hosted builds. Nothing left to decide.",
+  "repos": "none",
+  "correction": "No substantive correction. A small wording point: the auditor called dist/assets/index-JRaxdGHD.js the 'inline entry'. It is the external module file Vite emits from index.html's inline module script; the conclusion is unchanged."
+}

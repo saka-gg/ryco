@@ -1,0 +1,79 @@
+{
+  "id": "gap-first-turn-latency:worktree-first-send-serial-chain",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is right. Fixed: base-only fetch, origin/HEAD resolved locally, a node-side prefetch when worktree mode is entered, no client RPCs on the common non-hosted path, one dispatch removed (thread.create carries branch and path), the rename moved to idle, and the storage lock made read-write. Still open, as the auditor said: hosted sends await getConfig, 4 serial bootstrap dispatches, no provider warm-up for worktree sends, and the branch name is not generated in parallel. The auditor missed three things. (a) The prefetch runs once, when the hero mounts or the mode is entered, and is reused for only 60 s after it settles. Nothing refreshes it, so anyone who takes longer than about a minute to write the first prompt gets the base fetch back on the critical path. (b) With a setup script, the PTY open (exclusive storage admission, history read, spawn), the terminal write and 2 sequential activity dispatches still run inline before turn.start. Other worktree paths already launch setup in the background. (c) The idle-deferred rename has no 'already pushed' guard and now runs after the whole first turn, so it can rename a branch the agent already pushed or opened a PR from.",
+  "evidence": [
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2261-2267",
+      "note": "fetchOriginBranch fetches only +refs/heads/<base>. The all-heads fetchOrigin (2247) remains only for listRefs (2609-2610). Its doc comment still says 'Always fetches (creation must see origin as it is now)', which contradicts the 60 s prefetch reuse (2258)."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:2318-2334",
+      "note": "fetchOriginDefaultBranch uses the locally recorded refs/remotes/origin/HEAD and calls ls-remote --symref only when nothing is recorded or the fetch fails."
+    },
+    {
+      "location": "apps/server/src/vcs/GitVcsDriverCore.ts:936, 2349-2359, 2724-2745",
+      "note": "WORKTREE_BASE_PREFETCH_REUSE_MS = 60_000. createWorktree joins an in-flight prefetch or reuses one settled within 60 s. Otherwise it runs fetchWorktreeBase serially inside the send."
+    },
+    {
+      "location": "apps/web/src/components/chat/NewThreadWorkLocation.tsx:155-162",
+      "note": "MISSED BY AUDITOR: prefetchWorktreeSend is called from one useEffect keyed on [canEdit, cwd, environmentId, prefetchRefName, projectId]. It fires once on hero mount or mode entry and never again while the user types. Combined with the 60 s server reuse, a prompt written over more than ~60 s gets no prefetch benefit."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5258; apps/web/src/components/chat/ChatComposer.tsx:1579, 2756",
+      "note": "onComposerIntent fires on focus and first keystroke but only drives the provider-session prewarm, which returns early for worktree plans (ChatView.tsx:5243). It never refreshes the base prefetch."
+    },
+    {
+      "location": "apps/web/src/hooks/executeChatSendTurn.ts:598-640",
+      "note": "Non-hosted sends with a cached config and remembered preferences make no RPC before dispatch. runSetupScript is left undefined for nodes with preferences."
+    },
+    {
+      "location": "apps/web/src/hooks/executeChatSendTurn.ts:617-621",
+      "note": "REMAINING: hosted mode always awaits api.server.getConfig() (one relay round trip) before dispatch. The result is used only for capabilities.projectPreferences, a compatibility check that decides whether runSetupScript is sent as undefined or true."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:870-893, 972-1011, 1052-1054",
+      "note": "REMAINING: thread.create + drainThrough, worktree.create, thread.attach-to-worktree, then turn.start. That is 4 serial dispatches (thread.meta.update is gone)."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:721-760, 768-830, 1016",
+      "note": "MISSED BY AUDITOR: runSetupProgram() runs inline before turn.start. runForThread does a project read, terminalManager.open (flushPersist, readHistory, exclusive storageLifecycleLock admission via admitPtyStart, PTY spawn) and terminalManager.write. recordSetupScriptStarted then runs Effect.all of 2 thread.activity.append dispatches, which is sequential by default. Only the output watcher is detached (worktreeSetupProgress.ts forkDetach)."
+    },
+    {
+      "location": "apps/server/src/ws/context/managedCheckout.ts:294-330; apps/server/src/ws/context/worktreeOperations.ts:711; apps/server/src/threadFork/Layers/ThreadFork.ts:1925",
+      "note": "Precedent: other worktree paths already launch setup detached through launchSetupScriptForWorktreeInBackground. Only the first-send bootstrap still runs it inline."
+    },
+    {
+      "location": "apps/server/src/terminal/Layers/Manager.ts:2156-2225, 1503-1510",
+      "note": "Terminal open still waits for exclusive admission, which must drain every in-flight shared holder (orchestration commands, path leases) before spawning. That wait sits on the worktree first-send critical path when a setup script exists."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5212-5243; apps/server/src/orchestration/Layers/ProviderSessionPrewarm.ts:59-66",
+      "note": "No provider prewarm for worktree sends. The server prewarm needs an existing directory. Codex sessions spawn a per-session runtime (CodexAdapter.ts:2049), so nothing shared is warm either."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1465-1511, 1528-1541",
+      "note": "The rename waits for idle (good for the mid-turn race), and generation starts only once the turn is under way. Delaying generation is deliberate ('so the generation CLI does not compete with the provider's boot'), so the first half of proposal 5 was knowingly not adopted."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts:1476-1488; apps/server/src/vcs/GitVcsDriverCore.ts:3137-3155",
+      "note": "FIX CAVEAT: renameWorktreeBranchWhenIdle checks only that the thread is idle and still on the old branch and path. renameBranch runs a plain git branch -m with no upstream or published check. Before #710 the rename landed seconds into the turn. Now it lands after the whole first turn, so a branch the agent pushed or opened a PR from in that turn gets renamed locally while its upstream stays origin/<temp>. With git's default push.default=simple, a later plain git push from the agent fails. GitManager already has probeBranchPublished (GitManager.ts:904) that could guard this."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/executeSendTurn.ts:137",
+      "note": "Correction to the auditor's caveat: mobile never makes worktree first sends (baseBranchForWorktree: null), so it is not a surface missing the prefetch. The real gaps are split-pane drafts (the hero is hidden when paneThreadRef !== null, ChatView.tsx:2209-2218) and PR, issue or work-item sources. Those go through createWorktreeForProject (ChatView.tsx:4155-4189) with no prefetch, plus a client round trip for the thread.meta.update and settings writes (sendEngine.ts:376-394)."
+    }
+  ],
+  "remaining": "1) The prefetch expires. It fires once (NewThreadWorkLocation.tsx:159-162) and is reused for only 60 s after it settles (GitVcsDriverCore.ts:936, 2726-2736), so a first prompt written over more than ~60 s pays a full base-only fetch (~0.3-0.5 s on the network) inside the send.\n2) Hosted sends still await a serial getConfig before dispatch (executeChatSendTurn.ts:617-621).\n3) The setup script runs inline before turn.start when the project has one (ws/context.ts:1016 -> 768-830): exclusive storage admission, history read, PTY spawn, terminal write and 2 sequential activity dispatches.\n4) 4 serial orchestration dispatches plus drainThrough remain (ws/context.ts:870-893, 991-1011, 1052-1054). This is cheap (ms each) but still serial.\n5) No provider warm-up overlaps fetch and worktree add (ChatView.tsx:5243; ProviderSessionPrewarm.ts:59-66).\n6) The branch name is not generated in parallel. This is a deliberate design choice (PCR.ts:1528-1541), and the remaining cost is mostly cosmetic now that the rename is idle-deferred.",
+  "fixDefects": "1) Idle-deferred rename has no 'already published' guard (ProviderCommandReactor.ts:1465-1511, GitVcsDriverCore.ts:3137-3155). Because the rename now runs after the whole first turn rather than seconds into it, a temp branch the agent pushed or opened a PR from gets renamed locally. Upstream stays origin/<temp>, the thread shows a name that differs from the remote and PR head, and a plain git push from the agent fails under push.default=simple. 2) The prefetch is effectively a one-shot with a 60 s life, so it does not cover slower composers (see remaining 1). 3) The fetchOriginBranch doc comment (GitVcsDriverCore.ts:2258) still claims creation always fetches, which contradicts the reuse window. 4) Minor: the auditor's caveat names mobile as a surface missing the prefetch, but mobile never makes worktree first sends.",
+  "implementationSketch": "A) Keep the prefetch warm (biggest remaining win, small change). In apps/web/src/components/chat/NewThreadWorkLocation.tsx, while prefetchRefName && canEdit, also call prefetchWorktreeSend on composer intent. One way: export a small 'refreshWorktreeSendPrefetch' that ChatView's onComposerIntent calls when the plan is a worktree plan, instead of returning at ChatView.tsx:5243 with nothing. Another way: a setInterval of about 45 s while the draft is in newWorktree mode and the window is focused. The client throttle (30 s) and the server's reuse-or-start logic in prefetchWorktreeBase already dedupe, so this costs at most one base-only fetch per minute per open worktree draft. Alternatively, call prefetchWorktreeSend at the very top of executeChatSendTurn (before attachment encoding and scroll) so the fetch overlaps client-side preparation. Tests: extend worktreeSendPrefetch tests for the refresh; add a GitVcsDriverCore test that a prefetch settled 61 s ago is not reused but a refreshed one is.\nB) Move the setup script off the critical path. In apps/server/src/ws/context.ts dispatchBootstrapTurnStart, keep the requireWorktree liveThread check, then dispatch turn.start first. Run runSetupProgram forked (Effect.forkDetach), or reuse launchSetupScriptForWorktreeInBackground plus the setupProgress stage hooks, so the setup PTY admission, spawn and activity dispatches overlap the provider session start. At minimum, run the two recordSetupScriptStarted dispatches with { concurrency: 'unbounded' } or fold them into one dispatch. Update the setup-progress tests in ws/context and WorktreeSetupTracker to cover the new order (agent stage running while the setup-script stage is still starting).\nC) Hosted getConfig. Either derive capabilities.projectPreferences from the config the hosted lifecycle owner already accepted for the current relay generation (readEnvironmentServerConfig, made generation-safe), or start the getConfig read at worktree-mode entry inside prefetchWorktreeSend and reuse the promise if the connection generation is unchanged. Test in executeChatSendTurn tests with isHostedHubMode mocked.\nD) Fold the bootstrap dispatches. Add a server-only decider command (for example thread.bootstrap-worktree) that emits thread.created (with branch, path and worktreeId), worktree.created and thread.attached in one transaction, then drainThrough on its sequence. This removes 2 dispatches. Cover it in OrchestrationEngine decider tests and the projection tests.\nE) Rename guard. In renameWorktreeBranchWhenIdle, before gitWorkflow.renameBranch, skip the rename (keep the temp name and log it) when the old branch has an upstream (git rev-parse --abbrev-ref <old>@{upstream}) or refs/remotes/origin/<old> exists. Reuse or extract GitManager's probeBranchPublished. Add a PCR test where the branch is published and renameBranch is not called. Fix the fetchOriginBranch doc comment.\nF) Optional, Codex only: a cwd-less warm-up of the codex app-server binary (spawn + initialize) at send time, adopted by startSession after the worktree exists. This needs adapter work in CodexAdapter/CodexSessionRuntime and is not possible for Claude, whose CLI is spawned with its cwd.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": true,
+  "decisionReason": "Several of these are behaviour trade-offs. Keeping the prefetch warm adds periodic background git fetches. Starting turn.start before the setup script has spawned changes the order the user sees (agent before setup). Skipping the rename for published branches leaves temp names on pushed branches. The hosted getConfig removal touches config freshness per relay generation, which falls under the AGENTS.md rule that hosted lifecycle recovery has one owner and that stale generations must not publish state.",
+  "repos": "ryco",
+  "correction": "The auditor's DONE items hold. They missed: (1) the prefetch fires once and expires 60 s after it settles, so slower composers get no prefetch; (2) the setup-script PTY open (exclusive admission plus spawn) and 2 sequential activity dispatches are still inline before turn.start; (3) the idle-deferred rename has no upstream or PR guard and now lands after the agent may have pushed. Their caveat that mobile lacks the prefetch is wrong, because mobile never makes worktree first sends."
+}

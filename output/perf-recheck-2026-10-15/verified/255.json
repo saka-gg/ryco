@@ -1,0 +1,28 @@
+{
+  "id": "gap-logging-io:redact-deep-clone-fanout",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. PR #710 (60633eff3) moved redaction into agentControl/secretRedaction.ts. Redaction is now copy-on-write, and an includes(\"rycoac\") guard skips the regex for strings without the marker. Clean values come back as the same reference with no allocation. The Claude adapter shares one makeSharedPayloadSecretRedactor, so each SDK message is walked once and every fan-out event, plus the native log, reuses the cached raw.payload by reference. Every Claude event goes through the single Queue.offer, and no downstream stage deep-clones. I found no bypass, no regression and no missed Claude path. Only theoretical semantic changes remain.",
+  "evidence": [
+    {"location": "apps/server/src/agentControl/secretRedaction.ts:17-18", "note": "The marker guard returns strings unchanged unless they contain 'rycoac'. It is case-consistent with SECRET_PATTERN."},
+    {"location": "apps/server/src/agentControl/secretRedaction.ts:26-60", "note": "Copy-on-write walk over arrays and objects. Old code (f1be4abc7 ProviderInjection.ts:298-315) used Object.fromEntries/entries, map and replaceAll unconditionally. ProviderInjection.ts:308 now only re-exports."},
+    {"location": "apps/server/src/agentControl/secretRedaction.ts:77-124", "note": "A WeakMap caches the redacted result per SDK message. event() sends raw.payload through the cache and walks the other keys copy-on-write. When the payload is clean, the cache maps the message to itself, which is ephemeron-safe and does not leak."},
+    {"location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1932", "note": "One adapter-wide redactor."},
+    {"location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:1986-1993", "note": "secretRedactor.event(event) runs before the only Queue.offer on runtimeEventQueue. The other Queue.offer calls (6064, 6174) go to promptQueue."},
+    {"location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:2137", "note": "The native log uses secretRedactor.payload(message), which shares the cache with the event path. With no logger it returns early (2110-2112)."},
+    {"location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:3840-3845, 4366-4395", "note": "The workflow fan-out (task.progress per member, subagent.updated) uses raw.payload: message, which hits the cache. Per-event payloads are small, newly built objects, so each fan-out event costs only a small walk with no allocation."},
+    {"location": "apps/server/src/provider/Layers/ClaudeAdapter.ts:2018-2099", "note": "The subagent emitters also set raw.payload to the SDK message itself (input.raw). I found no code that mutates SDK messages after receipt."},
+    {"location": "apps/server/src/provider/runtimeSession.ts:34-44", "note": "stampRuntimeEvent is a shallow spread. ProviderService has no structuredClone, JSON round trip or deep clone (its line 286 fromEntries is an unrelated binding payload)."},
+    {"location": "apps/server/src/agentControl/secretRedaction.test.ts:13-65", "note": "Tests cover same-reference return, path-local copying, input not mutated, Error flattening, and a shared payload reused across events."}
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Theoretical notes only, none actionable: (1) Semantics changed for non-plain values. The old code flattened every object to a plain object, which dropped prototypes, toJSON, Map/Set contents and extra non-index properties on arrays. The new code returns a clean non-plain object as the same reference. A token held only in a Map/Set, behind toJSON or in an extra array property would therefore no longer be stripped. The inputs on these paths are JSON-derived SDK and RPC messages, Schema-typed events, and Error causes (which are still flattened), so this does not happen in practice. (2) There is no ClaudeAdapter-level test asserting that a token inside an SDK message is redacted in both the emitted event and the native log. That coverage was also missing before the change. (3) CopilotAdapter.ts:115/132 and AcpNativeLogging.ts:37/71 still use the uncached walk, but they no longer allocate when clean, and they are outside this Claude finding.",
+  "implementationSketch": "None required. Optional hardening: add a ClaudeAdapter.test.ts case. Feed a system/task_progress SDK message that contains `rycoac_<43 chars>` plus a workflow_progress array. Assert that every emitted runtime event's raw.payload shows [REDACTED] and that all of them share one reference, and that a native logger stub receives the same object.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "",
+  "repos": "none"
+}

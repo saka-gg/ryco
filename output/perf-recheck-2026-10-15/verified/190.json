@@ -1,0 +1,75 @@
+{
+  "id": "dedicated-pages:usage-client-waterfall-no-cache",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "On the web Statistics page all four proposals are in place and tested. There is no serverGetConfig round trip, environments merge as each one settles, a module-level SWR cache with in-flight sharing exists, and superseded requests are aborted on the client and interrupted on the server (a queued scan nobody waits for never runs). The other client of the same shared usage stack, the native mobile Statistics hook (apps/mobile, the intended phone surface per AGENTS.md), still has two of the four described problems. It waits on Promise.all across nodes, so one slow or hung node hides every other node, and it passes no AbortSignal, so its flights are pinned and every range switch queues another full scan on each node. Proposals 1 and 3 reach mobile through the shared wsRpcClient and usageSummaryCache. The web fix has only minor edge cases.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/rpc/wsRpcClient.ts:900-914",
+      "note": "Proposal 1 done for all clients. getUsageSummary checks the version locally, sends the request directly and maps a version rejection to UsageContractMismatchError. The serverGetConfig call is gone."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.ts:106-134",
+      "note": "Web proposals 2 and 4. There is one usageSummaryCache.load per connection with its own setAnswers. The previous run's controller is aborted only after the new run has joined, so only superseded flights are withdrawn. Unmount does not abort."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.ts:136-158",
+      "note": "Per-environment pendingEnvironmentIds. Until an environment answers, the view shows usageSummaryCache.peek (stale while revalidating)."
+    },
+    {
+      "location": "packages/client-runtime/src/usage/summaryCache.ts:73-160",
+      "note": "Proposal 3. Module-level UsageSummaryCache, keyed by environment, range and time zone, with a 32-entry LRU, peek and prefetch."
+    },
+    {
+      "location": "packages/client-runtime/src/usage/sharedRequests.ts:153-175",
+      "note": "#hold and #abortIfAbandoned. A flight whose waiting count drops to 0 is aborted. A caller without a signal sets pinned=true, so the flight is never aborted."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsTransport.ts:195-221",
+      "note": "The signal is passed to runtime.runPromise({signal}). Aborting interrupts the RPC fiber, which sends an Interrupt to the node."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.ts:1125-1196",
+      "note": "Server side of proposal 4. Identical requests share one forked scan. When the last waiter is interrupted, the scan fiber is interrupted, and computeSummary rethrows interrupts. File reads use Effect.promise(signal), so a running scan can be interrupted as well."
+    },
+    {
+      "location": "apps/server/src/usage/UsageService.test.ts:583-626",
+      "note": "Test: 'drops a queued scan once every caller has gone away'."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.browser.tsx:128-228",
+      "note": "Browser tests cover progressive merge (fast node vs slow node), repaint on remount, joining a prefetch, and withdrawing a superseded range while an unmounted view still finishes."
+    },
+    {
+      "location": "apps/mobile/src/features/settings/statistics/useStatisticsData.ts:127-138",
+      "note": "REMAINING. The mobile hook still awaits Promise.all(selected.map(loadNodeStatistics)) and calls setResult once at the end. A slow node (up to the 30 s SUMMARY_SCAN_DURATION_MS budget) or a hung node hides every other node's fresh result. Only cached peek data is shown meanwhile, and nothing is shown on a first visit to a range."
+    },
+    {
+      "location": "apps/mobile/src/features/settings/statistics/useStatisticsData.ts:48-56",
+      "note": "REMAINING. usageSummaryCache.load is called without a signal, and getUsageSummary drops the options argument. Every flight is pinned, so switching 7d, 30d, 90d keeps all three requests alive and queues three scans on each node's scanSemaphore. The effect cleanup only sets cancelled=true."
+    },
+    {
+      "location": "apps/mobile/src/features/settings/SettingsStatisticsRouteScreen.tsx:24-80",
+      "note": "Mobile has a range segmented control (setRange), so rapid range switching is a real interaction there."
+    },
+    {
+      "location": "apps/web/src/components/statistics/useUsageSummary.ts:113",
+      "note": "Minor web edge case. answeredViews also records failed answers, and the flight key (summaryCache.ts:155) ignores connection identity. When a connection is replaced (credential rejection, SSH re-issue, manual reconnect), a failed or doomed answer for the current view is not re-asked automatically. The old Promise.all hook re-ran on every registry change. The Refresh button recovers."
+    },
+    {
+      "location": "apps/web/src/routes/statistics.tsx:32-45",
+      "note": "Minor web edge case. The loader prefetches on every range change. Take the sequence 7d (answered), then 30d, then back to 7d before 30d answers. The hook skips 7d because it already answered that view, so the loader's 7d prefetch is never joined. It cannot be aborted and runs one wasted scan, which is cheap thanks to sourceMemos."
+    }
+  ],
+  "remaining": "The native mobile usage client still has the all-or-nothing wait and the missing cancellation that the finding describes. apps/mobile/src/features/settings/statistics/useStatisticsData.ts:127-138 waits for Promise.all across every node before it shows any fresh result. apps/mobile/src/features/settings/statistics/useStatisticsData.ts:48-56 loads without an AbortSignal (getUsageSummary: (request) => api.server.getUsageSummary(request)), so SharedRequests pins each flight (sharedRequests.ts:154-156). A superseded range is never withdrawn, and the node queues one full scan per range switch. The web Statistics page and the shared client and server pieces are done.",
+  "fixDefects": "No significant defect in the web fix. Two minor, timing-dependent edge cases. (1) useUsageSummary.ts:113 treats a failed answer as answered for the view, and flightKey (summaryCache.ts:155-157) ignores connection identity. When a connection is replaced, the failed result can stay until a manual refresh, or the new connection can join a flight bound to the disposed client. Before the fix, every registry change triggered a refetch. (2) A loader prefetch for a range the view has already answered (7d, then 30d, then 7d before 30d answers) is never joined or aborted, which costs one wasted, memoised server scan. isUsageContractRejection's substring match on 'contractVersion' is fragile, but wsRpcClient.usage.test.ts covers it, and a misclassification only produces an 'update Ryco' message.",
+  "implementationSketch": "Mobile (apps/mobile/src/features/settings/statistics/useStatisticsData.ts). (a) Add an optional signal parameter to loadNodeStatistics(environment, tab, range, signal?). Pass it as usageSummaryCache.load(target, range, tz, { signal }) and forward it as getUsageSummary: (request, options) => api.server.getUsageSummary(request, options). (b) Replace the single Promise.all and setResult with per-node state, e.g. a Map<environmentId, { requestKey, node }> updated by setState as each loadNodeStatistics settles, guarded by a generation or requestKey check. Derive pendingEnvironmentIds, loading = pending.length > 0, and refreshing = loading && any usable result. Merge fresh answers with cachedNodeUsage/peek for nodes that are still pending, as the web hook does. (c) Copy the web supersede rule: keep the previous run's AbortController in a ref, start the new run's loads first so identical flights are joined, then abort the previous controller. Do not abort on unmount, so a closed screen still fills the cache. Better still, to avoid two copies of this logic (AGENTS.md maintainability rule), extract a framework-free loader into packages/client-runtime/src/usage, e.g. loadUsageSummaryView(targets, range, timeZone, { fresh, onAnswer }) returning { release }, which owns the join-then-release ordering and per-target callbacks. Both apps/web/src/components/statistics/useUsageSummary.ts and the mobile hook would become thin React wrappers around it. The same per-node progressive pattern can cover the activity and limits tabs, which share the Promise.all. Optionally on web, stop recording 'failed' answers in answeredViews, or key them by connection object, so a re-registered connection is re-asked. Tests: extend apps/mobile/src/features/settings/statistics/useStatisticsData.test.ts with a fast node and a held slow node (the fast result is visible while the slow one is pending), a range switch that aborts the previous signal while leaving the joined one alive, and an unmount that does not abort. Add unit tests for the extracted loader in packages/client-runtime/src/usage. Run with bun run test, scoped to the mobile and client-runtime packages.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Client-only change in the mobile hook (and optionally a shared client-runtime helper). It does not touch auth, E2EE, hosted lifecycle, the Hub protocol or product trade-offs.",
+  "repos": "ryco",
+  "correction": "The auditor called this DONE and dismissed the mobile hook's missing signal as harmless for a single-shot load. The mobile Statistics screen has a range control, and its hook re-runs on every range change. Without a signal every superseded flight is pinned, so each node still queues one scan per switch, which is the exact cost proposal 4 targets. The mobile hook also still uses the all-or-nothing Promise.all across nodes (proposal 2). The web page and the shared client and server pieces are done. Mobile, the intended phone client per AGENTS.md, is not, so the status is PARTIAL rather than DONE."
+}

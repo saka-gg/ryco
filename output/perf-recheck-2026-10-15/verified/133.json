@@ -1,0 +1,63 @@
+{
+  "id": "thread-and-draft:retained-bytes-json-stringify",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. Commit 8fb94df00 swapped the per-snapshot, per-event and per-history-page TextEncoder.encode(JSON.stringify(value)) for approximateJsonSize, a walker that adds up string lengths. Live events are now sized per written row: an O(1) text.length for streaming deltas, a walk of the single activity or plan for upserts, and nothing for other events. evictToCapacity runs once per delivered chunk through a microtask. All 3 old estimator call sites and every per-event evictToCapacity call were converted. I benchmarked real 150-activity plus 150-message windows from the user's state.sqlite (161-319 KB, full payloads, so heavier than the web's preview payloads). The walk took 0.057-0.070 ms against 0.46-0.98 ms for the old stringify plus encode, 7-17x cheaper and below the windows' JSON.parse time (~0.26-0.33 ms). wsTransport hands each chunk to the listener synchronously, so the microtask coalescing really does run eviction once per chunk. Tests cover a pinned thread streaming past the budget and an activity updated in place being counted once. I found no other code path that re-serializes thread snapshots or events just to measure them. recordWebPerfPayload is behind the perf-profile flag. The remaining stringify sizers (sourceControlAtoms estimatePayloadBytes, workspaceMetadataPayloadBytes, hosted read vault encryption) sit outside this path or need the bytes anyway.",
+  "evidence": [
+    {
+      "location": "packages/client-runtime/src/connection/approximateJsonSize.ts:12-43",
+      "note": "Walker: string.length+2, small constants for number, boolean and null, key length plus 4 per key. It builds no serialized string or Uint8Array, caps depth at 64 and keeps a cycle-guard Set."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:206-207",
+      "note": "estimateJsonLength = approximateJsonSize. git grep finds no TextEncoder or JSON.stringify left in the supervisor."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:215-247",
+      "note": "retainedRowWrite: streaming message-sent costs text.length only (matches mergeMessageUpdate's append at state/threads/store.ts:1663-1670). Activity and plan upserts walk the one row. Every other event type returns null."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:434-455",
+      "note": "recordRetainedSnapshot walks the snapshot once. recordRetainedEvent applies a per-row delta through rowRetainedBytes. recordRetainedHistoryPage walks page.items."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:567-572",
+      "note": "applyEvent calls scheduleEvictToCapacity, not evictToCapacity, for each event."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:724-751",
+      "note": "evictToCapacity (at most 32 entries) is coalesced by scheduleEvictToCapacity into one microtask after the chunk. It runs synchronously only after snapshots (586, 665) and stale recovery (517). The history-page apply at 496 also uses the scheduled path."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:770-781,1304",
+      "note": "The companion per-event reconcileForEnvironment timer re-arm is coalesced the same way, once per chunk."
+    },
+    {
+      "location": "packages/client-runtime/src/rpc/wsTransport.ts:545-577",
+      "note": "Stream.runForEachArray hands each server chunk to the listener in one synchronous loop, so the microtask really fires once per chunk."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/evictionPolicy.ts:33-42",
+      "note": "planEvictionsToCapacity returns early when under both caps."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.test.ts:665-718",
+      "note": "Tests cover a pinned thread streaming past the byte budget without evicting idle ones, and an in-place activity update counted once."
+    },
+    {
+      "location": "scripts/perf/micro/client-retained-size.ts:1-50",
+      "note": "Micro-benchmark added alongside the fix. I measured separately on real DB windows (161-319 KB): walk 0.06 ms vs old 0.46-0.98 ms."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No correctness defects. Two caveats, neither worth reopening. (1) The walker's cost scales with object count, not bytes, and its per-object cost (closure recursion, for...in plus hasOwn, Set.add) is higher than stringify's. A synthetic payload of about 100k tiny objects (3.5 MB) took 7.3 ms against 6.0 ms for the old stringify plus encode. Real windows hold about 700-800 objects, the web requests 'preview' payloads (capped strings and arrays), and the most object-dense real activity has about 1.4k braces, so this does not happen in practice. (2) The 'seen' Set dedupes shared (non-cyclic) references as well as cycles, so a shared subtree is counted once. Decoded wire data is a fresh tree, so this changes nothing.",
+  "implementationSketch": "None required. Optional micro-polish only: in approximateJsonSize.ts, drop the Set and rely on MAX_DEPTH (decoded wire data is acyclic), or swap for...in/hasOwn for Object.keys, to cut per-object cost on object-dense payloads. Check with scripts/perf/micro/client-retained-size.ts plus an object-dense fixture in approximateJsonSize.test.ts.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Client-runtime bookkeeping only. No auth, E2EE, hosted lifecycle or Hub protocol impact.",
+  "correction": "",
+  "repos": "none"
+}

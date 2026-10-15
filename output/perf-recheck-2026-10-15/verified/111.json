@@ -1,0 +1,50 @@
+{
+  "id": "client-runtime-sync:resume-global-sequence-and-double-read",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE (commit 60633eff3, #710). canResumeAfter no longer reads or decodes event pages in production. It calls eventStore.probeResume, which does a rowid EXISTS anchor check plus count(*) over an inner `SELECT 1 ... LIMIT n+1`. The per-thread count is served by the covering idx_orch_events_stream_sequence index. A thread is judged only on its own backlog (anchored, and at most 1000 thread events after it; the global limit is 0). Its replay pages through readStreamEventsPage on (aggregate_kind, stream_id, sequence) instead of scanning global pages, so an idle retained thread now resumes however many global events have happened. The shell gets the same payload-free probe, and its single replay read is the one it needs anyway. Part (3), the periodic watermark, was not built and is no longer needed. No other caller has the old pattern, and I found no correctness regression.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:688-730",
+      "note": "canResumeAfter with probeResume. For the shell, the global limit is 1000. For a thread with readStreamEventsPage, the global limit is 0 (anchor only) and the decision is streamEventsAfter <= 1000. The old two-readEventsPage path (723-729) runs only when probeResume is missing."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:510-544",
+      "note": "probeResume SQL. It never selects payload_json. The stream count filters aggregate_kind, stream_id and sequence, so the index covers it."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:944-960",
+      "note": "Thread replay uses readStreamEventsPage({aggregateKind:'thread', streamId: threadId}) instead of global readEventsPage plus a filter."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:251-276,497-508",
+      "note": "readStreamEventRows and readStreamEventsPage. OrchestrationEventStore.test.ts:325-349 asserts the plan uses idx_orch_events_stream_sequence with no temp B-tree, and test :245-261 shows the probe works when payload_json is invalid JSON, so it never reads payloads."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:207,1262-1279",
+      "note": "Production wiring: OrchestrationEventStore comes from OrchestrationLayerLive (server.ts:505, runtimeLayer.ts:11-33). Its probeResume and readStreamEventsPage are passed to makeOrchestrationStreamHelpers. OrchestrationEventStoreLive is the only implementation."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:553-650",
+      "note": "subscribeThread and subscribeThreadWindow both call makeReplayableThreadStream(..., threadId, {resumeFromSequence}). They are the only callers. ProviderCommandReactor.ts:3463 is an unrelated single-row anchor read."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreamBatching.test.ts:306-385",
+      "note": "Tests cover an idle-thread resume with a large global backlog, a snapshot when the thread's own backlog exceeds 1000, per-stream replay with zero global page reads at eventsAfter=100000, and the shell staying on the global bound."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:556-572",
+      "note": "No client change was needed. appliedSequence still advances only on the thread's own events or snapshots, and the server now judges it against the thread's own stream. Transport reconnects resubscribe in place (wsTransport.ts:293-330) and re-read resumeFromSequence, so the closure's appliedSequence survives."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No functional defects. Four cosmetic or peripheral notes. (a) The ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS doc (apps/server/src/ws/context/constants.ts:5-10) still says a thread's 'replay still scans global pages'. That is now true only for the test-only fallback without readStreamEventsPage, so the comment is stale. (b) The readEventPage comment (OrchestrationEventStore.ts:119-123) says the extra +1 row is 'never decoded'. SqlSchema.findAll's Result schema still JSON-parses its payload (UnknownFromJsonString). That costs one row per page and is negligible. (c) The old double decoded read survives only in the fallback branch (orchestrationStreams.ts:723-729), which production never reaches. (d) Out of scope here and already in the report under its own items: resume stays disabled for hosted and hub-hosted connections (supervision.ts:562). attach() also re-creates appliedSequence=null, so an explicit supervisor.remove plus re-register (credential rejection, SSH re-issue, disconnect) always re-snapshots. Ordinary transport reconnects are unaffected.",
+  "implementationSketch": "Optional tidy-up only. Update the doc comment on ORCHESTRATION_THREAD_RESUME_MAX_SCAN_EVENTS (apps/server/src/ws/context/constants.ts) to say it bounds only the fallback global-scan replay when the event store has no stream reader. Reword the readEventPage comment to say the extra row is not schema-decoded into an event. No tests needed.",
+  "worth": "none",
+  "effort": "none",
+  "risk": "none",
+  "needsDecision": false,
+  "decisionReason": "Only stale comments remain. No product, security, Hub or lifecycle decision is involved.",
+  "repos": "none"
+}

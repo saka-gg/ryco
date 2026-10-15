@@ -1,0 +1,51 @@
+{
+  "id": "startup-hang:desktop-crash-restart-full-reload",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. In 60633eff3 (#710), loadPackagedBackendAppWindow got a gate (resolveBackendAppWindowAction). After a crash-restart, a window that already reported a usable shell on the backend origin gets an in-place reconnect nudge (SYSTEM_RESUMED_CHANNEL) and keeps its route. loadURL(backendHttpUrl) now runs only from the boot page, about:blank, or a backend-origin document that never became usable. The client deadlines the proposal depended on are in place: fetchWithDeadline (5 s), transient retry for ws-token/session (15 s), and the server httpStartupGate. Production desktop-main.log shows the shell-usable report arriving on every launch, so the gate is live, not dormant. The optional version check was not implemented; it is moot because a crash-restart relaunches the same bundled binary. One small missed edge: a renderer whose process died keeps its usable mark and is nudged instead of reloaded.",
+  "evidence": [
+    {
+      "location": "apps/desktop/src/backendAppWindowLoad.ts:61",
+      "note": "Pure gate. Returns load for an empty URL, about:blank or the boot URL. Returns ignore at bound or for another origin. Otherwise returns reconnect when shellUsable is true and load when it is false. Unit tests in backendAppWindowLoad.test.ts:23 cover the deep-route reconnect, the unusable reload, foreign origins and bound vs ready."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:1717",
+      "note": "loadPackagedBackendAppWindow now resolves the action first. The reconnect branch (1741-1745) only calls notifyRenderersToReconnect() and returns. The only remaining loadURL(backendHttpUrl) in this path is at 1757. At f1be4abc7 the function called loadURL for any backend-origin URL."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:3413",
+      "note": "The DESKTOP_STARTUP_MARKS IPC adds the sender to appShellUsableContents (declared at 495). The preload observer (startupMarks.ts) reports only after the primary-shell-usable mark, which service.ts:236 sets once the primary shell snapshot is applied. ~/.ryco/userdata/logs/desktop-main.log contains desktop.window.app.shell-usable on every recent launch."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4426",
+      "note": "The usable mark is cleared on every main-frame cross-document navigation start. Error pages and new documents must report again before they count as reconnectable."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:1183",
+      "note": "reconnectAfterResume forces reconnect() on connections whose heartbeat is not fresh. It is skipped in hosted mode (1244-1246), so the new trigger does not bypass hosted lifecycle ownership. A connection whose last pong is under 15 s old (Effect pings every 8 s) is skipped. It then relies on the transport retry: the URL provider polls ws-token every 500 ms (primaryAuth retryTransientBootstrap) and the startup gate holds that request until the backend serves. The WebSocketConnectionCoordinator stall detector is the backstop."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/primaryAuth.ts:139",
+      "note": "The ws-token request runs through fetchWithDeadline (CONTROL_PLANE_REQUEST_TIMEOUT_MS = 5000, fetchWithDeadline.ts:11), with transient retry on refused, timeout and 502-504 (118-137). The POST that used to hang across the restart, and that the reload used to rescue, is now bounded."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4825",
+      "note": "The bootstrap token and port are fixed per app run, and the session signing secret is persisted (ServerSecretStore). The renderer's cookie session survives a backend crash-restart, so reconnecting in place needs no re-auth."
+    },
+    {
+      "location": "apps/desktop/src/main.ts:4591",
+      "note": "The render-process-gone handler only marks the load request failed. It does not remove the webContents from appShellUsableContents, so a dead renderer still counts as reconnectable."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "Minor edge-case regression. The render-process-gone handler (apps/desktop/src/main.ts:4591-4596) sets request.failed but leaves the webContents in appShellUsableContents. getURL() still returns the backend-origin app URL. If the renderer process has died (OOM, GPU or renderer crash) when a backend crash-restart reaches readiness, resolveBackendAppWindowAction returns \"reconnect\" and notifyRenderersToReconnect sends IPC to a dead renderer. The window stays blank until the user presses Cmd+R. Before #710 the unconditional loadURL revived it. Not a blocker: it needs a renderer crash plus a backend crash-restart, and View > Reload is available. Not fixes, just notes: (a) the proposal's optional server-version check was not built; it only matters if files on disk change under a running app, such as a Linux deb/rpm upgrade, and the existing version-mismatch hint covers that. (b) The reconnect nudge skips a connection whose heartbeat is still fresh; the transport's own retry plus the startup gate reconnect at readiness.",
+  "implementationSketch": "In apps/desktop/src/main.ts, inside the window.webContents.on(\"render-process-gone\", ...) handler (around line 4591), add appShellUsableContents.delete(window.webContents) so a dead document is no longer reconnectable. Belt and braces: in loadPackagedBackendAppWindow (around line 1732), pass shellUsable: appShellUsableContents.has(contents) && !contents.isCrashed(). Then readiness takes the \"load\" path and loadURL(backendHttpUrl) revives the renderer. To make this testable, pull the check into a small helper, e.g. isReconnectableAppShell({ usable, crashed }), in backendAppWindowLoad.ts. Add a case to backendAppWindowLoad.test.ts: a deep backend-origin route with shellUsable false (crashed) resolves to \"load\". Optional and low value: send a distinct backend-restarted reason, or force reconnect of only the primary connection regardless of heartbeat freshness, so a crash shortly after a pong does not wait on the transport's retry timing. Validate with focused vitest runs for apps/desktop (backendAppWindowLoad.test.ts) and a manual check: kill the backend child and the renderer process (kill -9) in a packaged build, then confirm the window reloads.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Desktop-local window lifecycle only. No auth, E2EE, hosted lifecycle (supervision skips hosted mode) or Hub protocol change.",
+  "repos": "ryco",
+  "correction": "Status is right. The auditor missed one small edge: render-process-gone does not clear appShellUsableContents, so a crashed renderer is treated as reconnectable and loses the reload that used to revive it after a backend crash-restart."
+}

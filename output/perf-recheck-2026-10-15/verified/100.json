@@ -1,0 +1,67 @@
+{
+  "id": "browser-measure:layout-effect-forced-layout",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. The fix landed in 60633eff3 (#710) for useFlipLayout and useInboxListMotion, and in 46b9772ee for ContextWindowMeter. useFlipLayout's trigger effect now has [ref, trigger] deps. A per-commit effect only compares the container element, and resting rects come from one ResizeObserver and one MutationObserver per element, so the old per-commit getAnimations/getBoundingClientRect and observer recreation are gone. A browser test spies on both APIs across five no-op rerenders and asserts neither is called. useInboxListMotion reads row offsets only when the order signature changed or a list ResizeObserver marked positions dirty. ContextWindowMeter's tick now lives in the popup body, which mounts only while the popup is open, and it fires at relative-label granularity. I found no regression in the fix. Remaining issues are cosmetic or edge cases. (1) useFlipLayout's ResizeObserver never unobserves FlipItem spans that were removed, so detached spans stay retained until the row changes or unmounts. (2) Resting rects are viewport-relative and refresh only on row resize or DOM mutation. If the row moves without either (the hero's mount slide-in, or the hero re-centering when the composer grows), the next location change glides from a few px off. The old code had the same weakness, because NewThreadWorkLocation rarely commits in those situations. (3) A display:none inbox still calls getClientRects on each commit. (4) useInboxListMotion has no test for the new skip path. (5) A sibling per-commit getBoundingClientRect exists in ModelTuningDial's useAnimatedHeight, scoped to the open model picker.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:26-69",
+      "note": "The trigger effect has deps [ref, trigger] and returns early when Object.is(triggerRef.current, trigger). getAnimations and getBoundingClientRect run only on a real trigger change. Previously (f1be4abc7:23-70) it ran with no deps and called recordResting after every commit."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:74-88",
+      "note": "The only per-commit effect is an identity compare, observedRef.current?.container === container. Observers are disposed on a container change and on unmount. The verifier's point about the old no-deps useEffect recreating the ResizeObserver on every commit is fixed."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:91-116",
+      "note": "observeResting records once, then on ResizeObserver callbacks (container and items) and MutationObserver callbacks (childList, subtree, characterData; attributes excluded). observeSizes re-observes on every mutation, which is a no-op for targets already observed in Chromium and Gecko, but it never unobserves removed items. Detached FlipItem spans, for example the 'branch' and 'preposition' slots that toggle with location.kind, are kept by the observer until the container changes or unmounts. The leak is small and bounded."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:122-136",
+      "note": "recordResting still calls getAnimations() per item (the WeakSet idea from the proposal was not done), but only from observer callbacks or a trigger change, where layout is usually fresh. Negligible."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.browser.tsx:33-62",
+      "note": "The test 'reads no layout on commits that leave the row untouched' spies on Element.prototype.getBoundingClientRect and getAnimations across five rerenders that change only a data-* attribute, and asserts zero calls. A second test checks that a trigger change still glides moved and new items."
+    },
+    {
+      "location": "apps/web/src/components/ChatView.tsx:5883-5889",
+      "note": "The hero wrapper mounts with 'animate-in fade-in slide-in-from-bottom-1', a 4px translateY over about 150ms, and is laid out as a vertically centred block with the composer. observeResting's first record() and the ResizeObserver's first callback both run during this ancestor transform. Re-centring when the composer grows changes neither the row's size nor its DOM. Resting rects are viewport-relative (getBoundingClientRect), so they can be a few px stale until the row mutates or resizes. The pre-fix code had the same exposure, because NewThreadWorkLocation (prompt not in DraftSessionState) seldom commits in these cases. This is cosmetic, not a regression."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/useInboxListMotion.ts:131-161",
+      "note": "The list ResizeObserver refreshes row tops inside its callback, where layout is already computed. If the list is hidden it marks positions dirty instead. The list is a content-sized relative div (InboxSidebar.tsx:276-281), so a row height change resizes it and fires the observer."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/useInboxListMotion.ts:178-203",
+      "note": "The per-commit effect returns before any layout read when enabled, the signature is unchanged and positions are not dirty. With motion disabled, !input.enabled short-circuits before getClientRects, so there is no read either. Remaining edge case: when the effects run while the list is display:none, signatureRef stays null, so line 197 calls list.getClientRects() on every commit. Hidden panes torn down by Activity do not reach this."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxSidebar.browser.tsx",
+      "note": "No test asserts that useInboxListMotion skips offsetTop reads on non-reordering commits, or that a reorder after a row resize glides from the refreshed positions."
+    },
+    {
+      "location": "apps/web/src/components/chat/ContextWindowMeter.tsx:288-310",
+      "note": "ContextWindowDetails mounts only inside PopoverPopup (lines 481-496) and uses useRelativeLabelTick over contextWindowLabelInstants. Before the fix (f1be4abc7:91), the always-mounted meter called useRelativeTimeTick() with a 1 s tick."
+    },
+    {
+      "location": "apps/web/src/components/settings/settingsLayout.tsx:59-83",
+      "note": "useRelativeLabelTick is visibility-aware and schedules through relativeLabelRefreshDelayMs (timestampFormat.ts:192-207). It ticks at 1 s only while a future instant is under a minute away, otherwise at the next minute boundary plus 25 ms."
+    },
+    {
+      "location": "apps/web/src/components/chat/ModelTuningDial.tsx:547-565",
+      "note": "A sibling of the same pattern. useAnimatedHeight calls getBoundingClientRect() in a no-deps useLayoutEffect after every commit of ModelTuningDial. It is mounted only in the open model picker footer, so its impact is low and it is outside this finding's scope."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None in the core fix. Minor follow-ups only: (a) useFlipLayout.ts:97-103, the ResizeObserver never unobserves removed [data-flip-id] items, so detached FlipItem spans stay retained until the row changes or unmounts. (b) useFlipLayout.ts resting rects are viewport-relative and refresh only on row resize or mutation. When the row moves without either (the hero slide-in at ChatView.tsx:5888, or the hero re-centring as the composer grows), the next location change adds a small spurious vertical glide. This weakness predates the fix and is not a regression. (c) useInboxListMotion.ts:197, a display:none-but-effect-live inbox still forces getClientRects on each commit. (d) No unit or browser test covers the useInboxListMotion skip path.",
+  "implementationSketch": "Optional polish, not required to close the finding. 1) In useFlipLayout.observeResting, keep a Set<HTMLElement> of observed items. In observeSizes, call resizeObserver.unobserve(el) for members no longer in flipItems(container) and observe only new ones. Clear the set in dispose. 2) To refresh the FLIP 'before' frame at the moment of intent: in observeResting, add document-level capture listeners for 'pointerdown' and 'keydown' that call record() (one forced layout per user gesture while the hero is mounted). Also add an 'animationend' capture listener that calls record() when event.target contains the container (this catches the hero's slide-in). Remove all listeners in dispose. Add a browser test: render Row inside a wrapper, move the wrapper with margin-top (no size or DOM change in the row), dispatch pointerdown, change the trigger, and assert the animate() keyframes carry no dy offset. 3) In useInboxListMotion, have the ResizeObserver set a hiddenRef (contentRect width and height both 0, or list.getClientRects().length === 0 inside the callback). In the per-commit effect, return early with no layout read while hiddenRef is set and the signature is null. 4) Add an InboxSidebar browser test that spies on HTMLElement.prototype offsetTop (via Object.getOwnPropertyDescriptor) across non-reordering rerenders and asserts no reads, plus one where a row grows and then a reorder glides from the post-resize tops.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Web-only rendering and motion polish. No auth, E2EE, hosted lifecycle, Hub protocol or product trade-off is involved.",
+  "repos": "ryco",
+  "correction": "No correction to the DONE status. The auditor's evidence is accurate. Additions: the ResizeObserver in useFlipLayout never unobserves removed items, which is a small retention issue. Viewport-relative resting rects can go stale when the row moves without resizing (hero slide-in or composer re-centring), but this weakness predates the fix and is cosmetic. useInboxListMotion's new skip path has no test. ModelTuningDial's useAnimatedHeight is an adjacent per-commit layout read, scoped to the open model picker."
+}

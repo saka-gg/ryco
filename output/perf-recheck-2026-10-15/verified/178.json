@@ -1,0 +1,62 @@
+{
+  "id": "gap-composer-pickers:linked-worktree-sweep-on-read",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The core list/search problem is fixed. Reads no longer launch an unbounded sweep on the response path: sweeps run detached in the background process lane with concurrency 2, links are re-read at most once per 5 min per worktree (60633eff3), and a project-wide sweep reads PR states in one aliased GraphQL call (9a601cbd1). The stated gain ('1 GraphQL call per sweep') is only partly met, for three reasons. (1) The batch is computed before any per-worktree due check, so every read that passes the 5 s debounce spends a `gh api graphql` that is thrown away unless a link refresh is due. After 60633eff3 those sweeps cost zero forge calls, so 9a601cbd1 added this cost back. (2) Linked-issue states are not batched. Each due worktree with an issue still runs getIssueState, which on GitHub is a full `gh issue view --json ...body,comments` plus a second `gh api graphql` for comment reactions, just to read `state`. Each due worktree also still resolves its provider. (3) The same read-triggered refresh exists on another path, refreshStateForLinkedReference. getChangeRequestDetail, getIssue and the issue-comment RPCs call it, and clients poll detail every 30-60 s. It has no debounce, a link-refresh interval of 0 and no known states, so every detail poll re-reads each open link of the linked worktrees with `gh pr view` (including the PR the detail call just returned) and re-reads the linked issue.",
+  "evidence": [
+    {
+      "location": "apps/server/src/ws/context.ts:528",
+      "note": "Confirmed fix: non-lifecycle sweeps are `sweep.pipe(inBackgroundProcessLane, Effect.forkDetach)`, so scope resolution and all forge/git work leave the read's response path. Only lifecycle actions wait."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:516",
+      "note": "Confirmed fix: one Effect.forEach with concurrency LINKED_SOURCE_CONTROL_SWEEP_CONCURRENCY = 2 (context.ts:324) replaces the per-worktree forkDetach loop. Background-lane children only get forge/git permits while the pool has room (processGovernor.ts:1-16)."
+    },
+    {
+      "location": "apps/server/src/sourceControl/GitHubCli.ts:1335",
+      "note": "Confirmed fix: getPullRequestStates sends one aliased GraphQL document per 50 numbers (gitHubRepositoryLists.ts:459-536, decoder tolerates per-alias errors). Its terminalAt mapping matches the single read (GitHubSourceControlProvider.ts:1172-1197 vs 1152-1170)."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:495",
+      "note": "Defect: `batched` is computed eagerly on every sweep that passes the 5 s debounce (context.ts:460), whenever 2 or more open/current link numbers exist. Link-refresh due state is private to refreshWorktreeSourceControlState (lastLinkRefreshAtByWorktree, refreshWorktreeSourceControlState.ts:86, :155-160), so context.ts cannot gate on it."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:209",
+      "note": "Known states, batch included, are only consulted when linkRefreshDue, which a sweep gates at 5 min (context.ts:489-493, :507). Inside that window the batch result is discarded. `git log -S linkRefreshIntervalMs` shows the gate landed in 60633eff3, before the batch (9a601cbd1). So the batch turned zero-forge-call sweeps into one wasted `gh api graphql` per 5 s of '#'/search typing or list reads. That includes picker list reads now served from cachedRepositoryList with no gh call (sourceControlRpc.ts:521-534)."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:341",
+      "note": "Gap: the linked issue state is read per worktree with provider.getIssueState whenever link refresh is due. It is not batched and not taken from the listIssues/searchIssues rows the tap already holds. The sweep only accepts knownPullRequests (context.ts:438-439)."
+    },
+    {
+      "location": "apps/server/src/sourceControl/GitHubSourceControlProvider.ts:1199",
+      "note": "getIssueState calls github.getIssue: `gh issue view --json number,title,url,state,updatedAt,author,labels,assignees,body,comments` (GitHubCli.ts:2899-2925). When the issue has comments, hydrateCommentReactionGroups (GitHubCli.ts:1710-1731) adds a `gh api graphql` call. That is up to 2 gh processes per issue-linked worktree, only to read `state`."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:173",
+      "note": "Each due worktree still calls registry.resolve on its own cwd (provider cache TTL 5 s, SourceControlProviderRegistry.ts:33/701-708; VCS detection 2 min, VcsDriverRegistry.ts:20). That is still listRemotes plus detection git processes for each worktree on its first due sweep every 5 min, even when the batch already covers all PR links. These now run in the background lane."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:531",
+      "note": "Same problem, other caller: refreshStateForLinkedReference refreshes each worktree linked to a number with refreshWorktreeSourceControlState({ worktreeId, discoverPullRequest }) (context.ts:550). It has no debounce, linkRefreshIntervalMs defaults to 0 (always due, refreshWorktreeSourceControlState.ts:159) and passes no knownPullRequestStates. So every open/current link gets a `gh pr view` and the issue is re-read on every call. Only the concurrency bound (2) and background lane were added."
+    },
+    {
+      "location": "apps/server/src/ws/sourceControlRpc.ts:598",
+      "note": "getChangeRequestDetail taps refreshStateForLinkedReference (pr), and getIssue taps it at sourceControlRpc.ts:391 (issue), as do the issue comment/reaction RPCs at :413/:435. Web polls change-request detail at 30-60 s (apps/web/src/rpc/sourceControlRefreshPolicy.ts:6-9, sourceControlAtoms.ts:684), and mobile reads it in useThreadChecks.ts:56. Each poll re-reads the PR the detail just returned (its state/isDraft/closedAt/mergedAt are in the response, packages/contracts/src/sourceControl.ts:374-399) and the linked issue."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.test.ts:702",
+      "note": "The only test added for the batch covers the per-worktree consumer (an authoritative batched state skips gh pr view). Nothing tests the context-level batch selection or gating. GitManager.test.ts:574 only stubs the method."
+    }
+  ],
+  "remaining": "(a) context.ts:495-498 runs batchedPullRequestStates on every debounced sweep, even when no swept worktree is due for a link refresh (due state lives in refreshWorktreeSourceControlState.ts:86/:155). That is one wasted `gh api graphql` per 5 s of read activity. (b) Linked-issue states are not batched or reused from list rows. refreshWorktreeSourceControlState.ts:341-350 calls getIssueState per due worktree, which on GitHub is a full `gh issue view` with body and comments plus a reactions GraphQL call (GitHubSourceControlProvider.ts:1199, GitHubCli.ts:2899-2925, :1710-1731). (c) refreshStateForLinkedReference (context.ts:531-555), tapped by getChangeRequestDetail (sourceControlRpc.ts:598), getIssue (:391) and issue comment RPCs (:413, :435), still makes forge calls on every read. It has no debounce, no link-refresh interval and no reuse of the state the detail read just returned, so a 30-60 s detail poll on a PR with a linked workspace re-reads that PR with `gh pr view` and the linked issue on each poll.",
+  "fixDefects": "The batch added in 9a601cbd1 ignores the 5-min link-refresh gate from 60633eff3. Every sweep past the 5 s debounce with 2 or more open/current link numbers makes a `gh api graphql` call, and the per-worktree refreshes discard the result unless a link refresh is due (refreshWorktreeSourceControlState.ts:209-212). Sweeps between due windows went from zero forge calls to one. That includes picker list reads that are now served from cachedRepositoryList with no gh call at all. The process runs in the background lane and is cheap, but it is mostly wasted. No context-level test covers when the batch fires.",
+  "implementationSketch": "1) Make the batch lazy in apps/server/src/ws/context.ts. In refreshLinkedWorktreeSourceControlStates, wrap batchedPullRequestStates(input.cwd, refreshed) with `Effect.cached` (or a Deferred/Ref memo) and call it from inside `knownStates`. refreshWorktreeSourceControlState only invokes knownPullRequestStates when linkRefreshDue (refreshWorktreeSourceControlState.ts:209-212), so the GraphQL call happens only on the first due worktree and at most once per sweep. Optionally also export a non-claiming `isWorktreeLinkRefreshDue(worktreeId, intervalMs, nowMs)` from refreshWorktreeSourceControlState.ts and pass only due worktrees' numbers to the batch. Test: a context.ts sweep test or a small extracted helper test. Two debounced sweeps inside 5 min give one getPullRequestStates call; after the interval, one more.\n2) Batch and reuse issue states. Extend the GitHub batch document (gitHubRepositoryLists.ts buildGitHubPullRequestStatesQuery) to also take issue numbers (`i<n>: issue(number: n) { number state }`). Add an optional `getIssueStates` (or make the method `getLinkStates({ pullRequests, issues })`) on SourceControlProvider.ts / GitHubSourceControlProvider.ts, collect worktree.issueNumber in context.ts, and add `knownIssueStates` to RefreshWorktreeSourceControlStateInput so line 341 skips provider.getIssueState when the state is known. Also pass the listIssues/searchIssues rows from sourceControlRpc.ts:367/:458 as known issue states, the same way knownPullRequests is passed. Separately, make GitHub getIssueState cheap: `gh issue view N --json state`, or a GraphQL issue(number){state}, instead of github.getIssue with body, comments and reaction hydration. Tests: refreshWorktreeSourceControlState.test.ts, where a known issue state means no getIssueState call. gitHubRepositoryLists.test.ts, for the mixed query builder and decoder.\n3) De-piggyback refreshStateForLinkedReference (context.ts:531). Split read callers (getChangeRequestDetail :598, getIssue :391) from mutation callers (refreshLinkedChangeRequest, comment/reaction RPCs). For read callers, add a per (projectId, kind, number) debounce like SOURCE_CONTROL_LINKED_REFRESH_DEBOUNCE_MS, pass linkRefreshIntervalMs = WORKTREE_PULL_REQUEST_DISCOVERY_INTERVAL_MS, and pass the detail just read as a known state. For a PR: state, isDraft, reported.terminalAt from mergedAt/closedAt. For an issue: its state, via the new knownIssueStates. A detail poll then never re-reads the same PR or issue. Mutation callers keep interval 0. Test in apps/server/src/ws (the authRpcRegression-style context stub or a new sourceControlRpc test): two getChangeRequestDetail calls within the interval produce zero getPullRequestState calls for the linked worktree.",
+  "worth": "low",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Server-internal source-control refresh scheduling only. No auth, E2EE, Hub protocol or hosted lifecycle semantics. Staleness of linked PR/issue badges stays bounded by the existing 1-5 min intervals.",
+  "repos": "ryco"
+}

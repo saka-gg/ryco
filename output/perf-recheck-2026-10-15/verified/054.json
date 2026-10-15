@@ -1,0 +1,50 @@
+{
+  "id": "persistence-boot:sqlite-pragmas",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "The auditor is right. Commit 60633eff3 (#710) added PRAGMA mmap_size=256MiB and cache_size=-32768 to the shared setup layer, before migrations. Commit 79b492cd6 added the same two pragmas to the new read-only worker connection. Those are the only two SQLite connections the server opens on its own database: NodeSqliteClient uses a single DatabaseSync behind a semaphore, and the worker is the second. The other DatabaseSync in server src (opencodeUsageReader) opens OpenCode's external database. Every entry point (server.ts, ws.ts, cli.ts, AuthControlPlane.ts) goes through layerConfig, so the CLI process gets the tuning too. The server runs on Node in dev and in production. A test asserts that mmap is really enabled (non-zero, so node:sqlite's compile cap does not silently disable it), that cache_size is -32768, and that synchronous stays FULL. temp_store=MEMORY and PRAGMA optimize/ANALYZE were left out on purpose, with the A/B rationale in a code comment. That covers the earlier verifier's concern about plan changes. The measured gain in the finding came from mmap, and that is implemented. I found no regression. The only gaps are journal_size_limit (disk hygiene) and a missing test for the worker pragmas.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:56-57",
+      "note": "PRAGMA mmap_size = 268435456 and PRAGMA cache_size = -32768 on the main connection. They run before trackStartupPhase(\"persistence.migrations\") at line 60, so migrations and boot hydration both benefit."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:47-55",
+      "note": "The comment records a repeated A/B: 5 runs per variant, twice, on a 5k-thread / 400k-activity database. It also records the deliberate rejection of temp_store=MEMORY and optimize/ANALYZE, and that synchronous stays at its default per docs/streaming-sqlite.md."
+    },
+    {
+      "location": "apps/server/src/persistence/SqliteReadClient.ts:69-73",
+      "note": "The read-only worker connection sets the same mmap_size and cache_size. These pragmas are per connection, so this covers the heavy off-thread read path (introduced in 79b492cd6)."
+    },
+    {
+      "location": "apps/server/src/persistence/NodeSqliteClient.ts:226-229,257",
+      "note": "The main client opens a single DatabaseSync behind a Semaphore(1). There is no connection pool, so no other connection misses the setup pragmas."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.test.ts:98-118",
+      "note": "The test 'applies the A/B-tested read tuning to file databases' asserts cache_size=-32768, mmap_size > 0 and <= 256MiB (guards against a compile-time mmap cap of 0), and synchronous=2."
+    },
+    {
+      "location": "apps/server/src/cli.ts:134",
+      "note": "The CLI, server.ts:65, ws.ts:11 and auth/Layers/AuthControlPlane.ts:9 all use layerConfig from Layers/Sqlite.ts, so every process that opens state.sqlite gets the same tuning."
+    },
+    {
+      "location": "apps/server/package.json:20,23",
+      "note": "dev runs `node --watch src/bin.ts` and start runs `node dist/bin.mjs`. The Bun client path (system SQLite on macOS, mmap possibly capped) is not what users run."
+    },
+    {
+      "location": "apps/server/src/usage/opencodeUsageReader.ts:232",
+      "note": "This is the only other DatabaseSync in server src. It opens OpenCode's external database read-only and briefly, so it is out of scope."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No real defects. Minor gaps: (1) PRAGMA journal_size_limit (proposed at 64 MiB) is not set anywhere in apps/server/src. The new read worker can now hold long read transactions (whole-history statistics), which can starve checkpoints. The WAL then grows and stays at its high-water size on disk until the last connection closes. That costs disk space, not read speed. (2) No test asserts the worker connection's mmap/cache pragmas (SqliteReadClient.test.ts has none). (3) The A/B harness behind the numbers in the comment is not committed (scripts/measure-persistence-reads.ts has no pragma variants), so the figures cannot be reproduced. That does not break the fix.",
+  "implementationSketch": "Optional cleanup: in apps/server/src/persistence/Layers/Sqlite.ts, after line 57, add `yield* sql`PRAGMA journal_size_limit = 67108864;``. It only matters on the main (writer) connection, which is the one that checkpoints. Extend the existing test in Layers/Sqlite.test.ts to assert `PRAGMA journal_size_limit` returns 67108864. Optionally, in SqliteReadClient.test.ts, run `PRAGMA mmap_size` and `PRAGMA cache_size` through makeSqliteReadWorkerClient on a temp file database and assert the same values, so the worker's tuning cannot silently drift from the main connection's. One-line change, no behaviour risk.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Local SQLite tuning in the server persistence layer. It does not touch auth, E2EE, the Hub protocol or hosted lifecycle ownership. The remaining journal_size_limit item is disk hygiene with no product trade-off.",
+  "repos": "ryco"
+}

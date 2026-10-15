@@ -1,0 +1,71 @@
+{
+  "id": "thread-and-draft:thread-window-activity-overfetch",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "correction": "PARTIAL holds and the mobile gap is real. I found no mobile or Hub-side implementation the auditor missed. Their fixDefects line ('None seen') is wrong, though: the fix has two small fidelity regressions on web/desktop. (a) Multi-file file_change previews collapse to 4 changes. (b) Long commands stay truncated in the expanded panel after the full payload loads. The auditor also left out that live and replayed thread.activity-appended events still carry full payloads. That is outside the finding's window scope and low worth.",
+  "summary": "The server side shipped in 36760bffd: bounded per-kind previews (8 KiB for tool rows, 64 KiB for other kinds) with payloadPreview {fullBytes}, orchestration.getActivityPayload (2 MiB cap, viewer/read policy) and migration 088, which re-projects legacy rows. The web/desktop client opts in and fetches on expand (a01ef8557). Both commits are in the Hub's vendored 7bc39eec3, and the Hub has no method allowlist that needs a change. The native mobile client never opts in, so the intended phone surface still gets full payloads, bounded only by the 1 MiB window budget. Within the fix, the preview levels cut arrays to 16 and then 4 items at the same step that strings shrink. A file_change touching 14 or more files with ordinary diffs therefore keeps only 4 changes, and the collapsed row shows 'Edited 4 files' with +/- totals for those 4. The expanded panel also re-derives only output and exitCode from the fetched payload, so commands longer than 2 KiB stay cut with an ellipsis.",
+  "evidence": [
+    {
+      "location": "apps/server/src/orchestration/activityPayloadPreview.ts:26-31,129-153",
+      "note": "Per-kind preview budgets and boundPayload/previewActivityPayload are implemented as the auditor described."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:225-241,3880-3885,4277-4282",
+      "note": "toSentActivityRows is applied before the 1 MiB byte budget, both for windows and for history pages."
+    },
+    {
+      "location": "apps/server/src/ws/orchestrationRpc.ts:185,442-445",
+      "note": "activityPayloads is forwarded for get/subscribeThreadWindow, and getActivityPayload is registered."
+    },
+    {
+      "location": "apps/server/src/persistence/Migrations/088_LegacyActivityPayloads.ts:32-94",
+      "note": "Legacy re-projection: tool rows over 16,000 B go through capActivityData and projectActivityPayload. It is idempotent, recorded in ryco_compatibility_repairs and also re-run as a boot repair (Migrations.ts:547,749)."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:199",
+      "note": "Web/desktop sets threadWindowActivityPayloads: 'preview'. The supervisor applies it to windows, activity history pages and stale recovery (packages/client-runtime/src/connection/supervision.ts:478-507,656)."
+    },
+    {
+      "location": "apps/mobile/src/connection/environmentDriver.ts:629-636",
+      "note": "The mobile supervisor config has no threadWindowActivityPayloads. rg finds no payloadPreview, getActivityPayload or outputPreviewActivityId anywhere in apps/mobile."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/threadActivityFold.ts:96 and ThreadActivityFoldRow.tsx:29,89-94",
+      "note": "Mobile renders entry.output whole from the window payload when a row is opened. There is no on-demand fetch."
+    },
+    {
+      "location": "apps/server/src/orchestration/activityPayloadPreview.ts:55-62,137-141",
+      "note": "Fix defect (a). Level 2 is {512 chars, 16 items} and level 3 is {128 chars, 4 items}, so arrays shrink as strings shrink. I re-ran the same algorithm in node: a file_change with 12 changes and ~3 KB diffs lands at level 2 and keeps 12; with 14 or more changes it lands at level 3 and keeps 4."
+    },
+    {
+      "location": "packages/client-runtime/src/state/session/session-logic.ts:2008-2017,2108-2119 and apps/web/src/components/chat/MessagesTimeline.tsx:2892-2908",
+      "note": "changedFiles and changedFileStats come from the (preview) payload, capped at 12. The collapsed row's 'Edited N files' count and +/- summary therefore drop to 4 files' worth for large multi-file edits. Tests cover only a 2-change payload (activityPayloadPreview.test.ts:27-53)."
+    },
+    {
+      "location": "packages/client-runtime/src/state/session/session-logic.ts:1829-1834 and apps/web/src/components/chat/MessagesTimeline.tsx:3075-3082",
+      "note": "Fix defect (b). deriveActivityPayloadOutput returns only output and exitCode. The panel's inputLine comes from workEntryRawCommand(workEntry), which is derived from the preview, so a command over 2048 chars stays cut with an ellipsis after the full payload loads. Before the fix it showed up to 16,000 chars."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:937,965 and apps/server/src/orchestration/activityDataCap.ts:24",
+      "note": "Live and replayed thread events (thread.activity-appended) still carry full activity payloads. file_change diffs are exempt from the 16K cap. This is out of the finding's window scope; it is incremental cost only."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:2140-2164",
+      "note": "The window SQL still selects and JSON-decodes full payload_json for limit+1 rows, and all of them are previewed before the budget cut. This affects server CPU only, not wire size."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/claudeCacheReview.ts:83-87",
+      "note": "A minor additional caller reads 40 activities without preview, but only on a flagged Claude resume send. Negligible."
+    }
+  ],
+  "remaining": "1) Mobile, the main gap. apps/mobile/src/connection/environmentDriver.ts:629-636 does not set threadWindowActivityPayloads: 'preview', and mobile has no getActivityPayload fetch (threadActivityFold.ts:88-101 drops outputPreviewActivityId; ThreadActivityFoldRow.tsx:89-94 renders row.output directly). Mobile windows and history pages therefore still carry full tool output and diffs, up to the 1 MiB activity budget per window, over hosted relays and cellular links. 2) The fix defects listed in fixDefects. 3) Optional, low worth: live and replayed thread.activity-appended events still carry full payloads, including uncapped file_change diffs (orchestrationStreams.ts:937,965). 4) Optional, low worth: the server still reads and parses full payload_json for up to 201 rows per window or page and previews all of them before the budget cut (ProjectionSnapshotQuery.ts:2140-2164, 3881-3885, 4278-4282).",
+  "fixDefects": "(a) Preview levels cut arrays in the same step that strings shrink (activityPayloadPreview.ts:55-62). A file_change whose changes do not fit at level 2 (512 chars, 16 items) drops to level 3 (128 chars, 4 items). In practice that means about 14 or more changed files with diffs of roughly 600 B or more, which I verified by simulating the exact algorithm. The web collapsed row then reads 'Edited 4 files' with +/- totals for only those 4 (MessagesTimeline.tsx:2892-2908; derivation at session-logic.ts:2008-2017,2108-2119). Before the fix it showed up to 12 files. The expanded panel never re-derives changedFiles or changedFileStats from the fetched payload. (b) WorkEntryExpandedPanel (MessagesTimeline.tsx:3075-3082) takes inputLine from the preview-derived work entry, and deriveActivityPayloadOutput (session-logic.ts:1829-1834) returns only output and exitCode. Commands over 2048 chars (heredocs, python -c scripts) therefore stay cut with an ellipsis even after the full payload loads; before the fix they showed up to the 16,000-char ingestion cap. Both are small display regressions, not correctness or security issues.",
+  "implementationSketch": "Mobile: (1) Move the keyed query from apps/web/src/rpc/activityPayloadAtoms.ts into packages/client-runtime/src/rpc as makeActivityPayloadQuery({ resolveGetActivityPayload(environmentId) }), keeping stale Infinity, gc 2 min and max 16 entries. Web and mobile each pass their own ensureEnvironmentApi(...).orchestration.getActivityPayload. Mobile already uses defineKeyedQueryByKey in apps/mobile/src/rpc/projectFilesAtoms.ts. Keep deriveActivityPayloadOutput shared. (2) Add threadWindowActivityPayloads: 'preview' to the supervisor input in apps/mobile/src/connection/environmentDriver.ts (next to syncThreadWindowSnapshot, about line 633). (3) Carry outputPreviewActivityId on ActivityRow in threadActivityFold.ts toRow. (4) In ThreadActivityFoldRow.tsx, when the row is open and the id is set, watch the query: show the preview text with a small spinner, then the full output, with retry on error and a 'truncated' note when result.truncated. Tests: a threadActivityFold unit test for the id passthrough, and a row test with a mocked getActivityPayload. Fix (a): in activityPayloadPreview.ts previewLevels, shrink strings before arrays, for example [{s:base,a:64},{s:base/4,a:64},{s:base/16,a:64},{s:base/16,a:16},{s:base/16,a:4}], or never cut arrays below 12 items before the scalar shell. Optionally also re-derive changedFiles and changedFileStats from the fetched payload in the expanded panel. Add an activityPayloadPreview.test.ts case: a 20-file file_change with 2 KB diffs stays under 8 KiB and keeps at least 12 changes with path, additions and deletions. Fix (b): extend deriveActivityPayloadOutput to also return rawCommand/command (reuse session-logic's existing command-preview extractor) and the changed-file lists. Use them in WorkEntryExpandedPanel once loaded, and cover it with a long-command case in MessagesTimeline.browser.tsx (near the existing getActivityPayload test, about line 1206). Optional: preview live thread.activity-appended activities for preview-mode thread subscriptions. That means threading the mode into makeReplayableThreadStream and mapping event.payload.activity through previewActivityPayload with payloadPreview. It is low value because live rows are what the user is watching.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "None of this touches the protocol, auth or E2EE. The getActivityPayload RPC and the preview flag already exist and are relay-agnostic, and mobile opting in reuses the shared supervisor flag, as AGENTS.md requires for shared sync policy. The preview-level and panel fixes are client and server display details.",
+  "repos": "ryco"
+}

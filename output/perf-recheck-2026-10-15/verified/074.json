@@ -1,0 +1,86 @@
+{
+  "id": "web-boot-cpu:streaming-per-event-on-work",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All three parts of the proposal are in main through 60633eff3 (#710), and 8fb94df00 adds shared reads on top. (1) A shell thread-upserted for a known thread now does an O(1) seedThreadVisitedAt. The O(threads x drafts) syncThreadUiFromStore and the global draft promotion run only for new threads, removals and snapshot reconcile. (2) Shell items and thread-detail events are batched per environment and animation frame. Each batcher is a store mutation barrier, the old 10-events/ms threshold is gone, and derived UI sync runs once per batch. (3) The server shell feed coalesces message-sent, activity-appended and proposed-plan-upserted per thread over a 250 ms window with a 250 ms flush tick. That gives about 4 upserts and SQL re-reads per second per streaming thread instead of about 30. Message text on the thread-detail stream is never coalesced. I found no correctness regression: ordering is preserved, the projection tracker only needs monotonic sequences, resume replays held events, and the hosted generation gate runs at enqueue time. Draft promotion is still covered through the thread.created batch path. Only minor efficiency leftovers remain, listed under fixDefects; none of them brings back the per-delta O(N) cost the finding describes.",
+  "evidence": [
+    {
+      "location": "apps/web/src/environments/runtime/environmentStateSink.ts:78-102",
+      "note": "thread-upserted: syncThreadUiFromStore and markPromotedDraftThreadByRef run only when there is no previousThread. A known thread gets an O(1) seedThreadVisitedAt. previousThread is read from threadShellById, so no full Thread is derived."
+    },
+    {
+      "location": "apps/web/src/uiStateStore.ts:969-988",
+      "note": "seedThreadVisitedAt returns the same state once the thread is seeded, so zustand does not notify."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/environmentStateSink.test.ts:109-141",
+      "note": "Test: a second upsert of the same thread does not call syncThreads or markPromotedDraftThreadsByRef again; it seeds only the single key."
+    },
+    {
+      "location": "packages/client-runtime/src/state/composer/draftStore.ts:2432-2455",
+      "note": "markPromotedDraftThreadsByRef indexes drafts once, so the remaining global callers (snapshot reconcile, thread-removed) are O(threads + drafts)."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/supervision.ts:1026-1077",
+      "note": "Shell items go through createEnvironmentEventBatcher, which makes one applyShellEvents commit per environment and frame. After-hooks then run per event."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/eventBatching.ts:42-141",
+      "note": "Frame batcher with a 100 ms fallback, a flush at 512 pending events, and registration as a store mutation barrier, so ordering against snapshots and removals holds."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/store.ts:4078-4118",
+      "note": "createShellEventCoalescer always frame-batches. The 10 events/ms gate from the old store.ts:3636 is gone."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:727-814",
+      "note": "Thread-detail events are frame-batched through threadDetailEventBatcher. applyRecoveredEventBatch runs syncThreads only for thread.created, deleted, trashed or untrashed, and syncProjects only for project events."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationEventCoalescing.ts:62-77",
+      "note": "orchestrationShellFrameKey keys message-sent, activity-appended and proposed-plan-upserted per thread. Every other event returns null and flushes held frames first, in sequence order."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:606-648",
+      "note": "runLiveFeed runs a per-subscription coalescer plus a flush tick every coalesceWindowMs, so about 4 (at most about 8) shell upserts per second per streaming thread."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:831-838",
+      "note": "The shell live feed uses orchestrationShellFrameKey with ORCHESTRATION_SHELL_THREAD_COALESCE_WINDOW_MS = 250 (constants.ts:35)."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:926-933",
+      "note": "The thread-detail feed keeps orchestrationProgressFrameKey, which never keys thread.message-sent, so streaming text is not coalesced."
+    },
+    {
+      "location": "apps/server/src/ws/context/orchestrationStreams.ts:368-405",
+      "note": "toShellStreamEvents re-reads only the last upsert-class event per thread in each drained batch."
+    },
+    {
+      "location": "packages/client-runtime/src/connection/projectionTracker.ts:38-43",
+      "note": "Shell apply needs only sequence > current, so coalescing gaps cannot cause resyncs. pushSequenceMonitor gaps are diagnostics only, and the shell already coalesced progress frames at f1be4abc7."
+    },
+    {
+      "location": "apps/server/src/ws/context/sharedThreadShellReads.ts:42-74",
+      "note": "Shared reads are keyed by (thread, triggering sequence). Each subscription has its own coalescer, flush-tick phase and drain timing, so subscribers emit different sequences for a streaming thread and rarely share a read (minor leftover, see fixDefects)."
+    },
+    {
+      "location": "apps/web/src/environments/runtime/service.ts:791-797",
+      "note": "In a hidden document scheduleStreamBatchFrame uses queueMicrotask, so a background or occluded window still gets about one commit per WebSocket message (a deliberate trade-off against hidden-tab timer throttling)."
+    },
+    {
+      "location": "apps/mobile/src/connection/threadDetailEvents.ts:61",
+      "note": "Mobile's thread-detail applier still commits once per event (applyRecoveredEventBatch([event])). This is outside the web scope of this finding; mobile shell items are batched by the shared supervisor."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "None of these blocks the finding or regresses correctness; all are minor efficiency leftovers. (a) sharedThreadShellReads.ts:56 keys shared reads by (threadId, sequence), but each shell subscription coalesces with its own flush-tick phase and drain timing (orchestrationStreams.ts:636-640). During streaming the subscribers therefore emit different sequences for the same thread and almost never share a read: K subscribers cost about 4K shell reads/s per streaming thread instead of about 4. The finding's own target (about 30 down to about 4 reads/s per subscriber) is still met. (b) In hidden documents, scheduleStreamBatchFrame (service.ts:791-797) falls back to a microtask, so a minimized or occluded window still makes one commit plus a React render per thread-detail delta. (c) Mobile's thread-detail path (apps/mobile/src/connection/threadDetailEvents.ts:61) is not frame-batched; it is outside this web finding. evictIdleThreadDetailSubscriptionsToCapacity per upsert is bounded at 32 entries and now runs at about 4/s, which is negligible.",
+  "implementationSketch": "Optional follow-ups only. (a) In apps/server/src/ws/context/sharedThreadShellReads.ts, key entries by threadId alone and store the sequence each entry was read for. A request for (thread, S) reuses a fresh entry whose sequence is >= S: that read started after an event at or after S had committed, so it is a correct answer for S. Otherwise it starts a new read and replaces the entry. Keep the TTL, the no-sharing-of-failures rule and MAX_ENTRIES. Test in sharedThreadShellReads.test.ts: request (t, 8), then (t, 7), and expect 1 read; request (t, 9) and expect a 2nd read; plus an orchestrationStreams test with two shell subscribers and a stream of message-sent events, asserting sharedThreadShellReadCount stays near one per window. (b) Optionally, when document.visibilityState is hidden, batch thread-detail and shell items on a short timer (for example 250 ms) instead of a microtask, and flush on visibilitychange to visible. Because hidden-tab timer throttling could delay things like notifications, keep the microtask path if that latency matters. (c) Hoist web's applyRecoveredEventBatch into packages/client-runtime, wrap mobile's createThreadDetailEventApplier with createEnvironmentEventBatcher (default frameScheduler), and test that N enqueued events produce one applyOrchestrationEvents call.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "No decision is needed: the finding is fully implemented. The optional follow-ups are internal efficiency changes that touch no auth, E2EE, hosted lifecycle or Hub protocol.",
+  "repos": "ryco"
+}

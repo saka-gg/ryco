@@ -1,0 +1,71 @@
+{
+  "id": "web-bootstrap:react-suspense-reveal-throttle",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE for the finding's scope. Every route body is split with lazyRouteComponent, which the router awaits before it commits. The root shell and the hosted root are preloadableLazy modules that the root beforeLoad awaits, only on shell/hosted gate states. The named on-demand surfaces (command palette, Automations, Promote chat, Phone Home, settings sections) render synchronously once loaded. I also checked the router actually installed (react-router 1.170.33, router-core 1.171.28). There the pending UI is shown through a Suspense throw (Match.js:107). The reveal itself is a React.startTransition commit (load-client.js:919), not a retry lane, so React 19's 300 ms retry throttle (react-dom-client.production.js:10792) does not apply. A browser test guards this (RouteRevealThrottle.browser.tsx, included by vitest.browser.config.ts). The fix missed a few React.lazy+Suspense sites the finding did not name. They sit on secondary paths: the hosted native-auth sign-in surface, the Hub account Security/Appearance sections, the workspace Browser tab and Live preview, desktop Computer Use settings, the palette's Create-PR dialog host and the first-run onboarding dialog. Each still commits a fallback once and reveals up to 300 ms late. No timing was re-measured.",
+  "evidence": [
+    {
+      "location": "apps/web/src/routes/_chat.$environmentId.$threadId.tsx:33",
+      "note": "Thread route uses lazyRouteComponent with pendingComponent, pendingMs 300 and pendingMinMs 0 (line 41). Draft, statistics, projects, pull-requests, diagnostics, _chat layout/index and native-authorize do the same. pair.tsx is the only eager route body."
+    },
+    {
+      "location": "node_modules/.bun/@tanstack+react-router@1.170.33+005eabf3d8b6ef06/node_modules/@tanstack/react-router/dist/esm/lazyRouteComponent.js:25",
+      "note": "After load, lazyRouteComponent sets comp and clears .preload, so the next render returns the component synchronously. router-core awaits .preload() before it commits the match."
+    },
+    {
+      "location": "node_modules/.bun/@tanstack+router-core@1.171.28/node_modules/@tanstack/router-core/dist/esm/load-client.js:919",
+      "note": "Matches are committed through router.startTransition (React.startTransition, Transitioner.js:16-20). Match.js:107 throws router._tx[5] for a presented pending match, so the pending UI is a committed Suspense fallback. Its reveal is a transition lane, though, not RetryLanes, so the throttle at react-dom-client.production.js:10792 does not fire."
+    },
+    {
+      "location": "apps/web/src/routes/__root.tsx:127",
+      "note": "withRootSurfaceLoaded awaits RootAppShell/HostedHubRoot.preload() only when rootSurfaceFor returns a surface: authenticated/hosted-static/hosted-hub, never /pair or native-authorize. Line 163 starts the shell import alongside auth. Line 199 hands HostedHubRoot.preload() to runHostedBootGate. Line 429 renders the preloaded shell, keeping Suspense only as a safety net for a failed load."
+    },
+    {
+      "location": "apps/web/src/lib/preloadableLazy.ts:55",
+      "note": "The shared helper keeps the resolved component in module state, so a render after preload() settles never suspends. useLazyComponentReady and usePreloadWhenIdle cover on-demand surfaces. Errors surface through an error boundary and the next preload() retries."
+    },
+    {
+      "location": "apps/web/src/settingsRoute.ts:21",
+      "note": "SettingsRouteComponent is the lazyRouteComponent that both the router and preloadSettingsPage use, so the idle preload (RootAppShell.tsx:184) and the hover preload (SidebarChrome.tsx:88) now help. routes/settings.tsx:29 preloads the open section. SettingsPage.tsx:241-275 turns every section body into a preloadableLazy."
+    },
+    {
+      "location": "apps/web/src/components/perf/RouteRevealThrottle.browser.tsx:90",
+      "note": "Asserts commit within 50 ms of chunk resolve for a preloadableLazy root (with root pendingMs 0, i.e. the Suspense-thrown pending path) and for a lazyRouteComponent page. A React.lazy control is expected to exceed 150 ms. The app-route-tree case checks that every real route component except /pair and __root__ has .preload(). The root case is synthetic and does not exercise __root.tsx's withRootSurfaceLoaded."
+    },
+    {
+      "location": "apps/web/src/perf/webBundleSplitting.test.ts:28",
+      "note": "Route files must contain lazyRouteComponent( and no React lazy import or <Suspense>. The guard only covers route files, so it does not stop new React.lazy sites in components."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HostedNativeAuthorizationRoute.tsx:19",
+      "note": "Not covered: React.lazy HostedAuthenticationSurface in a fallback-null Suspense (line 81), rendered for a signed-out native handoff. The hosted boot gate has already loaded ./HostedHubRoot, so this is pure throttle: about 300 ms of blank page after the route commits."
+    },
+    {
+      "location": "apps/web/src/components/hostedHub/HubAccountPage.tsx:14",
+      "note": "Not covered: React.lazy AccountSettingsPanel and AppearanceSettingsPanel in a Skeleton Suspense (line 101) on the hosted Hub account Security/Appearance pages. The first visit holds the skeleton up to 300 ms after the chunk lands, even when SettingsPage has already loaded the same module."
+    },
+    {
+      "location": "apps/web/src/browser/LazyBrowserPanel.tsx:3",
+      "note": "Not covered: React.lazy BrowserPanel in Suspense. ThreadWorkspacePanel.tsx:453 (the Browser tab) and ProjectBrowserPreview.tsx:27 render it without the WorkspaceSurfaceGate that Review/Files use. The comment at ThreadWorkspacePanel.tsx:1493 says every split surface is gated."
+    },
+    {
+      "location": "apps/web/src/components/settings/IntegrationsSettingsPanel.tsx:23",
+      "note": "Not covered: React.lazy ComputerUseSettings nested inside the preloaded Integrations section (desktop only). The 'Loading device integrations…' fallback is held up to 300 ms."
+    },
+    {
+      "location": "apps/web/src/components/CommandPaletteDialog.tsx:416",
+      "note": "Not covered: React.lazy CreatePullRequestDialogHost in a fallback-null Suspense (line 439). The first 'New pull request…' from the palette appears up to 300 ms late. Also not covered: OnboardingCoordinator.tsx:23, the first-run OnboardingDialog. Not worth converting: the phone-tier PhoneSettingsSurface/AppSidebarLayout.tsx:40 (frozen per AGENTS.md), PreviewFileNavigationGuard (renders null), DesktopQuitFeedback in main.tsx:32 and the PDF preview."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No defects in the implemented fix. The routes, root and hosted shells, and named surfaces are correct on the installed router and React versions. The fix missed some same-class callers (pre-existing at f1be4abc7 but not named in the finding). Each still commits a Suspense fallback on first use and reveals up to 300 ms late:\n(1) HostedNativeAuthorizationRoute.tsx:19/81: a signed-out hosted native handoff, with the module already loaded, so the delay is pure throttle.\n(2) HubAccountPage.tsx:14,19/101: Hub account Security and Appearance pages.\n(3) LazyBrowserPanel.tsx:3, used by ThreadWorkspacePanel.tsx:453 (workspace Browser tab, not behind WorkspaceSurfaceGate despite the comment at :1493) and ProjectBrowserPreview.tsx:27.\n(4) IntegrationsSettingsPanel.tsx:23: desktop Computer Use subsection.\n(5) CommandPaletteDialog.tsx:416: Create-PR dialog host.\n(6) OnboardingCoordinator.tsx:23: first-run dialog.\nThere is no repo-wide guard, so new React.lazy sites can come back; webBundleSplitting.test.ts checks route files only. Minor test gap: no test exercises the real __root.tsx beforeLoad (withRootSurfaceLoaded / rootSurfaceFor). Negligible edge: a navigation that joins pendingReadyRootContext (__root.tsx:157) gets a context awaited for the first caller's pathname, so a boot on a native-authorize path joined by '/' would not await the shell.",
+  "implementationSketch": "1) HostedNativeAuthorizationRoute.tsx: replace lazy() with preloadableLazy(() => import('./HostedHubRoot').then(m => m.HostedAuthenticationSurface)) and export preloadHostedAuthenticationSurface(). Call it from a loader in routes/native.authorize.$handoffId.tsx when isHostedHubMode(), the same pattern as _chat.index.tsx's PhoneHome loader. Alternatively, gate the mount with useLazyComponentReady(surface, true) and render null or a loading surface as an ordinary render. 2) HubAccountPage.tsx: make both panels preloadableLazy (or reuse the SettingsPage module instances by exporting them), call usePreloadWhenIdle for both on HubAccountPage mount, and preload on pointerenter/focus of the rail buttons. Render the Skeleton as an ordinary branch when !useLazyComponentReady(panel, true), keeping Suspense only as a safety net. 3) LazyBrowserPanel.tsx: convert BrowserPanel to preloadableLazy, export preloadBrowserPanel, and render 'Loading browser…' as an ordinary branch via useLazyComponentReady. In ThreadWorkspacePanel, wrap the browser tab in WorkspaceSurfaceGate like review/files and register it with workspacePanelPreload so tab hover warms it. 4) IntegrationsSettingsPanel.tsx: make ComputerUseSettings preloadableLazy and preload it from preloadSettingsSection('integrations') when window.desktopBridge?.computerUse exists (SettingsPage.tsx:296), or gate it with useLazyComponentReady. 5) CommandPaletteDialog.tsx: preloadableLazy plus useLazyComponentReady(host, createPullRequestRequested). The dialog host stays mounted, as the other dialog mounts do in RootAppShell.tsx:118-160. 6) OnboardingCoordinator.tsx: preloadableLazy plus useLazyComponentReady(OnboardingDialog, active), or preload when the gate resolves to 'show'. 7) Guard: extend apps/web/src/perf/webBundleSplitting.test.ts with a scan of apps/web/src/**/*.tsx (excluding tests) that fails on `lazy(` imported from react or `React.lazy(` outside an explicit allowlist: the phone tier (PhoneSettingsSurface.tsx, AppSidebarLayout.tsx), __root.tsx's render-null guard and phone interstitial, main.tsx DesktopQuitFeedback, AttachmentDocumentPreview. 8) Optional test: export rootSurfaceFor/withRootSurfaceLoaded (or test via the RootRouteErrorRecovery harness). Assert that authenticated and hosted-static await the shell preload, and that /pair, native-authorize and requires-auth do not. Add a RouteRevealThrottle case for a useLazyComponentReady-gated surface whose chunk lands after the open (commit within 50 ms of resolve). Validate with focused checks: vitest for webBundleSplitting.test.ts, and the browser suite file RouteRevealThrottle.browser.tsx plus the touched components' .browser.tsx files.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Code-loading changes only. The native-auth item changes how the sign-in surface chunk is loaded, not authentication or hosted lifecycle semantics, and the phone-tier sites stay untouched per AGENTS.md.",
+  "repos": "ryco",
+  "correction": "None on status. On the auditor's evidence: the finding's verifier and the auditor say TanStack renders pendingComponent directly. On the installed router-core 1.171.28, MatchInner throws router._tx[5] for a presented pending match (Match.js:107), so the pending UI is a committed Suspense fallback. The fix still holds because the commit is a React transition, not a retry lane. Besides the residual sites the auditor listed (HubAccountPage, PhoneSettingsSurface, OnboardingDialog), it missed HostedNativeAuthorizationRoute (a route surface whose module is already loaded), the workspace Browser tab/Live preview (LazyBrowserPanel), desktop ComputerUseSettings and the palette's CreatePullRequestDialogHost."
+}

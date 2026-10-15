@@ -1,0 +1,63 @@
+{
+  "id": "thread-and-draft:layout-effects-every-commit",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "DONE holds. #710 (60633eff3) is the only commit since f1be4abc7 to touch useFlipLayout.ts, useInboxListMotion.ts or InboxSidebar.tsx. In useFlipLayout, the FLIP layout effect is now gated on the trigger, and the ResizeObserver plus a MutationObserver are created once per container element. A browser test checks that 5 unchanged re-renders call neither getBoundingClientRect nor getAnimations. In useInboxListMotion, commits where the order is unchanged and positions are not dirty take a fast path that reads no layout. A list ResizeObserver refreshes row tops inside its callback, where layout is already computed. #710 also added a boot motionReady gate, so the initial population skips measurement. Every other useInboxListMotion caller (ProjectListPane, PullRequestInbox, ChecksTab, MergeSection, ProjectActionsSection) gets the same fix through the shared hook. All of them attach the list ref to a container whose height follows its content, so row height changes reach the observer. Two parts of the proposal were not adopted: the mount-time record in useFlipLayout still reads layout synchronously, and nothing reads inside requestAnimationFrame. In both cases the cost moves rather than disappears, because other layout effects force layout in the same draft-open commit. I found no regressions. The auditor cited the caller line from before the report.",
+  "evidence": [
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:26-28",
+      "note": "The FLIP layout effect returns early when Object.is(triggerRef.current, trigger), with deps [ref, trigger] at :69. At f1be4abc7 the effect had no deps and called recordResting (getAnimations plus getBoundingClientRect per item) on every unchanged commit."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:74-88",
+      "note": "The deps-less layout effect only compares ref.current with observedRef.current.container, which is O(1). Observers are created only when the element changes and are disposed in a []-deps unmount effect. The per-render ResizeObserver disconnect/recreate (old :73-82) is gone. Under StrictMode and Activity hide/reveal, the deps-less layout effect re-runs and re-attaches correctly."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.ts:95-111",
+      "note": "observeResting does one synchronous record() at mount (:96), creates a ResizeObserver (:97) on the container and items, and creates a MutationObserver (childList, subtree, characterData) that re-observes items and re-records (:104-111). Re-observing an element that is already observed is a no-op in Chromium and WebKit (WPT issue 30708), so this does not cause extra RO notifications."
+    },
+    {
+      "location": "apps/web/src/components/chat/useFlipLayout.browser.tsx:33-48",
+      "note": "This regression test spies getBoundingClientRect and getAnimations across 5 rerenders that leave the row unchanged and expects zero calls. :50-61 covers the glide when the trigger changes."
+    },
+    {
+      "location": "apps/web/src/components/chat/NewThreadWorkLocation.tsx:189",
+      "note": "This is the only caller: useFlipLayout(sentenceRef, location.kind). The auditor cited :173, which is the line number from before the report."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/useInboxListMotion.ts:178-193",
+      "note": "This is the fast path. When enabled is true, a signature exists, the order is unchanged and positions are not dirty, it only updates the gate and returns. There is no getClientRects call and no offsetTop read, so thread switches and streaming updates that leave the order alone read no layout."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/useInboxListMotion.ts:136-173",
+      "note": "One ResizeObserver per list element (guard at :140) refreshes row tops and the highlight inside its callback, where layout is already computed. :164-173 resets the state on unmount or Activity hide. If the list is hidden without a commit, the next commit sees it as dirty and resets."
+    },
+    {
+      "location": "apps/web/src/components/inboxSidebar/InboxSidebar.tsx:204-225",
+      "note": "orderSignature, which includes the visible delegated children, and motionEnabled are passed to the hook. #710 also added props.motionReady (:52-58 in that diff) so measurement is skipped while lists populate at boot."
+    },
+    {
+      "location": "apps/web/src/components/projects/list/ProjectListPane.tsx:290",
+      "note": "The other hook callers (here, PullRequestInbox.tsx:520, ChecksTab.tsx:308, MergeSection.tsx:134) attach listRef to a 'relative' container whose height follows its content, so the list ResizeObserver catches row height changes that leave the order unchanged."
+    },
+    {
+      "location": "apps/web/src/components/chat/RollingText.tsx:83-92",
+      "note": "When the hero mounts, other layout effects also force layout in the same commit: RollingText measures getBoundingClientRect, and ChatComposer.tsx:1376 measures composerForm.clientWidth. Removing the remaining mount-time record() at useFlipLayout.ts:96 would only hand the forced layout to the next reader."
+    },
+    {
+      "location": "apps/web/src/components/chat/NewThreadHero.tsx:95",
+      "note": "The hero is a centered flex column, and ChatView.tsx:5877-5885 centers the hero and composer vertically as one block. The work-location sentence can therefore move without resizing or mutating, for example on a sidebar toggle, a horizontal window resize, or composer growth. Its stored resting rects, which are viewport-relative, then go stale. This gap predates the fix: the React Compiler memoizes the element, so the old per-commit refresh rarely ran in these cases either."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No regressions or defects in the implemented fix. Three minor gaps, all low value: (1) A gap that predates the fix and is not a regression. useFlipLayout stores resting rects relative to the viewport (useFlipLayout.ts:126-135) and refreshes them only on DOM mutation or a size change. When the sentence moves without resizing (hero re-centering on a sidebar toggle or window resize, or the hero+composer block shifting as the composer grows), the next location.kind change glides every item from the old offset. The doc comment at :14-19 overstates its coverage. (2) The mount-time record() at useFlipLayout.ts:96 still forces style and layout in the draft-open commit. ChatComposer and RollingText layout effects force layout in that same commit, so removing it would only move the cost. (3) useInboxListMotion has no test guarding its no-layout-read fast path, while useFlipLayout has one in useFlipLayout.browser.tsx.",
+  "implementationSketch": "Optional, low value. (a) To make FLIP snapshots immune to the container moving: in useFlipLayout.ts recordResting and in the trigger effect, store and compare item positions relative to the container (item rect minus container.getBoundingClientRect(), both read in the same pass) instead of raw viewport rects. The trigger effect then compares relative from/to positions. Trade-off: when a trigger change also moves the whole sentence (the line count changes and the centered hero shifts), that shift jumps instead of gliding, which matches how the composer behaves. Add a case to useFlipLayout.browser.tsx: render, settle, move the container with a parent margin change (no resize), change the trigger, and assert that animate() is not called for items whose relative position did not change. (b) Add a browser test next to useInboxListMotion (or extend InboxSidebar.browser.tsx): mount a list, settle two frames, spy on HTMLElement.prototype offsetTop (Object.defineProperty getter spy) and Element.prototype.getClientRects, rerender with the same orderSignature several times, and assert zero calls; then change orderSignature and assert reads plus row.animate. No requestAnimationFrame batching is needed, because the remaining reads happen on mount or reorder commits whose layout other effects force anyway.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Web-only animation and perf code. It does not touch auth, E2EE, the hosted lifecycle or the Hub.",
+  "repos": "ryco",
+  "correction": "The auditor cited NewThreadWorkLocation.tsx:173 for the useFlipLayout caller. At HEAD the call is at line 189; 173 is the pre-report line. The auditor also left out that #710 added the InboxSidebar motionReady boot gate and that the hook fix covers five other useInboxListMotion callers. Status DONE is otherwise correct."
+}

@@ -1,0 +1,58 @@
+{
+  "id": "hub-connection:read-cache-write-amplification",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "PR #710 (60633eff3) fixed four things. Publishes and catalog writes now happen only on real changes. Each thread's capture is cached by message-list identity. The O(n^2) size trim is now incremental. Saves wait for requestIdleCallback. The per-environment 'skip unchanged record' check, however, does not work in the scenario the finding targets: an agent streaming while its thread is open. The global scrollRevision is one of the skip inputs, and it is bumped on every streaming render. MessagesTimeline re-runs handleScroll through requestAnimationFrame whenever rows change, and LegendList's maintainScrollAtEnd scrolling also fires it. handleScroll calls saveHostedThreadScroll, which calls changed() even when the position has not moved. So every 750 ms save during streaming rebuilds, re-stringifies, encrypts and writes every hydrated environment record (up to 16, each up to 1.9 MB), not only the streaming one. The auditor saw that the global inputs were too coarse but treated it as a minor case triggered by user keystrokes, scrolls or visits. In fact it fires continuously and automatically during streaming. For multi-node users, this cancels much of the per-environment saving.",
+  "evidence": [
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:416-427",
+      "note": "Confirmed fixed: publish only when sameCatalog or sameItems differ, and the catalog is written only when JSON.stringify(nodes) changes. Covered by apps/web/src/browser/hostedReadCache.browser.tsx (one catalog write across lifecycle patches)."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:457-484",
+      "note": "Confirmed fixed: captureContent reuses captured content and entryBytes per thread while messageIdsByThreadId[id] and messageByThreadId[id] keep their identity."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:556-569",
+      "note": "Confirmed fixed: the trim is incremental. I checked the math: body minus '{}' (2 bytes), plus 2, plus the sum of entryBytes, plus the commas, equals the length of JSON.stringify(record). No unit test covers this equivalence."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:96,448-451,497-514",
+      "note": "scrollRevision is one module-wide counter and is part of every environment's SavedEnvironmentInputs. Any bump makes the skip check fail for all environments."
+    },
+    {
+      "location": "apps/web/src/persistence/hostedReadViewState.ts:10-17",
+      "note": "saveHostedThreadScroll calls changed() (that is, onScrollChanged, so scrollRevision++ and scheduleSave) on every call, even when the position is the same as the stored one."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:470-474,515-524,636-640",
+      "note": "handleScroll calls saveHostedThreadScroll(routeThreadKey, scrollTop) unconditionally. Its deps include minimapItems, which is derived from rows. The effect at 636-640 runs requestAnimationFrame(handleScroll) whenever handleScroll or rows.length changes. computeStableMessagesTimelineRows (MessagesTimeline.logic.ts:1477-1495) returns a new array whenever the streaming row changes, so every streaming render bumps scrollRevision."
+    },
+    {
+      "location": "apps/web/src/components/chat/MessagesTimeline.tsx:913-916",
+      "note": "maintainScrollAtEnd={liveFollowEnabled} with onScroll={handleScroll}: auto-follow scrolling during streaming also fires handleScroll."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:501-502,653-654",
+      "note": "The drafts inputs (composer.draftThreadsByThreadKey and draftsByThreadKey) are store-wide too. Typing in any composer invalidates every environment's record."
+    },
+    {
+      "location": "apps/web/src/persistence/hostedReadVault.ts:118-157",
+      "note": "Each write still stringifies and encodes the whole record, encrypts it with AES-GCM, and calls store.getAll() on the records store, which reads every sealed blob (up to READ_VAULT_MAX_BYTES = 12 MiB) back from IndexedDB just to compute eviction. Unnecessary environment rewrites therefore cost a full vault read each time. This code is unchanged from f1be4abc7."
+    },
+    {
+      "location": "apps/web/src/hostedHub/readCache.ts:581-602",
+      "note": "requestIdleCallback deferral is present. It falls back to a synchronous call where requestIdleCallback is missing, which has historically included Safari."
+    }
+  ],
+  "remaining": "Per-environment write skipping does not work during streaming. In apps/web/src/hostedHub/readCache.ts:497-514 the skip compares global inputs: scrollRevision (line 505) and the composer draft maps (501-502). scrollRevision is bumped continuously while a thread streams. The path is apps/web/src/components/chat/MessagesTimeline.tsx:636-640, then handleScroll at 470-474, then apps/web/src/persistence/hostedReadViewState.ts:10-17, which calls changed() unconditionally, then readCache.ts:448-451. So every 750 ms save rewrites every environment that has state in useStore. For each one it runs readWorkspaceMetadataSnapshot, the body stringify, and vault.write: a full-record stringify of up to 1.9 MB, TextEncoder, AES-GCM, an IndexedDB getAll of every sealed record (up to 12 MiB), and a put. Only the streaming environment's record actually changed. Single-node users are unaffected beyond the inherent rewrite of the active record. No test covers the per-environment skip or the incremental trim.",
+  "fixDefects": "(1) Main defect, more than the 'minor residual' the auditor described: the global scrollRevision is bumped automatically on every streaming render. The cause is MessagesTimeline's requestAnimationFrame handleScroll effect plus maintainScrollAtEnd, combined with saveHostedThreadScroll calling changed() even for an unchanged position. The savedInputs skip therefore never applies to the other environments during streaming. (2) The draft inputs are store-wide, so a keystroke in any composer invalidates all environments. (3) save() stamps each rebuilt metadata with Date.now(), so the next hostedHubStore patch fails sameItems and republishes once. This is bounded. (4) vault.write calls getAll() on all sealed records for every write. This was not caused by the fix, but it multiplies the cost of every unnecessary write. (5) No test covers the savedInputs skip or the byte equivalence of the incremental trim.",
+  "implementationSketch": "1. apps/web/src/persistence/hostedReadViewState.ts saveHostedThreadScroll: return early, without calling changed(), when hostedScrollPositions.get(key) === position. Do the same after rounding to whole pixels. Change the callback signature to changed(key) so the cache knows which environment moved. 2. apps/web/src/hostedHub/readCache.ts: replace the global scrollRevision with scrollRevisionByEnvironment: Map<EnvironmentId, number>. onScrollChanged(key) should parse the key with parseScopedThreadKey and bump only that environment; bump all if the key cannot be parsed. SavedEnvironmentInputs.scrollRevision then reads the per-environment value. Clear the map in forgetInMemory and when an environment is removed in reconcile. 3. Scope the draft inputs per environment. Keep a per-environment memo keyed on the store object's identity. When composer.draftsByThreadKey or draftThreadsByThreadKey changes identity, recompute each environment's filtered slice: the keys whose parseScopedThreadKey(key).environmentId or draft.environmentId match, or a draft session key belonging to that environment. Compare each slice shallowly (same keys, same prompt string or draft object) with the previous slice and reuse the previous slice object when equal. Put the slice object, not the store-wide map, into SavedEnvironmentInputs. Visits can be scoped the same way, since they change only on turn completion. 4. Optional and separate: in hostedReadVault.write, stop calling getAll() on every write. Keep sealed byte sizes in a small in-memory or separate metadata index, or use getAllKeys plus a stored size field, so eviction does not read up to 12 MiB of blobs per write. 5. Tests: in apps/web/src/browser/hostedReadCache.browser.tsx, hydrate two environments with the cache enabled and spy on vault.write. Update env A's messages several times and call saveHostedThreadScroll for an env A thread key. Advance past 750 ms plus idle. Assert that the only write calls name env A's environmentId. Also assert that saveHostedThreadScroll with an unchanged position schedules no write. Extract the trim into a pure helper, for example trimContentToBudget(bodyWithoutContent, entries, budget), and add a vitest unit test that compares its byte count with new TextEncoder().encode(JSON.stringify(record)).byteLength for random entries, including multi-byte characters.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "The change only decides which unchanged records are rewritten, plus a no-op guard for scroll saves. It does not change encryption, keys, account fencing, purge semantics or hosted lifecycle ownership. The feature is opt-in (default off) and the web phone tier is frozen, so the user-visible gain is limited to opted-in multi-node users watching a stream, mostly on desktop browsers.",
+  "repos": "ryco"
+}

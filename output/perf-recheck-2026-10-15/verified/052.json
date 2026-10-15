@@ -1,0 +1,95 @@
+{
+  "id": "persistence-boot:main-thread-single-connection",
+  "auditorStatus": "PARTIAL",
+  "status": "PARTIAL",
+  "verdict": "confirmed",
+  "summary": "PARTIAL is correct. 79b492cd6 added the short main-connection busy_timeout with async wall-clock retry, so the 5 s event-loop freeze is gone on Node. It also added SqliteReadClient, a read-only WAL connection in a worker_thread. Only statistics (39d17c78f) and the daily recap (05f67fe79) were moved onto that worker. Engine hydration (getCommandReadModel), getSnapshot, the full and scoped shell builds, message search, event replay reads and the other ProjectionSnapshotQuery reads still run in transactions on the single main connection behind Semaphore(1). So the head-of-line blocking the finding describes, such as the AgentControl lookup queued behind hydration, can still happen. d6a3f6819 and 502adfd1e made those reads cheaper but did not move them off-thread. I also found a correctness defect the auditor missed in the busy-retry part. A non-transactional statement runs without holding the semaphore. The async retry sleeps on a timer and then re-runs the statement on the shared connection, so it can land inside another fiber's open transaction.",
+  "evidence": [
+    {
+      "location": "apps/server/src/persistence/sqliteBusy.ts:18-44",
+      "note": "MAIN_CONNECTION_BUSY_TIMEOUT_MS=25, BUSY_RETRY_BUDGET_MS=5000, backoff 5..100 ms, SQLITE_BUSY_SNAPSHOT (517) not retried."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:40-44",
+      "note": "busy_timeout is 25 ms on Node and 5000 ms only on Bun. The server runs on Node in dev and prod (apps/server/package.json:20,23), so the Bun path does not matter."
+    },
+    {
+      "location": "apps/server/src/persistence/NodeSqliteClient.ts:143-162",
+      "note": "execute() catches retryable SQLITE_BUSY, sleeps with wallClockSleep (setTimeout) and re-runs attempt() on the same db/statement. It does not re-acquire the connection semaphore."
+    },
+    {
+      "location": "apps/server/src/persistence/NodeSqliteClient.ts:229",
+      "note": "acquirer = semaphore.withPermits(1)(Effect.succeed(connection)) releases the permit as soon as it hands out the connection. effect 4.0.2 Statement.ts:1438-1440 then runs the statement as Effect.scoped(acquirer.flatMap(f)), so non-transactional statements, and now their async busy retries, run without the permit. Unchanged since f1be4abc7:222. Only the retry suspension point is new."
+    },
+    {
+      "location": "apps/server/src/persistence/NodeSqliteClient.ts:230-237",
+      "note": "transactionAcquirer holds the permit for the whole transaction scope, and BEGIN is deferred. While fiber A sleeps in a busy retry, fiber B can take the permit and BEGIN on the same DatabaseSync. A's retried statement then runs inside B's transaction."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.test.ts:43-87",
+      "note": "The busy tests cover a single INSERT against a lock-holding child process. There is no test of a busy retry running at the same time as a transaction on the main connection."
+    },
+    {
+      "location": "apps/server/src/persistence/SqliteReadClient.ts:58-62",
+      "note": "readClientFor (auditor cited :77) keeps callers that are inside a main-connection transaction on main. It has no production caller. A grep finds it only in SqliteReadClient.test.ts."
+    },
+    {
+      "location": "apps/server/src/persistence/SqliteReadClient.ts:65-122",
+      "note": "Inline worker source: a readOnly DatabaseSync with query_only, mmap, 32 MiB cache, busy_timeout 5000 off-thread, and an LRU of prepared statements."
+    },
+    {
+      "location": "apps/server/src/persistence/SqliteReadClient.ts:344-393",
+      "note": "Worker client: one Semaphore(1) for the worker, falling back to main.reserve when the worker cannot start. Because the semaphore is 1, all worker reads share one queue, so a statistics recompute would block any shell builds later moved onto it."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/Sqlite.ts:74-87",
+      "note": "SqliteReadClientLayer.layer(dbPath) is part of the production persistence layer."
+    },
+    {
+      "location": "apps/server/src/statistics/StatisticsQuery.ts:263",
+      "note": "Statistics reads rows through the worker (39d17c78f). Only the revision probe stays on main."
+    },
+    {
+      "location": "apps/server/src/statistics/DailyRecapQuery.ts:96-99",
+      "note": "The daily recap reads on the worker (05f67fe79), with its own queriesOn(sql) pattern for the case where the caller is inside a transaction."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:711",
+      "note": "Depends only on SqlClient and never references SqliteReadClient."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:2399-2401",
+      "note": "getSnapshot: sql.withTransaction on main."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:2716-2718",
+      "note": "getCommandReadModel: sql.withTransaction on main."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts:601-604",
+      "note": "Boot hydration calls getCommandReadModel() on main, so other main-connection queries still queue behind it."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:3010-3012",
+      "note": "buildShell, used for both full and scoped shells, runs sql.withTransaction on main. getShellSnapshot at :3210-3215 already branches on an enclosing transaction."
+    },
+    {
+      "location": "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts:1569-1596",
+      "note": "Message search over the FTS table projection_message_search runs on main."
+    },
+    {
+      "location": "apps/server/src/persistence/Layers/OrchestrationEventStore.ts:369",
+      "note": "readFromSequence, which backs replay and readEventsPage, runs on main."
+    }
+  ],
+  "remaining": "Heavy reads are still on the main connection. Engine hydration (OrchestrationEngine.ts:602 -> ProjectionSnapshotQuery.ts:2716), getSnapshot (:2399), full and scoped shell builds (:3010), getWorkspacePlacement and listPendingGoalSyncThreads (:3236, :3283), message search (:1595), history-page reads, and event replay reads (OrchestrationEventStore.ts:369) all run on the single DatabaseSync behind Semaphore(1). They block the event loop for the length of their SQL and queue unrelated queries behind them. That includes the boot-time AgentControl lookup waiting on hydration, the finding's own example. Only StatisticsQuery.ts:263 and DailyRecapQuery.ts:96 use the read worker. readClientFor (SqliteReadClient.ts:58) has no production caller.",
+  "fixDefects": "Concurrency bug introduced by 79b492cd6. The main acquirer (NodeSqliteClient.ts:229) releases the semaphore before the statement executes, which was harmless while execution was synchronous. execute() (NodeSqliteClient.ts:143-162) now retries a busy statement after an async wall-clock sleep, on the same connection and without re-taking the permit. Failing scenario: the offline CLI holds the write lock, and fiber A issues a non-transactional write (for example an auth_sessions UPDATE, AuthSessions.ts:253) that gets SQLITE_BUSY and sleeps. Fiber B then takes the permit and runs a deferred BEGIN through sql.withTransaction. A's retry fires and executes inside B's open transaction. If B later fails or is interrupted and ROLLBACKs, A's write is silently discarded even though A returned success. If B already holds an older WAL snapshot, A instead fails with SQLITE_BUSY_SNAPSHOT, a failure it would not otherwise hit. Reads retried this way also see B's uncommitted rows. No test covers a busy retry running alongside a transaction. Minor issues: StatisticsQuery and DailyRecap hand-roll serviceOption(SqliteReadClient) instead of readClientFor. The worker's failure counter resets on every successful start (SqliteReadClient.ts:230), so a statement that crashes the worker after it starts restarts it indefinitely rather than reaching the MAX_WORKER_FAILURES fallback. Auditor line refs were slightly off: readClientFor is at :58, not :77; the worker source is at :65-122 and the fallback client at :344-393.",
+  "implementationSketch": "1) Fix the retry race first (S, low risk). In NodeSqliteClient.makeWithDatabase, pass Client.make a borrower that holds the permit for the whole statement, including busy retries: borrower: (f) => semaphore.withPermits(1)(f(connection)). effect 4.0.2 supports MakeOptions.borrower and Statement.ts:1438-1440 uses it for every non-transaction statement, which also saves a Scope per statement. Make the remaining acquirer (stream/reserve) scope-holding like transactionAcquirer so nothing runs on the shared connection without the permit. Statements inside a transaction still resolve the transaction connection first, so this adds no deadlock. Regression test in persistence/Layers/Sqlite.test.ts, reusing spawnWriteLockHolder: hold the lock for 300 ms and fork a non-transactional INSERT. After ~20 ms run sql.withTransaction(wallClock sleep 500 ms, then Effect.fail). Assert the INSERT's row exists afterwards; today it is rolled back with the transaction. Add one more test that busy retry inside a transaction still succeeds. 2) Move the heavy readers to the worker (M/L, medium risk). In ProjectionSnapshotQuery.ts, build the SqlSchema query set from a client, queriesOn(client) as DailyRecapQuery.ts:99 does, once for main and once for the reader. In buildShell, getCommandReadModel, getSnapshot, getWorkspacePlacement, listPendingGoalSyncThreads, searchThreadMessages and the history-page reads, pick the client with readClientFor(sql) and run client.withTransaction with that client's queries. Calls inside a main transaction stay on main, consistent with the existing branch at :3210. Use readClientFor in StatisticsQuery and DailyRecapQuery too. For boot hydration (OrchestrationEngine.ts:602), read the command read model on the worker after projectionPipeline.bootstrap commits; read-your-writes holds for a new WAL read transaction. Optionally read latestSequence inside the same worker transaction for a consistent pair. Move event replay pages (OrchestrationEventStore.readFromSequence) only for catch-up and replay callers, not the dispatch path at OrchestrationEngine.ts:204. 3) Avoid a new head-of-line queue on the worker. Give statistics its own worker or a small pool (two read workers), or split the queue so shell builds are not serialized behind a 0.5 s statistics recompute (SqliteReadClient.ts:351). 4) Tests: run the ProjectionSnapshotQuery suites against a file DB with the worker layer as well as main, and add parity assertions (worker result deep-equals main result). Add a SqliteReadClient test that a main-connection query completes while a long worker transaction is open. Validate with perf:external --fixture-home (d6a3f6819 generator) on a cold boot and check in the trace that small main-connection lookups no longer wait on hydration.",
+  "worth": "medium",
+  "effort": "M",
+  "risk": "medium",
+  "needsDecision": false,
+  "decisionReason": "Server-internal persistence change. It touches no auth, E2EE, Hub protocol or hosted lifecycle rules, and needs no product trade-off. The retry-race fix is a plain correctness fix.",
+  "repos": "ryco",
+  "correction": "Status PARTIAL is right, but the auditor reported no correctness defect in the implemented part and there is one. The async busy retry (NodeSqliteClient.ts:143-162) runs non-transactional statements outside the connection semaphore (acquirer at :229 releases the permit before execution). A retried statement can therefore execute inside another fiber's open transaction, where a rollback silently drops it or a stale snapshot makes it fail with SQLITE_BUSY_SNAPSHOT. The commit list also omits 39d17c78f (statistics on the worker), 05f67fe79 (daily recap on the worker) and 95a1a1b5e. Several cited line numbers in SqliteReadClient.ts and NodeSqliteClient.ts were off."
+}

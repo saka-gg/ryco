@@ -1,0 +1,58 @@
+{
+  "id": "gap-logging-io:stale-missing-checkouts-reprobed",
+  "auditorStatus": "DONE",
+  "status": "PARTIAL",
+  "verdict": "corrected",
+  "summary": "The core fix landed in #710 (60633eff3) and works in production: on 2026-10-12 it recorded 18 dead checkouts as checkout.remove reason \"missing\" (once each, which also archives them), and the sweep now skips removed rows. It is not complete, though. checkoutMissingOnDisk only records a checkout when its parent is still a real directory, and stat follows symlinks. A dead row whose parent is also gone, or is a dangling symlink, is never recorded. It stays a live workspace and keeps failing with a full stack on every sweep window. One of the rows the finding measured is in exactly this state on this install. Since the fix it has logged 95 'Source control refresh failed' lines to server.log: 83 full stacks, 198 KB, 47% of the file, in about 2.3 days.",
+  "evidence": [
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:121",
+      "note": "checkoutMissingOnDisk returns true only if stat(path) gives ENOENT and stat(dirname) is a directory. stat follows symlinks, so a dangling-symlink parent, or a removed per-project worktrees folder, counts as 'unavailable' and is never recorded."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.ts:173",
+      "note": "When resolve fails and the parent is missing, the code runs Effect.fail(error). The sweep then logs the failure with its full cause on every refresh. Only the parent-present case returns null and dispatches worktree.checkout.remove once, guarded by recordedMissingCheckouts (line 88). That Set is filled before the dispatch, and a failed dispatch is only logged at Debug and never retried in-process."
+    },
+    {
+      "location": "apps/server/src/logOnceEvery.ts:99",
+      "note": "ignoreCauseLogOnceEvery logs at Info and writes the full Cause on the first line of every new burst. A failure that comes back on each 5-minute sweep therefore still writes a roughly 2.3 KB stack about every window."
+    },
+    {
+      "location": "apps/server/src/ws/context.ts:470",
+      "note": "The sweep skips archived rows, rows with a null path and rows with checkoutRemovedAt set. A dead row whose parent is gone has none of these, so it is still refreshed. The lifecycle (merge) path uses interval 0 and re-resolves it each time."
+    },
+    {
+      "location": "(local, read-only) ~/.ryco/userdata/state.sqlite projection_worktrees",
+      "note": "18 rows have checkout_removal_reason='missing' with timestamps 2026-10-12T15:16:56Z and 19:16:20Z, so the mechanism works. One row is still active and missing: worktree-260e10cc-a5a9-47cb-a2e5-15cd1809fe56 (origin pr, PR #663, in the active project rooted at /Users/laurinfrank/Code/ryco). Its path is .../Dropbox/Code/ryco/.claude/worktrees/marketing-site-motion-redesign-49c526, and .claude/worktrees is a symlink to a deleted ryco.pre-local-migration-20261007-153400 directory."
+    },
+    {
+      "location": "(local) ~/.ryco/userdata/logs/server.log",
+      "note": "From 2026-10-12T15:16Z to 2026-10-14T20:58Z there are 95 'Source control refresh failed' lines, all for worktree-260e10cc: 83 full stacks of about 2,285 bytes and 12 summaries. That is 197,737 of 422,319 bytes (47%). 78 were triggered by ws.rpc.sourceControl.listChangeRequests and 5 by mergeChangeRequest. In the pre-fix server-child.log.1, the same path accounted for 90 of the measured detectProvider stacks, so it was one of the finding's dead rows."
+    },
+    {
+      "location": "apps/server/src/sourceControl/refreshWorktreeSourceControlState.test.ts:640",
+      "note": "The missing-parent test asserts exit._tag === 'Failure', so the noisy path (fail, then log the stack) is the tested behaviour. Nothing tests a dangling-symlink parent."
+    },
+    {
+      "location": "apps/server/src/orchestration/decider.ts:2509",
+      "note": "worktree.checkout.remove rejects a second removal unless the new reason is 'deleted'. It also emits worktree.archived when the row is not archived, so a 'missing' record auto-archives the workspace."
+    },
+    {
+      "location": "apps/server/src/workspace/WorkspaceLifecycle.ts:1160",
+      "note": "Race: Ryco's own remove-checkout runs git worktree remove, checks, completes the fence, and only then dispatches checkout.remove 'removed' (line 1211). A sweep that lands in that window, with a resolve cache miss, dispatches 'missing' first. The lifecycle's record step then fails and reports 'partial'."
+    },
+    {
+      "location": "apps/server/src/workspace/managedWorktreeMigration.ts:189",
+      "note": "Race: relocation runs git worktree move first, then finish(). finish() calls refreshRevision, which throws 'manual recovery is required' if checkoutRemovedAt is set, and then dispatches worktree.relocate. A sweep that sees the source path missing in between records 'missing' and archives the workspace. The relocation then ends in 'attention'. The window is narrow."
+    }
+  ],
+  "remaining": "Dead checkouts whose parent directory is also missing, or whose parent is a dangling symlink, are never recorded (refreshWorktreeSourceControlState.ts:121-132, 176-178). Each sweep re-resolves them (one failed git spawn each) and logs a full Info stack through ignoreCauseLogOnceEvery (ws/context.ts:512, logOnceEvery.ts:99-108). They also stay as live workspaces in the project and sidebar UI. On this install one such row, worktree-260e10cc (one of the rows the finding measured), produced 83 full stacks, 198 KB and 47% of server.log, in about 2.3 days after the fix: roughly 500 stacks or 1.2 MB per 2 weeks. The optional boot-time stat sweep was not added.",
+  "fixDefects": "(1) Narrow races with Ryco's own checkout operations. The missing-recorder does not check the storage lifecycle state (fence 'removing' rows, managed_worktree_relocations moving/moved, creation leases). A sweep that fires between git worktree remove and the lifecycle's checkout.remove 'removed' (WorkspaceLifecycle.ts:1160-1215), or between git worktree move and worktree.relocate (managedWorktreeMigration.ts:189-208), records 'missing' and auto-archives the workspace. The lifecycle then reports 'partial', or the relocation needs manual recovery. (2) recordedMissingCheckouts.add runs before the dispatch (refreshWorktreeSourceControlState.ts:181-182). A failed dispatch is logged only at Debug and never retried until restart, and later refreshes return null silently, so the row stays live with no signal. (3) The missing-parent test (test.ts:640) asserts a Failure exit, which makes the noisy path the tested contract.",
+  "implementationSketch": "A (no decision needed): In refreshWorktreeSourceControlState.ts, replace checkoutMissingOnDisk with a three-way checkoutPresence(cwd) returning 'present' | 'deleted' | 'unavailable'. For 'unavailable' (path and parent missing), return null instead of Effect.fail. Log once per worktree with logOnceEvery({ key: `sourceControl.checkoutUnavailable:${worktreeId}`, level: 'Info', window: Duration.hours(1), fields: { worktreeId, path } }) and no cause. Keep a module-level Map<worktreeId, retryAtMs> (cleared in resetWorktreePullRequestDiscoveryForTests) and check it before registry.resolve, so an unavailable checkout is not re-resolved for about 15 minutes. Optionally run a cheap stat in the ws/context.ts:470 sweep loop as well. B (decision: which missing parents count as deletion): in checkoutPresence, lstat the parent. If it is a symlink whose target is ENOENT, or the nearest existing ancestor is the project workspaceRoot or inside it, or is the Ryco worktrees root (resolveProjectWorktreesDir / config worktrees dir), or has the same st_dev as the project root, return 'deleted'. Return 'unavailable' only when the missing component looks like a mount point (the nearest existing ancestor is '/', '/Volumes', '/mnt' or '/media', or st_dev differs). Optionally confirm with `git worktree list --porcelain` from the project root, which reports the path as prunable. C (races): before dispatching 'missing', take storageLifecycleLock.withPermit, re-stat the path, and skip if hasWorktreeCreationLease(canonical), isWorktreeRelocationBlocked(sql, canonical), or a storage_owned_entries row for the canonical path has state 'removing'. Expose this as a small helper in storage/lifecycle.ts or checkoutFence.ts so the refresh does not need its own SQL. Alternatively, dispatch with a lifecycleGuard/expectedUpdatedAt. D: add to recordedMissingCheckouts only after a successful dispatch (or remove the entry on failure), and log a failed dispatch at Warn through logOnceEvery. Tests in refreshWorktreeSourceControlState.test.ts: (1) a parent that is a dangling symlink inside a temp dir yields exactly one checkout.remove 'missing'; (2) an unmounted-volume path succeeds with no failure exit and no dispatch, and a second run inside the backoff does not call registry.resolve (count resolve calls); (3) with a 'removing' fence row or a blocked relocation there is no dispatch; (4) a failed dispatch is retried on the next run. Update the existing missing-parent test so it no longer expects a Failure exit.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": true,
+  "decisionReason": "Part B decides which missing-parent cases count as 'deleted'. Recording 'missing' also auto-archives the workspace (decider.ts:2509), so this is a product trade-off: converge stale rows versus never archiving a checkout on a temporarily unmounted volume. Parts A, C and D (stop the stack and re-probe noise, close the lifecycle and relocation races, retry a failed record) change no semantics and can ship without a decision.",
+  "repos": "ryco"
+}

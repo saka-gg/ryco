@@ -1,0 +1,75 @@
+{
+  "id": "mobile-boot:home-rebuilds-on-scroll-and-every-store-tick",
+  "auditorStatus": "DONE",
+  "status": "DONE",
+  "verdict": "confirmed",
+  "summary": "Confirmed DONE. All six proposal parts are in HEAD via 60633eff3 (#710). Scroll offsets live outside React (homeScrollMemory). The filtered workspace arrays are memoized over slice-memoized store selectors whose rows keep their identity. Only the visible mode's model is built. Inbox rows are kept identity-stable by a structural stabilizer and rendered through memo'd InboxScreen, InboxThreadMenuRow and InboxThreadRow with a stable renderItem and per-tick snooze presets. useHomeEnvironments now selects a shallow bootstrapComplete map instead of environmentStateById. The O(W^2) spread is gone. Scrolling and store events that do not touch Home's slices no longer rebuild or re-render Home. Some smaller residuals are outside the proposal: `environments` gets a new identity on every Home render, the projects tab has no row stabilization, Home stays mounted and keeps rebuilding under the Thread route, and ThreadDetailScreen over-subscribes through useHomeWorkspaceData. All are low-value follow-ups, not defects in the fix.",
+  "evidence": [
+    {
+      "location": "apps/mobile/src/features/home/homeScrollMemory.ts:18",
+      "note": "Offsets are kept in a closure Map per mode and filter key. homeMode.ts has no scroll action left (the comment is at :23-24). HomeScreen.tsx:154-161 records through useCallback, and InboxScreen.tsx:253-257 forwards onScroll without setting state."
+    },
+    {
+      "location": "apps/mobile/src/state/homeData.ts:36",
+      "note": "useHomeWorkspaceData memoizes each filterEligible result on (slice, eligible set). The slices come from createAcrossEnvironmentsSelector / createSliceRowsSelector (packages/client-runtime/src/state/threads/store.ts:3311-3343), which return the previous array while the id list and record are unchanged, so useShallow sees the same identity."
+    },
+    {
+      "location": "apps/mobile/src/features/home/HomeScreen.tsx:65",
+      "note": "The eligible Set is memoized on the joined id string. inboxSections (:89) and projectRows (:122) are built only for the active mode and return frozen empty constants otherwise."
+    },
+    {
+      "location": "apps/mobile/src/features/inbox/inboxModel.ts:357",
+      "note": "stabilizeInboxSections reuses row, section and list objects when they are structurally equal at depth 4. That comparison is conservative: deeper differences compare by identity, so rows are never falsely equal. It has a test in inboxSectionStabilizer.test.ts. The impure closure mutation during render is harmless: at worst one extra InboxScreen render after a discarded render."
+    },
+    {
+      "location": "apps/mobile/src/features/inbox/InboxScreen.tsx:159",
+      "note": "InboxScreen, InboxThreadMenuRow (:128) and InboxThreadRow (InboxThreadRow.tsx:55) are memo()-wrapped. renderItem is a useCallback (:196). Snooze presets are resolved once per nowMs and kept by value (:187-194)."
+    },
+    {
+      "location": "apps/mobile/src/features/home/useHomeEnvironments.ts:43",
+      "note": "useStore(useShallow(selectShellCurrentByEnvironmentId)) replaces the whole environmentStateById subscription. The selector at homeEnvironmentModel.ts:252 returns a flat boolean map."
+    },
+    {
+      "location": "packages/client-runtime/src/state/threads/threadInbox.ts:406",
+      "note": "worktreesByProjectKey uses get/push/set, so the quadratic spread is gone."
+    },
+    {
+      "location": "apps/mobile/babel.config.js:6",
+      "note": "The auditor did not mention this. React Compiler is on for features/(home|inbox|projects), so HomeScreen, useHomeEnvironments and ProjectsScreen/ProjectRow get auto-memoized JSX on top of the manual memoization."
+    },
+    {
+      "location": "apps/mobile/src/features/connection/useConnectionController.ts:60",
+      "note": "This residual is confirmed. useSavedEnvironments is in features/connection, which is not compiled, and it builds a fresh rows array on every call. That is directRows in the final useMemo of useHomeEnvironments (:73-138), so `environments` changes identity on every HomeScreen render. inboxSections (in inbox mode) and projectRows (in projects mode) then rerun buildInboxSections/buildProjectRows even when only a provider-status/serverConfig emit, a preference change or a theme change caused the render. The inbox list does not re-render, because the stabilizer returns the same object."
+    },
+    {
+      "location": "apps/mobile/src/features/home/useHomeEnvironments.ts:88",
+      "note": "This is a pitfall in the auditor's suggested follow-up. apiAvailable (readEnvironmentApi, :88/:109) and the hosted capability flags (readEnvironmentDescriptor, :101/:106) are imperative, non-reactive reads inside the useMemo. Today they stay fresh only because directRows churns on every render. Memoizing `rows` in useSavedEnvironments would let them go stale until some other dependency changes."
+    },
+    {
+      "location": "apps/mobile/src/features/projects/ProjectsScreen.tsx:117",
+      "note": "Projects-mode residual. ProjectsScreen and ProjectRow are not memo()'d and buildProjectRows has no row stabilizer, so every rebuild hands the list all-new row objects. Rebuilds happen on every Home render in projects mode: environments churn, any thread summary change, and the 30s tick, which is not a projectRows dependency but still changes `environments`. The compiler's per-field JSX caching softens the cost, but every visible ProjectRow body still runs."
+    },
+    {
+      "location": "apps/server/src/ws/context/constants.ts:35",
+      "note": "Context for the remaining 'live event' rebuilds. Each streamed assistant flush (ProviderRuntimeIngestion.ts:177, every 32ms) bumps the thread's updatedAt (ProjectionPipeline.ts:1176-1180). The shell coalesces this to one thread-upserted per 250ms per thread. The summary is not equal (store.ts:643), so Home still rebuilds the whole inbox model about 4 times per second per streaming thread. Only the changed row re-renders. This is legitimate data change, but the full O(T log T) rebuild remains."
+    },
+    {
+      "location": "apps/mobile/src/Stack.tsx:351",
+      "note": "Home is the root of the native stack and stays mounted under Thread. No freezeOnBlur or enableFreeze is set anywhere in apps/mobile/src. So the rebuilds described above keep running while the user is reading a thread."
+    },
+    {
+      "location": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx:520",
+      "note": "Same pattern in another caller, not a regression: the hook bundled three subscriptions at f1be4abc7 too. ThreadDetailScreen, an 1872-line component that is not compiled, calls useHomeWorkspaceData() and uses only worktrees, yet it subscribes to every project and thread summary across environments. It re-renders whenever any other thread's summary changes (~4 Hz per streaming thread). It also calls useHomeEnvironments() (:521), whose result changes identity on every render. ThreadFileScreen.tsx:612 and ThreadFilesScreen.tsx:213 have the same worktrees-only usage."
+    }
+  ],
+  "remaining": "",
+  "fixDefects": "No bug or regression in the implemented fix. Residuals are outside the proposal's scope. (1) useSavedEnvironments builds a fresh `rows` array on every call (useConnectionController.ts:60), so `environments` from useHomeEnvironments changes identity on every Home render. inboxSections/projectRows then rebuild even for renders that changed none of their inputs, such as provider-status/serverConfig emits or preference and theme changes. The inbox list itself does not re-render. (2) Projects tab: buildProjectRows has no row stabilizer and ProjectsScreen/ProjectRow are not memo()'d, so every Home render in projects mode, including each thread-summary change, gives every visible project card a new row object. (3) Home stays mounted under Thread with no freezeOnBlur. Because streaming bumps thread updatedAt, coalesced to 250ms per thread on the server, Home rebuilds the full inbox model about 4 times per second per streaming thread even while hidden. (4) Uncovered callers: ThreadDetailScreen.tsx:520, ThreadFileScreen.tsx:612 and ThreadFilesScreen.tsx:213 call useHomeWorkspaceData() for worktrees only, but subscribe to all projects and thread summaries, so they re-render on unrelated threads' summary changes. Two corrections to the auditor's notes. The 30s clock tick is not wasted work in inbox mode, because nowMs is a real inbox dependency; it is wasted only in projects mode. Their suggested fix of memoizing `rows` in useSavedEnvironments would make the imperative readEnvironmentApi/readEnvironmentDescriptor reads in useHomeEnvironments (:88, :101-109) go stale.",
+  "implementationSketch": "Optional follow-ups, each small and independent. (a) Stabilize the `environments` output in apps/mobile/src/features/home/useHomeEnvironments.ts instead of memoizing useSavedEnvironments rows. Keep computing the list fresh so the imperative readEnvironmentApi/readEnvironmentDescriptor reads stay current. Then pass it through a per-hook stabilizer created with useState(createHomeEnvironmentsStabilizer), mirroring createInboxSectionStabilizer. It returns the previous array when the length matches and every element is shallow-equal field by field; otherwise it reuses equal elements. Add a unit test in homeEnvironmentModel.test.ts. (b) Projects tab: add createProjectRowStabilizer in apps/mobile/src/features/projects/projectsModel.ts, keyed by row.key with a bounded structural compare, and apply it in HomeScreen.tsx:122. Wrap ProjectRow in memo with a stable onPress, e.g. pass row plus onOpenProject and bind inside. Add a test like inboxSectionStabilizer.test.ts. (c) Hidden Home: either add `freezeOnBlur: true` to the Home route options in apps/mobile/src/Stack.tsx:351, or, with no UX trade-off, gate HomeScreen's model building on useIsFocused() so a blurred Home returns the last stabilized sections and rebuilds once on refocus. Verify on device that the iOS back-swipe shows current content. (d) Split useHomeWorkspaceData in apps/mobile/src/state/homeData.ts into narrow hooks (useHomeWorktrees/useHomeProjects/useHomeThreads), or accept a field mask. Switch ThreadDetailScreen.tsx:520, ThreadFileScreen.tsx:612 and ThreadFilesScreen.tsx:213 to the worktrees-only hook. Validate with focused vitest on apps/mobile, and with a React DevTools/Hermes profile on device while one agent streams and another thread is open.",
+  "worth": "low",
+  "effort": "S",
+  "risk": "low",
+  "needsDecision": false,
+  "decisionReason": "Pure client-side render memoization in apps/mobile. No auth, E2EE, hosted lifecycle, Hub protocol or product behaviour change, except the optional freezeOnBlur variant, which can be replaced by the useIsFocused gate.",
+  "repos": "ryco",
+  "correction": "The auditor's DONE stands, but parts of their residual note are inaccurate or incomplete. (1) The 30s clock tick is a real dependency of inboxSections (nowMs), so it is not a wasted rebuild in inbox mode. (2) Their suggested follow-up, memoizing `rows` in useSavedEnvironments, would freeze the imperative readEnvironmentApi/readEnvironmentDescriptor reads inside useHomeEnvironments' useMemo (:88, :101-109). Stabilizing the output is the safe fix. (3) They missed that React Compiler compiles features/home|inbox|projects. (4) They missed three other residuals: the projects tab has no row stabilization; Home stays mounted under Thread and keeps rebuilding about 4 times per second per streaming thread (server shell coalescing is 250ms and updatedAt bumps on every assistant flush); and ThreadDetailScreen/ThreadFile(s)Screen over-subscribe through useHomeWorkspaceData()."
+}
