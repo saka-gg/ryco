@@ -153,33 +153,64 @@ export function onProvidersUpdated(
   return subscribeLatest(providersUpdatedAtom, listener);
 }
 
+interface ServerStateSyncHold {
+  count: number;
+  readonly stop: () => void;
+}
+
+/** One lifecycle and config subscription pair per client, shared by every holder. */
+let serverStateSyncHolds = new WeakMap<ServerStateClient, ServerStateSyncHold>();
+
 /**
  * Keeps the primary server state live. The config subscription's first item is
  * always a full snapshot, so no separate `getConfig` read runs beside it: that
  * fetched the same ~100 KB config a second time on every connect and queued
  * the shell snapshot behind both on slow links.
+ *
+ * Reference-counted per client: a second holder (the boot path that starts
+ * the sync with the early primary connection, then the shell's own) shares
+ * the first one's subscriptions instead of opening duplicate streams, and the
+ * last returned stop ends them.
  */
 export function startServerStateSync(client: ServerStateClient): () => void {
-  const cleanups = [
-    client.subscribeLifecycle((event) => {
-      if (event.type === "welcome") {
-        emitWelcome(event.payload);
-      }
-    }),
-    client.subscribeConfig((event) => {
-      applyServerConfigEvent(event);
-    }),
-  ];
-
+  let hold = serverStateSyncHolds.get(client);
+  if (!hold) {
+    const cleanups = [
+      client.subscribeLifecycle((event) => {
+        if (event.type === "welcome") {
+          emitWelcome(event.payload);
+        }
+      }),
+      client.subscribeConfig((event) => {
+        applyServerConfigEvent(event);
+      }),
+    ];
+    hold = {
+      count: 0,
+      stop: () => {
+        for (const cleanup of cleanups) {
+          cleanup();
+        }
+      },
+    };
+    serverStateSyncHolds.set(client, hold);
+  }
+  const current = hold;
+  current.count += 1;
+  let released = false;
   return () => {
-    for (const cleanup of cleanups) {
-      cleanup();
-    }
+    if (released) return;
+    released = true;
+    current.count -= 1;
+    if (current.count > 0) return;
+    if (serverStateSyncHolds.get(client) === current) serverStateSyncHolds.delete(client);
+    current.stop();
   };
 }
 
 export function resetServerStateForTests() {
   resetAppAtomRegistryForTests();
+  serverStateSyncHolds = new WeakMap();
   nextServerConfigUpdatedNotificationId = 1;
 }
 

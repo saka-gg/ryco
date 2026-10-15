@@ -119,6 +119,15 @@ describe("preloadWorkspacePanel", () => {
     expect(loaded.modules).not.toContain("SimulatorPanel");
   });
 
+  it("skips idle preloads on a link slower than 4G, like the shell's speculative preloads", () => {
+    vi.stubGlobal("navigator", { connection: { effectiveType: "3g" } });
+    const requestIdleCallback = vi.fn();
+    vi.stubGlobal("requestIdleCallback", requestIdleCallback);
+    scheduleIdleWorkspacePanelPreload("simulator");
+    expect(requestIdleCallback).not.toHaveBeenCalled();
+    expect(loaded.modules).not.toContain("SimulatorPanel");
+  });
+
   it("preloads on idle otherwise", async () => {
     const requestIdleCallback = vi.fn((callback: () => void) => {
       callback();

@@ -14,10 +14,23 @@ const PANEL_SHORTCUTS = [
   { command: "workspace.simulator", key: "s", mode: "simulator", handler: "onOpenSimulatorPanel" },
 ] as const;
 
-const KEYBINDINGS: ResolvedKeybindingsConfig = PANEL_SHORTCUTS.map(({ command, key }) => ({
-  command,
-  shortcut: { key, metaKey: false, ctrlKey: false, shiftKey: true, altKey: true, modKey: false },
-}));
+const KEYBINDINGS: ResolvedKeybindingsConfig = [
+  ...PANEL_SHORTCUTS.map(({ command, key }) => ({
+    command,
+    shortcut: { key, metaKey: false, ctrlKey: false, shiftKey: true, altKey: true, modKey: false },
+  })),
+  {
+    command: "diff.toggle",
+    shortcut: {
+      key: "d",
+      metaKey: false,
+      ctrlKey: false,
+      shiftKey: true,
+      altKey: true,
+      modKey: false,
+    },
+  },
+];
 
 function createInput(): UseChatGlobalShortcutsInput {
   return {
@@ -32,6 +45,7 @@ function createInput(): UseChatGlobalShortcutsInput {
     closeTerminal: vi.fn(),
     createNewTerminal: vi.fn(),
     setTerminalOpen: vi.fn(),
+    diffOpen: false,
     onToggleDiff: vi.fn(),
     onOpenFilesPanel: vi.fn(),
     onOpenReviewPanel: vi.fn(),
@@ -66,6 +80,38 @@ describe("useChatGlobalShortcuts", () => {
       }
     } finally {
       await hook.unmount();
+    }
+  });
+
+  it("starts the review chunks before the diff toggle opens it, and not when it closes", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    const toggle = input.onToggleDiff as ReturnType<typeof vi.fn>;
+
+    try {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "d", altKey: true, shiftKey: true, bubbles: true }),
+      );
+      expect(preloadWorkspacePanel).toHaveBeenCalledExactlyOnceWith("review", { intent: true });
+      expect(toggle).toHaveBeenCalledOnce();
+      expect(preloadWorkspacePanel.mock.invocationCallOrder[0]).toBeLessThan(
+        toggle.mock.invocationCallOrder[0] ?? 0,
+      );
+    } finally {
+      await hook.unmount();
+    }
+
+    preloadWorkspacePanel.mockClear();
+    const openInput = { ...createInput(), diffOpen: true };
+    const openHook = await renderHook(() => useChatGlobalShortcuts(openInput));
+    try {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "d", altKey: true, shiftKey: true, bubbles: true }),
+      );
+      expect(openInput.onToggleDiff).toHaveBeenCalledOnce();
+      expect(preloadWorkspacePanel).not.toHaveBeenCalled();
+    } finally {
+      await openHook.unmount();
     }
   });
 });

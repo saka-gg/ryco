@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, type CSSProperties, type ReactNode } from "react";
+import { Suspense, useCallback, type CSSProperties, type ReactNode } from "react";
 
 import {
   PREFERS_REDUCED_MOTION_QUERY,
@@ -15,8 +15,6 @@ import { useDelayedUnmount } from "~/hooks/useDelayedUnmount";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import {
   LazyThreadWorkspacePanel,
-  scheduleIdleWorkspacePanelPreload,
-  setWorkspacePanelPreloadHint,
   useWorkspacePanelChunkReady,
   workspacePanelLoadingLabel,
 } from "../workspacePanelPreload";
@@ -132,17 +130,6 @@ export const RightPanelInlineSidebar = (props: {
 }) => {
   const { maximized, open, onClose, onOpen, panelMode, renderContent } = props;
   const prefersReducedMotion = useMediaQuery(PREFERS_REDUCED_MOTION_QUERY);
-  // While closed, `panelMode` is the surface the panel reopens to: hover on
-  // the header toggle preloads it, and an idle preload fetches its code once
-  // per session so the first open skips the chunk waterfall.
-  useEffect(() => {
-    setWorkspacePanelPreloadHint(panelMode);
-  }, [panelMode]);
-  const idlePreloadMode = open ? null : panelMode;
-  useEffect(() => {
-    if (idlePreloadMode === null) return;
-    return scheduleIdleWorkspacePanelPreload(idlePreloadMode);
-  }, [idlePreloadMode]);
   const renderPanelSurface = useDelayedUnmount(
     open,
     prefersReducedMotion ? 0 : RIGHT_PANEL_INLINE_EXIT_DURATION_MS,

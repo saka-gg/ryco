@@ -14,6 +14,30 @@ import type {
 import type { SidebarStatusBucket } from "../Sidebar.logic";
 import { SidebarWorktreeList } from "./SidebarWorktreeList";
 
+const linkedItemChunk = vi.hoisted(() => ({
+  fails: false,
+  notify: vi.fn<(surface: string, error: unknown, retry: () => void) => void>(),
+}));
+
+// The linked-item dialog's shared wrapper, with a chunk that can fail to load
+// (offline, or a deploy replaced it) while `fails` is set.
+vi.mock("../worktrees/lazyWorktreeDialogs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../worktrees/lazyWorktreeDialogs")>();
+  const { preloadableLazy } = await import("../../lib/preloadableLazy");
+  const LazyLinkedWorktreeItemDialog = preloadableLazy(async () => {
+    if (linkedItemChunk.fails) throw new Error("Failed to fetch dynamically imported module");
+    return (await import("../worktrees/LinkedWorktreeItemDialog")).LinkedWorktreeItemDialog;
+  });
+  return {
+    ...actual,
+    LazyLinkedWorktreeItemDialog,
+    preloadLinkedWorktreeItemDialog: () => void LazyLinkedWorktreeItemDialog.preload(),
+  };
+});
+vi.mock("../ui/surfaceLoadFailure", () => ({
+  notifySurfaceLoadFailure: linkedItemChunk.notify,
+}));
+
 const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 
@@ -262,6 +286,43 @@ describe("SidebarWorktreeList", () => {
     expect(badges.map((badge) => badge.dataset.linkedWorktreeItem)).toEqual(["pr"]);
     expect(document.body.textContent).toContain("#202");
     expect(document.body.textContent).not.toContain("#101");
+  });
+
+  // Runs before the dialog first loads in this file: the wrapper keeps its chunk once loaded.
+  it("reports a linked item dialog chunk that fails to load and reopens it on retry", async () => {
+    await page.viewport(1_280, 800);
+    linkedItemChunk.fails = true;
+    await render(
+      <SidebarWorktreeList
+        attachThreadListAutoAnimateRef={() => undefined}
+        projectExpanded
+        resolveThreadGitStatusTarget={() => null}
+        renderThread={(thread) => <div>{thread.title}</div>}
+        treeProject={makeLinkedIssueAndPrTreeProject()}
+        visibleThreadKeys={null}
+        onCopyWorktreePath={vi.fn()}
+        onWorkspaceAction={vi.fn()}
+        onNewSession={vi.fn()}
+        onOpenInEditor={vi.fn()}
+        onOpenWorktree={vi.fn()}
+        onRenameWorktree={vi.fn()}
+      />,
+    );
+
+    await page.getByLabelText("Pull request #202 — Open").click();
+
+    await vi.waitFor(() => expect(linkedItemChunk.notify).toHaveBeenCalledOnce());
+    expect(linkedItemChunk.notify.mock.calls[0]?.[0]).toBe("linked item");
+    // The sidebar stays; nothing threw to an error boundary.
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await expect.element(page.getByLabelText("Pull request #202 — Open")).toBeInTheDocument();
+
+    linkedItemChunk.fails = false;
+    linkedItemChunk.notify.mock.calls[0]?.[2]();
+
+    await expect
+      .element(page.getByRole("dialog", { name: "Pull request #202" }))
+      .toBeInTheDocument();
   });
 
   it("loads the linked item dialog the first time a badge opens it", async () => {

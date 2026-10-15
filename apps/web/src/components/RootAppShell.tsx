@@ -7,6 +7,7 @@ import { OnboardingCoordinator } from "./onboarding/OnboardingCoordinator";
 import { AppSidebarLayout } from "./AppSidebarLayout";
 import { CommandPalette, preloadCommandPaletteDialog } from "./CommandPalette";
 import {
+  expectsPrimaryShellPaint,
   resolveCanonicalPrimaryEnvironmentId,
   shouldApplyBootstrapThreadRedirect,
 } from "./RootAppShell.logic";
@@ -22,8 +23,11 @@ import { WebSocketConnectionCoordinator } from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
-import { preloadRouteChunk } from "../lib/routeChunkPreload";
-import { scheduleShellIdlePreloads } from "../lib/shellIdlePreload";
+import { pathnameMatchesRoute, preloadRouteChunk } from "../lib/routeChunkPreload";
+import {
+  scheduleShellIdlePreloads,
+  SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
+} from "../lib/shellIdlePreload";
 import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
 import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
@@ -108,7 +112,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
             recoveryOwner={authGateState.status === "hosted-hub" ? "hosted-lifecycle" : "generic"}
           />
         ) : null}
-        <ShellIdlePreloads />
+        <ShellIdlePreloads authGateStatus={authGateState.status} />
         {appShell}
       </AnchoredToastProvider>
     </ToastProvider>
@@ -165,25 +169,59 @@ const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";
 const DRAFT_ROUTE_ID = "/_chat/draft/$draftId";
 
 /**
- * Warms the chunks of the most likely next interactions once the shell has
- * painted, one idle period each, most likely first: the thread and draft
- * routes, then the command palette, then the settings page. Route-level
- * splitting makes these preloads count: a warmed route commits on the first
- * pass instead of suspending. The frozen phone tier and constrained networks
- * load them on demand instead.
+ * Warms the chunks of the most likely next interactions once the shell (and,
+ * on a thread boot, that thread) has painted, one download at a time, most
+ * likely first: the thread and draft routes, then the command palette, then
+ * the settings page. Route-level splitting makes these preloads count: a
+ * warmed route commits on the first pass instead of suspending. The frozen
+ * phone tier and constrained networks load them on demand instead.
+ *
+ * When the boot paints a primary shell (see `expectsPrimaryShellPaint`), the
+ * start cap is only a safety net: on a slow link the shell snapshot lands well
+ * after the default cap, and the preloads would otherwise start ahead of it.
+ * A boot on a thread route that leaves it before the thread paints (the thread
+ * is gone) starts them at that navigation instead of at the cap.
  */
-function ShellIdlePreloads() {
+function ShellIdlePreloads({
+  authGateStatus,
+}: {
+  readonly authGateStatus: RootAppShellProps["authGateState"]["status"];
+}) {
+  // Decided once for this boot; a later node switch must not reschedule.
+  const [primaryShellExpected] = useState(() =>
+    expectsPrimaryShellPaint({
+      status: authGateStatus,
+      routedHostedNodeId: getRoutedHostedNode().nodeId,
+    }),
+  );
+  // The router's logical pathname (hosted node prefixes stripped).
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const pathnameRef = useRef(pathname);
+  const navigationListenersRef = useRef(new Set<() => void>());
+  useEffect(() => {
+    pathnameRef.current = pathname;
+    for (const listener of Array.from(navigationListenersRef.current)) listener();
+  }, [pathname]);
+
   useEffect(() => {
     if (getPresentationTier() === "phone") return;
-    return scheduleShellIdlePreloads([
-      () => {
-        void preloadRouteChunk(THREAD_ROUTE_ID);
-        void preloadRouteChunk(DRAFT_ROUTE_ID);
+    return scheduleShellIdlePreloads(
+      [
+        () => Promise.all([preloadRouteChunk(THREAD_ROUTE_ID), preloadRouteChunk(DRAFT_ROUTE_ID)]),
+        preloadCommandPaletteDialog,
+        preloadSettingsPage,
+      ],
+      {
+        ...(primaryShellExpected ? { startCapMs: SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS } : {}),
+        awaitsFirstThreadPaint: () => pathnameMatchesRoute(pathnameRef.current, THREAD_ROUTE_ID),
+        subscribeToNavigation: (listener) => {
+          const listeners = navigationListenersRef.current;
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
       },
-      preloadCommandPaletteDialog,
-      preloadSettingsPage,
-    ]);
-  }, []);
+    );
+  }, [primaryShellExpected]);
   return null;
 }
 

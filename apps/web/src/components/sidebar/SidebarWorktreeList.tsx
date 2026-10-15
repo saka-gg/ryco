@@ -20,7 +20,8 @@ import {
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { EnvironmentId, ProjectId, WorktreeId } from "@ryco/contracts";
-import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import { useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import type { GitStatusTarget } from "../../lib/gitStatusState";
 import {
@@ -48,6 +49,17 @@ import {
   resolveSidebarStatusTextStyle,
 } from "./sidebarStatusText";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
+/*
+ * The linked issue / pull request / work item dialog (item detail, comment
+ * threads with the markdown renderer, workflow runs) is its own chunk, shared
+ * with the chat: nothing in it renders while the sidebar boots. Pointing at or
+ * focusing a badge that opens it starts the load, so a click usually finds it
+ * ready.
+ */
+import {
+  LazyLinkedWorktreeItemDialog,
+  preloadLinkedWorktreeItemDialog,
+} from "../worktrees/lazyWorktreeDialogs";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
 import {
   WorkspacePullRequestsPopover,
@@ -138,9 +150,21 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
   // stays mounted after it closes so it can animate closed.
   const [linkedItemDialogWanted, setLinkedItemDialogWanted] = useState(false);
   if (linkedItemContext !== null && !linkedItemDialogWanted) setLinkedItemDialogWanted(true);
+  // A failed chunk closes the item and offers a Retry that reopens it, so the
+  // mount never throws to the root error view.
   const linkedItemDialogReady = useLazyComponentReady(
-    LinkedWorktreeItemDialog,
+    LazyLinkedWorktreeItemDialog,
     linkedItemDialogWanted,
+    {
+      onLoadError: (error) => {
+        const context = linkedItemContext;
+        setLinkedItemContext(null);
+        setLinkedItemDialogWanted(false);
+        notifySurfaceLoadFailure("linked item", error, () => {
+          if (context) setLinkedItemContext(context);
+        });
+      },
+    },
   );
 
   const handleOpenLinkedItem = useCallback(
@@ -231,7 +255,7 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
       {/* Mounts once its chunk resolved, so the first open never commits a
           Suspense fallback or waits on React's fallback-reveal throttle. */}
       {linkedItemDialogWanted && linkedItemDialogReady ? (
-        <LinkedWorktreeItemDialog
+        <LazyLinkedWorktreeItemDialog
           open={linkedItemContext !== null}
           item={linkedItemContext?.item ?? null}
           environmentId={linkedItemContext?.environmentId ?? null}
@@ -243,20 +267,6 @@ export const SidebarWorktreeList = memo(function SidebarWorktreeList(
     </>
   );
 });
-
-/**
- * The linked issue / pull request / work item dialog (item detail, comment
- * threads with the markdown renderer, workflow runs) is its own chunk: nothing
- * in it renders while the sidebar boots. Pointing at or focusing a badge that
- * opens it starts the load, so a click usually finds it ready.
- */
-const LinkedWorktreeItemDialog = preloadableLazy(() =>
-  import("../worktrees/LinkedWorktreeItemDialog").then((module) => module.LinkedWorktreeItemDialog),
-);
-
-function preloadLinkedWorktreeItemDialog(): void {
-  void LinkedWorktreeItemDialog.preload();
-}
 
 function resolveWorktreeEnvironmentId(
   worktree: SidebarTreeWorktree,

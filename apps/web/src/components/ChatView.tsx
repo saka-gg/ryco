@@ -277,8 +277,8 @@ import {
   LazyPhoneOverviewSheet,
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
-  notifyChatSurfaceLoadFailure,
 } from "./chat/chatViewLazySurfaces";
+import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
 import {
   LazyLinkedWorktreeItemDialog,
   LazyNewWorktreeDialog,
@@ -3747,6 +3747,7 @@ export default function ChatView(props: ChatViewProps) {
     closeTerminal,
     createNewTerminal,
     setTerminalOpen,
+    diffOpen,
     onToggleDiff,
     onOpenFilesPanel,
     onOpenReviewPanel,
@@ -5411,14 +5412,14 @@ export default function ChatView(props: ChatViewProps) {
     LazyChatOverviewPanel,
     renderCrownRail || showPhoneOverviewSheet,
     {
-      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("overview panel", error, retry),
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("overview panel", error, retry),
     },
   );
   const computerBetaPreviewReady = useLazyComponentReady(
     LazyComputerBetaPreview,
     renderCrownRail && activeThread?.environmentId === localComputerEnvironmentId,
     {
-      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("computer preview", error, retry),
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("computer preview", error, retry),
     },
   );
   const contextHandoffPanelReady = useLazyComponentReady(
@@ -5428,7 +5429,7 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error) => {
         const inspected = inspectedContextHandoff;
         closeContextHandoffInspection();
-        notifyChatSurfaceLoadFailure(
+        notifySurfaceLoadFailure(
           "handoff details",
           error,
           () => {
@@ -5446,7 +5447,7 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error) => {
         const reference = pullRequestDialogState?.initialReference ?? undefined;
         closePullRequestDialog();
-        notifyChatSurfaceLoadFailure(
+        notifySurfaceLoadFailure(
           "pull request dialog",
           error,
           () => openPullRequestDialog(reference),
@@ -5461,7 +5462,7 @@ export default function ChatView(props: ChatViewProps) {
     {
       onLoadError: (error) => {
         setProjectExplorerOpen(false);
-        notifyChatSurfaceLoadFailure(
+        notifySurfaceLoadFailure(
           "new worktree dialog",
           error,
           () => setProjectExplorerOpen(true),
@@ -5477,7 +5478,7 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error) => {
         const item = headerLinkedItem;
         setHeaderLinkedItem(null);
-        notifyChatSurfaceLoadFailure(
+        notifySurfaceLoadFailure(
           "linked item",
           error,
           () => {
@@ -5495,7 +5496,7 @@ export default function ChatView(props: ChatViewProps) {
       onLoadError: (error) => {
         const preview = expandedImage;
         closeExpandedImage();
-        notifyChatSurfaceLoadFailure(
+        notifySurfaceLoadFailure(
           "image preview",
           error,
           () => {
@@ -5513,14 +5514,14 @@ export default function ChatView(props: ChatViewProps) {
     presentationTier !== "phone",
     {
       onLoadError: (error, retry) =>
-        notifyChatSurfaceLoadFailure("Agent Control approvals", error, retry),
+        notifySurfaceLoadFailure("Agent Control approvals", error, retry),
     },
   );
   const phoneOverviewSheetReady = useLazyComponentReady(
     LazyPhoneOverviewSheet,
     isPhoneTier && showPhoneOverviewSheet,
     {
-      onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("overview", error, retry),
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("overview", error, retry),
     },
   );
   const sideChatThreadKey = !isPhoneTier ? activeThreadKey : null;
@@ -5528,7 +5529,7 @@ export default function ChatView(props: ChatViewProps) {
     sideChatThreadKey ? state.chatsByThreadKey[sideChatThreadKey] !== undefined : false,
   );
   const sideChatPanelReady = useLazyComponentReady(LazySideChatPanel, hasSideChat, {
-    onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("side chat", error, retry),
+    onLoadError: (error, retry) => notifySurfaceLoadFailure("side chat", error, retry),
   });
   // Opening a side chat focuses its field on the next frame, so the panel is
   // warmed in idle time wherever a side chat can be started.

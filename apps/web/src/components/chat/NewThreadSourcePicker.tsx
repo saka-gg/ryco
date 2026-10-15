@@ -33,7 +33,7 @@ import { AtlassianJiraIcon } from "../Icons";
 import { ContextPickerTabs } from "./ContextPickerTabs";
 import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { notifyChatSurfaceLoadFailure } from "./chatViewLazySurfaces";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 
 export type NewThreadSourceTab = "branches" | "prs" | "issues" | "jira";
 
@@ -87,7 +87,7 @@ function preloadSourceItemTabs(): void {
 }
 
 const SOURCE_ITEM_TABS_LOAD: LazyComponentReadyOptions = {
-  onLoadError: (error, retry) => notifyChatSurfaceLoadFailure("source list", error, retry),
+  onLoadError: (error, retry) => notifySurfaceLoadFailure("source list", error, retry),
 };
 
 /**

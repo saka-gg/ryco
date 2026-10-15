@@ -18,11 +18,15 @@ export const SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS = 20_000;
 /**
  * How long a connect or reconnect waits for the config subscription's snapshot
  * before it reads the config itself. The stream's first item is a full
- * snapshot and normally arrives well within this; the read covers a server
- * that is slow to deliver it, so the connect never fails for a missing stream
- * item.
+ * snapshot; the read only covers a stream that never delivers it, so the
+ * connect never fails for a missing stream item. It goes over the same socket,
+ * queued behind the snapshot it would race, so starting it while that snapshot
+ * is merely slow (the ws-token, upgrade and a ~100 KB transfer on a slow link
+ * take well over a second) only doubled the config load on every connect and
+ * reconnect. The wait therefore covers a slow link's snapshot, and the read
+ * still gets most of `SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS`.
  */
-export const SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS = 1_000;
+export const SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS = 8_000;
 
 export const SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE =
   "This environment no longer accepts its saved pairing. Pair it again.";
@@ -73,7 +77,9 @@ export async function awaitSavedEnvironmentConfig<T>(input: {
   readonly waitMs?: number;
   readonly timeoutMs?: number;
 }): Promise<T> {
-  const waitMs = input.waitMs ?? SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS;
+  const timeoutMs = input.timeoutMs ?? SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS;
+  // The wait is part of the overall bound, never longer than it.
+  const waitMs = Math.min(input.waitMs ?? SAVED_ENVIRONMENT_CONFIG_SNAPSHOT_WAIT_MS, timeoutMs);
   const early = await new Promise<{ readonly value: T } | null>((resolve, reject) => {
     const timeoutId = globalThis.setTimeout(() => resolve(null), waitMs);
     input.snapshot.then(
@@ -88,9 +94,12 @@ export async function awaitSavedEnvironmentConfig<T>(input: {
     );
   });
   if (early !== null) return early.value;
+  const remainingMs = timeoutMs - waitMs;
+  if (remainingMs <= 0)
+    throw new SavedEnvironmentTimeoutError(SAVED_ENVIRONMENT_CONFIG_TIMEOUT_MESSAGE);
   return await withSavedEnvironmentTimeout(
     Promise.race([input.snapshot, input.readConfig()]),
-    Math.max(0, (input.timeoutMs ?? SAVED_ENVIRONMENT_INITIAL_CONFIG_TIMEOUT_MS) - waitMs),
+    remainingMs,
     SAVED_ENVIRONMENT_CONFIG_TIMEOUT_MESSAGE,
   );
 }

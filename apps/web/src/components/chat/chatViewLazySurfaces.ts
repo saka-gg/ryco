@@ -1,10 +1,8 @@
-import type { ScopedThreadRef } from "@ryco/contracts";
 import type { ComponentProps } from "react";
 
 import { preloadableLazy, type PreloadableLazyComponent } from "../../lib/preloadableLazy";
 import type { PullRequestThreadDialog } from "../PullRequestThreadDialog";
 import type { ExpandedImageDialog } from "./ExpandedImageDialog";
-import { stackedThreadToast, toastManager } from "../ui/toast";
 
 /*
  * Conditional ChatView surfaces kept out of the chat route's first-frame
@@ -59,30 +57,3 @@ export const LazyPullRequestThreadDialog: PreloadableLazyComponent<
 > = preloadableLazy(() =>
   import("../PullRequestThreadDialog").then((module) => module.PullRequestThreadDialog),
 );
-
-/**
- * A chat surface whose chunk failed to load (offline, or a deploy replaced
- * it): say so, and offer the retry. Without this the surface would stay blank
- * or closed with nothing pointing at the cause.
- *
- * Pass `threadRef` when the retry reopens something bound to that thread (a
- * dialog's target, a handoff marker): the toast then shows only while that
- * thread is open, so its Retry never reopens the surface over another thread.
- */
-export function notifyChatSurfaceLoadFailure(
-  surface: string,
-  error: unknown,
-  retry: () => void,
-  threadRef?: ScopedThreadRef | null,
-): void {
-  console.warn(`The chat ${surface} failed to load.`, error);
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title: `Couldn't load the ${surface}`,
-      description: "Check the connection, then try again.",
-      actionProps: { children: "Retry", onClick: retry },
-      ...(threadRef ? { data: { threadRef } } : {}),
-    }),
-  );
-}

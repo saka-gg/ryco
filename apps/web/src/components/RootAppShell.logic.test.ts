@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vite-plus/test";
-import { EnvironmentId } from "@ryco/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { EnvironmentId, ThreadId, type ServerLifecycleWelcomePayload } from "@ryco/contracts";
 
 import {
+  expectsPrimaryShellPaint,
   resolveCanonicalPrimaryEnvironmentId,
   shouldApplyBootstrapThreadRedirect,
+  warmBootstrapThread,
 } from "./RootAppShell.logic";
 
 const HUB_ENVIRONMENT_ID = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");
@@ -62,5 +64,90 @@ describe("resolveCanonicalPrimaryEnvironmentId", () => {
         serverEnvironmentId: SERVER_ENVIRONMENT_ID,
       }),
     ).toBeNull();
+  });
+});
+
+describe("warmBootstrapThread", () => {
+  const environmentId = EnvironmentId.make("environment-local");
+  const welcome = (bootstrapThreadId?: string): ServerLifecycleWelcomePayload => ({
+    environment: {
+      environmentId,
+      label: "Local",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: true,
+        threadSettlement: false,
+        threadPriorityRanking: false,
+      },
+    },
+    cwd: "/tmp/workspace",
+    projectName: "ryco",
+    ...(bootstrapThreadId ? { bootstrapThreadId: ThreadId.make(bootstrapThreadId) } : {}),
+  });
+
+  function setup(input: { readonly pathname: string; readonly tier: "desktop" | "phone" }) {
+    let finishShell!: () => void;
+    const order: string[] = [];
+    const deps = {
+      ...input,
+      preloadShell: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishShell = () => {
+              order.push("shell");
+              resolve();
+            };
+          }),
+      ),
+      preloadThreadRoute: vi.fn(() => order.push("thread-route")),
+      prewarmThreadDetail: vi.fn(() => order.push("thread-detail")),
+    };
+    return { deps, order, finishShell: () => finishShell() };
+  }
+
+  it("loads the thread route after the shell graph and opens its detail stream now", async () => {
+    const { deps, order, finishShell } = setup({ pathname: "/", tier: "desktop" });
+
+    expect(warmBootstrapThread(welcome("thread-1"), deps)).toBe(true);
+    expect(deps.prewarmThreadDetail).toHaveBeenCalledWith(environmentId, "thread-1");
+    expect(deps.preloadThreadRoute).not.toHaveBeenCalled();
+
+    finishShell();
+    await vi.waitFor(() => expect(deps.preloadThreadRoute).toHaveBeenCalledOnce());
+    expect(order).toEqual(["thread-detail", "shell", "thread-route"]);
+  });
+
+  it("leaves a deep link, the phone tier and a welcome without a thread alone", () => {
+    for (const [pathname, tier, threadId] of [
+      ["/env_a/t_1", "desktop", "thread-1"],
+      ["/", "phone", "thread-1"],
+      ["/", "desktop", undefined],
+    ] as const) {
+      const { deps } = setup({ pathname, tier });
+      expect(warmBootstrapThread(welcome(threadId), deps)).toBe(false);
+      expect(deps.preloadShell).not.toHaveBeenCalled();
+      expect(deps.prewarmThreadDetail).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe("expectsPrimaryShellPaint", () => {
+  it("expects a shell for a standard session and a hosted session on a routed node", () => {
+    expect(expectsPrimaryShellPaint({ status: "authenticated", routedHostedNodeId: null })).toBe(
+      true,
+    );
+    expect(expectsPrimaryShellPaint({ status: "hosted-hub", routedHostedNodeId: "node_1" })).toBe(
+      true,
+    );
+  });
+
+  it("expects none for hosted-static and a hosted session without a node", () => {
+    expect(expectsPrimaryShellPaint({ status: "hosted-hub", routedHostedNodeId: null })).toBe(
+      false,
+    );
+    expect(expectsPrimaryShellPaint({ status: "hosted-static", routedHostedNodeId: null })).toBe(
+      false,
+    );
   });
 });

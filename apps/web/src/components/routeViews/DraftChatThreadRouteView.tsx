@@ -23,6 +23,7 @@ import { useStore } from "../../store";
 import { createThreadSelectorAcrossEnvironments } from "../../storeSelectors";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { buildOpenSimulatorSearch } from "../../workspaceRouteSearch";
+import { useWorkspacePanelPreloadScheduling } from "../../workspacePanelPreload";
 import ChatView from "../ChatView";
 import { threadIsPromotedAndPersisted } from "../ChatView.logic";
 import { LazyRightPanel, RightPanelInlineSidebar } from "../ChatRightPanel";
@@ -173,6 +174,13 @@ export function DraftChatThreadRouteView({
     }
     void navigate({ to: "/", replace: true });
   }, [canonicalThreadRef, draftSession, navigate]);
+
+  // Before the early returns: a hook. Mirrors the panel the layouts below mount.
+  useWorkspacePanelPreloadScheduling({
+    open: rightPanelOpen,
+    panelMode: rightPanelOpen ? rightPanelMode : lastOpenedRightPanelMode,
+    enabled: presentationTier !== "phone" && canonicalThreadRef === null && draftSession !== null,
+  });
 
   if (canonicalThreadRef) {
     return (

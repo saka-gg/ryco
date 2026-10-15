@@ -3,14 +3,14 @@ import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 const { add } = vi.hoisted(() => ({ add: vi.fn() }));
-vi.mock("../ui/toast", async () => ({
+vi.mock("./toast", async () => ({
   toastManager: { add },
-  stackedThreadToast: (await import("../ui/toastHelpers")).stackedThreadToast,
+  stackedThreadToast: (await import("./toastHelpers")).stackedThreadToast,
 }));
 
-import { notifyChatSurfaceLoadFailure } from "./chatViewLazySurfaces";
+import { notifySurfaceLoadFailure } from "./surfaceLoadFailure";
 
-describe("notifyChatSurfaceLoadFailure", () => {
+describe("notifySurfaceLoadFailure", () => {
   afterEach(() => {
     add.mockReset();
     vi.restoreAllMocks();
@@ -20,7 +20,7 @@ describe("notifyChatSurfaceLoadFailure", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const retry = vi.fn();
 
-    notifyChatSurfaceLoadFailure("side chat", new Error("chunk failed"), retry);
+    notifySurfaceLoadFailure("side chat", new Error("chunk failed"), retry);
 
     expect(add).toHaveBeenCalledOnce();
     const toast = add.mock.calls[0]?.[0];
@@ -37,12 +37,7 @@ describe("notifyChatSurfaceLoadFailure", () => {
       ThreadId.make("thread-a"),
     );
 
-    notifyChatSurfaceLoadFailure(
-      "pull request dialog",
-      new Error("chunk failed"),
-      vi.fn(),
-      threadRef,
-    );
+    notifySurfaceLoadFailure("pull request dialog", new Error("chunk failed"), vi.fn(), threadRef);
 
     // A thread-scoped toast only shows while that thread is open, so its Retry
     // never reopens the dialog over a different thread.

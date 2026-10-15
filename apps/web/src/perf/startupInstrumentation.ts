@@ -18,7 +18,9 @@ export type StartupPhase =
   /** React committed the sidebar with the primary environment's bootstrapped shell. */
   | "primary-sidebar-committed"
   /** The frame holding that sidebar commit was presented (rAF, then a task). */
-  | "primary-shell-painted";
+  | "primary-shell-painted"
+  /** The frame holding the first committed thread view (the routed thread) was presented. */
+  | "first-thread-painted";
 
 /**
  * Measures recorded when their end phase is marked through

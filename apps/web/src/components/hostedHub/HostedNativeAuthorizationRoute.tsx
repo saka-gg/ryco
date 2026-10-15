@@ -7,20 +7,43 @@ import {
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import type { NativeHandoffPresentation } from "@ryco/contracts/native-handoff";
 
 import { APP_DISPLAY_NAME } from "../../branding";
+import type * as HostedHubRootModule from "./HostedHubRoot";
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import { hostedHubController, hostedHubStore, useHostedHubStore } from "../../hostedHub/state";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 
-const HostedAuthenticationSurface = lazy(() =>
-  import("./HostedHubRoot").then((module) => ({
-    default: module.HostedAuthenticationSurface,
-  })),
-);
+// The sign-in surface lives in the hosted root's chunk, which a signed-in
+// consent never needs. It renders synchronously once loaded: a `React.lazy`
+// boundary committed its (empty) fallback and React then held the sign-in for
+// up to 300 ms (its Suspense reveal throttle), even with the chunk cached.
+const HostedAuthenticationSurface = preloadableLazy<
+  NonNullable<ComponentProps<typeof HostedHubRootModule.HostedAuthenticationSurface>>
+>(() => import("./HostedHubRoot").then((module) => module.HostedAuthenticationSurface));
+
+/**
+ * The route loader's preload: a signed-out browser needs the sign-in surface,
+ * so its chunk loads before the route commits. A signed-in consent loads
+ * nothing extra. Never rejects.
+ */
+export function preloadNativeAuthorizationSurface(): Promise<void> {
+  return hostedHubStore.getState().accountStatus === "authenticated"
+    ? Promise.resolve()
+    : HostedAuthenticationSurface.preload();
+}
+
+/**
+ * The sign-in surface's chunk alone, for a boot that expects a signed-out
+ * browser before the access check has answered. Never rejects.
+ */
+export function preloadNativeAuthorizationSignIn(): Promise<void> {
+  return HostedAuthenticationSurface.preload();
+}
 
 type ConsentAction = "approve" | "cancel" | "switch-account";
 
@@ -48,6 +71,10 @@ export function HostedNativeAuthorizationRoute({
   const [approvedHandoff, setApprovedHandoff] = useState<ApprovedHandoff | null>(null);
   const [error, setError] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const authenticationSurfaceReady = useLazyComponentReady(
+    HostedAuthenticationSurface,
+    accountStatus !== "authenticated" || !account,
+  );
 
   useEffect(() => {
     const operation = new AbortController();
@@ -77,14 +104,14 @@ export function HostedNativeAuthorizationRoute({
   }, [accountStatus, loading]);
 
   if (accountStatus !== "authenticated" || !account) {
-    return (
-      <Suspense fallback={null}>
-        <HostedAuthenticationSurface
-          context="native-authorization"
-          autoExternalProvider={presentation?.providerHint ?? null}
-        />
-      </Suspense>
-    );
+    // Blank until the sign-in chunk lands (the loader usually preloaded it); a
+    // failed load mounts the surface, which reports the error.
+    return authenticationSurfaceReady ? (
+      <HostedAuthenticationSurface
+        context="native-authorization"
+        autoExternalProvider={presentation?.providerHint ?? null}
+      />
+    ) : null;
   }
 
   const run = async (nextAction: ConsentAction) => {

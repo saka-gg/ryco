@@ -63,6 +63,8 @@ vi.mock("../../hooks/useSettings", () => ({
   useUpdateSettings: () => ({ updateSettings: fixture.updateSettings }),
 }));
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
+// The dialog's load-failure toast pulls in the app's toast stack; not under test here.
+vi.mock("../ui/surfaceLoadFailure", () => ({ notifySurfaceLoadFailure: vi.fn() }));
 vi.mock("../../environments/primary", () => ({
   usePrimaryEnvironmentId: () => {
     useFixtureRevision();

@@ -1,26 +1,41 @@
 import { ArrowLeftIcon, PaletteIcon, ShieldCheckIcon, UserRoundIcon } from "lucide-react";
-import { lazy, Suspense } from "react";
+import type { ComponentProps, ReactElement } from "react";
 
 import { navigateHub, type HubAccountSection } from "../../hostedHub/hubRoutes";
 import { useHostedHubStore } from "../../hostedHub/state";
+import {
+  preloadableLazy,
+  useLazyComponentReady,
+  usePreloadWhenIdle,
+  type PreloadableModule,
+} from "../../lib/preloadableLazy";
 import { Button } from "../ui/button";
 import { Skeleton } from "../ui/skeleton";
 import { HubPage, HubPanel } from "./shell/HubPage";
 import { HubShell } from "./shell/HubShell";
 import { setHostedReadCacheEnabled, useHostedReadCache } from "../../hostedHub/readCache";
 import { Checkbox } from "../ui/checkbox";
+import type * as AppearanceSettingsModule from "../settings/AppearanceSettings";
 
-// Both panels are large and neither is on the Hub's first paint.
-const AccountSettingsPanel = lazy(() =>
-  import("../settings/AccountSettings").then((module) => ({
-    default: module.AccountSettingsPanel,
-  })),
+// Both panels are large and neither is on the Hub's first paint. They render
+// synchronously once loaded (a `React.lazy` boundary held the skeleton for
+// React's 300 ms Suspense reveal throttle), and load on the rail's intent or
+// once the account page is idle (where speculative downloads are allowed).
+const AccountSettingsPanel = preloadableLazy(() =>
+  import("../settings/AccountSettings").then((module) => module.AccountSettingsPanel),
 );
-const AppearanceSettingsPanel = lazy(() =>
-  import("../settings/AppearanceSettings").then((module) => ({
-    default: module.AppearanceSettingsPanel,
-  })),
-);
+const AppearanceSettingsPanel = preloadableLazy<
+  NonNullable<ComponentProps<typeof AppearanceSettingsModule.AppearanceSettingsPanel>>
+>(() => import("../settings/AppearanceSettings").then((module) => module.AppearanceSettingsPanel));
+
+const SECTION_PANELS: Partial<Record<HubAccountSection, PreloadableModule>> = {
+  security: AccountSettingsPanel,
+  appearance: AppearanceSettingsPanel,
+};
+
+function preloadSectionPanel(section: HubAccountSection): void {
+  void SECTION_PANELS[section]?.preload();
+}
 
 const SECTIONS: readonly {
   readonly id: HubAccountSection;
@@ -48,6 +63,8 @@ const SECTIONS: readonly {
  */
 export function HubAccountPage({ section }: { readonly section: HubAccountSection }) {
   const account = useHostedHubStore((state) => state.account);
+  usePreloadWhenIdle(AccountSettingsPanel, true);
+  usePreloadWhenIdle(AppearanceSettingsPanel, true);
 
   return (
     <HubShell
@@ -81,6 +98,8 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
                       aria-current={current ? "page" : undefined}
                       className="w-full justify-start"
                       onClick={() => navigateHub({ kind: "account", section: entry.id })}
+                      onPointerEnter={() => preloadSectionPanel(entry.id)}
+                      onFocus={() => preloadSectionPanel(entry.id)}
                     >
                       <entry.icon aria-hidden />
                       {entry.label}
@@ -97,24 +116,36 @@ export function HubAccountPage({ section }: { readonly section: HubAccountSectio
                 <HubAccountOverview />
                 <RememberBrowserPanel />
               </div>
+            ) : section === "security" ? (
+              <LoadedSectionPanel panel={AccountSettingsPanel}>
+                {() => <AccountSettingsPanel />}
+              </LoadedSectionPanel>
             ) : (
-              <Suspense fallback={<Skeleton className="h-64 w-full rounded-2xl" />}>
-                {section === "security" ? (
-                  <AccountSettingsPanel />
-                ) : (
-                  // The Hub-relevant subset. Composer controls and panel layout
-                  // are node-workspace concepts with no meaning on a site that
-                  // may not have a node at all, and stay in the node app's own
-                  // settings, reachable from inside a node session.
-                  <AppearanceSettingsPanel surface="hub" />
-                )}
-              </Suspense>
+              <LoadedSectionPanel panel={AppearanceSettingsPanel}>
+                {/* The Hub-relevant subset. Composer controls and panel layout
+                    are node-workspace concepts with no meaning on a site that
+                    may not have a node at all, and stay in the node app's own
+                    settings, reachable from inside a node session. */}
+                {() => <AppearanceSettingsPanel surface="hub" />}
+              </LoadedSectionPanel>
             )}
           </div>
         </div>
       </HubPage>
     </HubShell>
   );
+}
+
+/**
+ * A section panel once its chunk has loaded; the skeleton until then, as an
+ * ordinary commit. A failed load mounts the panel, which reports the error.
+ */
+function LoadedSectionPanel(props: {
+  readonly panel: PreloadableModule;
+  readonly children: () => ReactElement;
+}) {
+  const ready = useLazyComponentReady(props.panel, true);
+  return ready ? props.children() : <Skeleton className="h-64 w-full rounded-2xl" />;
 }
 
 function RememberBrowserPanel() {

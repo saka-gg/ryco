@@ -1,7 +1,14 @@
-import type { AnyRouter } from "@tanstack/react-router";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  type AnyRouter,
+} from "@tanstack/react-router";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  pathnameMatchesRoute,
   preloadMatchedRouteChunks,
   preloadRouteChunk,
   registerRouteChunkRouter,
@@ -65,5 +72,49 @@ describe("route chunk preloading", () => {
 
     expect(router.getMatchedRoutes).toHaveBeenCalledWith("/statistics");
     expect(router.loadRouteChunk).toHaveBeenCalledTimes(2);
+  });
+
+  describe("pathnameMatchesRoute", () => {
+    // The app's chat layout, enough to tell a thread from a draft or the index.
+    function registerChatRouter() {
+      const rootRoute = createRootRoute();
+      const chatRoute = createRoute({ getParentRoute: () => rootRoute, id: "_chat" });
+      const routeTree = rootRoute.addChildren([
+        chatRoute.addChildren([
+          createRoute({ getParentRoute: () => chatRoute, path: "/" }),
+          createRoute({ getParentRoute: () => chatRoute, path: "draft/$draftId" }),
+          createRoute({ getParentRoute: () => chatRoute, path: "$environmentId/$threadId" }),
+        ]),
+      ]);
+      const router = createRouter({ routeTree, history: createMemoryHistory() });
+      registerRouteChunkRouter(router as unknown as AnyRouter);
+    }
+
+    it("is false before a router is registered", () => {
+      expect(pathnameMatchesRoute("/env-1/thread-1", "/_chat/$environmentId/$threadId")).toBe(
+        false,
+      );
+    });
+
+    it("matches a thread path to the thread route, and drafts and the index to nothing of it", () => {
+      registerChatRouter();
+
+      expect(pathnameMatchesRoute("/env-1/thread-1", "/_chat/$environmentId/$threadId")).toBe(true);
+      expect(pathnameMatchesRoute("/draft/draft-1", "/_chat/$environmentId/$threadId")).toBe(false);
+      expect(pathnameMatchesRoute("/draft/draft-1", "/_chat/draft/$draftId")).toBe(true);
+      expect(pathnameMatchesRoute("/", "/_chat/$environmentId/$threadId")).toBe(false);
+    });
+
+    it("is false when the router cannot match the path", () => {
+      const router = fakeRouter({ loadRouteChunk: () => undefined });
+      router.getMatchedRoutes.mockImplementation(() => {
+        throw new Error("no match");
+      });
+      registerRouteChunkRouter(router as unknown as AnyRouter);
+
+      expect(pathnameMatchesRoute("/env-1/thread-1", "/_chat/$environmentId/$threadId")).toBe(
+        false,
+      );
+    });
   });
 });

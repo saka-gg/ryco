@@ -24,9 +24,12 @@ const CommandPaletteDialog = preloadableLazy(() =>
   import("./CommandPaletteDialog").then((module) => module.CommandPaletteDialog),
 );
 
-/** Warms the palette dialog chunk so the first open renders without a round trip. */
-export function preloadCommandPaletteDialog(): void {
-  void CommandPaletteDialog.preload();
+/**
+ * Warms the palette dialog chunk so the first open renders without a round
+ * trip. Resolves once the load settled; never rejects.
+ */
+export function preloadCommandPaletteDialog(): Promise<void> {
+  return CommandPaletteDialog.preload();
 }
 
 function LazyCommandPaletteDialogMount() {

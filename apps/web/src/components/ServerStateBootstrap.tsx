@@ -5,6 +5,7 @@ import {
   subscribeEnvironmentConnections,
 } from "../environments/runtime";
 import { getPrimaryKnownEnvironment } from "../environments/primary";
+import { releaseEarlyPrimaryServerStateSync } from "../rpc/earlyServerStateSync";
 import { startServerStateSync } from "../rpc/serverState";
 
 function readPrimaryEnvironmentConnection() {
@@ -21,7 +22,11 @@ export function ServerStateBootstrap() {
 
   useEffect(() => {
     if (!connection) return;
-    return startServerStateSync(connection.client.server);
+    // Shares the streams the boot path may have started on this client
+    // (reference-counted), then ends the boot path's hold on them.
+    const stop = startServerStateSync(connection.client.server);
+    releaseEarlyPrimaryServerStateSync();
+    return stop;
   }, [connection]);
 
   return null;

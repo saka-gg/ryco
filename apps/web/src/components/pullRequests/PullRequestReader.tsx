@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties
 
 import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { slidingTabId, slidingTabPanelId } from "../ui/sliding-tabs";
 import { ChecksTab } from "./checks/ChecksTab";
 import { CommitsTab } from "./commits/CommitsTab";
@@ -36,8 +37,32 @@ function preloadPullRequestFilesTab(): void {
 
 function FilesTabBody() {
   // The skeleton stands in only until the chunk lands; the tab itself mounts
-  // once, so its scroll position and expanded files are never reset.
-  const ready = useLazyComponentReady(FilesTab, true);
+  // once, so its scroll position and expanded files are never reset. A failed
+  // load stays inside the tab with a Retry: the page has no error boundary of
+  // its own, so a throw would replace the whole app with the root error view.
+  const [loadFailed, setLoadFailed] = useState<{ readonly retry: () => void } | null>(null);
+  const ready = useLazyComponentReady(FilesTab, true, {
+    onLoadError: (_error, retry) => setLoadFailed({ retry }),
+  });
+  if (loadFailed) {
+    return (
+      <div role="alert" className="flex flex-col items-start gap-3 px-6 pt-5 text-sm">
+        <p className="text-muted-foreground">
+          Couldn't load the changed files. Check the connection, then try again.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setLoadFailed(null);
+            loadFailed.retry();
+          }}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
   return ready ? <FilesTab /> : <PullRequestDiffSkeleton />;
 }
 

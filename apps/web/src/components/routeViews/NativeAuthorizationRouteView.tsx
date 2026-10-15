@@ -3,6 +3,11 @@ import type { ReactElement } from "react";
 
 import { HostedNativeAuthorizationRoute } from "../hostedHub/HostedNativeAuthorizationRoute";
 
+export {
+  preloadNativeAuthorizationSignIn,
+  preloadNativeAuthorizationSurface,
+} from "../hostedHub/HostedNativeAuthorizationRoute";
+
 const nativeAuthorizationRouteApi = getRouteApi("/native/authorize/$handoffId");
 
 /**

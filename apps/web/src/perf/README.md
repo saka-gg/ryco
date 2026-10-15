@@ -41,6 +41,7 @@ Startup phases are always recorded (no flag) as `ryco:startup:<phase>` marks by
 | `primary-shell-usable`            | Snapshot written to the store (before React renders it)                      |
 | `primary-sidebar-committed`       | React committed the shell with the bootstrapped primary environment          |
 | `primary-shell-painted`           | The frame holding that commit was presented (rAF, then a task)               |
+| `first-thread-painted`            | The frame holding the first committed routed thread view was presented       |
 
 Derived measures (`ryco:startup:<name>`) include `primary-shell-decode`,
 `primary-sidebar-commit`, `primary-shell-paint` and `primary-shell-painted`

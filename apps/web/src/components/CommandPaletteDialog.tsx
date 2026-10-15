@@ -60,8 +60,6 @@ import {
   SquarePenIcon,
 } from "lucide-react";
 import {
-  lazy,
-  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -112,6 +110,8 @@ import {
   resolveProjectPathForDispatch,
   resolveInitialProjectBrowsePath,
 } from "../lib/projectPaths";
+import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
+import { useLazyComponentReady } from "../lib/preloadableLazy";
 import { getLatestThreadForProject } from "../lib/threadSort";
 import { cn, isMacPlatform, isWindowsPlatform, newCommandId, newProjectId } from "../lib/utils";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
@@ -145,6 +145,7 @@ import { CommandPaletteResults } from "./CommandPaletteResults";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
+import { LazyCreatePullRequestDialogHost } from "./pullRequests/create/lazyCreatePullRequestDialogHost";
 import {
   buildProjectCheckoutOptions,
   projectCheckoutQualifier,
@@ -411,19 +412,27 @@ function errorMessage(error: unknown): string {
   return "An error occurred.";
 }
 
-// "New pull request…" opens its dialog after the palette closes, so the host
-// lives beside the palette (and loads with the first request).
-const LazyCreatePullRequestDialogHost = lazy(() =>
-  import("./pullRequests/create/CreatePullRequestDialogHost").then((module) => ({
-    default: module.CreatePullRequestDialogHost,
-  })),
-);
-
 export function CommandPaletteDialog() {
   const open = useCommandPaletteStore((store) => store.open);
   const setOpen = useCommandPaletteStore((store) => store.setOpen);
   const createPullRequestRequested = useCreatePullRequestDialogStore(
     (store) => store.request !== null,
+  );
+  // "New pull request…" opens its dialog after the palette closes, so the host
+  // lives beside the palette. A failed chunk drops the request and offers a
+  // Retry that repeats it.
+  const createPullRequestHostReady = useLazyComponentReady(
+    LazyCreatePullRequestDialogHost,
+    createPullRequestRequested,
+    {
+      onLoadError: (error) => {
+        const request = useCreatePullRequestDialogStore.getState().request;
+        useCreatePullRequestDialogStore.setState({ open: false, request: null });
+        notifySurfaceLoadFailure("pull request dialog", error, () => {
+          if (request) useCreatePullRequestDialogStore.getState().openFor(request);
+        });
+      },
+    },
   );
 
   useEffect(() => {
@@ -435,10 +444,8 @@ export function CommandPaletteDialog() {
   return (
     <>
       {open ? <OpenCommandPaletteDialog /> : null}
-      {createPullRequestRequested ? (
-        <Suspense fallback={null}>
-          <LazyCreatePullRequestDialogHost />
-        </Suspense>
+      {createPullRequestRequested && createPullRequestHostReady ? (
+        <LazyCreatePullRequestDialogHost />
       ) : null}
     </>
   );

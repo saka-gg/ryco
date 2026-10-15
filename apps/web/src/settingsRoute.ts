@@ -23,9 +23,15 @@ export const SettingsRouteComponent = lazyRouteComponent(
   "SettingsRoute",
 );
 
-/** Warm the settings page chunk before the first open, so it never flashes empty. */
-export function preloadSettingsPage(): void {
-  void SettingsRouteComponent.preload?.();
+/**
+ * Warm the settings page chunk before the first open, so it never flashes
+ * empty. Resolves once the chunk settled; never rejects.
+ */
+export function preloadSettingsPage(): Promise<void> {
+  return (SettingsRouteComponent.preload?.() ?? Promise.resolve()).then(
+    () => undefined,
+    () => undefined,
+  );
 }
 
 /**
