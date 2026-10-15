@@ -140,4 +140,62 @@ describe("executeSendTurn", () => {
     expect(restoreDraft).toHaveBeenCalledWith({ prompt: "hello world", images: [] });
     expect(setThreadError).toHaveBeenLastCalledWith(THREAD_ID, "network down");
   });
+
+  describe("Claude resume review", () => {
+    function claudeInput(
+      readSubscribedClaudeReviewState?: ExecuteSendTurnInput["readSubscribedClaudeReviewState"],
+    ) {
+      const getThreadWindow = vi.fn(async () => ({
+        thread: { session: null, activities: [], modelSelection },
+        workspaceCwd: "/repo",
+      }));
+      const { input, dispatchCommand } = baseInput({
+        providerDriver: "claudeAgent" as never,
+        sourceProviderDriver: "claudeAgent" as never,
+        ...(readSubscribedClaudeReviewState ? { readSubscribedClaudeReviewState } : {}),
+        thread: {
+          threadId: THREAD_ID,
+          isFirstMessage: false,
+          isServerThread: true,
+          isLocalDraftThread: false,
+          activeThreadBranch: null,
+          worktreePath: null,
+          createdAt: "2026-07-24T00:00:00.000Z",
+        },
+      });
+      const api = {
+        orchestration: { dispatchCommand, getThreadWindow },
+      } as unknown as EnvironmentApi;
+      return { input: { ...input, api }, dispatchCommand, getThreadWindow };
+    }
+
+    it("skips the window read when the subscribed state clears the send", async () => {
+      const readSubscribed = vi.fn(() => ({
+        thread: {
+          session: {
+            providerName: "claudeAgent",
+            status: "ready" as const,
+            activeTurnId: null,
+          },
+          activities: [],
+          modelSelection,
+        },
+        workspaceCwd: "/repo",
+      }));
+      const { input, dispatchCommand, getThreadWindow } = claudeInput(readSubscribed);
+
+      expect(await executeSendTurn(input)).toBe(true);
+      expect(readSubscribed).toHaveBeenCalledOnce();
+      expect(getThreadWindow).not.toHaveBeenCalled();
+      expect(dispatchCommand.mock.calls.map((call) => (call[0] as { type: string }).type)).toEqual([
+        "thread.turn.start",
+      ]);
+    });
+
+    it("reads the window when no subscribed state is available", async () => {
+      const { input, getThreadWindow } = claudeInput(() => undefined);
+      expect(await executeSendTurn(input)).toBe(true);
+      expect(getThreadWindow).toHaveBeenCalledOnce();
+    });
+  });
 });

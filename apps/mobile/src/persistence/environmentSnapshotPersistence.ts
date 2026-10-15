@@ -18,9 +18,9 @@ import {
 import { installHubSelectionPersistence } from "../hostedHub/selectionPersistence";
 import { useStore, type EnvironmentState } from "../state/threadsRuntime";
 import {
-  boundStoredEnvironmentSnapshot,
-  captureEnvironmentSnapshotRecord,
+  createEnvironmentSnapshotSerializer,
   decodeStoredEnvironmentSnapshot,
+  type EnvironmentSnapshotSerializer,
   toCachedEnvironmentShellSnapshot,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
 } from "./environmentSnapshotCodec";
@@ -37,7 +37,7 @@ import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
 
 /**
  * Trailing debounce on projection writes, bounded by a maximum wait. Every
- * capture re-serializes the whole environment (up to the per-environment byte
+ * capture writes the whole environment row (up to the per-environment byte
  * cap), so a busy environment is written at most once per window rather than
  * after every short gap in its event stream; the maximum wait keeps a
  * continuously active one from never being written, and backgrounding flushes
@@ -46,6 +46,13 @@ import { createSnapshotDb, type SnapshotDb } from "./snapshotDb";
 export const SNAPSHOT_WRITE_DEBOUNCE_MS = 2_000;
 export const SNAPSHOT_WRITE_MAX_WAIT_MS = 10_000;
 const ROSTER_WRITE_DEBOUNCE_MS = 1_000;
+/**
+ * Environments whose thread fragments are kept between captures. Fragments
+ * hold each thread's serialized JSON (up to the per-environment byte cap), and
+ * only an environment captured again and again — one an agent is running in —
+ * gains from them, so only the most recently captured few keep theirs.
+ */
+const MAX_RETAINED_SNAPSHOT_SERIALIZERS = 2;
 /**
  * Total-across-environments bounds, enforced with the shared eviction policy
  * (count cap + byte budget, LRU) from client-runtime. Per-environment bounds
@@ -161,19 +168,24 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   /** When each environment first became dirty since its last capture. */
   const dirtySince = new Map<EnvironmentId, number>();
   /**
-   * The slices each environment's stored snapshot was written from, and the
-   * removal epoch at the start of that capture. Any removal (purge, eviction,
-   * hydration discard) bumps the epoch once it has landed, so a row deleted
-   * after it was written can never be mistaken for current.
+   * The slices each environment's stored snapshot was written from, and that
+   * environment's removal epoch at the start of the capture. A removal of the
+   * row (purge, eviction, hydration discard) bumps the epoch once it has
+   * landed, so a row deleted after it was written can never be mistaken for
+   * current. Removing another environment's row leaves this one's epoch alone.
    */
   const written = new Map<EnvironmentId, { slices: PersistedSlices; epoch: number }>();
-  let removalEpoch = 0;
+  const removalEpochs = new Map<EnvironmentId, number>();
+  const removalEpochOf = (environmentId: EnvironmentId) => removalEpochs.get(environmentId) ?? 0;
+  /** Per-environment thread fragments, so a capture re-serializes only changed rows. */
+  const serializers = new Map<EnvironmentId, EnvironmentSnapshotSerializer>();
   const removeStoredSnapshot = async (environmentId: EnvironmentId): Promise<void> => {
     written.delete(environmentId);
+    serializers.delete(environmentId);
     try {
       await deps.db.removeEnvironmentSnapshot(environmentId);
     } finally {
-      removalEpoch += 1;
+      removalEpochs.set(environmentId, removalEpochOf(environmentId) + 1);
     }
   };
   let rosterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -225,21 +237,35 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     ) {
       return;
     }
-    // Most marks come from events that never touch the persisted projection
-    // (message streaming, session and liveness changes): skip those in O(1)
-    // instead of re-serializing and re-writing an identical environment.
+    // A capture whose persisted slices are all unchanged since the last write
+    // is skipped in O(1). While an agent runs this rarely hits: the shell
+    // stream gives the active thread a fresh `updatedAt` (and session) several
+    // times a second, replacing its shell and summary, so the serializer
+    // re-stringifies only those rows and reuses every other thread's fragment.
     const slices = persistedSlices(environmentState);
     const previous = written.get(environmentId);
+    const epoch = removalEpochOf(environmentId);
     if (
       previous !== undefined &&
-      previous.epoch === removalEpoch &&
+      previous.epoch === epoch &&
       samePersistedSlices(previous.slices, slices)
     ) {
       return;
     }
-    const epoch = removalEpoch;
-    const record = captureEnvironmentSnapshotRecord(environmentState, environmentId, deps.now());
-    const { payload, payloadBytes } = boundStoredEnvironmentSnapshot(record);
+    const serializer = serializers.get(environmentId) ?? createEnvironmentSnapshotSerializer();
+    // Most recently captured last; the least recently captured beyond the
+    // bound drops its fragments.
+    serializers.delete(environmentId);
+    serializers.set(environmentId, serializer);
+    for (const retained of serializers.keys()) {
+      if (serializers.size <= MAX_RETAINED_SNAPSHOT_SERIALIZERS) break;
+      serializers.delete(retained);
+    }
+    const { payload, payloadBytes } = serializer.serialize(
+      environmentState,
+      environmentId,
+      deps.now(),
+    );
     await deps.db.saveEnvironmentSnapshot({
       environmentId,
       schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
@@ -284,6 +310,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
   if (deps.subscribeBackground) uninstallers.push(deps.subscribeBackground(flushPending));
 
   const purgeEnvironment = async (environmentId: EnvironmentId): Promise<void> => {
+    serializers.delete(environmentId);
     const pending = dirtyTimers.get(environmentId);
     if (pending) {
       clearTimeout(pending);
@@ -462,6 +489,7 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
     for (const timer of dirtyTimers.values()) clearTimeout(timer);
     dirtyTimers.clear();
     dirtySince.clear();
+    serializers.clear();
     if (rosterTimer) clearTimeout(rosterTimer);
     rosterTimer = null;
     for (const uninstall of uninstallers.splice(0)) uninstall();

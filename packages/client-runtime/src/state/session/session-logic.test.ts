@@ -1612,6 +1612,7 @@ describe("deriveWorkLogEntries", () => {
     expect(deriveActivityPayloadOutput(commandPayload("full text\n"))).toEqual({
       output: "full text",
       exitCode: null,
+      changedFiles: [],
     });
   });
 

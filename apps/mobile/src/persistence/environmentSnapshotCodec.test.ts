@@ -11,6 +11,7 @@ import type {
 import {
   boundStoredEnvironmentSnapshot,
   captureEnvironmentSnapshotRecord,
+  createEnvironmentSnapshotSerializer,
   decodeStoredEnvironmentSnapshot,
   ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
   toWorkspaceMetadataSnapshot,
@@ -220,5 +221,113 @@ describe("environment snapshot codec", () => {
     expect(bounded.threads.length).toBeLessThan(4);
     expect(bounded.projects).toHaveLength(1);
     expect(new TextEncoder().encode(payload).byteLength).toBeLessThanOrEqual(1_200);
+  });
+});
+
+describe("incremental environment snapshot serializer", () => {
+  const caps = { maxThreads: 100, maxPayloadBytes: 10_000_000 };
+  function expectSameAsFullSerialization(
+    state: EnvironmentState,
+    serialized: { readonly payload: string; readonly payloadBytes: number },
+    capturedAt: number,
+    bounds = caps,
+  ) {
+    const full = boundStoredEnvironmentSnapshot(
+      captureEnvironmentSnapshotRecord(state, ENV, capturedAt),
+      bounds,
+    );
+    expect(serialized.payload).toBe(full.payload);
+    expect(serialized.payloadBytes).toBe(new TextEncoder().encode(serialized.payload).byteLength);
+    expect(serialized.payloadBytes).toBe(full.payloadBytes);
+  }
+
+  it("writes the payload the full serialization writes, byte for byte", () => {
+    const state = environmentState(["a", "b", "c"]);
+    const shells = state.threadShellById as Record<string, ThreadShell>;
+    // Non-ASCII, astral and lone-surrogate text all measure like TextEncoder.
+    shells["b"] = shell("b", { title: "Grüße 👋 \ud800 end" });
+    const serializer = createEnvironmentSnapshotSerializer(caps);
+    expectSameAsFullSerialization(state, serializer.serialize(state, ENV, 5), 5);
+    expectSameAsFullSerialization(
+      environmentState([]),
+      createEnvironmentSnapshotSerializer(caps).serialize(environmentState([]), ENV, 5),
+      5,
+    );
+  });
+
+  it("re-serializes only the threads whose shell or summary changed", () => {
+    const state = environmentState(["a", "b", "c", "d"]);
+    const serializer = createEnvironmentSnapshotSerializer(caps);
+    serializer.serialize(state, ENV, 1);
+    expect(serializer.serializedThreadCount()).toBe(4);
+
+    // A streaming turn bumps one thread's updatedAt: its shell and summary are
+    // replaced, every other row keeps its store objects.
+    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
+    const shells = state.threadShellById as Record<string, ThreadShell>;
+    const next: EnvironmentState = {
+      ...state,
+      threadShellById: { ...shells, c: { ...shells["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" } },
+      sidebarThreadSummaryById: {
+        ...summaries,
+        c: { ...summaries["c"]!, updatedAt: "2026-08-05T00:00:00.000Z" },
+      },
+    } as EnvironmentState;
+    const serialized = serializer.serialize(next, ENV, 2);
+    expect(serializer.serializedThreadCount()).toBe(5);
+    expectSameAsFullSerialization(next, serialized, 2);
+
+    // Nothing changed: nothing is re-serialized.
+    serializer.serialize(next, ENV, 3);
+    expect(serializer.serializedThreadCount()).toBe(5);
+  });
+
+  it("drops a removed thread and bounds threads like the full serialization", () => {
+    const state = environmentState(["old", "archived", "new"]);
+    const shells = state.threadShellById as Record<string, ThreadShell>;
+    shells["archived"] = shell("archived", { archivedAt: "2026-08-02T00:00:00.000Z" });
+    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
+    summaries["old"] = summary("old", { updatedAt: "2026-08-01T00:00:00.000Z" });
+    summaries["archived"] = summary("archived", { updatedAt: "2026-08-03T00:00:00.000Z" });
+    summaries["new"] = summary("new", { updatedAt: "2026-08-04T00:00:00.000Z" });
+
+    const byCount = { maxThreads: 1, maxPayloadBytes: 10_000_000 };
+    const serializer = createEnvironmentSnapshotSerializer(byCount);
+    const serialized = serializer.serialize(state, ENV, 1);
+    expect(serialized.threads).toBe(1);
+    expectSameAsFullSerialization(state, serialized, 1, byCount);
+
+    const removed = { ...state, threadIds: ["old", "new"] } as unknown as EnvironmentState;
+    expectSameAsFullSerialization(removed, serializer.serialize(removed, ENV, 2), 2, byCount);
+  });
+
+  it("serializes and retains only the threads that survive the count cap", () => {
+    const ids = Array.from({ length: 12 }, (_, index) => `t${index}`);
+    const state = environmentState(ids);
+    const summaries = state.sidebarThreadSummaryById as Record<string, SidebarThreadSummary>;
+    // Shuffled recency, so the survivors are not a prefix of the store order.
+    ids.forEach((id, index) => {
+      const minute = String((index * 7) % 12).padStart(2, "0");
+      summaries[id] = summary(id, { updatedAt: `2026-08-01T00:${minute}:00.000Z` });
+    });
+    const byCount = { maxThreads: 4, maxPayloadBytes: 10_000_000 };
+    const serializer = createEnvironmentSnapshotSerializer(byCount);
+    const serialized = serializer.serialize(state, ENV, 1);
+    expect(serialized.threads).toBe(4);
+    expect(serializer.serializedThreadCount()).toBe(4);
+    expectSameAsFullSerialization(state, serialized, 1, byCount);
+
+    // An unchanged capture reuses the survivors' fragments.
+    expectSameAsFullSerialization(state, serializer.serialize(state, ENV, 2), 2, byCount);
+    expect(serializer.serializedThreadCount()).toBe(4);
+  });
+
+  it("sheds threads under the byte cap exactly like the full serialization", () => {
+    const state = environmentState(["a", "b", "c", "d", "e", "f"]);
+    const byBytes = { maxThreads: 100, maxPayloadBytes: 1_500 };
+    const serialized = createEnvironmentSnapshotSerializer(byBytes).serialize(state, ENV, 1);
+    expect(serialized.threads).toBeLessThan(6);
+    expect(serialized.payloadBytes).toBeLessThanOrEqual(1_500);
+    expectSameAsFullSerialization(state, serialized, 1, byBytes);
   });
 });

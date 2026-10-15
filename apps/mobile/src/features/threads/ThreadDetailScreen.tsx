@@ -1,6 +1,7 @@
 import { sidebarUndo } from "../../state/sidebarUndo";
 import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
+import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
 import { runOutboxDrain } from "../../state/use-thread-outbox-drain";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
@@ -133,6 +134,7 @@ import {
   selectEnvironmentHydratedFromCacheAt,
   selectProjectByRef,
   selectSidebarThreadSummaryByRef,
+  selectSubscribedClaudeReviewState,
   selectThreadByRef,
   useStore,
 } from "../../state/threadsRuntime";
@@ -1350,6 +1352,13 @@ export function ThreadDetailScreen(props: {
               providerDriver: threadProviderDriver,
               sourceProviderDriver: currentThread.session?.provider ?? null,
               claudeCacheReview: mobileClaudeCacheReview,
+              // The retained detail subscription already holds what the Claude
+              // resume review reads; a send it clears skips the window read.
+              readSubscribedClaudeReviewState: () =>
+                selectSubscribedClaudeReviewState(
+                  useStore.getState(),
+                  scopeThreadRef(environmentId, threadId),
+                ),
               assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
                 createMobileConnectionRegistry().driver.supervisor.read(environmentId),
               ),
@@ -1524,6 +1533,8 @@ export function ThreadDetailScreen(props: {
     item.kind === "activity-fold" ? (
       <ThreadActivityFoldRow
         fold={item}
+        environmentId={environmentId}
+        threadId={threadId}
         onToggle={() => setExpandedFoldIds((current) => toggleFold(current, item))}
       />
     ) : (
@@ -1776,6 +1787,14 @@ export function ThreadDetailScreen(props: {
             );
         }}
         pendingHandoff={pendingHandoff}
+        onComposerIntent={() =>
+          void prewarmThreadProviderSession({
+            environmentId,
+            threadId,
+            modelSelection: selectedModelSelection,
+            mutationReady: environmentRow?.mutationReady ?? false,
+          })
+        }
       />
 
       {headerModel ? (

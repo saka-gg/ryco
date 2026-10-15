@@ -12,7 +12,7 @@ function emit(): void {
   for (const listener of listeners) listener();
 }
 
-function subscribe(listener: Listener): () => void {
+export function subscribeEnvironmentServerConfigs(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
@@ -52,7 +52,7 @@ export function getEnvironmentServerConfigsSnapshot(): ReadonlyMap<EnvironmentId
 
 export function useEnvironmentServerConfigs(): ReadonlyMap<EnvironmentId, ServerConfig> {
   return useSyncExternalStore(
-    subscribe,
+    subscribeEnvironmentServerConfigs,
     getEnvironmentServerConfigsSnapshot,
     getEnvironmentServerConfigsSnapshot,
   );

@@ -37,13 +37,19 @@ import {
 } from "./threadOutbox";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
-import { selectEnvironmentShellLive, selectThreadByRef, useStore } from "./threadsRuntime";
+import {
+  selectEnvironmentShellLive,
+  selectSubscribedClaudeReviewState,
+  selectThreadByRef,
+  useStore,
+} from "./threadsRuntime";
 import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
 
 // §3-14: dispatch a queued turn for an EXISTING thread through the runtime send
 // path. The queued item carries its own composer settings (captured at enqueue);
 // a message missing them cannot be sent and is dropped by the drain caller.
-async function sendQueuedThreadMessage(
+// Exported for testing.
+export async function sendQueuedThreadMessage(
   message: QueuedThreadMessage,
   hooks: QueueSendHooks,
 ): Promise<void> {
@@ -52,6 +58,7 @@ async function sendQueuedThreadMessage(
   }
   const api = ensureEnvironmentApi(message.environmentId);
   const turnAttachments = await buildQueuedThreadMessageAttachments(message);
+  const threadRef = scopeThreadRef(message.environmentId, message.threadId);
   await commitSendTurnDispatch({
     claudeCacheReview: {
       review: async (review) =>
@@ -59,10 +66,11 @@ async function sendQueuedThreadMessage(
           review,
         ),
     },
-    sourceProviderDriver: selectThreadByRef(
-      useStore.getState(),
-      scopeThreadRef(message.environmentId, message.threadId),
-    )?.session?.provider,
+    // The drain retains the queued thread's detail subscription, so the Claude
+    // resume review can judge the subscribed state and skip the window read.
+    readSubscribedClaudeReviewState: () =>
+      selectSubscribedClaudeReviewState(useStore.getState(), threadRef),
+    sourceProviderDriver: selectThreadByRef(useStore.getState(), threadRef)?.session?.provider,
     providerDriver:
       readEnvironmentServerConfig(message.environmentId)?.providers.find(
         (provider) => provider.instanceId === message.modelSelection?.instanceId,

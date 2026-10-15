@@ -5,6 +5,7 @@ import type {
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 
+import { evictCheckpointDiffsForThread } from "../rpc/checkpointDiffAtoms";
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
 import { selectThreadByRef, useStore } from "../state/threadsRuntime";
@@ -76,13 +77,15 @@ export function createMobileEnvironmentStateSink(
           // A shell upsert for a thread that did not exist means a local draft was
           // promoted to a real server thread — re-key its composer draft.
           if (!previousThread && threadRef) markPromotedDraftThreadByRef(threadRef);
-          // A thread that just became archived releases its terminal state.
+          // A thread that just became archived releases its terminal state and
+          // its cached checkpoint diffs (one still on screen goes once released).
           if (
             previousThread?.archivedAt === null &&
             event.thread.archivedAt !== null &&
             threadRef
           ) {
             useTerminalStateStore.getState().removeTerminalState(threadRef);
+            evictCheckpointDiffsForThread(event.thread.id);
           }
           input
             .supervisor?.()
@@ -95,6 +98,7 @@ export function createMobileEnvironmentStateSink(
             input.supervisor?.().disposeThreadDetailSubscription(environmentId, event.threadId);
             useComposerDraftStore.getState().clearDraftThread(threadRef);
             useTerminalStateStore.getState().removeTerminalState(threadRef);
+            evictCheckpointDiffsForThread(event.threadId);
           }
           return;
         }

@@ -153,6 +153,17 @@ describe("thread activity folds", () => {
     expect(row?.changedFiles).toEqual(["src/App.tsx"]);
   });
 
+  it("carries the preview activity id so an opened row can read the full output", () => {
+    const rows = build([
+      work("a", { output: "head of a long log…", outputPreviewActivityId: "activity-a" }),
+      work("b", { output: "short" }),
+    ]);
+    expect(folds(rows)[0]?.rows.map((row) => row.outputPreviewActivityId)).toEqual([
+      "activity-a",
+      null,
+    ]);
+  });
+
   it("skips blank lines when previewing a command", () => {
     expect(folds(build([work("a", { command: "\n\n  echo hi\nmore" })]))[0]?.rows[0]?.command).toBe(
       "echo hi",

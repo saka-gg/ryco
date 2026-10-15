@@ -1,4 +1,10 @@
-import type { AuthSessionState, EnvironmentId } from "@ryco/contracts";
+import type {
+  AuthSessionState,
+  EnvironmentId,
+  OrchestrationEvent,
+  OrchestrationThread,
+  ThreadId,
+} from "@ryco/contracts";
 import {
   RemoteEnvironmentAuthHttpError,
   SAVED_ENVIRONMENT_REQUIRES_AUTH_MESSAGE,
@@ -73,11 +79,12 @@ vi.mock("../rpc/wsRpcClient", async (importOriginal) => ({
 }));
 
 import { installHostedPrimaryConnectionFactory } from "../hostedHub/primaryConnectionFactory";
+import type { HostedPrimaryConnectionDeps } from "../hostedHub/primaryConnection";
 import { subscribeAppStateResume } from "./appStateResume";
 import { createMobileEnvironmentDriver, type MobileCatalogLike } from "./environmentDriver";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import { createSavedSessionHints, type SavedSessionHints } from "./savedSessionHints";
-import { useStore } from "../state/threadsRuntime";
+import { selectThreadDetailLoaded, useStore } from "../state/threadsRuntime";
 
 const ENV_ID = "env-1" as EnvironmentId;
 
@@ -909,11 +916,146 @@ describe("mobile environment driver", () => {
       // Released once: a second release does not build another candidate.
       driver.releaseDeferredPrimaryConnection();
       expect(factory).toHaveBeenCalledOnce();
+
+      // The hosted connection receives a priority handler, so it opts into
+      // thread-priority deltas, and the handler reaches the supervisor.
+      const [primaryDeps] = factory.mock.calls[0] as unknown as [HostedPrimaryConnectionDeps];
+      const applyPriorities = vi
+        .spyOn(driver.supervisor, "applyThreadPriorities")
+        .mockImplementation(() => undefined);
+      const item = { kind: "thread-priorities" } as unknown as Parameters<
+        HostedPrimaryConnectionDeps["applyThreadPriorities"]
+      >[0];
+      primaryDeps.applyThreadPriorities(item, primaryId);
+      expect(applyPriorities).toHaveBeenCalledExactlyOnceWith(item, primaryId);
+      applyPriorities.mockRestore();
       stop();
       await driver.supervisor.remove(primaryId);
     } finally {
       installHostedPrimaryConnectionFactory(null);
     }
+  });
+
+  it("asks thread windows for activity previews", () => {
+    const fake = createFakeCatalog();
+    const driver = createMobileEnvironmentDriver({
+      catalog: fake.catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+    });
+    const subscribeThreadWindow = vi.fn(() => () => undefined);
+    const connection = fakeConnection(ENV_ID);
+    (connection.client as { orchestration?: unknown }).orchestration = { subscribeThreadWindow };
+    driver.supervisor.register(connection);
+
+    const release = driver.supervisor.retainThreadDetailSubscription(
+      ENV_ID,
+      "thread-preview" as ThreadId,
+    );
+
+    // Full tool output and diffs are read on expand, not shipped in every window.
+    expect(subscribeThreadWindow).toHaveBeenCalledOnce();
+    expect(subscribeThreadWindow.mock.calls[0]).toEqual([
+      expect.objectContaining({ activityPayloads: "preview" }),
+      expect.any(Function),
+      expect.anything(),
+    ]);
+    release();
+  });
+
+  it("applies one frame's detail events as one batch, before a later window snapshot, and on stop", () => {
+    const environmentId = "env-detail-batch" as EnvironmentId;
+    const threadId = "thread-batch" as ThreadId;
+    const ref = { environmentId, threadId };
+    const sink = createMobileEnvironmentStateSink();
+    const applied: Array<{ readonly sequences: number[]; readonly detailLoaded: boolean }> = [];
+    const applySpy = vi
+      .spyOn(sink, "applyOrchestrationEvents")
+      .mockImplementation((_environmentId, events) => {
+        applied.push({
+          sequences: events.map((event) => event.sequence),
+          detailLoaded: selectThreadDetailLoaded(useStore.getState(), ref),
+        });
+      });
+    const frames: Array<() => void> = [];
+    const driver = createMobileEnvironmentDriver({
+      catalog: createFakeCatalog().catalog,
+      remoteApi: noopRemoteApi,
+      subscribeResume: () => () => {},
+      stateSink: sink,
+      threadDetailEventScheduling: {
+        scheduleFrame: (callback) => frames.push(callback),
+        scheduleFallback: () => undefined,
+      },
+    });
+    const stop = driver.start();
+    let emit: ((item: unknown) => void) | null = null;
+    const connection = fakeConnection(environmentId);
+    (connection.client as { orchestration?: unknown }).orchestration = {
+      subscribeThreadWindow: (_input: unknown, listener: (item: unknown) => void) => {
+        emit = listener;
+        return () => undefined;
+      },
+    };
+    driver.supervisor.register(connection);
+    const release = driver.supervisor.retainThreadDetailSubscription(environmentId, threadId);
+    expect(emit).not.toBeNull();
+    const event = (sequence: number) =>
+      ({
+        sequence,
+        type: "thread.message-sent",
+        payload: { threadId, messageId: "message-1", text: `delta ${sequence}`, streaming: true },
+      }) as unknown as OrchestrationEvent;
+
+    for (const sequence of [1, 2, 3]) emit!({ kind: "event", event: event(sequence) });
+    expect(applied).toEqual([]);
+    expect(frames).toHaveLength(1);
+
+    // A window snapshot is a store write: the buffered events land first, as
+    // one batch, before the snapshot loads the detail.
+    const page = { cursor: null, hasMore: false };
+    emit!({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 4,
+        thread: {
+          id: threadId,
+          projectId: "project-1",
+          title: "Batch",
+          modelSelection: { instanceId: "codex", model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          worktreeId: null,
+          latestTurn: null,
+          createdAt: "2026-10-15T00:00:00.000Z",
+          updatedAt: "2026-10-15T00:00:00.000Z",
+          archivedAt: null,
+          deletedAt: null,
+          messages: [],
+          proposedPlans: [],
+          activities: [],
+          checkpoints: [],
+          session: null,
+        } as unknown as OrchestrationThread,
+        history: { messages: page, proposedPlans: page, activities: page, checkpoints: page },
+      },
+    });
+    expect(applied).toEqual([{ sequences: [1, 2, 3], detailLoaded: false }]);
+    expect(selectThreadDetailLoaded(useStore.getState(), ref)).toBe(true);
+    frames[0]!();
+    expect(applied).toHaveLength(1);
+
+    // Stopping the driver applies what is still buffered.
+    emit!({ kind: "event", event: event(5) });
+    expect(applied).toHaveLength(1);
+    stop();
+    expect(applied.at(-1)).toEqual({ sequences: [5], detailLoaded: true });
+
+    release();
+    applySpy.mockRestore();
+    void driver.supervisor.remove(environmentId);
   });
 
   it("routes a thread-stream snapshot/event from the state sink into state/threads", () => {

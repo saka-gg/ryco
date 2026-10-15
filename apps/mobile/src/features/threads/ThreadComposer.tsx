@@ -62,6 +62,11 @@ export function ThreadComposer(props: {
   readonly onOpenSideChat?: () => void;
   /** What the next message's context handoff is (`derivePendingComposerHandoff`). */
   readonly pendingHandoff?: PendingComposerHandoff | null;
+  /**
+   * Editor focus or the first keystroke into an empty composer: the user is about
+   * to send, so the owner may prewarm the provider session the send would start.
+   */
+  readonly onComposerIntent?: () => void;
 }) {
   const policyModel = props.policyModel;
   const modelPicker = props.modelPicker;
@@ -228,7 +233,11 @@ export function ThreadComposer(props: {
             <ComposerEditor
               ref={editorRef}
               value={text}
-              onChangeText={setText}
+              onChangeText={(nextText) => {
+                if (text.length === 0 && nextText.length > 0) props.onComposerIntent?.();
+                setText(nextText);
+              }}
+              onFocus={props.onComposerIntent}
               placeholder="Message"
               multiline
               editable={!props.disabled && !sending}

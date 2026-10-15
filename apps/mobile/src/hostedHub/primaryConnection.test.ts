@@ -172,6 +172,7 @@ const deps = () => ({
   pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
   resetShellProjection: vi.fn(),
   applyShellEvent: vi.fn(),
+  applyThreadPriorities: vi.fn(),
   syncShellSnapshot: vi.fn(),
 });
 
@@ -354,6 +355,27 @@ describe("hosted primary connection", () => {
     expect(input.applyShellEvent).toHaveBeenCalledOnce();
     expect(input.syncShellSnapshot).not.toHaveBeenCalled();
     expect(hostedLifecycle.markReady).not.toHaveBeenCalled();
+  });
+
+  it("asks for thread-priority deltas and drops them from a superseded generation", () => {
+    writePrimaryEnvironmentDescriptor(descriptor);
+    const input = deps();
+
+    createHostedPrimaryConnection(input);
+    // The shared connection requests `threadPriorities: "delta"` exactly when
+    // this handler is supplied; without it every ranking batch is a full
+    // shell snapshot over the relay.
+    const connectionInput = connectionFactory.input as {
+      applyThreadPriorities?: (item: unknown, environmentId: string) => void;
+    };
+    expect(connectionInput.applyThreadPriorities).toBeTypeOf("function");
+    const item = { kind: "thread-priorities", priorities: [] };
+    connectionInput.applyThreadPriorities!(item, "env-hosted-1");
+    expect(input.applyThreadPriorities).toHaveBeenCalledExactlyOnceWith(item, "env-hosted-1");
+
+    coordinator.current = false;
+    connectionInput.applyThreadPriorities!(item, "env-hosted-1");
+    expect(input.applyThreadPriorities).toHaveBeenCalledOnce();
   });
 });
 

@@ -621,6 +621,30 @@ describe("environment snapshot persistence", () => {
     runtime.dispose();
   });
 
+  it("keeps skipping an unchanged environment when another environment's row is removed", async () => {
+    const { db } = createFakeSnapshotDb();
+    const save = vi.spyOn(db, "saveEnvironmentSnapshot");
+    const runtime = createSnapshotPersistenceRuntime({
+      db,
+      store: useStore,
+      now: () => 1,
+      hasDirectEnvironment: () => true,
+    });
+    const kept = env("persist-epoch-kept");
+    const purged = env("persist-epoch-purged");
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("kept"), kept);
+    useStore.getState().syncServerShellSnapshot(wireSnapshot("purged"), purged);
+
+    await runtime.capture(kept);
+    await runtime.capture(purged);
+    expect(save).toHaveBeenCalledTimes(2);
+    await runtime.purgeEnvironment(purged);
+    // The other environment's row was not touched: no redundant rewrite.
+    await runtime.capture(kept);
+    expect(save).toHaveBeenCalledTimes(2);
+    runtime.dispose();
+  });
+
   it("writes again after its stored row was removed, even with unchanged slices", async () => {
     const { db, snapshots } = createFakeSnapshotDb();
     const runtime = createSnapshotPersistenceRuntime({

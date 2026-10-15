@@ -1,7 +1,14 @@
 import type {
+  AgentTokenMode,
   EnvironmentApi,
+  ModelSelection,
+  OrchestrationSessionStatus,
+  ProjectId,
   ProviderSessionPrewarmInput,
   ProviderSessionPrewarmResult,
+  RuntimeMode,
+  ServerConfig,
+  ThreadId,
 } from "@ryco/contracts";
 
 /** A repeat of the same request within this window is not sent again. */
@@ -64,4 +71,75 @@ export function requestProviderSessionPrewarm(input: {
     },
   );
   return true;
+}
+
+/** Whether the node advertises `provider.prewarmSession`. */
+export function selectProviderSessionPrewarmSupported(config: ServerConfig | null): boolean {
+  return config?.environment.capabilities.providerSessionPrewarm === true;
+}
+
+export interface ProviderSessionPrewarmContext {
+  /** The composer's thread: a server thread, or a draft that has none yet. */
+  readonly thread:
+    | {
+        readonly id: ThreadId;
+        readonly projectId: ProjectId;
+        readonly session: { readonly orchestrationStatus: OrchestrationSessionStatus } | null;
+      }
+    | null
+    | undefined;
+  readonly isServerThread: boolean;
+  /** A chat whose folder its first send creates: there is no directory to start in yet. */
+  readonly isPendingChat?: boolean;
+  /** Whether this client may send to the thread now (connection, role, readiness). */
+  readonly dispatchAllowed: boolean;
+  /** A hosted draft whose target node is still being chosen. */
+  readonly hostedTargetPending?: boolean;
+  /**
+   * The send's worktree plan. A send that first creates a worktree, or materializes a
+   * legacy branch worktree, starts in a directory that does not exist yet.
+   */
+  readonly worktreePlan?: {
+    readonly shouldCreateWorktree: boolean;
+    readonly shouldMaterializeLegacyBranchWorktree: boolean;
+  };
+  /** What the composer would send with; the thread's settings when absent. */
+  readonly modelSelection?: ModelSelection | undefined;
+  readonly runtimeMode: RuntimeMode;
+  readonly tokenMode: AgentTokenMode;
+}
+
+/**
+ * The prewarm request for the session the composer's next send would start, or null
+ * when there is nothing to start: no thread, sending is not allowed now, the thread's
+ * session is already live (anything but stopped), or the send first creates the
+ * directory it runs in (a pending chat folder or a new worktree). Pure; pass the result
+ * to {@link requestProviderSessionPrewarm}, which throttles and sends it.
+ */
+export function resolveProviderSessionPrewarmRequest(
+  context: ProviderSessionPrewarmContext,
+): ProviderSessionPrewarmInput | null {
+  const thread = context.thread;
+  if (
+    !thread ||
+    context.isPendingChat === true ||
+    !context.dispatchAllowed ||
+    context.hostedTargetPending === true ||
+    (thread.session !== null && thread.session.orchestrationStatus !== "stopped")
+  ) {
+    return null;
+  }
+  if (
+    context.worktreePlan?.shouldCreateWorktree === true ||
+    context.worktreePlan?.shouldMaterializeLegacyBranchWorktree === true
+  ) {
+    return null;
+  }
+  return {
+    threadId: thread.id,
+    ...(context.isServerThread ? {} : { projectId: thread.projectId }),
+    ...(context.modelSelection ? { modelSelection: context.modelSelection } : {}),
+    runtimeMode: context.runtimeMode,
+    tokenMode: context.tokenMode,
+  };
 }

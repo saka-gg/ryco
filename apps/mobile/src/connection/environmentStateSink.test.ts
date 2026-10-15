@@ -23,7 +23,21 @@ vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
+import { appAtomRegistry } from "@ryco/client-runtime/rpc";
+import type { EnvironmentApi } from "@ryco/contracts";
+
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "./environmentApi";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
+import {
+  checkpointDiffCacheKey,
+  checkpointDiffStateAtom,
+  resetCheckpointDiffStateForTests,
+  watchCheckpointDiff,
+  type CheckpointDiffInput,
+} from "../rpc/checkpointDiffAtoms";
 import { useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
 
@@ -112,5 +126,74 @@ describe("createMobileEnvironmentStateSink.onEnvironmentProjectionChanged", () =
 
     const { useStore } = await import("../state/threadsRuntime");
     useStore.getState().removeEnvironmentState(ENV_ID);
+  });
+});
+
+describe("createMobileEnvironmentStateSink checkpoint-diff release", () => {
+  const diffInput: CheckpointDiffInput = {
+    environmentId: ENV_ID,
+    threadId: THREAD_ID,
+    fromTurnCount: 0,
+    toTurnCount: 1,
+    ignoreWhitespace: false,
+  };
+  const readDiff = () =>
+    appAtomRegistry.get(checkpointDiffStateAtom(checkpointDiffCacheKey(diffInput))).data;
+
+  async function cacheReleasedDiff(): Promise<void> {
+    resetCheckpointDiffStateForTests();
+    __resetEnvironmentApiOverridesForTests();
+    __setEnvironmentApiOverrideForTests(ENV_ID, {
+      orchestration: {
+        getFullThreadDiff: async () => ({
+          threadId: THREAD_ID,
+          fromTurnCount: 0,
+          toTurnCount: 1,
+          diff: "patch",
+        }),
+      },
+    } as unknown as EnvironmentApi);
+    const release = watchCheckpointDiff(diffInput);
+    await vi.waitFor(() => expect(readDiff()).not.toBeNull());
+    release();
+    // Released, the diff stays cached for a quick reopen.
+    expect(readDiff()?.diff).toBe("patch");
+  }
+
+  it("drops a thread's cached diffs when it is archived", async () => {
+    await cacheReleasedDiff();
+    const sink = createMobileEnvironmentStateSink({ supervisor: () => fakeSupervisor() });
+    const removeTerminal = vi
+      .spyOn(useTerminalStateStore.getState(), "removeTerminalState")
+      .mockImplementation(() => undefined);
+
+    sink.afterShellEventApplied(
+      ENV_ID,
+      {
+        kind: "thread-upserted",
+        thread: { id: THREAD_ID, archivedAt: "2026-08-20T00:00:00.000Z" },
+      } as unknown as Parameters<typeof sink.afterShellEventApplied>[1],
+      { previousThread: { archivedAt: null }, threadRef: scopeThreadRef(ENV_ID, THREAD_ID) },
+    );
+
+    expect(readDiff()).toBeNull();
+    removeTerminal.mockRestore();
+    __resetEnvironmentApiOverridesForTests();
+  });
+
+  it("drops a removed thread's cached diffs", async () => {
+    await cacheReleasedDiff();
+    const sink = createMobileEnvironmentStateSink({ supervisor: () => fakeSupervisor() });
+
+    sink.afterShellEventApplied(
+      ENV_ID,
+      { kind: "thread-removed", threadId: THREAD_ID } as unknown as Parameters<
+        typeof sink.afterShellEventApplied
+      >[1],
+      { previousThread: undefined, threadRef: scopeThreadRef(ENV_ID, THREAD_ID) },
+    );
+
+    expect(readDiff()).toBeNull();
+    __resetEnvironmentApiOverridesForTests();
   });
 });

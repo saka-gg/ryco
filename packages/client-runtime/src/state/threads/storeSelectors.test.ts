@@ -12,10 +12,12 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createEnvironmentFallbackThreadRefSelector,
   selectEnvironmentShellLive,
+  selectSubscribedClaudeReviewState,
   selectThreadDetailLoaded,
   selectThreadLiveDetailLoaded,
 } from "./storeSelectors.ts";
 import {
+  demoteEnvironmentStateToCachedSnapshot,
   syncServerThreadDetail,
   syncServerThreadWindow,
   type AppState,
@@ -317,5 +319,124 @@ describe("selectEnvironmentShellLive", () => {
     expect(
       selectEnvironmentShellLive(makeState(makeEnvironmentState()), EnvironmentId.make("other")),
     ).toBe(false);
+  });
+});
+
+describe("selectSubscribedClaudeReviewState", () => {
+  const ref = { environmentId, threadId: threadA } satisfies ScopedThreadRef;
+  const detail = {
+    id: threadA,
+    projectId,
+    title: "Detail",
+    modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: "2026-06-12T10:00:00.000Z",
+    updatedAt: "2026-06-12T10:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+    messages: [],
+    proposedPlans: [],
+    activities: [],
+    checkpoints: [],
+    session: {
+      threadId: threadA,
+      status: "ready",
+      providerName: "claudeAgent",
+      runtimeSessionId: "runtime-1",
+      runtimeMode: "full-access",
+      activeTurnId: null,
+      lastError: null,
+      updatedAt: "2026-06-12T10:00:00.000Z",
+    },
+  } as unknown as OrchestrationThread;
+  const project = {
+    id: projectId,
+    environmentId,
+    name: "Project",
+    cwd: "/repo",
+    defaultModelSelection: null,
+    scripts: [],
+  };
+  const withDetail = (overrides: Partial<EnvironmentState> = {}, thread = detail) =>
+    syncServerThreadDetail(
+      makeState(makeEnvironmentState({ projectById: { [projectId]: project }, ...overrides })),
+      thread,
+      environmentId,
+    );
+
+  it("maps the subscribed thread, session and project workspace", () => {
+    expect(selectSubscribedClaudeReviewState(withDetail(), ref)).toEqual({
+      thread: {
+        modelSelection: detail.modelSelection,
+        activities: [],
+        session: {
+          providerName: "claudeAgent",
+          runtimeSessionId: "runtime-1",
+          status: "ready",
+          activeTurnId: null,
+        },
+      },
+      workspaceCwd: "/repo",
+    });
+  });
+
+  it("prefers the thread's worktree and omits a missing runtime session", () => {
+    const state = withDetail({}, {
+      ...detail,
+      worktreePath: "/repo/.worktrees/a",
+      session: { ...detail.session!, runtimeSessionId: undefined },
+    } as OrchestrationThread);
+    const subscribed = selectSubscribedClaudeReviewState(state, ref);
+    expect(subscribed?.workspaceCwd).toBe("/repo/.worktrees/a");
+    expect(subscribed?.thread.session).not.toHaveProperty("runtimeSessionId");
+  });
+
+  it("is undefined unless the shell is live and the detail is loaded", () => {
+    expect(
+      selectSubscribedClaudeReviewState(withDetail({ hydratedFromCacheAt: 1 }), ref),
+    ).toBeUndefined();
+    expect(
+      selectSubscribedClaudeReviewState(withDetail({ bootstrapComplete: false }), ref),
+    ).toBeUndefined();
+    const shellOnly = makeState(
+      makeEnvironmentState({
+        threadIds: [threadA],
+        threadShellById: { [threadA]: makeShell(threadA) },
+        sidebarThreadSummaryById: { [threadA]: makeSummary(threadA) },
+      }),
+    );
+    expect(selectSubscribedClaudeReviewState(shellOnly, ref)).toBeUndefined();
+  });
+
+  it("documents the accepted gap: a detail loaded before a reconnect qualifies once the shell is live", () => {
+    const loaded = withDetail();
+    const demoted = demoteEnvironmentStateToCachedSnapshot(loaded, environmentId, 1);
+    expect(selectSubscribedClaudeReviewState(demoted, ref)).toBeUndefined();
+    // A live shell snapshot lands before the retained detail subscription has
+    // re-synced: the store records no detail sync generation, so the review
+    // judges the activities it held before the disconnect.
+    const environment = demoted.environmentStateById[environmentId]!;
+    const relive: AppState = {
+      ...demoted,
+      environmentStateById: {
+        [environmentId]: {
+          ...environment,
+          bootstrapComplete: true,
+          hydratedFromCacheAt: undefined,
+        },
+      },
+    };
+    expect(selectSubscribedClaudeReviewState(relive, ref)?.thread.activities).toEqual(
+      selectSubscribedClaudeReviewState(loaded, ref)?.thread.activities,
+    );
   });
 });
