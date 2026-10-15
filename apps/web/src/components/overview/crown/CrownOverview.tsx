@@ -16,6 +16,7 @@ import { CrownIsland } from "./CrownIsland";
 import { CROWN_GEOMETRY_STYLE } from "./crownLayout";
 import {
   buildCrownRailSummary,
+  crownHasPlan,
   resolveCrownFaceLogo,
   resolveCrownHeadline,
 } from "./crownModel.logic";
@@ -85,6 +86,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     isGitRepo,
     notesAvailable: notes !== undefined,
     chatAvailable: chat !== undefined,
+    hasPlan: crownHasPlan(props),
   });
   /** The card only opens on sections the rail shows. */
   const isShown = (section: CrownSection) => items.some((item) => item.section === section);
@@ -112,7 +114,10 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   if (alerts.current && alerts.current !== shownAlert) setShownAlert(alerts.current);
 
   const mode: CrownMode = cardOpen ? "card" : alerts.current ? "alert" : "dot";
-  const headlineSection = headline.section;
+  // The headline can name a section the rail hides (no plan yet); the card then opens the first one.
+  const headlineSection = isShown(headline.section)
+    ? headline.section
+    : (items[0]?.section ?? headline.section);
   // A section that went away (Notes turning off, a chat becoming a project) falls back.
   const selectedSection = selected !== null && isShown(selected) ? selected : null;
   const cardSection: CrownSection = selectedSection ?? headlineSection;

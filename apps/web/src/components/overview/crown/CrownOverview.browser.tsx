@@ -305,6 +305,18 @@ describe("CrownOverview", () => {
     expect(crown.rail().querySelectorAll(".crown-rail-sep")).toHaveLength(0);
   });
 
+  it("hides Plan until the thread has one and keeps Pull request without one", async () => {
+    const crown = await mountCrown();
+    await crown.update({ activePlan: null, activeProposedPlan: null, pullRequest: null });
+    expect(railKeys(crown.rail())).toEqual(["branch", "changes", "checks", "agents", "pr", "ship"]);
+
+    // Outside a repository the plan-less fallback headline opens the first shown section.
+    await crown.update({ isGitRepo: false });
+    expect(railKeys(crown.rail())).toEqual(["agents"]);
+    crown.host.querySelector<HTMLElement>('[data-slot="crown-face"]')!.click();
+    await expect.element(page.getByRole("region", { name: "Subagents" })).toBeVisible();
+  });
+
   it("glides one flyout between hovered icons and closes it after the pointer leaves", async () => {
     const crown = await mountCrown();
     await page.getByRole("button", { name: "Checks", exact: true }).hover();

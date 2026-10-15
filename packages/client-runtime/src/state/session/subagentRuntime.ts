@@ -59,6 +59,15 @@ export interface SubagentActivityEntry {
 export interface SubagentWorkflowPhase {
   readonly index: number;
   readonly title: string;
+  /** Provider-reported tally over the whole run, when the provider sends one. */
+  readonly counts?: SubagentWorkflowPhaseCounts;
+}
+
+export interface SubagentWorkflowPhaseCounts {
+  readonly memberCount: number;
+  readonly activeCount: number;
+  readonly settledCount: number;
+  readonly failedCount: number;
 }
 
 export interface SubagentRunHandles {
@@ -415,7 +424,21 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): bo
       const index = asCount(record.index);
       const phaseName = asString(record.title);
       if (index !== undefined && phaseName) {
-        phases.push({ index, title: phaseName });
+        const memberCount = asCount(record.memberCount);
+        phases.push(
+          memberCount === undefined
+            ? { index, title: phaseName }
+            : {
+                index,
+                title: phaseName,
+                counts: {
+                  memberCount,
+                  activeCount: asCount(record.activeCount) ?? 0,
+                  settledCount: asCount(record.settledCount) ?? 0,
+                  failedCount: asCount(record.failedCount) ?? 0,
+                },
+              },
+        );
       }
     }
     if (phases.length > 0) {
@@ -747,11 +770,16 @@ export interface AgentPanelWorkflowGroup {
   readonly phases: ReadonlyArray<{
     readonly index: number;
     readonly title: string;
+    /** The members still in retained activity; a large run's oldest age out. */
     readonly members: ReadonlyArray<RuntimeSubagent>;
     /** done = every member settled (success or error); running = any active. */
     readonly state: "pending" | "running" | "done";
+    /** The phase's whole roster: the provider's tally when it reports more
+     * members than are retained, else the retained members. */
+    readonly memberCount: number;
     readonly activeCount: number;
     readonly settledCount: number;
+    readonly failedCount: number;
   }>;
   /** Members with no resolvable phase (orphans render under the workflow). */
   readonly unphasedMembers: ReadonlyArray<RuntimeSubagent>;
@@ -925,7 +953,7 @@ export function deriveAgentPanelModel({
 
   const workflowGroups: AgentPanelWorkflowGroup[] = workflows.map((workflow) => {
     const workflowMembers = members.get(workflow.id) ?? [];
-    const knownPhases =
+    const knownPhases: ReadonlyArray<SubagentWorkflowPhase> =
       workflow.phases.length > 0
         ? workflow.phases
         : (() => {
@@ -953,22 +981,31 @@ export function deriveAgentPanelModel({
             a.firstSeenAt.localeCompare(b.firstSeenAt) ||
             a.id.localeCompare(b.id),
         );
-      const activeCount = phaseMembers.filter(
-        // Idle members count as active for phase-liveness: a resumable Codex
-        // member has not finished the phase.
-        (member) => isActiveSubagentStatus(member.status) || member.status === "idle",
-      ).length;
-      const settledCount = phaseMembers.filter((member) =>
-        isTerminalSubagentStatus(member.status),
-      ).length;
+      const retained = {
+        memberCount: phaseMembers.length,
+        activeCount: phaseMembers.filter(
+          // Idle members count as active for phase-liveness: a resumable Codex
+          // member has not finished the phase.
+          (member) => isActiveSubagentStatus(member.status) || member.status === "idle",
+        ).length,
+        settledCount: phaseMembers.filter((member) => isTerminalSubagentStatus(member.status))
+          .length,
+        failedCount: phaseMembers.filter((member) => member.status === "failed").length,
+      };
+      // The provider's tally covers members whose rows aged out of retention;
+      // retained rows win when they are at least as complete (and fresher).
+      const reported = phase.counts;
+      const counts =
+        reported !== undefined && reported.memberCount > retained.memberCount ? reported : retained;
+      const { memberCount, activeCount, settledCount } = counts;
       const state: "pending" | "running" | "done" =
-        phaseMembers.length === 0
+        memberCount === 0
           ? isTerminalSubagentStatus(workflow.status)
             ? "done"
             : "pending"
           : activeCount > 0
             ? "running"
-            : settledCount === phaseMembers.length
+            : settledCount === memberCount
               ? "done"
               : "pending";
       return {
@@ -976,8 +1013,10 @@ export function deriveAgentPanelModel({
         title: phase.title,
         members: phaseMembers,
         state,
+        memberCount,
         activeCount,
         settledCount,
+        failedCount: counts.failedCount,
       };
     });
 
@@ -1094,23 +1133,48 @@ export interface AgentWorkflowSummary {
 
 export function summarizeAgentWorkflow(group: AgentPanelWorkflowGroup): AgentWorkflowSummary {
   const coordinator = group.workflow;
-  const members = agentWorkflowMembers(group);
+  // Phase totals include members whose rows aged out; unphased members are
+  // only ever known from their rows.
+  let memberCount = 0;
   let settledCount = 0;
   let workingCount = 0;
   let failedCount = 0;
-  let totalTokens = members.length === 0 ? (coordinator.usage?.totalTokens ?? 0) : 0;
-  for (const member of members) {
+  let memberTokens = 0;
+  for (const phase of group.phases) {
+    memberCount += phase.memberCount;
+    settledCount += phase.settledCount;
+    failedCount += phase.failedCount;
+    // Idle is phase-active but not working: count the retained working rows
+    // unless the provider's tally covers more of the phase.
+    workingCount +=
+      phase.memberCount > phase.members.length
+        ? phase.activeCount
+        : phase.members.filter((member) => isActiveSubagentStatus(member.status)).length;
+    for (const member of phase.members) memberTokens += member.usage?.totalTokens ?? 0;
+  }
+  for (const member of group.unphasedMembers) {
+    memberCount += 1;
     if (isTerminalSubagentStatus(member.status)) settledCount += 1;
     if (isActiveSubagentStatus(member.status)) workingCount += 1;
     if (member.status === "failed") failedCount += 1;
-    totalTokens += member.usage?.totalTokens ?? 0;
+    memberTokens += member.usage?.totalTokens ?? 0;
   }
+  const retainedCount = agentWorkflowMembers(group).length;
+  // The coordinator may aggregate its members' usage, so it counts only when
+  // no members are known, or when some aged out and their usage is lost.
+  const coordinatorTokens = coordinator.usage?.totalTokens ?? 0;
+  const totalTokens =
+    retainedCount === 0
+      ? coordinatorTokens
+      : memberCount > retainedCount
+        ? Math.max(coordinatorTokens, memberTokens)
+        : memberTokens;
   return {
     id: coordinator.id,
     name: coordinator.workflowName ?? coordinator.title,
     live: !isTerminalSubagentStatus(coordinator.status),
     displayStatus: failedCount > 0 ? "failed" : coordinator.status,
-    memberCount: members.length,
+    memberCount,
     settledCount,
     workingCount,
     failedCount,
@@ -1139,7 +1203,7 @@ export function agentWorkflowStatusText(
 
 /** A phase's progress words: "3 done", "1 active · 2 done", or "not started". */
 export function agentPhaseStatusText(phase: AgentWorkflowPhase): string {
-  if (phase.members.length === 0 && phase.state === "pending") {
+  if (phase.memberCount === 0 && phase.state === "pending") {
     return "not started";
   }
   return phase.state === "done"
