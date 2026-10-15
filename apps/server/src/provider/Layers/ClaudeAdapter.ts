@@ -5609,8 +5609,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(input.cwd ? { cwd: input.cwd } : {}),
       ...(apiModelId ? { model: apiModelId } : {}),
       pathToClaudeCodeExecutable: claudeBinaryPath,
-      systemPrompt: { type: "preset", preset: "claude_code" },
-      ...(appendSystemPrompt ? ({ appendSystemPrompt } as Partial<ClaudeQueryOptions>) : {}),
+      // The SDK only reads appended text from `systemPrompt.append`; a top-level
+      // `appendSystemPrompt` query option is silently dropped.
+      systemPrompt: appendSystemPrompt
+        ? { type: "preset", preset: "claude_code", append: appendSystemPrompt }
+        : { type: "preset", preset: "claude_code" },
       settingSources: [...CLAUDE_SETTING_SOURCES],
       ...(effectiveEffort
         ? {
@@ -5651,6 +5654,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       "claude.query.model": apiModelId ?? "",
       "claude.query.effort": effectiveEffort ?? "",
       "claude.query.permission_mode": permissionMode ?? "",
+      "claude.query.system_prompt_append_bytes": Buffer.byteLength(appendSystemPrompt, "utf8"),
       "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
       "claude.query.resume": existingResumeSessionId ?? "",
       "claude.query.session_id": newSessionId ?? "",
@@ -6657,7 +6661,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnSteering: "native",
       // Transcripts live under a per-cwd project key, so a moved resume finds nothing.
       resumeSurvivesCwdChange: false,
-      // Carried in appendSystemPrompt, so slash commands such as /compact stay commands.
+      // Carried in systemPrompt.append, so slash commands such as /compact stay commands.
       attachmentInstructions: "session",
     },
     startSession,
@@ -6674,9 +6678,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     hasSession,
     stopAll,
     // The capabilities probe run in the directory: no prompt, nothing persisted, no MCP.
+    // A failed or timed-out probe fails the read, so it never stands in for an empty list.
     readProjectCommands: (cwd) =>
       probeClaudeCapabilities(claudeSettings, options?.environment, cwd).pipe(
-        Effect.map((probe) => ({ skills: [], slashCommands: probe?.slashCommands ?? [] })),
+        Effect.flatMap((probe) =>
+          probe === undefined
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "initialize",
+                  detail: "Claude Code did not report its commands for this directory.",
+                }),
+              )
+            : Effect.succeed({ skills: [], slashCommands: probe.slashCommands }),
+        ),
         Effect.provideService(Path.Path, path),
       ),
     get streamEvents() {

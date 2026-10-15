@@ -685,6 +685,118 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("re-reads only the usage of an adopted snapshot while its persisted window lasts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const usageReads = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshotSecond),
+          ),
+          refreshUsage: (snapshot) =>
+            Ref.updateAndGet(usageReads, (count) => count + 1).pipe(
+              Effect.map((count) => ({
+                ...snapshot,
+                rateLimits: { primary: { usedPercent: 40 + count } },
+              })),
+            ),
+          refreshInterval: null,
+          snapshotFreshness: Duration.minutes(5),
+          persistedSnapshotFreshness: Duration.hours(6),
+        });
+        const changes = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+        yield* Stream.runForEach(provider.streamChanges, (snapshot) =>
+          Ref.update(changes, (previous) => [...previous, snapshot]),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+
+        yield* TestClock.adjust(Duration.hours(1));
+        const withUsage: ServerProvider = {
+          ...refreshedSnapshot,
+          rateLimits: { primary: { usedPercent: 40 } },
+        };
+        // Probed an hour ago: the models and account stay adopted, the usage is stale.
+        yield* provider.adoptPersistedSnapshot!({ snapshot: withUsage, checkedAtMs: 0 });
+        assert.strictEqual(yield* provider.isFresh!, false);
+        assert.strictEqual(yield* provider.isProbeFresh!, true);
+
+        const [first, second] = yield* Effect.all([provider.revalidate, provider.revalidate], {
+          concurrency: "unbounded",
+        });
+        assert.deepStrictEqual(first.rateLimits, { primary: { usedPercent: 41 } });
+        assert.deepStrictEqual(second, first);
+        assert.strictEqual(yield* Ref.get(usageReads), 1);
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+        assert.strictEqual(yield* provider.isFresh!, true);
+        assert.deepStrictEqual(yield* provider.getSnapshot, first);
+        yield* Effect.yieldNow;
+        assert.deepStrictEqual(yield* Ref.get(changes), [first]);
+
+        // Usage keeps the regular window.
+        yield* TestClock.adjust(Duration.minutes(5));
+        assert.strictEqual(yield* provider.isFresh!, false);
+        const again = yield* provider.revalidate;
+        assert.deepStrictEqual(again.rateLimits, { primary: { usedPercent: 42 } });
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+
+        // Once the persisted window ends, a probe runs again.
+        yield* TestClock.adjust(Duration.hours(5));
+        assert.strictEqual(yield* provider.isProbeFresh!, false);
+        assert.deepStrictEqual(yield* provider.revalidate, refreshedSnapshotSecond);
+        assert.strictEqual(yield* Ref.get(checkCalls), 1);
+        assert.strictEqual(yield* Ref.get(usageReads), 2);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps re-reading usage after a read found none, instead of trusting its absence", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const usageReads = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Effect.succeed(refreshedSnapshotSecond),
+          refreshUsage: (snapshot) =>
+            Ref.updateAndGet(usageReads, (count) => count + 1).pipe(
+              Effect.map((count) => {
+                const { rateLimits: _rateLimits, ...withoutUsage } = snapshot;
+                return count === 1
+                  ? withoutUsage
+                  : { ...withoutUsage, rateLimits: { primary: { usedPercent: 7 } } };
+              }),
+            ),
+          refreshInterval: null,
+          snapshotFreshness: Duration.minutes(5),
+          persistedSnapshotFreshness: Duration.hours(6),
+        });
+
+        yield* TestClock.adjust(Duration.minutes(10));
+        yield* provider.adoptPersistedSnapshot!({
+          snapshot: { ...refreshedSnapshot, rateLimits: { primary: { usedPercent: 40 } } },
+          checkedAtMs: 0,
+        });
+        // The stale limits are dropped rather than shown as current.
+        assert.strictEqual((yield* provider.revalidate).rateLimits, undefined);
+        yield* TestClock.adjust(Duration.minutes(5));
+        assert.strictEqual(yield* provider.isFresh!, false);
+        assert.deepStrictEqual((yield* provider.revalidate).rateLimits, {
+          primary: { usedPercent: 7 },
+        });
+        assert.strictEqual(yield* Ref.get(usageReads), 2);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("never extends an adopted window past now plus the freshness window", () =>
     Effect.scoped(
       Effect.gen(function* () {

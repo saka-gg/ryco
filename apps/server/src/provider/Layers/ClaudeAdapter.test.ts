@@ -1,15 +1,20 @@
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 
 import { ASSISTANT_ATTACHMENT_INSTRUCTIONS } from "../../assistantAttachments.ts";
+import { buildAgentTokenModeInstructions } from "../../tokenReduction.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import type {
-  Options as ClaudeQueryOptions,
-  PermissionMode,
-  PermissionResult,
-  SDKMessage,
-  SDKUserMessage,
+import {
+  query as runClaudeSdkQuery,
+  type Options as ClaudeQueryOptions,
+  type PermissionMode,
+  type PermissionResult,
+  type SDKMessage,
+  type SDKUserMessage,
+  type SpawnedProcess,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
@@ -45,7 +50,7 @@ import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { installProcessDeviceToolGateway } from "../../providerTools/deviceToolGateway.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterValidationError } from "../Errors.ts";
+import { ProviderAdapterRequestError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
   makeClaudeAdapter,
@@ -263,6 +268,87 @@ function makeHarness(config?: {
     query,
     getLastCreateQueryInput: () => createInput,
   };
+}
+
+/** The text appended to the `claude_code` preset; undefined for any other system prompt. */
+function readPresetSystemPromptAppend(options: ClaudeQueryOptions | undefined): string | undefined {
+  const systemPrompt = options?.systemPrompt;
+  if (
+    systemPrompt === undefined ||
+    typeof systemPrompt === "string" ||
+    Array.isArray(systemPrompt) ||
+    systemPrompt.type !== "preset" ||
+    systemPrompt.preset !== "claude_code"
+  ) {
+    return undefined;
+  }
+  return systemPrompt.append;
+}
+
+/**
+ * Runs `options` through the real SDK `query()` against an in-memory CLI process and
+ * returns the initialize control request the SDK writes to the CLI's stdin.
+ */
+async function readSdkInitializeRequest(
+  options: ClaudeQueryOptions,
+): Promise<{ readonly appendSystemPrompt?: string }> {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const processEvents = new EventEmitter();
+  const abortController = new AbortController();
+  const initialize = new Promise<{ readonly appendSystemPrompt?: string }>((resolve, reject) => {
+    let buffered = "";
+    stdin.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString("utf8");
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) return;
+      try {
+        const message = JSON.parse(buffered.slice(0, newline)) as {
+          readonly request?: { readonly subtype?: string; readonly appendSystemPrompt?: string };
+        };
+        if (message.request?.subtype !== "initialize") {
+          reject(new Error(`Expected an initialize request, got ${buffered.slice(0, newline)}`));
+          return;
+        }
+        resolve(message.request);
+      } catch (cause) {
+        reject(cause);
+      }
+    });
+  });
+  type Listener = Parameters<EventEmitter["on"]>[1];
+  const spawned = {
+    stdin,
+    stdout,
+    killed: false,
+    exitCode: null,
+    kill: () => true,
+    on: (event: string, listener: Listener) => {
+      processEvents.on(event, listener);
+    },
+    once: (event: string, listener: Listener) => {
+      processEvents.once(event, listener);
+    },
+    off: (event: string, listener: Listener) => {
+      processEvents.off(event, listener);
+    },
+  } as SpawnedProcess;
+  const sdkQuery = runClaudeSdkQuery({
+    // Never yields: only the initialize request is read, no prompt is sent.
+    // oxlint-disable-next-line require-yield
+    prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
+      await new Promise<never>(() => undefined);
+    })(),
+    options: { ...options, abortController, spawnClaudeCodeProcess: () => spawned },
+  });
+  void sdkQuery.next().catch(() => undefined);
+  try {
+    return await initialize;
+  } finally {
+    abortController.abort();
+    stdout.end();
+    processEvents.emit("exit", 0, null);
+  }
 }
 
 class ProbedFakeClaudeQuery extends FakeClaudeQuery {
@@ -628,10 +714,75 @@ describe("ClaudeAdapterLive", () => {
         runtimeMode: "full-access",
       });
 
-      const options = harness.getLastCreateQueryInput()?.options as
-        | { readonly appendSystemPrompt?: string }
-        | undefined;
-      assert.include(options?.appendSystemPrompt ?? "", ASSISTANT_ATTACHMENT_INSTRUCTIONS);
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.isDefined(options);
+      // The SDK drops a top-level `appendSystemPrompt`; only `systemPrompt.append` is read.
+      assert.isFalse("appendSystemPrompt" in options);
+      assert.include(
+        readPresetSystemPromptAppend(options) ?? "",
+        ASSISTANT_ATTACHMENT_INSTRUCTIONS,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("appends the token-mode and project custom system prompts to the preset", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-system-prompt"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        tokenMode: "aggressive",
+        customSystemPrompt: "Always answer in haiku.",
+      });
+
+      const append = readPresetSystemPromptAppend(harness.getLastCreateQueryInput()?.options) ?? "";
+      assert.include(append, ASSISTANT_ATTACHMENT_INSTRUCTIONS);
+      assert.include(append, buildAgentTokenModeInstructions("aggressive") ?? "<missing>");
+      assert.include(append, "<project_custom_system_prompt>\nAlways answer in haiku.");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("hands the appended system prompt to the CLI through the real SDK", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-sdk-contract"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.isDefined(options);
+
+      // Run the adapter's options through the pinned SDK with an in-memory CLI and read
+      // the initialize request it writes: that is what Claude Code actually receives.
+      const initialize = yield* Effect.promise(() => readSdkInitializeRequest(options));
+      assert.include(initialize.appendSystemPrompt ?? "", ASSISTANT_ATTACHMENT_INSTRUCTIONS);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("fails a project-commands read whose probe got no answer", () => {
+    const harness = makeHarness({
+      claudeConfig: { binaryPath: "/nonexistent/ryco-test/claude" },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      // An unanswered probe must not pass for a directory without commands.
+      const error = yield* adapter.readProjectCommands!("/tmp").pipe(Effect.flip);
+      assert.instanceOf(error, ProviderAdapterRequestError);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

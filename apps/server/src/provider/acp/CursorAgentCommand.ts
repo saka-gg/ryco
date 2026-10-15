@@ -9,9 +9,14 @@
  *
  * @module provider/acp/CursorAgentCommand
  */
+import { ProviderDriverKind } from "@ryco/contracts";
 import { resolveCommandPath } from "@ryco/shared/shell";
 import { Effect } from "effect";
 
+import {
+  makeProviderMaintenanceCapabilities,
+  type ProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 import type { AcpStartupPhase } from "./AcpSessionRuntime.ts";
 
 export const DEFAULT_CURSOR_AGENT_COMMAND = "agent";
@@ -75,3 +80,18 @@ export const cursorAgentCommandCandidates = (
     ? [PREFERRED_CURSOR_AGENT_COMMAND, DEFAULT_CURSOR_AGENT_COMMAND]
     : [configured];
 };
+
+/**
+ * Cursor updates itself (`<command> update`). The update runs the resolved command, so it never
+ * reaches another CLI's `agent` that happens to come first on PATH.
+ */
+export const makeCursorMaintenanceCapabilities = (
+  command: ResolvedCursorAgentCommand,
+): ProviderMaintenanceCapabilities =>
+  makeProviderMaintenanceCapabilities({
+    provider: ProviderDriverKind.make("cursor"),
+    packageName: null,
+    updateExecutable: command.resolvedPath ?? command.command,
+    updateArgs: ["update"],
+    updateLockKey: "cursor-agent",
+  });

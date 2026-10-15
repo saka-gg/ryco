@@ -20,7 +20,8 @@ export const PROVIDER_BINARIES: ReadonlyArray<{ readonly name: string; readonly 
   [
     { name: "Claude", binary: "claude" },
     { name: "Codex", binary: "codex" },
-    { name: "Cursor", binary: "agent" },
+    // Cursor installs `cursor-agent` beside `agent`, a name other CLIs (Grok) ship too.
+    { name: "Cursor", binary: "cursor-agent" },
     { name: "GitHub Copilot", binary: "copilot" },
     { name: "OpenCode", binary: "opencode" },
     { name: "Grok", binary: "grok" },

@@ -25,6 +25,7 @@ import {
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
   probeClaudeCapabilities,
+  refreshClaudeProviderUsage,
 } from "../Layers/ClaudeProvider.ts";
 import { makeCachedClaudeUsageProbe } from "../Layers/ClaudeUsage.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
@@ -48,7 +49,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
-  resolveClaudeSourceRoot,
+  resolveClaudeProbeAuthFiles,
 } from "./ClaudeHome.ts";
 import { AgentControlSessionRegistry } from "../../agentControl/Services/AgentControlSessionRegistry.ts";
 
@@ -136,12 +137,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         binaryPaths: [effectiveConfig.binaryPath],
         env: processEnv,
         settings: { instanceId, displayName, accentColor, environment, config: effectiveConfig },
-        authFiles: [
-          path.join(
-            yield* resolveClaudeSourceRoot(effectiveConfig, processEnv),
-            ".credentials.json",
-          ),
-        ],
+        authFiles: yield* resolveClaudeProbeAuthFiles(effectiveConfig, processEnv),
         // The probed model list comes from the (remotely refreshable) model manifest.
         ...(Option.isSome(modelManifest) ? { dynamicInputs: modelManifest.value.current } : {}),
       });
@@ -201,6 +197,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         haveSettingsChanged: () => false,
         initialSnapshot: (settings) => stampIdentity(makePendingClaudeProvider(settings)),
         checkProvider,
+        // An adopted snapshot's usage is re-read alone: no `claude --version`, no SDK session.
+        refreshUsage: (current) =>
+          refreshClaudeProviderUsage(effectiveConfig, current, processEnv, probeUsage).pipe(
+            Effect.provideService(Path.Path, path),
+          ),
         enrichSnapshot: ({ snapshot, publishSnapshot }) =>
           maintenanceCapabilities.pipe(
             Effect.flatMap((capabilities) =>

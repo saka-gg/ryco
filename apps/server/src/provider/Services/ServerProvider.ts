@@ -16,6 +16,11 @@ export interface ServerProviderShape {
   readonly revalidate: Effect.Effect<ServerProvider>;
   /** Whether `revalidate` would return the current snapshot without probing. */
   readonly isFresh?: Effect.Effect<boolean>;
+  /**
+   * Whether `revalidate` would answer without a full probe: at most it re-reads usage limits,
+   * which leaves the persisted probe record as it is. Absent means the same as `isFresh`.
+   */
+  readonly isProbeFresh?: Effect.Effect<boolean>;
   readonly refresh: Effect.Effect<ServerProvider>;
   readonly streamChanges: Stream.Stream<ServerProvider>;
   /**

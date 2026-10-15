@@ -28,6 +28,8 @@ const emitLateIdlessXAiPromptSequence =
   readEnv("RYCO_ACP_EMIT_LATE_IDLESS_XAI_PROMPT_SEQUENCE") === "1";
 const failSetConfigOption = readEnv("RYCO_ACP_FAIL_SET_CONFIG_OPTION") === "1";
 const failPrompt = readEnv("RYCO_ACP_FAIL_PROMPT") === "1";
+// Never answers session/prompt: an agent that hangs mid-request.
+const hangPrompt = readEnv("RYCO_ACP_HANG_PROMPT") === "1";
 const advertiseHttpMcp = readEnv("RYCO_ACP_ADVERTISE_HTTP_MCP") === "1";
 const failMcpSetupOnce = readEnv("RYCO_ACP_FAIL_MCP_SETUP_ONCE") === "1";
 const exitOnSetConfigOption = readEnv("RYCO_ACP_EXIT_ON_SET_CONFIG_OPTION") === "1";
@@ -467,6 +469,10 @@ const program = Effect.gen(function* () {
           method: "session/prompt",
           params: request,
         });
+      }
+
+      if (hangPrompt) {
+        return yield* Effect.never;
       }
 
       if (emitStaleXAiPromptCompleteBeforeSecondHang && promptCount === 1) {

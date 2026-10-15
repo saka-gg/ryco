@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 
 import {
   TextGenerationError,
@@ -48,6 +48,13 @@ import {
   makeOpenCodeServerOwner,
   type OpenCodeServerOwner,
 } from "../provider/OpenCodeServerOwner.ts";
+
+/**
+ * Titles, branch names and workspace change summaries are short; each has a fallback (the
+ * user's own message, or no summary), so a hung OpenCode server must not hold them.
+ */
+const OPENCODE_NAMING_TIMEOUT_MS = 30_000;
+const OPENCODE_TIMEOUT_DETAIL = "OpenCode request timed out.";
 
 function getOpenCodePromptErrorMessage(error: unknown): string | null {
   if (!error || typeof error !== "object") {
@@ -119,6 +126,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     readonly outputSchemaJson: S;
     readonly modelSelection: ModelSelection;
     readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+    /** Bounds the request against the server (not the managed server's start). */
+    readonly timeoutMs?: number;
   }) {
     const parsedModel = parseOpenCodeModelSlug(input.modelSelection.model);
     if (!parsedModel) {
@@ -224,27 +233,47 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
           ),
         );
         return yield* Effect.tryPromise({
-          try: async () => {
-            const session = await client.session.create({
-              title: `Ryco ${input.operation}`,
-              permission: [{ permission: "*", pattern: "*", action: "deny" }],
-            });
+          // Interruption (a timeout) cancels the HTTP requests and aborts the session.
+          try: async (signal) => {
+            const session = await client.session.create(
+              {
+                title: `Ryco ${input.operation}`,
+                permission: [{ permission: "*", pattern: "*", action: "deny" }],
+              },
+              { signal },
+            );
             if (!session.data) {
               throw new Error("OpenCode session.create returned no session payload.");
             }
+            const sessionID = session.data.id;
+            const abortSession = () => {
+              void Promise.resolve()
+                .then(() => client.session.abort({ sessionID }))
+                .catch(() => undefined);
+            };
+            if (signal.aborted) {
+              abortSession();
+              throw new Error("OpenCode request cancelled.");
+            }
+            signal.addEventListener("abort", abortSession, { once: true });
             const selectedAgent = getModelSelectionStringOptionValue(input.modelSelection, "agent");
             const selectedVariant = getModelSelectionStringOptionValue(
               input.modelSelection,
               "variant",
             );
 
-            const result = await client.session.prompt({
-              sessionID: session.data.id,
-              model: parsedModel,
-              ...(selectedAgent ? { agent: selectedAgent } : {}),
-              ...(selectedVariant ? { variant: selectedVariant } : {}),
-              parts: [{ type: "text", text: finalPrompt }, ...fileParts],
-            });
+            const result = await client.session
+              .prompt(
+                {
+                  sessionID,
+                  model: parsedModel,
+                  ...(selectedAgent ? { agent: selectedAgent } : {}),
+                  ...(selectedVariant ? { variant: selectedVariant } : {}),
+                  parts: [{ type: "text", text: finalPrompt }, ...fileParts],
+                },
+                { signal },
+              )
+              .finally(() => signal.removeEventListener("abort", abortSession));
             const info = result.data?.info;
             const errorMessage = getOpenCodePromptErrorMessage(info?.error);
             if (errorMessage) {
@@ -265,9 +294,28 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         });
       });
 
+    const runBounded = (server: Pick<OpenCodeServerConnection, "url" | "serverPassword">) =>
+      input.timeoutMs === undefined
+        ? runAgainstServer(server)
+        : runAgainstServer(server).pipe(
+            Effect.timeoutOption(input.timeoutMs),
+            Effect.flatMap(
+              Option.match({
+                onNone: () =>
+                  Effect.fail(
+                    new TextGenerationError({
+                      operation: input.operation,
+                      detail: OPENCODE_TIMEOUT_DETAIL,
+                    }),
+                  ),
+                onSome: Effect.succeed,
+              }),
+            ),
+          );
+
     const rawOutput =
       openCodeSettings.serverUrl.length > 0
-        ? yield* runAgainstServer({
+        ? yield* runBounded({
             url: openCodeSettings.serverUrl,
             ...(openCodeSettings.serverPassword
               ? { serverPassword: openCodeSettings.serverPassword }
@@ -283,7 +331,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
                     cause,
                   }),
               ),
-              Effect.flatMap(runAgainstServer),
+              Effect.flatMap(runBounded),
             ),
           );
 
@@ -367,6 +415,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
       attachments: input.attachments,
+      timeoutMs: OPENCODE_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -390,6 +439,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
       attachments: input.attachments,
+      timeoutMs: OPENCODE_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -466,6 +516,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      timeoutMs: OPENCODE_NAMING_TIMEOUT_MS,
     });
     return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
   });

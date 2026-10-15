@@ -33,8 +33,11 @@ import {
 } from "../provider/acp/CursorAcpSupport.ts";
 
 const CURSOR_TIMEOUT_MS = 180_000;
-/** A workspace change summary is short and optional; no summary is the fallback. */
-const CURSOR_SUMMARY_TIMEOUT_MS = 30_000;
+/**
+ * Titles, branch names and workspace change summaries are short; each has a fallback (the
+ * user's own message, or no summary), so a hung agent must not hold them for minutes.
+ */
+const CURSOR_NAMING_TIMEOUT_MS = 30_000;
 
 function mapCursorAcpError(
   operation:
@@ -259,6 +262,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      timeoutMs: CURSOR_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -282,6 +286,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
+      timeoutMs: CURSOR_NAMING_TIMEOUT_MS,
     });
 
     return {
@@ -347,7 +352,7 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       prompt,
       outputSchemaJson: outputSchema,
       modelSelection: input.modelSelection,
-      timeoutMs: CURSOR_SUMMARY_TIMEOUT_MS,
+      timeoutMs: CURSOR_NAMING_TIMEOUT_MS,
     });
     return { summary: sanitizeWorkspaceChangesSummary(generated.summary) };
   });

@@ -2998,6 +2998,7 @@ const buildDeferredCodexRegistry = Effect.fn("buildDeferredCodexRegistry")(funct
   };
   readonly fingerprint: string;
   readonly probed: ServerProvider;
+  readonly refreshUsage?: (snapshot: ServerProvider) => Effect.Effect<ServerProvider>;
 }) {
   const scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
@@ -3036,6 +3037,7 @@ const buildDeferredCodexRegistry = Effect.fn("buildDeferredCodexRegistry")(funct
     haveSettingsChanged: () => false,
     initialSnapshot: () => codexSnapshot({ status: "warning", message: "Checking..." }),
     checkProvider: Ref.update(checks, (count) => count + 1).pipe(Effect.as(input.probed)),
+    ...(input.refreshUsage ? { refreshUsage: input.refreshUsage } : {}),
     refreshInterval: null,
   }).pipe(Scope.provide(scope));
   const instance: ProviderInstance = {
@@ -3151,6 +3153,49 @@ describe("ProviderRegistry persisted probe freshness", () => {
         assert.strictEqual((yield* readPersisted)?.probeFreshness?.fingerprint, "fp-1");
       }).pipe(Effect.provide(runtimeServices));
     }),
+  );
+
+  it.effect(
+    "re-reads only the usage of an adopted snapshot, keeping its persisted probe record",
+    () =>
+      Effect.gen(function* () {
+        const probedAt = new Date().toISOString();
+        const persisted = codexSnapshot({
+          checkedAt: "2026-10-02T00:00:00.000Z",
+          rateLimits: { primary: { usedPercent: 10 } },
+        });
+        const usageReads = yield* Ref.make(0);
+        const { runtimeServices, checks, arrive, readPersisted } =
+          yield* buildDeferredCodexRegistry({
+            persisted: {
+              provider: persisted,
+              probeFreshness: { fingerprint: "fp-1", checkedAt: probedAt },
+            },
+            fingerprint: "fp-1",
+            probed: codexSnapshot({ checkedAt: "2026-10-03T00:00:00.000Z" }),
+            refreshUsage: (snapshot) =>
+              Ref.update(usageReads, (count) => count + 1).pipe(
+                Effect.as({ ...snapshot, rateLimits: { primary: { usedPercent: 55 } } }),
+              ),
+          });
+
+        yield* Effect.gen(function* () {
+          yield* arrive;
+          // The adopted usage is past its five-minute window; the rest is not.
+          yield* TestClock.adjust("6 minutes");
+          const after = yield* revalidateInBackground;
+          assert.deepStrictEqual(after[0]?.rateLimits, { primary: { usedPercent: 55 } });
+          assert.strictEqual(after[0]?.checkedAt, persisted.checkedAt);
+          assert.strictEqual(yield* Ref.get(checks), 0);
+          assert.strictEqual(yield* Ref.get(usageReads), 1);
+          const written = yield* readPersisted;
+          assert.deepStrictEqual(written?.provider.rateLimits, { primary: { usedPercent: 55 } });
+          assert.deepStrictEqual(written?.probeFreshness, {
+            fingerprint: "fp-1",
+            checkedAt: probedAt,
+          });
+        }).pipe(Effect.provide(runtimeServices));
+      }),
   );
 
   it.effect("publishes the pending placeholder when nothing was persisted", () =>

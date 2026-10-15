@@ -120,7 +120,8 @@ export interface ProviderServiceShape {
   /**
    * The skills and slash commands `instanceId` offers in `cwd`, read without a session and
    * kept for five minutes (stale-while-revalidate). Empty when the instance cannot list per
-   * directory or the read fails. Optional so existing test doubles stay valid.
+   * directory or its first read fails; a failed refresh keeps serving the last good list, and
+   * a failure is never cached. Optional so existing test doubles stay valid.
    */
   readonly readProjectCommands?: (
     instanceId: ProviderInstanceId,

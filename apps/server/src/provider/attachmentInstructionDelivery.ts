@@ -3,7 +3,7 @@
  * reach a provider.
  *
  * The instructions describe a session-wide capability, so they belong in the
- * session's system or developer instructions (Claude `appendSystemPrompt`,
+ * session's system or developer instructions (Claude `systemPrompt.append`,
  * Codex collaboration-mode developer instructions). Adapters without such a
  * channel get them once, prefixed to the first turn of each runtime session.
  * A native command (`/compact`, `/init`, custom commands) is never prefixed:
@@ -50,7 +50,7 @@ export function makeAttachmentInstructionTracker() {
         delivered.delete(oldest);
       }
     },
-    /** The thread's conversation may have lost them (a rollback): deliver them again. */
+    /** The thread's conversation may have lost them (a rollback or compaction): deliver them again. */
     forget: (threadId: string): void => {
       delivered.delete(threadId);
     },
