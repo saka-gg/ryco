@@ -40,7 +40,7 @@ import {
   isSyntheticWorktreeId,
   normalizeWorktreePath,
   type SidebarTreeProject,
-  type SidebarTreeThread,
+  type ActiveSidebarTreeThread,
   type SidebarTreeWorktree,
   type SidebarWorktree,
 } from "./hooks/useSidebarTree";
@@ -87,9 +87,11 @@ const WORKTREE_THREAD_PREVIEW_LIMIT = 5;
 export interface SidebarWorktreeListProps {
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectExpanded: boolean;
-  resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
+  resolveThreadGitStatusTarget: (
+    thread: ActiveSidebarTreeThread,
+  ) => SidebarThreadGitStatusTarget | null;
   renderThread: (
-    thread: SidebarTreeThread,
+    thread: ActiveSidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
     gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
@@ -380,11 +382,13 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
   environmentId: EnvironmentId;
   projectExpanded: boolean;
   renderThread: (
-    thread: SidebarTreeThread,
+    thread: ActiveSidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
     gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
-  resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
+  resolveThreadGitStatusTarget: (
+    thread: ActiveSidebarTreeThread,
+  ) => SidebarThreadGitStatusTarget | null;
   visibleThreadKeys: ReadonlySet<string> | null;
   worktree: SidebarTreeWorktree;
   onCopyWorktreePath: (worktree: SidebarTreeWorktree) => void;
@@ -721,12 +725,14 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
 const SidebarWorktreeThreadRows = memo(function SidebarWorktreeThreadRows(props: {
   orderedProjectThreadKeys: readonly string[];
   renderThread: (
-    thread: SidebarTreeThread,
+    thread: ActiveSidebarTreeThread,
     orderedProjectThreadKeys: readonly string[],
     gitStatusTarget: GitStatusTarget | null | undefined,
   ) => React.ReactNode;
-  resolveThreadGitStatusTarget: (thread: SidebarTreeThread) => SidebarThreadGitStatusTarget | null;
-  visibleThreads: ReadonlyArray<SidebarTreeThread>;
+  resolveThreadGitStatusTarget: (
+    thread: ActiveSidebarTreeThread,
+  ) => SidebarThreadGitStatusTarget | null;
+  visibleThreads: ReadonlyArray<ActiveSidebarTreeThread>;
 }) {
   return (
     <>
@@ -1013,12 +1019,12 @@ function getOrderedThreadKeys(
 function getVisibleThreadsForWorktree(
   worktree: SidebarTreeWorktree,
   visibleThreadKeys: ReadonlySet<string> | null,
-): SidebarTreeThread[] {
+): ActiveSidebarTreeThread[] {
   return worktree.sessions.filter((thread) => shouldRenderThread(thread, visibleThreadKeys));
 }
 
 function shouldRenderThread(
-  thread: SidebarTreeThread,
+  thread: ActiveSidebarTreeThread,
   visibleThreadKeys: ReadonlySet<string> | null,
 ): boolean {
   if (thread.archivedAt !== null) {

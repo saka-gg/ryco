@@ -71,6 +71,7 @@ export function readSidebarUndoLocalContext(
   target: ScopedThreadRef,
 ): SidebarUndoLocalContext | null {
   const state = useStore.getState();
+  // An archived stub has a revision of its own (see `sidebarUndoThreadRevision`).
   const thread = selectSidebarThreadSummaryByRef(state, target);
   const project = thread
     ? selectProjectByRef(state, {

@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { SidebarTreeThread, SidebarTreeWorktree } from "./useSidebarTree";
+import type { ActiveSidebarTreeThread, SidebarTreeWorktree } from "./useSidebarTree";
 import { resolveWorktreeOpenTarget } from "./useSidebarWorktreeActions";
 
 const thread = (id: string, updatedAt: string) =>
-  ({ id, environmentId: "env", createdAt: updatedAt, updatedAt }) as unknown as SidebarTreeThread;
+  ({
+    id,
+    environmentId: "env",
+    createdAt: updatedAt,
+    updatedAt,
+  }) as unknown as ActiveSidebarTreeThread;
 
 function node(input: {
-  readonly sessions?: SidebarTreeThread[];
-  readonly archivedSessions?: SidebarTreeThread[];
+  readonly sessions?: ActiveSidebarTreeThread[];
+  readonly archivedSessions?: ActiveSidebarTreeThread[];
   readonly archivedAt?: string | null;
   readonly checkoutRemovedAt?: string | null;
 }): Pick<SidebarTreeWorktree, "sessions" | "archivedSessions" | "worktree"> {

@@ -1,6 +1,14 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import type { Project, SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import { getThreadSortTimestamp, sortThreads } from "@ryco/client-runtime/state/threads";
+import type {
+  Project,
+  SidebarThreadOrStub,
+  SidebarThreadSummary,
+} from "@ryco/client-runtime/state/threads";
+import {
+  getThreadSortTimestamp,
+  isUnarchivedThreadEntry,
+  sortThreads,
+} from "@ryco/client-runtime/state/threads";
 
 import {
   deriveLogicalProjectKey,
@@ -43,7 +51,8 @@ export function resolveHomeGroupingMode(
  */
 export function buildHomeThreadGroups(input: {
   readonly projects: ReadonlyArray<Project>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived threads, stubs among them, are left out. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly groupingMode: ProjectGroupingMode;
 }): ReadonlyArray<HomeThreadGroup> {
   const projectByRef = new Map<string, Project>();
@@ -71,7 +80,7 @@ export function buildHomeThreadGroups(input: {
   }
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) continue;
+    if (!isUnarchivedThreadEntry(thread)) continue;
     const project = projectByRef.get(projectRefKey(thread.environmentId, thread.projectId));
     if (!project) continue;
     const key = deriveLogicalProjectKey(project, { groupingMode: input.groupingMode });

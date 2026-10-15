@@ -36,7 +36,13 @@ import {
 
 import { scopeThreadRef, scopedProjectKey, scopedThreadKey } from "../../scoped.ts";
 import { CHAT_PROJECT_LABEL } from "../composer/chatDrafts.ts";
-import type { Project, SidebarThreadSummary, SidebarWorktreeSummary } from "./types.ts";
+import {
+  isArchivedThreadStub,
+  type Project,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
+} from "./types.ts";
 
 export interface ThreadInboxEnvironment {
   readonly environmentId: EnvironmentId;
@@ -106,7 +112,8 @@ export interface ThreadInboxEntry {
 export interface BuildThreadInboxInput {
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived stubs are accepted and, like every archived thread, excluded. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<ThreadInboxEnvironment>;
   readonly pinnedThreadKeys?: ReadonlySet<string> | ReadonlyArray<string> | undefined;
   readonly localQueuedThreadKeys?: ReadonlySet<string> | ReadonlyArray<string> | undefined;
@@ -421,6 +428,11 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
   let nextSettlementEvaluationAtMs: number | null = null;
   const entries: ThreadInboxEntry[] = [];
   for (const thread of input.threads) {
+    // Archived threads are never in the inbox, whatever their state; a stub knows no more.
+    if (isArchivedThreadStub(thread)) {
+      excludedCount += 1;
+      continue;
+    }
     const ref = scopeThreadRef(thread.environmentId, thread.id);
     const key = scopedThreadKey(ref);
     const environment =

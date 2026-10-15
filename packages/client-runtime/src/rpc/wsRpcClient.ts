@@ -62,6 +62,11 @@ export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions 
 export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
   /** Ask for small `thread-priorities` items instead of a snapshot per ranking. */
   readonly threadPriorities?: "delta";
+  /**
+   * Ask for archived threads as stubs (`snapshot.archivedThreadStubs`). Only
+   * for a listener whose store keeps stubs; older servers ignore it.
+   */
+  readonly archivedThreads?: "stub";
 }
 
 /** Options for a thread subscription; see `OrchestrationThreadHistoryRecoveryMode`. */
@@ -455,6 +460,8 @@ export interface WsRpcClient {
       typeof ORCHESTRATION_WS_METHODS.searchThreadMessages
     >;
     readonly getThreadWindow?: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getThreadWindow>;
+    /** Full shells for archived stubs; older servers answer "Unknown request tag". */
+    readonly getThreadShells?: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getThreadShells>;
     readonly getThreadHistoryPage?: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.getThreadHistoryPage
     >;
@@ -1066,6 +1073,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.searchThreadMessages](input)),
       getThreadWindow: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadWindow](input)),
+      getThreadShells: (input) =>
+        transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadShells](input)),
       getThreadHistoryPage: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getThreadHistoryPage](input)),
       getActivityPayload: (input) =>
@@ -1088,6 +1097,9 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
               // Bounded messages: a large shell stays under the relay's
               // message cap. Older servers ignore this and send one item.
               snapshotDelivery: "paged",
+              ...(options?.archivedThreads === undefined
+                ? {}
+                : { archivedThreads: options.archivedThreads }),
             });
           },
           (item) => {

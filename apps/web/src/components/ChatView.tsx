@@ -123,6 +123,7 @@ import { type LegendListRef } from "@legendapp/list/react";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadSummaryByRef,
+  selectEnvironmentState,
   selectSidebarThreadsForProjectRef,
   selectThreadExistsByRef,
   useStore,
@@ -144,6 +145,8 @@ import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_RUNTIME_MODE,
   MAX_TERMINALS_PER_GROUP,
+  fullThreadEntry,
+  isArchivedThreadStub,
   isChatImageAttachment,
   type ChatMessage,
   type TurnDiffSummary,
@@ -933,6 +936,11 @@ export default function ChatView(props: ChatViewProps) {
           )
         : undefined,
     [draftThread, localDraftError, threadId],
+  );
+  const routeThreadIsArchivedStub = useStore(
+    (store) =>
+      routeKind === "server" &&
+      isArchivedThreadStub(selectEnvironmentState(store, environmentId).threadShellById[threadId]),
   );
   const isServerThread = routeKind === "server" && serverThread !== undefined;
   const activeThread = isServerThread ? serverThread : localDraftThread;
@@ -2062,8 +2070,9 @@ export default function ChatView(props: ChatViewProps) {
   // banner is the only visible stop affordance. Stop routes through the
   // stop-everything interrupt: it kills every live background task before
   // interrupting the parent turn.
+  // An archived thread's stub carries none of this; its full summary loads on open.
   const activeThreadSummary = useStore((store) =>
-    selectSidebarThreadSummaryByRef(store, activeThreadRef),
+    fullThreadEntry(selectSidebarThreadSummaryByRef(store, activeThreadRef)),
   );
   const activeBackgroundLiveness =
     !isWorking && activeThread ? (activeThreadSummary?.backgroundLiveness ?? null) : null;
@@ -5667,9 +5676,10 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [headerOverlayActive, activeThreadId]);
 
-  // Empty state: no active thread
+  // Empty state: no active thread. An archived thread listed as a stub exists:
+  // its full shell and window are loading (this view retains them).
   if (!activeThread) {
-    return <NoActiveThreadState />;
+    return <NoActiveThreadState loading={routeThreadIsArchivedStub} />;
   }
 
   const workspacePreview =

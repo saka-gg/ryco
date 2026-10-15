@@ -1,10 +1,12 @@
 import type {
   EnvironmentId,
   OrchestrationEvent,
-  OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationStubbedShellSnapshot,
+  OrchestrationThreadShell,
   ScopedProjectRef,
   ScopedThreadRef,
+  ThreadId,
 } from "@ryco/contracts";
 
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
@@ -36,7 +38,18 @@ export interface EnvironmentStateSink {
   ) => void;
   readonly syncServerShellSnapshot: (
     environmentId: EnvironmentId,
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
+  ) => void;
+  /**
+   * Whether the store holds the thread as an archived stub. With
+   * `applyLoadedThreadShells`, lets the supervisor load the full shell of a
+   * stubbed thread that is opened. Absent, stubs stay stubs.
+   */
+  readonly isArchivedThreadStub?: (environmentId: EnvironmentId, threadId: ThreadId) => boolean;
+  /** Full shells loaded on demand for stubs; see the store's `applyLoadedThreadShells`. */
+  readonly applyLoadedThreadShells?: (
+    environmentId: EnvironmentId,
+    threads: ReadonlyArray<OrchestrationThreadShell>,
   ) => void;
   readonly reconcileSnapshotDerivedState: () => void;
   readonly syncProjects: (environmentId: EnvironmentId) => void;

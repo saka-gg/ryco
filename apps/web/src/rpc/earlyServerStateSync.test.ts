@@ -1,7 +1,10 @@
+import { createEnvironmentConnection } from "@ryco/client-runtime/connection";
+import type { KnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import {
   emitWelcome,
   resetServerStateForTests,
   startServerStateSync,
+  type WsRpcClient,
 } from "@ryco/client-runtime/rpc";
 import {
   EnvironmentId,
@@ -21,7 +24,7 @@ import {
 const lifecycleListeners = new Set<(event: ServerLifecycleStreamEvent) => void>();
 const configListeners = new Set<(event: ServerConfigStreamEvent) => void>();
 
-const client = {
+const server = {
   subscribeLifecycle: vi.fn((listener: (event: ServerLifecycleStreamEvent) => void) => {
     lifecycleListeners.add(listener);
     return () => lifecycleListeners.delete(listener);
@@ -31,6 +34,31 @@ const client = {
     return () => configListeners.delete(listener);
   }),
 };
+
+/** The primary connection as the web shell builds it: no config handler of its own. */
+function createPrimaryConnection() {
+  return createEnvironmentConnection({
+    kind: "primary",
+    knownEnvironment: {
+      environmentId: EnvironmentId.make("environment-local"),
+      label: "Local",
+    } as unknown as KnownEnvironment,
+    client: {
+      server,
+      orchestration: { subscribeShell: () => () => undefined },
+      terminal: { onEvent: () => () => undefined },
+      dispose: async () => undefined,
+      reconnect: async () => undefined,
+    } as unknown as WsRpcClient,
+    pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+    resetShellProjection: () => undefined,
+    applyShellEvent: () => undefined,
+    syncShellSnapshot: () => undefined,
+    applyTerminalEvent: () => undefined,
+  });
+}
+
+let connection = createPrimaryConnection();
 
 function welcome(threadId: string): ServerLifecycleWelcomePayload {
   return {
@@ -56,6 +84,7 @@ beforeEach(() => {
   lifecycleListeners.clear();
   configListeners.clear();
   resetServerStateForTests();
+  connection = createPrimaryConnection();
 });
 
 afterEach(() => {
@@ -66,15 +95,15 @@ afterEach(() => {
 
 describe("startEarlyPrimaryServerStateSync", () => {
   it("opens the welcome and config streams once and hands them to the shell's hold", () => {
-    startEarlyPrimaryServerStateSync(client);
-    expect(client.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(client.subscribeConfig).toHaveBeenCalledOnce();
+    startEarlyPrimaryServerStateSync(connection);
+    expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
 
-    // The shell's ServerStateBootstrap: same client, no second stream.
-    const stopShell = startServerStateSync(client);
+    // The shell's ServerStateBootstrap: same connection, no second stream.
+    const stopShell = startServerStateSync(connection);
     releaseEarlyPrimaryServerStateSync();
-    expect(client.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(client.subscribeConfig).toHaveBeenCalledOnce();
+    expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
     expect(lifecycleListeners.size).toBe(1);
     expect(configListeners.size).toBe(1);
 
@@ -85,7 +114,7 @@ describe("startEarlyPrimaryServerStateSync", () => {
 
   it("runs the first-welcome warm-up once", () => {
     const warm = vi.fn();
-    startEarlyPrimaryServerStateSync(client, { onFirstWelcome: warm });
+    startEarlyPrimaryServerStateSync(connection, { onFirstWelcome: warm });
 
     emitWelcome(welcome("thread-1"));
     emitWelcome(welcome("thread-2"));
@@ -96,7 +125,7 @@ describe("startEarlyPrimaryServerStateSync", () => {
 
   it("closes its streams when the shell never takes them over", () => {
     vi.useFakeTimers();
-    startEarlyPrimaryServerStateSync(client);
+    startEarlyPrimaryServerStateSync(connection);
 
     vi.advanceTimersByTime(EARLY_SERVER_STATE_SYNC_HOLD_MS - 1);
     expect(lifecycleListeners.size).toBe(1);
@@ -110,24 +139,24 @@ describe("startEarlyPrimaryServerStateSync", () => {
     const catalogsAttached = new Promise<void>((resolve) => {
       attachCatalogs = resolve;
     });
-    startEarlyPrimaryServerStateSync(client, { after: catalogsAttached });
+    startEarlyPrimaryServerStateSync(connection, { after: catalogsAttached });
     await Promise.resolve();
-    expect(client.subscribeConfig).not.toHaveBeenCalled();
-    expect(client.subscribeLifecycle).not.toHaveBeenCalled();
+    expect(server.subscribeConfig).not.toHaveBeenCalled();
+    expect(server.subscribeLifecycle).not.toHaveBeenCalled();
 
     attachCatalogs();
     await catalogsAttached;
     await Promise.resolve();
-    expect(client.subscribeConfig).toHaveBeenCalledOnce();
-    expect(client.subscribeLifecycle).toHaveBeenCalledOnce();
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
+    expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
   });
 
   it("opens the streams when the catalog attach rejects", async () => {
     const failed = Promise.reject(new Error("indexeddb unavailable"));
-    startEarlyPrimaryServerStateSync(client, { after: failed });
+    startEarlyPrimaryServerStateSync(connection, { after: failed });
     await failed.catch(() => undefined);
     await Promise.resolve();
-    expect(client.subscribeConfig).toHaveBeenCalledOnce();
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
   });
 
   it("opens nothing when the shell takes over before the catalogs attach", async () => {
@@ -136,16 +165,16 @@ describe("startEarlyPrimaryServerStateSync", () => {
       attachCatalogs = resolve;
     });
     const warm = vi.fn();
-    startEarlyPrimaryServerStateSync(client, { after: catalogsAttached, onFirstWelcome: warm });
+    startEarlyPrimaryServerStateSync(connection, { after: catalogsAttached, onFirstWelcome: warm });
 
-    const stopShell = startServerStateSync(client);
+    const stopShell = startServerStateSync(connection);
     releaseEarlyPrimaryServerStateSync();
     attachCatalogs();
     await catalogsAttached;
     await Promise.resolve();
     emitWelcome(welcome("thread-1"));
 
-    expect(client.subscribeConfig).toHaveBeenCalledOnce();
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
     expect(warm).not.toHaveBeenCalled();
     stopShell();
     expect(configListeners.size).toBe(0);

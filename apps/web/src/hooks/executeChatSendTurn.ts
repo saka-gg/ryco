@@ -5,7 +5,7 @@ import {
   readAndRememberProjectPreferences,
   readRememberedProjectPreferences,
 } from "./newDraftDefaults";
-import { readEnvironmentServerConfig } from "./useChatsAvailability";
+import { readNodeConfig, resolveNodeConfigSource } from "./nodeConfigSource";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
@@ -680,7 +680,8 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     }
     // Nothing here waits on a server round trip in the common case. Support for
     // project preferences comes from the environment's live config (hosted
-    // targets read it fresh: a cached one may still be another node's), the
+    // targets only from the connection's config for the current attempt and
+    // generation, else read fresh: a cached one may still be another node's), the
     // branch prefix from the preferences remembered when the draft opened or
     // worktree mode was entered (while the node's settings are unchanged), and
     // the setup-script choice is left to the server, which resolves the same
@@ -700,9 +701,10 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         ? readSettingsFallback()
         : undefined;
     const config = worktree.baseBranchForWorktree
-      ? isHostedHubMode()
-        ? await api.server?.getConfig?.()
-        : (readEnvironmentServerConfig(draft.environmentId) ?? (await api.server?.getConfig?.()))
+      ? await readNodeConfig(
+          resolveNodeConfigSource(draft.environmentId, { currentOnly: isHostedHubMode() }),
+          api,
+        )
       : null;
     const remembered = needsBranchPrefix
       ? readRememberedProjectPreferences(draft.environmentId, project.projectId, config ?? null)

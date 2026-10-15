@@ -57,6 +57,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreadMessages: "orchestration.searchThreadMessages",
   getThreadWindow: "orchestration.getThreadWindow",
+  getThreadShells: "orchestration.getThreadShells",
   getThreadHistoryPage: "orchestration.getThreadHistoryPage",
   getActivityPayload: "orchestration.getActivityPayload",
   setThreadHistoryRecovery: "orchestration.setThreadHistoryRecovery",
@@ -1191,6 +1192,30 @@ export const OrchestrationThreadShell = Schema.Struct({
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 
+/**
+ * An archived thread as a shell snapshot lists it for a client that asked for
+ * stubs (`archivedThreads: "stub"`): enough to list, count, link to, search and
+ * relate it (lineage), without the fields only an open conversation needs
+ * (model selection, session, latest turn, goal, pending flags). A client loads
+ * the full shell on demand (`getThreadShells`), and any later `thread-upserted`
+ * carries the full shell again. Uses the same leaf schemas as the full shell.
+ */
+export const OrchestrationArchivedThreadStub = Schema.Struct({
+  id: ThreadId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  worktreeId: Schema.optional(Schema.NullOr(WorktreeId)),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  archivedAt: IsoDateTime,
+  latestUserMessageAt: Schema.NullOr(IsoDateTime),
+  /** Server-owned provenance; absent on root threads. */
+  lineage: Schema.optional(Schema.NullOr(ThreadLineage)),
+});
+export type OrchestrationArchivedThreadStub = typeof OrchestrationArchivedThreadStub.Type;
+
 export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
@@ -1199,6 +1224,19 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
+
+/**
+ * A shell snapshot taken with `archivedThreads: "stub"`: `threads` lists every
+ * unarchived thread as a full shell and `archivedThreadStubs` every archived
+ * one, so each live thread is in exactly one of the two. It is never a wire
+ * shape of its own: the server sends it as pages (`snapshot-threads`, then
+ * `snapshot-archived-threads`) and the client reassembles it. A snapshot
+ * without the field (an older server, or no opt-in) lists archived threads in
+ * `threads` as full shells.
+ */
+export type OrchestrationStubbedShellSnapshot = OrchestrationShellSnapshot & {
+  readonly archivedThreadStubs?: ReadonlyArray<OrchestrationArchivedThreadStub> | undefined;
+};
 
 export const OrchestrationShellStreamEvent = Schema.Union([
   Schema.Struct({
@@ -1275,8 +1313,10 @@ export type OrchestrationShellSnapshotDelivery = typeof OrchestrationShellSnapsh
 
 /**
  * Opens a paged shell snapshot. Everything but the threads, plus how many
- * `snapshot-threads` will carry: `threadCount` in all, the last
- * `archivedThreadCount` of them archived.
+ * threads the pages will carry: `threadCount` in all, the last
+ * `archivedThreadCount` of them archived. With archived stubs, the archived
+ * ones are the `snapshot-archived-threads` stubs and the rest the
+ * `snapshot-threads` shells.
  */
 export const OrchestrationShellSnapshotBeginItem = Schema.Struct({
   kind: Schema.Literal("snapshot-begin"),
@@ -1297,6 +1337,18 @@ export const OrchestrationShellSnapshotThreadsItem = Schema.Struct({
 export type OrchestrationShellSnapshotThreadsItem =
   typeof OrchestrationShellSnapshotThreadsItem.Type;
 
+/**
+ * One page of a paged shell snapshot's archived threads as stubs. Only ever
+ * sent to a client that asked for `archivedThreads: "stub"`, after every
+ * `snapshot-threads` page of the same snapshot.
+ */
+export const OrchestrationShellSnapshotArchivedThreadsItem = Schema.Struct({
+  kind: Schema.Literal("snapshot-archived-threads"),
+  threads: Schema.Array(OrchestrationArchivedThreadStub),
+});
+export type OrchestrationShellSnapshotArchivedThreadsItem =
+  typeof OrchestrationShellSnapshotArchivedThreadsItem.Type;
+
 /** Closes a paged shell snapshot; the events after its sequence follow. */
 export const OrchestrationShellSnapshotEndItem = Schema.Struct({
   kind: Schema.Literal("snapshot-end"),
@@ -1306,6 +1358,7 @@ export type OrchestrationShellSnapshotEndItem = typeof OrchestrationShellSnapsho
 export const OrchestrationShellSnapshotPageItem = Schema.Union([
   OrchestrationShellSnapshotBeginItem,
   OrchestrationShellSnapshotThreadsItem,
+  OrchestrationShellSnapshotArchivedThreadsItem,
   OrchestrationShellSnapshotEndItem,
 ]);
 export type OrchestrationShellSnapshotPageItem = typeof OrchestrationShellSnapshotPageItem.Type;
@@ -1319,6 +1372,8 @@ export const OrchestrationShellStreamItem = Schema.Union([
   /** Only ever sent to a client that asked for `snapshotDelivery: "paged"`. */
   OrchestrationShellSnapshotBeginItem,
   OrchestrationShellSnapshotThreadsItem,
+  /** Only ever sent to a client that asked for `archivedThreads: "stub"` as well. */
+  OrchestrationShellSnapshotArchivedThreadsItem,
   OrchestrationShellSnapshotEndItem,
   /**
    * The server accepted `resumeFromSequence`: instead of a snapshot, the events
@@ -1335,12 +1390,15 @@ export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.T
 
 /**
  * A shell stream item as subscribers see it: a client that takes paged
- * snapshots reassembles the pages into one `snapshot` item before delivery.
+ * snapshots reassembles the pages into one `snapshot` item before delivery,
+ * whose snapshot carries the archived stubs when the server sent any.
  */
-export type OrchestrationShellSubscriptionItem = Exclude<
-  OrchestrationShellStreamItem,
-  OrchestrationShellSnapshotPageItem
->;
+export type OrchestrationShellSubscriptionItem =
+  | Exclude<
+      OrchestrationShellStreamItem,
+      OrchestrationShellSnapshotPageItem | { readonly kind: "snapshot" }
+    >
+  | { readonly kind: "snapshot"; readonly snapshot: OrchestrationStubbedShellSnapshot };
 
 export const OrchestrationSubscribeShellInput = Schema.Struct({
   /**
@@ -1364,6 +1422,15 @@ export const OrchestrationSubscribeShellInput = Schema.Struct({
    * keep sending that.
    */
   snapshotDelivery: Schema.optional(OrchestrationShellSnapshotDelivery),
+  /**
+   * `"stub"` asks for archived threads as stubs (`OrchestrationArchivedThreadStub`)
+   * in `snapshot-archived-threads` pages instead of full shells. Honoured only
+   * with `snapshotDelivery: "paged"`; the snapshot still lists every live
+   * thread. Live `thread-upserted` items keep carrying full shells. Absent, or
+   * from an older server, which ignores the field, archived threads arrive as
+   * full shells.
+   */
+  archivedThreads: Schema.optional(Schema.Literal("stub")),
 });
 export type OrchestrationSubscribeShellInput = typeof OrchestrationSubscribeShellInput.Type;
 
@@ -1451,6 +1518,34 @@ export const OrchestrationGetThreadWindowInput = Schema.Struct({
   activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
 });
 export type OrchestrationGetThreadWindowInput = typeof OrchestrationGetThreadWindowInput.Type;
+
+/** How many threads one `getThreadShells` request may name. */
+export const ORCHESTRATION_GET_THREAD_SHELLS_MAX_IDS = 100;
+
+/**
+ * Full shells of the named threads, for a client holding archived stubs
+ * (`archivedThreads: "stub"`) that needs a thread's full shell, such as when
+ * it opens an archived conversation.
+ */
+export const OrchestrationGetThreadShellsInput = Schema.Struct({
+  threadIds: Schema.Array(ThreadId).check(
+    Schema.isMaxLength(ORCHESTRATION_GET_THREAD_SHELLS_MAX_IDS),
+  ),
+});
+export type OrchestrationGetThreadShellsInput = typeof OrchestrationGetThreadShellsInput.Type;
+
+export const OrchestrationGetThreadShellsResult = Schema.Struct({
+  /** The projection sequence the shells were read at. */
+  snapshotSequence: NonNegativeInt,
+  /** Shells of the named live threads, in request order. A deleted or unknown id is left out. */
+  threads: Schema.Array(OrchestrationThreadShell),
+  /**
+   * Named threads the response's byte budget left out (it stays far below the
+   * relay message cap); ask for them again. Empty when every shell fitted.
+   */
+  remainingThreadIds: Schema.Array(ThreadId),
+});
+export type OrchestrationGetThreadShellsResult = typeof OrchestrationGetThreadShellsResult.Type;
 
 /**
  * Moves this connection's subscriptions of one thread between serving an open
@@ -3656,6 +3751,10 @@ export const OrchestrationRpcSchemas = {
   getThreadWindow: {
     input: OrchestrationGetThreadWindowInput,
     output: OrchestrationThreadWindowSnapshot,
+  },
+  getThreadShells: {
+    input: OrchestrationGetThreadShellsInput,
+    output: OrchestrationGetThreadShellsResult,
   },
   getThreadHistoryPage: {
     input: OrchestrationGetThreadHistoryPageInput,

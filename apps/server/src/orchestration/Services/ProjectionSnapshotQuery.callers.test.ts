@@ -25,7 +25,7 @@ const ALLOWED_SHELL_SNAPSHOT_CALLERS: Readonly<Record<string, { count: number; w
     why: "the cloud index's periodic rebuild; between rebuilds it patches changed rows",
   },
   "orchestration/Services/ProjectionSnapshotQuery.ts": {
-    count: 5,
+    count: 6,
     why: "narrow-read fallbacks for test doubles",
   },
   "workspace/WorkspaceLifecycle.ts": {

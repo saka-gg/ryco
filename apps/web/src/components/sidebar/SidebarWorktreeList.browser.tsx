@@ -7,7 +7,7 @@ import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { DraftId } from "../../composerDraftStore";
 import type {
   SidebarTreeProject,
-  SidebarTreeThread,
+  ActiveSidebarTreeThread,
   SidebarTreeWorktree,
   SidebarWorktree,
 } from "./hooks/useSidebarTree";
@@ -580,7 +580,7 @@ function makeManySessionsTreeProject(count: number): SidebarTreeProject {
   };
 }
 
-function makeSessionThread(index: number): SidebarTreeThread {
+function makeSessionThread(index: number): ActiveSidebarTreeThread {
   return {
     ...makeThread(),
     id: ThreadId.make(`thread-${index}`),
@@ -842,7 +842,7 @@ function makeProject() {
   };
 }
 
-function makeThread(): SidebarTreeThread {
+function makeThread(): ActiveSidebarTreeThread {
   return {
     id: ThreadId.make("thread-1"),
     environmentId,

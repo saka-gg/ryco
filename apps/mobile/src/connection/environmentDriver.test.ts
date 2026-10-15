@@ -178,6 +178,7 @@ function fakeConnection(
       reconnect: async () => {},
     } as EnvironmentConnection["client"],
     shellSnapshotReadiness: { read: () => null, subscribe: () => () => {} },
+    config: { read: () => null, subscribe: () => () => {} },
     ensureBootstrapped: async () => {},
     reconnect: overrides?.reconnect ?? (async () => {}),
     dispose: overrides?.dispose ?? (async () => {}),

@@ -251,6 +251,13 @@ export function createHostedPrimaryConnection(
     kind: "primary",
     knownEnvironment,
     client,
+    // The coordinator's record for this environment owns the generation: once
+    // it is replaced or removed, this connection's config is neither
+    // published nor read.
+    lifecycleGeneration: {
+      generation: connectionGeneration,
+      readCurrent: () => coordinator.read(descriptor.environmentId)?.generation ?? null,
+    },
     onConfigUpdated: (config) => {
       if (!acceptsEvent()) return;
       writeEnvironmentServerConfig(descriptor.environmentId, config);

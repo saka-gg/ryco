@@ -1,4 +1,5 @@
 import type {
+  OrchestrationArchivedThreadStub,
   OrchestrationShellSnapshotBeginItem,
   OrchestrationShellStreamItem,
   OrchestrationShellSubscriptionItem,
@@ -13,7 +14,9 @@ import type {
  * snapshot completed, exactly as if it had preceded a single `snapshot` item.
  *
  * A server that does not page (an older one) sends `snapshot` items, which
- * pass through unchanged. One assembler serves one subscription attempt; call
+ * pass through unchanged. Archived stubs (`snapshot-archived-threads`, for
+ * `archivedThreads: "stub"`) land in the snapshot's `archivedThreadStubs`;
+ * the thread count covers full shells and stubs together. One assembler serves one subscription attempt; call
  * `reset` when the subscription restarts so a half-received snapshot from the
  * previous attempt can never be completed by the next one.
  */
@@ -31,9 +34,11 @@ export function createShellSnapshotAssembler(
 ): ShellSnapshotAssembler {
   let header: OrchestrationShellSnapshotBeginItem | null = null;
   let threads: Array<OrchestrationThreadShell> = [];
+  let stubs: Array<OrchestrationArchivedThreadStub> | null = null;
   const reset = () => {
     header = null;
     threads = [];
+    stubs = null;
   };
   return {
     reset,
@@ -43,18 +48,26 @@ export function createShellSnapshotAssembler(
           // A new snapshot supersedes one that never ended.
           header = item;
           threads = [];
+          stubs = null;
           return null;
         case "snapshot-threads":
           if (header === null) return null;
           for (const thread of item.threads) threads.push(thread);
           return null;
+        case "snapshot-archived-threads":
+          if (header === null) return null;
+          stubs ??= [];
+          for (const stub of item.threads) stubs.push(stub);
+          return null;
         case "snapshot-end": {
           const begun = header;
           const received = threads;
+          const receivedStubs = stubs;
           reset();
           if (begun === null) return null;
-          if (received.length !== begun.threadCount) {
-            onIncomplete({ expected: begun.threadCount, received: received.length });
+          const receivedCount = received.length + (receivedStubs?.length ?? 0);
+          if (receivedCount !== begun.threadCount) {
+            onIncomplete({ expected: begun.threadCount, received: receivedCount });
           }
           return {
             kind: "snapshot",
@@ -63,6 +76,7 @@ export function createShellSnapshotAssembler(
               projects: begun.projects,
               ...(begun.worktrees === undefined ? {} : { worktrees: begun.worktrees }),
               threads: received,
+              ...(receivedStubs === null ? {} : { archivedThreadStubs: receivedStubs }),
               updatedAt: begun.updatedAt,
             },
           };

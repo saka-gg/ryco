@@ -1,7 +1,8 @@
 import type { Array as Arr } from "effect";
 import type {
-  OrchestrationShellSnapshot,
+  OrchestrationArchivedThreadStub,
   OrchestrationShellStreamItem,
+  OrchestrationStubbedShellSnapshot,
   OrchestrationThreadShell,
 } from "@ryco/contracts";
 
@@ -22,9 +23,13 @@ const PAGE_FRAMING_BYTES = 128;
  * filling the same byte budget. The archive does not start a message of its
  * own: every message costs an ack round trip, and clients apply the snapshot
  * only at `snapshot-end`, so a shell within the budget is exactly one message.
+ *
+ * A stubbed snapshot (`archivedThreadStubs`, for `archivedThreads: "stub"`)
+ * sends its archived threads as `snapshot-archived-threads` pages of stubs
+ * after every full shell, in the same byte budget.
  */
 export const pageShellSnapshot = (
-  snapshot: OrchestrationShellSnapshot,
+  snapshot: OrchestrationStubbedShellSnapshot,
   maxBytes: number = ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES,
 ): ReadonlyArray<Arr.NonEmptyReadonlyArray<OrchestrationShellStreamItem>> => {
   const unarchived: Array<OrchestrationThreadShell> = [];
@@ -32,24 +37,32 @@ export const pageShellSnapshot = (
   for (const thread of snapshot.threads) {
     (thread.archivedAt === null ? unarchived : archived).push(thread);
   }
+  const stubs = snapshot.archivedThreadStubs ?? [];
+  const archivedThreadCount = archived.length + stubs.length;
   const begin: OrchestrationShellStreamItem = {
     kind: "snapshot-begin",
     snapshotSequence: snapshot.snapshotSequence,
     updatedAt: snapshot.updatedAt,
     projects: snapshot.projects,
     ...(snapshot.worktrees === undefined ? {} : { worktrees: snapshot.worktrees }),
-    threadCount: snapshot.threads.length,
-    archivedThreadCount: archived.length,
+    threadCount: snapshot.threads.length + stubs.length,
+    archivedThreadCount,
   };
 
   const messages: Array<Arr.NonEmptyArray<OrchestrationShellStreamItem>> = [];
   let message: Array<OrchestrationShellStreamItem> = [begin];
   let messageBytes = jsonBytes(begin);
   let page: Array<OrchestrationThreadShell> = [];
+  let stubPage: Array<OrchestrationArchivedThreadStub> = [];
   const closePage = () => {
-    if (page.length === 0) return;
-    message.push({ kind: "snapshot-threads", threads: page });
-    page = [];
+    if (page.length > 0) {
+      message.push({ kind: "snapshot-threads", threads: page });
+      page = [];
+    }
+    if (stubPage.length > 0) {
+      message.push({ kind: "snapshot-archived-threads", threads: stubPage });
+      stubPage = [];
+    }
   };
   const closeMessage = () => {
     closePage();
@@ -59,19 +72,34 @@ export const pageShellSnapshot = (
     message = [];
     messageBytes = 0;
   };
+  const fit = (threadBytes: number) => {
+    if (messageBytes > 0 && messageBytes + threadBytes > maxBytes - PAGE_FRAMING_BYTES) {
+      closeMessage();
+    }
+    messageBytes += threadBytes;
+  };
   const addThreads = (threads: ReadonlyArray<OrchestrationThreadShell>) => {
     for (const thread of threads) {
-      const threadBytes = jsonBytes(thread) + 1;
-      if (messageBytes > 0 && messageBytes + threadBytes > maxBytes - PAGE_FRAMING_BYTES) {
-        closeMessage();
-      }
+      fit(jsonBytes(thread) + 1);
       page.push(thread);
-      messageBytes += threadBytes;
+    }
+  };
+  const addStubs = (threads: ReadonlyArray<OrchestrationArchivedThreadStub>) => {
+    // Full shells of the message come first: its pages keep the snapshot order.
+    if (threads.length > 0 && page.length > 0) {
+      message.push({ kind: "snapshot-threads", threads: page });
+      page = [];
+      messageBytes += PAGE_FRAMING_BYTES / 2;
+    }
+    for (const thread of threads) {
+      fit(jsonBytes(thread) + 1);
+      stubPage.push(thread);
     }
   };
 
   addThreads(unarchived);
   addThreads(archived);
+  addStubs(stubs);
   closePage();
   message.push({ kind: "snapshot-end" });
   messages.push(message as Arr.NonEmptyArray<OrchestrationShellStreamItem>);

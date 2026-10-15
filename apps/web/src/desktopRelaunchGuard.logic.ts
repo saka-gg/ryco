@@ -1,6 +1,7 @@
 import {
   deriveThreadActivityStatus,
-  type SidebarThreadSummary,
+  isUnarchivedThreadEntry,
+  type SidebarThreadOrStub,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 
@@ -21,14 +22,15 @@ const INTERRUPTIBLE = new Set(["working", "approval", "input", "connecting"]);
  * reconnect, show nothing running whatever the backend is doing.
  */
 export function countActiveDesktopTurns(
-  threads: ReadonlyArray<SidebarThreadSummary>,
+  /** Archived threads (stubs among them) never count. */
+  threads: ReadonlyArray<SidebarThreadOrStub>,
   localEnvironmentId: EnvironmentId | null,
   localEnvironmentLive: boolean,
 ): number | null {
   if (localEnvironmentId === null || !localEnvironmentLive) return null;
   let count = 0;
   for (const thread of threads) {
-    if (thread.environmentId !== localEnvironmentId || thread.archivedAt !== null) continue;
+    if (thread.environmentId !== localEnvironmentId || !isUnarchivedThreadEntry(thread)) continue;
     if (INTERRUPTIBLE.has(deriveThreadActivityStatus(thread))) count += 1;
   }
   return count;

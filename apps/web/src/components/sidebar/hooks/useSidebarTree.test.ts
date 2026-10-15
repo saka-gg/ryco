@@ -2,7 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@ryco/contracts";
 import { DEFAULT_INTERACTION_MODE, type Project } from "../../../types";
 import { DraftId } from "../../../composerDraftStore";
-import { composeSidebarTree, type SidebarTreeThread, type SidebarWorktree } from "./useSidebarTree";
+import {
+  composeSidebarTree,
+  type ActiveSidebarTreeThread,
+  type SidebarWorktree,
+} from "./useSidebarTree";
 
 const environmentId = EnvironmentId.make("environment-local");
 
@@ -124,7 +128,7 @@ describe("composeSidebarTree", () => {
       ThreadId.make("thread-kept"),
     );
     expect(
-      listed.flatMap((entry) => entry.sessions.concat(entry.archivedSessions)).map((t) => t.id),
+      listed.flatMap((entry) => [...entry.sessions, ...entry.archivedSessions]).map((t) => t.id),
     ).toEqual([ThreadId.make("thread-unarchived")]);
   });
 
@@ -629,7 +633,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
-function makeThread(overrides: Partial<SidebarTreeThread> = {}): SidebarTreeThread {
+function makeThread(overrides: Partial<ActiveSidebarTreeThread> = {}): ActiveSidebarTreeThread {
   return {
     id: ThreadId.make("thread-1"),
     environmentId,

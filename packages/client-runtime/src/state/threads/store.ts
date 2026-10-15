@@ -9,8 +9,10 @@ import type {
   OrchestrationProposedPlan,
   OrchestrationReadModel,
   OrchestrationReleasedTurn,
+  OrchestrationArchivedThreadStub,
   OrchestrationShellSnapshot,
   OrchestrationShellStreamEvent,
+  OrchestrationStubbedShellSnapshot,
   OrchestrationShellThreadPrioritiesItem,
   OrchestrationSession,
   OrchestrationSessionStatus,
@@ -41,9 +43,13 @@ import {
 } from "@ryco/shared/worktreePullRequests";
 import { create } from "zustand";
 import {
+  type ArchivedThreadStub,
   type ChatMessage,
   DEFAULT_AGENT_TOKEN_MODE,
+  isArchivedThreadStub,
   type Project,
+  type SidebarThreadOrStub,
+  type ThreadShellOrStub,
   type ProposedPlan,
   type SidebarThreadSummary,
   type SidebarWorktreeSummary,
@@ -89,7 +95,8 @@ export interface EnvironmentState {
   // functions prevent unnecessary React re-renders when both streams deliver
   // equivalent data.
   // ---------------------------------------------------------------------------
-  threadShellById: Record<ThreadId, ThreadShell>;
+  /** Archived threads a stubbed shell snapshot listed hold their stub here (see `ArchivedThreadStub`). */
+  threadShellById: Record<ThreadId, ThreadShellOrStub>;
   threadSessionById: Record<ThreadId, ThreadSession | null>;
   threadTurnStateById: Record<ThreadId, ThreadTurnState>;
 
@@ -122,7 +129,8 @@ export interface EnvironmentState {
   // stream must NOT write here; the shell stream is the single source of
   // truth for sidebar data.
   // ---------------------------------------------------------------------------
-  sidebarThreadSummaryById: Record<ThreadId, SidebarThreadSummary>;
+  /** The same stub object as `threadShellById` for an archived thread listed as a stub. */
+  sidebarThreadSummaryById: Record<ThreadId, SidebarThreadOrStub>;
 
   bootstrapComplete: boolean;
 
@@ -508,6 +516,80 @@ function mapThreadShell(
   };
 }
 
+function mapArchivedThreadStub(
+  stub: OrchestrationArchivedThreadStub,
+  environmentId: EnvironmentId,
+): ArchivedThreadStub {
+  return {
+    shellDetail: "archived-stub",
+    id: stub.id,
+    environmentId,
+    projectId: stub.projectId,
+    title: stub.title,
+    createdAt: stub.createdAt,
+    updatedAt: stub.updatedAt,
+    archivedAt: stub.archivedAt,
+    branch: stub.branch,
+    worktreePath: stub.worktreePath,
+    worktreeId: stub.worktreeId ?? null,
+    latestUserMessageAt: stub.latestUserMessageAt,
+    lineage: stub.lineage ?? null,
+  };
+}
+
+function archivedThreadStubsEqual(
+  left: ThreadShellOrStub | SidebarThreadOrStub | undefined,
+  right: ArchivedThreadStub,
+): boolean {
+  return (
+    isArchivedThreadStub(left) &&
+    left.id === right.id &&
+    left.environmentId === right.environmentId &&
+    left.projectId === right.projectId &&
+    left.title === right.title &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    left.archivedAt === right.archivedAt &&
+    left.branch === right.branch &&
+    left.worktreePath === right.worktreePath &&
+    left.worktreeId === right.worktreeId &&
+    left.latestUserMessageAt === right.latestUserMessageAt &&
+    threadLineagesEqual(left.lineage, right.lineage)
+  );
+}
+
+/**
+ * Whether a full shell and summary already held for a thread are what `stub`
+ * lists: archived at the same moment with the same row `updatedAt` (which
+ * every thread event bumps, session changes included) and the same stub
+ * fields. A re-applied stubbed snapshot keeps such a thread's full entries
+ * instead of downgrading a thread that is open, or was loaded on demand.
+ */
+function fullEntriesMatchStub(
+  shell: ThreadShellOrStub | undefined,
+  summary: SidebarThreadOrStub | undefined,
+  stub: ArchivedThreadStub,
+): boolean {
+  if (shell === undefined || summary === undefined) return false;
+  if (isArchivedThreadStub(shell) || isArchivedThreadStub(summary)) return false;
+  return (
+    shell.id === stub.id &&
+    shell.environmentId === stub.environmentId &&
+    shell.projectId === stub.projectId &&
+    shell.title === stub.title &&
+    shell.createdAt === stub.createdAt &&
+    shell.updatedAt === stub.updatedAt &&
+    shell.archivedAt === stub.archivedAt &&
+    shell.branch === stub.branch &&
+    shell.worktreePath === stub.worktreePath &&
+    (shell.worktreeId ?? null) === stub.worktreeId &&
+    summary.updatedAt === stub.updatedAt &&
+    summary.archivedAt === stub.archivedAt &&
+    summary.latestUserMessageAt === stub.latestUserMessageAt &&
+    threadLineagesEqual(shell.lineage, stub.lineage)
+  );
+}
+
 function toThreadShell(thread: Thread): ThreadShell {
   return {
     id: thread.id,
@@ -622,11 +704,12 @@ function threadSessionsEqual(
 }
 
 function sidebarThreadSummariesEqual(
-  left: SidebarThreadSummary | undefined,
+  left: SidebarThreadOrStub | undefined,
   right: SidebarThreadSummary,
 ): boolean {
   return (
     left !== undefined &&
+    !isArchivedThreadStub(left) &&
     left.id === right.id &&
     left.projectId === right.projectId &&
     left.title === right.title &&
@@ -701,9 +784,10 @@ function threadPrioritiesEqual(
   );
 }
 
-function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): boolean {
+function threadShellsEqual(left: ThreadShellOrStub | undefined, right: ThreadShell): boolean {
   return (
     left !== undefined &&
+    !isArchivedThreadStub(left) &&
     left.id === right.id &&
     left.environmentId === right.environmentId &&
     left.codexThreadId === right.codexThreadId &&
@@ -986,11 +1070,14 @@ function retargetCheckoutState(
     if (
       thread?.projectId === input.projectId &&
       (thread.worktreeId === input.worktreeId || thread.worktreePath === input.sourcePath)
-    )
-      next = updateThreadState(next, id, (current) => ({
-        ...current,
-        worktreePath: input.destinationPath,
-      }));
+    ) {
+      next = isArchivedThreadStub(thread)
+        ? writeArchivedThreadStub(next, { ...thread, worktreePath: input.destinationPath })
+        : updateThreadState(next, id, (current) => ({
+            ...current,
+            worktreePath: input.destinationPath,
+          }));
+    }
   }
   return next;
 }
@@ -1021,7 +1108,8 @@ function writeThreadState(
     state,
     nextThread.id,
     nextThread.projectId,
-    previousThread?.projectId,
+    // A stub composes no thread, but its project already lists it.
+    previousThread?.projectId ?? previousShell?.projectId,
   );
 
   if (!threadShellsEqual(previousShell, nextShell)) {
@@ -1220,6 +1308,18 @@ function writeThreadShellState(
   }
 
   return nextState;
+}
+
+/** Replaces an archived thread's stub, which stands in for both its shell and its summary. */
+function writeArchivedThreadStub(
+  state: EnvironmentState,
+  stub: ArchivedThreadStub,
+): EnvironmentState {
+  return {
+    ...state,
+    threadShellById: { ...state.threadShellById, [stub.id]: stub },
+    sidebarThreadSummaryById: { ...state.sidebarThreadSummaryById, [stub.id]: stub },
+  };
 }
 
 function retainThreadScopedRecord<T>(
@@ -1628,7 +1728,10 @@ function updateThreadShellTimestamp(
   owned?: BatchOwnedContainers,
 ): EnvironmentState {
   const shell = state.threadShellById[threadId];
-  if (!shell || shell.updatedAt === updatedAt) {
+  // A stub keeps the row's `updatedAt` the shell listed, in both its records: a detail
+  // event's time would make the full shell loaded for it look stale, and split the one
+  // stub object the shell and summary records share. The full shell replaces it anyway.
+  if (!shell || shell.updatedAt === updatedAt || isArchivedThreadStub(shell)) {
     return state;
   }
 
@@ -1650,8 +1753,11 @@ function updateThreadSettlementState(
     readonly updatedAt: string;
   },
 ): EnvironmentState {
-  const shell = state.threadShellById[threadId];
-  const summary = state.sidebarThreadSummaryById[threadId];
+  // A stub has no settlement fields to patch; the full upsert that follows replaces it.
+  const storedShell = state.threadShellById[threadId];
+  const storedSummary = state.sidebarThreadSummaryById[threadId];
+  const shell = isArchivedThreadStub(storedShell) ? undefined : storedShell;
+  const summary = isArchivedThreadStub(storedSummary) ? undefined : storedSummary;
   if (!shell && !summary) {
     return state;
   }
@@ -2096,7 +2202,7 @@ function reuseUnchangedIdsByKey<K extends string, T>(
 
 function syncEnvironmentShellSnapshot(
   state: EnvironmentState,
-  snapshot: OrchestrationShellSnapshot,
+  snapshot: OrchestrationStubbedShellSnapshot,
   environmentId: EnvironmentId,
 ): EnvironmentState {
   // Structural sharing: a re-applied snapshot (reconnect, Hub node switch,
@@ -2119,7 +2225,9 @@ function syncEnvironmentShellSnapshot(
   });
   const projectState = buildProjectState(nextProjects);
   const worktreeState = buildWorktreeState(nextWorktrees);
+  const archivedThreadStubs = snapshot.archivedThreadStubs ?? [];
   const nextThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
+  for (const stub of archivedThreadStubs) nextThreadIds.add(stub.id);
   const nextState: EnvironmentState = {
     ...state,
     projectIds: reuseUnchangedIds(state.projectIds, projectState.projectIds),
@@ -2212,6 +2320,36 @@ function syncEnvironmentShellSnapshot(
       ? previousSummary!
       : mapped.summary;
   }
+  // Archived threads listed as stubs: the stub stands in for both the shell and the
+  // summary, with no session or turn state, unless the full entries already held are
+  // exactly what the stub lists (an open or on-demand-loaded archived thread). Only live
+  // entries are kept: rows painted from a cache, or demoted ones, are last-known state.
+  const previousEntriesLive = state.hydratedFromCacheAt === undefined;
+  for (const rawStub of archivedThreadStubs) {
+    const stub = mapArchivedThreadStub(rawStub, environmentId);
+    if (!Object.hasOwn(nextState.threadShellById, stub.id)) {
+      nextState.threadIds.push(stub.id);
+    }
+    const previousShell = ownValue(state.threadShellById, stub.id);
+    const previousSummary = ownValue(state.sidebarThreadSummaryById, stub.id);
+    if (previousEntriesLive && fullEntriesMatchStub(previousShell, previousSummary, stub)) {
+      nextState.threadShellById[stub.id] = previousShell!;
+      nextState.sidebarThreadSummaryById[stub.id] = previousSummary!;
+      nextState.threadSessionById[stub.id] = ownValue(state.threadSessionById, stub.id) ?? null;
+      const previousTurnState = ownValue(state.threadTurnStateById, stub.id);
+      if (previousTurnState !== undefined) {
+        nextState.threadTurnStateById[stub.id] = previousTurnState;
+      }
+      continue;
+    }
+    const entry = archivedThreadStubsEqual(previousShell, stub)
+      ? (previousShell as ArchivedThreadStub)
+      : stub;
+    nextState.threadShellById[stub.id] = entry;
+    nextState.sidebarThreadSummaryById[stub.id] = entry;
+    delete nextState.threadSessionById[stub.id];
+    delete nextState.threadTurnStateById[stub.id];
+  }
   for (const threadId of nextState.threadIds) {
     const projectId = nextState.threadShellById[threadId]!.projectId;
     (nextState.threadIdsByProjectId[projectId] ??= []).push(threadId);
@@ -2227,15 +2365,16 @@ function syncEnvironmentShellSnapshot(
     nextState.threadShellById,
     nextState.threadIds,
   );
+  // Stubs have no session or turn state entry, so these records key fewer threads.
   nextState.threadSessionById = reuseUnchangedRecord(
     state.threadSessionById,
     nextState.threadSessionById,
-    nextState.threadIds,
+    Object.keys(nextState.threadSessionById) as ThreadId[],
   );
   nextState.threadTurnStateById = reuseUnchangedRecord(
     state.threadTurnStateById,
     nextState.threadTurnStateById,
-    nextState.threadIds,
+    Object.keys(nextState.threadTurnStateById) as ThreadId[],
   );
   nextState.sidebarThreadSummaryById = reuseUnchangedRecord(
     state.sidebarThreadSummaryById,
@@ -2248,7 +2387,7 @@ function syncEnvironmentShellSnapshot(
 
 export function syncServerShellSnapshot(
   state: AppState,
-  snapshot: OrchestrationShellSnapshot,
+  snapshot: OrchestrationStubbedShellSnapshot,
   environmentId: EnvironmentId,
 ): AppState {
   const previous = getStoredEnvironmentState(state, environmentId);
@@ -2265,6 +2404,31 @@ export function syncServerShellSnapshot(
       });
   }
   return commitEnvironmentState(state, environmentId, next);
+}
+
+/**
+ * Applies full shells loaded on demand for archived stubs (`getThreadShells`) to a
+ * live environment. A loaded shell only ever replaces a stub, and only one at least as recent:
+ * a thread that a live upsert already made full, that was deleted meanwhile
+ * (no entry), or whose newer stub arrived after the read keeps what it has.
+ */
+export function applyLoadedThreadShells(
+  state: AppState,
+  threads: ReadonlyArray<OrchestrationThreadShell>,
+  environmentId: EnvironmentId,
+): AppState {
+  let environmentState = getStoredEnvironmentState(state, environmentId);
+  // Rows painted from a cache stay last-known state until a live snapshot replaces them.
+  if (environmentState.hydratedFromCacheAt !== undefined) return state;
+  for (const thread of threads) {
+    const current = environmentState.threadShellById[thread.id];
+    if (!isArchivedThreadStub(current) || thread.updatedAt < current.updatedAt) continue;
+    environmentState = writeThreadShellState(
+      environmentState,
+      mapThreadShell(thread, environmentId),
+    );
+  }
+  return commitEnvironmentState(state, environmentId, environmentState);
 }
 
 export function syncServerThreadDetail(
@@ -3382,12 +3546,12 @@ function createAcrossEnvironmentsSelector<Row>(
 }
 
 const selectProjectRows = createSliceRowsSelector<ProjectId, Project>((record, id) => record[id]);
-const selectThreadShellRows = createSliceRowsSelector<ThreadId, ThreadShell>(
+const selectThreadShellRows = createSliceRowsSelector<ThreadId, ThreadShellOrStub>(
   (record, id) => record[id],
 );
 const environmentSidebarThreadRowSelectors = new Map<
   EnvironmentId,
-  ReturnType<typeof createSliceRowsSelector<ThreadId, SidebarThreadSummary>>
+  ReturnType<typeof createSliceRowsSelector<ThreadId, SidebarThreadOrStub>>
 >();
 const environmentSidebarWorktreeRowSelectors = new Map<
   EnvironmentId,
@@ -3398,10 +3562,10 @@ const environmentSidebarWorktreeRowSelectors = new Map<
 function selectEnvironmentSidebarThreadRows(
   environmentId: EnvironmentId,
   environmentState: EnvironmentState,
-): SidebarThreadSummary[] {
+): SidebarThreadOrStub[] {
   let select = environmentSidebarThreadRowSelectors.get(environmentId);
   if (select === undefined) {
-    select = createSliceRowsSelector<ThreadId, SidebarThreadSummary>((record, id) => {
+    select = createSliceRowsSelector<ThreadId, SidebarThreadOrStub>((record, id) => {
       const thread = record[id];
       return thread !== undefined && thread.environmentId === environmentId ? thread : undefined;
     });
@@ -3438,13 +3602,16 @@ export function selectThreadsAcrossEnvironments(state: AppState): Thread[] {
   );
 }
 
-/** Like `selectThreadsAcrossEnvironments` but returns stable `ThreadShell` references from the store (no derived data). */
-export const selectThreadShellsAcrossEnvironments: (state: AppState) => ThreadShell[] =
+/**
+ * Like `selectThreadsAcrossEnvironments` but returns stable `ThreadShell` references from the store
+ * (no derived data). Unlike it, archived threads listed as stubs are included as their stubs.
+ */
+export const selectThreadShellsAcrossEnvironments: (state: AppState) => ThreadShellOrStub[] =
   createAcrossEnvironmentsSelector((_environmentId, environmentState) =>
     selectThreadShellRows(environmentState.threadIds, environmentState.threadShellById),
   );
 
-export const selectSidebarThreadsAcrossEnvironments: (state: AppState) => SidebarThreadSummary[] =
+export const selectSidebarThreadsAcrossEnvironments: (state: AppState) => SidebarThreadOrStub[] =
   createAcrossEnvironmentsSelector(selectEnvironmentSidebarThreadRows);
 
 export const selectSidebarWorktreesAcrossEnvironments: (
@@ -3475,11 +3642,11 @@ export function selectEnvironmentHydratedFromCacheAt(
 const selectWorktreeRows = createSliceRowsSelector<WorktreeId, SidebarWorktreeSummary>(
   (record, id) => record[id],
 );
-const selectSidebarThreadRows = createSliceRowsSelector<ThreadId, SidebarThreadSummary>(
+const selectSidebarThreadRows = createSliceRowsSelector<ThreadId, SidebarThreadOrStub>(
   (record, id) => record[id],
 );
 const EMPTY_SIDEBAR_WORKTREES: SidebarWorktreeSummary[] = [];
-const EMPTY_SIDEBAR_THREADS: SidebarThreadSummary[] = [];
+const EMPTY_SIDEBAR_THREADS: SidebarThreadOrStub[] = [];
 
 export function selectSidebarWorktreesForProjectRef(
   state: AppState,
@@ -3526,7 +3693,7 @@ export const selectSidebarWorktreesForProjectRefs: (
 export function selectSidebarThreadsForProjectRef(
   state: AppState,
   ref: ScopedProjectRef | null | undefined,
-): SidebarThreadSummary[] {
+): SidebarThreadOrStub[] {
   if (!ref) {
     return EMPTY_SIDEBAR_THREADS;
   }
@@ -3538,8 +3705,8 @@ export function selectSidebarThreadsForProjectRef(
 
 /** Delegated children per candidate rows array, then per parent thread. */
 const delegatedChildThreadsCache = new WeakMap<
-  readonly SidebarThreadSummary[],
-  Map<ThreadId, SidebarThreadSummary[]>
+  readonly SidebarThreadOrStub[],
+  Map<ThreadId, SidebarThreadOrStub[]>
 >();
 
 /**
@@ -3551,7 +3718,7 @@ const delegatedChildThreadsCache = new WeakMap<
 export function selectDelegatedChildThreadsForThreadRef(
   state: AppState,
   ref: ScopedThreadRef | null | undefined,
-): SidebarThreadSummary[] {
+): SidebarThreadOrStub[] {
   if (!ref) {
     return EMPTY_SIDEBAR_THREADS;
   }
@@ -3581,7 +3748,7 @@ export function selectDelegatedChildThreadsForThreadRef(
 export const selectSidebarThreadsForProjectRefs: (
   state: AppState,
   refs: readonly ScopedProjectRef[],
-) => SidebarThreadSummary[] = createProjectRefsRowsSelector(selectSidebarThreadsForProjectRef);
+) => SidebarThreadOrStub[] = createProjectRefsRowsSelector(selectSidebarThreadsForProjectRef);
 
 export function selectBootstrapCompleteForActiveEnvironment(state: AppState): boolean {
   return selectBootstrapCompleteForEnvironment(state, state.activeEnvironmentId);
@@ -3649,7 +3816,7 @@ export function selectThreadAvailabilityByRef(
 export function selectSidebarThreadSummaryByRef(
   state: AppState,
   ref: ScopedThreadRef | null | undefined,
-): SidebarThreadSummary | undefined {
+): SidebarThreadOrStub | undefined {
   return ref
     ? selectEnvironmentState(state, ref.environmentId).sidebarThreadSummaryById[ref.threadId]
     : undefined;
@@ -3758,7 +3925,8 @@ export function applyThreadPriorities(
   let sidebarThreadSummaryById: EnvironmentState["sidebarThreadSummaryById"] | null = null;
   for (const threadId of environmentState.threadIds) {
     const summary = ownValue(environmentState.sidebarThreadSummaryById, threadId);
-    if (summary === undefined) continue;
+    // A stub carries no ranking; archived threads are never ranked.
+    if (summary === undefined || isArchivedThreadStub(summary)) continue;
     const priority = priorityByThread.get(threadId);
     if (threadPrioritiesEqual(summary.priority, priority)) continue;
     sidebarThreadSummaryById ??= { ...environmentState.sidebarThreadSummaryById };
@@ -3853,8 +4021,9 @@ export interface CachedEnvironmentShellSnapshot {
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
   readonly threads: ReadonlyArray<{
-    readonly shell: ThreadShell;
-    readonly summary: SidebarThreadSummary;
+    /** An archived thread cached as a stub holds the same stub in both. */
+    readonly shell: ThreadShellOrStub;
+    readonly summary: SidebarThreadOrStub;
     readonly content?: import("./readCache.ts").CachedThreadContent | undefined;
   }>;
 }
@@ -3981,19 +4150,38 @@ export function hydrateEnvironmentStateFromCache(
       continue;
     }
     const id = thread.shell.id;
-    if (!Object.hasOwn(environmentState.threadShellById, id)) environmentState.threadIds.push(id);
-    environmentState.threadShellById[id] = thread.shell;
-    environmentState.threadSessionById[id] = null;
-    environmentState.threadTurnStateById[id] = {
-      latestTurn: thread.summary.latestTurn,
-      pendingSourceProposedPlan: thread.summary.latestTurn?.sourceProposedPlan,
-    };
-    environmentState.sidebarThreadSummaryById[id] = {
-      ...thread.summary,
-      modelSelection: thread.summary.modelSelection ?? thread.shell.modelSelection,
-      session: null,
-      backgroundLiveness: null,
-    };
+    if (isArchivedThreadStub(thread.shell) || isArchivedThreadStub(thread.summary)) {
+      // A stub is cached as the same stub in both halves; half a stub is no usable row.
+      if (
+        !isArchivedThreadStub(thread.shell) ||
+        !archivedThreadStubsEqual(thread.summary, thread.shell)
+      ) {
+        continue;
+      }
+      if (!Object.hasOwn(environmentState.threadShellById, id)) {
+        environmentState.threadIds.push(id);
+      }
+      environmentState.threadShellById[id] = thread.shell;
+      environmentState.sidebarThreadSummaryById[id] = thread.shell;
+    } else {
+      if (!Object.hasOwn(environmentState.threadShellById, id)) {
+        environmentState.threadIds.push(id);
+      }
+      environmentState.threadShellById[id] = thread.shell;
+      environmentState.threadSessionById[id] = null;
+      environmentState.threadTurnStateById[id] = {
+        latestTurn: thread.summary.latestTurn,
+        pendingSourceProposedPlan: thread.summary.latestTurn?.sourceProposedPlan,
+      };
+      environmentState.sidebarThreadSummaryById[id] = {
+        ...thread.summary,
+        modelSelection: thread.summary.modelSelection ?? thread.shell.modelSelection,
+        session: null,
+        backgroundLiveness: null,
+      };
+    }
+    // Read content cached for a thread stays readable offline, whether it is listed in full
+    // or as a stub.
     const content =
       thread.content ??
       (previous && Object.hasOwn(previous.messageByThreadId, id)
@@ -4077,9 +4265,12 @@ export function demoteEnvironmentStateToCachedSnapshot(
   const sidebarThreadSummaryById = Object.fromEntries(
     Object.entries(environmentState.sidebarThreadSummaryById).map(([threadId, summary]) => [
       threadId,
-      { ...summary, session: null, backgroundLiveness: null },
+      // A stub claims no live activity to begin with.
+      isArchivedThreadStub(summary)
+        ? summary
+        : { ...summary, session: null, backgroundLiveness: null },
     ]),
-  ) as Record<ThreadId, SidebarThreadSummary>;
+  ) as Record<ThreadId, SidebarThreadOrStub>;
   return commitEnvironmentState(state, environmentId, {
     ...environmentState,
     threadSessionById,
@@ -4266,7 +4457,12 @@ interface AppStore extends AppState {
   ) => void;
   demoteEnvironmentStateToCachedSnapshot: (environmentId: EnvironmentId, demotedAt: number) => void;
   syncServerShellSnapshot: (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
+    environmentId: EnvironmentId,
+  ) => void;
+  /** Full shells loaded on demand for archived stubs; see `applyLoadedThreadShells`. */
+  applyLoadedThreadShells: (
+    threads: ReadonlyArray<OrchestrationThreadShell>,
     environmentId: EnvironmentId,
   ) => void;
   syncServerThreadDetail: (thread: OrchestrationThread, environmentId: EnvironmentId) => void;
@@ -4378,6 +4574,10 @@ export const useStore = create<AppStore>((set, get) => {
     demoteEnvironmentStateToCachedSnapshot: (environmentId, demotedAt) => {
       shellCoalescer.flush();
       set((state) => demoteEnvironmentStateToCachedSnapshot(state, environmentId, demotedAt));
+    },
+    applyLoadedThreadShells: (threads, environmentId) => {
+      shellCoalescer.flush();
+      commitWithRelocations(applyLoadedThreadShells(get(), threads, environmentId));
     },
     syncServerShellSnapshot: (snapshot, environmentId) => {
       shellCoalescer.flush();

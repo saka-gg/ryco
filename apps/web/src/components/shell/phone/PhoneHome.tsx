@@ -46,6 +46,7 @@ import {
   type AppState,
 } from "../../../store";
 import { formatRelativeTimeLabel } from "../../../timestampFormat";
+import { isUnarchivedThreadEntry } from "../../../types";
 import { useUiStateStore } from "../../../uiStateStore";
 import { cn } from "~/lib/utils";
 import { useLongPress } from "~/hooks/useLongPress";
@@ -63,7 +64,7 @@ import {
 } from "../../sidebar/sidebarTreeAdapters";
 import {
   useSidebarTree,
-  type SidebarTreeThread,
+  type ActiveSidebarTreeThread,
   type SidebarTreeWorktree,
 } from "../../sidebar/hooks/useSidebarTree";
 import { useSidebarProjectActions } from "../../sidebar/hooks/useSidebarProjectActions";
@@ -382,7 +383,7 @@ function PhoneHomeProjectSection({
   );
   const visibleThreads = useMemo(() => {
     return mergeSidebarThreadsWithDrafts(threads, draftThreads).filter(
-      (thread) => thread.archivedAt === null,
+      (thread): thread is ActiveSidebarTreeThread => isUnarchivedThreadEntry(thread),
     );
   }, [draftThreads, threads]);
   const sortedThreads = useMemo(
@@ -405,7 +406,7 @@ function PhoneHomeProjectSection({
       ),
     [sortedThreads],
   );
-  const threadByKeyRef = useRef<ReadonlyMap<string, SidebarTreeThread>>(threadByKey);
+  const threadByKeyRef = useRef<ReadonlyMap<string, ActiveSidebarTreeThread>>(threadByKey);
   threadByKeyRef.current = threadByKey;
   const memberProjectByScopedKey = useMemo(
     () =>
@@ -515,7 +516,7 @@ function PhoneHomeProjectSection({
   });
   const projectLongPress = useLongPress((point) => openProjectMenu(point));
 
-  const renderThreadRow = (thread: SidebarTreeThread) => {
+  const renderThreadRow = (thread: ActiveSidebarTreeThread) => {
     const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
     return (
       <PhoneHomeThreadRow
@@ -665,7 +666,7 @@ function PhoneHomeWorktreeSection({
   renderThreadRow,
 }: {
   readonly worktreeNode: SidebarTreeWorktree;
-  readonly renderThreadRow: (thread: SidebarTreeThread) => ReactNode;
+  readonly renderThreadRow: (thread: ActiveSidebarTreeThread) => ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const title = worktreeNode.worktree.title ?? worktreeNode.worktree.branch;
@@ -716,7 +717,7 @@ function PhoneHomeThreadRow({
   onOpen,
   onMenu,
 }: {
-  readonly thread: SidebarTreeThread;
+  readonly thread: ActiveSidebarTreeThread;
   readonly pinned: boolean;
   readonly onOpen: () => void;
   readonly onMenu: () => void;

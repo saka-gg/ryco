@@ -4,6 +4,7 @@ import {
 } from "@ryco/client-runtime/state/threads";
 import type {
   Project,
+  SidebarThreadOrStub,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
   ThreadInboxMutationBlocker,
@@ -125,7 +126,8 @@ export interface InboxSection {
 export interface BuildInboxInput {
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived stubs are accepted; the inbox excludes every archived thread. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<InboxEnvironment>;
   readonly nodeScope?: EnvironmentId | null;
   readonly query?: string;

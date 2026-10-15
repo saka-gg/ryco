@@ -11,6 +11,7 @@ import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/se
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import * as Atom from "effect/reactivity/Atom";
 
+import type { EnvironmentConnectionConfig } from "../connection/connection.ts";
 import type { WsRpcClient } from "./wsRpcClient.ts";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry.ts";
 import { projectServerConfigEvent } from "./serverConfigProjection.ts";
@@ -27,7 +28,7 @@ export interface ServerConfigUpdatedNotification {
   readonly source: ServerConfigUpdateSource;
 }
 
-type ServerStateClient = Pick<WsRpcClient["server"], "subscribeConfig" | "subscribeLifecycle">;
+type ServerStateClient = Pick<WsRpcClient["server"], "subscribeLifecycle">;
 
 function makeStateAtom<A>(label: string, initialValue: A) {
   return Atom.make(initialValue).pipe(Atom.keepAlive, Atom.withLabel(label));
@@ -158,8 +159,17 @@ interface ServerStateSyncHold {
   readonly stop: () => void;
 }
 
-/** One lifecycle and config subscription pair per client, shared by every holder. */
-let serverStateSyncHolds = new WeakMap<ServerStateClient, ServerStateSyncHold>();
+/**
+ * What the primary server-state sync reads: the connection's lifecycle stream
+ * and its config observer, which is the connection's one config stream.
+ */
+export interface ServerStateConnection {
+  readonly client: { readonly server: ServerStateClient };
+  readonly config: Pick<EnvironmentConnectionConfig, "subscribe">;
+}
+
+/** One lifecycle subscription and one config hold per connection, shared by every holder. */
+let serverStateSyncHolds = new WeakMap<ServerStateConnection, ServerStateSyncHold>();
 
 /**
  * Keeps the primary server state live. The config subscription's first item is
@@ -167,21 +177,27 @@ let serverStateSyncHolds = new WeakMap<ServerStateClient, ServerStateSyncHold>()
  * fetched the same ~100 KB config a second time on every connect and queued
  * the shell snapshot behind both on slow links.
  *
- * Reference-counted per client: a second holder (the boot path that starts
+ * Config comes from the connection's own observer instead of a second
+ * `subscribeConfig` on the same client, so each connection carries exactly one
+ * config stream, and an event the connection does not accept (an increment
+ * without a current snapshot, a stale hosted generation) never reaches the
+ * global state either.
+ *
+ * Reference-counted per connection: a second holder (the boot path that starts
  * the sync with the early primary connection, then the shell's own) shares
  * the first one's subscriptions instead of opening duplicate streams, and the
  * last returned stop ends them.
  */
-export function startServerStateSync(client: ServerStateClient): () => void {
-  let hold = serverStateSyncHolds.get(client);
+export function startServerStateSync(connection: ServerStateConnection): () => void {
+  let hold = serverStateSyncHolds.get(connection);
   if (!hold) {
     const cleanups = [
-      client.subscribeLifecycle((event) => {
+      connection.client.server.subscribeLifecycle((event) => {
         if (event.type === "welcome") {
           emitWelcome(event.payload);
         }
       }),
-      client.subscribeConfig((event) => {
+      connection.config.subscribe(({ event }) => {
         applyServerConfigEvent(event);
       }),
     ];
@@ -193,7 +209,7 @@ export function startServerStateSync(client: ServerStateClient): () => void {
         }
       },
     };
-    serverStateSyncHolds.set(client, hold);
+    serverStateSyncHolds.set(connection, hold);
   }
   const current = hold;
   current.count += 1;
@@ -203,7 +219,7 @@ export function startServerStateSync(client: ServerStateClient): () => void {
     released = true;
     current.count -= 1;
     if (current.count > 0) return;
-    if (serverStateSyncHolds.get(client) === current) serverStateSyncHolds.delete(client);
+    if (serverStateSyncHolds.get(connection) === current) serverStateSyncHolds.delete(connection);
     current.stop();
   };
 }

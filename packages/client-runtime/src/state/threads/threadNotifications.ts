@@ -2,7 +2,11 @@ import type { EnvironmentId, ScopedThreadRef, ThreadId, TurnId } from "@ryco/con
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { scopeThreadRef, scopedThreadKey } from "../../scoped.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
-import type { SidebarThreadSummary } from "./types.ts";
+import {
+  isArchivedThreadStub,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+} from "./types.ts";
 
 export type ThreadNotificationKind = "approval" | "input" | "plan-ready" | "completed" | "failed";
 
@@ -92,7 +96,11 @@ export function createThreadNotificationProjector(input: {
       readonly environmentId: EnvironmentId;
       readonly generation: object;
       readonly sequence: number;
-      readonly threads: ReadonlyArray<SidebarThreadSummary>;
+      /**
+       * An archived stub gets no baseline: whatever it shows once a full shell
+       * replaces it (unarchive, open) is its first observation, which never notifies.
+       */
+      readonly threads: ReadonlyArray<SidebarThreadOrStub>;
       readonly nowMs: number;
     }): void {
       const { environmentId, generation, sequence, threads, nowMs } = inputBaseline;
@@ -101,7 +109,7 @@ export function createThreadNotificationProjector(input: {
       if (previous?.generation === generation && previous.sequence > sequence) return;
       const baseline = new Map<ThreadId, ThreadState>();
       for (const thread of threads) {
-        if (thread.environmentId !== environmentId) continue;
+        if (thread.environmentId !== environmentId || isArchivedThreadStub(thread)) continue;
         const state = describe(thread, nowMs);
         baseline.set(thread.id, {
           fingerprint: state.fingerprint,

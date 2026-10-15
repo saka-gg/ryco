@@ -150,6 +150,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       ...(rpcClient.orchestration.getThreadWindow
         ? { getThreadWindow: rpcClient.orchestration.getThreadWindow }
         : {}),
+      ...(rpcClient.orchestration.getThreadShells
+        ? { getThreadShells: rpcClient.orchestration.getThreadShells }
+        : {}),
       ...(rpcClient.orchestration.getThreadHistoryPage
         ? { getThreadHistoryPage: rpcClient.orchestration.getThreadHistoryPage }
         : {}),

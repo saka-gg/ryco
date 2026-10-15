@@ -111,6 +111,8 @@ import {
 } from "./persistence/Services/ProjectionProjects.ts";
 import {
   ProjectionSnapshotQuery,
+  scopeShellSnapshot,
+  stubArchivedThreads,
   type ProjectionSnapshotQueryShape,
 } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery, type StatisticsQueryShape } from "./statistics/StatisticsQuery.ts";
@@ -6163,6 +6165,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     hasActionableProposedPlan: false,
   });
 
+  const pagedShellSnapshot = () => ({
+    snapshotSequence: 7,
+    projects: [],
+    threads: [
+      pagedShellThread("archived-1", "2026-04-04T00:00:00.000Z"),
+      pagedShellThread("live-1", null),
+      pagedShellThread("live-2", null),
+    ],
+    updatedAt: "2026-04-05T00:00:00.000Z",
+  });
   const buildPagedShellApp = Effect.gen(function* () {
     const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
     yield* buildAppUnderTest({
@@ -6173,17 +6185,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           subscribeDomainEvents: PubSub.subscribe(livePubSub),
         },
         projectionSnapshotQuery: {
-          getShellSnapshot: () =>
-            Effect.succeed({
-              snapshotSequence: 7,
-              projects: [],
-              threads: [
-                pagedShellThread("archived-1", "2026-04-04T00:00:00.000Z"),
-                pagedShellThread("live-1", null),
-                pagedShellThread("live-2", null),
-              ],
-              updatedAt: "2026-04-05T00:00:00.000Z",
-            }),
+          getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
+          getStubbedShellSnapshot: () => Effect.succeed(stubArchivedThreads(pagedShellSnapshot())),
         },
       },
     });
@@ -6239,6 +6242,147 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         first.snapshot.threads.map((thread) => thread.id),
         ["archived-1", "live-1", "live-2"],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const collectPagedShell = (input: Parameters<typeof subscribeShellInput>[0]) =>
+    Effect.gen(function* () {
+      const wsUrl = yield* getWsServerUrl("/ws");
+      return yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell](subscribeShellInput(input)).pipe(
+            Stream.takeUntil((item) => item.kind === "snapshot-end" || item.kind === "snapshot"),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)),
+          ),
+        ),
+      );
+    });
+  const subscribeShellInput = (input: {
+    readonly snapshotDelivery?: "paged";
+    readonly archivedThreads?: "stub";
+  }) => input;
+
+  it.effect("sends archived threads as stubs to a paged client that asks for them", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const items = yield* collectPagedShell({
+        snapshotDelivery: "paged",
+        archivedThreads: "stub",
+      });
+      const begin = items[0];
+      assertTrue(begin?.kind === "snapshot-begin");
+      assert.equal(begin.threadCount, 3);
+      assert.equal(begin.archivedThreadCount, 1);
+      assert.deepEqual(
+        items.flatMap((item) =>
+          item.kind === "snapshot-threads" ? item.threads.map((thread) => thread.id) : [],
+        ),
+        ["live-1", "live-2"],
+      );
+      const stubs = items.flatMap((item) =>
+        item.kind === "snapshot-archived-threads" ? item.threads : [],
+      );
+      assert.deepEqual(
+        stubs.map((thread) => thread.id),
+        ["archived-1"],
+      );
+      assertTrue(!("modelSelection" in stubs[0]!));
+      assert.equal(items.at(-1)?.kind, "snapshot-end");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("ignores the stub request without paged delivery: one full snapshot item", () =>
+    Effect.gen(function* () {
+      yield* buildPagedShellApp;
+      const items = yield* collectPagedShell({ archivedThreads: "stub" });
+      const first = items[0];
+      assertTrue(first?.kind === "snapshot");
+      assert.deepEqual(
+        first.snapshot.threads.map((thread) => [thread.id, thread.archivedAt]),
+        [
+          ["archived-1", "2026-04-04T00:00:00.000Z"],
+          ["live-1", null],
+          ["live-2", null],
+        ],
+      );
+      assertTrue(!("archivedThreadStubs" in first.snapshot));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const buildThreadShellsApp = (titleChars = 20) => {
+    const snapshot = () => ({
+      snapshotSequence: 9,
+      projects: [],
+      threads: ["a", "b", "c"].map((id) => ({
+        ...pagedShellThread(id, "2026-04-04T00:00:00.000Z"),
+        title: `${id} ${"t".repeat(titleChars)}`,
+      })),
+      updatedAt: "2026-04-05T00:00:00.000Z",
+    });
+    return buildAppUnderTest({
+      layers: {
+        projectionSnapshotQuery: {
+          getShellSnapshot: () => Effect.succeed(snapshot()),
+          getScopedShellSnapshot: (scope) => Effect.succeed(scopeShellSnapshot(snapshot(), scope)),
+        },
+      },
+    });
+  };
+
+  it.effect("loads full thread shells by id, in request order, leaving unknown ids out", () =>
+    Effect.gen(function* () {
+      yield* buildThreadShellsApp();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadShells]({
+            threadIds: [ThreadId.make("c"), ThreadId.make("missing"), ThreadId.make("a")],
+          }),
+        ),
+      );
+      assert.equal(result.snapshotSequence, 9);
+      assert.deepEqual(
+        result.threads.map((thread) => thread.id),
+        ["c", "a"],
+      );
+      assert.equal(result.threads[0]?.modelSelection.model, "fixture");
+      assert.deepEqual(result.remainingThreadIds, []);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("bounds a thread shells response and names the shells left for another ask", () =>
+    Effect.gen(function* () {
+      // Each shell is ~600 KB: one fits the 1 MiB budget, two do not.
+      yield* buildThreadShellsApp(600 * 1024);
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadShells]({
+            threadIds: [ThreadId.make("a"), ThreadId.make("b"), ThreadId.make("c")],
+          }),
+        ),
+      );
+      assert.deepEqual(
+        result.threads.map((thread) => thread.id),
+        ["a"],
+      );
+      assert.deepEqual(result.remainingThreadIds, [ThreadId.make("b"), ThreadId.make("c")]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("refuses a thread shells request naming too many threads", () =>
+    Effect.gen(function* () {
+      yield* buildThreadShellsApp();
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const exit = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.getThreadShells]({
+            threadIds: Array.from({ length: 101 }, (_, index) => ThreadId.make(`t${index}`)),
+          }),
+        ),
+      ).pipe(Effect.exit);
+      assertTrue(exit._tag === "Failure");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

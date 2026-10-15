@@ -1,8 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import {
+  OrchestrationArchivedThreadStub,
   OrchestrationShellStreamItem,
   OrchestrationThreadShell,
   type OrchestrationShellSnapshot,
+  type OrchestrationStubbedShellSnapshot,
 } from "@ryco/contracts";
 import { Schema } from "effect";
 
@@ -39,6 +41,31 @@ const snapshotOf = (
   threads,
   updatedAt: now,
 });
+
+const stub = (id: string, titleChars = 10): OrchestrationArchivedThreadStub =>
+  Schema.decodeUnknownSync(OrchestrationArchivedThreadStub)({
+    id,
+    projectId: "project-1",
+    title: `${id} ${"t".repeat(titleChars)}`,
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    createdAt: now,
+    updatedAt: now,
+    archivedAt: now,
+    latestUserMessageAt: null,
+    lineage: null,
+  });
+
+const stubbedSnapshotOf = (
+  threads: ReadonlyArray<OrchestrationThreadShell>,
+  archivedThreadStubs: ReadonlyArray<OrchestrationArchivedThreadStub>,
+): OrchestrationStubbedShellSnapshot => ({ ...snapshotOf(threads), archivedThreadStubs });
+
+const stubIdsOf = (items: ReadonlyArray<OrchestrationShellStreamItem>) =>
+  items.flatMap((item) =>
+    item.kind === "snapshot-archived-threads" ? item.threads.map((entry) => entry.id) : [],
+  );
 
 const flatten = (messages: ReturnType<typeof pageShellSnapshot>) => messages.flat();
 const threadIdsOf = (items: ReadonlyArray<OrchestrationShellStreamItem>) =>
@@ -118,8 +145,78 @@ describe("pageShellSnapshot", () => {
     );
   });
 
+  it("sends archived stubs after every full shell, counted in the header", () => {
+    const messages = pageShellSnapshot(
+      stubbedSnapshotOf([thread("a1", false), thread("a2", false)], [stub("x1"), stub("x2")]),
+    );
+    assert.equal(messages.length, 1);
+    const items = flatten(messages);
+    assert.deepEqual(
+      items.map((item) => item.kind),
+      ["snapshot-begin", "snapshot-threads", "snapshot-archived-threads", "snapshot-end"],
+    );
+    const begin = items[0];
+    assert(begin?.kind === "snapshot-begin");
+    assert.equal(begin.threadCount, 4);
+    assert.equal(begin.archivedThreadCount, 2);
+    assert.deepEqual(threadIdsOf(items), ["a1", "a2"]);
+    assert.deepEqual(stubIdsOf(items), ["x1", "x2"]);
+  });
+
+  it("keeps stub pages within the byte budget too", () => {
+    const budget = 8 * 1024;
+    const messages = pageShellSnapshot(
+      stubbedSnapshotOf(
+        Array.from({ length: 40 }, (_, index) => thread(`a${index}`, false, 200)),
+        Array.from({ length: 400 }, (_, index) => stub(`x${index}`, 200)),
+      ),
+      budget,
+    );
+    assert(messages.length > 4);
+    for (const message of messages) {
+      assert(Buffer.byteLength(JSON.stringify(message)) <= budget);
+    }
+    const items = flatten(messages);
+    assert.equal(threadIdsOf(items).length, 40);
+    assert.equal(stubIdsOf(items).length, 400);
+    // Full shells never follow a stub.
+    const kinds = items.map((item) => item.kind);
+    assert(kinds.lastIndexOf("snapshot-threads") < kinds.indexOf("snapshot-archived-threads"));
+  });
+
+  it("pages a stubbed shell with no archived threads like a full one", () => {
+    const messages = pageShellSnapshot(stubbedSnapshotOf([thread("a", false)], []));
+    assert.deepEqual(
+      flatten(messages).map((item) => item.kind),
+      ["snapshot-begin", "snapshot-threads", "snapshot-end"],
+    );
+  });
+
+  it("is far smaller with archived stubs than with archived full shells", () => {
+    const full = pageShellSnapshot(
+      snapshotOf(Array.from({ length: 50 }, (_, index) => thread(`x${index}`, true))),
+    );
+    const stubbed = pageShellSnapshot(
+      stubbedSnapshotOf(
+        [],
+        Array.from({ length: 50 }, (_, index) => stub(`x${index}`)),
+      ),
+    );
+    assert(
+      Buffer.byteLength(JSON.stringify(stubbed)) < Buffer.byteLength(JSON.stringify(full)) * 0.7,
+    );
+  });
+
   it("produces items the wire schema accepts", () => {
     const messages = pageShellSnapshot(snapshotOf([thread("a", false), thread("b", true)]));
+    const encode = Schema.encodeSync(Schema.Array(OrchestrationShellStreamItem));
+    const decode = Schema.decodeUnknownSync(Schema.Array(OrchestrationShellStreamItem));
+    const items = flatten(messages);
+    assert.deepEqual(decode(JSON.parse(JSON.stringify(encode(items)))), items);
+  });
+
+  it("produces stub items the wire schema accepts", () => {
+    const messages = pageShellSnapshot(stubbedSnapshotOf([thread("a", false)], [stub("x")]));
     const encode = Schema.encodeSync(Schema.Array(OrchestrationShellStreamItem));
     const decode = Schema.decodeUnknownSync(Schema.Array(OrchestrationShellStreamItem));
     const items = flatten(messages);

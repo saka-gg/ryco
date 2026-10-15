@@ -36,7 +36,10 @@ import {
   SquareTerminalIcon,
   XIcon,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+
+import { ensureArchivedThreadShells } from "../../../environments/runtime/service";
+import { isArchivedThreadStub } from "../../../types";
 
 import { openInPreferredEditor } from "../../../editorPreferences";
 import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
@@ -1081,6 +1084,14 @@ function ThreadPanel(props: {
   const router = useRouter();
   const access = useProjectEditAccess(detail.member.environmentId);
   const threadActions = useThreadActions();
+  // An archived thread held as a stub offers only what a stub knows (unarchive,
+  // delete); its full shell, loaded here, adds what its session allows.
+  const selectedStub = isArchivedThreadStub(detail.threads.get(props.id));
+  useEffect(() => {
+    if (selectedStub) {
+      ensureArchivedThreadShells(detail.member.environmentId, [ThreadId.make(props.id)]);
+    }
+  }, [detail.member.environmentId, props.id, selectedStub]);
   const workspace = detail.checkout.workspaces.find((candidate) =>
     candidate.threads.some((thread) => thread.id === props.id),
   );

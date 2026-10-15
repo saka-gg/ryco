@@ -4,7 +4,7 @@ import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 
 import type { DraftThreadState } from "../../composerDraftStore";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../types";
+import type { SidebarThreadOrStub, SidebarWorktreeSummary } from "../../types";
 import { sortThreadsWithPinned } from "../Sidebar.logic";
 import {
   composeSidebarTreeStructure,
@@ -19,7 +19,8 @@ import {
 
 export interface SidebarProjectTreeInput {
   readonly project: SidebarProjectSnapshot;
-  readonly threads: readonly SidebarThreadSummary[];
+  /** Archived threads may be stubs; the tree lists them as archived sessions. */
+  readonly threads: readonly SidebarThreadOrStub[];
   /** From `draftThreadsSelector(project)`, so every consumer passes the same rows. */
   readonly drafts: readonly SidebarTreeThread[];
   readonly worktrees: readonly SidebarWorktreeSummary[];

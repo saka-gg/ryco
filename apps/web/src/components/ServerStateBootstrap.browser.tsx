@@ -7,7 +7,10 @@ const harness = vi.hoisted(() => ({
     readonly client: { readonly server: { readonly stop: () => void } };
   },
   listeners: new Set<() => void>(),
-  startServerStateSync: vi.fn((server: { readonly stop: () => void }) => server.stop),
+  startServerStateSync: vi.fn(
+    (connection: { readonly client: { readonly server: { readonly stop: () => void } } }) =>
+      connection.client.server.stop,
+  ),
 }));
 
 vi.mock("../environments/primary", () => ({
@@ -47,7 +50,7 @@ afterEach(() => {
 });
 
 describe("ServerStateBootstrap", () => {
-  it("unsubscribes from the previous primary client and subscribes to its replacement", async () => {
+  it("unsubscribes from the previous primary connection and subscribes to its replacement", async () => {
     const stopFirst = vi.fn();
     const stopSecond = vi.fn();
     replaceConnection({
@@ -57,9 +60,7 @@ describe("ServerStateBootstrap", () => {
     const mounted = await render(<ServerStateBootstrap />);
 
     await vi.waitFor(() => expect(harness.startServerStateSync).toHaveBeenCalledTimes(1));
-    expect(harness.startServerStateSync).toHaveBeenLastCalledWith(
-      harness.connection?.client.server,
-    );
+    expect(harness.startServerStateSync).toHaveBeenLastCalledWith(harness.connection);
 
     replaceConnection(null);
     await vi.waitFor(() => expect(stopFirst).toHaveBeenCalledOnce());
@@ -69,9 +70,7 @@ describe("ServerStateBootstrap", () => {
       client: { server: { stop: stopSecond } },
     });
     await vi.waitFor(() => expect(harness.startServerStateSync).toHaveBeenCalledTimes(2));
-    expect(harness.startServerStateSync).toHaveBeenLastCalledWith(
-      harness.connection?.client.server,
-    );
+    expect(harness.startServerStateSync).toHaveBeenLastCalledWith(harness.connection);
 
     await mounted.unmount();
     expect(stopSecond).toHaveBeenCalledOnce();

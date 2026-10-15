@@ -46,6 +46,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { readEnvironmentApi } from "../../environmentApi";
+import { ensureArchivedThreadShells } from "../../environments/runtime/service";
 import { useEnvironmentServerConfig } from "../../hooks/useChatsAvailability";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useEvent } from "../../hooks/useEvent";
@@ -64,7 +65,7 @@ import { useFilesystemBrowse } from "../../rpc/useProject";
 import { selectProjectByRef, selectSidebarThreadsForProjectRef, useStore } from "../../store";
 import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../../threadRoutes";
-import type { Project } from "../../types";
+import { isArchivedThreadStub, isFullThreadEntry, type Project } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
 import { filterBrowseEntries } from "../CommandPalette.logic";
 import { AnimatedHeight } from "../AnimatedHeight";
@@ -372,9 +373,22 @@ function PromoteChatDialogBody(props: {
 
   // Live work in the chat, as this client sees it: the agent's activity and
   // its terminals running a command (both can keep the chat from moving).
-  const chatThreads = useStore(
+  // Archived threads may be stubs: they run nothing, and the provider they
+  // continue on is unknown until their full shells load (asked for below).
+  const chatThreadEntries = useStore(
     useShallow((state) => selectSidebarThreadsForProjectRef(state, projectRef)),
   );
+  const chatThreads = useMemo(
+    () => chatThreadEntries.filter(isFullThreadEntry),
+    [chatThreadEntries],
+  );
+  const stubThreadIds = useMemo(
+    () => chatThreadEntries.filter(isArchivedThreadStub).map((thread) => thread.id),
+    [chatThreadEntries],
+  );
+  useEffect(() => {
+    ensureArchivedThreadShells(environmentId, stubThreadIds);
+  }, [environmentId, stubThreadIds]);
   const terminalStateByThreadKey = useTerminalStateStore((state) => state.terminalStateByThreadKey);
   const liveWork = useMemo(
     () =>
@@ -395,10 +409,12 @@ function PromoteChatDialogBody(props: {
   const providers = useEnvironmentServerConfig(environmentId)?.providers;
   const continuity = useMemo<ConversationContinuity>(
     () =>
-      chatConversationContinuity(
-        chatThreads.map((thread) => resolveNextTurnProviderDriver(thread, providers ?? [])),
-      ),
-    [chatThreads, providers],
+      chatConversationContinuity([
+        ...chatThreads.map((thread) => resolveNextTurnProviderDriver(thread, providers ?? [])),
+        // Unknown until the stub's full shell arrives.
+        ...stubThreadIds.map(() => null),
+      ]),
+    [chatThreads, providers, stubThreadIds],
   );
 
   // The node re-points the project at its new folder before it sets up Git,

@@ -1,7 +1,7 @@
 import type {
   EnvironmentId,
   ExecutionEnvironmentDescriptor,
-  OrchestrationShellSnapshot,
+  OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationShellThreadPrioritiesItem,
   ServerConfig,
@@ -24,6 +24,38 @@ export interface PushSequenceMonitor {
   readonly recordSnapshot: (environmentId: EnvironmentId, sequence: number) => void;
 }
 
+/** One config update the connection accepted from its config stream. */
+export interface EnvironmentConfigUpdate {
+  /** The connection's config after the event (inner descriptors normalized for Hub relays). */
+  readonly config: ServerConfig;
+  /** The event exactly as the node's stream delivered it. */
+  readonly event: ServerConfigStreamEvent;
+}
+
+/**
+ * The node's pushed config, as this connection's one `subscribeConfig` stream
+ * keeps it. Every value is stamped with the socket attempt (and, for a hosted
+ * connection, the lifecycle generation) it arrived on.
+ */
+export interface EnvironmentConnectionConfig {
+  /**
+   * The config, or `null` unless all of these hold: the connection is not
+   * disposed, its socket is connected, the snapshot arrived on the current
+   * socket attempt and subscription, and a hosted connection's generation is
+   * still the owner's current one. A resubscribe, a reconnect and a dispose
+   * reset it until the next snapshot.
+   */
+  readonly read: () => ServerConfig | null;
+  /**
+   * Observes every accepted update from now on (the current value is
+   * `read()`). Incremental events are delivered only on
+   * top of a current-attempt snapshot, and nothing is delivered for a stale
+   * hosted generation. While any listener is held the stream stays open; a
+   * primary connection without `onConfigUpdated` opens it on the first one.
+   */
+  readonly subscribe: (listener: (update: EnvironmentConfigUpdate) => void) => () => void;
+}
+
 export interface EnvironmentConnection {
   readonly kind: "primary" | "saved";
   readonly environmentId: EnvironmentId;
@@ -35,8 +67,21 @@ export interface EnvironmentConnection {
     readonly read: () => object | null;
     readonly subscribe: (listener: () => void) => () => void;
   };
+  readonly config: EnvironmentConnectionConfig;
   readonly reconnect: () => Promise<void>;
   readonly dispose: () => Promise<void>;
+}
+
+/**
+ * The hosted lifecycle generation a connection was created for. Hosted
+ * recovery has one owner that advances the generation on every node switch,
+ * sign-out, account change, suspension or deactivation; a connection of an
+ * older generation (or of none) publishes no config and reads none.
+ */
+export interface ConnectionLifecycleGeneration {
+  readonly generation: number;
+  /** The owner's current generation; `null` when it has none for this environment. */
+  readonly readCurrent: () => number | null;
 }
 
 export interface OrchestrationHandlers {
@@ -50,8 +95,9 @@ export interface OrchestrationHandlers {
     event: OrchestrationShellStreamEvent,
     environmentId: EnvironmentId,
   ) => void;
+  /** Archived threads may arrive as stubs (`snapshot.archivedThreadStubs`). */
   readonly syncShellSnapshot: (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
   ) => void;
   readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
@@ -94,6 +140,8 @@ export interface EnvironmentConnectionInput extends OrchestrationHandlers {
     config: ServerConfig,
     source: ServerConfigStreamEvent["type"],
   ) => void;
+  /** Hosted connections only: see {@link ConnectionLifecycleGeneration}. */
+  readonly lifecycleGeneration?: ConnectionLifecycleGeneration;
   readonly onWelcome?: (payload: ServerLifecycleWelcomePayload) => void;
   readonly onResubscribe?: (environmentId: EnvironmentId) => void;
   readonly onShellError?: (environmentId: EnvironmentId) => void;
@@ -176,8 +224,22 @@ export function createEnvironmentConnection(
     notifyShellReadiness();
   };
   const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
-  const shouldObserveConfig = input.kind === "saved" || input.onConfigUpdated !== undefined;
-  let observedConfig: ServerConfig | null = null;
+  // Saved connections and those with a config handler hold their one config
+  // stream for their whole life. A primary without one opens it for its first
+  // observer (the primary server-state sync), which may wait for the provider
+  // catalogs it can name before it subscribes.
+  const holdsConfigForLife = input.kind === "saved" || input.onConfigUpdated !== undefined;
+  const lifecycleGeneration = input.lifecycleGeneration;
+  const isCurrentGeneration = () =>
+    lifecycleGeneration === undefined ||
+    lifecycleGeneration.readCurrent() === lifecycleGeneration.generation;
+  const currentAttempt = () => getWsConnectionStatusForEnvironment(environmentId).attemptCount;
+  let observedConfig: {
+    readonly config: ServerConfig;
+    readonly attempt: number;
+    readonly generation: number | null;
+  } | null = null;
+  const configListeners = new Set<(update: EnvironmentConfigUpdate) => void>();
   // Re-armed when a reconnect begins: the replacement subscription's first
   // item is a full snapshot, which the metadata refresh reuses.
   let configSnapshotWaiter = createConfigSnapshotWaiter();
@@ -220,35 +282,64 @@ export function createEnvironmentConnection(
         input.onWelcome?.(payload);
       })
     : () => undefined;
-  const unsubConfig = shouldObserveConfig
-    ? input.client.server.subscribeConfig(
-        (event) => {
-          const normalizedEvent =
-            event.type === "snapshot"
-              ? {
-                  ...event,
-                  config: {
-                    ...event.config,
-                    environment: normalizeObservedEnvironment(
-                      event.config.environment,
-                      "server config snapshot",
-                    ),
-                  },
-                }
-              : event;
-          const nextConfig = projectServerConfigEvent(observedConfig, normalizedEvent);
-          if (!nextConfig) return;
-          observedConfig = nextConfig;
-          if (normalizedEvent.type === "snapshot") configSnapshotWaiter.resolve(nextConfig);
-          input.onConfigUpdated?.(nextConfig, normalizedEvent.type);
+  const observeConfigEvent = (event: ServerConfigStreamEvent) => {
+    // A stale hosted generation never publishes config, not even a snapshot.
+    if (disposed || !isCurrentGeneration()) return;
+    const attempt = currentAttempt();
+    // Incremental events apply only on top of this attempt's own snapshot.
+    const base =
+      event.type === "snapshot" || observedConfig?.attempt !== attempt
+        ? null
+        : observedConfig.config;
+    const normalizedEvent =
+      event.type === "snapshot"
+        ? {
+            ...event,
+            config: {
+              ...event.config,
+              environment: normalizeObservedEnvironment(
+                event.config.environment,
+                "server config snapshot",
+              ),
+            },
+          }
+        : event;
+    const nextConfig = projectServerConfigEvent(base, normalizedEvent);
+    if (!nextConfig) return;
+    observedConfig = {
+      config: nextConfig,
+      attempt,
+      generation: lifecycleGeneration === undefined ? null : lifecycleGeneration.readCurrent(),
+    };
+    if (normalizedEvent.type === "snapshot") configSnapshotWaiter.resolve(nextConfig);
+    input.onConfigUpdated?.(nextConfig, normalizedEvent.type);
+    const update = { config: nextConfig, event };
+    for (const listener of Array.from(configListeners)) listener(update);
+  };
+  let configStreamHolds = 0;
+  let unsubConfigStream: (() => void) | null = null;
+  const holdConfigStream = (): (() => void) => {
+    configStreamHolds += 1;
+    if (unsubConfigStream === null && !disposed) {
+      unsubConfigStream = input.client.server.subscribeConfig(observeConfigEvent, {
+        onResubscribe: () => {
+          observedConfig = null;
         },
-        {
-          onResubscribe: () => {
-            observedConfig = null;
-          },
-        },
-      )
-    : () => undefined;
+      });
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      configStreamHolds -= 1;
+      if (configStreamHolds > 0) return;
+      observedConfig = null;
+      const unsubscribe = unsubConfigStream;
+      unsubConfigStream = null;
+      unsubscribe?.();
+    };
+  };
+  const unsubConfig = holdsConfigForLife ? holdConfigStream() : () => undefined;
   // Resume is attempted only on top of a baseline this connection established
   // itself, and a projection reset waits until the server has chosen between
   // resuming and sending a snapshot.
@@ -292,6 +383,8 @@ export function createEnvironmentConnection(
     },
     {
       ...(input.applyThreadPriorities === undefined ? {} : { threadPriorities: "delta" as const }),
+      // The store keeps archived threads as stubs and loads full shells on demand.
+      archivedThreads: "stub" as const,
       ...(readShellResumeSequence === undefined
         ? {}
         : {
@@ -332,6 +425,12 @@ export function createEnvironmentConnection(
     unsubTerminalEvent();
     unsubLifecycle();
     unsubConfig();
+    // Observers' holds end with the connection.
+    observedConfig = null;
+    configListeners.clear();
+    const unsubscribeConfigStream = unsubConfigStream;
+    unsubConfigStream = null;
+    unsubscribeConfigStream?.();
     deviceBinding?.dispose();
   };
 
@@ -357,9 +456,37 @@ export function createEnvironmentConnection(
         };
       },
     },
+    config: {
+      read: () => {
+        if (disposed || observedConfig === null) return null;
+        const status = getWsConnectionStatusForEnvironment(environmentId);
+        if (status.phase !== "connected" || observedConfig.attempt !== status.attemptCount) {
+          return null;
+        }
+        if (
+          lifecycleGeneration !== undefined &&
+          (observedConfig.generation !== lifecycleGeneration.generation || !isCurrentGeneration())
+        ) {
+          return null;
+        }
+        return observedConfig.config;
+      },
+      subscribe: (listener) => {
+        if (disposed) return () => undefined;
+        const entry = (update: EnvironmentConfigUpdate) => listener(update);
+        configListeners.add(entry);
+        const release = holdConfigStream();
+        return () => {
+          configListeners.delete(entry);
+          release();
+        };
+      },
+    },
     reconnect: async () => {
       bootstrapGate.reset();
       invalidateShellReadiness();
+      // The replacement socket's own snapshot is the next current config.
+      observedConfig = null;
       deviceBinding?.reconnecting();
       const configSnapshot = createConfigSnapshotWaiter();
       configSnapshotWaiter = configSnapshot;

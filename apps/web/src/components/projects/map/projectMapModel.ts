@@ -17,6 +17,7 @@ import { rel, scheduleLabel } from "@ryco/shared/automationSchedule";
 import { inboxGlyphLabel, resolveInboxGlyph } from "../../inboxSidebar/inboxRowPresentation";
 import { resolveInboxThreadStatus } from "../../inboxSidebar/inboxSidebarModel";
 import type { SidebarTreeThread, SidebarTreeWorktree } from "../../sidebar/hooks/useSidebarTree";
+import { isArchivedThreadStub } from "../../../types";
 import {
   findWorkspaceSummary,
   workspaceFacts,
@@ -31,6 +32,17 @@ import type {
 } from "./projectMap.logic";
 
 export function toMapThread(thread: SidebarTreeThread, archived: boolean): MapThread {
+  if (isArchivedThreadStub(thread)) {
+    // An archived stub has no status: it shows as the archived, quiet thread it is.
+    return {
+      id: thread.id,
+      title: thread.title,
+      glyph: "idle",
+      glyphLabel: "Archived",
+      archived: true,
+      activityAt: thread.updatedAt,
+    };
+  }
   const status = resolveInboxThreadStatus(thread);
   const glyph = resolveInboxGlyph(status, false);
   return {

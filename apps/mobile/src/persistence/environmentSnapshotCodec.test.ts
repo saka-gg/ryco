@@ -1,6 +1,11 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  fullThreadEntry,
+  isArchivedThreadStub,
+  type ArchivedThreadStub,
+} from "@ryco/client-runtime/state/threads";
 import type {
   EnvironmentState,
   Project,
@@ -117,8 +122,8 @@ describe("environment snapshot codec", () => {
     expect(record.capturedAt).toBe(123);
     expect(record.projects).toHaveLength(1);
     expect(record.threads).toHaveLength(1);
-    expect(record.threads[0]?.summary.session).toBeNull();
-    expect(record.threads[0]?.summary.backgroundLiveness).toBeNull();
+    expect(fullThreadEntry(record.threads[0]?.summary)?.session).toBeNull();
+    expect(fullThreadEntry(record.threads[0]?.summary)?.backgroundLiveness).toBeNull();
   });
 
   it("round-trips through encode and decode", () => {
@@ -177,14 +182,105 @@ describe("environment snapshot codec", () => {
     expect(threads.get("thread-root" as never)).not.toHaveProperty("lineage");
   });
 
-  it("discards a record whose schemaVersion literal does not match — a bump in either direction", () => {
+  it("discards a record whose schemaVersion literal it does not know — a bump in either direction", () => {
     const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
     const { payload } = boundStoredEnvironmentSnapshot(record);
-    const bumped = JSON.stringify({
-      ...(JSON.parse(payload) as Record<string, unknown>),
-      schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION + 1,
+    for (const schemaVersion of [ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION + 1, 0]) {
+      const bumped = JSON.stringify({
+        ...(JSON.parse(payload) as Record<string, unknown>),
+        schemaVersion,
+      });
+      expect(decodeStoredEnvironmentSnapshot(bumped, ENV)).toBeNull();
+    }
+  });
+
+  const archivedStub = (id: string): ArchivedThreadStub => ({
+    shellDetail: "archived-stub",
+    id: id as never,
+    environmentId: ENV,
+    projectId: "project-1" as never,
+    title: id,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+    archivedAt: "2026-08-02T00:00:00.000Z",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    latestUserMessageAt: null,
+    lineage: null,
+  });
+  const withStub = (state: EnvironmentState, id: string): EnvironmentState => ({
+    ...state,
+    threadIds: [...state.threadIds, id as never],
+    threadShellById: { ...state.threadShellById, [id]: archivedStub(id) } as never,
+    sidebarThreadSummaryById: {
+      ...state.sidebarThreadSummaryById,
+      [id]: archivedStub(id),
+    } as never,
+  });
+
+  it("writes stubs whole as v2 and round-trips them", () => {
+    const record = captureEnvironmentSnapshotRecord(
+      withStub(environmentState(["thread-1"]), "archived-1"),
+      ENV,
+      123,
+    );
+    expect(record.schemaVersion).toBe(2);
+    const stored = record.threads.find((thread) => thread.shell.id === "archived-1");
+    expect(isArchivedThreadStub(stored?.shell)).toBe(true);
+    // A stub claims no live state; it is stored as is.
+    expect(stored?.summary).toEqual(archivedStub("archived-1"));
+    const { payload } = boundStoredEnvironmentSnapshot(record);
+    expect(decodeStoredEnvironmentSnapshot(payload, ENV)).toEqual(record);
+    // The incremental serializer writes the same bytes.
+    const serialized = createEnvironmentSnapshotSerializer().serialize(
+      withStub(environmentState(["thread-1"]), "archived-1"),
+      ENV,
+      123,
+    );
+    expect(serialized.payload).toBe(payload);
+  });
+
+  it("still reads a v1 record, which only ever held full shells", () => {
+    const record = captureEnvironmentSnapshotRecord(environmentState(["thread-1"]), ENV, 123);
+    const legacy = JSON.stringify({ ...record, schemaVersion: 1 });
+    const decoded = decodeStoredEnvironmentSnapshot(legacy, ENV);
+    expect(decoded?.threads.map((thread) => thread.shell.id)).toEqual(["thread-1"]);
+  });
+
+  it("discards a v1 record that claims a stub, and half a stub in any record", () => {
+    const record = captureEnvironmentSnapshotRecord(
+      withStub(environmentState([]), "archived-1"),
+      ENV,
+      123,
+    );
+    const { payload } = boundStoredEnvironmentSnapshot(record);
+    expect(
+      decodeStoredEnvironmentSnapshot(
+        JSON.stringify({ ...(JSON.parse(payload) as object), schemaVersion: 1 }),
+        ENV,
+      ),
+    ).toBeNull();
+    const half = JSON.parse(payload) as { threads: Array<{ summary: unknown }> };
+    half.threads[0]!.summary = summary("archived-1");
+    expect(decodeStoredEnvironmentSnapshot(JSON.stringify(half), ENV)).toBeNull();
+  });
+
+  it("projects a stored stub into shared metadata as a marked stub", () => {
+    const record = captureEnvironmentSnapshotRecord(
+      withStub(environmentState(["thread-1"]), "archived-1"),
+      ENV,
+      123,
+    );
+    const threads = new Map(
+      toWorkspaceMetadataSnapshot(record).threads.map((thread) => [thread.id, thread]),
+    );
+    expect(threads.get("archived-1" as never)).toMatchObject({
+      shellDetail: "archived-stub",
+      archivedAt: "2026-08-02T00:00:00.000Z",
+      modelSelection: null,
     });
-    expect(decodeStoredEnvironmentSnapshot(bumped, ENV)).toBeNull();
+    expect(threads.get("thread-1" as never)).not.toHaveProperty("shellDetail");
   });
 
   it("discards corrupt JSON and identity mismatches", () => {

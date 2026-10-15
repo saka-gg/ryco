@@ -37,6 +37,11 @@ interface RememberedProjectPreferences {
 }
 
 const effectivePreferencesCache = new Map<string, RememberedProjectPreferences>();
+/**
+ * Advanced whenever the cache is forgotten (account teardown), so a read that
+ * started before it can never repopulate the cache for the next account.
+ */
+let effectivePreferencesEpoch = 0;
 
 const preferencesCacheKey = (environmentId: EnvironmentId, projectId: ProjectId | undefined) =>
   `${environmentId}\u0000${projectId ?? ""}`;
@@ -87,11 +92,15 @@ export async function readAndRememberProjectPreferences(input: {
 }): Promise<EffectiveProjectPreferences | null> {
   const cacheKey = preferencesCacheKey(input.environmentId, input.projectId);
   const settings = input.config?.settings;
+  const epoch = effectivePreferencesEpoch;
   const effective = await readEffectiveProjectPreferences({
     api: input.api,
     config: input.config,
     ...(input.projectId ? { projectId: input.projectId } : {}),
   });
+  // The cache was forgotten while the node answered: the answer belongs to a
+  // session that has ended and is returned to its caller only.
+  if (epoch !== effectivePreferencesEpoch) return effective;
   if (effective) effectivePreferencesCache.set(cacheKey, { settings, effective });
   else effectivePreferencesCache.delete(cacheKey);
   return effective;
@@ -99,6 +108,7 @@ export async function readAndRememberProjectPreferences(input: {
 
 /** Forgets every remembered answer (account teardown). */
 export function forgetRememberedProjectPreferences(): void {
+  effectivePreferencesEpoch += 1;
   effectivePreferencesCache.clear();
 }
 
@@ -177,9 +187,12 @@ function unwrap<A>(read: SettledRead<A>): A {
  *   ~100 KB `getConfig` and its decode are skipped entirely. When this session
  *   already has the node's answer for the project, that read moves off the
  *   path too (`fresh`), and the draft opens with no round trip at all.
- * - Hosted targets pass `requireFreshConfig`: the primary cache can still hold
- *   the previous node's settings while switching targets, so the config is
- *   read from the scoped connection. When the cache already shows the
+ * - Hosted targets pass their connection's live config, which is only ever
+ *   current for one socket attempt and hosted generation (see
+ *   `resolveNodeConfigSource`), and take the same path. Without one they pass
+ *   `requireFreshConfig`: the primary cache can still hold the previous node's
+ *   settings while switching targets, so the config is read from the scoped
+ *   connection. When the cache already shows the
  *   preferences capability, the preferences read starts in parallel with it;
  *   its result is used only if the fresh config confirms the capability (a
  *   cached value never decides support).

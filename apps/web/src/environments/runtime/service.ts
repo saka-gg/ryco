@@ -9,7 +9,7 @@ import {
   type OrchestrationThreadHistoryCollection,
   type OrchestrationThreadHistoryPageInfo,
   type MessageId,
-  type OrchestrationShellSnapshot,
+  type OrchestrationStubbedShellSnapshot,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellThreadPrioritiesItem,
   type ServerConfig,
@@ -78,8 +78,13 @@ import {
   writeSavedEnvironmentBearerToken,
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
-import { useStore, selectSidebarThreadSummaryByRef, selectThreadByRef } from "~/store";
-import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
+import {
+  useStore,
+  selectEnvironmentState,
+  selectSidebarThreadSummaryByRef,
+  selectThreadByRef,
+} from "~/store";
+import { createEnvironmentEventBatcher, fullThreadEntry } from "@ryco/client-runtime/state/threads";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import type { WsProtocolCloseContext } from "@ryco/client-runtime/rpc";
 import {
@@ -295,7 +300,8 @@ function isNonIdleThreadDetailSubscription(input: {
 }): boolean {
   const threadRef = scopeThreadRef(input.environmentId, input.threadId);
   const state = useStore.getState();
-  const sidebarThread = selectSidebarThreadSummaryByRef(state, threadRef);
+  // An archived stub knows of no pending work; once loaded, its full summary does.
+  const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, threadRef));
 
   // Prefer shell/sidebar state first because it carries the coarse thread
   // readiness flags used throughout the UI (pending approvals/input/plan).
@@ -351,6 +357,15 @@ export function retainThreadDetailSubscription(
     threadId,
     options,
   );
+}
+
+/** Loads full shells for archived stubs; see the supervisor's `ensureArchivedThreadShells`. */
+export function ensureArchivedThreadShells(
+  environmentId: EnvironmentId,
+  threadIds: ReadonlyArray<ThreadId>,
+): void {
+  if (threadIds.length === 0) return;
+  getEnvironmentSupervisor().ensureArchivedThreadShells(environmentId, threadIds);
 }
 
 export function loadOlderThreadHistory(input: {
@@ -858,7 +873,10 @@ function createEnvironmentConnectionHandlers(
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().applyThreadPriorities(item, environmentId);
     },
-    syncShellSnapshot: (snapshot: OrchestrationShellSnapshot, environmentId: EnvironmentId) => {
+    syncShellSnapshot: (
+      snapshot: OrchestrationStubbedShellSnapshot,
+      environmentId: EnvironmentId,
+    ) => {
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().syncShellSnapshot(snapshot, environmentId, {
         onCurrent: () => {
@@ -874,7 +892,9 @@ function createEnvironmentConnectionHandlers(
     applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       const threadRef = scopeThreadRef(environmentId, ThreadId.make(event.threadId));
-      const serverThread = selectThreadByRef(useStore.getState(), threadRef);
+      // The shell entry, stub or full: an archived stub is still a known, archived thread.
+      const serverThread = selectEnvironmentState(useStore.getState(), environmentId)
+        .threadShellById[threadRef.threadId];
       const hasDraftThread =
         useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null;
       if (
@@ -1256,6 +1276,16 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
       kind: "primary",
       knownEnvironment,
       client: createPrimaryEnvironmentClient(knownEnvironment),
+      // The hosted lifecycle owner's generation: once it moves on, this
+      // connection's config is neither published nor read.
+      ...(hostedGeneration === null
+        ? {}
+        : {
+            lifecycleGeneration: {
+              generation: hostedGeneration,
+              readCurrent: () => useHostedHubStore.getState().generation,
+            },
+          }),
       ...createEnvironmentConnectionHandlers(
         hostedGeneration,
         hostedGeneration !== null ? knownEnvironment.environmentId : undefined,

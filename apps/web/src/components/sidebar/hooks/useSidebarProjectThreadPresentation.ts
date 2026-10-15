@@ -9,7 +9,12 @@ import {
 import { restatusSidebarTreeThread } from "../sidebarTreeAdapters";
 import { useSidebarProjectTreeCache } from "../sidebarProjectTreeCache";
 import { decorateSidebarTreeProject, type SidebarTreeThread } from "./useSidebarTree";
-import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../../types";
+import {
+  isUnarchivedThreadEntry,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
+} from "../../../types";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
 import { useUiStateStore } from "../../../uiStateStore";
 
@@ -17,9 +22,9 @@ const THREAD_PREVIEW_LIMIT = 6;
 
 export function useSidebarProjectThreadPresentation(params: {
   project: SidebarProjectSnapshot;
-  /** The project's server threads and its drafts, merged. */
-  projectThreads: ReadonlyArray<SidebarThreadSummary>;
-  sidebarThreads: ReadonlyArray<SidebarThreadSummary>;
+  /** The project's server threads and its drafts, merged; archived ones may be stubs. */
+  projectThreads: ReadonlyArray<SidebarThreadOrStub>;
+  sidebarThreads: ReadonlyArray<SidebarThreadOrStub>;
   /** From the shared tree cache's `draftThreadsSelector(project)`. */
   projectDraftThreads: ReadonlyArray<SidebarTreeThread>;
   sidebarWorktrees: ReadonlyArray<SidebarWorktreeSummary>;
@@ -65,7 +70,7 @@ export function useSidebarProjectThreadPresentation(params: {
       });
     };
     const visibleProjectThreads = sortThreadsWithPinned({
-      threads: projectThreads.filter((thread) => thread.archivedAt === null),
+      threads: projectThreads.filter(isUnarchivedThreadEntry),
       sortOrder: threadSortOrder,
       pinnedThreadKeys,
       getThreadKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),

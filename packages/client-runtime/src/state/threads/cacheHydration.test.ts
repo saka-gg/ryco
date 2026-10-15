@@ -20,7 +20,13 @@ import {
   type CachedEnvironmentShellSnapshot,
   useStore,
 } from "./store.ts";
-import type { Project, SidebarThreadSummary, ThreadSession, ThreadShell } from "./types.ts";
+import {
+  fullThreadEntry,
+  type Project,
+  type SidebarThreadSummary,
+  type ThreadSession,
+  type ThreadShell,
+} from "./types.ts";
 
 const ENV_A = EnvironmentId.make("env-cache-a");
 const ENV_B = EnvironmentId.make("env-cache-b");
@@ -139,10 +145,12 @@ describe("cache hydration", () => {
     expect(state.environmentStateById[ENV_A]?.bootstrapComplete).toBe(false);
     expect(state.environmentStateById[ENV_A]?.hydratedFromCacheAt).toBe(1_755_000_000_000);
     expect(
-      state.environmentStateById[ENV_A]?.sidebarThreadSummaryById["thread-1" as never]
-        ?.modelSelection,
+      fullThreadEntry(
+        state.environmentStateById[ENV_A]?.sidebarThreadSummaryById["thread-1" as never],
+      )?.modelSelection,
     ).toEqual(
-      state.environmentStateById[ENV_A]?.threadShellById["thread-1" as never]?.modelSelection,
+      fullThreadEntry(state.environmentStateById[ENV_A]?.threadShellById["thread-1" as never])
+        ?.modelSelection,
     );
   });
 
