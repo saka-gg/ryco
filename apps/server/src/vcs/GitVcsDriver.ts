@@ -70,6 +70,8 @@ export interface ExecuteGitInput {
    * A read that must never take optional locks (`GIT_OPTIONAL_LOCKS=0`): a
    * background `git status` otherwise rewrites `.git/index` under
    * `index.lock`, racing agents' `git add` / `commit` in the same checkout.
+   * Porcelain `git diff` against the working tree ignores that variable; such
+   * reads also pass {@link NO_INDEX_REFRESH_DIFF_ARGS}.
    */
   readonly readOnly?: boolean;
 }
@@ -78,6 +80,19 @@ export interface ExecuteGitInput {
 export const READ_ONLY_GIT_ENV = Object.freeze({
   GIT_OPTIONAL_LOCKS: "0",
 } satisfies NodeJS.ProcessEnv);
+
+/**
+ * Leading arguments for a background porcelain `git diff` that reads the
+ * working tree. With `diff.autoRefreshIndex` (on by default) such a diff locks
+ * and rewrites `.git/index` whenever a tracked file's stat data changed but its
+ * content did not — `GIT_OPTIONAL_LOCKS=0` does not stop it. Off, those files
+ * are compared by content on every read instead, and an older Git may list
+ * them as unchanged `0\t0` numstat rows.
+ */
+export const NO_INDEX_REFRESH_DIFF_ARGS = Object.freeze([
+  "-c",
+  "diff.autoRefreshIndex=false",
+] as const);
 
 export interface ExecuteGitResult {
   readonly exitCode: ChildProcessSpawner.ExitCode;
@@ -225,9 +240,19 @@ export interface GitVcsDriverShape {
   readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
   readonly statusDetailsLocal: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
   /**
+   * `details` with only what a fetch can move recomputed — ahead / behind
+   * against the upstream and the ahead-of-base count — without the working-tree
+   * scans of {@link statusDetailsLocal}. Null when it cannot tell (HEAD left
+   * `details.branch`, the upstream is unreadable, a detached HEAD); read in full then.
+   */
+  readonly refreshStatusTracking: (
+    cwd: string,
+    details: GitStatusDetails,
+  ) => Effect.Effect<GitStatusDetails | null, GitCommandError>;
+  /**
    * Fetches the current branch's upstream remote unless that remote was
    * fetched recently (shared per repository and remote). Never fails; true
-   * when a fetch completed during the call, so remote-tracking refs may have moved.
+   * when a fetch succeeded during the call, so remote-tracking refs may have moved.
    */
   readonly refreshStatusUpstream: (cwd: string) => Effect.Effect<boolean>;
   readonly prepareCommitContext: (

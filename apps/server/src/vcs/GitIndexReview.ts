@@ -179,11 +179,9 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
         const temporaryIndex = path.join(temp, "index");
         const bytes = yield* readIndex();
         const env = { GIT_INDEX_FILE: temporaryIndex };
-        const resetTemporaryIndex = () =>
-          bytes
-            ? io(root, () => fs.writeFile(temporaryIndex, bytes))
-            : run(["read-tree", "--empty"], { env }).pipe(Effect.asVoid);
-        yield* resetTemporaryIndex();
+        yield* bytes
+          ? io(root, () => fs.writeFile(temporaryIndex, bytes))
+          : run(["read-tree", "--empty"], { env }).pipe(Effect.asVoid);
         const readRun = (args: readonly string[], allowNonZeroExit = false) =>
           run(args, { env, allowNonZeroExit });
         if ((yield* readRun(["ls-files", "--unmerged", "-z"])).stdout)
@@ -207,8 +205,22 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
             root,
             "Too many untracked files for review. Narrow the working changes first.",
           );
-        // Mark untracked files intent-to-add in the disposable index so the one
-        // working-tree diff reports them as new files, instead of one
+        // Tracked changes are read before any untracked path enters the index:
+        // `git add` replaces an entry that clashes file-vs-directory with the
+        // path it adds (tracked `foo` now a directory holding untracked
+        // `foo/bar`), which would hide that tracked deletion.
+        // With untracked files present a failed read refuses the review as the
+        // combined diff did, not with a raw Git error.
+        const trackedResult = yield* readRun([...diffArgs, "--"], untracked.length > 0);
+        if (trackedResult.exitCode !== 0)
+          return yield* error(
+            root,
+            "An untracked file changed or could not be read. Refresh the review.",
+          );
+        if (trackedResult.stdoutTruncated)
+          return yield* error(root, "Local changes exceed the 2 MB review limit.");
+        // Mark untracked files intent-to-add in the disposable index so one
+        // more working-tree diff reports them as new files, instead of one
         // `diff --no-index` process per file. Records only the empty blob.
         // Writing an index runs `post-index-change`; a read must not run hooks.
         const intentToAdd =
@@ -231,17 +243,20 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
                   allowNonZeroExit: true,
                 },
               )).exitCode === 0;
-        // A refused batch can still record the paths Git accepted (e.g. it skips
-        // only those outside a sparse checkout); start the fallback from the
-        // original index so no untracked file is diffed twice.
-        if (!intentToAdd) yield* resetTemporaryIndex();
-        const unstagedResult = yield* readRun([...diffArgs, "--"], untracked.length > 0);
-        if (unstagedResult.exitCode !== 0)
+        // Only intent-to-add entries can read as added against the index, so
+        // this diff holds exactly the untracked files. A refused batch can still
+        // have recorded some paths (e.g. all but those outside a sparse
+        // checkout); the per-file fallback below covers every untracked file.
+        const untrackedResult =
+          intentToAdd && untracked.length > 0
+            ? yield* readRun([...diffArgs, "--diff-filter=A", "--"], true)
+            : null;
+        if (untrackedResult !== null && untrackedResult.exitCode !== 0)
           return yield* error(
             root,
             "An untracked file changed or could not be read. Refresh the review.",
           );
-        if (unstagedResult.stdoutTruncated)
+        if (untrackedResult?.stdoutTruncated)
           return yield* error(root, "Local changes exceed the 2 MB review limit.");
         // An intent-to-add path that vanished before the diff reads as a deleted
         // empty file; refuse it like the per-file diff refuses a missing file.
@@ -263,7 +278,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
             root,
             "An untracked file changed or could not be read. Refresh the review.",
           );
-        let unstaged = unstagedResult.stdout;
+        let unstaged = trackedResult.stdout + (untrackedResult?.stdout ?? "");
         // Git refused the batch (e.g. a sparse-checkout path or an unwritable
         // object store): diff each untracked file on its own instead.
         for (const name of intentToAdd ? [] : untracked) {

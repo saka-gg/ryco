@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -115,7 +123,13 @@ function fixture() {
         try: () => {
           state.gitCalls.push(input.args.join(" "));
           return {
-            stdout: git(input.cwd, ...input.args),
+            // As the real driver: read-only commands skip optional locks.
+            stdout: execFileSync("git", input.args, {
+              cwd: input.cwd,
+              encoding: "utf8",
+              stdio: ["pipe", "pipe", "pipe"],
+              ...(input.readOnly ? { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } } : {}),
+            }),
             stderr: "",
             exitCode: 0,
             stdoutTruncated: false,
@@ -197,6 +211,29 @@ describe("workspace change summary", () => {
     // Nothing is staged or written: the index still matches HEAD.
     expect(f.state.gitCalls.some((args) => /\b(add|commit|stash|reset)\b/.test(args))).toBe(false);
     expect(f.git(f.checkout, "diff", "--cached", "--name-only").trim()).toBe("");
+  });
+
+  it("leaves the checkout's index untouched when files only changed stat data", async () => {
+    const f = fixture();
+    writeFileSync(path.join(f.checkout, "app.ts"), "export const greeting = 'goodbye';\n");
+    writeFileSync(path.join(f.checkout, "other.ts"), "export const other = 1;\n");
+    f.git(f.checkout, "add", "other.ts");
+    f.commit(f.checkout, "Add other");
+    // Same content, newer mtime: a refreshing `git diff` would rewrite the index.
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(path.join(f.checkout, "other.ts"), later, later);
+    const index = path.resolve(
+      f.checkout,
+      f.git(f.checkout, "rev-parse", "--git-path", "index").trim(),
+    );
+    const before = { bytes: readFileSync(index), mtimeMs: statSync(index).mtimeMs };
+
+    expect(await f.summarize()).toEqual({ summary: "Adds a **farewell** greeting." });
+    expect(readFileSync(index).equals(before.bytes)).toBe(true);
+    expect(statSync(index).mtimeMs).toBe(before.mtimeMs);
+    const call = f.state.calls[0]!;
+    expect(call.diffPatch).toContain("+export const greeting = 'goodbye';");
+    expect(call.diffPatch).not.toContain("other.ts");
   });
 
   it("summarizes unmerged commits on an otherwise clean checkout", async () => {

@@ -326,7 +326,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
                   ].join("\n"),
                 );
               }
-              if (command === "diff") {
+              if (command === "diff" || (command === "-c" && input.args.includes("diff"))) {
                 return ok();
               }
               if (command === "symbolic-ref") {
@@ -355,9 +355,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.equal(fetchCall?.env?.SSH_ASKPASS_REQUIRE, "never");
         assert.deepStrictEqual(
           calls
-            .filter((call) => call.args[0] === "diff" && call.args.includes("--numstat"))
+            .filter((call) => call.args.includes("diff") && call.args.includes("--numstat"))
             .map((call) => call.args),
-          [["diff", "HEAD", "--numstat"]],
+          [["-c", "diff.autoRefreshIndex=false", "diff", "HEAD", "--numstat"]],
         );
       }).pipe(Effect.provide(OverrideTestLayer)),
     );
@@ -382,7 +382,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
               const args = input.args.join(" ");
               if (args === "status --porcelain=2 --branch")
                 return ok("# branch.oid abc\n# branch.head feature/x\n");
-              if (args === "diff HEAD --numstat") return ok("1\t0\tsrc/a.ts\n");
+              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat")
+                return ok("1\t0\tsrc/a.ts\n");
               if (args === "symbolic-ref refs/remotes/origin/HEAD")
                 return ok("refs/remotes/origin/main\n");
               if (args === "config -z --list")
@@ -405,9 +406,10 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           { path: "src/b.ts", insertions: 4, deletions: 1 },
         ]);
         // The base is resolved once and shared by both counts and the diff.
+        // The working-tree diff never refreshes the index; the commit-pair diff has no working tree.
         assert.deepStrictEqual(calls.map((call) => call.args[0]).toSorted(), [
+          "-c",
           "config",
-          "diff",
           "diff",
           "for-each-ref",
           "rev-list",
@@ -508,6 +510,129 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           insertions: 1,
           deletions: 0,
         });
+      }),
+    );
+
+    it.effect("reads status without rewriting the index for files whose stat data changed", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        // Same content, newer mtime: a refreshing `git diff` rewrites the index under index.lock.
+        const later = new Date(Date.now() + 60_000);
+        yield* Effect.promise(() =>
+          fsPromises.utimes(nodePath.join(cwd, "README.md"), later, later),
+        );
+        const index = nodePath.join(cwd, ".git", "index");
+        const before = yield* Effect.promise(() =>
+          Promise.all([fsPromises.readFile(index), fsPromises.stat(index)]),
+        );
+
+        const status = yield* (yield* GitVcsDriver.GitVcsDriver).statusDetailsLocal(cwd);
+
+        const after = yield* Effect.promise(() =>
+          Promise.all([fsPromises.readFile(index), fsPromises.stat(index)]),
+        );
+        assert.isTrue(after[0].equals(before[0]));
+        assert.equal(after[1].mtimeMs, before[1].mtimeMs);
+        assert.equal(status.hasWorkingTreeChanges, false);
+        assert.deepStrictEqual(status.workingTree.files, []);
+      }),
+    );
+
+    it.effect("keeps only status-confirmed rows and renamed paths in the working tree", () =>
+      Effect.gen(function* () {
+        const ok = (stdout = "") =>
+          ({
+            exitCode: 0 as GitVcsDriver.ExecuteGitResult["exitCode"],
+            stdout,
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }) satisfies GitVcsDriver.ExecuteGitResult;
+        const hash = "c".repeat(40);
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            Effect.sync(() => {
+              const args = input.args.join(" ");
+              if (args === "status --porcelain=2 --branch")
+                return ok(
+                  [
+                    "# branch.oid abc",
+                    "# branch.head main",
+                    `1 .M N... 100644 100644 100644 ${hash} ${hash} src/my file.ts`,
+                    `2 R. N... 100644 100644 100644 ${hash} ${hash} R100 src/b.ts\tsrc/a.ts`,
+                    "",
+                  ].join("\n"),
+                );
+              if (args === "-c diff.autoRefreshIndex=false diff HEAD --numstat")
+                // An older Git lists a stat-only change (`touched.ts`) as an unchanged row.
+                return ok("3\t1\tsrc/my file.ts\n0\t0\tsrc/{a.ts => b.ts}\n0\t0\tsrc/touched.ts\n");
+              if (args === "symbolic-ref refs/remotes/origin/HEAD")
+                return ok("refs/remotes/origin/main\n");
+              return ok();
+            }),
+        });
+
+        const status = yield* driver.statusDetailsLocal("/repo");
+
+        assert.deepStrictEqual(status.workingTree.files, [
+          { path: "src/b.ts", insertions: 0, deletions: 0 },
+          { path: "src/my file.ts", insertions: 3, deletions: 1 },
+        ]);
+        assert.equal(status.workingTree.insertions, 3);
+      }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("reports a status fetch that git rejected as no fetch", () =>
+      Effect.gen(function* () {
+        let fetches = 0;
+        const result = (exitCode: number, stdout = "") =>
+          ({
+            exitCode: exitCode as GitVcsDriver.ExecuteGitResult["exitCode"],
+            stdout,
+            stderr: exitCode === 0 ? "" : "fatal: unable to access remote",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+          }) satisfies GitVcsDriver.ExecuteGitResult;
+        const driver = yield* makeGitVcsDriverCore({
+          executeOverride: (input) =>
+            Effect.sync(() => {
+              if (input.operation === "GitVcsDriver.fetchRemoteForStatus") {
+                fetches += 1;
+                return result(128);
+              }
+              if (input.args.includes("@{upstream}")) return result(0, "origin/main\n");
+              if (input.args.includes("--git-common-dir")) return result(0, ".git\n");
+              if (input.args[0] === "remote") return result(0, "origin\n");
+              throw new Error(`Unexpected git command: ${input.args.join(" ")}`);
+            }),
+        });
+
+        assert.isFalse(yield* driver.refreshStatusUpstream("/repo"));
+        // The failed fetch still holds the interval: an unreachable remote is not retried at once.
+        assert.isFalse(yield* driver.refreshStatusUpstream("/repo"));
+        assert.equal(fetches, 1);
+      }).pipe(Effect.provide(OverrideTestLayer)),
+    );
+
+    it.effect("recomputes upstream counts only while HEAD stays on the status's branch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const details = yield* driver.statusDetailsLocal(cwd);
+        assert.equal(details.aheadCount, 0);
+
+        yield* git(cwd, ["commit", "--allow-empty", "-m", "Local work"]);
+        const tracked = yield* driver.refreshStatusTracking(cwd, details);
+        assert.deepStrictEqual(tracked, { ...details, aheadCount: 1, behindCount: 0 });
+
+        yield* git(cwd, ["checkout", "-b", "elsewhere"]);
+        assert.isNull(yield* driver.refreshStatusTracking(cwd, details));
       }),
     );
 

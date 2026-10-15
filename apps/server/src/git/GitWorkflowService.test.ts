@@ -112,6 +112,36 @@ describe("GitWorkflowService", () => {
     }).pipe(Effect.provide(testLayer));
   });
 
+  it.effect("refreshes no remote-tracking refs outside a Git repository", () => {
+    const refreshRemoteTrackingRefs = vi.fn(() => Effect.succeed(true));
+    const testLayer = GitWorkflowService.layer.pipe(
+      Layer.provide(
+        Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+          detect: ({ cwd }) =>
+            Effect.succeed(
+              cwd === "/not-a-repo"
+                ? null
+                : ({
+                    kind: cwd === "/jj" ? "jj" : "git",
+                  } as unknown as VcsDriverRegistry.VcsDriverHandle),
+            ),
+        }),
+      ),
+      Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+      Layer.provide(Layer.mock(GitManager.GitManager)({ refreshRemoteTrackingRefs })),
+    );
+
+    return Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      assert.isFalse(yield* workflow.refreshRemoteTrackingRefs("/not-a-repo"));
+      assert.isFalse(yield* workflow.refreshRemoteTrackingRefs("/jj"));
+      assert.equal(refreshRemoteTrackingRefs.mock.calls.length, 0);
+
+      assert.isTrue(yield* workflow.refreshRemoteTrackingRefs("/repo"));
+      assert.deepStrictEqual(refreshRemoteTrackingRefs.mock.calls, [["/repo"]]);
+    }).pipe(Effect.provide(testLayer));
+  });
+
   it.effect("treats deleted status paths as non-repositories after stale VCS detection", () => {
     const detect = vi.fn(() =>
       Effect.succeed({

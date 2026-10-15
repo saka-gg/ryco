@@ -68,6 +68,7 @@ import {
   type PullRequestIndexScope,
 } from "../sourceControl/pullRequestIndex.ts";
 import { makeRepositoryListCache } from "../sourceControl/repositoryListCache.ts";
+import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
 
@@ -846,19 +847,33 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   };
   // The details behind the latest local status per checkout, so the remote
   // half that usually follows it does not run the whole local pipeline again.
+  // Each entry records the generations it was read under: an invalidation
+  // since then (a git action, agent turn) discards it; a successful fetch only
+  // makes the remote half recompute its upstream counts.
   const localStatusDetailsByCwd = new Map<
     string,
-    { readonly atMs: number; details: GitStatusDetails }
+    {
+      readonly atMs: number;
+      readonly localGeneration: number;
+      readonly fetchGeneration: number;
+      readonly details: GitStatusDetails;
+    }
   >();
+  const localStatusGenerations = makeCheckoutGenerations(STATUS_RESULT_CACHE_CAPACITY);
+  const statusFetchGenerations = makeCheckoutGenerations(STATUS_RESULT_CACHE_CAPACITY);
   const LOCAL_STATUS_DETAILS_TTL_MS = Duration.toMillis(LOCAL_STATUS_RESULT_CACHE_TTL);
   const readLocalStatus = Effect.fn("readLocalStatus")(function* (cwd: string) {
+    // Stamped when the read starts: what it saw predates anything after that.
+    const atMs = Date.now();
+    const localGeneration = localStatusGenerations.get(cwd);
+    const fetchGeneration = statusFetchGenerations.get(cwd);
     const details = yield* gitCore
       .statusDetailsLocal(cwd)
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
     localStatusDetailsByCwd.delete(cwd);
-    localStatusDetailsByCwd.set(cwd, { atMs: Date.now(), details });
+    localStatusDetailsByCwd.set(cwd, { atMs, localGeneration, fetchGeneration, details });
     if (localStatusDetailsByCwd.size > STATUS_RESULT_CACHE_CAPACITY) {
       const oldest = localStatusDetailsByCwd.keys().next().value;
       if (oldest !== undefined) localStatusDetailsByCwd.delete(oldest);
@@ -882,25 +897,44 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     capacity: STATUS_RESULT_CACHE_CAPACITY,
     timeToLive: (exit) => (Exit.isSuccess(exit) ? LOCAL_STATUS_RESULT_CACHE_TTL : Duration.zero),
   });
+  const forgetLocalStatusDetails = (cacheKey: string) => {
+    // Also discards a read still in flight, which captured the old generation.
+    localStatusGenerations.bump(cacheKey);
+    localStatusDetailsByCwd.delete(cacheKey);
+  };
   const invalidateLocalStatusResultCache = (cwd: string) =>
     normalizeStatusCacheKey(cwd).pipe(
       Effect.flatMap((cacheKey) =>
         Effect.andThen(
-          Effect.sync(() => localStatusDetailsByCwd.delete(cacheKey)),
+          Effect.sync(() => forgetLocalStatusDetails(cacheKey)),
           Cache.invalidate(localStatusResultCache, cacheKey),
         ),
       ),
     );
-  /** The details of a fresh local status read for this checkout, if any. */
-  const takeRecentLocalStatusDetails = (cwd: string): GitStatusDetails | null => {
+  /**
+   * The details of a fresh local status read for this checkout, if any. After
+   * a fetch since that read only the upstream counts are recomputed (a
+   * `rev-list`, no working-tree scan); null when there is nothing to reuse.
+   */
+  const reuseRecentLocalStatusDetails = Effect.fn("reuseRecentLocalStatusDetails")(function* (
+    cwd: string,
+  ) {
     const entry = localStatusDetailsByCwd.get(cwd);
     if (!entry) return null;
-    if (Date.now() - entry.atMs >= LOCAL_STATUS_DETAILS_TTL_MS) {
+    if (
+      Date.now() - entry.atMs >= LOCAL_STATUS_DETAILS_TTL_MS ||
+      entry.localGeneration !== localStatusGenerations.get(cwd)
+    ) {
       localStatusDetailsByCwd.delete(cwd);
       return null;
     }
-    return entry.details;
-  };
+    if (entry.fetchGeneration === statusFetchGenerations.get(cwd)) {
+      return entry.details;
+    }
+    return yield* gitCore
+      .refreshStatusTracking(cwd, entry.details)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+  });
   const probeBranchPublished = Effect.fn("probeBranchPublished")(function* (
     cwd: string,
     branch: string,
@@ -938,10 +972,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
     }).pipe(Effect.catch(() => Effect.succeed(null)));
   });
   // Reads the current remote-tracking refs; a fetch, when wanted, happens
-  // before (see `remoteStatus`) and drops the reused local details.
+  // before (see `remoteStatus`).
   const readRemoteStatus = Effect.fn("readRemoteStatus")(function* (cwd: string) {
     const details =
-      takeRecentLocalStatusDetails(cwd) ??
+      (yield* reuseRecentLocalStatusDetails(cwd)) ??
       (yield* gitCore
         .statusDetailsLocal(cwd)
         .pipe(Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(null))));
@@ -1679,11 +1713,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   const refreshRemoteTrackingRefsForKey = Effect.fn("refreshRemoteTrackingRefs")(function* (
     cacheKey: string,
   ) {
-    // Shared per repository and remote; only a completed fetch can move the
+    // Shared per repository and remote; only a successful fetch can move the
     // tracking refs a cached remote status was computed from.
     const fetched = yield* gitCore.refreshStatusUpstream(cacheKey);
     if (fetched) {
-      localStatusDetailsByCwd.delete(cacheKey);
+      statusFetchGenerations.bump(cacheKey);
       yield* Cache.invalidate(remoteStatusResultCache, cacheKey);
     }
     return fetched;
@@ -1874,7 +1908,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   const invalidateStatus: GitManagerShape["invalidateStatus"] = Effect.fn("invalidateStatus")(
     function* (cwd) {
       const cacheKey = yield* normalizeStatusCacheKey(cwd);
-      localStatusDetailsByCwd.delete(cacheKey);
+      forgetLocalStatusDetails(cacheKey);
       yield* Effect.all(
         [
           Cache.invalidate(localStatusResultCache, cacheKey),

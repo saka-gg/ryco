@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Layer, Option, PlatformError, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { expect } from "vite-plus/test";
 import type {
@@ -35,6 +35,7 @@ import {
 } from "../sourceControl/GitHubCli.ts";
 import { type TextGenerationShape, TextGeneration } from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { makeGitVcsDriverCore } from "../vcs/GitVcsDriverCore.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -766,6 +767,11 @@ function makeManager(input?: {
   project?: OrchestrationProjectShell;
   /** Route through the production registry, which detects the provider from git remotes. */
   detectSourceControlFromRemotes?: boolean;
+  /** Wraps every git command the manager's driver runs (observe, delay or replace it). */
+  gitExecute?: (
+    input: GitVcsDriver.ExecuteGitInput,
+    execute: GitVcsDriver.GitVcsDriverShape["execute"],
+  ) => ReturnType<GitVcsDriver.GitVcsDriverShape["execute"]>;
 }) {
   const {
     service: gitHubCli,
@@ -817,7 +823,22 @@ function makeManager(input?: {
       }),
   });
 
-  const vcsDriverLayer = GitVcsDriver.layer.pipe(
+  const gitExecute = input?.gitExecute;
+  const vcsDriverLayer = (
+    gitExecute
+      ? Layer.effect(
+          GitVcsDriver.GitVcsDriver,
+          Effect.gen(function* () {
+            const base = yield* makeGitVcsDriverCore();
+            return GitVcsDriver.GitVcsDriver.of(
+              yield* makeGitVcsDriverCore({
+                executeOverride: (command) => gitExecute(command, base.execute),
+              }),
+            );
+          }),
+        )
+      : GitVcsDriver.layer
+  ).pipe(
     Layer.provideMerge(VcsProcess.layer),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerConfigLayer),
@@ -1457,6 +1478,109 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(refreshed?.pr?.number).toBe(113);
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
       expect(ghCalls).not.toContain("getPullRequestStackSummaries");
+    }),
+  );
+
+  /** A checkout tracking `feature/tracked` on a bare remote that another clone moved ahead. */
+  const makeRemoteAheadFixture = Effect.gen(function* () {
+    const repoDir = yield* makeTempDir("ryco-git-manager-");
+    yield* initRepo(repoDir);
+    yield* runGit(repoDir, ["checkout", "-b", "feature/tracked"]);
+    const remoteDir = yield* createBareRemote();
+    yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+    yield* runGit(repoDir, ["push", "-u", "origin", "feature/tracked"]);
+    const otherDir = yield* makeTempDir("ryco-git-manager-other-");
+    yield* runGit(otherDir, ["clone", "--branch", "feature/tracked", remoteDir, "."]);
+    yield* configureTestGitCommitIdentity(otherDir, runGit);
+    yield* runGit(otherDir, ["commit", "--allow-empty", "-m", "Moved ahead"]);
+    yield* runGit(otherDir, ["push", "origin", "feature/tracked"]);
+    return { repoDir: fs.realpathSync(repoDir) };
+  });
+  const commandsOf = (calls: ReadonlyArray<GitVcsDriver.ExecuteGitInput>) =>
+    calls.map((call) => call.args.join(" "));
+  const isWorkingTreeScan = (command: string) =>
+    command.startsWith("status ") || command.includes("diff HEAD");
+
+  it.effect("recomputes only the upstream counts for remote status after a fetch", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const calls: GitVcsDriver.ExecuteGitInput[] = [];
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) => {
+          calls.push(input);
+          return execute(input);
+        },
+      });
+
+      yield* manager.localStatus({ cwd: repoDir });
+      calls.length = 0;
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+
+      expect(remote?.behindCount).toBe(1);
+      const commands = commandsOf(calls);
+      expect(calls.some((call) => call.operation === "GitVcsDriver.fetchRemoteForStatus")).toBe(
+        true,
+      );
+      expect(commands).toContain("rev-list --left-right --count @{upstream}...HEAD");
+      expect(commands.filter(isWorkingTreeScan)).toEqual([]);
+    }),
+  );
+
+  it.effect("reuses local status details when the status fetch fails", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      yield* runGit(repoDir, ["remote", "set-url", "origin", path.join(repoDir, "missing")]);
+      const calls: GitVcsDriver.ExecuteGitInput[] = [];
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) => {
+          calls.push(input);
+          return execute(input);
+        },
+      });
+
+      yield* manager.localStatus({ cwd: repoDir });
+      calls.length = 0;
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+
+      // The fetch ran and failed: the tracking refs did not move.
+      expect(remote?.behindCount).toBe(0);
+      const commands = commandsOf(calls);
+      expect(calls.some((call) => call.operation === "GitVcsDriver.fetchRemoteForStatus")).toBe(
+        true,
+      );
+      expect(commands.filter((command) => command.startsWith("rev-list --left-right"))).toEqual([]);
+      expect(commands.filter(isWorkingTreeScan)).toEqual([]);
+    }),
+  );
+
+  it.effect("does not reuse a local status read that a fetch overtook", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const firstStatusDone = yield* Deferred.make<void>();
+      const releaseFirstStatus = yield* Deferred.make<void>();
+      let statusReads = 0;
+      const { manager } = yield* makeManager({
+        gitExecute: (input, execute) =>
+          input.args[0] === "status" && ++statusReads === 1
+            ? // Read before the fetch, but finish after it.
+              execute(input).pipe(
+                Effect.tap(() => Deferred.succeed(firstStatusDone, undefined)),
+                Effect.tap(() => Deferred.await(releaseFirstStatus)),
+              )
+            : execute(input),
+      });
+
+      const localRead = yield* manager.localStatus({ cwd: repoDir }).pipe(Effect.forkScoped);
+      yield* Deferred.await(firstStatusDone);
+      const fetched = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+      expect(fetched?.behindCount).toBe(1);
+      yield* Deferred.succeed(releaseFirstStatus, undefined);
+      yield* Fiber.join(localRead);
+
+      // The remote half is recomputed without a fetch of its own.
+      yield* manager.invalidateRemoteStatus(repoDir);
+      const remote = yield* manager.remoteStatus({ cwd: repoDir });
+      expect(remote?.behindCount).toBe(1);
     }),
   );
 

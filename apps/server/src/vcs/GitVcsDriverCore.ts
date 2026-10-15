@@ -34,6 +34,7 @@ import { withGitFilesystemGuidance } from "../git/gitFilesystemErrors.ts";
 import { compactTraceAttributes } from "../observability/Attributes.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { readCheckoutHead } from "./gitCheckoutHead.ts";
 import {
   parseRemoteNames,
   parseRemoteNamesInGitOrder,
@@ -132,6 +133,17 @@ interface ExecuteGitOptions {
   readOnly?: boolean | undefined;
 }
 
+/** Whether a status compares the branch against a base: no upstream, or not the default branch. */
+function statusNeedsBase(upstreamRef: string | null, isDefaultBranch: boolean): boolean {
+  return upstreamRef === null || !isDefaultBranch;
+}
+
+/** `git rev-list --left-right --count A...B` output: commits only in A, then only in B. */
+function parseLeftRightCounts(stdout: string): { left: number; right: number } | null {
+  const match = /^(\d+)\s+(\d+)$/.exec(stdout.trim());
+  return match ? { left: Number(match[1]), right: Number(match[2]) } : null;
+}
+
 function parseBranchAb(value: string): { ahead: number; behind: number } {
   const match = value.match(/^\+(\d+)\s+-(\d+)$/);
   if (!match) return { ahead: 0, behind: 0 };
@@ -153,9 +165,7 @@ function parseNumstatEntries(
     if (rawPath.length === 0) continue;
     const added = Number.parseInt(addedRaw ?? "0", 10);
     const deleted = Number.parseInt(deletedRaw ?? "0", 10);
-    const renameArrowIndex = rawPath.indexOf(" => ");
-    const normalizedPath =
-      renameArrowIndex >= 0 ? rawPath.slice(renameArrowIndex + " => ".length).trim() : rawPath;
+    const normalizedPath = numstatDestinationPath(rawPath);
     entries.push({
       path: normalizedPath.length > 0 ? normalizedPath : rawPath,
       insertions: Number.isFinite(added) ? added : 0,
@@ -165,25 +175,45 @@ function parseNumstatEntries(
   return entries;
 }
 
+/** The new path of a numstat rename (`old => new` or `dir/{old => new}/file`). */
+function numstatDestinationPath(rawPath: string): string {
+  const braced = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(rawPath);
+  if (braced) {
+    const [, prefix = "", , destination = "", suffix = ""] = braced;
+    // `a/{ => b}/c` and `a/{b => }/c` leave a doubled separator.
+    return `${prefix}${destination}${suffix}`.replace(/\/{2,}/g, "/");
+  }
+  const renameArrowIndex = rawPath.indexOf(" => ");
+  return renameArrowIndex >= 0 ? rawPath.slice(renameArrowIndex + " => ".length).trim() : rawPath;
+}
+
+/** Space-separated fields before the path in each porcelain v2 entry type. */
+const PORCELAIN_V2_FIELDS_BEFORE_PATH: Readonly<Record<string, number>> = {
+  "1": 8,
+  "2": 9,
+  u: 10,
+};
+
 function parsePorcelainPath(line: string): string | null {
   if (line.startsWith("? ") || line.startsWith("! ")) {
     const simple = line.slice(2).trim();
     return simple.length > 0 ? simple : null;
   }
 
-  if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) {
+  const fieldsBeforePath = line[1] === " " ? PORCELAIN_V2_FIELDS_BEFORE_PATH[line[0] ?? ""] : null;
+  if (fieldsBeforePath === undefined || fieldsBeforePath === null) {
     return null;
   }
 
-  const tabIndex = line.indexOf("\t");
-  if (tabIndex >= 0) {
-    const fromTab = line.slice(tabIndex + 1);
-    const [filePath] = fromTab.split("\t");
-    return filePath?.trim().length ? filePath.trim() : null;
+  // The path may contain spaces; a rename (`2`) appends a tab and its original path.
+  let pathStart = 0;
+  for (let field = 0; field < fieldsBeforePath; field += 1) {
+    const separator = line.indexOf(" ", pathStart);
+    if (separator < 0) return null;
+    pathStart = separator + 1;
   }
-
-  const parts = line.trim().split(/\s+/g);
-  const filePath = parts.at(-1) ?? "";
+  const rest = line.slice(pathStart);
+  const filePath = line[0] === "2" ? (rest.split("\t")[0] ?? "") : rest;
   return filePath.length > 0 ? filePath : null;
 }
 
@@ -1265,10 +1295,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   // Status fetches are network round trips that may wake an SSH agent; a
   // couple at a time is plenty (they are already shared per repository and remote).
   const statusFetchPermits = yield* Semaphore.make(STATUS_UPSTREAM_REFRESH_CONCURRENCY);
+  /** True when the fetch succeeded; offline, auth and other git failures are false. */
   const fetchRemoteForStatus = (
     gitCommonDir: string,
     remoteName: string,
-  ): Effect.Effect<void, GitCommandError> => {
+  ): Effect.Effect<boolean, GitCommandError> => {
     const fetchCwd =
       path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
     return statusFetchPermits
@@ -1284,7 +1315,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           },
         ),
       )
-      .pipe(Effect.asVoid);
+      .pipe(Effect.map((result) => result.exitCode === 0));
   };
 
   const resolveGitCommonDir = Effect.fn("resolveGitCommonDir")(function* (cwd: string) {
@@ -1297,24 +1328,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(cwd, gitCommonDir);
   });
 
-  // Completed fetches per (common dir, remote), so a caller can tell whether
+  // Successful fetches per (common dir, remote), so a caller can tell whether
   // remote-tracking refs may have moved while it waited.
   const statusRemoteFetchGenerations = new Map<string, number>();
   const statusRemoteFetchGenerationKey = (cacheKey: StatusRemoteRefreshCacheKey) =>
     `${cacheKey.gitCommonDir}\0${cacheKey.remoteName}`;
 
+  // A fetch that git rejected (offline, signed out) moved no refs, so it bumps
+  // nothing; it still holds the entry for the full interval, so an unreachable
+  // remote is not retried more often than a reachable one is refreshed.
   const refreshStatusRemoteCacheEntry = Effect.fn("refreshStatusRemoteCacheEntry")(function* (
     cacheKey: StatusRemoteRefreshCacheKey,
   ) {
-    yield* fetchRemoteForStatus(cacheKey.gitCommonDir, cacheKey.remoteName).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          const key = statusRemoteFetchGenerationKey(cacheKey);
-          statusRemoteFetchGenerations.set(key, (statusRemoteFetchGenerations.get(key) ?? 0) + 1);
-        }),
-      ),
-    );
-    return true as const;
+    const fetched = yield* fetchRemoteForStatus(cacheKey.gitCommonDir, cacheKey.remoteName);
+    if (fetched) {
+      const key = statusRemoteFetchGenerationKey(cacheKey);
+      statusRemoteFetchGenerations.set(key, (statusRemoteFetchGenerations.get(key) ?? 0) + 1);
+    }
+    return fetched;
   });
 
   const statusRemoteRefreshCache = yield* Cache.makeWith(refreshStatusRemoteCacheEntry, {
@@ -1616,6 +1647,33 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     return new CommittedDiffCacheKey({ cwd: path.resolve(cwd), baseCommit, headCommit });
   });
 
+  /**
+   * The base a status compares a branch against, and the branch's commits
+   * ahead of it (cached by commit pair). Any git failure degrades to no base.
+   */
+  const readStatusBase = Effect.fn("readStatusBase")(function* (
+    cwd: string,
+    refName: string,
+    configSnapshot: GitVcsDriver.GitConfigSnapshot | null,
+    originDefaultBranch: string | null,
+  ) {
+    const baseCommitPair = yield* Effect.gen(function* () {
+      const baseContext =
+        configSnapshot === null
+          ? undefined
+          : yield* statusBaseBranchContext(cwd, refName, configSnapshot, originDefaultBranch);
+      const baseRef = yield* resolveBaseBranchForNoUpstream(cwd, refName, baseContext);
+      return baseRef === null ? null : yield* resolveBaseCommitPair(cwd, baseRef);
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
+    const aheadOfBase =
+      baseCommitPair === null
+        ? 0
+        : yield* Cache.get(aheadCountCache, baseCommitPair).pipe(
+            Effect.catch(() => Effect.succeed(0)),
+          );
+    return { baseCommitPair, aheadOfBase };
+  });
+
   const readStatusDetailsLocal = Effect.fn("readStatusDetailsLocal")(function* (cwd: string) {
     const statusResult = yield* executeGit(
       "GitVcsDriver.statusDetails.status",
@@ -1651,7 +1709,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         executeGit(
           "GitVcsDriver.statusDetails.trackedNumstat",
           cwd,
-          ["diff", "HEAD", "--numstat"],
+          [...GitVcsDriver.NO_INDEX_REFRESH_DIFF_ARGS, "diff", "HEAD", "--numstat"],
           { allowNonZeroExit: true, readOnly: true },
         ),
         executeGit(
@@ -1672,9 +1730,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ? trackedNumstatResult.stdout
         : yield* Effect.all(
             [
-              executeGit("GitVcsDriver.statusDetails.unstagedNumstat", cwd, ["diff", "--numstat"], {
-                readOnly: true,
-              }),
+              executeGit(
+                "GitVcsDriver.statusDetails.unstagedNumstat",
+                cwd,
+                [...GitVcsDriver.NO_INDEX_REFRESH_DIFF_ARGS, "diff", "--numstat"],
+                { readOnly: true },
+              ),
               executeGit(
                 "GitVcsDriver.statusDetails.stagedNumstat",
                 cwd,
@@ -1735,24 +1796,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // The base branch is resolved once per status and shared by the
     // no-upstream ahead count, the ahead-of-default count and the committed
     // diff; the latter two are cached by (base, HEAD) commit pair.
-    const needsBase = refName !== null && (upstreamRef === null || !isDefaultBranch);
-    const baseCommitPair =
-      refName !== null && needsBase
-        ? yield* Effect.gen(function* () {
-            const baseContext =
-              configSnapshot === null
-                ? undefined
-                : yield* statusBaseBranchContext(cwd, refName, configSnapshot, defaultBranch);
-            const baseRef = yield* resolveBaseBranchForNoUpstream(cwd, refName, baseContext);
-            return baseRef === null ? null : yield* resolveBaseCommitPair(cwd, baseRef);
-          }).pipe(Effect.catch(() => Effect.succeed(null)))
-        : null;
-    const aheadOfBase =
-      baseCommitPair === null
-        ? 0
-        : yield* Cache.get(aheadCountCache, baseCommitPair).pipe(
-            Effect.catch(() => Effect.succeed(0)),
-          );
+    const { baseCommitPair, aheadOfBase } =
+      refName !== null && statusNeedsBase(upstreamRef, isDefaultBranch)
+        ? yield* readStatusBase(cwd, refName, configSnapshot, defaultBranch)
+        : { baseCommitPair: null, aheadOfBase: 0 };
 
     if (refName !== null && upstreamRef === null) {
       aheadCount = aheadOfBase;
@@ -1762,7 +1809,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       aheadOfDefaultCount = aheadOfBase;
     }
 
-    const trackedEntries = parseNumstatEntries(trackedNumstatStdout);
+    // Without the index refresh an older Git lists stat-only changes as `0 0`
+    // rows; status (which compares content) is the authority on what changed.
+    const trackedEntries = parseNumstatEntries(trackedNumstatStdout).filter(
+      (entry) =>
+        entry.insertions !== 0 ||
+        entry.deletions !== 0 ||
+        changedFilesWithoutNumstat.has(entry.path),
+    );
     const fileStatMap = new Map<string, { insertions: number; deletions: number }>();
     for (const entry of trackedEntries) {
       const existing = fileStatMap.get(entry.path) ?? { insertions: 0, deletions: 0 };
@@ -1844,6 +1898,49 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     "statusDetailsLocal",
   )(function* (cwd) {
     return yield* readStatusDetailsLocal(cwd);
+  });
+
+  const refreshStatusTracking: GitVcsDriver.GitVcsDriverShape["refreshStatusTracking"] = Effect.fn(
+    "refreshStatusTracking",
+  )(function* (cwd, details) {
+    if (!details.isRepo || details.branch === null) return null;
+    const refName = details.branch;
+    // Spawn-free; also null for a folder below the checkout root, which then reads in full.
+    const head = yield* readCheckoutHead(cwd);
+    if (head === null || head.branch !== refName) return null;
+
+    const [upstreamCounts, configSnapshot] = yield* Effect.all(
+      [
+        details.upstreamRef === null
+          ? Effect.succeed(null)
+          : executeGit(
+              "GitVcsDriver.refreshStatusTracking.upstreamCounts",
+              cwd,
+              ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+              { allowNonZeroExit: true, readOnly: true },
+            ).pipe(
+              Effect.map((result) =>
+                result.exitCode === 0 ? parseLeftRightCounts(result.stdout) : null,
+              ),
+            ),
+        statusNeedsBase(details.upstreamRef, details.isDefaultBranch)
+          ? readConfigSnapshot(cwd).pipe(Effect.catch(() => Effect.succeed(null)))
+          : Effect.succeed(null),
+      ],
+      { concurrency: "unbounded" },
+    );
+    // The upstream went away or cannot be read: only a full status can tell.
+    if (details.upstreamRef !== null && upstreamCounts === null) return null;
+
+    const { aheadOfBase } = statusNeedsBase(details.upstreamRef, details.isDefaultBranch)
+      ? yield* readStatusBase(cwd, refName, configSnapshot, head.originDefaultBranch)
+      : { aheadOfBase: 0 };
+    return {
+      ...details,
+      aheadCount: upstreamCounts === null ? aheadOfBase : upstreamCounts.right,
+      behindCount: upstreamCounts === null ? 0 : upstreamCounts.left,
+      aheadOfDefaultCount: details.isDefaultBranch ? details.aheadOfDefaultCount : aheadOfBase,
+    };
   });
 
   const statusDetails: GitVcsDriver.GitVcsDriverShape["statusDetails"] = Effect.fn("statusDetails")(
@@ -3312,6 +3409,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     status,
     statusDetails,
     statusDetailsLocal,
+    refreshStatusTracking,
     refreshStatusUpstream,
     prepareCommitContext,
     commit,

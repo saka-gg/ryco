@@ -18,7 +18,11 @@ import {
   type TextGenerationShape,
   type WorkspaceChangesSummaryGenerationInput,
 } from "../textGeneration/TextGeneration.ts";
-import { GitVcsDriver, type GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import {
+  GitVcsDriver,
+  type GitVcsDriverShape,
+  NO_INDEX_REFRESH_DIFF_ARGS,
+} from "../vcs/GitVcsDriver.ts";
 import {
   CheckoutInspectionError,
   inspectCheckout,
@@ -82,13 +86,23 @@ export function makeWorkspaceChangeSummary(
   // identical requests join one model call, and failures are never kept.
   const cache = makeCheckoutReadCache({ ttl: SUMMARY_TTL, capacity: SUMMARY_CACHE_CAPACITY });
 
-  /** Read-only, lock-free, bounded Git; output over the bound is cut, not failed. */
+  /**
+   * Read-only, lock-free (the working-tree diffs included), bounded Git; output
+   * over the bound is cut, not failed.
+   */
   const readGit = (cwd: string, args: ReadonlyArray<string>) =>
     deps.gitDriver
       .execute({
         operation: OPERATION,
         cwd,
-        args: ["-c", "core.fsmonitor=false", "-c", "core.quotepath=false", ...args],
+        args: [
+          "-c",
+          "core.fsmonitor=false",
+          "-c",
+          "core.quotepath=false",
+          ...NO_INDEX_REFRESH_DIFF_ARGS,
+          ...args,
+        ],
         timeoutMs: GIT_TIMEOUT_MS,
         maxOutputBytes: GIT_MAX_OUTPUT_BYTES,
         truncateOutputAtMaxBytes: true,

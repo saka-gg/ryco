@@ -150,4 +150,39 @@ describe("VcsDriverRegistry", () => {
       Effect.ensuring(Effect.sync(() => rmSync(root, { recursive: true, force: true }))),
     );
   });
+
+  it.effect("keeps the answer for a folder whose own .git Git skips as invalid", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "ryco-vcs-registry-"));
+    mkdirSync(path.join(root, ".git"));
+    // An empty `.git` directory is not a repository; discovery moves on to the root.
+    mkdirSync(path.join(root, "nested", ".git"), { recursive: true });
+    let detections = 0;
+    const layer = makeLayer((input) =>
+      Effect.sync(() => {
+        if (input.args.join(" ") !== DETECT_COMMAND) return processOutput("");
+        detections += 1;
+        return processOutput(`true\n${root}\n${root}/.git\n`);
+      }),
+    );
+
+    return Effect.gen(function* () {
+      const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
+      const nested = path.join(root, "nested");
+      for (let read = 0; read < 3; read += 1) {
+        const handle = yield* registry.detect({ cwd: nested });
+        assert.strictEqual(handle?.repository.rootPath, root);
+      }
+      assert.strictEqual(detections, 1);
+
+      // Replacing it (now a real `git init`, say) is a change and detects again.
+      renameSync(path.join(nested, ".git"), path.join(nested, ".git-old"));
+      mkdirSync(path.join(nested, ".git"));
+      rmSync(path.join(nested, ".git-old"), { recursive: true });
+      yield* registry.detect({ cwd: nested });
+      assert.strictEqual(detections, 2);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.ensuring(Effect.sync(() => rmSync(root, { recursive: true, force: true }))),
+    );
+  });
 });

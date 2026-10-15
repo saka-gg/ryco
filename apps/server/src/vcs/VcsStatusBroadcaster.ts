@@ -54,6 +54,8 @@ const EMPTY_WORKING_TREE: VcsStatusLocalResult["workingTree"] = Object.freeze({
 const VCS_STATUS_REFRESH_FAILURE_BASE_DELAY = Duration.seconds(30);
 const VCS_STATUS_REFRESH_FAILURE_MAX_DELAY = Duration.minutes(15);
 const MAX_REMOTE_REFRESH_CONSECUTIVE_FAILURES = 64;
+/** At most one full failure line per folder this often while refreshes keep failing. */
+const VCS_STATUS_REFRESH_FAILURE_LOG_WINDOW = Duration.hours(1);
 const LOCAL_STATUS_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(5));
 const REMOTE_STATUS_CACHE_TTL_MS = Duration.toMillis(Duration.seconds(30));
 
@@ -174,6 +176,15 @@ export function remoteRefreshFailureDelay(
     VCS_STATUS_REFRESH_FAILURE_MAX_DELAY,
   );
   return Duration.max(configuredInterval, cappedBackoff);
+}
+
+/**
+ * The log window for a failed remote refresh retried after `nextDelay`. It
+ * spans at least two retries: a window shorter than the backoff makes every
+ * failure a new burst, logged in full with its cause.
+ */
+export function remoteRefreshFailureLogWindow(nextDelay: Duration.Duration): Duration.Duration {
+  return Duration.max(VCS_STATUS_REFRESH_FAILURE_LOG_WINDOW, Duration.times(nextDelay, 2));
 }
 
 export const layer = Layer.effect(
@@ -488,13 +499,24 @@ export const layer = Layer.effect(
       rawCwd: string,
     ) {
       const cwd = normalizeCwd(rawCwd);
+      // An explicit refresh or poll brings the remote-tracking refs up to date
+      // first. The fetch (shared per repository and remote) runs outside the
+      // single flight, so a load meanwhile is served from the current refs
+      // instead of waiting on the network. It is forked into the broadcaster's
+      // scope and only joined: a caller that goes away mid-fetch (a poller
+      // released when its last stream ends) must not kill a running
+      // `git fetch`, which can leave ref lockfiles behind.
+      const fetch = yield* workflow.refreshRemoteTrackingRefs(cwd).pipe(
+        Effect.catchCause(() => Effect.succeed(false)),
+        Effect.forkIn(broadcasterScope, { startImmediately: true }),
+      );
+      yield* Fiber.join(fetch);
       return yield* coalesceRemoteStatus(
         cwd,
         "refresh",
         Effect.gen(function* () {
           yield* workflow.invalidateRemoteStatus(cwd);
-          // An explicit refresh or poll brings the remote-tracking refs up to date first.
-          const remote = yield* workflow.remoteStatus({ cwd }, { fetch: true });
+          const remote = yield* workflow.remoteStatus({ cwd });
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
       );
@@ -559,6 +581,7 @@ export const layer = Layer.effect(
           yield* logOnceEvery({
             key: `vcs.remoteStatusRefresh:${cwd}`,
             message: "VCS remote status refresh failed",
+            window: remoteRefreshFailureLogWindow(nextDelay),
             fields: { cwd, consecutiveFailures, nextDelayMs: Duration.toMillis(nextDelay) },
             cause: exit.cause,
           });
@@ -682,11 +705,15 @@ export const layer = Layer.effect(
             }),
             Stream.merge(
               // A fresh cached remote status needs nothing: whichever stream
-              // loaded it already started that load's background fetch.
-              retainedRemotePoller || initialRemote !== null
+              // loaded it already started that load's background fetch. A stale
+              // one is read from the current tracking refs, never waiting on the
+              // network; then a fetch follows — the poller's own when polling.
+              initialRemote !== null
                 ? Stream.empty
                 : Stream.fromEffect(getOrLoadRemoteStatus(cwd)).pipe(
-                    Stream.tap(() => refreshRemoteStatusAfterFetch(cwd)),
+                    Stream.tap(() =>
+                      retainedRemotePoller ? Effect.void : refreshRemoteStatusAfterFetch(cwd),
+                    ),
                     Stream.map((remote) => ({ _tag: "remoteUpdated" as const, remote })),
                     Stream.catchCause(() => Stream.empty),
                   ),
