@@ -433,12 +433,13 @@ describe("ChatView chats without a project (full app)", () => {
         "Unable to find the overview rail.",
       );
       // A chat folder is no checkout: no Branch, Changes, Checks, Pull request or
-      // Push, and no worktree Notes. Promotion is where all of them start.
+      // Push, and no worktree Notes. Promotion is where all of them start. Plan
+      // stays hidden until the chat has a plan.
       const railKeys = () =>
         Array.from(rail.querySelectorAll<HTMLElement>("[data-nav-key]"), (button) => {
           return button.dataset.navKey;
         });
-      await vi.waitFor(() => expect(railKeys()).toEqual(["plan", "agents", "project"]));
+      await vi.waitFor(() => expect(railKeys()).toEqual(["agents", "project"]));
       // The face wears the chat glyph "No project" wears elsewhere, not the chat
       // folder's favicon or a monogram of the chat's title.
       const faceLogo = rail

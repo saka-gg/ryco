@@ -475,10 +475,7 @@ interface ClaudeSessionContext {
    * prevents a thin heartbeat from temporarily erasing future phases in the
    * Agents workspace.
    */
-  readonly workflowPhasesByTaskId: Map<
-    string,
-    ReadonlyArray<{ readonly index: number; readonly title: string }>
-  >;
+  readonly workflowPhasesByTaskId: Map<string, ReadonlyArray<ClaudeWorkflowPhase>>;
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
   /**
@@ -952,7 +949,22 @@ function readClaudeToolUseResult(message: SDKMessage): Record<string, unknown> |
 }
 
 const WORKFLOW_PHASE_CAP = 64;
-const WORKFLOW_AGENT_CAP = 100;
+/**
+ * Members re-examined per progress tick. Bounds work on a hostile payload, not
+ * a real run's size: settled members were emitted on earlier ticks, so live
+ * ones are kept first and a run past the cap still reports what is moving.
+ */
+const WORKFLOW_AGENT_CAP = 2000;
+
+/** One workflow phase with its member tally (counts absent until a roster arrives). */
+interface ClaudeWorkflowPhase {
+  readonly index: number;
+  readonly title: string;
+  readonly memberCount?: number;
+  readonly activeCount?: number;
+  readonly settledCount?: number;
+  readonly failedCount?: number;
+}
 
 interface ClaudeWorkflowAgentEntry {
   readonly index: number;
@@ -970,7 +982,7 @@ interface ClaudeWorkflowAgentEntry {
 }
 
 interface ClaudeWorkflowProgress {
-  readonly phases: ReadonlyArray<{ index: number; title: string }>;
+  readonly phases: ReadonlyArray<ClaudeWorkflowPhase>;
   readonly agents: ReadonlyArray<ClaudeWorkflowAgentEntry>;
 }
 
@@ -1027,13 +1039,46 @@ function parseWorkflowProgress(value: unknown): ClaudeWorkflowProgress | undefin
   if (phasesByIndex.size === 0 && agentsByIndex.size === 0) {
     return undefined;
   }
+  // Tallied from the whole roster before the per-tick cap, so totals stay
+  // true however large the run.
+  const tallies = new Map<
+    number,
+    { members: number; active: number; settled: number; failed: number }
+  >();
+  for (const agent of agentsByIndex.values()) {
+    if (agent.phaseIndex === undefined) continue;
+    const tally = tallies.get(agent.phaseIndex) ?? { members: 0, active: 0, settled: 0, failed: 0 };
+    const status = workflowAgentStatus(agent);
+    tally.members += 1;
+    if (status === "completed" || status === "failed") tally.settled += 1;
+    else tally.active += 1;
+    if (status === "failed") tally.failed += 1;
+    tallies.set(agent.phaseIndex, tally);
+  }
   const phases = Array.from(phasesByIndex.entries())
-    .map(([index, title]) => ({ index, title }))
+    .map(([index, title]): ClaudeWorkflowPhase => {
+      const tally = agentsByIndex.size > 0 ? (tallies.get(index) ?? null) : undefined;
+      return tally === undefined
+        ? { index, title }
+        : {
+            index,
+            title,
+            memberCount: tally?.members ?? 0,
+            activeCount: tally?.active ?? 0,
+            settledCount: tally?.settled ?? 0,
+            failedCount: tally?.failed ?? 0,
+          };
+    })
     .toSorted((a, b) => a.index - b.index)
     .slice(0, WORKFLOW_PHASE_CAP);
+  const isLive = (agent: ClaudeWorkflowAgentEntry) => {
+    const status = workflowAgentStatus(agent);
+    return status !== "completed" && status !== "failed";
+  };
   const agents = Array.from(agentsByIndex.values())
-    .toSorted((a, b) => a.index - b.index)
-    .slice(0, WORKFLOW_AGENT_CAP);
+    .toSorted((a, b) => Number(isLive(b)) - Number(isLive(a)) || a.index - b.index)
+    .slice(0, WORKFLOW_AGENT_CAP)
+    .toSorted((a, b) => a.index - b.index);
   return { phases, agents };
 }
 
@@ -1044,21 +1089,27 @@ function parseWorkflowProgress(value: unknown): ClaudeWorkflowProgress | undefin
  * workflow shape observed so far.
  */
 function mergeWorkflowPhases(
-  current: ReadonlyArray<{ readonly index: number; readonly title: string }> | undefined,
-  incoming: ReadonlyArray<{ readonly index: number; readonly title: string }> | undefined,
-): ReadonlyArray<{ readonly index: number; readonly title: string }> {
+  current: ReadonlyArray<ClaudeWorkflowPhase> | undefined,
+  incoming: ReadonlyArray<ClaudeWorkflowPhase> | undefined,
+): ReadonlyArray<ClaudeWorkflowPhase> {
   if (!incoming || incoming.length === 0) {
     return current ?? [];
   }
-  const byIndex = new Map<number, string>();
+  const byIndex = new Map<number, ClaudeWorkflowPhase>();
   for (const phase of current ?? []) {
-    byIndex.set(phase.index, phase.title);
+    byIndex.set(phase.index, phase);
   }
   for (const phase of incoming) {
-    byIndex.set(phase.index, phase.title);
+    // A tick without a roster renames a phase but must not erase its tally.
+    const previous = byIndex.get(phase.index);
+    byIndex.set(
+      phase.index,
+      phase.memberCount === undefined && previous?.memberCount !== undefined
+        ? { ...previous, title: phase.title }
+        : phase,
+    );
   }
-  return Array.from(byIndex.entries())
-    .map(([index, title]) => ({ index, title }))
+  return Array.from(byIndex.values())
     .toSorted((left, right) => left.index - right.index)
     .slice(0, WORKFLOW_PHASE_CAP);
 }
@@ -4383,7 +4434,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
         yield* emitWorkflowMemberProgress(context, message, workflowProgress);
-        if (isClaudeSubagentTaskMessage(message) || context.subagentByTaskId.has(message.task_id)) {
+        // A workflow coordinator ticks several times a second for its whole
+        // run, and each subagent update is its own persisted row: hundreds of
+        // members' ticks pushed every member row out of the thread's activity
+        // window. Its latest-state progress row above and the member rows
+        // already carry everything those updates said.
+        const isWorkflowCoordinator =
+          context.taskAgents.get(message.task_id)?.taskType === "local_workflow";
+        if (
+          !isWorkflowCoordinator &&
+          (isClaudeSubagentTaskMessage(message) || context.subagentByTaskId.has(message.task_id))
+        ) {
           const subagent = makeClaudeTaskSubagentRef(
             context.subagentByTaskId.get(message.task_id),
             message,

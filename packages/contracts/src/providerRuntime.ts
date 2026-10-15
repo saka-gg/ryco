@@ -543,6 +543,15 @@ export type RuntimeTaskUsage = typeof RuntimeTaskUsage.Type;
 export const TaskWorkflowPhase = Schema.Struct({
   index: NonNegativeInt,
   title: TrimmedNonEmptyStringSchema,
+  /**
+   * The phase's member tally from the provider's full roster. Clients keep
+   * only recent activity, so a large run's older member rows age out; these
+   * counts keep its totals true regardless.
+   */
+  memberCount: Schema.optional(NonNegativeInt),
+  activeCount: Schema.optional(NonNegativeInt),
+  settledCount: Schema.optional(NonNegativeInt),
+  failedCount: Schema.optional(NonNegativeInt),
 });
 export type TaskWorkflowPhase = typeof TaskWorkflowPhase.Type;
 
