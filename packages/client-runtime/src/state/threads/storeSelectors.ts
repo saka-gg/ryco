@@ -185,6 +185,23 @@ export function selectThreadDetailLoaded(state: AppState, ref: ScopedThreadRef):
 }
 
 /**
+ * True once live detail has been applied for the thread: a thread-detail
+ * window, a full-detail snapshot or a live message. Unlike
+ * `selectThreadDetailLoaded`, messages hydrated from a read cache (marked in
+ * `cachedMessageThreadIds` until live data replaces them) do not count, so
+ * work that must wait for the thread's own live window (sibling prefetch)
+ * does not start while that window is still on its way.
+ */
+export function selectThreadLiveDetailLoaded(state: AppState, ref: ScopedThreadRef): boolean {
+  const environmentState = selectEnvironmentState(state, ref.environmentId);
+  return (
+    environmentState.threadHistoryByThreadId?.[ref.threadId] !== undefined ||
+    (environmentState.messageIdsByThreadId[ref.threadId] !== undefined &&
+      environmentState.cachedMessageThreadIds?.[ref.threadId] !== true)
+  );
+}
+
+/**
  * True when the environment's rows come from a live shell snapshot: bootstrap
  * completed and not cache provenance. Rows hydrated from the snapshot cache, or
  * demoted after a disconnect, are last-known state with every session dropped.

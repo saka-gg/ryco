@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  startStaggeredThreadPrefetch,
+  THREAD_PREFETCH_STAGGER_MS,
+} from "../../lib/staggeredThreadPrefetch";
 import type { SessionTabItem } from "../../sessionTabs.selectors";
 import {
   MAX_SPECULATIVE_SIBLING_TAB_PREFETCH,
-  SIBLING_TAB_PREFETCH_STAGGER_MS,
   selectSpeculativeSiblingTabPrefetchKeys,
-  startStaggeredThreadPrefetch,
 } from "./useChatSessionTabsPrefetch";
 
 function tab(key: string): SessionTabItem {
@@ -67,7 +69,10 @@ describe("startStaggeredThreadPrefetch", () => {
       timers: {
         scheduleIdle: (callback: () => void) => {
           idle.push(callback);
-          return () => idle.splice(idle.indexOf(callback), 1);
+          return () => {
+            const index = idle.indexOf(callback);
+            if (index >= 0) idle.splice(index, 1);
+          };
         },
         setTimeout: (callback: () => void, delayMs: number) => {
           const handle = nextHandle++;
@@ -101,7 +106,7 @@ describe("startStaggeredThreadPrefetch", () => {
 
     clock.idle.shift()!();
     expect(retain.mock.calls.map(([key]) => key)).toEqual(["a"]);
-    expect(clock.runTimeout()).toBe(SIBLING_TAB_PREFETCH_STAGGER_MS);
+    expect(clock.runTimeout()).toBe(THREAD_PREFETCH_STAGGER_MS);
     expect(retain.mock.calls.map(([key]) => key)).toEqual(["a", "b"]);
 
     stop();

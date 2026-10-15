@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { EnvironmentId } from "@ryco/contracts";
+import { isAwaitingAdmission } from "@ryco/client-runtime/rpc";
 import { createVisibilityAwarePoller } from "../lib/visibilityPolling";
 import { webAppLifecycle } from "../platform/appLifecycle";
 
@@ -54,6 +55,8 @@ interface QueryEntry {
   readonly listeners: Set<() => void>;
   readonly observers: Set<QueryObserver>;
   promise: Promise<unknown> | null;
+  /** A forced fetch joined the in-flight attempt after it was issued. */
+  forcedWhileFetching: boolean;
   fetchId: number;
   gcTime: number;
   lastAccessedAt: number;
@@ -220,6 +223,7 @@ export class QueryClient {
         listeners: new Set(),
         observers: new Set(),
         promise: null,
+        forcedWhileFetching: false,
         fetchId: 0,
         gcTime: this.defaultGcTime,
         lastAccessedAt: Date.now(),
@@ -396,10 +400,12 @@ export class QueryClient {
   ): Promise<TData | undefined> {
     const entry = this.ensureEntry(key);
     if (entry.promise) {
+      if (options.force === true) entry.forcedWhileFetching = true;
       return entry.promise as Promise<TData | undefined>;
     }
 
     const fetchId = ++entry.fetchId;
+    entry.forcedWhileFetching = false;
     const retries = resolveRetryCount(options.retry);
     this.setState(entry, { ...entry.state, fetchStatus: "fetching", error: null });
 
@@ -423,7 +429,18 @@ export class QueryClient {
           if (entry.fetchId !== fetchId) {
             return undefined;
           }
-          if (attempt >= retries) {
+          // A read refused until the hosted session is ready is not retried on a
+          // timer: the post-ready refresh re-runs failed queries at once, and a
+          // backoff sleep here would hold that refresh (it joins this attempt).
+          const awaitingAdmission = isAwaitingAdmission(rawError);
+          if (awaitingAdmission && entry.forcedWhileFetching) {
+            // That refresh joined this attempt after it was refused: run it
+            // again now rather than leave the query failed until the next one.
+            entry.forcedWhileFetching = false;
+            attempt -= 1;
+            continue;
+          }
+          if (attempt >= retries || awaitingAdmission) {
             const error = toError(rawError);
             this.setState(entry, {
               data: entry.state.data,

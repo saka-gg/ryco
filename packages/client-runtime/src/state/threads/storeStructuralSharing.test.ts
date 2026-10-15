@@ -12,12 +12,17 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { deepFreeze } from "../../../test/deepFreeze.ts";
 import { createEnvironmentEventBatcher } from "./eventBatching.ts";
 import {
+  applyOrchestrationEvent,
+  applyOrchestrationEvents,
   applyShellEvent,
   registerThreadStoreMutationBarrier,
+  selectDelegatedChildThreadsForThreadRef,
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsAcrossEnvironments,
   selectSidebarThreadsForProjectRefs,
   selectSidebarWorktreesAcrossEnvironments,
+  selectSidebarWorktreesForProjectRef,
+  selectSidebarWorktreesForProjectRefs,
   selectThreadShellsAcrossEnvironments,
   syncServerShellSnapshot,
   useStore,
@@ -259,6 +264,75 @@ describe("slice-memoized selectors", () => {
     expect(selectSidebarThreadsForProjectRefs(unrelated, refs)).toBe(projectThreads);
     expect(threads.map((thread) => thread.id)).toEqual(["a", "b"]);
     expect(projectThreads.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+
+  it("keep worktree rows for projects without worktrees and delegated children", () => {
+    const delegated = (parent: string) => ({
+      lineage: {
+        parentThreadId: ThreadId.make(parent),
+        rootThreadId: ThreadId.make(parent),
+        relationship: "delegated",
+      },
+    });
+    const state = syncServerShellSnapshot(
+      emptyState,
+      makeSnapshot([
+        makeThreadShell("parent"),
+        makeThreadShell("child-2", {
+          ...delegated("parent"),
+          createdAt: "2026-10-03T00:00:00.000Z",
+        }),
+        makeThreadShell("child-1", {
+          ...delegated("parent"),
+          createdAt: "2026-10-02T00:00:00.000Z",
+        }),
+        makeThreadShell("other"),
+      ]),
+      environmentId,
+    );
+    const unrelated: AppState = {
+      ...state,
+      environmentStateById: {
+        ...state.environmentStateById,
+        [environmentId]: { ...environmentOf(state), messageIdsByThreadId: {} },
+      },
+    };
+    const noWorktrees = { environmentId, projectId: otherProjectId };
+    const refs = [{ environmentId, projectId }, noWorktrees];
+    const parentRef = { environmentId, threadId: ThreadId.make("parent") };
+    const draftRef = { environmentId, threadId: ThreadId.make("draft-without-shell") };
+
+    const emptyWorktrees = selectSidebarWorktreesForProjectRef(state, noWorktrees);
+    const combinedWorktrees = selectSidebarWorktreesForProjectRefs(state, refs);
+    const children = selectDelegatedChildThreadsForThreadRef(state, parentRef);
+    const draftChildren = selectDelegatedChildThreadsForThreadRef(state, draftRef);
+
+    expect(emptyWorktrees).toEqual([]);
+    expect(combinedWorktrees.map((worktree) => worktree.id)).toEqual(["worktree-1"]);
+    expect(children.map((thread) => thread.id)).toEqual(["child-1", "child-2"]);
+    expect(draftChildren).toEqual([]);
+    expect(selectSidebarWorktreesForProjectRef(unrelated, noWorktrees)).toBe(emptyWorktrees);
+    expect(selectSidebarWorktreesForProjectRefs(unrelated, refs)).toBe(combinedWorktrees);
+    expect(selectDelegatedChildThreadsForThreadRef(unrelated, parentRef)).toBe(children);
+    expect(selectDelegatedChildThreadsForThreadRef(unrelated, draftRef)).toBe(draftChildren);
+
+    // Archiving a child changes its summary, so the children are recomputed.
+    const archived = applyShellEvent(
+      state,
+      {
+        kind: "thread-upserted",
+        sequence: 2,
+        thread: makeThreadShell("child-1", {
+          ...delegated("parent"),
+          createdAt: "2026-10-02T00:00:00.000Z",
+          archivedAt: "2026-10-04T00:00:00.000Z",
+        }),
+      } as never,
+      environmentId,
+    );
+    expect(
+      selectDelegatedChildThreadsForThreadRef(archived, parentRef).map((thread) => thread.id),
+    ).toEqual(["child-2"]);
   });
 
   it("combine environments and follow environment removal", () => {
@@ -514,5 +588,153 @@ describe("frame-batched orchestration events", () => {
     expect(() =>
       useStore.getState().applyOrchestrationEvents([malformed], environmentId),
     ).toThrow();
+  });
+});
+
+describe("batch-owned containers", () => {
+  afterEach(() => {
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
+  });
+
+  function detailEvent(
+    sequence: number,
+    type: "thread.message-sent" | "thread.activity-appended" | "thread.session-set",
+    threadId: string,
+  ): OrchestrationEvent {
+    const occurredAt = `2026-10-02T00:00:${String(sequence).padStart(2, "0")}.000Z`;
+    const payload =
+      type === "thread.message-sent"
+        ? {
+            threadId,
+            messageId: `message-${threadId}`,
+            role: "assistant",
+            text: `delta ${sequence} `,
+            turnId: "turn-1",
+            streaming: true,
+            createdAt: occurredAt,
+            updatedAt: occurredAt,
+          }
+        : type === "thread.activity-appended"
+          ? {
+              threadId,
+              activity: {
+                id: `activity-${sequence}`,
+                tone: "tool",
+                kind: "tool.started",
+                summary: `tool ${sequence}`,
+                payload: {},
+                turnId: "turn-1",
+                createdAt: occurredAt,
+              },
+            }
+          : {
+              threadId,
+              session: {
+                threadId,
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-1",
+                lastError: null,
+                updatedAt: occurredAt,
+              },
+            };
+    return {
+      sequence,
+      eventId: `event-${sequence}`,
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt,
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type,
+      payload,
+    } as unknown as OrchestrationEvent;
+  }
+
+  it("folds a detail batch like one event at a time without touching the published state", () => {
+    const published = deepFreeze(
+      syncServerShellSnapshot(
+        emptyState,
+        makeSnapshot([makeThreadShell("a"), makeThreadShell("b"), makeThreadShell("c")]),
+        environmentId,
+      ),
+    );
+    const events = [
+      detailEvent(2, "thread.message-sent", "a"),
+      detailEvent(3, "thread.activity-appended", "a"),
+      detailEvent(4, "thread.message-sent", "b"),
+      detailEvent(5, "thread.message-sent", "a"),
+      detailEvent(6, "thread.session-set", "b"),
+      detailEvent(7, "thread.message-sent", "b"),
+      detailEvent(8, "thread.activity-appended", "a"),
+    ];
+
+    const batched = applyOrchestrationEvents(published, events, environmentId);
+    const sequential = events.reduce(
+      (state, event) => applyOrchestrationEvent(deepFreeze(state), event, environmentId),
+      published,
+    );
+
+    expect(environmentOf(batched)).toEqual(environmentOf(sequential));
+    const a = ThreadId.make("a");
+    const b = ThreadId.make("b");
+    expect(environmentOf(batched).messageByThreadId[a]?.[`message-a` as never]?.text).toBe(
+      "delta 2 delta 5 ",
+    );
+    expect(environmentOf(batched).activityIdsByThreadId[a]).toEqual(["activity-3", "activity-8"]);
+    expect(environmentOf(batched).threadShellById[b]?.updatedAt).toBe("2026-10-02T00:00:07.000Z");
+    // The untouched thread keeps its shell; the published state is unchanged.
+    expect(environmentOf(batched).threadShellById[ThreadId.make("c")]).toBe(
+      environmentOf(published).threadShellById[ThreadId.make("c")],
+    );
+    expect(environmentOf(published).messageIdsByThreadId[a]).toBeUndefined();
+    expect(environmentOf(published).threadShellById[a]?.updatedAt).toBe("2026-10-01T00:00:00.000Z");
+  });
+
+  it("copies the per-thread records once for a frame of shell upserts", () => {
+    useStore
+      .getState()
+      .syncServerShellSnapshot(
+        makeSnapshot([makeThreadShell("a"), makeThreadShell("b"), makeThreadShell("c")]),
+        environmentId,
+      );
+    const published = deepFreeze(useStore.getState());
+    useStore.setState(published, true);
+    const upsert = (sequence: number, id: string) =>
+      ({
+        kind: "thread-upserted",
+        sequence,
+        thread: makeThreadShell(id, {
+          title: `Renamed ${sequence}`,
+          updatedAt: `2026-10-02T00:00:0${sequence}.000Z`,
+        }),
+      }) as never;
+    const events = [upsert(2, "a"), upsert(3, "b"), upsert(4, "c"), upsert(5, "a")];
+    const intermediate: AppState[] = [];
+
+    useStore.getState().applyShellEvents(events, environmentId, (state) => {
+      intermediate.push(state);
+    });
+
+    const next = useStore.getState();
+    const sequential = events.reduce<AppState>(
+      (state, event) => applyShellEvent(deepFreeze(state), event, environmentId),
+      published,
+    );
+    expect(environmentOf(next)).toEqual(environmentOf(sequential));
+    expect(environmentOf(next).threadShellById[ThreadId.make("a")]?.title).toBe("Renamed 5");
+    // Every upsert after the first writes into the record the batch copied.
+    const shells = intermediate.slice(1).map((state) => environmentOf(state).threadShellById);
+    for (const shellById of shells) {
+      expect(shellById).toBe(environmentOf(next).threadShellById);
+    }
+    expect(environmentOf(next).threadShellById).not.toBe(environmentOf(published).threadShellById);
+    expect(environmentOf(next).sidebarThreadSummaryById).not.toBe(
+      environmentOf(published).sidebarThreadSummaryById,
+    );
+    expect(environmentOf(published).threadShellById[ThreadId.make("a")]?.title).toBe("Thread a");
   });
 });

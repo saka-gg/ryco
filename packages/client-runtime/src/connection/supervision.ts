@@ -21,9 +21,9 @@ import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import type { EnvironmentConnection } from "./connection.ts";
-import { approximateJsonSize } from "./approximateJsonSize.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { planEvictionsToCapacity } from "./evictionPolicy.ts";
+import { createRetainedThreadBytes, type RetainedThreadBytes } from "./retainedThreadBytes.ts";
 import {
   classifyProjectionSnapshot,
   createProjectionTracker,
@@ -54,8 +54,6 @@ const MIN_THREAD_WINDOW_ITEMS = 10;
 /** Backoff for re-requesting a window the server failed to load (not a size or support failure). */
 const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
 const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
-/** Fixed per-row overhead (ids, timestamps, envelope) in the retained-bytes estimate. */
-const RETAINED_ROW_OVERHEAD_BYTES = 256;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
@@ -203,50 +201,6 @@ function classifyThreadWindowFailure(error: unknown): SubscriptionFailureKind {
   return "failed";
 }
 
-// Retained-memory budgets need magnitudes only: walk instead of serializing every event.
-const estimateJsonLength = approximateJsonSize;
-
-/**
- * The row a live thread event writes in the client's thread state, and how
- * its size combines with what that row already holds. Streaming message
- * deltas append to their message; activity and plan upserts replace theirs.
- * Other events update rows in place and do not grow retained state.
- */
-function retainedRowWrite(
-  event: unknown,
-): { readonly key: string; readonly bytes: number; readonly append: boolean } | null {
-  const candidate = event as {
-    readonly type?: unknown;
-    readonly payload?: Record<string, unknown>;
-  } | null;
-  const payload = candidate?.payload;
-  if (payload === undefined || payload === null) return null;
-  switch (candidate?.type) {
-    case "thread.message-sent": {
-      const text = typeof payload.text === "string" ? payload.text : "";
-      return {
-        key: `message:${String(payload.messageId)}`,
-        bytes: text.length,
-        append: payload.streaming === true,
-      };
-    }
-    case "thread.activity-appended": {
-      const activity = payload.activity as { readonly id?: unknown } | undefined;
-      return {
-        key: `activity:${String(activity?.id)}`,
-        bytes: estimateJsonLength(activity),
-        append: false,
-      };
-    }
-    case "thread.proposed-plan-upserted": {
-      const plan = payload.proposedPlan as { readonly id?: unknown } | undefined;
-      return { key: `plan:${String(plan?.id)}`, bytes: estimateJsonLength(plan), append: false };
-    }
-    default:
-      return null;
-  }
-}
-
 type ThreadDetailSubscriptionEntry = {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -255,6 +209,8 @@ type ThreadDetailSubscriptionEntry = {
   refCount: number;
   /** Retains from views the user has open; the rest only keep the thread warm. */
   viewCount: number;
+  /** View retains ever taken; a retain handle compares it to tell whether a view came since. */
+  viewRetains: number;
   lastAccessedAt: number;
   evictionTimeoutId: ReturnType<typeof setTimeout> | null;
   protocol: "bounded" | "legacy";
@@ -265,11 +221,17 @@ type ThreadDetailSubscriptionEntry = {
    * rows live events and history pages added since, never the traffic.
    */
   estimatedRetainedBytes: number;
-  /** Estimated bytes per row written since the last snapshot. */
-  rowRetainedBytes: Map<string, number>;
+  /** The rows behind `estimatedRetainedBytes`, capped like the store's collections. */
+  readonly retainedRows: RetainedThreadBytes;
 };
 
 export interface ThreadDetailSubscriptionReleaseOptions {
+  /**
+   * Dispose the subscription now instead of keeping it in the idle cache, when
+   * this was its last retain and no view retained the thread while this retain
+   * was held (including a view that was already open when it was taken). A speculative retain (a hover, a press) that led to the thread
+   * being opened hands the stream to the idle cache like the view's release.
+   */
   readonly immediately?: boolean | undefined;
 }
 
@@ -432,26 +394,16 @@ export function createEnvironmentConnectionSupervisor<
     entry.estimatedRetainedBytes = Math.min(MAX_CACHED_THREAD_DETAIL_ESTIMATED_BYTES, bytes);
   };
   const recordRetainedSnapshot = (entry: ThreadDetailSubscriptionEntry, snapshot: unknown) => {
-    entry.rowRetainedBytes.clear();
-    setRetainedBytes(entry, estimateJsonLength(snapshot));
+    entry.retainedRows.recordSnapshot(snapshot);
+    setRetainedBytes(entry, entry.retainedRows.bytes());
   };
   const recordRetainedEvent = (entry: ThreadDetailSubscriptionEntry, event: unknown) => {
-    const write = retainedRowWrite(event);
-    if (write === null) return;
-    const previous = entry.rowRetainedBytes.get(write.key);
-    const next =
-      previous === undefined
-        ? write.bytes + RETAINED_ROW_OVERHEAD_BYTES
-        : write.append
-          ? previous + write.bytes
-          : Math.max(previous, write.bytes + RETAINED_ROW_OVERHEAD_BYTES);
-    if (next === previous) return;
-    entry.rowRetainedBytes.set(write.key, next);
-    setRetainedBytes(entry, entry.estimatedRetainedBytes + next - (previous ?? 0));
+    entry.retainedRows.recordEvent(event);
+    setRetainedBytes(entry, entry.retainedRows.bytes());
   };
   const recordRetainedHistoryPage = (entry: ThreadDetailSubscriptionEntry, page: unknown) => {
-    const items = (page as { readonly items?: unknown } | null)?.items;
-    setRetainedBytes(entry, entry.estimatedRetainedBytes + estimateJsonLength(items ?? page));
+    entry.retainedRows.recordHistoryPage(page);
+    setRetainedBytes(entry, entry.retainedRows.bytes());
   };
   const clearEviction = (entry: ThreadDetailSubscriptionEntry) => {
     if (entry.evictionTimeoutId !== null) {
@@ -847,12 +799,13 @@ export function createEnvironmentConnectionSupervisor<
       unsubscribeConnectionListener: null,
       refCount: 0,
       viewCount: 0,
+      viewRetains: 0,
       lastAccessedAt: input.now(),
       evictionTimeoutId: null,
       protocol: "bounded" as const,
       windowLimits: THREAD_WINDOW_LIMITS,
       estimatedRetainedBytes: 0,
-      rowRetainedBytes: new Map<string, number>(),
+      retainedRows: createRetainedThreadBytes(),
     };
     if (!existing) threadDetailSubscriptions.set(key, entry);
     clearEviction(entry);
@@ -860,8 +813,13 @@ export function createEnvironmentConnectionSupervisor<
     const view = options?.view === true;
     if (view) {
       entry.viewCount += 1;
+      entry.viewRetains += 1;
       if (entry.viewCount === 1) announceHistoryRecoveryMode(entry);
     }
+    // A view already open, or one opened while this retain is held, means the
+    // user has looked at the thread: its release then goes to the idle cache.
+    const viewedAtRetain = entry.viewCount > (view ? 1 : 0);
+    const viewRetainsAtRetain = entry.viewRetains;
     entry.lastAccessedAt = input.now();
     if (!attach(entry)) watch(entry);
     if (!existing) evictToCapacity();
@@ -877,7 +835,12 @@ export function createEnvironmentConnectionSupervisor<
       entry.refCount = Math.max(0, entry.refCount - 1);
       entry.lastAccessedAt = input.now();
       if (entry.refCount === 0) {
-        if (options?.immediately === true && shouldEvict(entry)) {
+        if (
+          options?.immediately === true &&
+          !viewedAtRetain &&
+          entry.viewRetains === viewRetainsAtRetain &&
+          shouldEvict(entry)
+        ) {
           disposeByKey(key);
           return;
         }

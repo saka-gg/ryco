@@ -11,7 +11,11 @@ vi.mock("../../../environments/runtime/service", () => ({
   retainThreadDetailSubscription: prewarmHarness.retain,
 }));
 
-import { useSidebarThreadPrewarm } from "./useSidebarThreadPrewarm";
+import { THREAD_PREFETCH_STAGGER_MS } from "../../../lib/staggeredThreadPrefetch";
+import {
+  SIDEBAR_PREWARM_FOREGROUND_WAIT_MS,
+  useSidebarThreadPrewarm,
+} from "./useSidebarThreadPrewarm";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 
@@ -22,9 +26,22 @@ function refs(...ids: string[]): ReadonlyArray<ScopedThreadRef> {
 function PrewarmProbe(props: {
   readonly enabled: boolean;
   readonly threadRefs: ReadonlyArray<ScopedThreadRef>;
+  readonly foregroundReady?: boolean;
+  readonly foregroundKey?: string | null;
 }) {
-  useSidebarThreadPrewarm(props.enabled, props.threadRefs);
+  useSidebarThreadPrewarm(
+    props.enabled,
+    props.threadRefs,
+    props.foregroundReady,
+    props.foregroundKey,
+  );
   return null;
+}
+
+/** Runs the idle slot, then every stagger step after it. */
+function runStaggeredRetains(idleCallback: () => void, count: number) {
+  idleCallback();
+  vi.advanceTimersByTime(THREAD_PREFETCH_STAGGER_MS * (count - 1));
 }
 
 describe("useSidebarThreadPrewarm", () => {
@@ -32,6 +49,7 @@ describe("useSidebarThreadPrewarm", () => {
   let nextIdleHandle = 1;
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     idleCallbacks.clear();
     nextIdleHandle = 1;
     prewarmHarness.retain.mockReset();
@@ -56,6 +74,7 @@ describe("useSidebarThreadPrewarm", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -72,6 +91,11 @@ describe("useSidebarThreadPrewarm", () => {
 
     const firstIdleCallback = [...idleCallbacks.values()][0]!;
     firstIdleCallback();
+    // One retain per stagger step, never all three at once.
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(THREAD_PREFETCH_STAGGER_MS);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(THREAD_PREFETCH_STAGGER_MS);
     expect(prewarmHarness.retain).toHaveBeenCalledTimes(3);
     const firstReleases = prewarmHarness.retain.mock.results.map(
       (result) => result.value as ReturnType<typeof vi.fn>,
@@ -87,7 +111,7 @@ describe("useSidebarThreadPrewarm", () => {
     expect(idleCallbacks.size).toBe(1);
 
     const secondIdleCallback = [...idleCallbacks.values()][0]!;
-    secondIdleCallback();
+    runStaggeredRetains(secondIdleCallback, 3);
     expect(prewarmHarness.retain).toHaveBeenCalledTimes(6);
     const secondReleases = prewarmHarness.retain.mock.results
       .slice(3)
@@ -122,7 +146,7 @@ describe("useSidebarThreadPrewarm", () => {
     const mounted = await render(
       <PrewarmProbe enabled threadRefs={refs("thread-1", "thread-2")} />,
     );
-    [...idleCallbacks.values()][0]!();
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 2);
 
     const releases = prewarmHarness.retain.mock.results.map(
       (result) => result.value as ReturnType<typeof vi.fn>,
@@ -142,7 +166,7 @@ describe("useSidebarThreadPrewarm", () => {
   });
   it("preserves overlapping demand and ignores reordering", async () => {
     const mounted = await render(<PrewarmProbe enabled threadRefs={refs("a", "b", "c")} />);
-    [...idleCallbacks.values()][0]!();
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 3);
     const [releaseA, releaseB, releaseC] = prewarmHarness.retain.mock.results.map(
       (result) => result.value as ReturnType<typeof vi.fn>,
     );
@@ -162,5 +186,67 @@ describe("useSidebarThreadPrewarm", () => {
     await mounted.unmount();
     expect(releaseA).toHaveBeenCalledWith({ immediately: true });
     expect(releaseB).toHaveBeenCalledWith({ immediately: true });
+  });
+
+  it("starts new retains only once the foreground thread is live and keeps held ones", async () => {
+    const mounted = await render(
+      <PrewarmProbe enabled foregroundReady={false} threadRefs={refs("a", "b")} />,
+    );
+    expect(idleCallbacks.size).toBe(0);
+    expect(prewarmHarness.retain).not.toHaveBeenCalled();
+
+    await mounted.rerender(<PrewarmProbe enabled foregroundReady threadRefs={refs("a", "b")} />);
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 2);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(2);
+    const [releaseA, releaseB] = prewarmHarness.retain.mock.results.map(
+      (result) => result.value as ReturnType<typeof vi.fn>,
+    );
+
+    // Navigating to another thread: held retains stay, the new one waits.
+    await mounted.rerender(
+      <PrewarmProbe enabled foregroundReady={false} threadRefs={refs("a", "c")} />,
+    );
+    expect(releaseB).toHaveBeenCalledWith({ immediately: true });
+    expect(releaseA).not.toHaveBeenCalled();
+    expect(idleCallbacks.size).toBe(0);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(2);
+
+    await mounted.rerender(<PrewarmProbe enabled foregroundReady threadRefs={refs("a", "c")} />);
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 1);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(3);
+    expect(prewarmHarness.retain).toHaveBeenLastCalledWith(ENVIRONMENT_ID, ThreadId.make("c"));
+    await mounted.unmount();
+  });
+
+  it("stops waiting for a foreground thread that never loads", async () => {
+    const mounted = await render(
+      <PrewarmProbe
+        enabled
+        foregroundReady={false}
+        foregroundKey="stalled"
+        threadRefs={refs("a")}
+      />,
+    );
+    vi.advanceTimersByTime(SIDEBAR_PREWARM_FOREGROUND_WAIT_MS - 1);
+    await Promise.resolve();
+    expect(idleCallbacks.size).toBe(0);
+
+    vi.advanceTimersByTime(1);
+    await vi.waitFor(() => expect(idleCallbacks.size).toBe(1));
+    runStaggeredRetains([...idleCallbacks.values()][0]!, 1);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(1);
+
+    // Opening another thread waits for that one again.
+    await mounted.rerender(
+      <PrewarmProbe
+        enabled
+        foregroundReady={false}
+        foregroundKey="loading"
+        threadRefs={refs("a", "b")}
+      />,
+    );
+    expect(idleCallbacks.size).toBe(0);
+    expect(prewarmHarness.retain).toHaveBeenCalledTimes(1);
+    await mounted.unmount();
   });
 });

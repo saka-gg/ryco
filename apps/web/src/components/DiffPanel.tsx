@@ -40,8 +40,10 @@ import { useDiffLayout, type DiffRenderMode } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
 import {
   buildDiffParseCacheKey,
+  DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES,
   DiffParseCache,
   type DiffParseCacheKey,
+  type DiffParseCacheSetOptions,
 } from "../lib/diffParseCache";
 import { getOffThreadDiffParser, OFF_THREAD_DIFF_PARSE_MIN_CHARS } from "../lib/diffParseOffThread";
 import { ActiveDiffParser, type RenderablePatch } from "../lib/diffParsing";
@@ -135,7 +137,13 @@ interface ParsedDiffContent {
 // re-queues worker highlight jobs for) identical content. Worker jobs for files
 // that scroll out / unmount are cancelled by @pierre/diffs on unmount, so the
 // queue does not stack as the selection changes.
-const renderablePatchCache = new DiffParseCache<ParsedDiffContent>();
+// Weighed by patch length: a parsed payload holds at least its source text (context lines
+// sit in both line arrays), so the budget bounds the parsed copies like the raw store's.
+const RENDERABLE_PATCH_CACHE_MAX_CHARS = 16 * 1024 * 1024;
+const renderablePatchCache = new DiffParseCache<ParsedDiffContent>(
+  DEFAULT_DIFF_PARSE_CACHE_MAX_ENTRIES,
+  RENDERABLE_PATCH_CACHE_MAX_CHARS,
+);
 const EMPTY_PARSED_DIFF_CONTENT: ParsedDiffContent = { patch: null, files: [] };
 const DIFF_PANEL_PARSE_SCOPE = "diff-panel";
 
@@ -597,6 +605,7 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     readonly content: ParsedDiffContent;
     readonly pendingParse: {
       readonly cacheKey: DiffParseCacheKey;
+      readonly cacheOptions: DiffParseCacheSetOptions;
       readonly source: string;
     } | null;
   }>(() => {
@@ -617,13 +626,27 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     const cacheKey = {
       turnId: turnScope,
       filePath: parseScope,
-      // The local-changes revision is a server-side hash of both patches, so it
-      // already identifies the content without hashing megabytes again here.
-      // Checkpoint patches are hashed once per distinct text this panel sees.
+      // The local-changes and comparison revisions are server-side hashes over
+      // their patches (the turn scope carries them), so they already identify
+      // the content without hashing megabytes again here. Checkpoint patches
+      // are hashed once per distinct fetched result.
       blobSha:
         reviewingLocal && localChanges.data && localScope
           ? `revision:${localScope}`
-          : activeDiffParser.identify(normalizedPatch),
+          : comparing && comparison.data
+            ? "revision:comparison"
+            : activeDiffParser.identify(
+                normalizedPatch,
+                activeCheckpointDiffQuery.data ?? undefined,
+              ),
+    };
+    const cacheOptions = {
+      weight: normalizedPatch.length,
+      // Each completed turn makes a new conversation key; its parse replaces the
+      // thread's previous conversation parse instead of waiting for eviction.
+      ...(!comparing && !reviewingLocal && !selectedTurn && activeThreadId
+        ? { slot: `conversation:${activeThread?.environmentId ?? ""}:${activeThreadId}` }
+        : {}),
     };
     const cached = renderablePatchCache.get(cacheKey);
     if (cached) {
@@ -633,18 +656,22 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     if (normalizedPatch.length >= OFF_THREAD_DIFF_PARSE_MIN_CHARS) {
       return {
         content: EMPTY_PARSED_DIFF_CONTENT,
-        pendingParse: { cacheKey, source: normalizedPatch },
+        pendingParse: { cacheKey, cacheOptions, source: normalizedPatch },
       };
     }
     const patch = activeDiffParser.parse(normalizedPatch, parseScope);
     const content: ParsedDiffContent = { patch, files: sortRenderableFiles(patch) };
     if (patch) {
-      renderablePatchCache.set(cacheKey, content);
+      renderablePatchCache.set(cacheKey, content, cacheOptions);
     }
     return { content, pendingParse: null };
   }, [
+    activeCheckpointDiffQuery.data,
     activeDiffParser,
+    activeThread?.environmentId,
+    activeThreadId,
     comparing,
+    comparison.data,
     reviewingLocal,
     comparisonRevision,
     conversationCacheScope,
@@ -662,7 +689,8 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
       .then((patch) => {
         const content: ParsedDiffContent = { patch, files: sortRenderableFiles(patch) };
         // Cached even when the selection moved on: going back is then instant.
-        if (patch) renderablePatchCache.set(pendingParse.cacheKey, content);
+        if (patch)
+          renderablePatchCache.set(pendingParse.cacheKey, content, pendingParse.cacheOptions);
         if (!current) return;
         activeDiffParser.parse(pendingParse.source, DIFF_PANEL_PARSE_SCOPE, patch);
         setOffThreadParsed({

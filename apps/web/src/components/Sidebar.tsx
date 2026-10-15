@@ -43,7 +43,10 @@ import {
 } from "@ryco/client-runtime/scoped";
 import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
-import { selectCacheHydratedEnvironmentIds } from "@ryco/client-runtime/state/threads";
+import {
+  selectCacheHydratedEnvironmentIds,
+  selectThreadLiveDetailLoaded,
+} from "@ryco/client-runtime/state/threads";
 import { isWorkspaceMetadataSnapshot } from "@ryco/client-runtime/state/workspace";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { usePrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
@@ -1163,9 +1166,17 @@ export default function Sidebar() {
     [prewarmedSidebarThreadKeys],
   );
 
+  // Prewarmed windows wait (a bounded time) for the routed thread's own live
+  // window, so they never compete with it; a draft or a route without a thread
+  // has none.
+  const routeThreadLiveDetailLoaded = useStore((store) =>
+    routeThreadRef ? selectThreadLiveDetailLoaded(store, routeThreadRef) : true,
+  );
   useSidebarThreadPrewarm(
     shouldPrewarmSidebarThreads({ isMobile, open, openMobile, sidebarMode }),
     prewarmedSidebarThreadRefs,
+    routeThreadLiveDetailLoaded,
+    routeThreadKey,
   );
 
   useEffect(() => {

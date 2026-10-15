@@ -1,7 +1,19 @@
-import { describe, expect, it } from "vite-plus/test";
-
 import {
+  EnvironmentId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationEvent,
+  type OrchestrationShellSnapshot,
+} from "@ryco/contracts";
+import { afterEach, describe, expect, it } from "vite-plus/test";
+
+import { useStore } from "~/store";
+import {
+  applyEnvironmentThreadDetailEvent,
   classifyProjectionSnapshot,
+  flushEnvironmentThreadDetailEvents,
   shouldApplyProjectionEvent,
   shouldApplyProjectionSnapshot,
   shouldApplyTerminalEvent,
@@ -160,5 +172,137 @@ describe("shouldApplyProjectionEvent", () => {
         sequence: 6,
       }),
     ).toBe(true);
+  });
+});
+
+describe("frame-batched thread detail events", () => {
+  const environmentId = EnvironmentId.make("environment-detail-batch");
+  const projectId = ProjectId.make("project-detail-batch");
+  const threadId = ThreadId.make("thread-detail-batch");
+  const messageId = MessageId.make("message-detail-batch");
+  let sequence = 1;
+
+  afterEach(() => {
+    flushEnvironmentThreadDetailEvents();
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
+  });
+
+  function seedThread() {
+    useStore.getState().syncServerShellSnapshot(
+      {
+        snapshotSequence: 1,
+        projects: [
+          {
+            id: projectId,
+            title: "Project",
+            workspaceRoot: "/tmp/project-detail-batch",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-01T00:00:00.000Z",
+            updatedAt: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+        worktrees: [],
+        threads: [
+          {
+            id: threadId,
+            projectId,
+            title: "Thread",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            worktreeId: null,
+            manualStatusBucket: null,
+            manualPosition: 0,
+            latestTurn: null,
+            createdAt: "2026-10-01T00:00:00.000Z",
+            updatedAt: "2026-10-01T00:00:00.000Z",
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            session: null,
+            latestUserMessageAt: null,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+          },
+        ],
+        updatedAt: "2026-10-01T00:00:00.000Z",
+      } as unknown as OrchestrationShellSnapshot,
+      environmentId,
+    );
+  }
+
+  function messageSent(text: string, streaming: boolean): OrchestrationEvent {
+    sequence += 1;
+    return {
+      sequence,
+      eventId: `event-detail-batch-${sequence}`,
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: "2026-10-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.message-sent",
+      payload: {
+        threadId,
+        messageId,
+        role: "assistant",
+        text,
+        turnId: null,
+        streaming,
+        createdAt: "2026-10-01T00:00:01.000Z",
+        updatedAt: "2026-10-01T00:00:01.000Z",
+      },
+    } as unknown as OrchestrationEvent;
+  }
+
+  function storedMessage() {
+    return useStore.getState().environmentStateById[environmentId]?.messageByThreadId[threadId]?.[
+      messageId
+    ];
+  }
+
+  function applyFrame(events: ReadonlyArray<OrchestrationEvent>) {
+    for (const event of events) applyEnvironmentThreadDetailEvent(event, environmentId);
+    flushEnvironmentThreadDetailEvents();
+  }
+
+  it("keeps earlier text when a delta and its empty completion share a frame", () => {
+    seedThread();
+    applyFrame([messageSent("Earlier ", true)]);
+    applyFrame([messageSent("tail", true), messageSent("", false)]);
+
+    expect(storedMessage()?.text).toBe("Earlier tail");
+    expect(storedMessage()?.streaming).toBe(false);
+  });
+
+  it("lets a completion that carries the full text replace the streamed text", () => {
+    seedThread();
+    applyFrame([messageSent("Earlier ", true)]);
+    applyFrame([messageSent("tail", true), messageSent("Full text", false)]);
+
+    expect(storedMessage()?.text).toBe("Full text");
+    expect(storedMessage()?.streaming).toBe(false);
+  });
+
+  it("appends consecutive deltas of one frame", () => {
+    seedThread();
+    applyFrame([messageSent("a", true), messageSent("b", true)]);
+
+    expect(storedMessage()?.text).toBe("ab");
+    expect(storedMessage()?.streaming).toBe(true);
+  });
+
+  it("completes a message first seen in the same frame", () => {
+    seedThread();
+    applyFrame([messageSent("x", true), messageSent("", false)]);
+
+    expect(storedMessage()?.text).toBe("x");
+    expect(storedMessage()?.streaming).toBe(false);
   });
 });

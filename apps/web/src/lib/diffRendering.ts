@@ -5,6 +5,13 @@ export const DIFF_THEME_NAMES = {
 
 export type DiffThemeName = (typeof DIFF_THEME_NAMES)[keyof typeof DIFF_THEME_NAMES];
 
+/**
+ * Lines longer than this are not tokenized (rendered in the default color).
+ * Shiki has no cap by default, and one minified line costs it up to its
+ * 500 ms per-line limit; every highlighter in the app shares this bound.
+ */
+export const SYNTAX_TOKENIZE_MAX_LINE_LENGTH = 1_000;
+
 export function resolveDiffThemeName(theme: "light" | "dark"): DiffThemeName {
   return theme === "dark" ? DIFF_THEME_NAMES.dark : DIFF_THEME_NAMES.light;
 }

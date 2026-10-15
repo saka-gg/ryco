@@ -2,7 +2,11 @@ import { getSharedHighlighter } from "@pierre/diffs";
 import { WorkerPoolManager } from "@pierre/diffs/worker";
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 
-import { resolveDiffThemeName, type DiffThemeName } from "./diffRendering";
+import {
+  resolveDiffThemeName,
+  SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
+  type DiffThemeName,
+} from "./diffRendering";
 import {
   createDiffWorkerPoolOwner,
   resolveDiffWorkerPoolSize,
@@ -20,7 +24,6 @@ import {
  */
 
 const DIFF_AST_CACHE_SIZE = 120;
-const DIFF_TOKENIZE_MAX_LINE_LENGTH = 1_000;
 
 function supportsWasmHighlighter(): boolean {
   return typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function";
@@ -53,7 +56,7 @@ function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
     },
     {
       theme: themeName,
-      tokenizeMaxLineLength: DIFF_TOKENIZE_MAX_LINE_LENGTH,
+      tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
       preferredHighlighter,
     },
   );

@@ -55,6 +55,12 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import {
+  MAX_THREAD_ACTIVITIES,
+  MAX_THREAD_CHECKPOINTS,
+  MAX_THREAD_MESSAGES,
+  MAX_THREAD_PROPOSED_PLANS,
+} from "./limits.ts";
 import { getThreadsRuntimeConfiguration, type CheckoutRelocation } from "./runtime.ts";
 import { selectDelegatedChildThreads, threadLineagesEqual } from "./threadLineage.ts";
 
@@ -170,10 +176,6 @@ const initialState: AppState = {
   environmentStateById: {},
 };
 
-const MAX_THREAD_MESSAGES = 2_000;
-const MAX_THREAD_CHECKPOINTS = 500;
-const MAX_THREAD_PROPOSED_PLANS = 200;
-const MAX_THREAD_ACTIVITIES = 500;
 const EMPTY_THREAD_IDS: ThreadId[] = [];
 const EMPTY_WORKTREE_IDS: WorktreeId[] = [];
 const EMPTY_MESSAGE_IDS: MessageId[] = [];
@@ -783,6 +785,30 @@ function removeId<T extends string>(ids: readonly T[], id: T): T[] {
   return ids.filter((value) => value !== id);
 }
 
+/**
+ * Containers a batch apply copied and has not published yet. A later event in
+ * the same batch may write into such a copy in place instead of copying a
+ * record keyed by every thread again; anything not in the set is copied on its
+ * first write, so a published state is never mutated. Single-event entry
+ * points pass `undefined` and keep plain copy-on-write.
+ */
+type BatchOwnedContainers = WeakSet<object>;
+
+function writeRecordEntry<K extends string, V>(
+  record: Record<K, V>,
+  key: K,
+  value: V,
+  owned: BatchOwnedContainers | undefined,
+): Record<K, V> {
+  if (owned?.has(record)) {
+    record[key] = value;
+    return record;
+  }
+  const next = { ...record, [key]: value } as Record<K, V>;
+  owned?.add(next);
+  return next;
+}
+
 function markThreadMessagesLive(state: EnvironmentState, threadId: ThreadId) {
   if (!state.cachedMessageThreadIds?.[threadId]) return state.cachedMessageThreadIds;
   const { [threadId]: _cached, ...rest } = state.cachedMessageThreadIds ?? {};
@@ -1118,6 +1144,7 @@ function writeThreadShellState(
     turnState: ThreadTurnState;
     summary: SidebarThreadSummary;
   },
+  owned?: BatchOwnedContainers,
 ): EnvironmentState {
   const shell = resolveRelocatedThreadPath(state, nextThread.shell);
   if (shell !== nextThread.shell)
@@ -1138,10 +1165,12 @@ function writeThreadShellState(
   if (!threadShellsEqual(previousShell, nextThread.shell)) {
     nextState = {
       ...nextState,
-      threadShellById: {
-        ...nextState.threadShellById,
-        [nextThread.shell.id]: nextThread.shell,
-      },
+      threadShellById: writeRecordEntry(
+        nextState.threadShellById,
+        nextThread.shell.id,
+        nextThread.shell,
+        owned,
+      ),
     };
   }
 
@@ -1150,10 +1179,12 @@ function writeThreadShellState(
   ) {
     nextState = {
       ...nextState,
-      threadSessionById: {
-        ...nextState.threadSessionById,
-        [nextThread.shell.id]: nextThread.session,
-      },
+      threadSessionById: writeRecordEntry(
+        nextState.threadSessionById,
+        nextThread.shell.id,
+        nextThread.session,
+        owned,
+      ),
     };
   }
 
@@ -1162,10 +1193,12 @@ function writeThreadShellState(
   ) {
     nextState = {
       ...nextState,
-      threadTurnStateById: {
-        ...nextState.threadTurnStateById,
-        [nextThread.shell.id]: nextThread.turnState,
-      },
+      threadTurnStateById: writeRecordEntry(
+        nextState.threadTurnStateById,
+        nextThread.shell.id,
+        nextThread.turnState,
+        owned,
+      ),
     };
   }
 
@@ -1177,10 +1210,12 @@ function writeThreadShellState(
   ) {
     nextState = {
       ...nextState,
-      sidebarThreadSummaryById: {
-        ...nextState.sidebarThreadSummaryById,
-        [nextThread.shell.id]: nextThread.summary,
-      },
+      sidebarThreadSummaryById: writeRecordEntry(
+        nextState.sidebarThreadSummaryById,
+        nextThread.shell.id,
+        nextThread.summary,
+        owned,
+      ),
     };
   }
 
@@ -1590,6 +1625,7 @@ function updateThreadShellTimestamp(
   state: EnvironmentState,
   threadId: ThreadId,
   updatedAt: string,
+  owned?: BatchOwnedContainers,
 ): EnvironmentState {
   const shell = state.threadShellById[threadId];
   if (!shell || shell.updatedAt === updatedAt) {
@@ -1598,13 +1634,12 @@ function updateThreadShellTimestamp(
 
   return {
     ...state,
-    threadShellById: {
-      ...state.threadShellById,
-      [threadId]: {
-        ...shell,
-        updatedAt,
-      },
-    },
+    threadShellById: writeRecordEntry(
+      state.threadShellById,
+      threadId,
+      { ...shell, updatedAt },
+      owned,
+    ),
   };
 }
 
@@ -1731,7 +1766,7 @@ function applyThreadMessageSentEvent(
   state: EnvironmentState,
   event: Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
   environmentId: EnvironmentId,
-  ownedMessageMaps?: WeakSet<object>,
+  owned?: BatchOwnedContainers,
 ): EnvironmentState {
   const message = mapMessage(environmentId, {
     id: event.payload.messageId,
@@ -1761,7 +1796,7 @@ function applyThreadMessageSentEvent(
   let nextIds = currentIds;
   // A replay batch can own its unpublished map across consecutive message
   // events. Single-event updates still copy, so published snapshots stay immutable.
-  let nextById: Record<MessageId, ChatMessage> = ownedMessageMaps?.has(currentById)
+  let nextById: Record<MessageId, ChatMessage> = owned?.has(currentById)
     ? currentById
     : Object.assign(Object.create(null) as Record<MessageId, ChatMessage>, currentById);
   nextById[message.id] = nextMessage;
@@ -1779,7 +1814,7 @@ function applyThreadMessageSentEvent(
     }
   }
 
-  ownedMessageMaps?.add(nextById);
+  owned?.add(nextById);
 
   if (pendingMessage) {
     const nextPendingMessages = pendingMessages.filter((entry) => entry.id !== message.id);
@@ -1801,14 +1836,11 @@ function applyThreadMessageSentEvent(
     messageIdsByThreadId:
       nextIds === currentIds
         ? state.messageIdsByThreadId
-        : {
-            ...state.messageIdsByThreadId,
-            [threadId]: nextIds,
-          },
-    messageByThreadId: {
-      ...state.messageByThreadId,
-      [threadId]: nextById,
-    },
+        : writeRecordEntry(state.messageIdsByThreadId, threadId, nextIds, owned),
+    messageByThreadId:
+      state.messageByThreadId[threadId] === nextById
+        ? state.messageByThreadId
+        : writeRecordEntry(state.messageByThreadId, threadId, nextById, owned),
   };
 
   if (event.payload.role === "assistant" && event.payload.turnId !== null) {
@@ -1859,16 +1891,18 @@ function applyThreadMessageSentEvent(
       if (!threadTurnStatesEqual(previousTurnState, nextTurnState)) {
         nextState = {
           ...nextState,
-          threadTurnStateById: {
-            ...nextState.threadTurnStateById,
-            [threadId]: nextTurnState,
-          },
+          threadTurnStateById: writeRecordEntry(
+            nextState.threadTurnStateById,
+            threadId,
+            nextTurnState,
+            owned,
+          ),
         };
       }
     }
   }
 
-  return updateThreadShellTimestamp(nextState, threadId, event.occurredAt);
+  return updateThreadShellTimestamp(nextState, threadId, event.occurredAt, owned);
 }
 
 function insertActivityIdByOrder(
@@ -1897,6 +1931,7 @@ function insertActivityIdByOrder(
 function applyThreadActivityAppendedEvent(
   state: EnvironmentState,
   event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  owned?: BatchOwnedContainers,
 ): EnvironmentState {
   const threadId = event.payload.threadId;
   if (!state.threadShellById[threadId]) {
@@ -1915,10 +1950,10 @@ function applyThreadActivityAppendedEvent(
     (existingActivity.createdAt !== activity.createdAt ||
       existingActivity.sequence !== activity.sequence);
   let nextIds = currentIds;
-  let nextById: Record<string, OrchestrationThreadActivity> = {
-    ...currentById,
-    [activity.id]: activity,
-  };
+  let nextById: Record<string, OrchestrationThreadActivity> = writeRecordEntry<
+    string,
+    OrchestrationThreadActivity
+  >(currentById, activity.id, activity, owned);
 
   if (!existingActivity) {
     nextIds = insertActivityIdByOrder(currentIds, currentById, activity);
@@ -1940,22 +1975,20 @@ function applyThreadActivityAppendedEvent(
     nextById = cappedSlice.byId;
   }
 
+  owned?.add(nextById);
   const nextState: EnvironmentState = {
     ...state,
     activityIdsByThreadId:
       nextIds === currentIds
         ? state.activityIdsByThreadId
-        : {
-            ...state.activityIdsByThreadId,
-            [threadId]: nextIds,
-          },
-    activityByThreadId: {
-      ...state.activityByThreadId,
-      [threadId]: nextById,
-    },
+        : writeRecordEntry(state.activityIdsByThreadId, threadId, nextIds, owned),
+    activityByThreadId:
+      state.activityByThreadId[threadId] === nextById
+        ? state.activityByThreadId
+        : writeRecordEntry(state.activityByThreadId, threadId, nextById, owned),
   };
 
-  return updateThreadShellTimestamp(nextState, threadId, event.occurredAt);
+  return updateThreadShellTimestamp(nextState, threadId, event.occurredAt, owned);
 }
 
 function buildProjectState(
@@ -3117,6 +3150,7 @@ function applyEnvironmentShellEvent(
   state: EnvironmentState,
   event: OrchestrationShellStreamEvent,
   environmentId: EnvironmentId,
+  owned?: BatchOwnedContainers,
 ): EnvironmentState {
   switch (event.kind) {
     case "project-upserted": {
@@ -3168,7 +3202,7 @@ function applyEnvironmentShellEvent(
       };
     }
     case "thread-upserted":
-      return writeThreadShellState(state, mapThreadShell(event.thread, environmentId));
+      return writeThreadShellState(state, mapThreadShell(event.thread, environmentId), owned);
     case "worktree-upserted":
       return upsertWorktreeState(state, mapWorktree(event.worktree, environmentId));
     case "worktree-relocated":
@@ -3202,19 +3236,24 @@ export function applyOrchestrationEvents(
   const startedAt = perfEnabled ? runtime.clock.now() : 0;
   const currentEnvironmentState = getStoredEnvironmentState(state, environmentId);
   let nextEnvironmentState = currentEnvironmentState;
-  let ownedMessageMaps = new WeakSet<object>();
+  // Streaming message and activity events of one batch write into the records
+  // this batch already copied, so a frame of deltas copies each per-thread
+  // record once instead of once per event.
+  let owned: BatchOwnedContainers = new WeakSet<object>();
   for (const event of events) {
     if (event.type === "thread.message-sent") {
       nextEnvironmentState = applyThreadMessageSentEvent(
         nextEnvironmentState,
         event,
         environmentId,
-        ownedMessageMaps,
+        owned,
       );
+    } else if (event.type === "thread.activity-appended") {
+      nextEnvironmentState = applyThreadActivityAppendedEvent(nextEnvironmentState, event, owned);
     } else {
       // Other event handlers may derive/cache an intermediate thread. Stop
       // mutating that generation before crossing an event-type boundary.
-      ownedMessageMaps = new WeakSet<object>();
+      owned = new WeakSet<object>();
       nextEnvironmentState = applyEnvironmentOrchestrationEvent(
         nextEnvironmentState,
         event,
@@ -3439,16 +3478,21 @@ const selectWorktreeRows = createSliceRowsSelector<WorktreeId, SidebarWorktreeSu
 const selectSidebarThreadRows = createSliceRowsSelector<ThreadId, SidebarThreadSummary>(
   (record, id) => record[id],
 );
+const EMPTY_SIDEBAR_WORKTREES: SidebarWorktreeSummary[] = [];
+const EMPTY_SIDEBAR_THREADS: SidebarThreadSummary[] = [];
 
 export function selectSidebarWorktreesForProjectRef(
   state: AppState,
   ref: ScopedProjectRef | null | undefined,
 ): SidebarWorktreeSummary[] {
   if (!ref) {
-    return [];
+    return EMPTY_SIDEBAR_WORKTREES;
   }
   const environmentState = selectEnvironmentState(state, ref.environmentId);
-  const worktreeIds = environmentState.worktreeIdsByProjectId?.[ref.projectId] ?? [];
+  // The shared empty list keeps the slice cache hitting for projects without
+  // worktrees (their key is deleted), so the result keeps its identity.
+  const worktreeIds =
+    environmentState.worktreeIdsByProjectId?.[ref.projectId] ?? EMPTY_WORKTREE_IDS;
   return selectWorktreeRows(worktreeIds, environmentState.worktreeById);
 }
 
@@ -3461,8 +3505,9 @@ function createProjectRefsRowsSelector<Row>(
   selectForRef: (state: AppState, ref: ScopedProjectRef) => Row[],
 ): (state: AppState, refs: readonly ScopedProjectRef[]) => Row[] {
   const cache = new WeakMap<readonly ScopedProjectRef[], { parts: Row[][]; rows: Row[] }>();
+  const empty: Row[] = [];
   return (state, refs) => {
-    if (refs.length === 0) return [];
+    if (refs.length === 0) return empty;
     if (refs.length === 1) return selectForRef(state, refs[0]!);
     const parts = refs.map((ref) => selectForRef(state, ref));
     const cached = cache.get(refs);
@@ -3483,7 +3528,7 @@ export function selectSidebarThreadsForProjectRef(
   ref: ScopedProjectRef | null | undefined,
 ): SidebarThreadSummary[] {
   if (!ref) {
-    return [];
+    return EMPTY_SIDEBAR_THREADS;
   }
 
   const environmentState = selectEnvironmentState(state, ref.environmentId);
@@ -3491,29 +3536,46 @@ export function selectSidebarThreadsForProjectRef(
   return selectSidebarThreadRows(threadIds, environmentState.sidebarThreadSummaryById);
 }
 
+/** Delegated children per candidate rows array, then per parent thread. */
+const delegatedChildThreadsCache = new WeakMap<
+  readonly SidebarThreadSummary[],
+  Map<ThreadId, SidebarThreadSummary[]>
+>();
+
 /**
  * Direct delegated children of a thread, oldest first. Children are always in the
  * parent's project (the decider enforces it); without a parent shell, fall back
- * to every summary in the environment.
+ * to every summary in the environment. Memoized on the candidate rows, which
+ * keep their identity across commits that do not touch the sidebar summaries.
  */
 export function selectDelegatedChildThreadsForThreadRef(
   state: AppState,
   ref: ScopedThreadRef | null | undefined,
 ): SidebarThreadSummary[] {
   if (!ref) {
-    return [];
+    return EMPTY_SIDEBAR_THREADS;
   }
   const environmentState = selectEnvironmentState(state, ref.environmentId);
   const parentShell = environmentState.threadShellById[ref.threadId];
-  const candidateIds =
+  const candidates =
     parentShell === undefined
-      ? environmentState.threadIds
-      : (environmentState.threadIdsByProjectId[parentShell.projectId] ?? EMPTY_THREAD_IDS);
-  const candidates = candidateIds.flatMap((threadId) => {
-    const thread = environmentState.sidebarThreadSummaryById[threadId];
-    return thread ? [thread] : [];
-  });
-  return selectDelegatedChildThreads(candidates, ref);
+      ? selectEnvironmentSidebarThreadRows(ref.environmentId, environmentState)
+      : selectSidebarThreadRows(
+          environmentState.threadIdsByProjectId[parentShell.projectId] ?? EMPTY_THREAD_IDS,
+          environmentState.sidebarThreadSummaryById,
+        );
+  // Candidate rows are per environment, so the thread id identifies the parent.
+  let byParent = delegatedChildThreadsCache.get(candidates);
+  const cached = byParent?.get(ref.threadId);
+  if (cached !== undefined) return cached;
+  const children = selectDelegatedChildThreads(candidates, ref);
+  const rows = children.length === 0 ? EMPTY_SIDEBAR_THREADS : children;
+  if (byParent === undefined) {
+    byParent = new Map();
+    delegatedChildThreadsCache.set(candidates, byParent);
+  }
+  byParent.set(ref.threadId, rows);
+  return rows;
 }
 
 export const selectSidebarThreadsForProjectRefs: (
@@ -3649,6 +3711,15 @@ export function applyShellEvent(
   event: OrchestrationShellStreamEvent,
   environmentId: EnvironmentId,
 ): AppState {
+  return applyShellEventInBatch(state, event, environmentId, undefined);
+}
+
+function applyShellEventInBatch(
+  state: AppState,
+  event: OrchestrationShellStreamEvent,
+  environmentId: EnvironmentId,
+  owned: BatchOwnedContainers | undefined,
+): AppState {
   const runtime = getThreadsRuntimeConfiguration();
   const perfEnabled = runtime.observability.performanceEnabled();
   const startedAt = perfEnabled ? runtime.clock.now() : 0;
@@ -3659,6 +3730,7 @@ export function applyShellEvent(
       getStoredEnvironmentState(state, environmentId),
       event,
       environmentId,
+      owned,
     ),
   );
   if (perfEnabled) {
@@ -3706,14 +3778,42 @@ export type ShellStoreUpdate =
   | OrchestrationShellStreamEvent
   | OrchestrationShellThreadPrioritiesItem;
 
-function applyShellStoreUpdate(
+/**
+ * Folds a run of shell updates into `state`. Consecutive thread upserts share
+ * the records the run already copied, so a frame of upserts for different
+ * threads copies each record keyed by every thread once, not once per upsert.
+ * Any other update starts a new generation before it is applied.
+ *
+ * Because of that sharing, the state handed to `prepare` is only valid during
+ * the call: later upserts in the run write into the same records in place.
+ * `prepare` must read what it needs synchronously and keep neither the state
+ * nor any record reached through it.
+ */
+function applyShellStoreUpdates<Item>(
   state: AppState,
-  update: ShellStoreUpdate,
-  environmentId: EnvironmentId,
+  items: ReadonlyArray<Item>,
+  read: (item: Item) => {
+    readonly update: ShellStoreUpdate;
+    readonly environmentId: EnvironmentId;
+  },
+  beforeEach?: (state: AppState, item: Item) => void,
 ): AppState {
-  return update.kind === "thread-priorities"
-    ? applyThreadPriorities(state, update, environmentId)
-    : applyShellEvent(state, update, environmentId);
+  let nextState = state;
+  let owned: BatchOwnedContainers = new WeakSet<object>();
+  for (const item of items) {
+    beforeEach?.(nextState, item);
+    const { update, environmentId } = read(item);
+    if (update.kind === "thread-upserted") {
+      nextState = applyShellEventInBatch(nextState, update, environmentId, owned);
+      continue;
+    }
+    owned = new WeakSet<object>();
+    nextState =
+      update.kind === "thread-priorities"
+        ? applyThreadPriorities(nextState, update, environmentId)
+        : applyShellEvent(nextState, update, environmentId);
+  }
+  return nextState;
 }
 
 export function setActiveEnvironmentId(state: AppState, environmentId: EnvironmentId): AppState {
@@ -4098,11 +4198,12 @@ export function createShellEventCoalescer(deps: ShellEventCoalescerDeps): ShellE
     }
     const pending = queue;
     queue = [];
-    let nextState = deps.getState();
-    for (const item of pending) {
-      nextState = applyShellStoreUpdate(nextState, item.event, item.environmentId);
-    }
-    deps.commitState(nextState);
+    deps.commitState(
+      applyShellStoreUpdates(deps.getState(), pending, (item) => ({
+        update: item.event,
+        environmentId: item.environmentId,
+      })),
+    );
   }
 
   function enqueue(event: ShellStoreUpdate, environmentId: EnvironmentId): void {
@@ -4194,7 +4295,9 @@ interface AppStore extends AppState {
   /**
    * Applies one environment's shell updates in order as a single commit, now.
    * `prepare` sees the state each update applies to (after the ones before it)
-   * and its results are returned in order.
+   * and its results are returned in order. That state shares records with the
+   * rest of the batch, which later updates write in place: read it
+   * synchronously and keep neither it nor any record reached through it.
    */
   applyShellEvents: <Context>(
     events: ReadonlyArray<ShellStoreUpdate>,
@@ -4314,11 +4417,16 @@ export const useStore = create<AppStore>((set, get) => {
     ): ReadonlyArray<Context> => {
       shellCoalescer.flush();
       const contexts: Context[] = [];
-      let nextState: AppState = get();
-      for (const event of events) {
-        if (prepare !== undefined) contexts.push(prepare(nextState, event));
-        nextState = applyShellStoreUpdate(nextState, event, environmentId);
-      }
+      const nextState = applyShellStoreUpdates(
+        get(),
+        events,
+        (event) => ({ update: event, environmentId }),
+        prepare === undefined
+          ? undefined
+          : (state, event) => {
+              contexts.push(prepare(state, event));
+            },
+      );
       commitWithRelocations(nextState);
       return contexts;
     },

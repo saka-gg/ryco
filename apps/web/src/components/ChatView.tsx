@@ -265,6 +265,7 @@ import {
   threadForkBoundaryQuote,
   selectEnvironmentShellLive,
   selectThreadDetailLoaded,
+  selectThreadLiveDetailLoaded,
 } from "@ryco/client-runtime/state/threads";
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
@@ -1025,6 +1026,11 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadDetailLoaded = useStore((store) =>
     isServerThread && activeThreadRef ? selectThreadDetailLoaded(store, activeThreadRef) : true,
   );
+  // The same, but not satisfied by messages hydrated from a read cache: sibling
+  // prefetch waits for the active thread's live window, not its cached copy.
+  const activeThreadLiveDetailLoaded = useStore((store) =>
+    isServerThread && activeThreadRef ? selectThreadLiveDetailLoaded(store, activeThreadRef) : true,
+  );
   const activeThreadMessageHistory = useStore((state) =>
     activeThreadRef
       ? state.environmentStateById[activeThreadRef.environmentId]?.threadHistoryByThreadId?.[
@@ -1251,7 +1257,7 @@ export default function ChatView(props: ChatViewProps) {
   useChatSessionTabsPrefetch({
     activeWorktreeSessionTabs,
     activeSessionTabKey,
-    activeDetailLoaded: activeThreadDetailLoaded,
+    activeDetailLoaded: activeThreadLiveDetailLoaded,
   });
 
   // Compute the list of environments this logical project spans, used to

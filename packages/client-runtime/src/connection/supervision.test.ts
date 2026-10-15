@@ -718,6 +718,81 @@ describe("thread detail cache accounting", () => {
 
     expect(threads.unsubscribed).toEqual([]);
   });
+
+  it("disposes an immediate release at once unless a view retained the thread meanwhile", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: () => false,
+    });
+    const threads = streamingConnection();
+    supervisor.register(threads.connection);
+
+    // An intent that led nowhere: disposed at once.
+    const releaseDwell = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-dwell" as ThreadId,
+    );
+    releaseDwell({ immediately: true });
+    expect(threads.unsubscribed).toEqual(["thread-dwell"]);
+
+    // An intent that opened the thread: the view came and went before the
+    // intent's deadline, and the stream stays in the idle cache.
+    const releaseIntent = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-opened" as ThreadId,
+    );
+    const releaseView = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-opened" as ThreadId,
+      { view: true },
+    );
+    releaseView();
+    releaseIntent({ immediately: true });
+    expect(threads.unsubscribed).toEqual(["thread-dwell"]);
+
+    // An intent on the thread that is already open: the user leaves it before
+    // the intent's deadline, and the stream still reaches the idle cache.
+    const releaseOpenView = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-open" as ThreadId,
+      { view: true },
+    );
+    const releaseOpenIntent = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-open" as ThreadId,
+    );
+    releaseOpenView();
+    releaseOpenIntent({ immediately: true });
+    expect(threads.unsubscribed).toEqual(["thread-dwell"]);
+  });
+
+  it("counts only the activities the store keeps when a busy thread is released", async () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: () => false,
+    });
+    const threads = streamingConnection();
+    supervisor.register(threads.connection);
+    const releaseOlder = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-older" as ThreadId,
+    );
+    threads.listeners.get("thread-older")?.({
+      kind: "snapshot",
+      snapshot: { snapshotSequence: 1, thread: { padding: "x".repeat(200_000) }, history: {} },
+    });
+    releaseOlder();
+    const releaseBusy = supervisor.retainThreadDetailSubscription(
+      remote,
+      "thread-busy" as ThreadId,
+    );
+    // ~20 MB of unique 10 KB tool rows; the store keeps the last 500 (~5 MB).
+    for (let index = 0; index < 2_000; index += 1) {
+      threads.listeners.get("thread-busy")?.(activityEvent(index + 2, `tool-${index}`, 10_000));
+    }
+    await Promise.resolve();
+    releaseBusy();
+
+    expect(threads.unsubscribed).toEqual([]);
+  });
 });
 
 describe("shell frame batching", () => {

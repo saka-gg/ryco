@@ -13,6 +13,7 @@ import {
   createEnvironmentFallbackThreadRefSelector,
   selectEnvironmentShellLive,
   selectThreadDetailLoaded,
+  selectThreadLiveDetailLoaded,
 } from "./storeSelectors.ts";
 import {
   syncServerThreadDetail,
@@ -223,6 +224,78 @@ describe("selectThreadDetailLoaded", () => {
       environmentId,
     );
     expect(selectThreadDetailLoaded(state, ref)).toBe(true);
+  });
+});
+
+describe("selectThreadLiveDetailLoaded", () => {
+  const ref = { environmentId, threadId: threadA } satisfies ScopedThreadRef;
+  const message = {
+    id: "message-1",
+    role: "assistant",
+    text: "cached",
+    createdAt: "2026-06-12T10:00:00.000Z",
+    streaming: false,
+  } as never;
+  const cachedState = makeState(
+    makeEnvironmentState({
+      threadIds: [threadA],
+      threadShellById: { [threadA]: makeShell(threadA) },
+      sidebarThreadSummaryById: { [threadA]: makeSummary(threadA) },
+      messageIdsByThreadId: { [threadA]: ["message-1" as never] },
+      messageByThreadId: { [threadA]: { ["message-1" as never]: message } },
+      cachedMessageThreadIds: { [threadA]: true },
+    }),
+  );
+  const detail = {
+    id: threadA,
+    projectId,
+    title: "Detail",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    worktreeId: null,
+    manualStatusBucket: null,
+    manualPosition: 0,
+    latestTurn: null,
+    createdAt: "2026-06-12T10:00:00.000Z",
+    updatedAt: "2026-06-12T10:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+    messages: [],
+    proposedPlans: [],
+    activities: [],
+    checkpoints: [],
+    session: null,
+  } as unknown as OrchestrationThread;
+  const page = { cursor: null, hasMore: false } as never;
+  const history = {
+    messages: page,
+    proposedPlans: page,
+    activities: page,
+    checkpoints: page,
+  } as OrchestrationThreadHistoryState;
+
+  it("is false for messages hydrated from a cache, which selectThreadDetailLoaded counts", () => {
+    expect(selectThreadDetailLoaded(cachedState, ref)).toBe(true);
+    expect(selectThreadLiveDetailLoaded(cachedState, ref)).toBe(false);
+  });
+
+  it("is true once the live window is applied over cached messages", () => {
+    const state = syncServerThreadWindow(
+      cachedState,
+      { snapshotSequence: 1, thread: detail, history },
+      environmentId,
+    );
+    expect(selectThreadLiveDetailLoaded(state, ref)).toBe(true);
+  });
+
+  it("is true once a legacy full-detail snapshot replaces cached messages", () => {
+    const state = syncServerThreadDetail(cachedState, detail, environmentId);
+    expect(selectThreadLiveDetailLoaded(state, ref)).toBe(true);
   });
 });
 

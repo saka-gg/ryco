@@ -676,43 +676,6 @@ function markSavedEnvironmentCredentialRejected(
   }, 0);
 }
 
-function coalesceOrchestrationUiEvents(
-  events: ReadonlyArray<OrchestrationEvent>,
-): OrchestrationEvent[] {
-  if (events.length < 2) {
-    return [...events];
-  }
-
-  const coalesced: OrchestrationEvent[] = [];
-  for (const event of events) {
-    const previous = coalesced.at(-1);
-    if (
-      previous?.type === "thread.message-sent" &&
-      event.type === "thread.message-sent" &&
-      previous.payload.threadId === event.payload.threadId &&
-      previous.payload.messageId === event.payload.messageId
-    ) {
-      coalesced[coalesced.length - 1] = {
-        ...event,
-        payload: {
-          ...event.payload,
-          attachments: event.payload.attachments ?? previous.payload.attachments,
-          createdAt: previous.payload.createdAt,
-          text:
-            !event.payload.streaming && event.payload.text.length > 0
-              ? event.payload.text
-              : previous.payload.text + event.payload.text,
-        },
-      };
-      continue;
-    }
-
-    coalesced.push(event);
-  }
-
-  return coalesced;
-}
-
 export function shouldApplyTerminalEvent(input: {
   serverThreadArchivedAt: string | null | undefined;
   hasDraftThread: boolean;
@@ -733,7 +696,6 @@ function applyRecoveredEventBatch(
   }
 
   const batchEffects = deriveOrchestrationBatchEffects(events);
-  const uiEvents = coalesceOrchestrationUiEvents(events);
   const needsProjectUiSync = events.some(
     (event) =>
       event.type === "project.created" ||
@@ -746,7 +708,11 @@ function applyRecoveredEventBatch(
     environmentStateSink.markProviderInvalidationNeeded();
   }
 
-  environmentStateSink.applyOrchestrationEvents(environmentId, uiEvents);
+  // The raw events go to the store: the reducer folds a batch's consecutive
+  // message deltas into one owned copy per thread, so pre-merging them here
+  // saves nothing, and merging a delta with the empty-text completion that
+  // follows it would turn the delta into a replacement of the whole text.
+  environmentStateSink.applyOrchestrationEvents(environmentId, events);
   if (needsProjectUiSync) {
     environmentStateSink.syncProjects(environmentId);
   }

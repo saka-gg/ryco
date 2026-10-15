@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
 import { retainThreadDetailSubscription } from "../../environments/runtime/service";
-import { scheduleIdleTask } from "../../lib/idleTask";
+import { startStaggeredThreadPrefetch } from "../../lib/staggeredThreadPrefetch";
 import { markTabSwitchFirstPaint } from "../../perf/tabSwitchInstrumentation";
 import type { SessionTabItem } from "../../sessionTabs.selectors";
 
@@ -9,16 +9,15 @@ export interface UseChatSessionTabsPrefetchInput {
   activeWorktreeSessionTabs: ReadonlyArray<SessionTabItem>;
   activeSessionTabKey: string | null;
   /**
-   * Whether the active thread's own window has been applied (always true for
-   * drafts). Sibling windows wait for it, so they never queue ahead of or
-   * compete with the thread being opened.
+   * Whether the active thread's own live window has been applied (always true
+   * for drafts); messages hydrated from a read cache do not count. Sibling
+   * windows wait for it, so they never queue ahead of or compete with the
+   * thread being opened.
    */
   activeDetailLoaded: boolean;
 }
 
 export const MAX_SPECULATIVE_SIBLING_TAB_PREFETCH = 6;
-/** Gap between two sibling window retains, so they never arrive as a burst. */
-export const SIBLING_TAB_PREFETCH_STAGGER_MS = 100;
 
 export function selectSpeculativeSiblingTabPrefetchKeys(
   activeWorktreeSessionTabs: ReadonlyArray<SessionTabItem>,
@@ -60,49 +59,6 @@ export function selectSpeculativeSiblingTabPrefetchKeys(
   }
 
   return keys;
-}
-
-/**
- * Retains `keys` one at a time: the first in an idle slot, each next one
- * {@link SIBLING_TAB_PREFETCH_STAGGER_MS} later. Returns a function that
- * cancels the retains that have not started and releases those that have.
- */
-export function startStaggeredThreadPrefetch(
-  keys: ReadonlyArray<string>,
-  retain: (key: string) => (() => void) | null,
-  timers: {
-    readonly scheduleIdle?: (callback: () => void) => () => void;
-    readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
-    readonly clearTimeout?: (handle: unknown) => void;
-  } = {},
-): () => void {
-  const scheduleIdle = timers.scheduleIdle ?? scheduleIdleTask;
-  const setTimer =
-    timers.setTimeout ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
-  const clearTimer =
-    timers.clearTimeout ??
-    ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-  const releases: Array<() => void> = [];
-  let index = 0;
-  let cancelPending: (() => void) | null = null;
-  const retainNext = () => {
-    cancelPending = null;
-    const key = keys[index];
-    if (key === undefined) return;
-    index += 1;
-    const release = retain(key);
-    if (release) releases.push(release);
-    if (index >= keys.length) return;
-    const handle = setTimer(retainNext, SIBLING_TAB_PREFETCH_STAGGER_MS);
-    cancelPending = () => clearTimer(handle);
-  };
-  cancelPending = scheduleIdle(retainNext);
-  return () => {
-    cancelPending?.();
-    cancelPending = null;
-    for (const release of releases) release();
-    releases.length = 0;
-  };
 }
 
 /**
