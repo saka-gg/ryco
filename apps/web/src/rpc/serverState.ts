@@ -51,14 +51,41 @@ export function useServerConfig(): ServerConfig | null {
 /**
  * Narrow subscription to the server config (the open settings surface's node
  * when one is targeted): re-renders only when `selector`'s result changes
- * (Object.is). Prefer it over `useServerConfig`, which re-renders on every
- * config push, including each provider-status probe during boot.
+ * under `isEqual` (Object.is by default). Prefer it over `useServerConfig`,
+ * which re-renders on every config push, including each provider-status probe
+ * during boot.
  */
-export function useServerConfigSelector<T>(selector: (config: ServerConfig | null) => T): T {
-  const registry = useContext(RegistryContext);
+export function useServerConfigSelector<T>(
+  selector: (config: ServerConfig | null) => T,
+  isEqual?: (left: T, right: T) => boolean,
+): T {
   const target = useSettingsTarget();
-  const hasTarget = target !== null;
-  const targetServerConfig = target?.serverConfig ?? null;
+  return useConfigSelector(
+    target === null ? null : target.serverConfig,
+    target !== null,
+    selector,
+    isEqual,
+  );
+}
+
+/**
+ * {@link useServerConfigSelector} for the primary node's config, ignoring any
+ * settings target: for surfaces that show the primary node's own data.
+ */
+export function usePrimaryServerConfigSelector<T>(
+  selector: (config: ServerConfig | null) => T,
+  isEqual?: (left: T, right: T) => boolean,
+): T {
+  return useConfigSelector(null, false, selector, isEqual);
+}
+
+function useConfigSelector<T>(
+  targetServerConfig: ServerConfig | null,
+  hasTarget: boolean,
+  selector: (config: ServerConfig | null) => T,
+  isEqual: ((left: T, right: T) => boolean) | undefined,
+): T {
+  const registry = useContext(RegistryContext);
   const subscribe = useCallback(
     (listener: () => void) =>
       hasTarget ? () => undefined : registry.subscribe(serverConfigAtom, () => listener()),
@@ -68,7 +95,7 @@ export function useServerConfigSelector<T>(selector: (config: ServerConfig | nul
     () => (hasTarget ? targetServerConfig : registry.get(serverConfigAtom)),
     [hasTarget, registry, targetServerConfig],
   );
-  return useSyncExternalStoreSelector(subscribe, getSnapshot, selector);
+  return useSyncExternalStoreSelector(subscribe, getSnapshot, selector, isEqual);
 }
 
 export function useServerSettings(): ServerSettings {

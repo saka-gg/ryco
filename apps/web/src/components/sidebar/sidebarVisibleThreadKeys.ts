@@ -1,6 +1,19 @@
-import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import {
+  scopedProjectKey,
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@ryco/client-runtime/scoped";
+import type { ProjectId } from "@ryco/contracts";
+import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@ryco/contracts/settings";
 
+import type { DraftThreadState } from "../../composerDraftStore";
+import type { SidebarProjectTreeRow } from "../../sidebarProjectFolders";
+import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
+import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../types";
+import { sortProjectsForSidebar } from "../Sidebar.logic";
 import type { SidebarTreeStructureProject } from "./hooks/useSidebarTree";
+import type { SidebarProjectTreeCache } from "./sidebarProjectTreeCache";
 
 const EMPTY_KEYS: readonly string[] = [];
 
@@ -105,4 +118,85 @@ export function createSidebarProjectThreadKeysCache(): SidebarProjectThreadKeysC
       return keys;
     },
   };
+}
+
+export interface SidebarProjectOrderInput {
+  readonly sidebarProjects: readonly SidebarProjectSnapshot[];
+  /** Unarchived threads; their activity orders the projects. */
+  readonly visibleThreads: readonly SidebarThreadSummary[];
+  readonly projectPhysicalKeyByScopedRef: ReadonlyMap<string, string>;
+  readonly physicalToLogicalKey: ReadonlyMap<string, string>;
+  readonly sidebarProjectByKey: ReadonlyMap<string, SidebarProjectSnapshot>;
+  readonly sortOrder: SidebarProjectSortOrder;
+}
+
+/** The sidebar's project order: logical projects sorted by their threads' activity. */
+export function sortSidebarProjects(input: SidebarProjectOrderInput): SidebarProjectSnapshot[] {
+  const sortableProjects = input.sidebarProjects.map((project) => ({
+    ...project,
+    id: project.projectKey,
+  }));
+  const sortableThreads = input.visibleThreads.map((thread) => {
+    const scopedKey = scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId));
+    const physicalKey = input.projectPhysicalKeyByScopedRef.get(scopedKey) ?? scopedKey;
+    return {
+      ...thread,
+      projectId: (input.physicalToLogicalKey.get(physicalKey) ?? physicalKey) as ProjectId,
+    };
+  });
+  return sortProjectsForSidebar(sortableProjects, sortableThreads, input.sortOrder).flatMap(
+    (project) => {
+      const resolvedProject = input.sidebarProjectByKey.get(project.id);
+      return resolvedProject ? [resolvedProject] : [];
+    },
+  );
+}
+
+export interface SidebarVisibleThreadKeysInput {
+  readonly projectTreeRows: readonly SidebarProjectTreeRow[];
+  readonly projectExpandedById: Readonly<Record<string, boolean>>;
+  readonly routeThreadKey: string | null;
+  readonly projectThreadKeysCache: SidebarProjectThreadKeysCache;
+  readonly projectTreeCache: SidebarProjectTreeCache;
+  readonly threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadSummary[]>;
+  readonly worktreesByProjectKey: ReadonlyMap<string, readonly SidebarWorktreeSummary[]>;
+  readonly draftThreadsByThreadKey: Readonly<Record<string, DraftThreadState>>;
+  readonly sortOrder: SidebarThreadSortOrder;
+  readonly pinnedThreadKeys: ReadonlySet<string>;
+}
+
+const NO_THREADS: readonly SidebarThreadSummary[] = [];
+const NO_WORKTREES: readonly SidebarWorktreeSummary[] = [];
+
+/**
+ * Keyboard traversal and jump order: every visible project's threads, in the
+ * project tree's order. Memoized per project through the shared caches, so a
+ * commit that changes one project's threads re-derives only that project.
+ */
+export function collectSidebarVisibleThreadKeys(input: SidebarVisibleThreadKeysInput): string[] {
+  return input.projectTreeRows.flatMap((row) => {
+    const projectsForRow =
+      row.kind === "project" ? [row.project] : row.folder.expanded ? row.projects : [];
+    return projectsForRow.flatMap((project) => {
+      const projectExpanded = input.projectExpandedById[project.projectKey] ?? true;
+      const activeThreadKey = projectExpanded ? null : input.routeThreadKey;
+      // A collapsed project without a routed thread shows nothing to traverse.
+      if (!projectExpanded && activeThreadKey === null) return [];
+      return input.projectThreadKeysCache.projectThreadKeys({
+        projectKey: project.projectKey,
+        structure: input.projectTreeCache.structure({
+          project,
+          threads: input.threadsByProjectKey.get(project.projectKey) ?? NO_THREADS,
+          drafts: input.projectTreeCache.draftThreadsSelector(project)({
+            draftThreadsByThreadKey: input.draftThreadsByThreadKey,
+          }),
+          worktrees: input.worktreesByProjectKey.get(project.projectKey) ?? NO_WORKTREES,
+          sortOrder: input.sortOrder,
+          pinnedThreadKeys: input.pinnedThreadKeys,
+        }),
+        projectExpanded,
+        activeThreadKey,
+      });
+    });
+  });
 }

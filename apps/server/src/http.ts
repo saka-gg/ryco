@@ -730,6 +730,19 @@ export const attachmentUploadRouteLayer = HttpRouter.add(
   }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
 );
 
+/**
+ * The folder fallback, for a project without artwork or one whose read the
+ * node could not finish. The latter is not an answer: it is served `no-store`
+ * so it is never cached as the project's icon.
+ */
+function fallbackProjectFaviconResponse(cacheControl: string) {
+  return HttpServerResponse.text(FALLBACK_PROJECT_FAVICON_SVG, {
+    status: 200,
+    contentType: "image/svg+xml",
+    headers: { ...inlineImageResponseHeaders("fallback.svg"), "Cache-Control": cacheControl },
+  });
+}
+
 export const projectFaviconRouteLayer = HttpRouter.add(
   "GET",
   "/api/project-favicon",
@@ -749,11 +762,7 @@ export const projectFaviconRouteLayer = HttpRouter.add(
     const faviconResolver = yield* ProjectFaviconResolver;
     const favicon = yield* faviconResolver.readIcon(projectCwd);
     if (!favicon) {
-      return HttpServerResponse.text(FALLBACK_PROJECT_FAVICON_SVG, {
-        status: 200,
-        contentType: "image/svg+xml",
-        headers: inlineImageResponseHeaders("fallback.svg"),
-      });
+      return fallbackProjectFaviconResponse(PROJECT_FAVICON_CACHE_CONTROL);
     }
 
     return HttpServerResponse.uint8Array(favicon.bytes, {
@@ -761,7 +770,12 @@ export const projectFaviconRouteLayer = HttpRouter.add(
       contentType: resolveStaticContentType(favicon.path, yield* Path.Path),
       headers: inlineImageResponseHeaders(favicon.path),
     });
-  }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
+  }).pipe(
+    Effect.catchTag("ProjectFaviconUnavailable", () =>
+      Effect.succeed(fallbackProjectFaviconResponse("no-store")),
+    ),
+    Effect.catchTag("AuthError", respondToAuthError),
+  ),
 );
 
 const AvatarFormSchema = Schema.Struct({

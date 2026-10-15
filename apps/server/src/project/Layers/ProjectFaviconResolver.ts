@@ -2,6 +2,7 @@ import { Deferred, Effect, Layer, Queue } from "effect";
 
 import {
   ProjectFaviconResolver,
+  ProjectFaviconUnavailable,
   type ProjectFavicon,
   type ProjectFaviconResolverShape,
 } from "../Services/ProjectFaviconResolver.ts";
@@ -19,13 +20,19 @@ const ROOTS_PER_CHILD = 16;
 /** Bounds a caller's wait (queueing included); icons never gate a usable node. */
 const READ_ICON_DEADLINE = "30 seconds";
 
+/** Interrupting a read aborts `signal`, which kills its child at once. */
 export type ReadProjectFavicons = (
   roots: readonly string[],
+  signal: AbortSignal,
 ) => Promise<ReadonlyArray<ProjectFaviconReadResult>>;
+
+/** A read that did not finish: not an answer, never served as "no icon". */
+const UNAVAILABLE = Symbol("ProjectFaviconUnavailable");
+type IconOutcome = ProjectFavicon | null | typeof UNAVAILABLE;
 
 interface CachedIcon {
   readonly expiresAtMs: number;
-  readonly icon: ProjectFavicon | null;
+  readonly icon: IconOutcome;
 }
 
 export const makeProjectFaviconResolverWith = (options: {
@@ -35,10 +42,10 @@ export const makeProjectFaviconResolverWith = (options: {
   Effect.gen(function* () {
     const now = options.now ?? Date.now;
     const cache = new Map<string, CachedIcon>();
-    const pending = new Map<string, Deferred.Deferred<ProjectFavicon | null>>();
+    const pending = new Map<string, Deferred.Deferred<IconOutcome>>();
     const queue = yield* Queue.unbounded<string>();
 
-    const remember = (root: string, icon: ProjectFavicon | null, ttlMs: number) => {
+    const remember = (root: string, icon: IconOutcome, ttlMs: number) => {
       cache.delete(root);
       cache.set(root, { expiresAtMs: now() + ttlMs, icon });
       for (const oldest of cache.keys()) {
@@ -46,7 +53,7 @@ export const makeProjectFaviconResolverWith = (options: {
         cache.delete(oldest);
       }
     };
-    const settle = (root: string, icon: ProjectFavicon | null) =>
+    const settle = (root: string, icon: IconOutcome) =>
       Effect.suspend(() => {
         const deferred = pending.get(root);
         pending.delete(root);
@@ -54,21 +61,18 @@ export const makeProjectFaviconResolverWith = (options: {
       });
 
     /** Releases a batch's callers still waiting on the deferred they registered (no answer cached). */
-    const abandon = (
-      root: string,
-      deferred: Deferred.Deferred<ProjectFavicon | null> | undefined,
-    ) =>
+    const abandon = (root: string, deferred: Deferred.Deferred<IconOutcome> | undefined) =>
       Effect.suspend(() => {
         if (deferred === undefined || pending.get(root) !== deferred) return Effect.void;
         pending.delete(root);
-        return Deferred.succeed(deferred, null).pipe(Effect.asVoid);
+        return Deferred.succeed(deferred, UNAVAILABLE).pipe(Effect.asVoid);
       });
 
     const readBatch = (roots: ReadonlyArray<string>, retry: boolean): Effect.Effect<void> =>
       Effect.gen(function* () {
-        const results = yield* Effect.tryPromise(() => options.readFavicons(roots)).pipe(
-          Effect.orElseSucceed(() => roots.map(() => ({ status: "unavailable" }) as const)),
-        );
+        const results = yield* Effect.tryPromise((signal) =>
+          options.readFavicons(roots, signal),
+        ).pipe(Effect.orElseSucceed(() => roots.map(() => ({ status: "unavailable" }) as const)));
         const unresolved: string[] = [];
         for (const [index, root] of roots.entries()) {
           const result = results[index] ?? { status: "unavailable" as const };
@@ -82,14 +86,15 @@ export const makeProjectFaviconResolverWith = (options: {
         }
         if (unresolved.length === 0) return;
         // Roots are read in order: the first unfinished one is where the child
-        // stalled. It backs off; the roots behind it get one more child.
+        // stalled. It backs off (still unavailable, not "no icon"); the roots
+        // behind it get one more child.
         const [stalled, ...rest] = unresolved;
-        remember(stalled!, null, STALLED_ROOT_BACKOFF_MS);
-        yield* settle(stalled!, null);
+        remember(stalled!, UNAVAILABLE, STALLED_ROOT_BACKOFF_MS);
+        yield* settle(stalled!, UNAVAILABLE);
         if (retry && rest.length > 0) {
           yield* readBatch(rest, false);
         } else {
-          yield* Effect.forEach(rest, (root) => settle(root, null), { discard: true });
+          yield* Effect.forEach(rest, (root) => settle(root, UNAVAILABLE), { discard: true });
         }
       });
 
@@ -111,28 +116,35 @@ export const makeProjectFaviconResolverWith = (options: {
     }
 
     const readIcon: ProjectFaviconResolverShape["readIcon"] = (cwd) =>
-      Effect.suspend(() => {
+      Effect.suspend((): Effect.Effect<IconOutcome> => {
         const cached = cache.get(cwd);
         if (cached && cached.expiresAtMs > now()) return Effect.succeed(cached.icon);
         // Registered and queued synchronously: an interrupted caller can never
         // leave a pending root that no reader will settle.
         let deferred = pending.get(cwd);
         if (!deferred) {
-          deferred = Deferred.makeUnsafe<ProjectFavicon | null>();
+          deferred = Deferred.makeUnsafe<IconOutcome>();
           pending.set(cwd, deferred);
           Queue.offerUnsafe(queue, cwd);
         }
         return Deferred.await(deferred);
       }).pipe(
-        Effect.timeout(READ_ICON_DEADLINE),
-        Effect.catch(() => Effect.succeed(null)),
+        Effect.timeoutOrElse({
+          duration: READ_ICON_DEADLINE,
+          orElse: () => Effect.succeed<IconOutcome>(UNAVAILABLE),
+        }),
+        Effect.flatMap((icon) =>
+          icon === UNAVAILABLE
+            ? Effect.fail(new ProjectFaviconUnavailable({ cwd }))
+            : Effect.succeed(icon),
+        ),
       );
 
     return { readIcon } satisfies ProjectFaviconResolverShape;
   });
 
 export const makeProjectFaviconResolver = makeProjectFaviconResolverWith({
-  readFavicons: (roots) => readProjectFavicons(roots),
+  readFavicons: (roots, signal) => readProjectFavicons(roots, { signal }),
 });
 
 export const ProjectFaviconResolverLive = Layer.effect(

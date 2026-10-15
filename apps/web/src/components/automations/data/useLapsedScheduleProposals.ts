@@ -20,6 +20,7 @@ import {
   type ScheduleProposalHistory,
 } from "./scheduleProposalHistory";
 import { environmentIdsOfKey, proposalSyncKey } from "./useAutomationProposalSync";
+import { useAgentControlSyncEnvironmentIds } from "../../agent-control/agentControlSyncGate";
 
 interface DismissedLapsedState {
   /** Proposal ids by environment, dismissed this session. */
@@ -156,7 +157,10 @@ export interface CheckoutProposalQueue {
 export function useLapsedScheduleProposals(
   checkouts: readonly AutomationCheckoutRef[],
 ): ReadonlyMap<string, CheckoutProposalQueue> {
-  const environmentsKey = proposalSyncKey(checkouts.map((checkout) => checkout.environmentId));
+  // A device whose Agent Control is off refuses the list read: skip it.
+  const environmentsKey = proposalSyncKey(
+    useAgentControlSyncEnvironmentIds(checkouts.map((checkout) => checkout.environmentId)),
+  );
   useEffect(() => {
     const releases = environmentIdsOfKey(environmentsKey).map(retainScheduleProposalHistory);
     return () => {

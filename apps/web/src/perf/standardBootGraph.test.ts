@@ -225,6 +225,13 @@ describe("standard build static import graph", () => {
     }
   });
 
+  it("keeps the hosted runtime out of Settings", () => {
+    // Hosted-only settings actions load the Hub API on demand.
+    expect(forbiddenChains("components/routeViews/SettingsRouteView.tsx", HOSTED_RUNTIME)).toEqual(
+      [],
+    );
+  });
+
   it("follows the seams the standard build applies", () => {
     const reachable = [...staticGraph(path.join(srcRoot, "main.tsx")).keys()].map(display);
     expect(reachable).toContain("apps/web/src/hostedHub/state.standard.ts");

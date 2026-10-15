@@ -297,6 +297,14 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       maxGzipBytes: null,
       forbiddenSources: [...HOSTED_RUNTIME_SOURCES, ...DIFF_RENDERER_SOURCES],
     },
+    {
+      // Hosted-only settings actions load the Hub API on demand.
+      name: "SettingsRouteView",
+      chunk: "SettingsRouteView",
+      beyondBoot: true,
+      maxGzipBytes: null,
+      forbiddenSources: HOSTED_RUNTIME_SOURCES,
+    },
   ],
 };
 

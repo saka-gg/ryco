@@ -1,13 +1,14 @@
-import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import type { EnvironmentId, ProjectId, ServerConfig } from "@ryco/contracts";
 import { FolderIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { resolveEnvironmentHttpUrl } from "../environments/runtime";
 import { isHostedHubMode } from "../env";
 import { useAtomValue } from "@effect/atom-react";
-import { serverConfigAtom, wsConnectionStatusForEnvironmentAtom } from "@ryco/client-runtime/rpc";
+import { wsConnectionStatusForEnvironmentAtom } from "@ryco/client-runtime/rpc";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
 import { readEnvironmentApi } from "../environmentApi";
+import { usePrimaryServerConfigSelector } from "../rpc/serverState";
 import {
   peekProjectIconSource,
   projectIconRequestKey,
@@ -42,6 +43,24 @@ function resolveProjectFaviconHttpUrl(input: {
   }
 }
 
+/**
+ * The primary node's icon capability as a primitive: `null` while its config is
+ * unknown. Rows subscribe to this, not to the whole config, so provider and
+ * settings pushes do not re-render every favicon.
+ */
+const selectProjectIconsSupport = (config: ServerConfig | null): boolean | null =>
+  config === null ? null : config.environment.capabilities.projectIcons === true;
+
+/**
+ * How long a row waits before asking again after the node could not answer
+ * (stalled or unavailable read). The first delay matches the node's own
+ * back-off for a stalled root; each later one doubles. Once these are used up
+ * the row stops asking until its read runs again (reconnect, remount or a new
+ * avatar revision), so a root that always stalls does not cost the node a
+ * reader child every minute for as long as the row is on screen.
+ */
+const PROJECT_ICON_RETRY_DELAYS_MS = [60_000, 120_000, 240_000] as const;
+
 export function ProjectFavicon(input: {
   environmentId: EnvironmentId;
   cwd: string;
@@ -60,15 +79,16 @@ export function ProjectFavicon(input: {
   deferred?: boolean;
 }) {
   const primaryId = usePrimaryEnvironmentId();
-  const primaryConfig = useAtomValue(serverConfigAtom);
-  const savedConfig = useSavedEnvironmentRuntimeStore(
-    (state) => state.byId[input.environmentId]?.serverConfig,
-  );
+  const primarySupport = usePrimaryServerConfigSelector(selectProjectIconsSupport);
+  const savedSupport = useSavedEnvironmentRuntimeStore((state) => {
+    const config = state.byId[input.environmentId]?.serverConfig;
+    return config == null ? null : selectProjectIconsSupport(config);
+  });
   const connectionPhase = useAtomValue(
     wsConnectionStatusForEnvironmentAtom(input.environmentId),
   ).phase;
-  const config = input.environmentId === primaryId ? primaryConfig : savedConfig;
-  const rpcSupported = config?.environment.capabilities.projectIcons === true;
+  const iconSupport = input.environmentId === primaryId ? primarySupport : savedSupport;
+  const rpcSupported = iconSupport === true;
   const deferred = input.deferred === true;
   const api =
     connectionPhase === "connected" && rpcSupported && !deferred
@@ -86,30 +106,50 @@ export function ProjectFavicon(input: {
     () => projectIconRequestKey(environmentId, projectId, revision),
     [environmentId, projectId, revision],
   );
+  // The artwork this row shows, latched: once displayed it stays until a newer
+  // answer replaces it, so an expired or evicted cache entry never blanks a
+  // mounted row.
   const [artwork, setArtwork] = useState<{ key: string; source: string | null } | null>(null);
   // Cached artwork renders on the first pass, without a request.
   const cached =
     api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
   useEffect(() => {
     if (!api || !projectId || !visible) return;
-    if (peekProjectIconSource(environmentId, projectId, revision) !== undefined) return;
     let current = true;
-    void readProjectIconSource(api, environmentId, projectId, revision)
-      .then((source) => {
-        if (current) setArtwork({ key: requestKey, source });
-      })
-      .catch(() => {
-        if (current) setArtwork({ key: requestKey, source: null });
-      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // A fresh cache hit answers without a request; an expired entry is read
+    // again while the latched artwork stays on screen (stale-while-revalidate).
+    // Answers are revalidated only when this effect runs again, never on a
+    // free-running timer. A read the node could not finish is not an answer:
+    // it is retried a bounded number of times.
+    const readArtwork = (failures: number) => {
+      if (!current) return;
+      readProjectIconSource(api, environmentId, projectId, revision).then(
+        (source) => {
+          if (!current) return;
+          setArtwork((previous) => latchArtwork(previous, requestKey, source));
+        },
+        () => {
+          if (!current) return;
+          setArtwork((previous) =>
+            previous?.key === requestKey ? previous : { key: requestKey, source: null },
+          );
+          const delay = PROJECT_ICON_RETRY_DELAYS_MS[failures];
+          if (delay !== undefined) timer = setTimeout(() => readArtwork(failures + 1), delay);
+        },
+      );
+    };
+    readArtwork(0);
     return () => {
       current = false;
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [api, environmentId, projectId, requestKey, revision, visible]);
   const src =
     // Until the node's config is known, whether it serves icons over RPC is
     // unknown: show the placeholder rather than starting an HTTP fallback the
     // RPC would duplicate a moment later.
-    config == null || deferred
+    iconSupport === null || deferred
       ? null
       : rpcSupported && projectId
         ? // Node artwork shows only while the node is connected.
@@ -137,6 +177,14 @@ export function ProjectFavicon(input: {
       onImageLoad={input.onImageLoad}
     />
   );
+}
+
+function latchArtwork(
+  previous: { key: string; source: string | null } | null,
+  key: string,
+  source: string | null,
+): { key: string; source: string | null } {
+  return previous?.key === key && previous.source === source ? previous : { key, source };
 }
 
 function ProjectFaviconImage(input: {

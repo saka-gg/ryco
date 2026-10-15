@@ -6,7 +6,7 @@
  *
  * @module ProjectFaviconResolver
  */
-import { Context } from "effect";
+import { Context, Data } from "effect";
 import type { Effect } from "effect";
 
 export interface ProjectFavicon {
@@ -15,15 +15,27 @@ export interface ProjectFavicon {
 }
 
 /**
+ * The icon could not be read in time (a stalled or failed read, or the
+ * caller's deadline). Unlike `null` it is not an answer: callers must not
+ * remember it as "no icon".
+ */
+export class ProjectFaviconUnavailable extends Data.TaggedError("ProjectFaviconUnavailable")<{
+  readonly cwd: string;
+}> {}
+
+/**
  * ProjectFaviconResolverShape - Service API for project favicon lookup.
  */
 export interface ProjectFaviconResolverShape {
   /**
    * Read a bounded favicon for the workspace without blocking the node's I/O.
    *
-   * Returns `null` when no candidate icon file can be found.
+   * Returns `null` when no candidate icon file can be found, and fails with
+   * {@link ProjectFaviconUnavailable} when the read did not finish.
    */
-  readonly readIcon: (cwd: string) => Effect.Effect<ProjectFavicon | null>;
+  readonly readIcon: (
+    cwd: string,
+  ) => Effect.Effect<ProjectFavicon | null, ProjectFaviconUnavailable>;
 }
 
 /**

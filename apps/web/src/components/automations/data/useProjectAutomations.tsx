@@ -20,6 +20,7 @@ import {
 } from "../../projects/useEnvironmentPresence";
 import { useAutomationCentre, type AutomationCentreState } from "../useAutomationCentre";
 import { useAutomationProposalSync } from "./useAutomationProposalSync";
+import { useAgentControlSyncEnvironmentIds } from "../../agent-control/agentControlSyncGate";
 
 /** One checkout of a project — a device — with its schedules, runs and pending approvals. */
 export interface ProjectAutomationsCheckout {
@@ -63,8 +64,10 @@ function CheckoutAutomationsSource(props: {
     if (!isElectron || isPrimary) return;
     return retainDesktopWorkspaceInteractiveScope(environmentId);
   }, [environmentId, isPrimary]);
-  // Lapsed proposals only live in the device's Agent Control queue.
-  useAutomationProposalSync([environmentId]);
+  // Lapsed proposals only live in the device's Agent Control queue (none
+  // while the device's Agent Control is off).
+  const syncEnvironmentIds = useMemo(() => [environmentId], [environmentId]);
+  useAutomationProposalSync(useAgentControlSyncEnvironmentIds(syncEnvironmentIds));
 
   const centre = useAutomationCentre(environmentId, member.id);
   const command = useEvent(centre.command);

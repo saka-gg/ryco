@@ -364,19 +364,44 @@ export function resetAppearancePreference(key: AppearancePreferenceKey): void {
   writeStoredOverrides(overrides);
 }
 
-export function applyAppearancePreferencesToDocument(): void {
-  if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
+/** The stylesheet text {@link applyAppearancePreferencesToDocument} writes. */
+export function buildAppearancePreferencesCss(): string {
   const preferences = getEffectiveAppearancePreferences();
+  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} }${buildPrimaryColorCssRule(preferences)}`;
+}
+
+/**
+ * Whether {@link applyAppearancePreferencesToDocument} would write new CSS.
+ * Lets callers skip work (the transition guard) when an apply is a no-op.
+ */
+export function appearancePreferencesDocumentNeedsUpdate(): boolean {
+  if (typeof document === "undefined" || typeof document.getElementById !== "function") {
+    return false;
+  }
+  const existing = document.getElementById(APPEARANCE_PREFERENCES_STYLE_ELEMENT_ID);
+  return (
+    !(existing instanceof HTMLStyleElement) ||
+    existing.textContent !== buildAppearancePreferencesCss()
+  );
+}
+
+/** Writes the appearance stylesheet; returns whether its text changed. */
+export function applyAppearancePreferencesToDocument(): boolean {
+  if (typeof document === "undefined" || typeof document.getElementById !== "function") {
+    return false;
+  }
   const style = ensureAppearancePreferencesStyleElement();
-  const textContent = `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} }${buildPrimaryColorCssRule(preferences)}`;
+  const textContent = buildAppearancePreferencesCss();
   // Rewriting (or moving) the sheet invalidates :root and forces a
   // full-document style recalc even when the text is identical.
-  if (style.textContent !== textContent) {
+  const changed = style.textContent !== textContent;
+  if (changed) {
     style.textContent = textContent;
   }
   // Subscribers still hear about environment changes that emit no CSS
   // (e.g. prefers-reduced-transparency, which the settings UI reports).
   dispatchAppearancePreferencesChangeEvent();
+  return changed;
 }
 
 /**

@@ -146,6 +146,29 @@ describe("McpServersSettings provider capabilities", () => {
     expect(harness.listServers).toHaveBeenCalledWith({ workspaceId, detail: "full" });
   });
 
+  it("clears refreshing when a mutation result lands while a refresh is in flight", async () => {
+    render(<McpServersSettings />);
+    const refreshButton = page.getByRole("button", { name: "Refresh MCP servers" });
+    await expect.element(refreshButton).toBeEnabled();
+
+    let resolveRefresh: (value: typeof snapshot) => void = () => {};
+    harness.listServers.mockReturnValueOnce(
+      new Promise<typeof snapshot>((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+    await refreshButton.click();
+    await expect.element(refreshButton).toBeDisabled();
+
+    // A save lands first and supersedes the pending listing's snapshot.
+    await page.getByRole("button", { name: "Edit" }).click();
+    await page.getByRole("button", { name: "Save" }).click();
+    await vi.waitFor(() => expect(harness.upsertServer).toHaveBeenCalledTimes(1));
+
+    resolveRefresh(snapshot);
+    await expect.element(refreshButton).toBeEnabled();
+  });
+
   it("keeps stored secret values out of the form and sends an explicit clear mutation", async () => {
     render(<McpServersSettings />);
 

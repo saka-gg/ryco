@@ -18,6 +18,7 @@ import {
   useServerConfigSelector,
 } from "../rpc/serverState";
 import { useSettings } from "../hooks/useSettings";
+import { sameInboxProviderCatalogs } from "../components/inboxSidebar/inboxSidebarModel";
 
 vi.mock("../localApi", () => ({
   ensureLocalApi: () => ({
@@ -62,6 +63,7 @@ function makeConfig(): ServerConfig {
 
 const selectAgentControlEnabled = (settings: UnifiedSettings) => settings.agentControl.enabled;
 const selectProviderCount = (config: ServerConfig | null) => config?.providers.length ?? 0;
+const selectProviders = (config: ServerConfig | null) => config?.providers ?? null;
 
 describe("useSettings subscriptions", () => {
   afterEach(() => {
@@ -126,6 +128,51 @@ describe("useSettings subscriptions", () => {
         ),
       );
       expect(renders.settings).toBe(settingsRendersAfterMount + 1);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps the inbox's provider catalogs across status-only provider pushes", async () => {
+    const models = [{ slug: "gpt-5.4" }] as unknown as ServerProvider["models"];
+    const provider = (status: string, nextModels = models) =>
+      ({
+        instanceId: "codex",
+        driver: "codex",
+        status,
+        models: nextModels,
+      }) as unknown as ServerProvider;
+    setServerConfigSnapshot({ ...makeConfig(), providers: [provider("ready")] });
+    let renders = 0;
+    function CatalogProbe() {
+      const providers = useServerConfigSelector(selectProviders, sameInboxProviderCatalogs);
+      return <span data-testid="catalog">{providers?.[0]?.models.length ?? 0}</span>;
+    }
+    const mounted = await render(
+      <AppAtomRegistryProvider>
+        <Profiler id="catalog" onRender={() => (renders += 1)}>
+          <CatalogProbe />
+        </Profiler>
+      </AppAtomRegistryProvider>,
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(mounted.container.querySelector('[data-testid="catalog"]')?.textContent).toBe("1"),
+      );
+      const rendersAfterMount = renders;
+      // Status changes keep the catalog: the inbox model is not rebuilt.
+      applyProvidersUpdated({ providers: [provider("checking")] });
+      applyProvidersUpdated({ providers: [provider("error")] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(renders).toBe(rendersAfterMount);
+      // A new model catalog does.
+      applyProvidersUpdated({
+        providers: [provider("ready", [...models, { slug: "gpt-5.5" }] as typeof models)],
+      });
+      await vi.waitFor(() =>
+        expect(mounted.container.querySelector('[data-testid="catalog"]')?.textContent).toBe("2"),
+      );
+      expect(renders).toBe(rendersAfterMount + 1);
     } finally {
       await mounted.unmount();
     }

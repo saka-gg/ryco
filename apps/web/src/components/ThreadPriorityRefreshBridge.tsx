@@ -1,4 +1,5 @@
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
+import type { ServerConfig } from "@ryco/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -10,7 +11,7 @@ import {
 import { getPrimaryKnownEnvironment } from "../environments/primary";
 import { useSettings } from "../hooks/useSettings";
 import { webAppLifecycle } from "../platform/appLifecycle";
-import { useServerConfig } from "../rpc/serverState";
+import { useServerConfigSelector } from "../rpc/serverState";
 import { useWsConnectionOpenedCount } from "../rpc/wsConnectionState";
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../store";
 import {
@@ -20,6 +21,22 @@ import {
   setWebThreadPriorityForeground,
   setWebThreadPriorityRefreshEnvironments,
 } from "../threadPriorityRefreshRuntime";
+
+// Ranking support is all the bridge reads from a config: provider-status and
+// settings pushes must not re-run the environments-changed refresh.
+const selectRankingSupported = (config: ServerConfig | null) =>
+  config?.environment.capabilities.threadPriorityRanking === true;
+const selectSavedRankingSupport = (state: {
+  readonly byId: Readonly<
+    Record<string, { readonly serverConfig?: ServerConfig | null } | undefined>
+  >;
+}): Record<string, boolean> => {
+  const support: Record<string, boolean> = {};
+  for (const [environmentId, runtime] of Object.entries(state.byId)) {
+    support[environmentId] = selectRankingSupported(runtime?.serverConfig ?? null);
+  }
+  return support;
+};
 
 function useConnections() {
   const [connections, setConnections] = useState(() => listEnvironmentConnections());
@@ -39,8 +56,8 @@ export function ThreadPriorityRefreshBridge() {
   const intervalMs = useSettings((settings) => settings.aiFocusRefreshIntervalMs);
   const connections = useConnections();
   const connectionOpenedCount = useWsConnectionOpenedCount();
-  const primaryConfig = useServerConfig();
-  const savedRuntimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
+  const primarySupported = useServerConfigSelector(selectRankingSupported);
+  const savedSupportById = useSavedEnvironmentRuntimeStore(useShallow(selectSavedRankingSupport));
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
 
   const environments = useMemo(() => {
@@ -50,18 +67,18 @@ export function ThreadPriorityRefreshBridge() {
     return connections.map((connection) => {
       const environmentId = connection.environmentId;
       const status = getWsConnectionStatusForEnvironment(environmentId);
-      const config =
+      const supported =
         getPrimaryKnownEnvironment()?.environmentId === environmentId
-          ? primaryConfig
-          : (savedRuntimeById[environmentId]?.serverConfig ?? null);
+          ? primarySupported
+          : savedSupportById[environmentId] === true;
       return {
         environmentId,
         generation: status.attemptCount,
         connected: status.phase === "connected",
-        supported: config?.environment.capabilities.threadPriorityRanking === true,
+        supported,
       };
     });
-  }, [connections, connectionOpenedCount, primaryConfig, savedRuntimeById]);
+  }, [connections, connectionOpenedCount, primarySupported, savedSupportById]);
 
   useEffect(() => {
     setWebThreadPriorityRefreshEnvironments(environments);

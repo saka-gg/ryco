@@ -296,17 +296,58 @@ export function themeTokensToStyle(tokens: ThemeTokens): CSSProperties {
   return style as CSSProperties;
 }
 
-export function applyThemeToDocument(theme: ThemeDefinition): void {
-  if (typeof document === "undefined" || typeof document.getElementById !== "function") return;
-  if (theme.id === DEFAULT_THEME_ID) {
-    removeThemeStyleElement();
-    return;
+// Theme definitions are cached objects (built-ins, parsed custom themes), so
+// the last built stylesheet is reused while the same object is applied.
+let themeDocumentCssCache: { readonly theme: ThemeDefinition; readonly css: string | null } | null =
+  null;
+
+/**
+ * The stylesheet text {@link applyThemeToDocument} writes for `theme`, or
+ * `null` for the default theme, which needs no sheet. The text covers both
+ * variants (`:root` and `:root.dark`), so it does not depend on the dark class.
+ */
+export function buildThemeDocumentCss(theme: ThemeDefinition): string | null {
+  if (themeDocumentCssCache?.theme === theme) return themeDocumentCssCache.css;
+  let css: string | null = null;
+  if (theme.id !== DEFAULT_THEME_ID) {
+    const lightCss = tokensToCss(materializeTokens(resolveTokens(theme, "light")));
+    const darkCss = tokensToCss(materializeTokens(resolveTokens(theme, "dark")));
+    css = `:root { ${lightCss} } :root.dark { ${darkCss} }`;
   }
+  themeDocumentCssCache = { theme, css };
+  return css;
+}
+
+/**
+ * Whether {@link applyThemeToDocument} would change the document for `theme`.
+ * Lets callers skip work (the transition guard) when an apply is a no-op.
+ */
+export function themeDocumentNeedsUpdate(theme: ThemeDefinition): boolean {
+  if (typeof document === "undefined" || typeof document.getElementById !== "function") {
+    return false;
+  }
+  const css = buildThemeDocumentCss(theme);
+  const existing = document.getElementById(THEME_STYLE_ELEMENT_ID);
+  if (css === null) return existing !== null;
+  return !(existing instanceof HTMLStyleElement) || existing.textContent !== css;
+}
+
+/**
+ * Writes the theme stylesheet. Rewriting a sheet invalidates `:root` and
+ * restyles the whole document, so identical text is never written again.
+ * Returns whether the document changed.
+ */
+export function applyThemeToDocument(theme: ThemeDefinition): boolean {
+  if (typeof document === "undefined" || typeof document.getElementById !== "function") {
+    return false;
+  }
+  const css = buildThemeDocumentCss(theme);
+  if (css === null) return removeThemeStyleElement();
 
   const style = ensureThemeStyleElement();
-  const lightCss = tokensToCss(materializeTokens(resolveTokens(theme, "light")));
-  const darkCss = tokensToCss(materializeTokens(resolveTokens(theme, "dark")));
-  style.textContent = `:root { ${lightCss} } :root.dark { ${darkCss} }`;
+  if (style.textContent === css) return false;
+  style.textContent = css;
+  return true;
 }
 
 function ensureThemeStyleElement(): HTMLStyleElement {
@@ -318,9 +359,11 @@ function ensureThemeStyleElement(): HTMLStyleElement {
   return style;
 }
 
-function removeThemeStyleElement(): void {
+function removeThemeStyleElement(): boolean {
   const existing = document.getElementById(THEME_STYLE_ELEMENT_ID);
-  existing?.remove();
+  if (existing === null) return false;
+  existing.remove();
+  return true;
 }
 
 function isValidTheme(value: unknown): value is ThemeDefinition {

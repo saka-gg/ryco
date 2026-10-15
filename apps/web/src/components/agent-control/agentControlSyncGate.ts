@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
-import { useServerConfigSelector } from "../../rpc/serverState";
+import { usePrimaryServerConfigSelector } from "../../rpc/serverState";
 
 /** `null` while the environment's config is unknown. */
 export function readAgentControlEnabled(config: ServerConfig | null | undefined): boolean | null {
@@ -32,7 +32,8 @@ export function useAgentControlSyncEnvironmentIds(
   environmentIds: readonly EnvironmentId[],
 ): EnvironmentId[] {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryEnabled = useServerConfigSelector(selectPrimaryAgentControlEnabled);
+  // The primary node's own flag, whatever settings surface is open.
+  const primaryEnabled = usePrimaryServerConfigSelector(selectPrimaryAgentControlEnabled);
   // A joined key keeps the selection a primitive, so unrelated runtime-store
   // updates do not re-render the caller.
   const savedDisabledKey = useSavedEnvironmentRuntimeStore((state) =>

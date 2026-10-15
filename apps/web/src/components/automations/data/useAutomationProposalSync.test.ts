@@ -69,6 +69,35 @@ describe("retainAgentControlProposalSync", () => {
     expect(isAgentControlProposalSyncRetained(STUDIO)).toBe(false);
   });
 
+  it("binds again for a new retainer after the server refused the subscription", async () => {
+    runtime.client = {};
+    const held = retainAgentControlProposalSync(LOCAL);
+    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(1);
+    const [, options] = runtime.subscribeProposals.mock.calls[0] as unknown as [
+      unknown,
+      { onError?: () => void },
+    ];
+    const refusedUnsubscribe = runtime.subscribeProposals.mock.results[0]!.value;
+    // The feature was off: the transport does not retry a refusal.
+    options.onError?.();
+
+    // Turned on: a surface retains the environment again while the first
+    // retainer still holds the refused entry.
+    const reopened = retainAgentControlProposalSync(LOCAL);
+    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(2);
+    expect(refusedUnsubscribe).toHaveBeenCalledTimes(1);
+
+    // A healthy subscription is shared as before.
+    const third = retainAgentControlProposalSync(LOCAL);
+    expect(runtime.subscribeProposals).toHaveBeenCalledTimes(2);
+    held();
+    reopened();
+    third();
+    await flush();
+    expect(runtime.subscribeProposals.mock.results[1]!.value).toHaveBeenCalledTimes(1);
+    expect(isAgentControlProposalSyncRetained(LOCAL)).toBe(false);
+  });
+
   it("subscribes once the environment connects", async () => {
     const release = retainAgentControlProposalSync(LOCAL);
     expect(runtime.subscribeProposals).not.toHaveBeenCalled();

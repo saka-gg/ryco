@@ -9,9 +9,11 @@ import {
   getActiveThemeId,
   setActiveThemeId,
   subscribeThemeRegistry,
+  themeDocumentNeedsUpdate,
 } from "../themes/registry";
 import {
   APPEARANCE_PREFERENCES_STORAGE_KEY,
+  appearancePreferencesDocumentNeedsUpdate,
   applyAppearancePreferencesToDocument,
 } from "../themes/appearancePreferences";
 
@@ -126,12 +128,33 @@ function startThemeTransitionGuard(root: HTMLElement) {
   });
 }
 
+function resolveIsDark(theme: Theme): boolean {
+  return theme === "dark" || (theme === "system" && getSystemDark());
+}
+
+/**
+ * Whether applying `theme` would change anything the document shows: the dark
+ * class, the active theme sheet or the appearance sheet. Reads only DOM state
+ * and storage, never computed style.
+ */
+function themeApplyChangesDocument(theme: Theme): boolean {
+  return (
+    document.documentElement.classList.contains("dark") !== resolveIsDark(theme) ||
+    themeDocumentNeedsUpdate(findTheme(getActiveThemeId())) ||
+    appearancePreferencesDocumentNeedsUpdate()
+  );
+}
+
 function applyTheme(theme: Theme, suppressTransitions = false) {
   if (typeof document === "undefined" || typeof window === "undefined") return;
   const root = document.documentElement;
-  if (suppressTransitions) startThemeTransitionGuard(root);
-  const isDark = theme === "dark" || (theme === "system" && getSystemDark());
-  root.classList.toggle("dark", isDark);
+  // The guard costs two full-document restyles (on and off), so it is only
+  // started when this apply changes something visible. A no-op apply (same
+  // theme re-selected, another tab's diffLayout or inactive custom theme edit)
+  // writes nothing and restyles nothing.
+  const changesDocument = themeApplyChangesDocument(theme);
+  if (suppressTransitions && changesDocument) startThemeTransitionGuard(root);
+  root.classList.toggle("dark", resolveIsDark(theme));
   applyThemeToDocument(findTheme(getActiveThemeId()));
   applyAppearancePreferencesToDocument();
   if (!suppressTransitions) syncBrowserChromeTheme();
@@ -250,13 +273,11 @@ function attachDocumentListeners() {
     window.removeEventListener("storage", handleThemeStorage);
     unsubscribeRegistry();
   };
-  // Changes between the module-load apply and the first consumer.
+  // Changes between the module-load apply and the first consumer: no listener
+  // heard them, so compare every applied input (mode, dark class, active or
+  // custom theme sheet, appearance sheet) with what storage says now.
   const stored = getStored();
-  const expectedDark = stored === "dark" || (stored === "system" && getSystemDark());
-  if (
-    appliedTheme !== stored ||
-    document.documentElement.classList.contains("dark") !== expectedDark
-  ) {
+  if (appliedTheme !== stored || themeApplyChangesDocument(stored)) {
     applyThemeChange(stored);
   }
 }
@@ -314,4 +335,8 @@ export function __resetThemeControllerForTests(): void {
   snapshotStale = true;
   appliedTheme = null;
   lastDesktopTheme = null;
+  // Back to the module-load state: applied, but no listeners until a consumer.
+  if (typeof document !== "undefined" && hasThemeStorage()) {
+    applyThemeChange(getStored());
+  }
 }

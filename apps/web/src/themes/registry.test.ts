@@ -634,6 +634,27 @@ describe("applyThemeToDocument", () => {
     expect(style?.textContent).toMatch(/color-mix\(in srgb, /);
   });
 
+  it("writes the sheet only when its text changes and reports whether it did", () => {
+    const theme = { id: "custom-y", name: "Y", builtIn: false, light: { primary: "#ff0000" } };
+    expect(applyThemeToDocument(theme)).toBe(true);
+    const style = appended.find((node) => node.id === THEME_STYLE_ELEMENT_ID);
+    let writes = 0;
+    let text = style!.textContent;
+    Object.defineProperty(style, "textContent", {
+      get: () => text,
+      set: (value: string) => {
+        writes += 1;
+        text = value;
+      },
+    });
+    // Same theme, and an equal copy: identical text, nothing written.
+    expect(applyThemeToDocument(theme)).toBe(false);
+    expect(applyThemeToDocument({ ...theme })).toBe(false);
+    expect(writes).toBe(0);
+    expect(applyThemeToDocument({ ...theme, light: { primary: "#00ff00" } })).toBe(true);
+    expect(writes).toBe(1);
+  });
+
   it("converts --alpha() in user-supplied overlay tokens too", () => {
     applyThemeToDocument({
       id: "custom-x",
