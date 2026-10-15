@@ -610,6 +610,35 @@ describe("change request page forwarding", () => {
       assert.strictEqual(yield* Ref.get(merged), true);
     }),
   );
+  it.effect("reads batched link states through registry.resolve", () =>
+    Effect.gen(function* () {
+      const registry = yield* makeRegistry({
+        remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+        githubCli: {
+          getLinkStates: (input) =>
+            Effect.succeed({
+              pullRequests: new Map(
+                input.pullRequests.map((number) => [
+                  number,
+                  { state: "open" as const, isDraft: false, closedAt: null, mergedAt: null },
+                ]),
+              ),
+              issues: new Map(input.issues.map((number) => [number, "closed" as const])),
+            }),
+        },
+      });
+      const provider = yield* registry.resolve({ cwd: "/repo" });
+      const getLinkStates = provider.getLinkStates;
+      assert.ok(getLinkStates, "the batched read must survive the lazy provider and context");
+      const states = yield* getLinkStates({
+        cwd: "/repo",
+        pullRequestNumbers: [7],
+        issueNumbers: [9],
+      });
+      assert.strictEqual(states.pullRequests.get(7)?.state, "open");
+      assert.strictEqual(states.issues.get(9), "closed");
+    }),
+  );
 });
 
 describe("unsupported change request options", () => {

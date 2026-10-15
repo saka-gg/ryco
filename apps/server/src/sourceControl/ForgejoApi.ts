@@ -108,6 +108,12 @@ export interface ForgejoApiShape {
     readonly source?: SourceControlProvider.SourceControlRefSelector;
     readonly state: "open" | "closed" | "merged" | "all";
     readonly limit?: number;
+    /**
+     * Read merge readiness (head commit status) for open rows of a page list.
+     * Defaults to true; index and picker reads that only consume branch and
+     * state fields turn it off so a listing costs one request.
+     */
+    readonly readiness?: boolean;
   }) => Effect.Effect<
     ReadonlyArray<ForgejoPullRequests.NormalizedForgejoPullRequestRecord>,
     ForgejoApiError
@@ -1065,7 +1071,7 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
     detectProviderFromRemoteUrl,
     listPullRequests: (input) => {
       // An empty head selector is the pull requests page's list: every head,
-      // with merge readiness on open rows.
+      // with merge readiness on open rows unless the caller opted out.
       const expectedHead = SourceControlProvider.sourceBranch(input);
       const pageList = expectedHead.length === 0;
       return resolveRepository(input).pipe(
@@ -1093,7 +1099,11 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
               }),
             ),
             Effect.flatMap((list) =>
-              pageList ? page.withRowReadiness(input, list) : Effect.succeed(list),
+              !pageList
+                ? Effect.succeed(list)
+                : input.readiness === false
+                  ? page.rememberRows(input, list)
+                  : page.withRowReadiness(input, list),
             ),
           ),
         ),

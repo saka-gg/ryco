@@ -1,5 +1,6 @@
 import {
   Cache,
+  Clock,
   Context,
   DateTime,
   Duration,
@@ -49,6 +50,8 @@ import { formatSchemaError } from "@ryco/shared/schemaJson";
 import { parseGitHubRepositoryIdentityFromUrl } from "@ryco/shared/sourceControl";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
+import { inBackgroundProcessLane } from "../processGovernor.ts";
 import * as GitHubIssues from "./gitHubIssues.ts";
 import type { NormalizedGitHubIssueDetail, NormalizedGitHubIssueRecord } from "./gitHubIssues.ts";
 import * as GitHubActions from "./gitHubActions.ts";
@@ -73,8 +76,13 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const LIST_REPOSITORY_CAPACITY = 256;
-const LIST_REPOSITORY_TTL = Duration.minutes(10);
+/** A resolution older than this is still served, and re-resolved in the background. */
+const LIST_REPOSITORY_REFRESH_AFTER_MS = 10 * 60_000;
+/** A resolution nobody read for this long is resolved again before use. */
+const LIST_REPOSITORY_MAX_AGE = Duration.hours(24);
 const LIST_REPOSITORY_FAILURE_TTL = Duration.seconds(5);
+/** After a failed background re-resolution, the stale value is kept and retried after this. */
+const LIST_REPOSITORY_REFRESH_RETRY_MS = 60_000;
 const STACKLESS_HOST_TTL_MS = 10 * 60_000;
 /** Ceiling for a single-commit diff; larger diffs fail clearly instead of truncating mid-hunk. */
 const COMMIT_DIFF_MAX_BYTES = 8 * 1024 * 1024;
@@ -441,14 +449,15 @@ export interface GitHubCliShape {
    * diff stats and each row's stack summary. `involvement` makes it the same
    * GitHub search `gh pr list --search` runs.
    */
-  /** States of several pull requests of `cwd`'s repository: one GraphQL request per 50. */
-  readonly getPullRequestStates: (input: {
+  /**
+   * States of several pull requests and issues of `cwd`'s repository: one GraphQL request
+   * per 50 numbers. Numbers GitHub does not resolve are absent.
+   */
+  readonly getLinkStates: (input: {
     readonly cwd: string;
-    readonly numbers: ReadonlyArray<number>;
-  }) => Effect.Effect<
-    ReadonlyMap<number, GitHubRepositoryLists.GitHubPullRequestStateRecord>,
-    GitHubCliError
-  >;
+    readonly pullRequests: ReadonlyArray<number>;
+    readonly issues: ReadonlyArray<number>;
+  }) => Effect.Effect<GitHubRepositoryLists.GitHubLinkStates, GitHubCliError>;
 
   readonly listPullRequests: (input: {
     readonly cwd: string;
@@ -1233,44 +1242,88 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
   /**
    * The repository `gh pr list` and `gh issue list` read in `cwd` (gh's own
    * remote resolution, including `gh repo set-default`), so the GraphQL lists
-   * address exactly that repository. Remotes rarely change; a failed lookup
-   * is retried after a few seconds.
+   * address exactly that repository.
    */
-  const listRepositories = yield* Cache.makeWith(
-    (cwd: string) =>
-      execute({ cwd, args: ["repo", "view", "--json", "nameWithOwner,url"] }).pipe(
-        Effect.flatMap((result) =>
-          decodeGitHubJson(
-            result.stdout.trim(),
-            RawListRepositorySchema,
-            "resolveRepository",
-            "GitHub CLI returned invalid repository JSON",
-          ),
+  const resolveListRepository = (cwd: string) =>
+    execute({ cwd, args: ["repo", "view", "--json", "nameWithOwner,url"] }).pipe(
+      Effect.flatMap((result) =>
+        decodeGitHubJson(
+          result.stdout.trim(),
+          RawListRepositorySchema,
+          "resolveRepository",
+          "GitHub CLI returned invalid repository JSON",
         ),
-        Effect.flatMap((raw) => {
-          // The same host / owner / name parsing every other GraphQL read uses.
-          const identity = parseGitHubRepositoryIdentityFromUrl(raw.url);
-          return identity &&
-            identity.nameWithOwner.toLowerCase() === raw.nameWithOwner.toLowerCase()
-            ? Effect.succeed<GitHubRepositoryLists.GitHubListRepository>({
-                host: identity.host,
-                owner: identity.owner,
-                name: identity.repository,
-              })
-            : Effect.fail(
-                new GitHubCliError({
-                  operation: "resolveRepository",
-                  detail: `GitHub CLI returned an unexpected repository: ${raw.nameWithOwner}`,
-                }),
-              );
-        }),
       ),
+      Effect.flatMap((raw) => {
+        // The same host / owner / name parsing every other GraphQL read uses.
+        const identity = parseGitHubRepositoryIdentityFromUrl(raw.url);
+        return identity && identity.nameWithOwner.toLowerCase() === raw.nameWithOwner.toLowerCase()
+          ? Effect.succeed<GitHubRepositoryLists.GitHubListRepository>({
+              host: identity.host,
+              owner: identity.owner,
+              name: identity.repository,
+            })
+          : Effect.fail(
+              new GitHubCliError({
+                operation: "resolveRepository",
+                detail: `GitHub CLI returned an unexpected repository: ${raw.nameWithOwner}`,
+              }),
+            );
+      }),
+      Effect.flatMap((repository) =>
+        Clock.currentTimeMillis.pipe(Effect.map((resolvedAtMs) => ({ repository, resolvedAtMs }))),
+      ),
+    );
+
+  // Resolutions are shared by every checkout of a repository (keyed by its
+  // common git dir; gh's remotes and `set-default` live in its shared config)
+  // and outlive their freshness window: an older one is served at once while
+  // one background `gh repo view` re-resolves it, so a list never waits for
+  // that round trip once the repository was resolved. A failed first lookup
+  // is retried after a few seconds.
+  const listRepositoryCwds = new Map<string, string>();
+  const listRepositories = yield* Cache.makeWith(
+    (key: string) => resolveListRepository(listRepositoryCwds.get(key) ?? key),
     {
       capacity: LIST_REPOSITORY_CAPACITY,
       timeToLive: (exit) =>
-        Exit.isSuccess(exit) ? LIST_REPOSITORY_TTL : LIST_REPOSITORY_FAILURE_TTL,
+        Exit.isSuccess(exit) ? LIST_REPOSITORY_MAX_AGE : LIST_REPOSITORY_FAILURE_TTL,
     },
   );
+  const refreshingListRepositories = new Set<string>();
+
+  const listRepository = (cwd: string) =>
+    Effect.gen(function* () {
+      const key = (yield* readCheckoutHead(cwd))?.commonDir ?? cwd;
+      listRepositoryCwds.delete(key);
+      listRepositoryCwds.set(key, cwd);
+      for (const oldest of listRepositoryCwds.keys()) {
+        if (listRepositoryCwds.size <= LIST_REPOSITORY_CAPACITY) break;
+        listRepositoryCwds.delete(oldest);
+      }
+      const resolved = yield* Cache.get(listRepositories, key);
+      const nowMs = yield* Clock.currentTimeMillis;
+      if (
+        nowMs - resolved.resolvedAtMs >= LIST_REPOSITORY_REFRESH_AFTER_MS &&
+        !refreshingListRepositories.has(key)
+      ) {
+        refreshingListRepositories.add(key);
+        yield* resolveListRepository(cwd).pipe(
+          // Offline or signed out: keep serving the last resolution and try
+          // again a minute later instead of on every read.
+          Effect.orElseSucceed(() => ({
+            repository: resolved.repository,
+            resolvedAtMs:
+              nowMs - LIST_REPOSITORY_REFRESH_AFTER_MS + LIST_REPOSITORY_REFRESH_RETRY_MS,
+          })),
+          Effect.flatMap((next) => Cache.set(listRepositories, key, next)),
+          Effect.ensuring(Effect.sync(() => refreshingListRepositories.delete(key))),
+          inBackgroundProcessLane,
+          Effect.forkDetach,
+        );
+      }
+      return resolved.repository;
+    });
 
   // Hosts whose GraphQL schema has no native stacks (older GHES): lists skip
   // those fields there instead of failing first every time.
@@ -1332,42 +1385,49 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       return items.length > input.limit ? items.slice(0, input.limit) : items;
     });
 
-  const getPullRequestStates: GitHubCliShape["getPullRequestStates"] = (input) =>
+  const getLinkStates: GitHubCliShape["getLinkStates"] = (input) =>
     Effect.gen(function* () {
-      const numbers = [...new Set(input.numbers)].filter(
-        (number) => Number.isSafeInteger(number) && number > 0,
-      );
-      const states = new Map<number, GitHubRepositoryLists.GitHubPullRequestStateRecord>();
-      if (numbers.length === 0) return states;
-      const repository = yield* Cache.get(listRepositories, input.cwd);
-      const batch = GitHubRepositoryLists.GITHUB_PULL_REQUEST_STATES_BATCH_SIZE;
-      for (let start = 0; start < numbers.length; start += batch) {
+      const valid = (numbers: ReadonlyArray<number>) =>
+        [...new Set(numbers)].filter((number) => Number.isSafeInteger(number) && number > 0);
+      const aliases = [
+        ...valid(input.pullRequests).map((number) => ({ kind: "pr" as const, number })),
+        ...valid(input.issues).map((number) => ({ kind: "issue" as const, number })),
+      ];
+      const pullRequests = new Map<number, GitHubRepositoryLists.GitHubPullRequestStateRecord>();
+      const issues = new Map<number, "open" | "closed">();
+      if (aliases.length === 0) return { pullRequests, issues };
+      const repository = yield* listRepository(input.cwd);
+      const batch = GitHubRepositoryLists.GITHUB_LINK_STATES_BATCH_SIZE;
+      for (let start = 0; start < aliases.length; start += batch) {
+        const slice = aliases.slice(start, start + batch);
         const raw: string = yield* graphqlDocument({
           cwd: input.cwd,
           host: repository.host,
-          operation: "getPullRequestStates",
-          query: GitHubRepositoryLists.buildGitHubPullRequestStatesQuery(
-            numbers.slice(start, start + batch),
-          ),
+          operation: "getLinkStates",
+          query: GitHubRepositoryLists.buildGitHubLinkStatesQuery({
+            pullRequests: slice.flatMap((alias) => (alias.kind === "pr" ? [alias.number] : [])),
+            issues: slice.flatMap((alias) => (alias.kind === "issue" ? [alias.number] : [])),
+          }),
           variables: { owner: repository.owner, name: repository.name },
           // A number that does not resolve fails only itself; the decoder decides.
           acceptPartialData: true,
         });
-        const decoded = GitHubRepositoryLists.decodeGitHubPullRequestStatesJson(raw);
+        const decoded = GitHubRepositoryLists.decodeGitHubLinkStatesJson(raw);
         if (Result.isFailure(decoded)) {
           return yield* new GitHubCliError({
-            operation: "getPullRequestStates",
+            operation: "getLinkStates",
             detail: decoded.failure,
           });
         }
-        for (const [number, state] of decoded.success) states.set(number, state);
+        for (const [number, state] of decoded.success.pullRequests) pullRequests.set(number, state);
+        for (const [number, state] of decoded.success.issues) issues.set(number, state);
       }
-      return states;
+      return { pullRequests, issues };
     });
 
   const listPullRequests: GitHubCliShape["listPullRequests"] = (input) =>
     Effect.gen(function* () {
-      const repository = yield* Cache.get(listRepositories, input.cwd);
+      const repository = yield* listRepository(input.cwd);
       const limit = listLimit(input.limit, 20);
       const search = input.involvement !== undefined;
       const head = input.headSelector?.trim() ?? "";
@@ -1431,7 +1491,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
 
   const listIssues: GitHubCliShape["listIssues"] = (input) =>
     Effect.gen(function* () {
-      const repository = yield* Cache.get(listRepositories, input.cwd);
+      const repository = yield* listRepository(input.cwd);
       return yield* readListPages({
         cwd: input.cwd,
         host: repository.host,
@@ -2773,7 +2833,7 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
     updatePullRequest,
     getPullRequestFileContents,
     listPullRequests,
-    getPullRequestStates,
+    getLinkStates,
     listOpenPullRequests: (input) =>
       executePrJson({
         cwd: input.cwd,

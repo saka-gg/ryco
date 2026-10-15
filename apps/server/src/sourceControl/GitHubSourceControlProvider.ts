@@ -1169,12 +1169,17 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           }),
           Effect.mapError((cause) => providerError("getPullRequestState", cause)),
         ),
-    getPullRequestStates: (input) =>
-      github.getPullRequestStates({ cwd: input.cwd, numbers: input.numbers }).pipe(
-        Effect.map(
-          (records) =>
-            new Map(
-              [...records].map(([number, record]) => {
+    getLinkStates: (input) =>
+      github
+        .getLinkStates({
+          cwd: input.cwd,
+          pullRequests: input.pullRequestNumbers,
+          issues: input.issueNumbers,
+        })
+        .pipe(
+          Effect.map((records) => ({
+            pullRequests: new Map(
+              [...records.pullRequests].map(([number, record]) => {
                 const terminal =
                   record.state === "merged"
                     ? (record.mergedAt ?? record.closedAt)
@@ -1193,12 +1198,25 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
                 ] as const;
               }),
             ),
+            issues: records.issues,
+          })),
+          Effect.mapError((cause) => providerError("getLinkStates", cause)),
         ),
-        Effect.mapError((cause) => providerError("getPullRequestStates", cause)),
-      ),
+    // Only the state: one aliased GraphQL read, not the issue's body, comments and
+    // comment reactions.
     getIssueState: (input) =>
-      github.getIssue({ cwd: input.cwd, reference: String(input.number) }).pipe(
-        Effect.map((detail) => ({ state: detail.state })),
+      github.getLinkStates({ cwd: input.cwd, pullRequests: [], issues: [input.number] }).pipe(
+        Effect.flatMap((records) => {
+          const state = records.issues.get(input.number);
+          return state === undefined
+            ? Effect.fail(
+                new GitHubCli.GitHubCliError({
+                  operation: "getIssueState",
+                  detail: `GitHub could not resolve issue #${input.number}.`,
+                }),
+              )
+            : Effect.succeed({ state });
+        }),
         Effect.mapError((cause) => providerError("getIssueState", cause)),
       ),
     listWorkflowRuns: (input) =>

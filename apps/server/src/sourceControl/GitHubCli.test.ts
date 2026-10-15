@@ -1,5 +1,10 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { assert, it, afterEach, describe, expect, vi } from "@effect/vitest";
 import { Effect, Layer } from "effect";
+import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/process";
 import { VcsProcessExitError } from "@ryco/contracts";
 
@@ -799,6 +804,80 @@ describe("GitHubCli.layer", () => {
         expect(queryOf(calls[0]!)).toContain("comments { totalCount }");
       }).pipe(Effect.provide(layer)),
     );
+
+    describe("repository resolution", () => {
+      const roots: string[] = [];
+      afterEach(() => {
+        for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+      });
+
+      /** A main checkout and one linked worktree, laid out on disk as git does. */
+      const makeCheckouts = () => {
+        const root = mkdtempSync(path.join(os.tmpdir(), "ryco-gh-repository-"));
+        roots.push(root);
+        const main = path.join(root, "main");
+        const linked = path.join(root, "linked");
+        const linkedGitDir = path.join(main, ".git", "worktrees", "linked");
+        mkdirSync(linkedGitDir, { recursive: true });
+        mkdirSync(linked);
+        writeFileSync(path.join(main, ".git", "HEAD"), "ref: refs/heads/main\n");
+        writeFileSync(path.join(linkedGitDir, "HEAD"), "ref: refs/heads/feature\n");
+        writeFileSync(path.join(linkedGitDir, "commondir"), "../..\n");
+        writeFileSync(path.join(linked, ".git"), `gitdir: ${linkedGitDir}\n`);
+        return { main, linked };
+      };
+
+      const answer = (names: string[]) => {
+        mockRun.mockImplementation((input) => {
+          if (input.args[0] === "repo") {
+            const name = names.shift() ?? "repo";
+            return Effect.succeed(
+              processOutput(
+                JSON.stringify({
+                  nameWithOwner: `owner/${name}`,
+                  url: `https://github.com/owner/${name}`,
+                }),
+              ),
+            );
+          }
+          return Effect.succeed(pullRequestPage([1]));
+        });
+      };
+      const repoViews = () => mockRun.mock.calls.filter(([input]) => input.args[0] === "repo");
+
+      it.effect("resolves once for every checkout of a repository", () =>
+        Effect.gen(function* () {
+          const { main, linked } = makeCheckouts();
+          answer(["repo"]);
+          const gh = yield* GitHubCli.GitHubCli;
+          yield* gh.listPullRequests({ cwd: main, state: "open" });
+          yield* gh.listIssues({ cwd: linked, state: "open" }).pipe(Effect.ignore);
+          yield* gh.listPullRequests({ cwd: linked, state: "open" });
+          expect(repoViews()).toHaveLength(1);
+        }).pipe(Effect.provide(layer)),
+      );
+
+      it.effect("serves an older resolution at once and re-resolves it in the background", () =>
+        Effect.gen(function* () {
+          const { main } = makeCheckouts();
+          answer(["repo", "renamed"]);
+          const gh = yield* GitHubCli.GitHubCli;
+          yield* gh.listPullRequests({ cwd: main, state: "open" });
+
+          yield* TestClock.adjust("11 minutes");
+          yield* gh.listPullRequests({ cwd: main, state: "open" });
+          // The list did not wait: it read the repository resolved before.
+          expect(variablesOf(graphQlCalls()[1]!)).toMatchObject({ name: "repo" });
+          yield* gh.listPullRequests({ cwd: main, state: "closed" });
+          for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+          expect(repoViews()).toHaveLength(2);
+
+          yield* gh.listPullRequests({ cwd: main, state: "open" });
+          expect(variablesOf(graphQlCalls().at(-1)!)).toMatchObject({ name: "renamed" });
+          expect(repoViews()).toHaveLength(2);
+        }).pipe(Effect.provide(layer)),
+      );
+    });
 
     it.effect("runs involvement lists as the search gh pr list --search would", () =>
       Effect.gen(function* () {

@@ -61,7 +61,9 @@ import {
   type GitWorktreeCreationContext,
 } from "../vcs/GitVcsDriver.ts";
 import { SourceControlProviderRegistry } from "../sourceControl/SourceControlProviderRegistry.ts";
+import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
 import {
+  BRANCH_CHANGE_REQUEST_LIMIT,
   lookupIndexedChangeRequest,
   makePullRequestIndex,
   pullRequestIndexRepositoryKey,
@@ -135,6 +137,8 @@ export interface GitManagerShape {
     readonly cwd: string;
     readonly key: string;
     readonly load: Effect.Effect<A, E, R>;
+    /** Shorter lifetime for reads that go stale faster than lists (details). */
+    readonly ttlMs?: number;
   }) => Effect.Effect<A, E, R>;
   /** Drops `cwd`'s repository's cached list reads (after a change request mutation). */
   readonly invalidateRepositoryLists: (cwd: string) => Effect.Effect<void>;
@@ -213,6 +217,11 @@ const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInp
   Order.flip(Option.makeOrder(DateTime.Order)),
   (pullRequest) => pullRequest.updatedAt,
 );
+
+interface PullRequestIndexTarget {
+  readonly repository: string;
+  readonly provider: SourceControlProviderShape;
+}
 
 interface ResolvedPullRequest {
   number: number;
@@ -1185,7 +1194,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   /** The forge repository a checkout's change requests live in; null without a known host. */
   const resolvePullRequestIndexTarget = (cwd: string) =>
     sourceControlProviders.resolveHandle({ cwd }).pipe(
-      Effect.map((handle) =>
+      Effect.map((handle): PullRequestIndexTarget | null =>
         handle.context === null || handle.provider.kind === "unknown"
           ? null
           : {
@@ -1248,22 +1257,25 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
               repository: target.repository,
               key: input.key,
               load: input.load,
+              ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
             }),
       ),
     );
 
   const findLatestPrInIndex = Effect.fn("findLatestPrInIndex")(function* (
     cwd: string,
+    target: PullRequestIndexTarget,
     headContext: BranchHeadContext,
     openOnly: boolean,
   ) {
-    const target = yield* resolvePullRequestIndexTarget(cwd);
-    if (target === null) return { resolved: false } as const;
     return yield* lookupIndexedChangeRequest({
       readListing: (scope) =>
-        pullRequestIndex
-          .read({ repository: target.repository, scope, cwd, provider: target.provider })
-          .pipe(Effect.catch(() => Effect.succeed(null))),
+        pullRequestIndex.read({
+          repository: target.repository,
+          scope,
+          cwd,
+          provider: target.provider,
+        }),
       matches: (item) => {
         const pr = toPullRequestInfo(item);
         return matchesBranchHeadContext(pr, headContext) ? pr : null;
@@ -1283,22 +1295,35 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   ) {
     const headContext = yield* resolveBranchHeadContext(cwd, details, { statusRead: true });
     // One listing per repository answers most branches; only a branch it
-    // cannot answer for (older than the recent window) asks per head selector.
-    const indexed = yield* findLatestPrInIndex(cwd, headContext, details.isDefaultBranch);
-    if (indexed.resolved) {
-      return indexed.match;
+    // cannot answer for (older than the recent window) asks per head selector,
+    // and those answers are cached per repository too. A failed listing fails
+    // the lookup instead of fanning out into per-branch calls to the same host.
+    const target = yield* resolvePullRequestIndexTarget(cwd);
+    if (target !== null) {
+      const indexed = yield* findLatestPrInIndex(cwd, target, headContext, details.isDefaultBranch);
+      if (indexed.resolved) {
+        return indexed.match;
+      }
     }
     const parsedByNumber = new Map<number, PullRequestInfo>();
 
     for (const headSelector of headContext.headSelectors) {
-      const pullRequests = yield* (yield* sourceControlProvider(cwd)).listChangeRequests({
-        cwd,
-        headSelector,
-        state: "all",
-        limit: 20,
-        includeStackSummary: false,
-        fields: "summary",
-      });
+      const pullRequests =
+        target === null
+          ? yield* (yield* sourceControlProvider(cwd)).listChangeRequests({
+              cwd,
+              headSelector,
+              state: "all",
+              limit: BRANCH_CHANGE_REQUEST_LIMIT,
+              includeStackSummary: false,
+              fields: "summary",
+            })
+          : yield* pullRequestIndex.readBranch({
+              repository: target.repository,
+              headSelector,
+              cwd,
+              provider: target.provider,
+            });
 
       for (const pr of pullRequests.map(toPullRequestInfo)) {
         if (!matchesBranchHeadContext(pr, headContext)) {

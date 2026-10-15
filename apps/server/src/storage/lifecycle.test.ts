@@ -11,6 +11,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   acquireStoragePathUseLease,
   acquireStoragePathUseLeaseHandle,
+  checkoutLifecycleOwner,
   hasWorktreeCreationLease,
   isStoragePathBlocked,
   retainStoragePathUseLease,
@@ -216,5 +217,28 @@ it.layer(SqlitePersistenceMemory)("storage admission for chat moves", (it) => {
         assert.isTrue(Result.isFailure(refused));
         assert.isFalse(hasWorktreeCreationLease(root));
       }).pipe(Effect.scoped),
+  );
+
+  it.effect("tells a checkout its own removal is still recording from one left behind", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const checkout = "/code/app/.worktrees/feature";
+      assert.isNull(yield* checkoutLifecycleOwner(sql, checkout, "linux"));
+      for (const [state, owner] of [
+        ["removing", "removal"],
+        ["removed", "removed"],
+      ] as const) {
+        yield* sql`DELETE FROM storage_owned_entries`;
+        yield* sql`INSERT INTO storage_owned_entries (id, path, repository_path, category, identity_json, created_at, state)
+          VALUES ('entry', ${checkout}, '/code/app', 'worktree', '{}', '2026-10-15T00:00:00.000Z', ${state})`;
+        assert.equal(yield* checkoutLifecycleOwner(sql, checkout, "linux"), owner);
+        assert.isNull(yield* checkoutLifecycleOwner(sql, "/code/app/.worktrees/other", "linux"));
+      }
+      yield* sql`UPDATE storage_owned_entries SET state = 'owned'`;
+      assert.isNull(yield* checkoutLifecycleOwner(sql, checkout, "linux"));
+      // Without persistence only creation leases are known.
+      assert.isNull(yield* checkoutLifecycleOwner(undefined, checkout, "linux"));
+      yield* sql`DELETE FROM storage_owned_entries`;
+    }),
   );
 });

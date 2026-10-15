@@ -206,6 +206,9 @@ export const make = Effect.fn("makeForgejoSourceControlProvider")(function* () {
           ...(source ? { source } : {}),
           state: input.state,
           ...limit,
+          // Index, status and picker reads consume only branch and state
+          // fields; skip the per-row commit-status fan-out for them.
+          readiness: input.includeStackSummary !== false && input.fields !== "summary",
         })
         .pipe(
           Effect.map((items) => items.map(toChangeRequest)),

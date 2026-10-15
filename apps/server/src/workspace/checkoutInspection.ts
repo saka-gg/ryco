@@ -65,6 +65,11 @@ export interface ProjectGitFacts {
   readonly worktreeEntries: ReadonlyArray<ReadonlyArray<string>>;
   /** Local branch name to its commit. */
   readonly branchHeads: ReadonlyMap<string, string>;
+  /**
+   * Local branches with commits `baseHead` does not contain, read in one pass for listings
+   * (see `withUnmergedBranches`); absent when each inspection counts its own branch.
+   */
+  readonly unmergedBranches?: ReadonlySet<string> | undefined;
 }
 
 /** Bound on directory entries visited while deciding ignored directories are empty. */
@@ -337,6 +342,11 @@ export const inspectProjectGitFacts = (
   input: {
     readonly project: { readonly id: ProjectId; readonly workspaceRoot: string };
     readonly operation: string;
+    /**
+     * Also read which local branches `baseHead` does not contain, in one `for-each-ref`,
+     * instead of one `rev-list` per diverged branch: for listings of many checkouts.
+     */
+    readonly withUnmergedBranches?: boolean | undefined;
   },
 ): Effect.Effect<ProjectGitFacts, CheckoutInspectionError> =>
   Effect.gen(function* () {
@@ -374,6 +384,19 @@ export const inspectProjectGitFacts = (
       if (refname?.startsWith("refs/heads/") && objectname)
         branchHeads.set(refname.slice("refs/heads/".length), objectname);
     }
+    const unmergedBranches = input.withUnmergedBranches
+      ? new Set(
+          (yield* run(
+            root,
+            ["for-each-ref", `--no-merged=${baseHead}`, "--format=%(refname)", "refs/heads"],
+            4 * 1024 * 1024,
+          ))
+            .split("\n")
+            .flatMap((refname) =>
+              refname.startsWith("refs/heads/") ? [refname.slice("refs/heads/".length)] : [],
+            ),
+        )
+      : undefined;
     return {
       projectId: project.id,
       rootIdentity: `${rootStat.dev}:${rootStat.ino}`,
@@ -382,6 +405,7 @@ export const inspectProjectGitFacts = (
       baseHead,
       worktreeEntries: listing.split("\0\0").map((entry) => entry.split("\0")),
       branchHeads,
+      ...(unmergedBranches ? { unmergedBranches } : {}),
     } satisfies ProjectGitFacts;
   });
 
@@ -545,13 +569,15 @@ export const inspectCheckout = (
       );
     const unmerged = branchHead
       ? branchHead !== baseHead &&
-        (yield* input.caches
-          ? input.caches.ancestry.through(
-              `${repository}\u0000${input.branch ?? ""}`,
-              `${baseHead}..${branchHead}`,
-              countUnmerged(branchHead),
-            )
-          : countUnmerged(branchHead))
+        (projectFacts.unmergedBranches
+          ? input.branch !== null && projectFacts.unmergedBranches.has(input.branch)
+          : yield* input.caches
+              ? input.caches.ancestry.through(
+                  `${repository}\u0000${input.branch ?? ""}`,
+                  `${baseHead}..${branchHead}`,
+                  countUnmerged(branchHead),
+                )
+              : countUnmerged(branchHead))
       : null;
     if (stat && registered && input.branch !== null) {
       if (!checkoutEntry?.includes(`branch refs/heads/${input.branch}`))

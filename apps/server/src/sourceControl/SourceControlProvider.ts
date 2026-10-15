@@ -146,6 +146,19 @@ export function unsupportedChangeRequestOperation(
   );
 }
 
+/** Batched link states (see `getLinkStates`). */
+export interface SourceControlLinkStates {
+  readonly pullRequests: ReadonlyMap<
+    number,
+    {
+      readonly state: PullRequestState;
+      readonly isDraft: boolean;
+      readonly terminalAt: DateTime.Utc | null;
+    }
+  >;
+  readonly issues: ReadonlyMap<number, IssueState>;
+}
+
 export interface SourceControlProviderShape {
   readonly kind: SourceControlProviderKind;
   readonly listChangeRequests: (input: {
@@ -354,25 +367,16 @@ export interface SourceControlProviderShape {
     SourceControlProviderError
   >;
   /**
-   * `getPullRequestState` for several pull requests of one repository at once (GitHub: one
-   * GraphQL request per 50). Numbers the forge does not resolve are absent from the result.
-   * Optional: callers read one at a time without it.
+   * `getPullRequestState` and `getIssueState` for several pull requests and issues of one
+   * repository at once (GitHub: one GraphQL request per 50 numbers). Numbers the forge does
+   * not resolve are absent from the result. Optional: callers read one at a time without it.
    */
-  readonly getPullRequestStates?: (input: {
-    readonly numbers: ReadonlyArray<number>;
+  readonly getLinkStates?: (input: {
+    readonly pullRequestNumbers: ReadonlyArray<number>;
+    readonly issueNumbers: ReadonlyArray<number>;
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
-  }) => Effect.Effect<
-    ReadonlyMap<
-      number,
-      {
-        readonly state: PullRequestState;
-        readonly isDraft: boolean;
-        readonly terminalAt: DateTime.Utc | null;
-      }
-    >,
-    SourceControlProviderError
-  >;
+  }) => Effect.Effect<SourceControlLinkStates, SourceControlProviderError>;
   readonly getIssueState: (input: {
     readonly number: number;
     readonly cwd: string;

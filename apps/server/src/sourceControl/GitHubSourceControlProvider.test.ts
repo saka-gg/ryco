@@ -1993,3 +1993,53 @@ it.effect("reports the PR terminal time from mergedAt and closedAt", () =>
     assert.isNull(open.terminalAt);
   }),
 );
+
+it.effect("reads a linked issue's state alone, through the batched link read", () =>
+  Effect.gen(function* () {
+    const asked: Array<{ pullRequests: ReadonlyArray<number>; issues: ReadonlyArray<number> }> = [];
+    const provider = yield* makeProvider({
+      getIssue: () => Effect.die("the full issue (body, comments, reactions) is not read"),
+      getLinkStates: (input) =>
+        Effect.sync(() => {
+          asked.push({ pullRequests: input.pullRequests, issues: input.issues });
+          return {
+            pullRequests: new Map([
+              [
+                3,
+                {
+                  state: "merged" as const,
+                  isDraft: false,
+                  closedAt: "2026-10-01T00:00:00Z",
+                  mergedAt: "2026-10-01T00:00:00Z",
+                },
+              ],
+            ]),
+            issues: new Map(input.issues.includes(7) ? [[7, "closed" as const]] : []),
+          };
+        }),
+    });
+
+    assert.deepStrictEqual(yield* provider.getIssueState({ cwd: "/repo", number: 7 }), {
+      state: "closed",
+    });
+    const missing = yield* provider.getIssueState({ cwd: "/repo", number: 8 }).pipe(Effect.flip);
+    assert.include(missing.detail, "#8");
+
+    const batched = yield* provider.getLinkStates!({
+      cwd: "/repo",
+      pullRequestNumbers: [3],
+      issueNumbers: [7],
+    });
+    assert.equal(batched.pullRequests.get(3)?.state, "merged");
+    assert.equal(
+      batched.pullRequests.get(3)?.terminalAt?.pipe(DateTime.formatIso),
+      "2026-10-01T00:00:00.000Z",
+    );
+    assert.equal(batched.issues.get(7), "closed");
+    assert.deepStrictEqual(asked, [
+      { pullRequests: [], issues: [7] },
+      { pullRequests: [], issues: [8] },
+      { pullRequests: [3], issues: [7] },
+    ]);
+  }),
+);

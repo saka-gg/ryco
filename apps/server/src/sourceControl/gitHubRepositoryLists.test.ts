@@ -4,8 +4,8 @@ import { Option, Result } from "effect";
 import {
   buildGitHubPullRequestInvolvementSearch,
   buildGitHubPullRequestListQuery,
-  buildGitHubPullRequestStatesQuery,
-  decodeGitHubPullRequestStatesJson,
+  buildGitHubLinkStatesQuery,
+  decodeGitHubLinkStatesJson,
   decodeGitHubIssueListPageJson,
   decodeGitHubPullRequestListPageJson,
   gitHubPullRequestListStates,
@@ -291,11 +291,11 @@ describe("gitHubRepositoryLists", () => {
 
 describe("pull request states by number", () => {
   it("asks for every number in one document and decodes states, skipping unresolved ones", () => {
-    const query = buildGitHubPullRequestStatesQuery([12, 7, 0, -1]);
+    const query = buildGitHubLinkStatesQuery({ pullRequests: [12, 7, 0, -1], issues: [] });
     assert.include(query, "p12: pullRequest(number: 12)");
     assert.include(query, "p7: pullRequest(number: 7)");
     assert.notInclude(query, "number: 0");
-    const decoded = decodeGitHubPullRequestStatesJson(
+    const decoded = decodeGitHubLinkStatesJson(
       JSON.stringify({
         data: {
           repository: {
@@ -315,8 +315,9 @@ describe("pull request states by number", () => {
     );
     assert.isTrue(Result.isSuccess(decoded));
     if (!Result.isSuccess(decoded)) return;
+    assert.strictEqual(decoded.success.issues.size, 0);
     assert.deepStrictEqual(
-      [...decoded.success],
+      [...decoded.success.pullRequests],
       [
         [
           12,
@@ -330,9 +331,33 @@ describe("pull request states by number", () => {
         [9, { state: "open", isDraft: true, closedAt: null, mergedAt: null }],
       ],
     );
-    const failed = decodeGitHubPullRequestStatesJson(
+    const failed = decodeGitHubLinkStatesJson(
       JSON.stringify({ data: null, errors: [{ message: "Bad credentials", path: null }] }),
     );
     assert.isTrue(Result.isFailure(failed));
+  });
+
+  it("reads issue states in the same document, keeping pull requests and issues apart", () => {
+    const query = buildGitHubLinkStatesQuery({ pullRequests: [12], issues: [12, 30, 0] });
+    assert.include(query, "p12: pullRequest(number: 12)");
+    assert.include(query, "i12: issue(number: 12) { number state }");
+    assert.include(query, "i30: issue(number: 30)");
+    assert.notInclude(query, "number: 0");
+    const decoded = decodeGitHubLinkStatesJson(
+      JSON.stringify({
+        data: {
+          repository: {
+            p12: { number: 12, state: "OPEN", isDraft: false, closedAt: null, mergedAt: null },
+            i12: null,
+            i30: { number: 30, state: "CLOSED" },
+          },
+        },
+        errors: [{ message: "Could not resolve to an Issue", path: ["repository", "i12"] }],
+      }),
+    );
+    assert.isTrue(Result.isSuccess(decoded));
+    if (!Result.isSuccess(decoded)) return;
+    assert.deepStrictEqual([...decoded.success.pullRequests.keys()], [12]);
+    assert.deepStrictEqual([...decoded.success.issues], [[30, "closed"]]);
   });
 });

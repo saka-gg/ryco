@@ -80,11 +80,23 @@ export class ProcessPool {
   readonly name: ProcessPoolName;
   readonly limit: number;
   private readonly now: () => number;
+  private readonly onChange: ((pool: ProcessPool) => void) | undefined;
 
-  constructor(name: ProcessPoolName, limit: number, now: () => number = Date.now) {
+  /**
+   * `onChange` runs synchronously after every change of the in-flight or
+   * queued count (a grant, an enqueue, a withdrawal, a release), whichever
+   * path (Effect or Promise) made it.
+   */
+  constructor(
+    name: ProcessPoolName,
+    limit: number,
+    now: () => number = Date.now,
+    onChange?: (pool: ProcessPool) => void,
+  ) {
     this.name = name;
     this.limit = limit;
     this.now = now;
+    this.onChange = onChange;
   }
 
   /**
@@ -109,6 +121,7 @@ export class ProcessPool {
         released = true;
         this.inFlight -= 1;
         this.drain();
+        this.onChange?.(this);
       };
       onGranted(release, queueWaitMs);
     };
@@ -116,6 +129,7 @@ export class ProcessPool {
     const enqueuedAtMs = this.now();
     if (lane === "interactive" || (this.waiters.length === 0 && this.inFlight < this.limit)) {
       grant(enqueuedAtMs);
+      this.onChange?.(this);
     } else {
       this.queuedTotal += 1;
       const waiter: Waiter = {
@@ -124,11 +138,15 @@ export class ProcessPool {
         },
       };
       this.waiters.push(waiter);
+      this.onChange?.(this);
       return {
         cancel: () => {
           withdrawn = true;
           const index = this.waiters.indexOf(waiter);
-          if (index >= 0) this.waiters.splice(index, 1);
+          if (index >= 0) {
+            this.waiters.splice(index, 1);
+            this.onChange?.(this);
+          }
           release?.();
         },
       };
@@ -157,18 +175,48 @@ export class ProcessPool {
   }
 }
 
+const processQueueWaitDuration = Metric.timer("ryco_process_governor_queue_wait_duration", {
+  description: "Time background child processes waited for a governor permit.",
+});
+
+export const processGovernorMetricNames = {
+  inFlight: "ryco_process_governor_in_flight",
+  queued: "ryco_process_governor_queued",
+} as const;
+
+const processInFlight = Metric.gauge(processGovernorMetricNames.inFlight, {
+  description: "Governed child processes currently running, by pool.",
+});
+
+const processQueued = Metric.gauge(processGovernorMetricNames.queued, {
+  description: "Background child processes waiting for a governor permit, by pool.",
+});
+
+/**
+ * Publishes a pool's current counts; the pool calls it synchronously after
+ * every change, from the Effect path and the Promise path alike.
+ */
+const publishPoolGauges = (pool: ProcessPool): void => {
+  const stats = pool.stats();
+  Effect.runSync(
+    Effect.all(
+      [
+        Metric.update(Metric.withAttributes(processInFlight, { pool: pool.name }), stats.inFlight),
+        Metric.update(Metric.withAttributes(processQueued, { pool: pool.name }), stats.queued),
+      ],
+      { discard: true },
+    ),
+  );
+};
+
 const pools: Record<ProcessPoolName, ProcessPool> = {
-  git: new ProcessPool("git", GIT_PROCESS_LIMIT),
-  forge: new ProcessPool("forge", FORGE_PROCESS_LIMIT),
+  git: new ProcessPool("git", GIT_PROCESS_LIMIT, Date.now, publishPoolGauges),
+  forge: new ProcessPool("forge", FORGE_PROCESS_LIMIT, Date.now, publishPoolGauges),
 };
 
 export function processGovernorStats(): ReadonlyArray<ProcessPoolStats> {
   return [pools.git.stats(), pools.forge.stats()];
 }
-
-const processQueueWaitDuration = Metric.timer("ryco_process_governor_queue_wait_duration", {
-  description: "Time background child processes waited for a governor permit.",
-});
 
 const acquirePermit = (pool: ProcessPool, lane: ProcessLane) =>
   Effect.callback<{ readonly release: () => void; readonly queueWaitMs: number }>((resume) => {

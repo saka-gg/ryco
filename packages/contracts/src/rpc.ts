@@ -1238,6 +1238,12 @@ export const WsSourceControlGetChangeRequestDetailRpc = Rpc.make(
       cwd: Schema.String,
       reference: Schema.String,
       fullContent: Schema.optional(Schema.Boolean),
+      /**
+       * `row`: a passive per-row read (sidebar and inbox glyphs). The server runs it in the
+       * background process lane and may answer from a result a few seconds old shared with
+       * other row reads of the same repository. Older servers ignore it and read fresh.
+       */
+      view: Schema.optional(Schema.Literals(["row"])),
     }),
     success: SourceControlChangeRequestDetail,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),

@@ -22,6 +22,7 @@ import {
   ProjectionWorktreeRepository,
   type ProjectionWorktreeRepositoryShape,
 } from "../persistence/Services/ProjectionWorktrees.ts";
+import { ProcessLaneRef, type ProcessLane } from "../processGovernor.ts";
 import type { SourceControlProviderShape } from "../sourceControl/SourceControlProvider.ts";
 import {
   makeRepositoryListCache,
@@ -83,10 +84,8 @@ function makeContext(
       cachedRepositoryList: <A, E, R>(input: {
         readonly key: string;
         readonly load: Effect.Effect<A, E, R>;
-      }) =>
-        listCache
-          ? listCache.get({ repository: "repo", key: input.key, load: input.load })
-          : input.load,
+        readonly ttlMs?: number;
+      }) => (listCache ? listCache.get({ repository: "repo", ...input }) : input.load),
       invalidateRepositoryLists: (cwd: string) =>
         Effect.sync(() => listInvalidations.push(cwd)).pipe(
           Effect.andThen(listCache ? listCache.invalidate("repo") : Effect.void),
@@ -313,6 +312,45 @@ describe("pull request page handlers", () => {
       expect(listInvalidations).toEqual(["/repo"]);
       yield* list;
       expect(lists).toBe(3);
+    }),
+  );
+
+  it.effect("reads row details in the background lane and shares them briefly", () =>
+    Effect.gen(function* () {
+      const lanes: Array<ProcessLane> = [];
+      const listCache = makeRepositoryListCache();
+      const { handlers, refreshes } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            ProcessLaneRef.pipe(
+              Effect.tap((lane) => Effect.sync(() => lanes.push(lane))),
+              Effect.as({ number: Number(input.reference) } as never),
+            ),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = (reference: string, view?: "row") =>
+        handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference,
+          ...(view ? { view } : {}),
+        }).pipe(Effect.provide(handlerLayer));
+
+      yield* read("42", "row");
+      yield* read("42", "row");
+      expect(lanes).toEqual(["background"]);
+      expect(refreshes).toEqual(["linked"]);
+      // Another change request is its own read; a mutation or refresh drops the share.
+      yield* read("43", "row");
+      yield* listCache.invalidate("repo");
+      yield* read("42", "row");
+      expect(lanes).toEqual(["background", "background", "background"]);
+
+      // Focused surfaces read fresh, in the interactive lane.
+      yield* read("42");
+      yield* read("42");
+      expect(lanes.slice(3)).toEqual(["interactive", "interactive"]);
     }),
   );
 

@@ -578,7 +578,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       if (!project) return Effect.succeed(undefined);
       return inspectProjectGitFacts(
         { policy: deps.policy, git: deps.gitDriver },
-        { project, operation: "workspace lifecycle inspection" },
+        { project, operation: "workspace lifecycle inspection", withUnmergedBranches: true },
       ).pipe(Effect.orElseSucceed(() => undefined));
     });
 

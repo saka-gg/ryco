@@ -71,6 +71,8 @@ interface FakeGhScenario {
   };
   repositoryCloneUrls?: Record<string, { url: string; sshUrl: string }>;
   failWith?: GitHubCliError;
+  /** Fails only repository-wide `pr list` calls (no `--head`). */
+  failRepositoryListWith?: GitHubCliError;
 }
 
 function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
@@ -437,6 +439,9 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
         headSelectorIndex >= 0 && headSelectorIndex < args.length - 1
           ? args[headSelectorIndex + 1]
           : undefined;
+      if (headSelector === undefined && scenario.failRepositoryListWith) {
+        return Effect.fail(scenario.failRepositoryListWith);
+      }
       const mappedQueue =
         typeof headSelector === "string"
           ? prListQueueByHeadSelector.get(headSelector)?.shift()
@@ -572,7 +577,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
       listPullRequests: () => Effect.die("unused"),
-      getPullRequestStates: () => Effect.die("unused"),
+      getLinkStates: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>
         execute({
           cwd: input.cwd,
@@ -1745,6 +1750,80 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const mainStatus = yield* manager.refSummary(repoDir);
       expect(mainStatus).toMatchObject({ refName: "main", isDefaultRef: true, pr: null });
       expect(ghCalls.slice(callsBefore).filter((call) => call.includes("--head"))).toEqual([]);
+    }),
+  );
+
+  it.effect("caches per-branch answers per repository until the index is invalidated", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/old"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/old"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const recent = Array.from({ length: 100 }, (_, index) =>
+        indexedPullRequest({ number: 200 + index, headRefName: `other/${index}`, state: "MERGED" }),
+      );
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          prListSequence: [
+            JSON.stringify(recent),
+            JSON.stringify([]),
+            JSON.stringify(recent),
+            JSON.stringify([]),
+          ],
+          prListByHeadSelector: {
+            "feature/old": JSON.stringify([
+              indexedPullRequest({ number: 3, headRefName: "feature/old", state: "MERGED" }),
+            ]),
+          },
+        },
+      });
+      const headCalls = () => ghCalls.filter((call) => call.includes("pr list --head "));
+
+      // The full status and the sidebar summary keep separate result caches,
+      // but share the repository's index and its per-branch answers.
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 3 });
+      expect((yield* manager.refSummary(repoDir)).pr).toMatchObject({ number: 3 });
+      expect(headCalls()).toHaveLength(1);
+
+      // An explicit refresh drops the branch answers along with the index.
+      yield* manager.invalidateRemoteStatus(repoDir);
+      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toMatchObject({ number: 3 });
+      expect(headCalls()).toHaveLength(2);
+    }),
+  );
+
+  it.effect("does not fall back to per-branch queries when the index listing fails", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/offline"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/offline"]);
+      yield* runGit(repoDir, ["remote", "set-url", "origin", "https://github.com/acme/app.git"]);
+
+      const { manager, ghCalls } = yield* makeManager({
+        detectSourceControlFromRemotes: true,
+        ghScenario: {
+          failRepositoryListWith: new GitHubCliError({
+            operation: "execute",
+            detail: "host unreachable",
+          }),
+        },
+      });
+
+      const error = yield* manager.remoteStatus({ cwd: repoDir }).pipe(Effect.flip);
+      expect(String(error)).toContain("host unreachable");
+      const summary = yield* manager.refSummary(repoDir);
+      expect(summary).toMatchObject({ refName: "feature/offline", pr: null });
+      expect(ghCalls.filter((call) => call.includes("pr list --head "))).toEqual([]);
+      // The failed listing is remembered briefly instead of retried per read.
+      expect(ghCalls.filter((call) => call.startsWith("pr list --state all "))).toHaveLength(1);
     }),
   );
 

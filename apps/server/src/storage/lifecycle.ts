@@ -298,6 +298,41 @@ function isCheckoutPathBlocked(
   });
 }
 
+/**
+ * What part of Ryco's own checkout lifecycle owns `canonical` right now, or null: a worktree
+ * `creation` lease on it, a `relocation` touching it (in flight, awaiting recovery, or done), a
+ * `removal` in progress (`removing`), or a `removed` cleanup tombstone, whose workspace record
+ * follows the git step and may still be pending. Something that finds such a checkout missing on
+ * disk must leave recording that to the lifecycle. Call inside `storageLifecycleLock`; without
+ * persistence only the in-memory creation leases are known.
+ */
+export type CheckoutLifecycleOwner = "creation" | "relocation" | "removal" | "removed";
+
+export function checkoutLifecycleOwner(
+  sql: SqlClient.SqlClient | undefined,
+  canonical: string,
+  platform: NodeJS.Platform = process.platform,
+) {
+  return Effect.gen(function* () {
+    if (hasWorktreeCreationLease(canonical)) return "creation" as const;
+    if (sql === undefined) return null;
+    if (yield* isWorktreeRelocationBlocked(sql, canonical, platform)) return "relocation" as const;
+    const matching =
+      platform === "darwin" || platform === "win32"
+        ? sql`path = ${canonical} COLLATE NOCASE`
+        : sql`path = ${canonical}`;
+    const tombstones = yield* sql<{
+      state: string;
+    }>`SELECT state FROM storage_owned_entries WHERE state IN ('removing', 'removed') AND ${matching} LIMIT 1`;
+    const state = tombstones[0]?.state;
+    return state === "removing"
+      ? ("removal" as const)
+      : state === "removed"
+        ? ("removed" as const)
+        : null;
+  });
+}
+
 /** Active moves fence both paths; completed moves permanently fence the old path. */
 export function isWorktreeRelocationBlocked(
   sql: SqlClient.SqlClient,
