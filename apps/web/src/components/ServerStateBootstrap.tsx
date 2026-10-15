@@ -22,9 +22,9 @@ export function ServerStateBootstrap() {
 
   useEffect(() => {
     if (!connection) return;
-    // Shares the streams the boot path may have started on this client
+    // Shares the streams the boot path may have started on this connection
     // (reference-counted), then ends the boot path's hold on them.
-    const stop = startServerStateSync(connection.client.server);
+    const stop = startServerStateSync(connection);
     releaseEarlyPrimaryServerStateSync();
     return stop;
   }, [connection]);

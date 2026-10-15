@@ -11,7 +11,7 @@ import {
   WORKTREE_SETUP_CANCELLED_MESSAGE,
 } from "@ryco/contracts";
 import { useWorktreeLaunchStore } from "@ryco/client-runtime/state/worktree-setup";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { readWorktreeLaunchRetry } from "../components/chat/worktreeLaunch/worktreeLaunchSend";
 
 import { DraftId } from "../composerDraftStore";
@@ -28,6 +28,31 @@ import {
   executeChatSendTurn,
   rollbackSendTurn,
 } from "./executeChatSendTurn";
+
+// Hosted Hub mode and the target's connection, for the hosted worktree path.
+const hostedTarget = vi.hoisted(() => ({
+  hostedHubMode: false,
+  connection: null as null | {
+    readonly config: { readonly read: () => unknown };
+    readonly shellSnapshotReadiness: { readonly read: () => unknown };
+  },
+}));
+vi.mock("../env", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../env")>()),
+  isHostedHubMode: () => hostedTarget.hostedHubMode,
+}));
+vi.mock("../environments/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../environments/runtime")>();
+  // Forwards to the live module (a copy would freeze bindings that a circular
+  // import has not initialized yet); no connection is registered in these
+  // tests unless one stands in.
+  return new Proxy(actual, {
+    get: (target, key, receiver) =>
+      key === "readEnvironmentConnection"
+        ? () => hostedTarget.connection
+        : Reflect.get(target, key, receiver),
+  });
+});
 
 // Pass-through spy: every test still runs the real send engine.
 const { commitSendTurnDispatchSpy } = vi.hoisted(() => ({
@@ -1274,6 +1299,76 @@ describe("worktree branch defaults", () => {
         }),
       }),
     );
+  });
+
+  describe("on a hosted target", () => {
+    beforeEach(() => resetNewDraftDefaultsCacheForTests());
+    afterEach(() => {
+      hostedTarget.hostedHubMode = false;
+      hostedTarget.connection = null;
+      resetNewDraftDefaultsCacheForTests();
+    });
+
+    function hostedWorktreeSend(liveConfig: ServerConfig | null) {
+      hostedTarget.hostedHubMode = true;
+      hostedTarget.connection = {
+        config: { read: () => liveConfig },
+        shellSnapshotReadiness: { read: () => ({}) },
+      };
+      const { input, dispatchCommand } = makeSendInput();
+      input.worktree.baseBranchForWorktree = "main";
+      input.worktree.shouldCreateWorktree = true;
+      const freshConfig = {
+        environment: { capabilities: { projectPreferences: true } },
+      } as ServerConfig;
+      const getConfig = vi.fn(async () => freshConfig);
+      const getProjectPreferences = vi.fn(async () => ({
+        worktreeBranchPrefix: { value: "proj", source: "project" },
+        runSetupScript: { value: true, source: "builtin" },
+      }));
+      input.dispatch.api = {
+        orchestration: { dispatchCommand },
+        server: {
+          getConfig,
+          getProjectPreferences,
+          getSettings: async () => ({ worktreeBranchPrefix: "team" }),
+        },
+      } as never;
+      return { input, dispatchCommand, getConfig, getProjectPreferences };
+    }
+
+    it("uses the connection's current live config instead of a fresh read", async () => {
+      const live = {
+        environment: { capabilities: { projectPreferences: true } },
+      } as ServerConfig;
+      const send = hostedWorktreeSend(live);
+
+      expect(await executeChatSendTurn(send.input)).toBe(true);
+      expect(send.getConfig).not.toHaveBeenCalled();
+      expect(send.getProjectPreferences).toHaveBeenCalledOnce();
+      const command = send.dispatchCommand.mock.calls[0]?.[0] as { bootstrap?: object };
+      // The live config decided support: the node resolves the setup choice.
+      expect(command.bootstrap).not.toHaveProperty("runSetupScript");
+      expect(command.bootstrap).toMatchObject({
+        prepareWorktree: { branch: expect.stringMatching(/^proj\/[0-9a-f]{8}$/) },
+      });
+    });
+
+    it("reads the config fresh when no current live config exists", async () => {
+      const send = hostedWorktreeSend(null);
+
+      expect(await executeChatSendTurn(send.input)).toBe(true);
+      expect(send.getConfig).toHaveBeenCalledOnce();
+      expect(send.dispatchCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bootstrap: expect.objectContaining({
+            prepareWorktree: expect.objectContaining({
+              branch: expect.stringMatching(/^proj\/[0-9a-f]{8}$/),
+            }),
+          }),
+        }),
+      );
+    });
   });
 
   it("does not guess a default if the node settings are unavailable", async () => {

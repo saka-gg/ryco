@@ -555,6 +555,43 @@ describe("createEnvironmentConnection", () => {
     expect(client.server.subscribeConfig).not.toHaveBeenCalled();
     expect(client.orchestration.subscribeShell).toHaveBeenCalledOnce();
 
+    // Its config stream opens for the first observer (the server-state sync).
+    const stop = connection.config.subscribe(() => undefined);
+    expect(client.server.subscribeConfig).toHaveBeenCalledOnce();
+    stop();
+
+    await connection.dispose();
+  });
+
+  it("keeps one config stream on a saved environment, however many observe it", async () => {
+    const environmentId = EnvironmentId.make("env-1");
+    const { client } = createTestClient();
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: {
+        id: "env-1",
+        label: "Remote env",
+        source: "manual",
+        target: {
+          httpBaseUrl: "http://example.test",
+          wsBaseUrl: "ws://example.test",
+        },
+        environmentId,
+      },
+      client,
+      resetShellProjection: vi.fn(),
+      applyShellEvent: vi.fn(),
+      syncShellSnapshot: vi.fn(),
+      applyTerminalEvent: vi.fn(),
+      onConfigUpdated: vi.fn(),
+    });
+    const stopFirst = connection.config.subscribe(() => undefined);
+    const stopSecond = connection.config.subscribe(() => undefined);
+    stopFirst();
+    stopSecond();
+
+    expect(client.server.subscribeConfig).toHaveBeenCalledOnce();
+
     await connection.dispose();
   });
 });

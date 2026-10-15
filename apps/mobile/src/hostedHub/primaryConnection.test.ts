@@ -1,4 +1,16 @@
-import type { ExecutionEnvironmentDescriptor } from "@ryco/contracts";
+import type { EnvironmentConnectionInput } from "@ryco/client-runtime/connection";
+import {
+  recordWsConnectionAttempt,
+  recordWsConnectionOpened,
+  resetWsConnectionStateForTests,
+  type WsRpcClient,
+} from "@ryco/client-runtime/rpc";
+import {
+  EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
+  type ServerConfig,
+  type ServerConfigStreamEvent,
+} from "@ryco/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const hostedLifecycle = vi.hoisted(() => ({
@@ -159,6 +171,10 @@ import {
   writePrimaryEnvironmentDescriptor,
 } from "./primaryEnvironment";
 import { resetMobileHostedRuntimeConfigForTests } from "./runtimeConfig";
+import {
+  readEnvironmentServerConfig,
+  resetEnvironmentServerConfigsForTests,
+} from "../state/environmentServerConfigs";
 
 const descriptor = {
   environmentId: "env-hosted-1",
@@ -187,6 +203,9 @@ beforeEach(() => {
   enrollment.applyRevocation.mockClear();
   enrollment.invalidate.mockClear();
   coordinator.current = true;
+  coordinator.generation = 3;
+  resetWsConnectionStateForTests();
+  resetEnvironmentServerConfigsForTests();
   coordinator.markReady.mockReset();
   coordinator.markReplaying.mockReset();
   coordinator.reportFailure.mockReset();
@@ -376,6 +395,69 @@ describe("hosted primary connection", () => {
     coordinator.current = false;
     connectionInput.applyThreadPriorities!(item, "env-hosted-1");
     expect(input.applyThreadPriorities).toHaveBeenCalledOnce();
+  });
+
+  it("never reads or publishes config from a superseded generation", async () => {
+    writePrimaryEnvironmentDescriptor(descriptor);
+    createHostedPrimaryConnection(deps());
+    // The real connection over the input the hosted primary built.
+    const { createEnvironmentConnection: createRealConnection } = await vi.importActual<
+      typeof import("@ryco/client-runtime/connection")
+    >("@ryco/client-runtime/connection");
+    let emit: (event: ServerConfigStreamEvent) => void = () => undefined;
+    const connection = createRealConnection({
+      ...(connectionFactory.input as unknown as EnvironmentConnectionInput),
+      client: {
+        server: {
+          subscribeLifecycle: () => () => undefined,
+          subscribeConfig: (listener: (event: ServerConfigStreamEvent) => void) => {
+            emit = listener;
+            return () => undefined;
+          },
+        },
+        orchestration: { subscribeShell: () => () => undefined },
+        terminal: { onEvent: () => () => undefined },
+        dispose: async () => undefined,
+        reconnect: async () => undefined,
+      } as unknown as WsRpcClient,
+    });
+    const environmentId = EnvironmentId.make("env-hosted-1");
+    recordWsConnectionAttempt("wss://hub.example.test/v1/relay/client", {
+      environmentId,
+      recordGlobal: false,
+    });
+    recordWsConnectionOpened({ environmentId, recordGlobal: false });
+    const observed = vi.fn();
+    connection.config.subscribe(observed);
+    const config = (label: string) =>
+      ({
+        environment: { ...descriptor, label },
+        providers: [],
+        issues: [],
+        keybindings: [],
+        settings: { label },
+      }) as unknown as ServerConfig;
+
+    emit({ version: 1, type: "snapshot", config: config("current") } as ServerConfigStreamEvent);
+    expect(connection.config.read()).not.toBeNull();
+    expect(readEnvironmentServerConfig(environmentId)?.settings).toEqual({ label: "current" });
+    expect(observed).toHaveBeenCalledOnce();
+
+    // The coordinator replaced this environment's record: a new generation.
+    coordinator.current = false;
+    coordinator.generation = 4;
+    expect(connection.config.read()).toBeNull();
+    emit({ version: 1, type: "snapshot", config: config("stale") } as ServerConfigStreamEvent);
+    emit({
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: { label: "stale delta" } },
+    } as unknown as ServerConfigStreamEvent);
+
+    expect(connection.config.read()).toBeNull();
+    expect(observed).toHaveBeenCalledOnce();
+    expect(readEnvironmentServerConfig(environmentId)?.settings).toEqual({ label: "current" });
+    await connection.dispose();
   });
 });
 

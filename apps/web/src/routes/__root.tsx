@@ -379,7 +379,7 @@ function startPrimaryConnectionEarly(input: {
       const connection = connectPrimaryEnvironment();
       if (!connection || !input.syncsServerState) return;
       return import("../rpc/earlyServerStateSync").then(({ startEarlyPrimaryServerStateSync }) =>
-        startEarlyPrimaryServerStateSync(connection.client.server, {
+        startEarlyPrimaryServerStateSync(connection, {
           after: input.providerCatalogs,
           onFirstWelcome: warmWelcomeBootstrapThread,
         }),
