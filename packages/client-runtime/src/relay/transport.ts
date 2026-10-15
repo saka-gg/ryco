@@ -189,6 +189,12 @@ export interface HostedRelayAttemptBinding {
       readonly onFailure: (failure: HostedRelayFailure) => void;
     };
     readonly preparedSocketContext: unknown;
+    /**
+     * Whether this attempt may use relay payload compression (§4.6). `false`
+     * once an earlier attempt of this connection ended with
+     * `HostedRelayFailure.compressionFailed`.
+     */
+    readonly relayCompression: boolean;
   }) => unknown;
   readonly authorizeRequest: (info: {
     readonly tag: string;
@@ -310,6 +316,12 @@ export class HostedRelayAttemptFactory {
   #preparation = 0;
   #disposed = false;
   #retryable = true;
+  /**
+   * An attempt of this connection ended on a compressed payload it could not
+   * deliver (§4.6.5); every later attempt runs without compression. Compression
+   * only saves bytes, so going without it costs nothing a peer could exploit.
+   */
+  #compressionDisabled = false;
   /**
    * The last attempt failed before it had a ticket. The next one opens its
    * socket only once it has one, so a node that is offline (or a Hub refusing
@@ -445,6 +457,7 @@ export class HostedRelayAttemptFactory {
         if (!isCurrentAttempt()) return;
         this.#retryable = failure.retryable;
         this.#lastRetryAfterMs = failure.retryAfterMs;
+        if (failure.compressionFailed === true) this.#compressionDisabled = true;
         this.#reconnect.closed();
         if (this.#pendingRequests.size > 0) {
           this.#binding.markDeliveryUnknown(generation);
@@ -461,6 +474,7 @@ export class HostedRelayAttemptFactory {
         ticketExpiresAt,
         callbacks,
         preparedSocketContext: pending.preparedSocketContext,
+        relayCompression: !this.#compressionDisabled,
         ...(earlySocket === undefined ? {} : { earlySocket }),
       };
       const socket = this.#binding.createRelaySocket
@@ -629,6 +643,7 @@ export class HostedRelayAttemptFactory {
     this.#invalidateAttempt();
     this.#disposed = false;
     this.#retryable = true;
+    this.#compressionDisabled = false;
     this.#pendingRequests.clear();
     this.#clearStallWatch();
     this.#lastRetryAfterMs = undefined;

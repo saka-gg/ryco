@@ -248,7 +248,9 @@ design and not as a defect:
 
 - which account and session talk to which node;
 - channel open and close events and their reasons;
-- frame sizes and timing;
+- frame sizes and timing — for the allowlisted node-to-client messages that §4.6 compresses, the
+  size is that of the compressed message rounded up to a padding bucket, and therefore depends on
+  how well the content compresses (§4.6.6);
 - the `capability` and `effectiveRole` carried in `channel.open`;
 - heartbeats;
 - transfer-budget accounting.
@@ -256,7 +258,9 @@ design and not as a defect:
 ### 2.6 Never delivered
 
 - Protection of compromised endpoints (node host or client device).
-- Traffic-analysis protection for the metadata in §2.5.
+- Traffic-analysis protection for the metadata in §2.5, including the compression-length side
+  channel of §4.6.6: a compressed message's padded length depends on the redundancy of its
+  content, which an adversary that also controls part of that content can probe.
 - An operator-proof web client (§2.4).
 - Cryptographic proof that an abrupt channel close was attacker-caused rather than ordinary
   network failure. Authenticated close (§10) detects whether a nominally orderly termination is
@@ -691,6 +695,11 @@ Legacy JSON payloads always begin `{` or `[`; the pinned RPC serialization emits
 object or a JSON array of messages. The capability carrier (§5.3) is the single legacy-JSON
 payload this protocol itself defines.
 
+The first byte `0xFF` is reserved and MUST NOT be assigned as a discriminator: it opens a §4.6
+compressed RPC frame. Such a frame is never discriminated as a class of its own. Inside an
+envelope it is an RPC inner-record body; on a `legacy` channel whose client advertised §4.6 it is
+removed before step 2 of §4.3; anywhere else it is "any other value" and fatal.
+
 The zero-length row exists because a payload with no first byte would otherwise match no class:
 the relay frame schema admits a `data.payload` of length zero, and a payload consisting of
 exactly `RELAY_CHUNK_CAPABILITY_PRELUDE` also post-strips to nothing. Both are enumerated here
@@ -823,6 +832,7 @@ relay frame (canonical CBOR map — relay-protocol.md)
         RELAY_CHUNK_MAGIC chunk framing on oversized messages
          └─ post-strip payload: E2EE envelope | negotiation record | legacy JSON (§3.4)
              └─ inside an envelope: authenticated inner record — RPC bytes or E2EE control
+                 └─ RPC bytes: JSON, or a node-to-client §4.6 compressed frame of it
 ```
 
 Relay contracts, frames, limits, tickets, close reasons, and the relay fixture corpus are
@@ -888,6 +898,12 @@ A receiver MUST process every inbound `data.payload` in exactly this order:
 
 **Unauthenticated bytes never reach the RPC parser.** On a channel in `e2ee` mode the only path
 to the RPC parser is a successfully authenticated inner RPC record.
+
+§4.6 compression adds one step, on one path only. A client that advertised compression on a
+channel locked `legacy` inflates a post-strip payload whose first byte is `0xFF` between steps 1
+and 2, and discriminates the result. In every other state that byte stays "any other value"
+(step 6). On an `e2ee` channel a compressed frame exists only as the body of an authenticated RPC
+inner record, and the client inflates it after step 3.
 
 ### 4.4 Mode machine
 
@@ -1158,12 +1174,236 @@ non-positive fails the channel during establishment rather than shrinking anythi
 same adversary control over `maxDataChunkBytes` is **not** fail-closed by itself, which is why
 §5.5 handles it explicitly.
 
+**Compression (§4.6) changes neither ceiling.** The node compresses an RPC message before the
+record is built, so the record body is the compressed frame, and that frame is what
+`plaintextCeiling` bounds and what the relay cap and chunking see. The client inflates under
+`RELAY_MAX_RPC_MESSAGE_BYTES`, the same bound an uncompressed message meets, so a node never
+compresses a message larger than that. A record's ciphertext length still equals its body length
+plus constant overhead. For a compressed body that length is a function of the content's
+compressibility and not only of its size; §4.6.6 analyses what that exposes.
+
 _Note (non-normative)_: the sender-side ceiling formula matches the existing negotiated-limit
 computation on both current senders, and because `effectiveMessageCeiling` never exceeds
 `RELAY_MAX_RPC_MESSAGE_BYTES`, envelopes produced under it always pass the receiving assembler's
 fixed reassembly cap (verified against `packages/client-runtime/src/relay/relayEngine.ts:198-206`,
 `apps/server/src/hubConnector/RelayChannelRegistry.ts:232-239`, and
 `packages/shared/src/relayMessageChunks.ts:228-235`, 2026-07-30).
+
+### 4.6 Relay payload compression (node to client)
+
+The node may compress large, allowlisted node-to-client RPC messages before they enter the
+pipeline of §4.2. This is an encoding of the **RPC message bytes**. It is not part of this
+protocol's wire format. On an `e2ee` channel the compressed frame is the body of an ordinary RPC
+inner record (`0x01`, "opaque application RPC message bytes"), so the envelope, the registries,
+the signed capability statement (§5.2) and the relay `channel.open` schema are unchanged, and the
+Hub never sees the frame. Client-to-node messages are never compressed.
+
+The reference implementation is `packages/shared/src/relayPayloadCompression.ts` (frame,
+advertisement, padding), `apps/server/src/ws/relayResponseCompression.ts` (the node's allowlist
+and gates), and `packages/client-runtime/src/relay/relayPayloadInflation.ts` (the client's guard).
+
+#### 4.6.1 Frame
+
+| Offset | Bytes | Field                                                                    |
+| ------ | ----- | ------------------------------------------------------------------------ |
+| 0      | 1     | magic `0xFF`                                                             |
+| 1      | 1     | frame version; `0x01` is the only one defined                            |
+| 2      | 1     | flags, `0x00`                                                            |
+| 3      | 1     | reserved, `0x00`                                                         |
+| 4      | 4     | uncompressed length, big-endian uint32, `1..RELAY_MAX_RPC_MESSAGE_BYTES` |
+| 8      | 4     | DEFLATE body length `n`, big-endian uint32, `≥ 1`                        |
+| 12     | `n`   | raw DEFLATE (RFC 1951) stream of the RPC message                         |
+| 12 + n | rest  | zero padding to the bucket of §4.6.4                                     |
+
+`0xFF` never occurs in UTF-8, so no JSON RPC message starts with it. No other payload form starts
+with it either: relay chunks start `RELAY_CHUNK_MAGIC` (`0x00`), the chunk prelude starts `0x20`,
+envelopes `0x01`, and negotiation records `0x02`. A frame passes through the chunk layer like any
+message and is reassembled before anything reads its first byte. The DEFLATE stream MUST end
+exactly at the end of the body; trailing bytes or a second concatenated stream make the frame
+malformed on every platform.
+
+#### 4.6.2 Negotiation and versioning
+
+A client that can inflate appends eight bytes of JSON whitespace to the **end** of its own
+outbound RPC messages: the magic `0x0A 0x0D 0x09 0x20`, then the highest frame version it inflates
+as four base-4 digits spelled `0x20`, `0x09`, `0x0A`, `0x0D` for 0 to 3. Version 1 is
+`0x0A 0x0D 0x09 0x20 0x20 0x20 0x20 0x09`. A client that advertises version N MUST accept every
+frame version from 1 to N; the node frames with the highest version it writes that does not
+exceed N and does not compress at all when there is none. A future frame format is therefore a new
+version, and a client advertising today never receives a format it cannot read.
+
+Trailing whitespace is valid JSON, so a node that predates compression parses the message
+unchanged. The canonical encoder never emits whitespace outside strings, so a current node can
+recognize the advertisement. The leading bytes are left alone: they belong to the chunk prelude
+and to §3.4's discrimination. The client omits the advertisement from a message within its length
+of §4.5's `plaintextCeiling`, and, while the peer has not yet shown it reassembles chunks, from a
+message that it would push past one data chunk (envelope included). The node strips the
+advertisement before the RPC parser and latches it **per channel**, reading it only from bytes the
+E2EE layer delivered to the parser. On an `e2ee` channel the advertisement is therefore
+authenticated, and the Hub can neither inject nor strip it. On a `legacy` channel the Hub can do
+both. That channel is plaintext to the Hub already; injecting the advertisement toward a client
+that cannot inflate produces a frame that client rejects (§4.6.5), which ends the channel with a
+retryable failure after which the client reconnects without compression.
+
+A node compresses a channel's responses only after it has latched that channel's advertisement. A
+client that never advertises — an older client, a platform without a raw-DEFLATE inflater (for
+example Chrome 80 to 102, whose `DecompressionStream` refuses `"deflate-raw"`), or a connection
+on which compression has failed once — never receives a frame. A client advertising to an older
+node receives plain JSON and needs nothing further.
+
+#### 4.6.3 What the node compresses
+
+A response is compressed only when all of the following hold:
+
+1. the channel's client advertised a frame version the node writes (§4.6.2);
+2. the response belongs to an allowlisted method, and **every** value it carries is an
+   allowlisted kind, except for the split described below;
+3. the encoded message is at least 16 KiB (the permessage-deflate threshold of the direct
+   WebSocket), and the message and its compressed frame **together** fit the channel's
+   `plaintextCeiling` (§4.5). The client holds both while it inflates and charges both to its
+   inbound queue, so this keeps a compressed message within what one message may occupy;
+4. raw DEFLATE at level 1, with a **fresh compression context for this message alone**, plus the
+   frame and its padding, comes to at most 90% of the original.
+
+The default allowlist:
+
+| Class                | Method and values                                                                           |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| shell snapshot pages | `orchestration.subscribeShell`: `snapshot-threads` pages, and `snapshot-end` sharing a page |
+| provider lists       | `subscribeServerConfig`: full `providerStatuses` lists                                      |
+
+What each class carries, stated because none of it is credential-free by construction:
+
+- **Shell thread pages** carry thread titles, goals, branches, worktree paths, model selections,
+  and each thread's session, whose `lastError` is provider error text. Titles and goals can be
+  shaped by an attacker (for example an agent that a prompt injection steers into retitling
+  threads through Agent Control).
+- **Provider lists** carry model catalogs, each provider's status `message` (which may embed an
+  OpenCode server URL or CLI stderr), `updateState.output` (raw update-command output, up to 10,000
+  characters), and `auth.email`. An attacker's influence over them is weak: at most a provider
+  endpoint it controls shaping its own catalog. Current clients ask for `providerStatusesDelta`
+  and therefore receive no full list after the snapshot; full lists are compressed only for
+  clients that do not take deltas.
+
+Never compressed:
+
+- `snapshot-begin` and the unpaged shell `snapshot`. They carry the projects, whose script
+  commands and custom system prompts (up to 20,000 characters) are where users put database URLs,
+  `Authorization` headers and API keys. When `snapshot-begin` shares a message with the first
+  thread page, the node splits it off into an uncompressed message of its own ahead of the
+  compressed page. The client acknowledges both messages; the node withholds the first of those
+  two acknowledgements from the RPC server, which sent one chunk and waits for one.
+- Every event and delta, including `providerStatusesDelta`.
+- The server config snapshot, `settingsUpdated` and `server.getConfig`. They carry
+  `ServerSettings`, whose client copy still holds credential-bearing values in plain text: the
+  OpenCode server password, provider environment variables not marked sensitive, and telemetry
+  URLs. Only sensitive provider environment variables and the CLIProxyAPI hub keys are redacted for
+  clients (`redactServerSettingsForClient` in `apps/server/src/serverSettings.ts`).
+- Errors and defects, authentication, pairing and token methods, terminals, and device and
+  computer streams.
+- Thread windows (`orchestration.subscribeThreadWindow` snapshots, `orchestration.getThreadWindow`
+  and `orchestration.getThreadHistoryPage` results). Their rules are defined as an opt-in class and
+  are off by default (§4.6.6).
+
+The node compresses before §4.2 step 1, inside the RPC session's single output lock, so a
+response waiting on the compressor keeps its place and per-channel order holds. On an `e2ee`
+channel the compressed frame is the record body, and it alone is checked against
+`plaintextCeiling`.
+
+#### 4.6.4 Padding
+
+The frame is zero-padded to a multiple of `max(1 KiB, P / 16)`, where `P` is the largest power of
+two not above the unpadded frame length. The overhead stays below 6.25% at every size. A receiver
+rejects non-zero padding.
+
+#### 4.6.5 Client inflation and its guard
+
+The client inflates where the frame lives: after authentication and dispatch of the RPC inner
+record on an `e2ee` channel, and before discrimination on a `legacy` one (§4.3). In `negotiating`
+a frame is not inflated; it is "any other value" for the mode machine. Inflation is asynchronous
+and is chained with interception, so no payload is delivered ahead of an earlier one. Payloads
+waiting on the chain stay charged to the inbound queue, so a slow inflation pauses the channel
+(`flow.pause`) and bounds what waits behind it like any slow reader.
+
+The guard is:
+
+- the declared uncompressed length MUST NOT exceed `RELAY_MAX_RPC_MESSAGE_BYTES`, and is checked
+  before any byte is inflated. It is charged to the inbound queue for the inflation's duration, in
+  addition to the frame, which stays charged until delivery. A charge the queue cannot hold fails
+  the channel as a slow consumer, and that failure is flagged as a compression failure (below):
+  compression can be what put it over, since a compressed message is held twice where an
+  uncompressed one is held once. A conforming node keeps message and frame within the channel's
+  ceiling (§4.6.3), so this takes a full queue or non-conforming limits;
+- inflation is streamed in 4 KiB input slices into a single buffer of the declared length and
+  abandoned as soon as output would exceed it. Peak memory is the declared length plus one slice's
+  worst-case expansion (raw DEFLATE expands at most about 1032:1, so about 4 MiB), with no further
+  copy;
+- an output length that differs from the declared one is fatal, as is a truncated or corrupt
+  stream, trailing bytes after it, an unknown version, non-zero flags, or non-zero padding;
+- a frame on a channel where this client never advertised is fatal.
+
+Every such failure ends the channel with `channel_rejected` and no `E2EEError` (the condition is
+detected above the record layer, as for any other defect past authentication). The local failure
+is **retryable** and flagged, and the connection's next attempt runs without compression: for web
+and the native app until the connection is reset, for the desktop workspace relay for ten minutes
+per environment or until its session resets. On a `legacy`-locked channel this includes a `0xFF`
+frame a Hub injected: the result is a retryable close and a reconnect without compression. Turning
+compression off removes a side channel and costs only bytes, so a peer that provokes it gains
+nothing it could not get by closing the channel, and it is not a downgrade of anything §2
+promises. Web and desktop inflate with the platform `DecompressionStream("deflate-raw")`, after
+probing that the format is supported. The native app inflates with fflate's streaming `Inflate`,
+because Hermes has no `DecompressionStream`, and applies the same end-of-stream rule.
+
+#### 4.6.6 The length side channel
+
+Compressing before encrypting makes a record's length depend on the redundancy of its plaintext.
+That is the CRIME/BREACH class of side channel. The Hub is the adversary of §2.1. It sees every
+record's length, message boundaries (the chunk headers that split an envelope travel outside it),
+and timing, and it can close channels at will.
+
+- **Baseline.** Without compression the Hub already learns the exact length of every RPC message
+  and the timing of every streaming delta: the thread count of a shell snapshot, the length of
+  each prompt and response, and the length of each streamed token, which is itself a known side
+  channel against streamed model output. What compression adds is different in kind. The length
+  now also reveals whether content repeats other content of the **same message** within DEFLATE's
+  32 KiB window.
+- **What an attack needs and costs.** The attacker must place chosen bytes in the same compressed
+  message as a secret, within 32 KiB of it, next to a known prefix of at least three bytes —
+  trivially available for most credential formats (`sk-ant-`, `ghp_`, `AKIA`, `Bearer `) — and see
+  the compressed length of each attempt. Placing several candidate guesses in one message and
+  splitting the candidate set by halves recovers a character in roughly six observations, so a
+  40-character secret takes about 240 observations before padding. The practical limit is how many
+  messages containing both the secret and fresh attacker content get delivered.
+- **What the Hub can force.** Closing a channel makes the client reconnect and re-subscribe. A
+  reconnect within the server's replay window resumes instead of re-sending the snapshot; a Hub
+  that stalls reconnects past that window forces a full snapshot each time. Clients that do not
+  take thread-priority deltas also receive a full snapshot on every priority change. Re-delivering
+  unchanged content repeats the same length and teaches nothing, so each new guess still needs new
+  attacker-controlled content inside the same message, for shell pages through thread titles or
+  goals an attacker can steer.
+- **Per class.** Shell thread pages pair attacker-steerable titles and goals with other threads'
+  titles, goals, branches and provider error text. Credentials there are not expected but are not
+  excluded either: a user can paste a token into a title or goal, and provider error text can echo
+  one. Provider lists carry update output, status messages and account email, and attacker
+  influence over them is weak. Project data, settings, every event and every thread window stay
+  uncompressed by default. Thread windows would pair whatever the user pasted and tools printed
+  (environment dumps, configuration files, tokens) with repository content, fetched pages and
+  model output an attacker can shape; that is why they are opt-in.
+- **Mitigations and their limits.** Fresh per-message contexts confine the channel to one
+  message: no message can probe another. Padding hides the one to three bytes a guess changes
+  unless the message sits within those bytes of a bucket boundary; an attacker who controls the
+  length of the injected content can binary-search the boundary, which costs about
+  `log2(bucket)` extra observations (10 at 1 KiB, 16 at 64 KiB) and must be redone whenever other
+  content in the message changes. Padding therefore multiplies the cost by roughly ten; it does not
+  stop the attack. The 16 KiB threshold is not a defense, because injected content can always reach
+  it. Level 1 finds slightly fewer matches than higher levels, which adds noise but no protection.
+- **Per tier.** On the unsigned web tier an active Hub can already read everything through the
+  code it serves (§2.4). On the native tiers, where §2.2 promises that the Hub learns only §2.5
+  metadata, shell-page compression is a residual risk for any secret that ends up in a thread title,
+  goal or provider error, against a Hub that also steers what those fields contain.
+- **The levers.** Every class is one entry of `RELAY_COMPRESSION_ALLOWLIST`; deleting
+  `shellSnapshotPages` or `providerStatuses` removes it, and adding
+  `RELAY_COMPRESSION_OPT_IN_CLASSES.threadWindows` turns thread windows on.
 
 ## 5. Capability advertisement and negotiation
 

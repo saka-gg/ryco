@@ -13,6 +13,11 @@ import {
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
 import { stripRelayChunkCapabilityPrelude } from "@ryco/shared/relayMessageChunks";
+import {
+  encodeCompressedRelayPayload,
+  hasRelayCompressionAdvertisement,
+  stripRelayCompressionAdvertisement,
+} from "@ryco/shared/relayPayloadCompression";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -25,6 +30,7 @@ import {
 } from "../../test/maliciousRelay";
 import {
   BrowserHostedRelaySocket,
+  browserRelayPayloadInflater,
   createBrowserRelaySocket,
   hostedHubSessionWebSocketUrl,
   hostedRelayWebSocketUrl,
@@ -54,8 +60,11 @@ const callbacks = relayCallbacks;
  * still builds it whenever §14.5's startup check refuses one: no `e2ee`, so the
  * engine runs the unchanged legacy channel.
  */
-function create(handlers = callbacks()) {
-  return createRelayHarness({ handlers });
+function create(handlers = callbacks(), options: { readonly compression?: boolean } = {}) {
+  return createRelayHarness({
+    handlers,
+    ...(options.compression === false ? { inflater: null } : {}),
+  });
 }
 
 function authenticate(socket: MockWebSocket) {
@@ -84,7 +93,11 @@ function hex(bytes: Uint8Array): string {
 function lastPayload(socket: MockWebSocket): number[] | null {
   const decoded = decodeRelayFrame(new Uint8Array(socket.sent.at(-1)!));
   return decoded.ok && decoded.value.type === "data"
-    ? [...stripRelayChunkCapabilityPrelude(decoded.value.payload).message]
+    ? [
+        ...stripRelayCompressionAdvertisement(
+          stripRelayChunkCapabilityPrelude(decoded.value.payload).message,
+        ),
+      ]
     : null;
 }
 
@@ -180,7 +193,9 @@ describe("BrowserHostedRelaySocket destination validation", () => {
 
 describe("BrowserHostedRelaySocket wire compatibility", () => {
   it("emits the pre-E2EE frame sequence byte for byte when constructed with no E2EE provider", async () => {
-    const { facade, socket } = create();
+    // Compression off as well: its advertisement is the one deliberate change
+    // to a provider-less channel's bytes, and the test below pins it.
+    const { facade, socket } = create(callbacks(), { compression: false });
     const received: number[][] = [];
     facade.addEventListener("message", (event) =>
       received.push([...new Uint8Array((event as MessageEvent).data)]),
@@ -251,6 +266,72 @@ describe("BrowserHostedRelaySocket wire compatibility", () => {
     socket.frame({ type: "channel.accept", ...VERSION, channelId: CHANNEL_ID });
     expect(built).toHaveLength(1);
     expect(built[0]!.channel.channelId).toBe(CHANNEL_ID);
+  });
+
+  it("advertises compression by default and inflates the node's compressed payloads", async () => {
+    const { facade, socket } = create();
+    const received: string[] = [];
+    facade.addEventListener("message", (event) =>
+      received.push(new TextDecoder().decode((event as MessageEvent).data)),
+    );
+    authenticate(socket);
+    facade.send(new TextEncoder().encode('{"first":1}'));
+    const decoded = decodeRelayFrame(new Uint8Array(socket.sent.at(-1)!));
+    if (!decoded.ok || decoded.value.type !== "data") throw new Error("expected a data frame");
+    expect(
+      hasRelayCompressionAdvertisement(
+        stripRelayChunkCapabilityPrelude(decoded.value.payload).message,
+      ),
+    ).toBe(true);
+
+    const message = JSON.stringify({ snapshot: "thread ".repeat(4_000) });
+    const deflated = new Uint8Array(
+      await new Response(
+        new Blob([message]).stream().pipeThrough(new CompressionStream("deflate-raw")),
+      ).arrayBuffer(),
+    );
+    socket.frame({
+      type: "data",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      sequence: 0 as never,
+      payload: encodeCompressedRelayPayload(deflated, new TextEncoder().encode(message).byteLength),
+    });
+    await vi.waitFor(() => expect(received).toEqual([message]));
+  });
+
+  it("does not advertise where DecompressionStream lacks deflate-raw, or when told not to", () => {
+    const original = globalThis.DecompressionStream;
+    // Chrome 80–102: the constructor exists and refuses "deflate-raw".
+    globalThis.DecompressionStream = function (format: string) {
+      if (format === "deflate-raw") throw new TypeError("Unsupported compression format");
+    } as unknown as typeof DecompressionStream;
+    try {
+      expect(browserRelayPayloadInflater()).toBeUndefined();
+      const { facade, socket } = create();
+      authenticate(socket);
+      facade.send(new TextEncoder().encode('{"first":1}'));
+      const decoded = decodeRelayFrame(new Uint8Array(socket.sent.at(-1)!));
+      if (!decoded.ok || decoded.value.type !== "data") throw new Error("expected a data frame");
+      expect(
+        hasRelayCompressionAdvertisement(
+          stripRelayChunkCapabilityPrelude(decoded.value.payload).message,
+        ),
+      ).toBe(false);
+    } finally {
+      globalThis.DecompressionStream = original;
+    }
+    expect(browserRelayPayloadInflater()).toBeDefined();
+    const disabled = createRelayHarness({ relayCompression: false });
+    authenticate(disabled.socket);
+    disabled.facade.send(new TextEncoder().encode('{"first":1}'));
+    const decoded = decodeRelayFrame(new Uint8Array(disabled.socket.sent.at(-1)!));
+    if (!decoded.ok || decoded.value.type !== "data") throw new Error("expected a data frame");
+    expect(
+      hasRelayCompressionAdvertisement(
+        stripRelayChunkCapabilityPrelude(decoded.value.payload).message,
+      ),
+    ).toBe(false);
   });
 
   it("coerces string, ArrayBuffer, typed-array, and SharedArrayBuffer send inputs", () => {

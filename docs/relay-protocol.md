@@ -246,6 +246,12 @@ encryption layer carried entirely inside `data.payload`. It adds no relay frame,
 close reason, or version change; encrypted payloads remain opaque byte strings that the relay
 routes exactly as this document specifies.
 
+Node-to-client compression of large, allowlisted RPC messages
+([relay payload encryption §4.6](./relay-e2ee-protocol.md#46-relay-payload-compression-node-to-client))
+is likewise carried inside `data.payload`. On an encrypted channel it sits inside the encrypted
+record, so the relay sees only the record's length. It is negotiated in-band between client and
+node and needs nothing from the relay.
+
 ## Encoded-size enforcement
 
 Size is checked before semantic validation:

@@ -10,10 +10,20 @@ import {
 import { type HubSessionFrame } from "@ryco/contracts/hub-session";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
+import {
+  RelayMessageAssembler,
+  stripRelayChunkCapabilityPrelude,
+} from "@ryco/shared/relayMessageChunks";
+import {
+  hasRelayCompressionAdvertisement,
+  isCompressedRelayPayload,
+} from "@ryco/shared/relayPayloadCompression";
 import { Effect, Exit, Scope, Stream } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { makeRpcByteSession } from "../ws/RpcByteSession.ts";
+import { pageShellSnapshot } from "../ws/context/shellSnapshotPages.ts";
+import { RelayResponseCompressor } from "../ws/relayResponseCompression.ts";
 import { RelayChannelRegistry } from "./RelayChannelRegistry.ts";
 import { RelaySendQueue } from "./RelaySendQueue.ts";
 
@@ -221,6 +231,222 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+interface HostedShellSession {
+  readonly received: unknown[];
+  readonly unsubscribe: () => void;
+  readonly client: { readonly dispose: () => Promise<void> };
+  readonly registry: RelayChannelRegistry;
+  readonly sessionScopes: Scope.Closeable[];
+  /** Every node-to-client data payload, reassembled into whole messages. */
+  readonly nodeMessages: Uint8Array[];
+}
+
+/**
+ * The real hosted web client stack — WsTransport, the hosted relay socket and
+ * engine — subscribed to the shell of a real node byte session behind a real
+ * channel registry, with the Hub reduced to a frame forwarder.
+ */
+async function openHostedShellSession(options: {
+  readonly subscribeShell: (input: {
+    readonly snapshotDelivery?: "paged";
+  }) => Stream.Stream<unknown>;
+  readonly compressResponses?: boolean;
+}): Promise<HostedShellSession> {
+  const handlerLayer = WsRpcGroup.toLayer(
+    Effect.succeed(
+      WsRpcGroup.of({
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: options.subscribeShell,
+      } as never),
+    ),
+  );
+  const sessionScopes: Scope.Closeable[] = [];
+  const nodeMessages: Uint8Array[] = [];
+  const nodeAssembler = new RelayMessageAssembler();
+  const relaySocket = {
+    bufferedAmount: 0,
+    send: (bytes: Uint8Array) => {
+      const decoded = decodeRelayFrame(bytes);
+      if (decoded.ok && decoded.value.type === "data") {
+        const assembled = nodeAssembler.push(Uint8Array.from(decoded.value.payload));
+        if (assembled.kind === "done") nodeMessages.push(assembled.message);
+      }
+      physicalSockets.at(-1)?.deliverBytes(bytes);
+    },
+  };
+  const sendQueue = new RelaySendQueue(relaySocket, RELAY_INITIAL_LIMITS);
+  const registry = new RelayChannelRegistry({
+    limits: RELAY_INITIAL_LIMITS,
+    protocol: VERSION,
+    sendQueue,
+    onOutboundReady: () => sendQueue.flush(),
+    factory: {
+      open: async ({ send }) => {
+        const scope = await Effect.runPromise(Scope.make("sequential"));
+        sessionScopes.push(scope);
+        const session = await Effect.runPromise(
+          makeRpcByteSession(
+            WsRpcGroup,
+            handlerLayer,
+            (bytes) =>
+              Effect.sync(() => {
+                if (!send(bytes).accepted) throw new Error("Test relay output queue is full.");
+              }),
+            {
+              queueCapacity: 8,
+              ...(options.compressResponses ? { compressor: new RelayResponseCompressor() } : {}),
+            },
+          ).pipe(Effect.provideService(Scope.Scope, scope)),
+        );
+        return {
+          receive: (bytes: Uint8Array) => Effect.runPromise(session.receive(bytes)),
+          queuedBytes: () => Effect.runPromise(session.queuedBytes),
+          supportsChunkedMessages: session.supportsChunkedMessages,
+          close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
+        };
+      },
+    },
+  });
+  testGlobals.WebSocket = class extends PhysicalRelaySocket {
+    constructor() {
+      super(registry);
+      queueMicrotask(() => this.open());
+    }
+  };
+  const selectedNode = {
+    id: "node_aaaaaaaaaaaaaaaaaaaaaa",
+    environmentId: EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa"),
+    label: "Public test node",
+    platformOs: "linux",
+    platformArch: "x64",
+    clientVersion: "0.1.8",
+    createdAt: 1,
+    updatedAt: 1,
+    lastAuthenticatedAt: 1,
+    revokedAt: null,
+    revocationReasonCode: null,
+    grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
+    effectiveRole: "operator",
+    presence: { online: true, lastHeartbeatAt: 1 },
+  };
+  // The outer socket is account-owned before any node ticket is consumed.
+  vi.spyOn(hostedHubController, "notifyDirectoryInvalidated").mockImplementation(() => undefined);
+  useHostedHubStore.setState({
+    accountStatus: "authenticated",
+    account: {
+      id: "account-public-test",
+      displayName: "Test",
+      role: "owner",
+      createdAt: 1,
+      disabledAt: null,
+    },
+    session: {
+      id: "session-public-test",
+      accountId: "account-public-test",
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      lastSeenAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+    },
+    directoryStatus: "ready",
+    selectedNode,
+    selectionStatus: "online",
+    effectiveRole: "operator",
+    generation: 1,
+  });
+  stopWatchingSession = watchWebHostedHubSession();
+  vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+    ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
+    expiresAt: Date.now() + 60_000,
+  });
+  const attemptFactory = getHostedRelayAttemptFactory();
+  const transport = new WsTransport(
+    () => attemptFactory.nextUrl(),
+    attemptFactory.lifecycleHandlers(),
+  );
+  const client = createWsRpcClient(transport);
+  const received: unknown[] = [];
+  const unsubscribe = client.orchestration.subscribeShell((item) => received.push(item));
+  return { received, unsubscribe, client, registry, sessionScopes, nodeMessages };
+}
+
+async function closeHostedShellSession(session: HostedShellSession): Promise<void> {
+  session.unsubscribe();
+  await session.client.dispose();
+  stopWatchingSession?.();
+  stopWatchingSession = undefined;
+  await session.registry.closeAll();
+  for (const scope of session.sessionScopes) {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+  }
+}
+
+/** A project whose script carries a credential, as users' scripts do. */
+const SECRET_SCRIPT_COMMAND =
+  "DATABASE_URL=postgres://relay:hunter2@db.internal/app bun run migrate";
+
+/** The shell as the subscriber asked for it: paged when it asked, one item otherwise. */
+function shellItems(
+  snapshot: ReturnType<typeof largeShellSnapshot>,
+  input: { readonly snapshotDelivery?: "paged" },
+): Stream.Stream<unknown> {
+  return input.snapshotDelivery === "paged"
+    ? Stream.fromArrays(...pageShellSnapshot(snapshot.snapshot as never, 256 * 1_024))
+    : Stream.succeed(snapshot);
+}
+
+function largeShellSnapshot(threadCount: number) {
+  return {
+    kind: "snapshot" as const,
+    snapshot: {
+      snapshotSequence: 0,
+      projects: [
+        {
+          id: "project-public-test",
+          title: "Public test project",
+          workspaceRoot: "/tmp/public-test",
+          defaultModelSelection: null,
+          scripts: [
+            {
+              id: "migrate",
+              name: "Migrate",
+              command: SECRET_SCRIPT_COMMAND,
+              icon: "play" as const,
+              runOnWorktreeCreate: false,
+            },
+          ],
+          createdAt: "2026-07-18T00:00:00.000Z",
+          updatedAt: "2026-07-18T00:00:00.000Z",
+        },
+      ],
+      worktrees: [],
+      threads: Array.from({ length: threadCount }, (_, index) => ({
+        id: `thread-${index}`,
+        projectId: "project-public-test",
+        title: `Investigate relay case ${index % 37}`,
+        modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: `feature/relay-${index}`,
+        worktreePath: null,
+        latestTurn: null,
+        goal: null,
+        createdAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: "2026-07-18T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      })),
+      updatedAt: "2026-07-18T00:00:00.000Z",
+    },
+  };
+}
+
 describe("hosted relay session integration", () => {
   it("streams the initial shell snapshot, acknowledges it, and receives a later event", async () => {
     const snapshot = {
@@ -238,118 +464,18 @@ describe("hosted relay session integration", () => {
       sequence: 1,
       projectId: ProjectId.make("project-public-test"),
     };
-    const handlerLayer = WsRpcGroup.toLayer(
-      Effect.succeed(
-        WsRpcGroup.of({
-          [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
-            Stream.concat(
-              Stream.succeed(snapshot),
-              Stream.concat(
-                Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
-                Stream.never,
-              ),
-            ),
-        } as never),
-      ),
-    );
-    const sessionScopes: Scope.Closeable[] = [];
-    const relaySocket = {
-      bufferedAmount: 0,
-      send: (bytes: Uint8Array) => physicalSockets.at(-1)?.deliverBytes(bytes),
-    };
-    const sendQueue = new RelaySendQueue(relaySocket, RELAY_INITIAL_LIMITS);
-    const registry = new RelayChannelRegistry({
-      limits: RELAY_INITIAL_LIMITS,
-      protocol: VERSION,
-      sendQueue,
-      onOutboundReady: () => sendQueue.flush(),
-      factory: {
-        open: async ({ send }) => {
-          const scope = await Effect.runPromise(Scope.make("sequential"));
-          sessionScopes.push(scope);
-          const session = await Effect.runPromise(
-            makeRpcByteSession(
-              WsRpcGroup,
-              handlerLayer,
-              (bytes) =>
-                Effect.sync(() => {
-                  if (!send(bytes).accepted) throw new Error("Test relay output queue is full.");
-                }),
-              { queueCapacity: 8 },
-            ).pipe(Effect.provideService(Scope.Scope, scope)),
-          );
-          return {
-            receive: (bytes: Uint8Array) => Effect.runPromise(session.receive(bytes)),
-            queuedBytes: () => Effect.runPromise(session.queuedBytes),
-            supportsChunkedMessages: session.supportsChunkedMessages,
-            close: () => Effect.runPromise(Scope.close(scope, Exit.void)),
-          };
-        },
-      },
+    const session = await openHostedShellSession({
+      subscribeShell: () =>
+        Stream.concat(
+          Stream.succeed(snapshot),
+          Stream.concat(
+            Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
+            Stream.never,
+          ),
+        ),
     });
-    testGlobals.WebSocket = class extends PhysicalRelaySocket {
-      constructor() {
-        super(registry);
-        queueMicrotask(() => this.open());
-      }
-    };
-    const selectedNode = {
-      id: "node_aaaaaaaaaaaaaaaaaaaaaa",
-      environmentId: EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa"),
-      label: "Public test node",
-      platformOs: "linux",
-      platformArch: "x64",
-      clientVersion: "0.1.8",
-      createdAt: 1,
-      updatedAt: 1,
-      lastAuthenticatedAt: 1,
-      revokedAt: null,
-      revocationReasonCode: null,
-      grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
-      effectiveRole: "operator",
-      presence: { online: true, lastHeartbeatAt: 1 },
-    };
-    // The outer socket is account-owned before any node ticket is consumed.
-    vi.spyOn(hostedHubController, "notifyDirectoryInvalidated").mockImplementation(() => undefined);
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account: {
-        id: "account-public-test",
-        displayName: "Test",
-        role: "owner",
-        createdAt: 1,
-        disabledAt: null,
-      },
-      session: {
-        id: "session-public-test",
-        accountId: "account-public-test",
-        createdAt: 1,
-        expiresAt: Date.now() + 60_000,
-        lastSeenAt: 1,
-        revokedAt: null,
-        revocationReasonCode: null,
-      },
-      directoryStatus: "ready",
-      selectedNode,
-      selectionStatus: "online",
-      effectiveRole: "operator",
-      generation: 1,
-    });
-    stopWatchingSession = watchWebHostedHubSession();
-    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
-      ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
-      expiresAt: Date.now() + 60_000,
-    });
-    const attemptFactory = getHostedRelayAttemptFactory();
-    const transport = new WsTransport(
-      () => attemptFactory.nextUrl(),
-      attemptFactory.lifecycleHandlers(),
-    );
-    const client = createWsRpcClient(transport);
-    const received: unknown[] = [];
-    const unsubscribe = client.orchestration.subscribeShell((item) => received.push(item));
 
-    await vi.waitFor(() => expect(received).toEqual([snapshot, laterEvent]));
+    await vi.waitFor(() => expect(session.received).toEqual([snapshot, laterEvent]));
 
     expect(useHostedHubStore.getState()).toMatchObject({
       transportStatus: "online",
@@ -363,8 +489,8 @@ describe("hosted relay session integration", () => {
         (frame) => frame.type === "data" && frame.channelId === CHANNEL_ID,
       ).length,
     ).toBeGreaterThanOrEqual(2);
-    unsubscribe();
-    await client.dispose();
+    session.unsubscribe();
+    await session.client.dispose();
     await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
     expect(physicalSockets).toHaveLength(1);
     expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
@@ -374,12 +500,85 @@ describe("hosted relay session integration", () => {
     expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
       true,
     );
-    stopWatchingSession();
+    stopWatchingSession?.();
     stopWatchingSession = undefined;
     expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
-    await registry.closeAll();
-    for (const scope of sessionScopes) {
-      await Effect.runPromise(Scope.close(scope, Exit.void));
+    await closeHostedShellSession(session);
+  });
+
+  it("carries a large paged shell snapshot compressed end to end and delivers it intact", async () => {
+    const snapshot = largeShellSnapshot(2_000);
+    const session = await openHostedShellSession({
+      subscribeShell: (input) => Stream.concat(shellItems(snapshot, input), Stream.never),
+      compressResponses: true,
+    });
+
+    await vi.waitFor(() => expect(session.received).toHaveLength(1), { timeout: 5_000 });
+    const delivered = session.received[0] as typeof snapshot;
+    expect(delivered.kind).toBe("snapshot");
+    expect(delivered.snapshot.threads.map((thread) => thread.id)).toEqual(
+      snapshot.snapshot.threads.map((thread) => thread.id),
+    );
+    expect(delivered.snapshot.projects[0]?.scripts[0]?.command).toBe(SECRET_SCRIPT_COMMAND);
+
+    // The browser client advertised, so the node compressed every thread page.
+    // Each page is an acknowledged chunk, so getting past the first proves the
+    // split first message (its `snapshot-begin` alone, then its compressed
+    // threads) was acknowledged exactly once.
+    const plainBytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+    const compressed = session.nodeMessages.filter(isCompressedRelayPayload);
+    expect(compressed.length).toBeGreaterThan(2);
+    const wire = compressed.reduce((sum, frame) => sum + frame.byteLength, 0);
+    expect(wire).toBeLessThan(plainBytes / 5);
+    // Project data travelled uncompressed, in a message of its own.
+    const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+    const withProjects = session.nodeMessages.filter((bytes) => text(bytes).includes("hunter2"));
+    expect(withProjects).toHaveLength(1);
+    expect(isCompressedRelayPayload(withProjects[0]!)).toBe(false);
+    expect(text(withProjects[0]!)).not.toContain('"snapshot-threads"');
+    const physical = physicalSockets.at(-1)!;
+    const advertised = physical.receivedFromClient.filter(
+      (frame) =>
+        frame.type === "data" &&
+        hasRelayCompressionAdvertisement(stripRelayChunkCapabilityPrelude(frame.payload).message),
+    );
+    expect(advertised.length).toBeGreaterThan(0);
+    await closeHostedShellSession(session);
+  });
+
+  it("sends plain bytes to a client that cannot inflate, from the same compressing node", async () => {
+    // An old client: it never advertises, so the node must not compress for it.
+    const original = globalThis.DecompressionStream;
+    Object.defineProperty(globalThis, "DecompressionStream", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+    try {
+      const snapshot = largeShellSnapshot(500);
+      const session = await openHostedShellSession({
+        subscribeShell: (input) => Stream.concat(shellItems(snapshot, input), Stream.never),
+        compressResponses: true,
+      });
+      await vi.waitFor(() => expect(session.received).toHaveLength(1), { timeout: 5_000 });
+      expect(session.nodeMessages.some(isCompressedRelayPayload)).toBe(false);
+      const physical = physicalSockets.at(-1)!;
+      expect(
+        physical.receivedFromClient.some(
+          (frame) =>
+            frame.type === "data" &&
+            hasRelayCompressionAdvertisement(
+              stripRelayChunkCapabilityPrelude(frame.payload).message,
+            ),
+        ),
+      ).toBe(false);
+      await closeHostedShellSession(session);
+    } finally {
+      Object.defineProperty(globalThis, "DecompressionStream", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
     }
   });
 });

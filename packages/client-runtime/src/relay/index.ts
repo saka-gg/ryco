@@ -13,3 +13,4 @@ export * from "./hostedHubSession.ts";
 // re-exported: import them from `@ryco/client-runtime/relay/e2ee`. Metro does
 // not tree-shake, so a re-export here would put that stack on the startup path
 // of every native client that imports any relay helper.
+export * from "./relayPayloadInflation.ts";

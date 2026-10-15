@@ -3,6 +3,7 @@ import {
   encodeBase64Url,
   type HostedRelaySocketCallbacks,
   type RelayE2eeProvider,
+  type RelayPayloadInflater,
 } from "@ryco/client-runtime/relay";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
 import {
@@ -136,6 +137,9 @@ export function createRelayHarness(
   options: {
     readonly e2ee?: RelayE2eeProvider | undefined;
     readonly handlers?: RelayCallbackSpies;
+    /** Relay payload compression; `null` builds a socket that neither advertises nor inflates. */
+    readonly inflater?: RelayPayloadInflater | null;
+    readonly relayCompression?: boolean;
   } = {},
 ): RelayHarness {
   const handlers = options.handlers ?? relayCallbacks();
@@ -151,6 +155,10 @@ export function createRelayHarness(
       return socket as unknown as WebSocket;
     },
     ...(options.e2ee === undefined ? {} : { e2ee: options.e2ee }),
+    ...(options.inflater === undefined ? {} : { inflater: options.inflater }),
+    ...(options.relayCompression === undefined
+      ? {}
+      : { relayCompression: options.relayCompression }),
   });
   return { facade, socket: sockets[0]!, handlers };
 }

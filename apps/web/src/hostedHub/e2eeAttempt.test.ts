@@ -3,6 +3,7 @@ import type { RelayE2eeChannel, RelayE2eeHost } from "@ryco/client-runtime/relay
 import { T_ADV } from "@ryco/shared/relayE2eeConstants";
 import { decodeNodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscripts";
 import { deriveE2eeWebSas } from "@ryco/shared/relayE2eeVerificationDisplay";
+import { stripRelayCompressionAdvertisement } from "@ryco/shared/relayPayloadCompression";
 import {
   classifyPostStripPayload,
   encodeE2eeCapabilityCarrier,
@@ -278,7 +279,9 @@ describe("§14.5 the startup randomness check gates the provider, not a handshak
     // to LEGACY rather than to a half-E2EE mode nothing could describe.
     const payloads = outboundRelayPayloads(harness.socket);
     expect(payloads).toHaveLength(1);
-    expect(new TextDecoder().decode(payloads[0]!)).toBe('{"first":1}');
+    expect(new TextDecoder().decode(stripRelayCompressionAdvertisement(payloads[0]!))).toBe(
+      '{"first":1}',
+    );
     expect(relayCloseReasons(harness.socket)).toEqual([]);
 
     // …and the projection SAYS legacy, because §12.2 applies to this channel as

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   DesktopWorkspaceRelayManager,
+  RELAY_COMPRESSION_RETRY_AFTER_MS,
   type DesktopWorkspaceRelayAuthority,
   type DesktopWorkspaceTransportEvent,
 } from "./desktopWorkspaceRelay.ts";
@@ -222,7 +223,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function relayFixture() {
+function relayFixture(options: { readonly now?: () => number } = {}) {
   const environmentId = EnvironmentId.make("environment-1");
   const target = {
     accountId: "account",
@@ -254,7 +255,12 @@ function relayFixture() {
     ) => ({ send: vi.fn(), close }),
   );
   const emit = vi.fn();
-  const manager = new DesktopWorkspaceRelayManager({ authority, socketFactory, emit });
+  const manager = new DesktopWorkspaceRelayManager({
+    authority,
+    socketFactory,
+    emit,
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
   return {
     environmentId,
     target,
@@ -375,6 +381,59 @@ describe("desktop relay attempt ownership", () => {
     await Promise.resolve();
     expect(f.authority.onAccountAuthorizationRevoked).not.toHaveBeenCalled();
     expect(f.close).not.toHaveBeenCalled();
+    f.manager.dispose();
+  });
+
+  it("runs later attempts for an environment without compression after a compression failure", async () => {
+    const f = relayFixture();
+    const first = f.manager.prepare(f.environmentId);
+    await f.manager.activate(first);
+    expect(f.socketFactory.mock.calls[0]![0].relayCompression).toBe(true);
+    const input = f.socketFactory.mock.calls[0]![0];
+    input.callbacks.onFailure({
+      kind: "protocol",
+      retryable: true,
+      closeReason: "channel_rejected",
+      compressionFailed: true,
+    });
+    input.events.close(4000, "protocol");
+    expect(f.emit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "close", transportId: first, retryable: true }),
+    );
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[1]![0].relayCompression).toBe(false);
+    f.manager.dispose();
+  });
+
+  it("re-enables compression after the retry window, and on a fresh manager session", async () => {
+    let now = 1_000;
+    const f = relayFixture({ now: () => now });
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    f.socketFactory.mock.calls[0]![0].callbacks.onFailure({
+      kind: "protocol",
+      retryable: true,
+      closeReason: "channel_rejected",
+      compressionFailed: true,
+    });
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[1]![0].relayCompression).toBe(false);
+    now += RELAY_COMPRESSION_RETRY_AFTER_MS - 1;
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[2]![0].relayCompression).toBe(false);
+    now += 1;
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[3]![0].relayCompression).toBe(true);
+
+    // A further failure, then an account or session change: back on at once.
+    f.socketFactory.mock.calls[3]![0].callbacks.onFailure({
+      kind: "protocol",
+      retryable: true,
+      closeReason: "channel_rejected",
+      compressionFailed: true,
+    });
+    f.manager.dispose();
+    await f.manager.activate(f.manager.prepare(f.environmentId));
+    expect(f.socketFactory.mock.calls[4]![0].relayCompression).toBe(true);
     f.manager.dispose();
   });
 });

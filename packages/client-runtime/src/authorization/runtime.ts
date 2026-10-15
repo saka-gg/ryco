@@ -100,6 +100,8 @@ export interface HostedRuntimeConfiguration {
     readonly ticketExpiresAt: number;
     readonly earlySocket?: HostedEarlyRelaySocket;
     readonly preparedSocketContext?: unknown;
+    /** Whether this attempt may use relay payload compression (§4.6). */
+    readonly relayCompression?: boolean;
     readonly callbacks: {
       readonly onTransportStatus: (status: HostedRelayTransportStatus) => void;
       readonly onSessionStatus: (status: HostedRycoSessionStatus) => void;

@@ -1,5 +1,6 @@
 import {
   HostedRelayEngine,
+  probeStreamRelayPayloadInflater,
   RELAY_E2EE_NEGOTIATION_BUFFER_FULL_MESSAGE,
   RELAY_E2EE_SEND_UNAVAILABLE_MESSAGE,
   RELAY_MESSAGE_TOO_LARGE_MESSAGE,
@@ -7,6 +8,7 @@ import {
   RELAY_SEND_QUEUE_FULL_MESSAGE,
   type HostedRelaySocketCallbacks,
   type RelayE2eeProvider,
+  type RelayPayloadInflater,
   type RelaySocket,
 } from "@ryco/client-runtime/relay";
 
@@ -32,7 +34,29 @@ export interface HostedRelaySocketOptions {
    * none gets the unchanged legacy channel, byte for byte.
    */
   readonly e2ee?: RelayE2eeProvider | undefined;
+  /**
+   * Relay payload compression. Defaults to the browser's
+   * `DecompressionStream("deflate-raw")`; `null` turns compression off, so the
+   * socket neither advertises nor accepts it.
+   */
+  readonly inflater?: RelayPayloadInflater | null;
+  /**
+   * The connection's verdict for this attempt: `false` after an earlier attempt
+   * ended on a compressed payload it could not deliver. Overrides `inflater`.
+   */
+  readonly relayCompression?: boolean;
 }
+
+/**
+ * The browser's raw-DEFLATE inflater, or `undefined` where the platform has
+ * none, or has `DecompressionStream` without `deflate-raw` (Chrome 80–102) — in
+ * which case this client never advertises compression.
+ */
+export function browserRelayPayloadInflater(): RelayPayloadInflater | undefined {
+  if (typeof DecompressionStream !== "function") return undefined;
+  return probeStreamRelayPayloadInflater(() => new DecompressionStream("deflate-raw"));
+}
+
 export function hostedRelayWebSocketUrl(): string {
   const url = new URL(window.location.origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -181,6 +205,12 @@ export class BrowserHostedRelaySocket extends EventTarget {
       createBrowserRelaySocket(options.url, options.createSocket, (reason) =>
         this.#engine.reportUndecodableMessage(reason),
       );
+    const inflater =
+      options.relayCompression === false
+        ? null
+        : options.inflater === undefined
+          ? browserRelayPayloadInflater()
+          : options.inflater;
     try {
       this.#engine = new HostedRelayEngine({
         ticket: options.ticket,
@@ -188,6 +218,7 @@ export class BrowserHostedRelaySocket extends EventTarget {
         socket,
         callbacks: options.callbacks,
         ...(options.e2ee === undefined ? {} : { e2ee: options.e2ee }),
+        ...(inflater == null ? {} : { inflater }),
         timers: {
           now: () => Date.now(),
           setTimeout: (f, ms) => globalThis.setTimeout(f, ms),

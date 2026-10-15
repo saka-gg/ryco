@@ -1,12 +1,20 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Schema } from "effect";
+import { Deferred, Effect, Exit, Queue, Schema, Stream } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import {
   prepareRelayMessage,
   RELAY_CHUNK_CAPABILITY_PRELUDE,
 } from "@ryco/shared/relayMessageChunks";
+import {
+  appendRelayCompressionAdvertisement,
+  decodeCompressedRelayPayload,
+  isCompressedRelayPayload,
+} from "@ryco/shared/relayPayloadCompression";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
+import { inflateRawSync } from "node:zlib";
 
 import { makeRpcByteSession, RpcOutputRefusedError } from "./RpcByteSession.ts";
+import { deflateRelayRpcMessage, RelayResponseCompressor } from "./relayResponseCompression.ts";
 
 const EchoRpc = Rpc.make("echo", {
   payload: Schema.Struct({ value: Schema.String }),
@@ -304,6 +312,205 @@ describe("RpcByteSession", () => {
         expect(yield* session.receive(request("1", "one"))).toBe(true);
         yield* Effect.yieldNow;
         expect(yield* session.queuedMessages).toBeLessThanOrEqual(1);
+      }),
+    ),
+  );
+});
+
+// ─── relay payload compression ───────────────────────────────────────────────
+
+const ShellItem = Schema.Struct({ kind: Schema.String, data: Schema.String });
+const SubscribeShellRpc = Rpc.make(ORCHESTRATION_WS_METHODS.subscribeShell, {
+  payload: Schema.Struct({}),
+  success: ShellItem,
+  stream: true,
+});
+const CompressionGroup = RpcGroup.make(SubscribeShellRpc, EchoRpc);
+const bigSnapshotData = Array.from({ length: 2_000 }, (_, index) => `thread-${index % 50}`).join(
+  " ",
+);
+const compressionHandlers = CompressionGroup.toLayer(
+  Effect.succeed(
+    CompressionGroup.of({
+      [ORCHESTRATION_WS_METHODS.subscribeShell]: () =>
+        Stream.make({ kind: "snapshot-threads", data: bigSnapshotData }),
+      echo: ({ value }: { readonly value: string }) => Effect.succeed({ value }),
+    } as never),
+  ),
+);
+
+const subscribeShellRequest = (id: string) =>
+  new TextEncoder().encode(
+    JSON.stringify({
+      _tag: "Request",
+      id,
+      tag: ORCHESTRATION_WS_METHODS.subscribeShell,
+      payload: {},
+      headers: [],
+    }),
+  );
+
+function decodeResponse(bytes: Uint8Array): { readonly _tag: string; readonly requestId?: string } {
+  let text: Uint8Array = bytes;
+  if (isCompressedRelayPayload(bytes)) {
+    const decoded = decodeCompressedRelayPayload(bytes);
+    if (decoded.kind !== "ok") throw new Error(decoded.reason);
+    text = new Uint8Array(inflateRawSync(decoded.body));
+  }
+  return JSON.parse(new TextDecoder().decode(text));
+}
+
+describe("RpcByteSession relay payload compression", () => {
+  it.live("compresses an allowlisted snapshot for an advertised client, in order", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        let releaseDeflate: (() => void) | undefined;
+        const deflateGate = new Promise<void>((resolve) => {
+          releaseDeflate = resolve;
+        });
+        const compressor = new RelayResponseCompressor({
+          deflate: async (message) => {
+            await deflateGate;
+            return deflateRelayRpcMessage(message);
+          },
+        });
+        const session = yield* makeRpcByteSession(
+          CompressionGroup,
+          compressionHandlers,
+          (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+          { compressor },
+        );
+        expect(
+          yield* session.receive(appendRelayCompressionAdvertisement(subscribeShellRequest("1"))),
+        ).toBe(true);
+        // A small response for another request is produced while the snapshot
+        // is still compressing; it may not overtake it.
+        expect(yield* session.receive(request("2", "small"))).toBe(true);
+        yield* Effect.sleep(20);
+        expect(yield* Queue.size(outputs)).toBe(0);
+        releaseDeflate?.();
+
+        const first = yield* Queue.take(outputs);
+        expect(isCompressedRelayPayload(first)).toBe(true);
+        expect(decodeResponse(first)).toMatchObject({ _tag: "Chunk", requestId: "1" });
+        const second = yield* Queue.take(outputs);
+        expect(isCompressedRelayPayload(second)).toBe(false);
+        expect(decodeResponse(second)).toMatchObject({ _tag: "Exit", requestId: "2" });
+      }),
+    ),
+  );
+
+  it.live("latches only an advertisement the interceptor passed to the parser", () =>
+    // On an E2EE channel the interceptor is the authentication boundary: an
+    // advertisement in bytes it claimed or refused cannot turn compression on.
+    Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        const compressor = new RelayResponseCompressor();
+        const session = yield* makeRpcByteSession(
+          CompressionGroup,
+          compressionHandlers,
+          (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+          {
+            compressor,
+            // Stands in for the E2EE layer: a leading 0x01 marks an envelope it
+            // authenticates and unwraps; anything else it claims.
+            interceptor: (message) =>
+              Effect.succeed(
+                message[0] === 0x01
+                  ? { kind: "rpc", message: message.subarray(1) }
+                  : { kind: "claimed" },
+              ),
+          },
+        );
+        expect(
+          yield* session.receive(appendRelayCompressionAdvertisement(subscribeShellRequest("1"))),
+        ).toBe(true);
+        const envelope = (bytes: Uint8Array) => Uint8Array.from([0x01, ...bytes]);
+        expect(yield* session.receive(envelope(subscribeShellRequest("2")))).toBe(true);
+        const plain = yield* Queue.take(outputs);
+        expect(compressor.advertised).toBe(false);
+        expect(plain[0]).toBe(0x7b);
+        expect(decodeResponse(plain)).toMatchObject({ _tag: "Chunk", requestId: "2" });
+
+        expect(
+          yield* session.receive(
+            envelope(appendRelayCompressionAdvertisement(subscribeShellRequest("3"))),
+          ),
+        ).toBe(true);
+        const compressed = yield* Queue.take(outputs);
+        expect(compressor.advertised).toBe(true);
+        expect(isCompressedRelayPayload(compressed)).toBe(true);
+        expect(decodeResponse(compressed)).toMatchObject({ _tag: "Chunk", requestId: "3" });
+      }),
+    ),
+  );
+
+  it.live("sends plain bytes to a client that never advertised", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        const session = yield* makeRpcByteSession(
+          CompressionGroup,
+          compressionHandlers,
+          (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+          { compressor: new RelayResponseCompressor() },
+        );
+        expect(yield* session.receive(subscribeShellRequest("1"))).toBe(true);
+        const first = yield* Queue.take(outputs);
+        expect(first.byteLength).toBeGreaterThan(16 * 1_024);
+        expect(first[0]).toBe(0x7b);
+        expect(decodeResponse(first)).toMatchObject({ _tag: "Chunk", requestId: "1" });
+      }),
+    ),
+  );
+
+  it.live("leaves a large response outside the allowlist uncompressed", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        const session = yield* makeRpcByteSession(
+          CompressionGroup,
+          compressionHandlers,
+          (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+          { compressor: new RelayResponseCompressor() },
+        );
+        expect(
+          yield* session.receive(
+            appendRelayCompressionAdvertisement(request("1", bigSnapshotData)),
+          ),
+        ).toBe(true);
+        const response = yield* Queue.take(outputs);
+        expect(response.byteLength).toBeGreaterThan(16 * 1_024);
+        expect(response[0]).toBe(0x7b);
+      }),
+    ),
+  );
+
+  it.live("serves an advertised request unchanged on a node without compression", () =>
+    // The base node's byte session — no compressor — is exactly this path: the
+    // advertisement is trailing JSON whitespace its parser ignores.
+    Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        const session = yield* makeRpcByteSession(CompressionGroup, compressionHandlers, (bytes) =>
+          Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+        );
+        expect(
+          yield* session.receive(appendRelayCompressionAdvertisement(request("1", "relay"))),
+        ).toBe(true);
+        expect(decodeResponse(yield* Queue.take(outputs))).toMatchObject({
+          _tag: "Exit",
+          requestId: "1",
+          exit: { _tag: "Success", value: { value: "relay" } },
+        });
+        expect(
+          yield* session.receive(appendRelayCompressionAdvertisement(subscribeShellRequest("2"))),
+        ).toBe(true);
+        const snapshot = yield* Queue.take(outputs);
+        expect(snapshot[0]).toBe(0x7b);
+        expect(decodeResponse(snapshot)).toMatchObject({ _tag: "Chunk", requestId: "2" });
       }),
     ),
   );

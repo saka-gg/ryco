@@ -7,12 +7,9 @@ import { installE2eeNodeNativePrimitives } from "@ryco/shared/relayE2eeNodeCrypt
 import { AgentControlExternalTopologyService } from "../agentControl/Services/AgentControlExternalTopology.ts";
 import { DEFAULT_HUB_CONNECTOR_CONFIG, ServerConfig } from "../config.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
-import {
-  makeRpcByteSession,
-  RpcInboundRejectedError,
-  RpcOutputRefusedError,
-} from "../ws/RpcByteSession.ts";
+import { makeRpcByteSession } from "../ws/RpcByteSession.ts";
 import { relayRpcPrincipal, type RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
+import { RelayResponseCompressor } from "../ws/relayResponseCompression.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { base64UrlEncode } from "../auth/utils.ts";
 import { makeDeviceWsRpcLayer } from "../ws/index.ts";
@@ -45,6 +42,8 @@ import {
 import { makeNodeE2eeOperator } from "./NodeE2eeOperator.ts";
 import {
   makeNodeE2eeRelayChannelSession,
+  nodeE2eeRpcInterceptor,
+  nodeE2eeRpcSink,
   nodeE2eeChannelPlaintextCeiling,
 } from "./NodeE2eeRelayChannel.ts";
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
@@ -596,14 +595,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               // channel through `onOutputFailure` below. On an `e2ee` channel
               // this is also the §4.2 send pipeline — the ceiling, the §9.3
               // admission, the pair, the AEAD, and the envelope.
-              (bytes) =>
-                Effect.promise(() => e2ee.emit(bytes)).pipe(
-                  Effect.flatMap((result) =>
-                    result === "sent"
-                      ? Effect.void
-                      : Effect.fail(new RpcOutputRefusedError(result)),
-                  ),
-                ),
+              nodeE2eeRpcSink(e2ee),
               {
                 queueCapacity: 64,
                 // A lost response would leave its request — or, with acknowledged
@@ -615,18 +607,18 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 },
                 // §4.3: discrimination on the reassembled, prelude-stripped
                 // payload, and the only path to the RPC parser.
-                interceptor: (message) =>
-                  Effect.promise(() => e2ee.intercept(message)).pipe(
-                    Effect.flatMap((disposition) =>
-                      disposition.kind === "rejected"
-                        ? Effect.fail(new RpcInboundRejectedError())
-                        : Effect.succeed(disposition),
-                    ),
-                  ),
+                interceptor: nodeE2eeRpcInterceptor(e2ee),
                 // The channel-fatal verdict has already emitted its §11 record
                 // and asked for the close by the time this runs; nothing further
                 // is owed here.
                 onInboundRejected: () => undefined,
+                // Allowlisted snapshot-class responses, once this channel's client
+                // advertised it can inflate. On an `e2ee` channel the frame is
+                // the inner record body, so the Hub sees only its padded length.
+                // Bounded by this channel's ceiling, so a compressed message and
+                // its frame never claim more of the client's queue than one
+                // message may (§4.6.3).
+                compressor: new RelayResponseCompressor({ maxMessageBytes: plaintextCeiling ?? 0 }),
               },
             ).pipe(Effect.provideService(Scope.Scope, scope)),
           );

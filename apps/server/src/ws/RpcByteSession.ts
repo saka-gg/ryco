@@ -5,6 +5,8 @@ import { RelayMessageAssembler } from "@ryco/shared/relayMessageChunks";
 import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
 import type { RpcGroup } from "effect/rpc";
 
+import type { RelayResponseCompressor } from "./relayResponseCompression.ts";
+
 export interface RpcByteSession {
   readonly receive: (bytes: Uint8Array) => Effect.Effect<boolean>;
   readonly supportsChunkedMessages: () => boolean;
@@ -159,6 +161,14 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
      * which the channel layer sees as an unavailable consumer.
      */
     readonly onInboundRejected?: (error: RpcInboundRejectedError) => void;
+    /**
+     * Relay payload compression for this channel's responses. It sees every
+     * inbound message after the interceptor accepted it — so the client's
+     * advertisement is latched only from authenticated bytes on an E2EE channel
+     * — and every outbound response, in order, inside the output lock. Absent,
+     * nothing is compressed and inbound bytes reach the parser unchanged.
+     */
+    readonly compressor?: RelayResponseCompressor;
   } = {},
 ): Effect.Effect<RpcByteSession, E, Scope.Scope | R> {
   return Effect.gen(function* () {
@@ -262,7 +272,16 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                   // before the decoder sees it.
                   const disposition = yield* discriminate(assembled.message);
                   if (disposition.kind === "claimed") return;
-                  const messages = parser.decode(disposition.message);
+                  const compressor = options.compressor;
+                  const decoded = parser.decode(
+                    compressor === undefined
+                      ? disposition.message
+                      : compressor.acceptInbound(disposition.message),
+                  );
+                  const messages =
+                    compressor === undefined
+                      ? decoded
+                      : decoded.filter((message) => compressor.admitInbound(message));
                   yield* Effect.forEach(messages, (message) => writeRequest(0, message as never), {
                     discard: true,
                   });
@@ -294,9 +313,24 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
             outputLock.withPermits(1)(
               Effect.gen(function* () {
                 if (outputFailed) return;
-                const bytes = encodeResponse(response);
-                if (bytes === undefined) return;
-                const outcome = yield* deliver(bytes);
+                const encoded = encodeResponse(response);
+                if (encoded === undefined) return;
+                // Compressed here, inside the output lock, so a response that
+                // waits on the threadpool still holds its place in line. A
+                // response may become two messages (see `RelayResponseCompressor`),
+                // delivered back to back under the same lock.
+                const compressor = options.compressor;
+                const parts =
+                  compressor === undefined
+                    ? [encoded]
+                    : yield* Effect.promise(() =>
+                        compressor.encode(response, encoded, encodeResponse),
+                      );
+                let outcome: RpcOutputRefusal | "stalled" | undefined;
+                for (const part of parts) {
+                  outcome = yield* deliver(part);
+                  if (outcome !== undefined) break;
+                }
                 if (outcome === undefined) return;
                 if (
                   outcome === "too_large" &&
@@ -354,6 +388,7 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
         clients.clear();
         queuedBytes = 0;
         assembler.reset();
+        options.compressor?.reset();
         yield* Queue.offer(disconnects, 0);
         yield* Queue.shutdown(incoming);
         yield* Queue.shutdown(disconnects);

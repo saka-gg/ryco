@@ -29,8 +29,15 @@ import {
   RELAY_CHUNK_CAPABILITY_PRELUDE,
   RelayMessageAssembler,
 } from "@ryco/shared/relayMessageChunks";
+import {
+  appendRelayCompressionAdvertisement,
+  decodeCompressedRelayPayload,
+  isCompressedRelayPayload,
+  RELAY_COMPRESSION_ADVERTISEMENT,
+} from "@ryco/shared/relayPayloadCompression";
 
 import { decodeBase64Url } from "./base64url.ts";
+import { inflateRelayPayload, type RelayPayloadInflater } from "./relayPayloadInflation.ts";
 import type {
   HostedRelayFailure,
   HostedRelayTransportStatus,
@@ -309,6 +316,15 @@ export interface RelayEngineOptions {
   events: RelayEngineEvents;
   /** §4: the E2EE channel factory. Absent means an unchanged legacy channel. */
   e2ee?: RelayE2eeProvider;
+  /**
+   * Relay payload compression (docs/relay-e2ee-protocol.md §4.6). With an
+   * inflater the engine advertises on its outbound messages and inflates the
+   * node's compressed ones; without one it advertises nothing, and a compressed
+   * payload — which a conforming node never sends it — ends the channel. Every
+   * compression failure ends the channel with the retryable
+   * `relayCompressionFailure()`, so its owner can reconnect without an inflater.
+   */
+  inflater?: RelayPayloadInflater;
 }
 
 interface QueuedPayload {
@@ -401,6 +417,27 @@ export function relayE2eeFailure(kind: RelayE2eeFailureKind): HostedRelayFailure
 }
 
 /**
+ * A compressed payload this client could not deliver (§4.6.5): one it never
+ * advertised for, a malformed frame, an inflate that passed its cap, or an
+ * output whose length differs from the header.
+ *
+ * Fatal for the channel and RETRYABLE, flagged so the connection's owner opens
+ * the next attempt without compression. Turning compression off only removes a
+ * side channel and costs bytes, so a peer that provokes this gains nothing it
+ * could not get by closing the channel; and nothing in it reflects on the
+ * channel's cryptography, which is why it is not one of the non-retryable E2EE
+ * failures.
+ */
+export function relayCompressionFailure(): HostedRelayFailure {
+  return {
+    kind: "protocol",
+    retryable: true,
+    closeReason: "channel_rejected",
+    compressionFailed: true,
+  };
+}
+
+/**
  * The client declining to open a channel because it had no resolved §4.4
  * attempt to build the machine from. LOCAL, and not a cryptographic verdict.
  *
@@ -473,8 +510,24 @@ export class HostedRelayEngine {
   #outboundReservedBytes = 0;
   /** Close invalidates every token so a late release cannot debit the next lifecycle. */
   readonly #outboundReservations = new Set<OutboundReservationToken>();
-  /** §9.2 requires envelopes to reach `unprotect` in arrival order. */
-  #e2eeInbound: Promise<void> = Promise.resolve();
+  /**
+   * Inbound delivery, one payload at a time: §9.2 requires envelopes to reach
+   * `unprotect` in arrival order, and an inflation that is still running holds
+   * every later payload behind it so the application sees the node's order.
+   */
+  #inbound: Promise<void> = Promise.resolve();
+  /** Payloads queued on `#inbound` and not yet delivered or dropped. */
+  #pendingDeliveries = 0;
+  /**
+   * Bytes held on the delivery chain: every payload queued on `#inbound` until
+   * it is delivered or dropped, and the declared output of the one inflation
+   * running. Counted with the inbound queue, so a slow inflate pauses the
+   * channel and bounds what waits behind it exactly as a slow reader would.
+   */
+  #deliveryHeldBytes = 0;
+  #inflatingBytes = 0;
+  /** At least one outbound message carried the compression advertisement. */
+  #advertisedCompression = false;
   /** A §10 close attempt is in flight, or its phase opened. Never both at once. */
   #e2eeClosing = false;
   /** The application asked for the close; it stands until one attempt opens a phase. */
@@ -540,14 +593,44 @@ export class HostedRelayEngine {
     // completes (channel.accept); a channel that is merely open is not enough.
     if (this.#closed || !this.#accepted || !this.#channel || !this.#limits)
       throw new Error("Relay channel is not open.");
-    if (this.#mode === "negotiating") return this.#bufferNegotiating(payload, this.#limits);
-    // `legacy` is the ONLY mode that may reach the plaintext path. The dispatch
-    // is exhaustive on the mode rather than conditional on the channel being
-    // present, because the failure direction of a missing channel is the one
-    // this seam must never take: a mode machine that locked `e2ee` putting
-    // application plaintext on the wire.
-    if (this.#mode === "e2ee") return this.#emitE2ee(payload);
-    this.#sendPlaintext(payload);
+    const outbound = this.#advertiseCompression(payload, this.#limits);
+    try {
+      if (this.#mode === "negotiating") return this.#bufferNegotiating(outbound, this.#limits);
+      // `legacy` is the ONLY mode that may reach the plaintext path. The dispatch
+      // is exhaustive on the mode rather than conditional on the channel being
+      // present, because the failure direction of a missing channel is the one
+      // this seam must never take: a mode machine that locked `e2ee` putting
+      // application plaintext on the wire.
+      if (this.#mode === "e2ee") return this.#emitE2ee(outbound);
+      this.#sendPlaintext(outbound);
+    } finally {
+      // Every sink copies what it keeps, so the advertised copy is ours to wipe.
+      if (outbound !== payload) outbound.fill(0);
+    }
+  }
+
+  /**
+   * The compression advertisement: trailing JSON whitespace on every outbound
+   * message this client could still have sent with it, which an old node's JSON
+   * parser ignores. It goes inside the E2EE record on an `e2ee` channel, so the
+   * Hub can neither see, strip, nor forge it there. Messages within
+   * advertisement-length of §4.5's ceiling go out as they are.
+   */
+  #advertiseCompression(payload: Uint8Array, limits: RelayLimits): Uint8Array {
+    const advertised = payload.byteLength + RELAY_COMPRESSION_ADVERTISEMENT.byteLength;
+    if (
+      this.options.inflater === undefined ||
+      advertised > e2eeChannelSizeBudget(limits).plaintextCeiling ||
+      // Until the peer has shown it reassembles chunks, a message that fits one
+      // frame must keep fitting one (with an envelope, if it gets one): eight
+      // bytes must never turn a deliverable send into `peer_unsupported`.
+      (!this.#assembler.peerSupportsChunking &&
+        advertised + E2EE_ENVELOPE_OVERHEAD_BYTES > limits.maxDataChunkBytes)
+    ) {
+      return payload;
+    }
+    this.#advertisedCompression = true;
+    return appendRelayCompressionAdvertisement(payload);
   }
 
   /**
@@ -1168,7 +1251,12 @@ export class HostedRelayEngine {
   }
 
   #inboundOwnedBytes(): number {
-    return this.#inboundQueuedBytes + this.#assembler.heldBytes;
+    return (
+      this.#inboundQueuedBytes +
+      this.#assembler.heldBytes +
+      this.#deliveryHeldBytes +
+      this.#inflatingBytes
+    );
   }
 
   #refreshInboundFlow(): void {
@@ -1226,25 +1314,109 @@ export class HostedRelayEngine {
    * the RPC parser. The interceptions are chained rather than launched, because
    * §9.2 compares each envelope against a single expected pair and two
    * overlapping `unprotect` calls would race that comparison.
+   *
+   * A compressed payload (§4.6) is inflated where its frame lives: inside the
+   * authenticated inner record on an `e2ee` channel, and as the post-strip
+   * payload itself — before the machine's legacy rows, which admit only JSON —
+   * on a legacy one. Inflation is asynchronous, so it runs on the same chain:
+   * no payload is delivered before the one ahead of it.
    */
   #deliver(message: Uint8Array): void {
     const channel = this.#e2ee;
-    if (!channel) return this.options.events.onData(message);
-    const intercept = async (): Promise<void> => {
-      if (this.#closed || this.#e2ee !== channel) return;
+    if (!channel && this.#pendingDeliveries === 0 && !isCompressedRelayPayload(message)) {
+      return this.options.events.onData(message);
+    }
+    this.#pendingDeliveries += 1;
+    const held = message.byteLength;
+    this.#deliveryHeldBytes += held;
+    const step = async (): Promise<void> => {
       try {
-        const disposition = await channel.intercept(message);
-        if (disposition.kind === "rpc" && !this.#closed) {
-          this.options.events.onData(disposition.message);
-        }
-      } catch {
-        // The channel decides every condition it can decide; a throw escaping
-        // it is a local defect, and the only fail-closed answer is to stop
-        // consuming (§4.3: nothing unauthenticated reaches the parser).
-        this.#failE2ee(relayE2eeFailure("fatal_post_key"));
+        await this.#deliverInOrder(channel, message);
+      } finally {
+        this.#pendingDeliveries -= 1;
+        this.#deliveryHeldBytes -= held;
+        this.#inflatingBytes = 0;
+        if (!this.#closed) this.#refreshInboundFlow();
       }
     };
-    this.#e2eeInbound = this.#e2eeInbound.then(intercept, intercept);
+    this.#inbound = this.#inbound.then(step, step);
+  }
+
+  async #deliverInOrder(channel: RelayE2eeChannel | null, message: Uint8Array): Promise<void> {
+    if (this.#closed || this.#e2ee !== channel) return;
+    let payload = message;
+    if ((!channel || this.#mode === "legacy") && isCompressedRelayPayload(payload)) {
+      const inflated = await this.#inflate(payload);
+      if (inflated === undefined) return;
+      payload = inflated;
+    }
+    if (!channel) {
+      if (!this.#closed) this.options.events.onData(payload);
+      return;
+    }
+    let delivered: Uint8Array;
+    try {
+      const disposition = await channel.intercept(payload);
+      if (disposition.kind !== "rpc" || this.#closed) return;
+      delivered = disposition.message;
+    } catch {
+      // The channel decides every condition it can decide; a throw escaping
+      // it is a local defect, and the only fail-closed answer is to stop
+      // consuming (§4.3: nothing unauthenticated reaches the parser).
+      this.#failE2ee(relayE2eeFailure("fatal_post_key"));
+      return;
+    }
+    if (this.#mode === "e2ee" && isCompressedRelayPayload(delivered)) {
+      const inflated = await this.#inflate(delivered);
+      if (inflated === undefined) return;
+      delivered = inflated;
+    }
+    if (!this.#closed) this.options.events.onData(delivered);
+  }
+
+  /**
+   * Inflate one compressed frame, or end the channel and resolve `undefined`.
+   * A frame this client never advertised for is as fatal as a corrupt one, and
+   * both take `relayCompressionFailure()` — on an `e2ee` channel, as on a legacy
+   * one, the outer close with `channel_rejected` and no `E2EEError`, because the
+   * condition is detected above the record layer.
+   *
+   * The declared output is charged to the inbound budget before a byte is
+   * inflated, on top of the frame itself, which is held until delivery. A
+   * charge the queue cannot hold fails the channel as a slow consumer — FLAGGED
+   * as a compression failure, because it can be compression that put it over
+   * (frame and output are both held, where an uncompressed message is held
+   * once), and a reconnect that kept compressing could fail the same way again.
+   */
+  async #inflate(frame: Uint8Array): Promise<Uint8Array | undefined> {
+    const inflater = this.options.inflater;
+    const header = decodeCompressedRelayPayload(frame);
+    if (inflater === undefined || !this.#advertisedCompression || header.kind === "error") {
+      frame.fill(0);
+      this.#failE2ee(relayCompressionFailure());
+      return undefined;
+    }
+    this.#inflatingBytes = header.uncompressedBytes;
+    if (this.#limits && this.#inboundOwnedBytes() > this.#limits.maxQueuedBytes) {
+      frame.fill(0);
+      this.#fail({ ...failure("slow_consumer"), compressionFailed: true });
+      return undefined;
+    }
+    this.#refreshInboundFlow();
+    const fatal = () => this.#failE2ee(relayCompressionFailure());
+    try {
+      const inflated = await inflateRelayPayload(frame, inflater);
+      if (this.#closed) {
+        inflated.fill(0);
+        return undefined;
+      }
+      return inflated;
+    } catch {
+      fatal();
+      return undefined;
+    } finally {
+      frame.fill(0);
+    }
   }
 
   #enqueueOutbound(payload: Uint8Array): void {

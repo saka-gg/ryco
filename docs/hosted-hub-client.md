@@ -261,6 +261,14 @@ part of the client. One encryption protocol is part of it, and only one: the rel
 encryption layer described below, which lives entirely inside `data.payload` and adds no relay
 frame, field, close reason, or version.
 
+Clients that can inflate (web and desktop through `DecompressionStream`, the native app through
+fflate) advertise it in-band. The node then compresses large shell snapshot thread pages and full
+provider lists inside the payload, and inside the encrypted record on an encrypted channel. The
+client inflates each one under a hard cap of the relay message limit before the RPC layer sees it.
+A compressed payload the client cannot deliver ends the channel with a retryable failure, and the
+connection's next attempt runs without compression
+([relay payload encryption §4.6](./relay-e2ee-protocol.md#46-relay-payload-compression-node-to-client)).
+
 It does cost message budget, and that is the one thing it changes that a caller can observe. The
 per-message plaintext ceiling on a channel carrying the layer is the relay's effective message
 ceiling less the record envelope overhead, and a send submitted while the channel is still

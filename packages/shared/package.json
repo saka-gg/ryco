@@ -74,6 +74,10 @@
       "types": "./src/relayMessageChunks.ts",
       "import": "./src/relayMessageChunks.ts"
     },
+    "./relayPayloadCompression": {
+      "types": "./src/relayPayloadCompression.ts",
+      "import": "./src/relayPayloadCompression.ts"
+    },
     "./relayE2eeConstants": {
       "types": "./src/relayE2eeConstants.ts",
       "import": "./src/relayE2eeConstants.ts"

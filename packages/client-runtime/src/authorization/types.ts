@@ -408,6 +408,12 @@ export interface HostedRelayFailure {
    * node's channel and must never be read as a device-wide revocation.
    */
   readonly enrollmentRevoked?: HostedRelayEnrollmentRevocation;
+  /**
+   * The channel ended because a compressed relay payload could not be
+   * delivered (docs/relay-e2ee-protocol.md §4.6.5). The connection's next
+   * attempt runs without compression.
+   */
+  readonly compressionFailed?: true;
 }
 
 /**
