@@ -225,6 +225,72 @@ export interface ThreadShell {
   lineage?: ThreadLineage | null | undefined;
 }
 
+/**
+ * An archived thread the shell listed as a stub (`archivedThreads: "stub"`):
+ * enough to list, count, link to, search and relate it, but none of the
+ * fields only a full shell has (model selection, session, latest turn, goal,
+ * pending flags). It sits in `threadShellById` and `sidebarThreadSummaryById`
+ * in place of the full entries, so a consumer that needs those fields must
+ * narrow (`isArchivedThreadStub`, or `archivedAt === null`, which a stub
+ * never has) and load the full shell on demand instead of reading defaults.
+ * A full shell (a live upsert, opening the thread, an on-demand load)
+ * replaces it.
+ */
+export interface ArchivedThreadStub {
+  readonly shellDetail: "archived-stub";
+  id: ThreadId;
+  environmentId: EnvironmentId;
+  projectId: ProjectId;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string;
+  branch: string | null;
+  worktreePath: string | null;
+  worktreeId: string | null;
+  latestUserMessageAt: string | null;
+  /** Server-owned provenance; null on root threads. */
+  lineage: ThreadLineage | null;
+}
+
+/** A `threadShellById` entry: a full shell, or an archived thread's stub. */
+export type ThreadShellOrStub = ThreadShell | ArchivedThreadStub;
+/** A `sidebarThreadSummaryById` entry: a full summary, or an archived thread's stub. */
+export type SidebarThreadOrStub = SidebarThreadSummary | ArchivedThreadStub;
+
+export function isArchivedThreadStub(
+  thread: object | null | undefined,
+): thread is ArchivedThreadStub {
+  return (
+    thread != null &&
+    "shellDetail" in thread &&
+    (thread as { readonly shellDetail?: unknown }).shellDetail === "archived-stub"
+  );
+}
+
+/** The entry when it is full; `undefined` for a stub, as for a thread with no entry. */
+export function fullThreadEntry<T extends object>(
+  thread: T | ArchivedThreadStub | null | undefined,
+): Exclude<T, ArchivedThreadStub> | undefined {
+  return thread == null || isArchivedThreadStub(thread)
+    ? undefined
+    : (thread as Exclude<T, ArchivedThreadStub>);
+}
+
+/** An unarchived thread's entry, which is always full: `false` for any archived one. */
+export function isUnarchivedThreadEntry<T extends { readonly archivedAt: string | null }>(
+  thread: T | ArchivedThreadStub,
+): thread is Exclude<T, ArchivedThreadStub> {
+  return !isArchivedThreadStub(thread) && thread.archivedAt === null;
+}
+
+/** Narrows an entry to its full form: `false` for a stub. */
+export function isFullThreadEntry<T extends object>(
+  thread: T | ArchivedThreadStub,
+): thread is Exclude<T, ArchivedThreadStub> {
+  return !isArchivedThreadStub(thread);
+}
+
 export interface ThreadTurnState {
   latestTurn: OrchestrationLatestTurn | null;
   pendingSourceProposedPlan?: OrchestrationLatestTurn["sourceProposedPlan"];

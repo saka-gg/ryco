@@ -8,7 +8,8 @@ import type { EnvironmentId } from "@ryco/contracts";
 import { evictCheckpointDiffsForThread } from "../rpc/checkpointDiffAtoms";
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
-import { selectThreadByRef, useStore } from "../state/threadsRuntime";
+import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
+import { selectEnvironmentState, useStore } from "../state/threadsRuntime";
 
 // The supervisor methods the sink drives from live shell events (§4). Threaded in
 // as a getter (the supervisor is constructed after the sink), mirroring web's
@@ -21,7 +22,8 @@ type SinkSupervisor = Pick<
 >;
 
 interface ShellEventContext {
-  readonly previousThread: ReturnType<typeof selectThreadByRef> | undefined;
+  /** The stored entry, an archived stub included: enough to tell a new thread and an archive flip. */
+  readonly previousThread: { readonly archivedAt: string | null } | undefined;
   readonly threadRef: ReturnType<typeof scopeThreadRef> | null;
 }
 
@@ -63,7 +65,9 @@ export function createMobileEnvironmentStateSink(
                 : null;
           const threadRef = threadId ? scopeThreadRef(environmentId, threadId) : null;
           return {
-            previousThread: threadRef ? selectThreadByRef(state, threadRef) : undefined,
+            previousThread: threadId
+              ? selectEnvironmentState(state, environmentId).threadShellById[threadId]
+              : undefined,
             threadRef,
           };
         });
@@ -112,6 +116,14 @@ export function createMobileEnvironmentStateSink(
     },
     syncServerShellSnapshot: (environmentId, snapshot) => {
       useStore.getState().syncServerShellSnapshot(snapshot, environmentId);
+      projectionChanged(environmentId);
+    },
+    isArchivedThreadStub: (environmentId, threadId) =>
+      isArchivedThreadStub(
+        selectEnvironmentState(useStore.getState(), environmentId).threadShellById[threadId],
+      ),
+    applyLoadedThreadShells: (environmentId, threads) => {
+      useStore.getState().applyLoadedThreadShells(threads, environmentId);
       projectionChanged(environmentId);
     },
     // No mobile UI store and terminal GC is deferred (terminals are v1.1) — §3-5.

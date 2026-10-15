@@ -2,6 +2,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
+  type OrchestrationArchivedThreadStub,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
@@ -43,6 +44,20 @@ const thread = (id: string, archivedAt: string | null = null): OrchestrationThre
   hasPendingApprovals: false,
   hasPendingUserInput: false,
   hasActionableProposedPlan: false,
+});
+
+const stub = (id: string): OrchestrationArchivedThreadStub => ({
+  id: ThreadId.make(id),
+  projectId: ProjectId.make("project-1"),
+  title: id,
+  branch: null,
+  worktreePath: null,
+  worktreeId: null,
+  createdAt: now,
+  updatedAt: now,
+  archivedAt: now,
+  latestUserMessageAt: null,
+  lineage: null,
 });
 
 const begin = (threadCount: number, archivedThreadCount = 0): OrchestrationShellStreamItem => ({
@@ -123,6 +138,54 @@ describe("createShellSnapshotAssembler", () => {
     ]);
   });
 
+  it("assembles archived stub pages into the snapshot's stubs, counted with the shells", () => {
+    const onIncomplete = vi.fn();
+    const assembler = createShellSnapshotAssembler(onIncomplete);
+    const delivered = [
+      begin(4, 2),
+      { kind: "snapshot-threads", threads: [thread("a"), thread("b")] },
+      { kind: "snapshot-archived-threads", threads: [stub("x")] },
+      { kind: "snapshot-archived-threads", threads: [stub("y")] },
+      { kind: "snapshot-end" },
+    ].flatMap((item) => assembler.accept(item as OrchestrationShellStreamItem) ?? []);
+    expect(delivered).toEqual([
+      {
+        kind: "snapshot",
+        snapshot: {
+          snapshotSequence: 9,
+          projects: [],
+          worktrees: [],
+          threads: [thread("a"), thread("b")],
+          archivedThreadStubs: [stub("x"), stub("y")],
+          updatedAt: now,
+        },
+      },
+    ]);
+    expect(onIncomplete).not.toHaveBeenCalled();
+  });
+
+  it("leaves stubs out of a snapshot from a server that sent none (an older server)", () => {
+    const assembler = createShellSnapshotAssembler();
+    assembler.accept(begin(1, 1));
+    assembler.accept({ kind: "snapshot-threads", threads: [thread("x", now)] });
+    const delivered = assembler.accept({ kind: "snapshot-end" });
+    expect(delivered?.kind === "snapshot" && "archivedThreadStubs" in delivered.snapshot).toBe(
+      false,
+    );
+  });
+
+  it("never carries stubs of an unfinished snapshot into the next one", () => {
+    const assembler = createShellSnapshotAssembler();
+    assembler.accept(begin(1, 1));
+    assembler.accept({ kind: "snapshot-archived-threads", threads: [stub("stale")] });
+    assembler.accept(begin(1));
+    assembler.accept({ kind: "snapshot-threads", threads: [thread("a")] });
+    const delivered = assembler.accept({ kind: "snapshot-end" });
+    expect(delivered?.kind === "snapshot" && "archivedThreadStubs" in delivered.snapshot).toBe(
+      false,
+    );
+  });
+
   it("reports a count mismatch but still delivers what arrived", () => {
     const onIncomplete = vi.fn();
     const assembler = createShellSnapshotAssembler(onIncomplete);
@@ -169,6 +232,15 @@ describe("wsRpcClient shell subscription", () => {
       threadPriorities: "delta",
       snapshotDelivery: "paged",
     });
+  });
+
+  it("asks for archived stubs only when the subscriber says it keeps them", () => {
+    const harness = makeClient();
+    harness.client.orchestration.subscribeShell(() => undefined, { archivedThreads: "stub" });
+    expect(harness.connect()).toEqual({ snapshotDelivery: "paged", archivedThreads: "stub" });
+    const plain = makeClient();
+    plain.client.orchestration.subscribeShell(() => undefined);
+    expect(plain.connect()).toEqual({ snapshotDelivery: "paged" });
   });
 
   it("delivers a paged snapshot (new server) as one snapshot item", () => {

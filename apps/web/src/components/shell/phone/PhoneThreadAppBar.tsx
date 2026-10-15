@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { fullThreadEntry } from "../../../types";
 import { useShallow } from "zustand/react/shallow";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -30,10 +31,13 @@ export interface PhoneThreadAppBarProps {
 export function PhoneThreadAppBar(props: PhoneThreadAppBarProps) {
   const navigate = useNavigate();
   const summaries = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  // An archived stub has no status to show until its full summary loads.
   const summary = useMemo(
     () =>
-      summaries.find(
-        (thread) => thread.id === props.threadId && thread.environmentId === props.environmentId,
+      fullThreadEntry(
+        summaries.find(
+          (thread) => thread.id === props.threadId && thread.environmentId === props.environmentId,
+        ),
       ) ?? null,
     [props.environmentId, props.threadId, summaries],
   );

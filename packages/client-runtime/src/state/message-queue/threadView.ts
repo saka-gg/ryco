@@ -14,6 +14,7 @@ import { indexTurnSteerRejections } from "./logic.ts";
 import { PROVIDER_DIFF_CHECKPOINT_REF_PREFIX } from "../threads/checkpointSummary.ts";
 import { selectEnvironmentState, type AppState } from "../threads/store.ts";
 import { selectThreadDetailLoaded } from "../threads/storeSelectors.ts";
+import { isArchivedThreadStub } from "../threads/types.ts";
 
 /**
  * The queue's read of one thread: everything the drain policy needs, and
@@ -187,10 +188,34 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
   const threadId = ref.threadId;
   const shell = environmentState.threadShellById[threadId];
   if (!shell) return null;
+  // An archived thread listed as a stub: archived is all that is known, and an
+  // archived thread waits before anything else is consulted. Nothing else is
+  // claimed (no session, turn or pending work) until its full shell loads.
+  if (isArchivedThreadStub(shell)) {
+    return {
+      ref,
+      started: shell.latestUserMessageAt !== null,
+      archived: true,
+      detailLoaded: false,
+      running: false,
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      session: null,
+      latestTurn: null,
+      latestTurnPlaceholderCheckpoint: false,
+      projectedMessageIds: readProjectedMessageIds(environmentState.messageIdsByThreadId[threadId]),
+      turnStartFailures: EMPTY_ACTIVITY_VIEW.turnStartFailures,
+      steerRejectionsByActivityId: EMPTY_ACTIVITY_VIEW.steerRejectionsByActivityId,
+      turnStartCancelledMessageIds: EMPTY_ACTIVITY_VIEW.turnStartCancelledMessageIds,
+      usageLimit: null,
+      modelSelection: null,
+    };
+  }
 
   const session = environmentState.threadSessionById[threadId] ?? null;
   const latestTurn = environmentState.threadTurnStateById[threadId]?.latestTurn ?? null;
-  const summary = environmentState.sidebarThreadSummaryById[threadId];
+  const storedSummary = environmentState.sidebarThreadSummaryById[threadId];
+  const summary = isArchivedThreadStub(storedSummary) ? undefined : storedSummary;
   const messageIds = environmentState.messageIdsByThreadId[threadId];
   const detailLoaded = selectThreadDetailLoaded(state, ref);
   const activityView = detailLoaded

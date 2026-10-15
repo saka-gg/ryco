@@ -17,6 +17,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { selectEnvironmentState, useStore } from "../store";
+import { fullThreadEntry } from "../types";
 import {
   capturePrimaryShellSnapshot,
   decodePrimaryShellCacheRecord,
@@ -149,7 +150,7 @@ describe("primary shell cache hydration", () => {
     expect(selectEnvironmentShellLive(state, environmentId)).toBe(false);
     for (const id of environment.threadIds) {
       expect(environment.threadSessionById[id]).toBeNull();
-      expect(environment.sidebarThreadSummaryById[id]?.session).toBeNull();
+      expect(fullThreadEntry(environment.sidebarThreadSummaryById[id])?.session).toBeNull();
     }
   });
 

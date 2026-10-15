@@ -1,7 +1,7 @@
 import type {
   EnvironmentId,
   ExecutionEnvironmentDescriptor,
-  OrchestrationShellSnapshot,
+  OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationShellThreadPrioritiesItem,
   ServerConfig,
@@ -50,8 +50,9 @@ export interface OrchestrationHandlers {
     event: OrchestrationShellStreamEvent,
     environmentId: EnvironmentId,
   ) => void;
+  /** Archived threads may arrive as stubs (`snapshot.archivedThreadStubs`). */
   readonly syncShellSnapshot: (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
   ) => void;
   readonly applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => void;
@@ -292,6 +293,8 @@ export function createEnvironmentConnection(
     },
     {
       ...(input.applyThreadPriorities === undefined ? {} : { threadPriorities: "delta" as const }),
+      // The store keeps archived threads as stubs and loads full shells on demand.
+      archivedThreads: "stub" as const,
       ...(readShellResumeSequence === undefined
         ? {}
         : {

@@ -504,6 +504,135 @@ describe("thread subscription before the thread exists", () => {
   });
 });
 
+describe("archived thread stubs", () => {
+  function stubHarness() {
+    const subscribed: string[] = [];
+    const requested: Array<ReadonlyArray<string>> = [];
+    const applied: Array<ReadonlyArray<string>> = [];
+    const stubs = new Set(["thread-archived"]);
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      dispose: () => Promise.resolve(),
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (input: { readonly threadId: string }) => {
+            subscribed.push(input.threadId);
+            return () => undefined;
+          },
+          getThreadShells: (input: { readonly threadIds: ReadonlyArray<string> }) => {
+            requested.push(input.threadIds);
+            return Promise.resolve({
+              snapshotSequence: 2,
+              threads: input.threadIds.map((id) => ({ id })),
+              remainingThreadIds: [],
+            });
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      stateSink: {
+        applyShellEvents: (_environmentId: EnvironmentId, events: ReadonlyArray<unknown>) =>
+          events.map(() => undefined),
+        afterShellEventApplied: () => undefined,
+        syncServerShellSnapshot: () => undefined,
+        reconcileSnapshotDerivedState: () => undefined,
+        isArchivedThreadStub: (_environmentId: EnvironmentId, threadId: ThreadId) =>
+          stubs.has(threadId),
+        applyLoadedThreadShells: (
+          _environmentId: EnvironmentId,
+          threads: ReadonlyArray<{ readonly id: string }>,
+        ) => {
+          applied.push(threads.map((thread) => thread.id));
+          for (const thread of threads) stubs.delete(thread.id);
+        },
+      },
+    });
+    return { supervisor, connection, subscribed, requested, applied, stubs };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("keeps a stubbed thread's open subscription across a stubbed snapshot", () => {
+    const { supervisor, connection, subscribed } = stubHarness();
+    supervisor.register(connection);
+    supervisor.syncShellSnapshot(
+      {
+        snapshotSequence: 1,
+        updatedAt: null,
+        projects: [],
+        threads: [{ id: "thread-live" }],
+        archivedThreadStubs: [{ id: "thread-archived" }],
+      } as never,
+      remote,
+    );
+    // The archived thread is listed (as a stub): opening it subscribes at once.
+    supervisor.retainThreadDetailSubscription(remote, "thread-archived" as ThreadId, {
+      view: true,
+    });
+    expect(subscribed).toEqual(["thread-archived"]);
+  });
+
+  const stubbedSnapshot = (snapshotSequence: number) =>
+    ({
+      snapshotSequence,
+      updatedAt: null,
+      projects: [],
+      threads: [{ id: "thread-live" }],
+      archivedThreadStubs: [{ id: "thread-archived" }],
+    }) as never;
+
+  it("loads an opened stub's full shell and applies it", async () => {
+    const { supervisor, connection, requested, applied } = stubHarness();
+    supervisor.register(connection);
+    supervisor.syncShellSnapshot(stubbedSnapshot(1), remote);
+    supervisor.retainThreadDetailSubscription(remote, "thread-archived" as ThreadId, {
+      view: true,
+    });
+    supervisor.retainThreadDetailSubscription(remote, "thread-live" as ThreadId);
+    await settle();
+    expect(requested).toEqual([["thread-archived"]]);
+    expect(applied).toEqual([["thread-archived"]]);
+  });
+
+  it("waits for the connection's snapshot before loading a stub opened earlier", async () => {
+    const { supervisor, connection, requested, applied } = stubHarness();
+    supervisor.register(connection);
+    // Opened before any live snapshot: the stub can only be a cached one.
+    supervisor.retainThreadDetailSubscription(remote, "thread-archived" as ThreadId, {
+      view: true,
+    });
+    await settle();
+    expect(requested).toEqual([]);
+    supervisor.syncShellSnapshot(stubbedSnapshot(1), remote);
+    await settle();
+    expect(requested).toEqual([["thread-archived"]]);
+    expect(applied).toEqual([["thread-archived"]]);
+  });
+
+  it("loads stubs a view asks for without opening them", async () => {
+    const { supervisor, connection, requested } = stubHarness();
+    supervisor.register(connection);
+    supervisor.ensureArchivedThreadShells(remote, [
+      "thread-archived" as ThreadId,
+      "thread-live" as ThreadId,
+    ]);
+    await settle();
+    expect(requested).toEqual([["thread-archived"]]);
+  });
+
+  it("drops a load whose connection went away before it answered", async () => {
+    const { supervisor, connection, applied } = stubHarness();
+    supervisor.register(connection);
+    supervisor.ensureArchivedThreadShells(remote, ["thread-archived" as ThreadId]);
+    await supervisor.remove(remote);
+    await settle();
+    expect(applied).toEqual([]);
+  });
+});
+
 describe("thread window failures", () => {
   beforeEach(() => {
     vi.useFakeTimers();

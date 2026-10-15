@@ -5,6 +5,7 @@ import type { DragEvent as ReactDragEvent } from "react";
 import { paneKey, type PaneDropVerdict, type PaneRect, type PaneSide } from "../../chatPanes.logic";
 import { cn } from "../../lib/utils";
 import { selectSidebarThreadSummaryByRef, useStore } from "../../store";
+import { isArchivedThreadStub } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
 import { inboxGlyphLabel, resolveInboxGlyph } from "../inboxSidebar/inboxRowPresentation";
 import { resolveInboxThreadStatus } from "../inboxSidebar/inboxSidebarModel";
@@ -23,6 +24,8 @@ function usePaneStatus(threadRef: ScopedThreadRef, focused: boolean) {
     (state) => state.threadLastVisitedAtById[paneKey(threadRef)],
   );
   if (!thread) return { title: "Thread", glyph: null };
+  // An archived stub has no status to show until its full shell loads.
+  if (isArchivedThreadStub(thread)) return { title: thread.title || "Untitled task", glyph: null };
   const status = resolveInboxThreadStatus(thread);
   const unseen =
     status.state === "idle" &&

@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import { isArchivedThreadStub, type SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import { useRouter } from "@tanstack/react-router";
 
 import { cn } from "../../lib/utils";
@@ -16,11 +16,12 @@ import { threadLinkActivityAt } from "./threadLinkActivity";
  * container (Agents on the pull request rail, Delegated threads in a chat).
  */
 export function ThreadLinkList(props: {
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** An archived thread may be a stub, which shows as archived (no status). */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly tone: "rail" | "band";
 }) {
   const router = useRouter({ warn: false });
-  const open = (thread: SidebarThreadSummary) => {
+  const open = (thread: SidebarThreadOrStub) => {
     if (!router) return;
     void router.navigate({
       to: "/$environmentId/$threadId",
@@ -30,8 +31,10 @@ export function ThreadLinkList(props: {
   return (
     <>
       {props.threads.map((thread) => {
-        const status = resolveInboxThreadStatus(thread);
-        const glyph = resolveInboxGlyph(status, false);
+        const stub = isArchivedThreadStub(thread);
+        const status = stub ? null : resolveInboxThreadStatus(thread);
+        const glyph = status === null ? "idle" : resolveInboxGlyph(status, false);
+        const glyphLabel = status === null ? "Archived" : inboxGlyphLabel(status, false);
         return (
           <button
             key={thread.id}
@@ -45,7 +48,7 @@ export function ThreadLinkList(props: {
                 : "-mx-1.5 px-1.5 hover:bg-accent/60",
             )}
           >
-            <InboxStatusGlyph key={glyph} kind={glyph} label={inboxGlyphLabel(status, false)} />
+            <InboxStatusGlyph key={glyph} kind={glyph} label={glyphLabel} />
             <span className="min-w-0 flex-1 truncate text-[13px] text-foreground/90">
               {thread.title}
             </span>

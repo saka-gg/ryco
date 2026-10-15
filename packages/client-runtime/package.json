@@ -34,6 +34,10 @@
       "types": "./src/rpc/index.ts",
       "import": "./src/rpc/index.ts"
     },
+    "./rpc/shellSnapshotAssembly": {
+      "types": "./src/rpc/shellSnapshotAssembly.ts",
+      "import": "./src/rpc/shellSnapshotAssembly.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"

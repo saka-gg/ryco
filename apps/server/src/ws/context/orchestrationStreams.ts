@@ -5,6 +5,7 @@ import {
   type OrchestrationShellSnapshotDelivery,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
+  type OrchestrationStubbedShellSnapshot,
   type OrchestrationThreadPriorityEntry,
   OrchestrationGetSnapshotError,
   ThreadId,
@@ -55,10 +56,15 @@ interface PriorityLoadFlight<A> {
 }
 
 // Keyed by the projection query service, which every connection of a server
-// shares, so subscribers on different connections join the same load.
+// shares, so subscribers on different connections join the same load. Each
+// shell form (full archived shells or archived stubs) has loads of its own.
 const prioritySnapshotFlights = new WeakMap<
   object,
-  PriorityLoadFlight<OrchestrationShellSnapshot>
+  PriorityLoadFlight<OrchestrationStubbedShellSnapshot>
+>();
+const priorityStubbedSnapshotFlights = new WeakMap<
+  object,
+  PriorityLoadFlight<OrchestrationStubbedShellSnapshot>
 >();
 const priorityEntryFlights = new WeakMap<
   object,
@@ -357,6 +363,22 @@ export const toShellStreamEvent = (
         Effect.catch(() => Effect.succeed(Option.none())),
       );
   }
+};
+
+/**
+ * A snapshot as one `snapshot` item: archived threads as full shells. A
+ * stubbed snapshot never takes this path (stubs travel paged only), so its
+ * stubs are never silently dropped; this only strips the empty field.
+ */
+const withoutArchivedStubs = (
+  snapshot: OrchestrationStubbedShellSnapshot,
+): OrchestrationShellSnapshot => {
+  if (snapshot.archivedThreadStubs === undefined) return snapshot;
+  if (snapshot.archivedThreadStubs.length > 0) {
+    throw new Error("A shell snapshot with archived stubs can only be sent paged");
+  }
+  const { archivedThreadStubs: _stubs, ...full } = snapshot;
+  return full;
 };
 
 /**
@@ -740,14 +762,17 @@ export const makeOrchestrationStreamHelpers = (deps: {
           ),
         );
 
-  /** A shell snapshot as the subscriber asked to receive it: one item, or pages. */
+  /**
+   * A shell snapshot as the subscriber asked to receive it: one item, or pages.
+   * Archived stubs only ever reach a paged subscriber (see `makeReplayableShellStream`).
+   */
   const shellSnapshotItems = (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
     snapshotDelivery: OrchestrationShellSnapshotDelivery | undefined,
   ): Stream.Stream<OrchestrationShellStreamItem> =>
     snapshotDelivery === "paged"
       ? Stream.fromArrays(...pageShellSnapshot(snapshot))
-      : Stream.make({ kind: "snapshot" as const, snapshot });
+      : Stream.make({ kind: "snapshot" as const, snapshot: withoutArchivedStubs(snapshot) });
 
   /**
    * The shell items a thread-priority ranking sends a subscriber. A client
@@ -756,9 +781,10 @@ export const makeOrchestrationStreamHelpers = (deps: {
    * subscriber hears a ranking at the same moment, so they join one load.
    */
   const priorityStream = (
-    snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
+    snapshot: Effect.Effect<OrchestrationStubbedShellSnapshot, OrchestrationGetSnapshotError>,
     threadPriorities: "delta" | undefined,
     snapshotDelivery: OrchestrationShellSnapshotDelivery | undefined,
+    stubbed: boolean,
   ): Stream.Stream<OrchestrationShellStreamItem, OrchestrationGetSnapshotError> => {
     const loadPriorities = loadThreadPriorityEntries;
     if (threadPriorities === "delta" && loadPriorities !== undefined) {
@@ -771,7 +797,11 @@ export const makeOrchestrationStreamHelpers = (deps: {
     }
     return threadPriorityChanges.pipe(
       Stream.mapEffect(() =>
-        joinPriorityLoad(prioritySnapshotFlights, projectionSnapshotQuery, snapshot),
+        joinPriorityLoad(
+          stubbed ? priorityStubbedSnapshotFlights : prioritySnapshotFlights,
+          projectionSnapshotQuery,
+          snapshot,
+        ),
       ),
       Stream.flatMap((nextSnapshot) => shellSnapshotItems(nextSnapshot, snapshotDelivery)),
     );
@@ -798,15 +828,30 @@ export const makeOrchestrationStreamHelpers = (deps: {
   };
 
   const makeReplayableShellStream = (
-    snapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
+    fullSnapshot: Effect.Effect<OrchestrationShellSnapshot, OrchestrationGetSnapshotError>,
     options: {
       readonly resumeFromSequence?: number | undefined;
       readonly threadPriorities?: "delta" | undefined;
       readonly snapshotDelivery?: OrchestrationShellSnapshotDelivery | undefined;
+      /**
+       * The snapshot with archived stubs, for a subscriber that asked for
+       * `archivedThreads: "stub"`. Used only with paged delivery: a single
+       * `snapshot` item always lists archived threads as full shells.
+       */
+      readonly stubbedSnapshot?:
+        | Effect.Effect<OrchestrationStubbedShellSnapshot, OrchestrationGetSnapshotError>
+        | undefined;
     } = {},
   ) =>
     Stream.unwrap(
       Effect.gen(function* () {
+        const stubbed =
+          options.stubbedSnapshot !== undefined && options.snapshotDelivery === "paged";
+        const snapshot: Effect.Effect<
+          OrchestrationStubbedShellSnapshot,
+          OrchestrationGetSnapshotError
+        > =
+          stubbed && options.stubbedSnapshot !== undefined ? options.stubbedSnapshot : fullSnapshot;
         const resumeFromSequence = options.resumeFromSequence;
         const resumed =
           resumeFromSequence !== undefined && (yield* canResumeAfter(resumeFromSequence));
@@ -858,6 +903,7 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshot,
           options.threadPriorities,
           options.snapshotDelivery,
+          stubbed,
         );
 
         const resumedItem: OrchestrationShellStreamItem = {

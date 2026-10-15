@@ -134,6 +134,13 @@ export interface WorkspaceThreadMetadata {
    */
   readonly latestUserMessageAt?: string | null;
   readonly latestTurn?: WorkspaceThreadLatestTurn | null;
+  /**
+   * `"archived-stub"`: the row was an archived thread's stub, so model
+   * selection, provider, pending flags and the latest turn are unknown (stored
+   * as null and false) and it rehydrates as a stub again. Optional: absent in
+   * older caches; older readers ignore it.
+   */
+  readonly shellDetail?: "archived-stub";
 }
 
 export const WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION = 1 as const;

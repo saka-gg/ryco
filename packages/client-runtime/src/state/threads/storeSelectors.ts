@@ -18,10 +18,11 @@ import {
 } from "./store.ts";
 import {
   type Project,
+  type SidebarThreadOrStub,
   type SidebarThreadSummary,
   type SidebarWorktreeSummary,
   type Thread,
-  type ThreadShell,
+  type ThreadShellOrStub,
 } from "./types.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 
@@ -108,8 +109,8 @@ type FallbackThreadCandidate = Pick<SidebarThreadSummary, "id"> & ThreadSortInpu
 
 const toFallbackThreadCandidate = (
   threadId: ThreadId,
-  summary: SidebarThreadSummary | undefined,
-  shell: ThreadShell | undefined,
+  summary: SidebarThreadOrStub | undefined,
+  shell: ThreadShellOrStub | undefined,
 ): FallbackThreadCandidate | null => {
   if (summary) {
     return summary;

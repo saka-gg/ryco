@@ -1,22 +1,24 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { WorktreeId } from "@ryco/contracts/worktree";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { isThreadLineage } from "@ryco/client-runtime/state/threads";
+import { isArchivedThreadStub, isThreadLineage } from "@ryco/client-runtime/state/threads";
 import {
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT,
   MAX_WORKSPACE_SNAPSHOT_THREADS_PER_ENVIRONMENT,
   WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION,
   type WorkspaceMetadataSnapshot,
+  type WorkspaceThreadMetadata,
 } from "@ryco/client-runtime/state/workspace";
 
 import { payloadByteLength } from "./snapshotDb";
 import type {
+  ArchivedThreadStub,
   CachedEnvironmentShellSnapshot,
   EnvironmentState,
   Project,
-  SidebarThreadSummary,
+  SidebarThreadOrStub,
   SidebarWorktreeSummary,
-  ThreadShell,
+  ThreadShellOrStub,
 } from "../state/threadsRuntime";
 
 /**
@@ -28,16 +30,24 @@ import type {
  * v1 — initial: projects, worktrees, and thread shell/sidebar-summary pairs,
  *      with sessions and background liveness stripped at capture so a cached
  *      row can never claim live activity.
+ * v2 — an archived thread the shell listed as a stub (`ArchivedThreadStub`)
+ *      is stored as that stub in both halves. A v1 reader would take a stub
+ *      for a full shell, so v2 records are discarded by it; v2 readers still
+ *      read v1 records, which only hold full shells.
  */
-export const ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION = 1;
+export const ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION = 2;
+/** Older record versions this client still reads. */
+const READABLE_LEGACY_SCHEMA_VERSIONS: ReadonlySet<unknown> = new Set([1]);
 
 export interface StoredEnvironmentSnapshotThread {
-  readonly shell: ThreadShell;
-  readonly summary: SidebarThreadSummary;
+  /** An archived thread's stub is the same stub in both halves. */
+  readonly shell: ThreadShellOrStub;
+  readonly summary: SidebarThreadOrStub;
 }
 
 export interface StoredEnvironmentSnapshot {
-  readonly schemaVersion: typeof ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION;
+  /** Records are written as the current version; a legacy one decodes as is. */
+  readonly schemaVersion: typeof ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION | 1;
   readonly environmentId: EnvironmentId;
   readonly capturedAt: number;
   readonly projects: ReadonlyArray<Project>;
@@ -54,7 +64,7 @@ export const MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT = MAX_WORKSPACE_SNAPSHOT_THREA
 export const MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT =
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT;
 
-function threadRecency(summary: SidebarThreadSummary): number {
+function threadRecency(summary: SidebarThreadOrStub): number {
   const timestamp = Date.parse(
     summary.updatedAt ?? summary.latestUserMessageAt ?? summary.createdAt,
   );
@@ -83,7 +93,7 @@ export function captureEnvironmentSnapshotRecord(
     const shell = environmentState.threadShellById[threadId];
     const summary = environmentState.sidebarThreadSummaryById[threadId];
     if (!shell || !summary) return [];
-    return [{ shell, summary: { ...summary, session: null, backgroundLiveness: null } }];
+    return [{ shell, summary: withoutLiveState(summary) }];
   });
   return {
     schemaVersion: ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION,
@@ -93,6 +103,13 @@ export function captureEnvironmentSnapshotRecord(
     worktrees,
     threads,
   };
+}
+
+/** A cached row never claims live activity; a stub claims none to begin with. */
+function withoutLiveState(summary: SidebarThreadOrStub): SidebarThreadOrStub {
+  return isArchivedThreadStub(summary)
+    ? summary
+    : { ...summary, session: null, backgroundLiveness: null };
 }
 
 /**
@@ -161,8 +178,8 @@ export function boundStoredEnvironmentSnapshot(
 
 interface SerializedThreadFragment {
   /** The store objects the fragment was serialized from. */
-  readonly shell: ThreadShell;
-  readonly summary: SidebarThreadSummary;
+  readonly shell: ThreadShellOrStub;
+  readonly summary: SidebarThreadOrStub;
   readonly json: string;
   readonly bytes: number;
 }
@@ -201,15 +218,12 @@ export function createEnvironmentSnapshotSerializer(
   let fragments = new Map<string, SerializedThreadFragment>();
   let serializedThreads = 0;
 
-  const fragmentFor = (shell: ThreadShell, summary: SidebarThreadSummary) => {
+  const fragmentFor = (shell: ThreadShellOrStub, summary: SidebarThreadOrStub) => {
     const cached = fragments.get(shell.id);
     if (cached !== undefined && cached.shell === shell && cached.summary === summary) {
       return cached;
     }
-    const thread: StoredEnvironmentSnapshotThread = {
-      shell,
-      summary: { ...summary, session: null, backgroundLiveness: null },
-    };
+    const thread: StoredEnvironmentSnapshotThread = { shell, summary: withoutLiveState(summary) };
     const json = JSON.stringify(thread);
     serializedThreads += 1;
     return { shell, summary, json, bytes: payloadByteLength(json) };
@@ -298,16 +312,29 @@ function isValidWorktree(value: unknown, environmentId: string): boolean {
   );
 }
 
-function isValidThread(value: unknown, environmentId: string): boolean {
+function isValidThread(value: unknown, environmentId: string, legacy: boolean): boolean {
   if (!isRecord(value) || !isRecord(value.shell) || !isRecord(value.summary)) return false;
   const shell = value.shell;
   const summary = value.summary;
-  return (
+  const identityValid =
     isNonEmptyString(shell.id) &&
     shell.environmentId === environmentId &&
     isNonEmptyString(shell.projectId) &&
     summary.id === shell.id &&
-    summary.environmentId === environmentId
+    summary.environmentId === environmentId;
+  if (!identityValid) return false;
+  const shellIsStub = shell.shellDetail === "archived-stub";
+  const summaryIsStub = summary.shellDetail === "archived-stub";
+  if (!shellIsStub && !summaryIsStub) return true;
+  // A stub is stored whole (both halves) and archived; v1 never held one.
+  return (
+    !legacy &&
+    shellIsStub &&
+    summaryIsStub &&
+    isNonEmptyString(shell.archivedAt) &&
+    isNonEmptyString(shell.title) &&
+    isNonEmptyString(shell.createdAt) &&
+    isNonEmptyString(shell.updatedAt)
   );
 }
 
@@ -328,7 +355,8 @@ export function decodeStoredEnvironmentSnapshot(
     return null;
   }
   if (!isRecord(value)) return null;
-  if (value.schemaVersion !== ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION) return null;
+  const legacy = READABLE_LEGACY_SCHEMA_VERSIONS.has(value.schemaVersion);
+  if (value.schemaVersion !== ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION && !legacy) return null;
   if (value.environmentId !== environmentId) return null;
   if (typeof value.capturedAt !== "number" || !Number.isFinite(value.capturedAt)) return null;
   const { projects, worktrees, threads } = value;
@@ -337,7 +365,7 @@ export function decodeStoredEnvironmentSnapshot(
   }
   if (!projects.every((project) => isValidProject(project, environmentId))) return null;
   if (!worktrees.every((worktree) => isValidWorktree(worktree, environmentId))) return null;
-  if (!threads.every((thread) => isValidThread(thread, environmentId))) return null;
+  if (!threads.every((thread) => isValidThread(thread, environmentId, legacy))) return null;
   return value as unknown as StoredEnvironmentSnapshot;
 }
 
@@ -385,24 +413,57 @@ export function toWorkspaceMetadataSnapshot(
       archivedAt: worktree.archivedAt,
       updatedAt: worktree.updatedAt,
     })),
-    threads: record.threads.map(({ shell, summary }) => ({
-      environmentId: shell.environmentId,
-      id: shell.id,
-      projectId: shell.projectId,
-      worktreeId: summary.worktreeId ? WorktreeId.make(summary.worktreeId) : null,
-      title: shell.title,
-      createdAt: shell.createdAt,
-      updatedAt: summary.updatedAt ?? shell.updatedAt ?? null,
-      archivedAt: shell.archivedAt,
-      modelSelection: summary.modelSelection ?? shell.modelSelection,
-      providerDriver: summary.providerDriver ?? null,
-      branch: shell.branch,
-      hasPendingApprovals: summary.hasPendingApprovals,
-      hasPendingUserInput: summary.hasPendingUserInput,
-      hasActionableProposedPlan: summary.hasActionableProposedPlan,
-      deliveryUnknown: false,
-      // Stored shells come from storage: keep lineage only when well formed.
-      ...(isThreadLineage(shell.lineage) ? { lineage: shell.lineage } : {}),
-    })),
+    threads: record.threads.map(({ shell, summary }) =>
+      isArchivedThreadStub(shell)
+        ? {
+            environmentId: shell.environmentId,
+            id: shell.id,
+            projectId: shell.projectId,
+            worktreeId: shell.worktreeId ? WorktreeId.make(shell.worktreeId) : null,
+            title: shell.title,
+            createdAt: shell.createdAt,
+            updatedAt: shell.updatedAt,
+            archivedAt: shell.archivedAt,
+            // Unknown for a stub, and marked so (`shellDetail`) rather than read.
+            modelSelection: null,
+            providerDriver: null,
+            branch: shell.branch,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+            deliveryUnknown: false,
+            ...(isThreadLineage(shell.lineage) ? { lineage: shell.lineage } : {}),
+            latestUserMessageAt: shell.latestUserMessageAt,
+            shellDetail: "archived-stub" as const,
+          }
+        : toFullThreadMetadata(shell, summary),
+    ),
+  };
+}
+
+function toFullThreadMetadata(
+  shell: Exclude<ThreadShellOrStub, ArchivedThreadStub>,
+  storedSummary: SidebarThreadOrStub,
+): WorkspaceThreadMetadata {
+  // A full shell is always stored with its full summary (`isValidThread`).
+  const summary = isArchivedThreadStub(storedSummary) ? null : storedSummary;
+  return {
+    environmentId: shell.environmentId,
+    id: shell.id,
+    projectId: shell.projectId,
+    worktreeId: summary?.worktreeId ? WorktreeId.make(summary.worktreeId) : null,
+    title: shell.title,
+    createdAt: shell.createdAt,
+    updatedAt: summary?.updatedAt ?? shell.updatedAt ?? null,
+    archivedAt: shell.archivedAt,
+    modelSelection: summary?.modelSelection ?? shell.modelSelection,
+    providerDriver: summary?.providerDriver ?? null,
+    branch: shell.branch,
+    hasPendingApprovals: summary?.hasPendingApprovals ?? false,
+    hasPendingUserInput: summary?.hasPendingUserInput ?? false,
+    hasActionableProposedPlan: summary?.hasActionableProposedPlan ?? false,
+    deliveryUnknown: false,
+    // Stored shells come from storage: keep lineage only when well formed.
+    ...(isThreadLineage(shell.lineage) ? { lineage: shell.lineage } : {}),
   };
 }

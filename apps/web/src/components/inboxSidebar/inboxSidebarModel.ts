@@ -13,6 +13,7 @@ import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
 import { PROVIDER_OPTIONS } from "@ryco/client-runtime/state/session";
 import type {
   Project,
+  SidebarThreadOrStub,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
@@ -247,7 +248,8 @@ export interface InboxSidebarFilters {
 export interface BuildInboxSidebarInput {
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived threads may be stubs: they only feed lineage walks and counts. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<InboxSidebarEnvironment>;
   readonly filters: InboxSidebarFilters;
   readonly deliveryUnknownThreadKeys?: ReadonlySet<string>;
@@ -482,7 +484,7 @@ const UNKNOWN_PROJECT_LABEL = "Unknown project";
  */
 function nestDelegatedRows(
   rows: ReadonlyArray<InboxSidebarRow>,
-  threads: ReadonlyArray<SidebarThreadSummary>,
+  threads: ReadonlyArray<SidebarThreadOrStub>,
 ): InboxSidebarRow[] {
   // All threads, so filtered-out or archived intermediates can still be walked.
   const lineageByKey = new Map(

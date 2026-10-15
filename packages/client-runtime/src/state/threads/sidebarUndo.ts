@@ -1,4 +1,4 @@
-import type { SidebarThreadSummary } from "./types.ts";
+import { isArchivedThreadStub, type SidebarThreadOrStub } from "./types.ts";
 import type {
   CommandId,
   DispatchableClientOrchestrationCommand,
@@ -50,8 +50,26 @@ export interface SidebarUndoNotice {
   readonly threadTitle?: string | undefined;
 }
 
-/** A local pin restores ordering, without treating response text/status updates as a new action. */
-export function sidebarUndoThreadRevision(thread: SidebarThreadSummary): string {
+/**
+ * A local pin restores ordering, without treating response text/status updates as a new action.
+ * An archived stub's revision covers the ordering fields it has; it differs from the revision of
+ * the same thread's full summary, so swapping one for the other reads as a change.
+ */
+export function sidebarUndoThreadRevision(thread: SidebarThreadOrStub): string {
+  if (isArchivedThreadStub(thread)) {
+    return JSON.stringify([
+      "archived-stub",
+      thread.projectId,
+      thread.title,
+      thread.createdAt,
+      thread.archivedAt,
+      thread.branch,
+      thread.worktreePath,
+      thread.worktreeId,
+      thread.latestUserMessageAt,
+      thread.latestUserMessageAt == null ? thread.updatedAt : null,
+    ]);
+  }
   return JSON.stringify([
     thread.projectId,
     thread.title,

@@ -5,7 +5,12 @@ import {
   resolveThreadStatusPill,
   type SidebarStatusBucket,
 } from "./components/Sidebar.logic";
-import { DEFAULT_AGENT_TOKEN_MODE, type SidebarThreadSummary } from "./types";
+import {
+  DEFAULT_AGENT_TOKEN_MODE,
+  isUnarchivedThreadEntry,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+} from "./types";
 
 export interface SessionTabItem {
   key: string;
@@ -74,7 +79,7 @@ function threadBelongsToFilter(thread: SidebarThreadSummary, filter: SessionTabs
 }
 
 export function createSessionTabsSelector(): (
-  threads: ReadonlyArray<SidebarThreadSummary>,
+  threads: ReadonlyArray<SidebarThreadOrStub>,
   filter: SessionTabsFilter,
 ) => ReadonlyArray<SessionTabItem> {
   const cache = new Map<string, CachedItem>();
@@ -83,7 +88,7 @@ export function createSessionTabsSelector(): (
   return (threads, filter) => {
     const matching: SidebarThreadSummary[] = [];
     for (const thread of threads) {
-      if (thread.archivedAt !== null) continue;
+      if (!isUnarchivedThreadEntry(thread)) continue;
       if (!threadBelongsToFilter(thread, filter)) continue;
       matching.push(thread);
     }

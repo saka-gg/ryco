@@ -5,6 +5,8 @@ import type {
 } from "@ryco/contracts";
 import { threadHasConversation } from "@ryco/shared/threadFork";
 
+import { isArchivedThreadStub, type ArchivedThreadStub } from "../threads/types.ts";
+
 /**
  * The lifecycle action inventory shared by every client surface (sidebar, Inbox,
  * workspace management; web, desktop and mobile). Conversation and workspace actions
@@ -47,8 +49,15 @@ export const isThreadSessionLive = (thread: ThreadLifecycleSubject): boolean =>
   thread.session.status !== "error";
 
 export function listThreadLifecycleActions(
-  thread: ThreadLifecycleSubject,
+  thread: ThreadLifecycleSubject | ArchivedThreadStub,
 ): ThreadLifecycleActionItem[] {
+  // A stub knows of no session or turn to stop; its full shell, once loaded, does.
+  if (isArchivedThreadStub(thread)) {
+    return [
+      { id: "unarchive", label: "Unarchive thread" },
+      { id: "delete", label: "Delete…", destructive: true },
+    ];
+  }
   const items: ThreadLifecycleActionItem[] = [];
   if (isThreadTurnRunning(thread)) items.push({ id: "interrupt-turn", label: "Interrupt turn" });
   else if (isThreadSessionLive(thread)) items.push({ id: "stop-session", label: "Stop session" });

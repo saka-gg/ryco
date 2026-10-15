@@ -28,12 +28,12 @@ import { openExternalLink } from "../../lib/openExternalLink";
 import { SidebarWorktreeList, type SidebarThreadGitStatusTarget } from "./SidebarWorktreeList";
 import { useSidebarProjectTreeCache } from "./sidebarProjectTreeCache";
 import { mergeSidebarThreadsWithDrafts } from "./sidebarTreeAdapters";
-import { type SidebarTreeThread } from "./hooks/useSidebarTree";
+import { type ActiveSidebarTreeThread, type SidebarTreeThread } from "./hooks/useSidebarTree";
 import { type SortableProjectHandleProps } from "./SidebarProjectList";
 import { SidebarThreadRow } from "./SidebarThreadRow";
 import { SidebarProjectThreadList } from "./SidebarProjectThreadList";
 import { useSettings } from "~/hooks/useSettings";
-import type { SidebarThreadSummary } from "../../types";
+import { isUnarchivedThreadEntry, type SidebarThreadSummary } from "../../types";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { SidebarProjectHeader } from "./SidebarProjectHeader";
 import { useSidebarProjectJiraLinks } from "./hooks/useSidebarProjectJiraLinks";
@@ -138,13 +138,16 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
   );
   const projectTreeCache = useSidebarProjectTreeCache();
   const projectDraftThreads = useComposerDraftStore(projectTreeCache.draftThreadsSelector(project));
+  // Thread actions act on the rows the sidebar lists, all unarchived (never stubs).
   const sidebarThreadByKey = useMemo(
     () =>
       new Map(
-        sidebarThreads.map(
-          (thread) =>
-            [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
-        ),
+        sidebarThreads
+          .filter(isUnarchivedThreadEntry)
+          .map(
+            (thread) =>
+              [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
+          ),
       ),
     [sidebarThreads],
   );
@@ -525,7 +528,7 @@ export const SidebarProjectItem = memo(function SidebarProjectItem(props: Sideba
           onOpenInEditor={openWorktreeInEditor}
           onOpenWorktree={openWorktree}
           onRenameWorktree={renameWorktree}
-          renderThread={(thread: SidebarTreeThread, treeThreadKeys, gitStatusTarget) => {
+          renderThread={(thread: ActiveSidebarTreeThread, treeThreadKeys, gitStatusTarget) => {
             const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
             return (
               <SidebarThreadRow

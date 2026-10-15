@@ -99,6 +99,35 @@ describe("shell resume", () => {
     expect(harness.resubscribe()).toBeNull();
   });
 
+  it("asks for archived stubs and hands the store the stubs a snapshot carries", async () => {
+    const harness = shellHarness();
+    const synced: unknown[] = [];
+    const connection = createEnvironmentConnection({
+      kind: "primary",
+      knownEnvironment: { environmentId, label: "Remote Mac" } as unknown as KnownEnvironment,
+      client: harness.client,
+      pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: (next) => synced.push(next),
+      applyTerminalEvent: () => undefined,
+    });
+    expect(harness.options()?.archivedThreads).toBe("stub");
+    const stubs = [{ id: "archived-1" }] as never;
+    harness.emit({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 5,
+        projects: [],
+        threads: [],
+        archivedThreadStubs: stubs,
+        updatedAt: "2026-09-30T00:00:00.000Z",
+      },
+    } as unknown as OrchestrationShellStreamItem);
+    await connection.ensureBootstrapped();
+    expect(synced).toEqual([expect.objectContaining({ archivedThreadStubs: stubs })]);
+  });
+
   it("resets immediately when resume is not offered", async () => {
     const harness = shellHarness();
     const { connection, calls } = connect(harness, null);

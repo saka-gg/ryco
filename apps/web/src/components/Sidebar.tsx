@@ -139,7 +139,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
 } from "../environments/runtime";
-import type { SidebarThreadSummary } from "../types";
+import { isUnarchivedThreadEntry, type SidebarThreadSummary } from "../types";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildSidebarProjectFolderTree } from "../sidebarProjectFolders";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
@@ -403,6 +403,11 @@ export default function Sidebar() {
   usePerfMark("Sidebar");
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const sidebarThreads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  // Archived threads may be stubs; everything listed as active reads full rows.
+  const unarchivedSidebarThreads = useMemo(
+    () => sidebarThreads.filter(isUnarchivedThreadEntry),
+    [sidebarThreads],
+  );
   const sidebarWorktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
   // Only cache provenance is needed here. Subscribing to the whole
   // `environmentStateById` re-rendered the Sidebar on every store commit,
@@ -746,7 +751,7 @@ export default function Sidebar() {
       projectTreeDerived
         ? buildSidebarChatRows({
             projects,
-            threads: sidebarThreads,
+            threads: unarchivedSidebarThreads,
             draftThreadsByThreadKey,
             sortOrder: sidebarThreadSortOrder,
             pinnedThreadKeys,
@@ -758,7 +763,7 @@ export default function Sidebar() {
       projectTreeDerived,
       projects,
       sidebarThreadSortOrder,
-      sidebarThreads,
+      unarchivedSidebarThreads,
     ],
   );
   const chatEnvironmentId =
@@ -922,10 +927,7 @@ export default function Sidebar() {
     return closestCorners(args);
   }, []);
 
-  const visibleThreads = useMemo(
-    () => sidebarThreads.filter((thread) => thread.archivedAt === null),
-    [sidebarThreads],
-  );
+  const visibleThreads = unarchivedSidebarThreads;
   const projectOrderInput = useMemo(
     () => ({
       sidebarProjects,

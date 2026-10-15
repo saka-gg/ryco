@@ -4,7 +4,7 @@ import {
   type WorkspaceExecutionTargetResolution,
   type WorkspacePhysicalProjectVariant,
 } from "@ryco/client-runtime/state/workspace";
-import type { Project, SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import type {
   CommandId,
   EnvironmentId,
@@ -30,7 +30,7 @@ import { inferTaskTitle } from "./newTaskModel";
 
 function projectLastUsedAt(
   project: Project,
-  threads: ReadonlyArray<SidebarThreadSummary>,
+  threads: ReadonlyArray<SidebarThreadOrStub>,
 ): number | null {
   const values = threads
     .filter(
@@ -47,7 +47,8 @@ export function resolveMobileNewTaskTarget(input: {
   readonly projectId: ProjectId;
   readonly projects: ReadonlyArray<Project>;
   readonly environments: ReadonlyArray<ProjectEnvironment>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Any thread, archived stubs included: only its project and times are read. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly overrideEnvironmentId?: EnvironmentId | null;
 }): WorkspaceExecutionTargetResolution {
   const environments = new Map(

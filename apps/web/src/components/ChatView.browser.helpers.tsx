@@ -198,6 +198,11 @@ interface TestFixture {
    * opens but sends no snapshot until a test emits one.
    */
   threadsWithHeldHistory?: ReadonlySet<ThreadId>;
+  /**
+   * Answer like a server from before archived stubs: ignore `archivedThreads`
+   * and send archived threads as full shells.
+   */
+  serverIgnoresArchivedStubs?: boolean;
 }
 
 let fixture: TestFixture;
@@ -708,6 +713,59 @@ function toShellSnapshot(snapshot: OrchestrationReadModel) {
     threads: snapshot.threads.map(toShellThread),
     updatedAt: snapshot.updatedAt,
   };
+}
+
+/** An archived thread as a server answering `archivedThreads: "stub"` lists it. */
+function toArchivedThreadStub(thread: OrchestrationReadModel["threads"][number]) {
+  const shell = toShellThread(thread);
+  return {
+    id: shell.id,
+    projectId: shell.projectId,
+    title: shell.title,
+    branch: shell.branch,
+    worktreePath: shell.worktreePath,
+    worktreeId: null,
+    createdAt: shell.createdAt,
+    updatedAt: shell.updatedAt,
+    archivedAt: shell.archivedAt,
+    latestUserMessageAt: shell.latestUserMessageAt,
+    lineage: null,
+  };
+}
+
+/**
+ * The shell snapshot items a current server sends for `request`: archived threads
+ * as stub pages to a paged client that asks for stubs, one snapshot item otherwise.
+ */
+function shellSnapshotItemsFor(
+  snapshot: OrchestrationReadModel,
+  request: object,
+): ReadonlyArray<unknown> {
+  const shell = toShellSnapshot(snapshot);
+  const input = request as {
+    readonly snapshotDelivery?: unknown;
+    readonly archivedThreads?: unknown;
+  };
+  if (input.snapshotDelivery !== "paged" || input.archivedThreads !== "stub") {
+    return [{ kind: "snapshot", snapshot: shell }];
+  }
+  const archived = snapshot.threads.filter((thread) => thread.archivedAt !== null);
+  const unarchived = shell.threads.filter((thread) => thread.archivedAt === null);
+  return [
+    {
+      kind: "snapshot-begin",
+      snapshotSequence: shell.snapshotSequence,
+      updatedAt: shell.updatedAt,
+      projects: shell.projects,
+      threadCount: shell.threads.length,
+      archivedThreadCount: archived.length,
+    },
+    ...(unarchived.length > 0 ? [{ kind: "snapshot-threads", threads: unarchived }] : []),
+    ...(archived.length > 0
+      ? [{ kind: "snapshot-archived-threads", threads: archived.map(toArchivedThreadStub) }]
+      : []),
+    { kind: "snapshot-end" },
+  ];
 }
 
 function toThreadWindowSnapshot(
@@ -1359,6 +1417,17 @@ function resolveWsRpc(body: NormalizedWsRpcRequestBody): unknown {
   const tag = body._tag;
   if (tag === WS_METHODS.serverGetConfig) {
     return fixture.serverConfig;
+  }
+  if (tag === ORCHESTRATION_WS_METHODS.getThreadShells) {
+    const threadIds = (body as { readonly threadIds?: ReadonlyArray<string> }).threadIds ?? [];
+    return {
+      snapshotSequence: fixture.snapshot.snapshotSequence,
+      threads: threadIds.flatMap((threadId) => {
+        const thread = fixture.snapshot.threads.find((entry) => entry.id === threadId);
+        return thread ? [toShellThread(thread)] : [];
+      }),
+      remainingThreadIds: [],
+    };
   }
   if (tag === WS_METHODS.serverDiscoverSourceControl) {
     return {
@@ -2612,10 +2681,10 @@ export function setupChatViewBrowserSuite() {
         }
         if (request._tag === ORCHESTRATION_WS_METHODS.subscribeShell) {
           return [
-            {
-              kind: "snapshot",
-              snapshot: toShellSnapshot(fixture.snapshot),
-            },
+            ...shellSnapshotItemsFor(
+              fixture.snapshot,
+              fixture.serverIgnoresArchivedStubs === true ? {} : request,
+            ),
           ];
         }
         if (
