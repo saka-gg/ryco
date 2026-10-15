@@ -219,6 +219,45 @@ describe("cloud thread history publisher", () => {
     ).toBe(true);
   });
 
+  it("never uploads a thread body the bounded index does not list", async () => {
+    const test = harness(1);
+    // Like the Hub: a thread body must be listed by the shell in its batch, or else by the
+    // last uploaded shell (node_conflict otherwise, which resets the whole cloud cache).
+    let indexed = new Set<string>();
+    test.upload.mockImplementation(async (_generation, items) => {
+      const shellItem = items.find((item) => item.kind === "shell");
+      const listed =
+        shellItem?.kind === "shell"
+          ? new Set<string>(shellItem.snapshot.threads.map((thread) => thread.id))
+          : indexed;
+      for (const item of items) {
+        if (item.kind === "thread" && !listed.has(item.threadId)) {
+          throw new Error(`node_conflict: ${item.threadId} is not indexed`);
+        }
+      }
+      indexed = listed;
+    });
+    // Wide shell rows: the bounded index keeps fewer threads than the 512-thread content window.
+    const wide = shell(600, 2);
+    test.setShell({
+      ...wide,
+      threads: wide.threads.map((thread) =>
+        Object.assign({}, thread, { title: "T".repeat(6_000) }),
+      ),
+    });
+    for (let tick = 0; tick < 60; tick += 1) await test.publisher.synchronize();
+
+    expect(indexed.size).toBeGreaterThan(16);
+    expect(indexed.size).toBeLessThan(512);
+    const uploadedThreads = new Set(
+      test.upload.mock.calls.flatMap(([, items]) =>
+        items.flatMap((item) => (item.kind === "thread" ? [item.threadId] : [])),
+      ),
+    );
+    // Every indexed thread's content was published, and nothing else.
+    expect(uploadedThreads).toEqual(indexed);
+  });
+
   it("does not hold the index back when no crowded-out content is left to send", async () => {
     const test = harness(1);
     test.readThread.mockImplementation(async () => ({

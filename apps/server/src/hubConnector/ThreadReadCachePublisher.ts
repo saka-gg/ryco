@@ -210,8 +210,7 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       // An already published shell that crowded content out of the last batch
       // waits one batch for that content; the first shell never waits, since
       // the cloud index must exist before anything else is useful. Content in
-      // such a batch is limited to threads the published index already lists,
-      // so a body never reaches the Hub ahead of the index that names it.
+      // such a batch is limited to threads the published index already lists.
       const shellYields = shellOutdated && shellCrowdedOutContent && publishedSequence !== -1;
       if (shellOutdated && !shellYields) {
         const upload = shellUpload(shell);
@@ -221,6 +220,11 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
         size = upload.batchBytes;
       }
       let contentLeftOut = false;
+      // Content only for threads the index this batch publishes (or the one already published)
+      // lists: the Hub rejects any other body, and a rejection resets the whole cloud cache. The
+      // bounded index can list fewer threads than the content window when projects and worktrees
+      // crowd it.
+      const indexedThreadIds = shellThreadIds ?? publishedThreadIds;
       const recentThreads = shell.threads
         .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
         .slice(0, MAX_THREADS);
@@ -237,7 +241,7 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
             ? `${thread.updatedAt}:${shell.snapshotSequence}`
             : thread.updatedAt;
         if (uploadedVersions.get(thread.id) === version) continue;
-        if (shellYields && !publishedThreadIds.has(thread.id)) continue;
+        if (!indexedThreadIds.has(thread.id)) continue;
         const detail = await deps.readThread(thread.id);
         if (!isCurrent(currentNode)) return;
         if (detail === null) continue;

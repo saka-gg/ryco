@@ -14,6 +14,10 @@
  * Chat projects (Ryco-managed folders, never repositories) and roots that are currently missing
  * are skipped.
  *
+ * A probe `git` could not answer (timeout, spawn failure) records nothing: the stored identity,
+ * fingerprint and check time stay as they were, so the project is not shown as "no repository"
+ * for a day. It is retried soon, backing off up to the sweep interval.
+ *
  * @module RepositoryIdentitySync
  */
 import {
@@ -43,6 +47,20 @@ import {
 export const REPOSITORY_IDENTITY_SWEEP_INTERVAL = Duration.minutes(30);
 /** Resolve again even with an unchanged fingerprint (config includes, `insteadOf` rewrites). */
 export const REPOSITORY_IDENTITY_MAX_AGE = Duration.hours(24);
+/** First retry after a failed probe; doubles per consecutive failure, capped at the sweep. */
+export const REPOSITORY_IDENTITY_RETRY_DELAY = Duration.minutes(1);
+
+/** Delay before retry `attempt` (1-based) of a project whose probe failed. */
+export const repositoryIdentityRetryDelay = (
+  attempt: number,
+  sweepInterval: Duration.Input = REPOSITORY_IDENTITY_SWEEP_INTERVAL,
+): Duration.Duration =>
+  Duration.millis(
+    Math.min(
+      Duration.toMillis(REPOSITORY_IDENTITY_RETRY_DELAY) * 2 ** Math.max(0, attempt - 1),
+      Duration.toMillis(sweepInterval),
+    ),
+  );
 const REPOSITORY_IDENTITY_SYNC_CONCURRENCY = 4;
 
 export interface RepositoryIdentitySyncDependencies {
@@ -58,6 +76,11 @@ export interface RepositoryIdentitySyncDependencies {
   readonly readFingerprint?: (workspaceRoot: string) => Effect.Effect<string | null>;
   readonly now?: () => Date;
   readonly maxAge?: Duration.Input;
+  /**
+   * A project's probe failed `attempt` times in a row and nothing was recorded; schedule a retry.
+   * Never called for a project whose last probe answered.
+   */
+  readonly onProbeFailed?: (projectId: ProjectId, attempt: number) => Effect.Effect<void>;
 }
 
 export interface RepositoryIdentitySyncResult {
@@ -67,6 +90,8 @@ export interface RepositoryIdentitySyncResult {
   readonly resolved: number;
   /** Of those, how many stored a different identity (and were announced). */
   readonly changed: number;
+  /** Of those checked, how many `git` could not answer (nothing recorded, retried). */
+  readonly failed: number;
 }
 
 /** Whether a domain event can change which repository a project points at. */
@@ -96,8 +121,10 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
   const now = deps.now ?? (() => new Date());
   const maxAgeMs = Duration.toMillis(deps.maxAge ?? REPOSITORY_IDENTITY_MAX_AGE);
   const resolveFresh = deps.resolver.refresh ?? deps.resolver.resolve;
+  /** Consecutive failed probes per project, cleared once its probe answers. */
+  const failedAttempts = new Map<ProjectId, number>();
 
-  /** "skipped" | "fresh" | "resolved" | "changed" */
+  /** "skipped" | "fresh" | "resolved" | "changed" | "failed" */
   const syncProject = (state: ProjectionProjectRepositoryIdentityState) =>
     Effect.gen(function* () {
       if (isChatProject(state)) return "skipped" as const;
@@ -112,10 +139,29 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
       ) {
         return "fresh" as const;
       }
-      const identityJson = encodePersistedRepositoryIdentity(
-        // Never what a user waits on: its `git` yields to interactive work.
-        yield* inBackgroundProcessLane(resolveFresh(state.workspaceRoot)),
+      // Never what a user waits on: its `git` yields to interactive work.
+      const probed = yield* inBackgroundProcessLane(resolveFresh(state.workspaceRoot)).pipe(
+        Effect.map((identity) => ({ ok: true as const, identity })),
+        Effect.catchTag("RepositoryIdentityProbeError", (error) =>
+          Effect.succeed({ ok: false as const, detail: error.message }),
+        ),
       );
+      if (!probed.ok) {
+        // Keep what was known (and its check time, so the next sweep retries too).
+        const attempt = (failedAttempts.get(state.projectId) ?? 0) + 1;
+        failedAttempts.set(state.projectId, attempt);
+        yield* Effect.logWarning("repository identity probe failed; keeping the stored identity", {
+          projectId: state.projectId,
+          attempt,
+          detail: probed.detail,
+        });
+        if (deps.onProbeFailed !== undefined) {
+          yield* deps.onProbeFailed(state.projectId, attempt);
+        }
+        return "failed" as const;
+      }
+      failedAttempts.delete(state.projectId);
+      const identityJson = encodePersistedRepositoryIdentity(probed.identity);
       const recorded = yield* deps.projects.recordRepositoryIdentity({
         projectId: state.projectId,
         workspaceRoot: state.workspaceRoot,
@@ -172,6 +218,7 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
             resolved: outcomes.filter((outcome) => outcome === "resolved" || outcome === "changed")
               .length,
             changed: outcomes.filter((outcome) => outcome === "changed").length,
+            failed: outcomes.filter((outcome) => outcome === "failed").length,
           };
           if (result.resolved > 0) {
             yield* Effect.logDebug("repository identities resolved", result);
@@ -186,7 +233,12 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
             : Effect.logWarning("repository identity sync failed", {
                 cause: Cause.pretty(cause),
               }).pipe(
-                Effect.as<RepositoryIdentitySyncResult>({ checked: 0, resolved: 0, changed: 0 }),
+                Effect.as<RepositoryIdentitySyncResult>({
+                  checked: 0,
+                  resolved: 0,
+                  changed: 0,
+                  failed: 0,
+                }),
               ),
         ),
       );
@@ -196,7 +248,8 @@ export const makeRepositoryIdentitySync = Effect.fn("makeRepositoryIdentitySync"
 
 /**
  * Run the sync for the server's lifetime: projects created or moved are synced as their events
- * arrive, every project once now and then every {@link REPOSITORY_IDENTITY_SWEEP_INTERVAL}.
+ * arrive, every project once now and then every {@link REPOSITORY_IDENTITY_SWEEP_INTERVAL}, and a
+ * project whose probe failed again after {@link repositoryIdentityRetryDelay}.
  * `drain` waits until every triggered project handed off so far has been synced (tests).
  */
 export const runRepositoryIdentitySync = (
@@ -207,7 +260,22 @@ export const runRepositoryIdentitySync = (
   },
 ) =>
   Effect.gen(function* () {
-    const { sync } = yield* makeRepositoryIdentitySync(deps);
+    const scope = yield* Effect.scope;
+    const sweepInterval = deps.sweepInterval ?? REPOSITORY_IDENTITY_SWEEP_INTERVAL;
+    // One pending retry per project: a sweep failing meanwhile does not stack another.
+    const pendingRetries = new Set<ProjectId>();
+    const scheduleRetry = (projectId: ProjectId, attempt: number): Effect.Effect<void> =>
+      Effect.suspend(() => {
+        if (pendingRetries.has(projectId)) return Effect.void;
+        pendingRetries.add(projectId);
+        return Effect.sleep(repositoryIdentityRetryDelay(attempt, sweepInterval)).pipe(
+          Effect.andThen(Effect.sync(() => pendingRetries.delete(projectId))),
+          Effect.andThen(worker.enqueue(projectId)),
+          Effect.forkIn(scope),
+          Effect.asVoid,
+        );
+      });
+    const { sync } = yield* makeRepositoryIdentitySync({ ...deps, onProbeFailed: scheduleRetry });
     // The domain-event subscription is backpressured: a subscriber stuck behind a sweep (or a
     // slow `git`) would eventually stall the engine's publishing. Hand triggered projects to a
     // worker instead and keep the subscriber at the speed of the event stream.
@@ -225,10 +293,6 @@ export const runRepositoryIdentitySync = (
         return projectId === null ? Effect.void : worker.enqueue(projectId);
       }),
     );
-    yield* Effect.forkScoped(
-      sync().pipe(
-        Effect.repeat(Schedule.spaced(deps.sweepInterval ?? REPOSITORY_IDENTITY_SWEEP_INTERVAL)),
-      ),
-    );
+    yield* Effect.forkScoped(sync().pipe(Effect.repeat(Schedule.spaced(sweepInterval))));
     return { drain: worker.drain };
   });

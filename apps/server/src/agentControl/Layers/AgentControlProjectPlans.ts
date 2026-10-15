@@ -63,10 +63,16 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
       ),
     );
 
-  const stateFor = (project: OrchestrationProjectShell): AgentControlProjectState => ({
+  // The approved and the revalidated repository identity both come from the live resolver: the
+  // persisted projection identity lags remote changes and is kept for a missing root, so mixing
+  // the two would reject plans that nothing has invalidated.
+  const stateFor = (
+    project: OrchestrationProjectShell,
+    repositoryIdentityKey: string | null,
+  ): AgentControlProjectState => ({
     title: project.title,
     workspaceRoot: project.workspaceRoot,
-    repositoryIdentityKey: project.repositoryIdentity?.canonicalKey ?? null,
+    repositoryIdentityKey,
     updatedAt: project.updatedAt,
     customSystemPrompt: project.customSystemPrompt,
     scripts: project.scripts,
@@ -187,11 +193,13 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
       ) {
         return yield* fail("invalid-plan", "The requested project metadata is unchanged.");
       }
-      const repositoryIdentityKey = yield* identityKey(workspaceRoot);
+      const currentKey = yield* identityKey(project.workspaceRoot);
+      const repositoryIdentityKey =
+        workspaceRoot === project.workspaceRoot ? currentKey : yield* identityKey(workspaceRoot);
       return {
         kind: "updateProject",
         projectId: project.id,
-        before: stateFor(project),
+        before: stateFor(project, currentKey),
         after: { ...targetFor({ title, workspaceRoot, repositoryIdentityKey }), ...preferences },
       } satisfies AgentControlUpdateProjectPlan;
     });
@@ -216,7 +224,7 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
       return {
         kind: "removeProject",
         projectId: project.id,
-        expected: stateFor(project),
+        expected: stateFor(project, yield* identityKey(project.workspaceRoot)),
         expectedThreadIds,
         force,
       } satisfies AgentControlRemoveProjectPlan;
@@ -254,12 +262,10 @@ const makeAgentControlProjectPlans = Effect.gen(function* () {
         return yield* fail("project-unavailable", "The approved project was removed.");
       }
       const expected = plan.kind === "updateProject" ? plan.before : plan.expected;
-      const currentState = stateFor(current);
       if (
-        currentState.title !== expected.title ||
-        currentState.workspaceRoot !== expected.workspaceRoot ||
-        currentState.repositoryIdentityKey !== expected.repositoryIdentityKey ||
-        currentState.updatedAt !== expected.updatedAt
+        current.title !== expected.title ||
+        current.workspaceRoot !== expected.workspaceRoot ||
+        current.updatedAt !== expected.updatedAt
       ) {
         return yield* fail("project-stale", "The approved project state changed.");
       }

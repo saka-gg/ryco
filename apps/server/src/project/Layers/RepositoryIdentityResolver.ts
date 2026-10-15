@@ -9,6 +9,7 @@ import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../../observa
 import { READ_ONLY_GIT_ENV } from "../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import {
+  RepositoryIdentityProbeError,
   RepositoryIdentityResolver,
   type RepositoryIdentityResolverShape,
 } from "../Services/RepositoryIdentityResolver.ts";
@@ -108,11 +109,22 @@ interface RepositoryIdentityResolverOptions {
  * metrics, never through a shell. The root is the process cwd rather than a `-C <path>` argument:
  * on Windows `shell: true` split unquoted roots with spaces (`C:\Users\Jane Doe`) into two
  * arguments, so those projects never got an identity, and every probe paid an extra cmd.exe.
- * A failed, timed-out or unspawnable probe reads as "no identity".
+ *
+ * Answers the probe's stdout, `null` when git answered "not a repository" (`notRepository`), and
+ * fails with `RepositoryIdentityProbeError` when git could not answer: a timeout, a spawn failure
+ * or any other non-zero exit (dubious ownership, a broken config). Callers must not persist the
+ * failure as "no repository".
  */
+const NOT_A_REPOSITORY = /not a git repository/i;
+
 const makeGitIdentityProbe =
   (vcsProcess: VcsProcess.VcsProcessShape) =>
-  (operation: string, cwd: string, args: ReadonlyArray<string>): Effect.Effect<string | null> =>
+  (
+    operation: string,
+    cwd: string,
+    args: ReadonlyArray<string>,
+    options: { readonly notRepository?: boolean } = {},
+  ): Effect.Effect<string | null, RepositoryIdentityProbeError> =>
     vcsProcess
       .run({
         operation,
@@ -126,20 +138,36 @@ const makeGitIdentityProbe =
         timeoutMs: GIT_IDENTITY_PROBE_TIMEOUT_MS,
       })
       .pipe(
-        Effect.map((result) => (result.exitCode === 0 ? result.stdout : null)),
         withMetrics({
           counter: gitCommandsTotal,
           timer: gitCommandDuration,
           attributes: { operation },
         }),
-        Effect.catch(() => Effect.succeed(null)),
+        Effect.mapError(
+          (cause) => new RepositoryIdentityProbeError({ operation, detail: cause.message }),
+        ),
+        Effect.flatMap((result) => {
+          if (result.exitCode === 0) return Effect.succeed(result.stdout);
+          // The C locale (env above) keeps git's message stable.
+          if (options.notRepository === true && NOT_A_REPOSITORY.test(result.stderr)) {
+            return Effect.succeed(null);
+          }
+          return Effect.fail(
+            new RepositoryIdentityProbeError({
+              operation,
+              detail: result.stderr.trim() || `git exited with code ${result.exitCode}.`,
+            }),
+          );
+        }),
       );
 
 export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityResolver")(
   function* (options: RepositoryIdentityResolverOptions = {}) {
     const probe = makeGitIdentityProbe(yield* VcsProcess.VcsProcess);
     const resolveRepositoryIdentityCacheKey = (cwd: string) =>
-      probe("RepositoryIdentityResolver.showToplevel", cwd, ["rev-parse", "--show-toplevel"]).pipe(
+      probe("RepositoryIdentityResolver.showToplevel", cwd, ["rev-parse", "--show-toplevel"], {
+        notRepository: true,
+      }).pipe(
         Effect.map((stdout) => {
           const candidate = stdout?.trim() ?? "";
           return candidate.length > 0 ? candidate : null;
@@ -157,40 +185,46 @@ export const makeRepositoryIdentityResolver = Effect.fn("makeRepositoryIdentityR
         }),
       );
 
-    const workspaceRootCache = yield* Cache.makeWith<string, string | null>(
-      resolveRepositoryIdentityCacheKey,
-      {
-        capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
-        timeToLive: Exit.match({
-          onSuccess: (value) =>
-            value === null
-              ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
-              : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
-          onFailure: () => Duration.zero,
-        }),
-      },
-    );
-    const repositoryIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
-      resolveRepositoryIdentityFromCacheKey,
-      {
-        capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
-        timeToLive: Exit.match({
-          onSuccess: (value) =>
-            value === null
-              ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
-              : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
-          onFailure: () => Duration.zero,
-        }),
-      },
-    );
+    // Failures are never cached (`onFailure: Duration.zero`): the next lookup probes again.
+    const workspaceRootCache = yield* Cache.makeWith<
+      string,
+      string | null,
+      RepositoryIdentityProbeError
+    >(resolveRepositoryIdentityCacheKey, {
+      capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
+      timeToLive: Exit.match({
+        onSuccess: (value) =>
+          value === null
+            ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
+            : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
+        onFailure: () => Duration.zero,
+      }),
+    });
+    const repositoryIdentityCache = yield* Cache.makeWith<
+      string,
+      RepositoryIdentity | null,
+      RepositoryIdentityProbeError
+    >(resolveRepositoryIdentityFromCacheKey, {
+      capacity: options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY,
+      timeToLive: Exit.match({
+        onSuccess: (value) =>
+          value === null
+            ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
+            : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
+        onFailure: () => Duration.zero,
+      }),
+    });
 
     const resolve: RepositoryIdentityResolverShape["resolve"] = Effect.fn(
       "RepositoryIdentityResolver.resolve",
-    )(function* (cwd) {
-      const cacheKey = yield* Cache.get(workspaceRootCache, cwd);
-      if (cacheKey === null) return null;
-      return yield* Cache.get(repositoryIdentityCache, cacheKey);
-    });
+    )(
+      function* (cwd) {
+        const cacheKey = yield* Cache.get(workspaceRootCache, cwd);
+        if (cacheKey === null) return null;
+        return yield* Cache.get(repositoryIdentityCache, cacheKey);
+      },
+      Effect.catchTag("RepositoryIdentityProbeError", () => Effect.succeed(null)),
+    );
 
     const refresh: NonNullable<RepositoryIdentityResolverShape["refresh"]> = Effect.fn(
       "RepositoryIdentityResolver.refresh",

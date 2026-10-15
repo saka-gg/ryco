@@ -11,10 +11,11 @@ import {
   ProjectionSnapshotQuery,
   readProjectShells,
   readWorkspacePlacement,
+  threadKeyPageOf,
   workspacePlacementOf,
 } from "../Services/ProjectionSnapshotQuery.ts";
+import { COMMAND_READ_MODEL_ACTIVITY_KINDS } from "../commandReadModelShape.ts";
 import {
-  COMMAND_READ_MODEL_ACTIVITY_KINDS,
   coalesceConcurrentRuns,
   OrchestrationProjectionSnapshotQueryLive,
 } from "./ProjectionSnapshotQuery.ts";
@@ -269,6 +270,61 @@ layer("ProjectionSnapshotQuery shell reads", (it) => {
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* sql`DELETE FROM projection_threads WHERE project_id = 'goal-project'`;
+        }).pipe(Effect.orDie),
+      ),
+    ),
+  );
+
+  it.effect("pages live thread keys in shell order without building a shell", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      const created = ["2026-09-03", "2026-09-01", "2026-09-02", "2026-09-01", "2026-09-04"];
+      for (const [index, day] of created.entries()) {
+        yield* insertThread({ threadId: `keyset-${index}`, projectId: "keyset-project" });
+        yield* sql`
+          UPDATE projection_threads SET created_at = ${`${day}T00:00:00.000Z`}
+          WHERE thread_id = ${`keyset-${index}`}
+        `;
+      }
+      yield* sql`UPDATE projection_threads SET archived_at = '2026-10-02T00:00:00.000Z' WHERE thread_id = 'keyset-2'`;
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-10-02T00:00:00.000Z' WHERE thread_id = 'keyset-4'`;
+
+      const listThreadKeyPage = query.listThreadKeyPage;
+      assert.isDefined(listThreadKeyPage);
+      if (listThreadKeyPage === undefined) return;
+      const shell = yield* query.getShellSnapshot();
+      for (const includeArchived of [false, true]) {
+        const paged: Array<{ readonly createdAt: string; readonly threadId: string }> = [];
+        let after: { readonly createdAt: string; readonly threadId: string } | null = null;
+        for (;;) {
+          const page: ReadonlyArray<{ readonly createdAt: string; readonly threadId: string }> =
+            yield* listThreadKeyPage({ after, includeArchived, limit: 2 });
+          paged.push(...page);
+          if (page.length < 2) break;
+          after = page.at(-1)!;
+        }
+        // Exactly the shell's live threads in the order list_threads pages them.
+        assert.deepEqual(paged, [
+          ...threadKeyPageOf(shell, {
+            after: null,
+            includeArchived,
+            limit: Number.MAX_SAFE_INTEGER,
+          }),
+        ]);
+        const ids = paged.map((key) => key.threadId).filter((id) => id.startsWith("keyset-"));
+        assert.deepEqual(
+          ids,
+          includeArchived
+            ? ["keyset-1", "keyset-3", "keyset-2", "keyset-0"]
+            : ["keyset-1", "keyset-3", "keyset-0"],
+        );
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`DELETE FROM projection_threads WHERE project_id = 'keyset-project'`;
         }).pipe(Effect.orDie),
       ),
     ),

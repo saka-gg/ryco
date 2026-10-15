@@ -292,7 +292,11 @@ describe("decider thread.fork.create", () => {
         ["user"],
       );
       assert.strictEqual(fork?.proposedPlans.length, 1);
-      assert.strictEqual(fork?.activities.length, 2);
+      // The command model keeps the fork record, not the inherited tool activity.
+      assert.deepEqual(
+        fork?.activities.map((activity) => activity.kind),
+        ["thread.forked"],
+      );
       // Nothing started: no turn, no session.
       assert.isNull(fork?.latestTurn);
       assert.isNull(fork?.session);

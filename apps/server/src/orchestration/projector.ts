@@ -19,6 +19,12 @@ import { Effect, Schema } from "effect";
 import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
+import {
+  commandModelCheckpoint,
+  commandModelMessage,
+  commandModelProposedPlan,
+  isCommandModelActivityKind,
+} from "./commandReadModelShape.ts";
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import { isForkBaseItemId } from "./forkInheritance.ts";
 import {
@@ -74,29 +80,6 @@ import {
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 
-/**
- * The command read model holds what the decider and the command invariants read, and no more.
- * Messages: only user messages, as anchors without text or attachments (the decider reads their
- * id, role, creation time and order: thread started, the delegated-return fence and settlement
- * recency). Plans: ids and timestamps; the decider only checks that a source plan exists. The
- * hydrated model (ProjectionSnapshotQuery.getCommandReadModel) has the same shape, so a live
- * model and one hydrated after a restart do not drift apart in size.
- */
-export const COMMAND_MODEL_OMITTED_PLAN_MARKDOWN = "(not loaded in the command read model)";
-
-export function commandModelMessage(
-  message: Omit<OrchestrationMessage, "text" | "attachments">,
-): OrchestrationMessage {
-  return { ...message, text: "" };
-}
-
-export function commandModelProposedPlan(
-  plan: OrchestrationThread["proposedPlans"][number],
-): OrchestrationThread["proposedPlans"][number] {
-  return plan.planMarkdown === COMMAND_MODEL_OMITTED_PLAN_MARKDOWN
-    ? plan
-    : { ...plan, planMarkdown: COMMAND_MODEL_OMITTED_PLAN_MARKDOWN };
-}
 type WorktreePatch = Partial<Omit<OrchestrationWorktreeShell, "worktreeId" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
@@ -1041,19 +1024,22 @@ export function projectEvent(
           return nextBase;
         }
 
-        const checkpoint = yield* decodeForEvent(
-          OrchestrationCheckpointSummary,
-          {
-            turnId: payload.turnId,
-            checkpointTurnCount: payload.checkpointTurnCount,
-            checkpointRef: payload.checkpointRef,
-            status: payload.status,
-            files: payload.files,
-            assistantMessageId: payload.assistantMessageId,
-            completedAt: payload.completedAt,
-          },
-          event.type,
-          "checkpoint",
+        // Kept without its changed files: nothing in the command model reads them.
+        const checkpoint = commandModelCheckpoint(
+          yield* decodeForEvent(
+            OrchestrationCheckpointSummary,
+            {
+              turnId: payload.turnId,
+              checkpointTurnCount: payload.checkpointTurnCount,
+              checkpointRef: payload.checkpointRef,
+              status: payload.status,
+              files: payload.files,
+              assistantMessageId: payload.assistantMessageId,
+              completedAt: payload.completedAt,
+            },
+            event.type,
+            "checkpoint",
+          ),
         );
 
         // Do not let a placeholder (status "missing") overwrite a checkpoint
@@ -1196,6 +1182,16 @@ export function projectEvent(
           const thread = findThreadInArray(nextBase.threads, payload.threadId);
           if (!thread) {
             return nextBase;
+          }
+          // Only kinds a command-model reader looks at are kept (tool output, reasoning and
+          // subagent updates are most of the volume); the rest only advance updatedAt.
+          if (!isCommandModelActivityKind(payload.activity.kind)) {
+            return {
+              ...nextBase,
+              threads: updateThread(nextBase.threads, payload.threadId, {
+                updatedAt: event.occurredAt,
+              }),
+            };
           }
 
           const activities = [

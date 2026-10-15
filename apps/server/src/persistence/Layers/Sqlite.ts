@@ -55,6 +55,9 @@ const setup = Layer.effectDiscard(
     // `synchronous` stays at its default on purpose (docs/streaming-sqlite.md).
     yield* sql`PRAGMA mmap_size = 268435456;`;
     yield* sql`PRAGMA cache_size = -32768;`;
+    // Long read transactions on the read worker can delay checkpoints, so the WAL may grow
+    // well past its steady size. Cap what stays on disk once it is reset (64 MiB).
+    yield* sql`PRAGMA journal_size_limit = 67108864;`;
     // Named for the startup stall monitor: a slow ledger pass or one-time repair (9.5 s and
     // 27.4 s stalls were observed before the listener bound) is otherwise unattributed.
     yield* trackStartupPhase("persistence.migrations", runMigrations());
