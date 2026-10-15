@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer, Option, Path } from "effect";
 
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
@@ -11,6 +11,26 @@ import { configureTestGitCommitIdentity } from "./testing/GitTestRepo.ts";
 const TestLayer = Layer.mergeAll(GitVcsDriver.vcsLayer, GitVcsDriver.layer).pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-git-list-files-" })),
   Layer.provideMerge(VcsProcess.layer),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+/** Real git, except that ignore-filter listings never finish (a slow network volume). */
+const HangingIgnoreFilterProcessLayer = Layer.effect(
+  VcsProcess.VcsProcess,
+  Effect.map(Effect.service(VcsProcess.VcsProcess), (real) =>
+    VcsProcess.VcsProcess.of({
+      ...real,
+      run: (input) =>
+        input.args.includes("ls-files") && input.args.includes("--ignored")
+          ? Effect.never
+          : real.run(input),
+    }),
+  ),
+).pipe(Layer.provide(VcsProcess.layer));
+
+const HangingIgnoreFilterLayer = Layer.mergeAll(GitVcsDriver.vcsLayer, GitVcsDriver.layer).pipe(
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-git-list-files-" })),
+  Layer.provideMerge(HangingIgnoreFilterProcessLayer),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -73,3 +93,21 @@ it.layer(TestLayer)("GitVcsDriver.listWorkspaceFiles", (it) => {
     }),
   );
 });
+
+// Live clock: the ignore filter's budget runs on real time beside real git.
+it.live("answers a tracked-only listing from the index when the ignore filter stalls", () =>
+  Effect.gen(function* () {
+    const cwd = yield* makeCheckout;
+    const driver = yield* VcsDriver.VcsDriver;
+
+    const result = yield* driver
+      .listWorkspaceFiles(cwd, { trackedOnly: true })
+      .pipe(Effect.timeoutOption(10_000));
+
+    // Unfiltered: the tracked-but-ignored file shows in this partial stand-in.
+    assert.deepStrictEqual(
+      Option.map(result, (listed) => listed.paths),
+      Option.some(["generated/stale.json", "src/tracked.ts"]),
+    );
+  }).pipe(Effect.provide(HangingIgnoreFilterLayer)),
+);

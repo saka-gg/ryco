@@ -125,7 +125,6 @@ export function useComposerAttachmentMenus(
     pathTriggerQuery.length === 0 || resolvesPathQueryLocally
       ? pathTriggerQuery
       : debouncedPathQuery;
-  const normalizedEffectivePathQuery = normalizeWorkspaceEntryQuery(effectivePathQuery);
   const requestsPathSearch = shouldRequestComposerPathSearch({
     isPathTrigger,
     query: effectivePathQuery,
@@ -138,9 +137,11 @@ export function useComposerAttachmentMenus(
     enabled: requestsPathSearch,
     limit: COMPOSER_PATH_SEARCH_LIMIT,
   });
+  // Judged against what the user typed, not the debounced query: the bare
+  // listing must not stand in for a typed character while its search waits.
   const pathResults = isRelatedPathQuery(
     workspaceEntriesQuery.dataQuery,
-    normalizedEffectivePathQuery,
+    normalizeWorkspaceEntryQuery(pathTriggerQuery),
   )
     ? workspaceEntriesQuery.data
     : null;

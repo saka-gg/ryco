@@ -252,10 +252,11 @@ function sourceControlClient(environmentId: EnvironmentId) {
 // the client. The composer `#` picker, the context picker, the overview, the
 // explorer tabs and the pull request page therefore share one cache entry,
 // one poll timer and one provider call instead of one per distinct limit.
-// List reads use the server's default row shape, except the `picker` view (lean
-// rows for the composer's `#` menu). A request option other than the fixed
-// superset limit (a view or field set, a query) changes the payload and must be
-// part of `buildKey`, or callers would share rows of different shapes.
+// List reads use the server's default row shape, except the `picker` view:
+// lean change request rows the two pickers share. A request option other than
+// the fixed superset limit (a view or field set, a query) changes the payload
+// and must be part of `buildKey`, or callers would share rows of different
+// shapes.
 // ---------------------------------------------------------------------------
 
 /** Every list surface asks for at most this many rows (100 is also one provider page). */

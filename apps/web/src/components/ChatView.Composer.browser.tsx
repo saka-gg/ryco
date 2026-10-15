@@ -1553,6 +1553,64 @@ describe("ChatView Composer (full app)", () => {
         await mounted.cleanup();
       }
     });
+
+    it("drops the bare listing as soon as a character is typed", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-user-bare-mention-typed" as MessageId,
+          targetText: "bare mention typed",
+        }),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            environment: {
+              ...nextFixture.serverConfig.environment,
+              capabilities: {
+                ...nextFixture.serverConfig.environment.capabilities,
+                projectSearchEmptyQuery: true,
+              },
+            },
+          };
+        },
+        // A truncated listing: typed queries cannot be narrowed from it locally.
+        resolveRpc: (body) =>
+          body._tag === WS_METHODS.projectsSearchEntries
+            ? body.query === ""
+              ? {
+                  entries: [
+                    { path: ".github", kind: "directory" },
+                    { path: "src", kind: "directory" },
+                  ],
+                  truncated: true,
+                }
+              : { entries: [{ path: "src/index.ts", kind: "file" }], truncated: false }
+            : undefined,
+      });
+
+      try {
+        await waitForServerConfigToApply();
+        await waitForComposerEditor();
+        await page.getByTestId("composer-editor").fill("@");
+        await waitForComposerMenuItem("path:directory:.github");
+
+        await page.getByTestId("composer-editor").fill("@s");
+        // Well inside the typed query's debounce: the unfiltered listing must not
+        // stand in for it (Enter would insert `.github`).
+        await vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[data-composer-item-id="path:directory:.github"]'),
+            ).toBeNull();
+          },
+          { timeout: 60, interval: 4 },
+        );
+        await waitForComposerMenuItem("path:file:src/index.ts");
+        expect(searchQueries()).toContain("s");
+      } finally {
+        await mounted.cleanup();
+      }
+    });
   });
 
   it("stages an idle provider target locally and sends it without an unsafe model meta update", async () => {
