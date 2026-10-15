@@ -15,7 +15,12 @@ import { cn } from "~/lib/utils";
 import { DesktopAccountConnect } from "./DesktopAccountConnect";
 import { NoActiveThreadHostedStatus } from "./NoActiveThreadHostedStatus";
 
-export function NoActiveThreadState() {
+export function NoActiveThreadState(
+  props: {
+    /** A thread that exists but is still loading (an archived thread's stub) says so instead. */
+    readonly loading?: boolean;
+  } = {},
+) {
   const navigate = useNavigate();
   // Same corner ownership as the chat header: with the thread sidebar
   // collapsed this bar has to clear the shell's floating show-sidebar control.
@@ -65,9 +70,13 @@ export function NoActiveThreadState() {
         <Empty className="flex-1">
           <div className="w-full max-w-lg rounded-3xl border border-border/55 bg-card/20 px-8 py-12 shadow-sm/5">
             <EmptyHeader className="max-w-none">
-              <EmptyTitle className="text-foreground text-xl">Pick a thread to continue</EmptyTitle>
+              <EmptyTitle className="text-foreground text-xl">
+                {props.loading ? "Loading archived thread" : "Pick a thread to continue"}
+              </EmptyTitle>
               <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
-                Select an existing thread or create a new one to get started.
+                {props.loading
+                  ? "Its conversation is on its way from the node."
+                  : "Select an existing thread or create a new one to get started."}
               </EmptyDescription>
               {isElectron ? <DesktopAccountConnect /> : null}
               {isHostedHubMode() ? <NoActiveThreadHostedStatus /> : null}

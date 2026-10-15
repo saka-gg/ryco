@@ -28,6 +28,7 @@ import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
 import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
 import { WsTransport } from "../rpc/wsTransport";
+import { fullThreadEntry } from "@ryco/client-runtime/state/threads";
 import {
   selectSidebarThreadSummaryByRef,
   selectThreadByRef,
@@ -59,7 +60,8 @@ export function isThreadDetailSubscriptionNonIdle(
 ): boolean {
   const threadRef = scopeThreadRef(environmentId, threadId);
   const state = useStore.getState();
-  const sidebarThread = selectSidebarThreadSummaryByRef(state, threadRef);
+  // An archived stub knows of no pending work; once loaded, its full summary does.
+  const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, threadRef));
 
   if (sidebarThread) {
     if (

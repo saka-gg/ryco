@@ -17,9 +17,17 @@ import {
   WS_METHODS,
   ThreadPriorityRpcError,
   type OrchestrationGetThreadHistoryPageInput,
+  type OrchestrationGetThreadShellsInput,
   type OrchestrationGetThreadWindowInput,
+  type OrchestrationThreadShell,
   type ThreadId,
 } from "@ryco/contracts";
+
+import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
+import {
+  readScopedShellSnapshot,
+  readStubbedShellSnapshot,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
 import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
@@ -46,6 +54,7 @@ import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
   ORCHESTRATION_REPLAY_PAGE_MAX_LIMIT,
+  ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES,
 } from "./context/constants.ts";
 import { observeArrays } from "./streamBatching.ts";
 
@@ -236,6 +245,76 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
               message: `Failed to load ${input.collection} history for thread ${input.threadId}`,
               cause,
             }),
+      ),
+    );
+  };
+
+  const shellSnapshotLoad = <A>(load: Effect.Effect<A, ProjectionRepositoryError>) =>
+    load.pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("orchestration shell snapshot load failed", { cause }),
+      ),
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetSnapshotError({
+            message: "Failed to load orchestration shell snapshot",
+            cause,
+          }),
+      ),
+    );
+
+  /**
+   * Full shells of a few threads (archived stubs' on-demand load), in request
+   * order, within one page's byte budget; the rest are named for another ask.
+   */
+  const loadThreadShells = (input: OrchestrationGetThreadShellsInput) => {
+    const threadIds = Array.from(new Set(input.threadIds));
+    if (threadIds.length === 0) {
+      return projectionSnapshotQuery.getSnapshotSequence().pipe(
+        Effect.map(({ snapshotSequence }) => ({
+          snapshotSequence,
+          threads: [],
+          remainingThreadIds: [],
+        })),
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationGetSnapshotError({
+              message: "Failed to load thread shells",
+              cause,
+            }),
+        ),
+      );
+    }
+    return readScopedShellSnapshot(projectionSnapshotQuery, { threadIds }).pipe(
+      Effect.map((snapshot) => {
+        const byId = new Map(snapshot.threads.map((thread) => [thread.id, thread] as const));
+        const threads: Array<OrchestrationThreadShell> = [];
+        const remainingThreadIds: Array<ThreadId> = [];
+        let bytes = 0;
+        for (const threadId of threadIds) {
+          const thread = byId.get(threadId);
+          if (thread === undefined) continue;
+          const threadBytes = Buffer.byteLength(JSON.stringify(thread), "utf8") + 1;
+          // The first shell always travels, so a request always makes progress.
+          if (
+            remainingThreadIds.length > 0 ||
+            (threads.length > 0 &&
+              bytes + threadBytes > ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES)
+          ) {
+            remainingThreadIds.push(threadId);
+            continue;
+          }
+          threads.push(thread);
+          bytes += threadBytes;
+        }
+        return { snapshotSequence: snapshot.snapshotSequence, threads, remainingThreadIds };
+      }),
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetSnapshotError({
+            message: "Failed to load thread shells",
+            cause,
+          }),
       ),
     );
   };
@@ -441,6 +520,10 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
       observeRpcEffect(ORCHESTRATION_WS_METHODS.getThreadWindow, loadThreadWindow(input), {
         "rpc.aggregate": "orchestration",
       }),
+    [ORCHESTRATION_WS_METHODS.getThreadShells]: (input) =>
+      observeRpcEffect(ORCHESTRATION_WS_METHODS.getThreadShells, loadThreadShells(input), {
+        "rpc.aggregate": "orchestration",
+      }),
     [ORCHESTRATION_WS_METHODS.getActivityPayload]: (input) =>
       observeRpcEffect(
         ORCHESTRATION_WS_METHODS.getActivityPayload,
@@ -526,22 +609,18 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           Effect.forkDetach,
           Effect.as(
             makeReplayableShellStream(
-              projectionSnapshotQuery.getShellSnapshot().pipe(
-                Effect.tapError((cause) =>
-                  Effect.logError("orchestration shell snapshot load failed", { cause }),
-                ),
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationGetSnapshotError({
-                      message: "Failed to load orchestration shell snapshot",
-                      cause,
-                    }),
-                ),
-              ),
+              shellSnapshotLoad(projectionSnapshotQuery.getShellSnapshot()),
               {
                 resumeFromSequence: input.resumeFromSequence,
                 threadPriorities: input.threadPriorities,
                 snapshotDelivery: input.snapshotDelivery,
+                ...(input.archivedThreads === "stub"
+                  ? {
+                      stubbedSnapshot: shellSnapshotLoad(
+                        readStubbedShellSnapshot(projectionSnapshotQuery),
+                      ),
+                    }
+                  : {}),
               },
             ).pipe(
               observeArrays(isServerPerfProfileEnabled(), (items) =>

@@ -63,7 +63,7 @@ import { resetHubRoutesForTests } from "../../../hostedHub/hubRoutes";
 import type { HostedHubNode } from "../../../hostedHub/types";
 import { syncDocumentPresentationTier } from "../../../lib/presentationTier";
 import { useStore, type EnvironmentState } from "../../../store";
-import type { SidebarThreadSummary } from "../../../types";
+import { isFullThreadEntry, type SidebarThreadSummary } from "../../../types";
 import { useUiStateStore } from "../../../uiStateStore";
 import { readEnvironmentConnection } from "../../../environments/runtime";
 import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
@@ -286,18 +286,20 @@ function installActionConnection(
       createdAt: NOW_ISO,
       updatedAt: NOW_ISO,
     })),
-    threads: Object.values(state.sidebarThreadSummaryById).map((thread) =>
-      Object.assign({}, thread, {
-        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
-        runtimeMode: "full-access" as const,
-        updatedAt: NOW_ISO,
-        goal: null,
-        settledOverride: null,
-        settledAt: null,
-        worktreeId: null,
-        session: null,
-      }),
-    ),
+    threads: Object.values(state.sidebarThreadSummaryById)
+      .filter(isFullThreadEntry)
+      .map((thread) =>
+        Object.assign({}, thread, {
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runtimeMode: "full-access" as const,
+          updatedAt: NOW_ISO,
+          goal: null,
+          settledOverride: null,
+          settledAt: null,
+          worktreeId: null,
+          session: null,
+        }),
+      ),
   };
   const client = {
     orchestration: {

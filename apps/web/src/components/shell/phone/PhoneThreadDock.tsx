@@ -13,7 +13,11 @@ import {
 
 import type { DraftId } from "../../../composerDraftStore";
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../../store";
-import { DEFAULT_INTERACTION_MODE, type SidebarThreadSummary } from "../../../types";
+import {
+  DEFAULT_INTERACTION_MODE,
+  fullThreadEntry,
+  type SidebarThreadSummary,
+} from "../../../types";
 import type { SessionTabItem } from "../../../sessionTabs.selectors";
 import { MobileContextStrip, type MobileContextStripItem } from "../../mobile/MobileContextStrip";
 import { MobileListRow } from "../../mobile/MobileListRow";
@@ -81,10 +85,13 @@ export function PhoneThreadDock(props: PhoneThreadDockProps) {
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const threadKey = scopedThreadKey(scopeThreadRef(props.environmentId, props.threadId));
   const summaries = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  // An archived stub has no status to show until its full summary loads.
   const summary = useMemo(
     () =>
-      summaries.find(
-        (thread) => thread.id === props.threadId && thread.environmentId === props.environmentId,
+      fullThreadEntry(
+        summaries.find(
+          (thread) => thread.id === props.threadId && thread.environmentId === props.environmentId,
+        ),
       ) ?? null,
     [props.environmentId, props.threadId, summaries],
   );

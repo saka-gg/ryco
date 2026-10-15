@@ -3,6 +3,7 @@ import type {
   EnvironmentConnectionSupervisor,
 } from "@ryco/client-runtime/connection";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
 
 import {
   markPromotedDraftThreadByRef,
@@ -119,6 +120,12 @@ export function createWebEnvironmentStateSink(input: {
       useStore.getState().applyOrchestrationEvents(events, environmentId),
     syncServerShellSnapshot: (environmentId, snapshot) =>
       useStore.getState().syncServerShellSnapshot(snapshot, environmentId),
+    isArchivedThreadStub: (environmentId, threadId) =>
+      isArchivedThreadStub(
+        selectEnvironmentState(useStore.getState(), environmentId).threadShellById[threadId],
+      ),
+    applyLoadedThreadShells: (environmentId, threads) =>
+      useStore.getState().applyLoadedThreadShells(threads, environmentId),
     reconcileSnapshotDerivedState: () => {
       syncProjectUiFromStore();
       syncThreadUiFromStore();

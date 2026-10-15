@@ -1,5 +1,9 @@
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import {
+  isUnarchivedThreadEntry,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+} from "@ryco/client-runtime/state/threads";
 import { useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 
@@ -15,7 +19,7 @@ import { SectionLabel } from "../primitives";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { linkedAgentThreads } from "./agentThreads.logic";
 
-const EMPTY_THREADS: ReadonlyArray<SidebarThreadSummary> = [];
+const EMPTY_THREADS: ReadonlyArray<SidebarThreadOrStub> = [];
 
 /**
  * Agent threads working on this pull request (hand-offs from this page, or
@@ -54,7 +58,8 @@ export function useLinkedAgentThreads(): ReadonlyArray<SidebarThreadSummary> {
   return useMemo(
     () =>
       linkedAgentThreads({
-        threads,
+        // Only unarchived threads are linked; archived ones may be stubs.
+        threads: threads.filter(isUnarchivedThreadEntry),
         worktrees,
         link: { number: selection.number, headRefName, isCrossRepository },
       }),

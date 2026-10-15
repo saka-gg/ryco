@@ -1,7 +1,7 @@
 import type {
   EnvironmentId,
   MessageId,
-  OrchestrationShellSnapshot,
+  OrchestrationStubbedShellSnapshot,
   OrchestrationShellStreamEvent,
   OrchestrationShellThreadPrioritiesItem,
   OrchestrationThreadHistoryCollection,
@@ -22,6 +22,7 @@ import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
+import { createArchivedThreadShellLoader } from "./archivedThreadShellLoader.ts";
 import { planEvictionsToCapacity } from "./evictionPolicy.ts";
 import { createRetainedThreadBytes, type RetainedThreadBytes } from "./retainedThreadBytes.ts";
 import {
@@ -286,7 +287,7 @@ export interface EnvironmentConnectionSupervisor {
   /** The last shell sequence applied for an environment, for resuming its subscription. */
   readonly readShellProjectionSequence: (environmentId: EnvironmentId) => number | null;
   readonly syncShellSnapshot: (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
     callbacks?: {
       readonly onCurrent: () => void;
@@ -315,6 +316,15 @@ export interface EnvironmentConnectionSupervisor {
     threadIds: ReadonlyArray<ThreadId>,
   ) => void;
   readonly evictIdleThreadDetailSubscriptionsToCapacity: () => void;
+  /**
+   * Loads the full shells of threads the store holds as archived stubs, for a
+   * view that needs more than a stub carries without opening the thread. A
+   * no-op for full shells; opening a thread loads its own.
+   */
+  readonly ensureArchivedThreadShells: (
+    environmentId: EnvironmentId,
+    threadIds: ReadonlyArray<ThreadId>,
+  ) => void;
   readonly loadOlderThreadHistory: (input: {
     readonly environmentId: EnvironmentId;
     readonly threadId: ThreadId;
@@ -427,6 +437,21 @@ export function createEnvironmentConnectionSupervisor<
     return connection;
   };
 
+  // Full shells for archived stubs the user opens (or that a retained
+  // subscription keeps warm), from the environment's current connection.
+  const archivedThreadShells = createArchivedThreadShellLoader({
+    sourceFor: (environmentId) => {
+      const connection = read(environmentId);
+      return connection === null
+        ? null
+        : { token: connection, getThreadShells: connection.client.orchestration.getThreadShells };
+    },
+    isArchivedThreadStub: (environmentId, threadId) =>
+      input.stateSink.isArchivedThreadStub?.(environmentId, threadId) ?? false,
+    apply: (environmentId, threads) =>
+      input.stateSink.applyLoadedThreadShells?.(environmentId, threads),
+  });
+
   const activityPayloads = input.threadWindowActivityPayloads;
   const activityPayloadsRequest = activityPayloads !== undefined ? { activityPayloads } : {};
   const historyPagination = createThreadHistoryPaginationController({
@@ -501,6 +526,11 @@ export function createEnvironmentConnectionSupervisor<
     if (isMissingFromShell(entry.environmentId, entry.threadId)) return true;
     const connection = read(entry.environmentId);
     if (!connection) return false;
+    // Before this connection's first snapshot a stub can only be a cached one; the
+    // snapshot's own pass below loads whatever is still a stub then.
+    if (shellThreadIdsByEnvironment.has(entry.environmentId)) {
+      archivedThreadShells.ensureFullShell(entry.environmentId, entry.threadId);
+    }
     let active = true;
     let unsubscribeCurrent: () => void = NOOP;
     const scope = {
@@ -772,6 +802,7 @@ export function createEnvironmentConnectionSupervisor<
     if (!connection) return false;
     flushShellEvents();
     connections.delete(environmentId);
+    archivedThreadShells.clearEnvironment(environmentId);
     projectionTracker.clearEnvironment(environmentId);
     shellThreadIdsByEnvironment.delete(environmentId);
     historyPagination.clearEnvironment(environmentId);
@@ -1039,7 +1070,7 @@ export function createEnvironmentConnectionSupervisor<
     environmentId: EnvironmentId,
   ) => shellBatcher.enqueue(environmentId, item);
   const syncShellSnapshot = (
-    snapshot: OrchestrationShellSnapshot,
+    snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
     callbacks?: {
       readonly onCurrent: () => void;
@@ -1065,10 +1096,20 @@ export function createEnvironmentConnectionSupervisor<
     projectionTracker.markSnapshot(environmentId, snapshot);
     input.onShellSnapshotReady(environmentId);
     callbacks?.onReady();
-    const shellThreadIds = snapshot.threads.map((thread) => thread.id);
+    const shellThreadIds = [
+      ...snapshot.threads.map((thread) => thread.id),
+      ...(snapshot.archivedThreadStubs ?? []).map((stub) => stub.id),
+    ];
     shellThreadIdsByEnvironment.set(environmentId, new Set(shellThreadIds));
     reconcileSubscriptionsForEnvironment(environmentId, shellThreadIds);
     attachListedThreads(environmentId);
+    // A thread held open whose stub no longer matches what the store had is a
+    // stub again: load its full shell anew.
+    for (const entry of threadDetailSubscriptions.values()) {
+      if (entry.environmentId === environmentId && entry.refCount > 0) {
+        archivedThreadShells.ensureFullShell(environmentId, entry.threadId);
+      }
+    }
     reconcileForEnvironment(environmentId);
     input.stateSink.reconcileSnapshotDerivedState();
   };
@@ -1268,6 +1309,11 @@ export function createEnvironmentConnectionSupervisor<
     reconcileThreadDetailSubscriptionEvictionForThread: reconcileForThread,
     reconcileThreadDetailSubscriptionsForEnvironment: reconcileSubscriptionsForEnvironment,
     evictIdleThreadDetailSubscriptionsToCapacity: evictToCapacity,
+    ensureArchivedThreadShells: (environmentId, threadIds) => {
+      for (const threadId of threadIds) {
+        archivedThreadShells.ensureFullShell(environmentId, threadId);
+      }
+    },
     loadOlderThreadHistory: ({ environmentId, threadId, collection, page, limit }) =>
       historyPagination.loadBefore({
         scope: { environmentId, threadId },

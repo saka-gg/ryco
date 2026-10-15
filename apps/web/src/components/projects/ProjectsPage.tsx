@@ -17,6 +17,7 @@ import { isPageShortcutKeystroke } from "../pullRequests/pullRequestsShortcuts";
 import { shouldIgnoreGlobalNavigationShortcut } from "../../keybindings";
 import { buildProjectCheckoutOptions, resolveProjectCheckout } from "../../projectCheckouts.logic";
 import { selectSidebarThreadsAcrossEnvironments, useStore } from "../../store";
+import { isUnarchivedThreadEntry } from "../../types";
 import { SidebarInset } from "../ui/sidebar";
 import {
   buildProjectListRows,
@@ -69,8 +70,14 @@ export function ProjectsPage({ search, onSearchChange }: ProjectsPageProps) {
   // ── Projects and the checkout the URL names ─────────────────────────
   const { snapshots } = useLogicalProjectSnapshots();
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  // Activity comes from unarchived threads only (archived ones may be stubs).
   const rows = useMemo(
-    () => buildProjectListRows({ snapshots, threads, primaryEnvironmentId }),
+    () =>
+      buildProjectListRows({
+        snapshots,
+        threads: threads.filter(isUnarchivedThreadEntry),
+        primaryEnvironmentId,
+      }),
     [primaryEnvironmentId, snapshots, threads],
   );
   const options = useMemo(() => buildProjectCheckoutOptions(snapshots), [snapshots]);

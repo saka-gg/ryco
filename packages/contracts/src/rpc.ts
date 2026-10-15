@@ -2108,6 +2108,15 @@ export const WsOrchestrationGetThreadWindowRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetThreadShellsRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getThreadShells,
+  {
+    payload: OrchestrationRpcSchemas.getThreadShells.input,
+    success: OrchestrationRpcSchemas.getThreadShells.output,
+    error: OrchestrationGetSnapshotError,
+  },
+);
+
 export const WsOrchestrationGetThreadHistoryPageRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
   {
@@ -2596,6 +2605,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationGetFullThreadDiffRpc
   | typeof WsOrchestrationSearchThreadMessagesRpc
   | typeof WsOrchestrationGetThreadWindowRpc
+  | typeof WsOrchestrationGetThreadShellsRpc
   | typeof WsOrchestrationGetThreadHistoryPageRpc
   | typeof WsOrchestrationGetActivityPayloadRpc
   | typeof WsOrchestrationSetThreadHistoryRecoveryRpc
@@ -2809,6 +2819,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadMessagesRpc,
   WsOrchestrationGetThreadWindowRpc,
+  WsOrchestrationGetThreadShellsRpc,
   WsOrchestrationGetThreadHistoryPageRpc,
   WsOrchestrationGetActivityPayloadRpc,
   WsOrchestrationSetThreadHistoryRecoveryRpc,

@@ -10,7 +10,12 @@ import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@ryco/cont
 import type { DraftThreadState } from "../../composerDraftStore";
 import type { SidebarProjectTreeRow } from "../../sidebarProjectFolders";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
-import type { SidebarThreadSummary, SidebarWorktreeSummary } from "../../types";
+import type {
+  SidebarThreadOrStub,
+  SidebarThreadSummary,
+  SidebarWorktreeSummary,
+} from "../../types";
+import { isUnarchivedThreadEntry } from "../../types";
 import { sortProjectsForSidebar } from "../Sidebar.logic";
 import type { SidebarTreeStructureProject } from "./hooks/useSidebarTree";
 import type { SidebarProjectTreeCache } from "./sidebarProjectTreeCache";
@@ -53,7 +58,7 @@ export function computeSidebarProjectThreadKeys(input: ProjectThreadKeysInput): 
   if (!input.projectExpanded && !input.activeThreadKey) return EMPTY_KEYS;
   const keys = input.structure.worktrees.flatMap((worktree) =>
     worktree.threads
-      .filter((thread) => thread.archivedAt === null)
+      .filter(isUnarchivedThreadEntry)
       .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
   if (input.projectExpanded) return keys;
@@ -158,14 +163,15 @@ export interface SidebarVisibleThreadKeysInput {
   readonly routeThreadKey: string | null;
   readonly projectThreadKeysCache: SidebarProjectThreadKeysCache;
   readonly projectTreeCache: SidebarProjectTreeCache;
-  readonly threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadSummary[]>;
+  /** Archived threads may be stubs (the tree lists them as archived sessions). */
+  readonly threadsByProjectKey: ReadonlyMap<string, readonly SidebarThreadOrStub[]>;
   readonly worktreesByProjectKey: ReadonlyMap<string, readonly SidebarWorktreeSummary[]>;
   readonly draftThreadsByThreadKey: Readonly<Record<string, DraftThreadState>>;
   readonly sortOrder: SidebarThreadSortOrder;
   readonly pinnedThreadKeys: ReadonlySet<string>;
 }
 
-const NO_THREADS: readonly SidebarThreadSummary[] = [];
+const NO_THREADS: readonly SidebarThreadOrStub[] = [];
 const NO_WORKTREES: readonly SidebarWorktreeSummary[] = [];
 
 /**

@@ -120,6 +120,7 @@ import {
   selectSidebarThreadsAcrossEnvironments,
   useStore,
 } from "../store";
+import { isUnarchivedThreadEntry } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -486,7 +487,10 @@ function OpenCommandPaletteDialog() {
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   // Project lists never offer chats; "No project" entries stand in for them.
   const pickerProjects = useMemo(() => excludeChatProjects(projects), [projects]);
+  // Archived threads may be stubs: they still name message-search results
+  // (title, project), while thread actions list only unarchived threads.
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
+  const unarchivedThreads = useMemo(() => threads.filter(isUnarchivedThreadEntry), [threads]);
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
@@ -1044,7 +1048,7 @@ function OpenCommandPaletteDialog() {
   const allThreadItems = useMemo(
     () =>
       buildThreadActionItems({
-        threads,
+        threads: unarchivedThreads,
         ...(activeThreadId ? { activeThreadId } : {}),
         projectTitleById,
         sortOrder: settings.sidebarThreadSortOrder,
@@ -1058,7 +1062,13 @@ function OpenCommandPaletteDialog() {
           });
         },
       }),
-    [activeThreadId, navigate, projectTitleById, settings.sidebarThreadSortOrder, threads],
+    [
+      activeThreadId,
+      navigate,
+      projectTitleById,
+      settings.sidebarThreadSortOrder,
+      unarchivedThreads,
+    ],
   );
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
   // Threads the mounted split can take: same machine, not already open, and a
@@ -1069,7 +1079,7 @@ function OpenCommandPaletteDialog() {
     () =>
       paneAnchor
         ? buildThreadActionItems({
-            threads: threads.filter(
+            threads: unarchivedThreads.filter(
               (thread) =>
                 availablePaneSplit(
                   paneRoot,
@@ -1087,7 +1097,7 @@ function OpenCommandPaletteDialog() {
             },
           })
         : [],
-    [paneAnchor, paneRoot, projectTitleById, settings.sidebarThreadSortOrder, threads],
+    [paneAnchor, paneRoot, projectTitleById, settings.sidebarThreadSortOrder, unarchivedThreads],
   );
 
   function pushPaletteView(view: CommandPaletteView): void {

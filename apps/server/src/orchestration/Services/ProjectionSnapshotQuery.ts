@@ -8,6 +8,7 @@
  */
 import type {
   CheckpointRevertActivityPayload,
+  OrchestrationArchivedThreadStub,
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
@@ -38,6 +39,46 @@ import { Context, Effect } from "effect";
 import type { Option } from "effect";
 
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
+
+/**
+ * A shell snapshot for subscribers that take archived threads as stubs
+ * (`archivedThreads: "stub"`): `threads` holds every unarchived thread and
+ * `archivedThreadStubs` every archived one.
+ */
+export type ProjectionStubbedShellSnapshot = OrchestrationShellSnapshot & {
+  readonly archivedThreadStubs: ReadonlyArray<OrchestrationArchivedThreadStub>;
+};
+
+/** The stub an archived shell is listed as; see `OrchestrationArchivedThreadStub`. */
+export const toArchivedThreadStub = (
+  thread: OrchestrationThreadShell & { readonly archivedAt: string },
+): OrchestrationArchivedThreadStub => ({
+  id: thread.id,
+  projectId: thread.projectId,
+  title: thread.title,
+  branch: thread.branch,
+  worktreePath: thread.worktreePath,
+  worktreeId: thread.worktreeId ?? null,
+  createdAt: thread.createdAt,
+  updatedAt: thread.updatedAt,
+  archivedAt: thread.archivedAt,
+  latestUserMessageAt: thread.latestUserMessageAt,
+  lineage: thread.lineage ?? null,
+});
+
+/** Splits a full shell snapshot into the stubbed form; the fallback for test doubles. */
+export const stubArchivedThreads = (
+  snapshot: OrchestrationShellSnapshot,
+): ProjectionStubbedShellSnapshot => {
+  const threads: Array<OrchestrationThreadShell> = [];
+  const archivedThreadStubs: Array<OrchestrationArchivedThreadStub> = [];
+  for (const thread of snapshot.threads) {
+    if (thread.archivedAt === null) threads.push(thread);
+    else
+      archivedThreadStubs.push(toArchivedThreadStub({ ...thread, archivedAt: thread.archivedAt }));
+  }
+  return { ...snapshot, threads, archivedThreadStubs };
+};
 
 export interface ProjectionSnapshotCounts {
   readonly projectCount: number;
@@ -255,6 +296,17 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getShellSnapshot: () => Effect.Effect<
     OrchestrationShellSnapshot,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * The shell snapshot with archived threads as stubs, for shell subscribers that asked for
+   * them: the same sequence and `updatedAt` as {@link getShellSnapshot}, without reading the
+   * sessions and latest turns of archived threads. Concurrent callers share builds. Optional
+   * for test doubles; read it through {@link readStubbedShellSnapshot}.
+   */
+  readonly getStubbedShellSnapshot?: () => Effect.Effect<
+    ProjectionStubbedShellSnapshot,
     ProjectionRepositoryError
   >;
 
@@ -562,6 +614,12 @@ export const readScopedShellSnapshot = (
 ): Effect.Effect<OrchestrationShellSnapshot, ProjectionRepositoryError> =>
   query.getScopedShellSnapshot?.(scope) ??
   Effect.map(query.getShellSnapshot(), (snapshot) => scopeShellSnapshot(snapshot, scope));
+
+/** The shell snapshot with archived stubs; see {@link readProjectShells}. */
+export const readStubbedShellSnapshot = (
+  query: ShellSnapshotFallback<"getStubbedShellSnapshot">,
+): Effect.Effect<ProjectionStubbedShellSnapshot, ProjectionRepositoryError> =>
+  query.getStubbedShellSnapshot?.() ?? Effect.map(query.getShellSnapshot(), stubArchivedThreads);
 
 /** One keyset page of live thread keys; see {@link readProjectShells}. */
 export const readThreadKeyPage = (

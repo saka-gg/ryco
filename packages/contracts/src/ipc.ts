@@ -219,6 +219,8 @@ import type {
   OrchestrationGetActivityPayloadResult,
   OrchestrationGetThreadHistoryPageInput,
   OrchestrationGetThreadWindowInput,
+  OrchestrationGetThreadShellsInput,
+  OrchestrationGetThreadShellsResult,
   OrchestrationThreadHistoryPage,
   OrchestrationThreadWindowSnapshot,
   OrchestrationThreadWindowStreamItem,
@@ -1360,6 +1362,10 @@ export interface EnvironmentApi {
     getThreadWindow?: (
       input: OrchestrationGetThreadWindowInput,
     ) => Promise<OrchestrationThreadWindowSnapshot>;
+    /** Optional so clients can feature-detect against older environments. */
+    getThreadShells?: (
+      input: OrchestrationGetThreadShellsInput,
+    ) => Promise<OrchestrationGetThreadShellsResult>;
     /** Optional so clients can feature-detect against older environments. */
     getThreadHistoryPage?: (
       input: OrchestrationGetThreadHistoryPageInput,

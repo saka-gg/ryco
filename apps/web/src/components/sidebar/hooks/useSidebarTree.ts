@@ -1,7 +1,13 @@
 import { useMemo } from "react";
 import type { DraftId } from "../../../composerDraftStore";
 import { normalizeProjectPathForComparison } from "../../../lib/projectPaths";
-import type { Project, SidebarThreadSummary } from "../../../types";
+import {
+  isArchivedThreadStub,
+  isUnarchivedThreadEntry,
+  type ArchivedThreadStub,
+  type Project,
+  type SidebarThreadOrStub,
+} from "../../../types";
 import {
   aggregateWorktreeStatus,
   deriveStatusBucket,
@@ -54,7 +60,11 @@ export interface SidebarWorktreeDiffStats {
   removed: number;
 }
 
-export type SidebarTreeThread = SidebarThreadSummary & {
+/**
+ * A session row of the tree. An archived thread may be its stub
+ * (`ArchivedThreadStub`): archived rows only ever need what a stub carries.
+ */
+export type SidebarTreeThread = SidebarThreadOrStub & {
   draftId?: DraftId | undefined;
   manualStatusBucket?: SidebarStatusBucket | null | undefined;
   sourceProjectId?: Project["id"] | undefined;
@@ -63,12 +73,15 @@ export type SidebarTreeThread = SidebarThreadSummary & {
   worktreeId?: string | null | undefined;
 };
 
+/** An unarchived session row: never a stub. */
+export type ActiveSidebarTreeThread = Exclude<SidebarTreeThread, ArchivedThreadStub>;
+
 export interface SidebarTreeWorktree {
   aggregateStatus: SidebarStatusBucket;
   archivedSessions: ReadonlyArray<SidebarTreeThread>;
-  buckets: Record<SidebarStatusBucket, ReadonlyArray<SidebarTreeThread>>;
+  buckets: Record<SidebarStatusBucket, ReadonlyArray<ActiveSidebarTreeThread>>;
   diffStats: SidebarWorktreeDiffStats | null;
-  sessions: ReadonlyArray<SidebarTreeThread>;
+  sessions: ReadonlyArray<ActiveSidebarTreeThread>;
   shouldSuggestArchive: boolean;
   worktree: SidebarWorktree;
 }
@@ -76,8 +89,8 @@ export interface SidebarTreeWorktree {
 export interface SidebarTreeProject {
   archivedSessions: ReadonlyArray<SidebarTreeThread>;
   archivedWorktrees: ReadonlyArray<SidebarTreeWorktree>;
-  draftSessions: ReadonlyArray<SidebarTreeThread>;
-  flatSessions: ReadonlyArray<SidebarTreeThread>;
+  draftSessions: ReadonlyArray<ActiveSidebarTreeThread>;
+  flatSessions: ReadonlyArray<ActiveSidebarTreeThread>;
   isGitRepo: boolean;
   project: Project;
   worktrees: ReadonlyArray<SidebarTreeWorktree>;
@@ -121,8 +134,8 @@ export interface SidebarTreeStructureNode {
 export interface SidebarTreeStructureProject {
   readonly archivedSessions: ReadonlyArray<SidebarTreeThread>;
   readonly archivedWorktrees: ReadonlyArray<SidebarTreeStructureNode>;
-  readonly draftSessions: ReadonlyArray<SidebarTreeThread>;
-  readonly flatSessions: ReadonlyArray<SidebarTreeThread>;
+  readonly draftSessions: ReadonlyArray<ActiveSidebarTreeThread>;
+  readonly flatSessions: ReadonlyArray<ActiveSidebarTreeThread>;
   readonly isGitRepo: boolean;
   readonly project: Project;
   readonly worktrees: ReadonlyArray<SidebarTreeStructureNode>;
@@ -147,7 +160,7 @@ export interface DecorateSidebarTreeInput {
    * reflects when the user last visited it). Called once per session; must
    * return the same object when nothing changes.
    */
-  restatusThread?: ((thread: SidebarTreeThread) => SidebarTreeThread) | undefined;
+  restatusThread?: ((thread: ActiveSidebarTreeThread) => ActiveSidebarTreeThread) | undefined;
 }
 
 export function composeSidebarTree(input: ComposeSidebarTreeInput): SidebarTree {
@@ -167,7 +180,8 @@ export function composeSidebarTreeStructure(
     projects: input.projects.map((project): SidebarTreeStructureProject => {
       const projectThreads = threadsByProjectId.get(project.id) ?? [];
       const draftSessions = projectThreads.filter(
-        (thread) => thread.draftId !== undefined && thread.archivedAt === null,
+        (thread): thread is ActiveSidebarTreeThread =>
+          thread.draftId !== undefined && isUnarchivedThreadEntry(thread),
       );
       const materializedThreads = projectThreads.filter((thread) => thread.draftId === undefined);
       const isGitRepo = resolveProjectIsGitRepo(project, input.isGitRepoByProjectId);
@@ -178,7 +192,7 @@ export function composeSidebarTreeStructure(
           archivedSessions,
           archivedWorktrees: [],
           draftSessions,
-          flatSessions: projectThreads.filter((thread) => thread.archivedAt === null),
+          flatSessions: projectThreads.filter(isUnarchivedThreadEntry),
           isGitRepo,
           project,
           worktrees: [],
@@ -252,17 +266,18 @@ export function decorateSidebarTreeProject(
   const nowMs = input.nowMs ?? Date.now();
   const restatus = input.restatusThread;
   const restatused = new Map<SidebarTreeThread, SidebarTreeThread>();
-  const restatusOne = (thread: SidebarTreeThread) => {
-    if (restatus === undefined) return thread;
+  // A stub has no status to restate, and stays itself.
+  const restatusOne = <T extends SidebarTreeThread>(thread: T): T => {
+    if (restatus === undefined || isArchivedThreadStub(thread)) return thread;
     let next = restatused.get(thread);
     if (next === undefined) {
-      next = restatus(thread);
+      next = restatus(thread as ActiveSidebarTreeThread);
       restatused.set(thread, next);
     }
-    return next;
+    return next as T;
   };
-  const restatusAll = (threads: ReadonlyArray<SidebarTreeThread>) =>
-    restatus === undefined ? threads : threads.map(restatusOne);
+  const restatusAll = <T extends SidebarTreeThread>(threads: ReadonlyArray<T>) =>
+    restatus === undefined ? threads : threads.map((thread) => restatusOne(thread));
   const composeNode = (node: SidebarTreeStructureNode) =>
     composeWorktreeNode({
       diffStats: getDiffStats(input, node.worktree.worktreeId),
@@ -335,7 +350,7 @@ function composeWorktreeNode(input: {
   threads: ReadonlyArray<SidebarTreeThread>;
   worktree: SidebarWorktree;
 }): SidebarTreeWorktree {
-  const buckets: Record<SidebarStatusBucket, SidebarTreeThread[]> = {
+  const buckets: Record<SidebarStatusBucket, ActiveSidebarTreeThread[]> = {
     done: [],
     idle: [],
     in_progress: [],
@@ -343,10 +358,10 @@ function composeWorktreeNode(input: {
   };
   const activeBuckets: SidebarStatusBucket[] = [];
   const archivedSessions: SidebarTreeThread[] = [];
-  const sessions: SidebarTreeThread[] = [];
+  const sessions: ActiveSidebarTreeThread[] = [];
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) {
+    if (isArchivedThreadStub(thread) || thread.archivedAt !== null) {
       archivedSessions.push(thread);
       continue;
     }
@@ -372,7 +387,7 @@ function composeWorktreeNode(input: {
   };
 }
 
-function getThreadBucket(thread: SidebarTreeThread): SidebarStatusBucket {
+function getThreadBucket(thread: ActiveSidebarTreeThread): SidebarStatusBucket {
   return deriveStatusBucket({
     manualBucket: thread.manualStatusBucket ?? null,
     statusPill: thread.statusPill ?? resolveThreadStatusPill({ thread }),

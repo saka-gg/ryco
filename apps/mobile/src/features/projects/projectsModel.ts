@@ -1,8 +1,10 @@
 import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
-import type {
-  Project,
-  SidebarThreadSummary,
-  SidebarWorktreeSummary,
+import {
+  isUnarchivedThreadEntry,
+  type Project,
+  type SidebarThreadOrStub,
+  type SidebarThreadSummary,
+  type SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
@@ -91,7 +93,8 @@ export function buildProjectDetail(input: {
   readonly projectId: ProjectId;
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived threads, stubs among them, are left out. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<ProjectEnvironment>;
 }): ProjectDetailModel | null {
   const project = input.projects.find(
@@ -110,11 +113,10 @@ export function buildProjectDetail(input: {
     )
     .toSorted(newestFirst);
   const threads = input.threads
+    .filter(isUnarchivedThreadEntry)
     .filter(
       (thread) =>
-        thread.environmentId === input.environmentId &&
-        thread.projectId === input.projectId &&
-        thread.archivedAt === null,
+        thread.environmentId === input.environmentId && thread.projectId === input.projectId,
     )
     .toSorted(newestFirst);
   const threadsByWorktree = new Map<string, SidebarThreadSummary[]>();
@@ -230,7 +232,8 @@ function claimKey(used: Set<string>, preferred: string, fallback: string): strin
 export function buildProjectRows(input: {
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived threads, stubs among them, are left out. */
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<ProjectEnvironment>;
   readonly nodeScope?: EnvironmentId | null;
   readonly query?: string;
@@ -251,7 +254,7 @@ export function buildProjectRows(input: {
   }
   const threadsByProject = new Map<string, SidebarThreadSummary[]>();
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null) continue;
+    if (!isUnarchivedThreadEntry(thread)) continue;
     const key = scopedKey(thread.environmentId, thread.projectId);
     const threads = threadsByProject.get(key) ?? [];
     threads.push(thread);

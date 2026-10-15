@@ -1,5 +1,6 @@
 import type { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import type { EnvironmentState } from "./store.ts";
+import { isArchivedThreadStub } from "./types.ts";
 import type {
   ChatMessage,
   ProposedPlan,
@@ -104,7 +105,8 @@ export function getThreadFromEnvironmentState(
   threadId: ThreadId,
 ): Thread | undefined {
   const shell = state.threadShellById[threadId];
-  if (!shell) {
+  // A stub is no thread to compose: its full shell is loaded on demand.
+  if (!shell || isArchivedThreadStub(shell)) {
     return undefined;
   }
 

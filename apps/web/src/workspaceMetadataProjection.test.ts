@@ -19,6 +19,7 @@ import {
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { useStore } from "./store";
+import { fullThreadEntry } from "./types";
 import {
   readWorkspaceMetadataSnapshot,
   remapWorkspaceMetadataSnapshotEnvironment,
@@ -290,7 +291,7 @@ describe("workspace metadata lineage", () => {
     const captured = readWorkspaceMetadataSnapshot(environmentId, 1)!;
     const cached = workspaceMetadataToCachedShellSnapshot(captured);
     const summaryOf = (id: ThreadId) =>
-      cached.threads.find((thread) => thread.shell.id === id)?.summary;
+      fullThreadEntry(cached.threads.find((thread) => thread.shell.id === id)?.summary);
     expect(summaryOf(parentId)?.latestUserMessageAt).toBe("2026-01-01T00:00:00.000Z");
     expect(summaryOf(parentId)?.latestTurn).toEqual(turn("completed"));
     // A running turn is live state: the cached row has none.
@@ -342,6 +343,6 @@ describe("workspace metadata lineage", () => {
     };
     const cached = workspaceMetadataToCachedShellSnapshot(snapshot);
     expect(cached.threads[0]?.summary.latestUserMessageAt).toBeNull();
-    expect(cached.threads[0]?.summary.latestTurn).toBeNull();
+    expect(fullThreadEntry(cached.threads[0]?.summary)?.latestTurn).toBeNull();
   });
 });

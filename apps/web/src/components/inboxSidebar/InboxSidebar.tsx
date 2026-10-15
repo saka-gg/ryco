@@ -1,6 +1,7 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type {
   Project,
+  SidebarThreadOrStub,
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
@@ -39,7 +40,7 @@ export interface InboxSidebarProps {
   readonly threadActions?: InboxThreadActions | undefined;
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
-  readonly threads: ReadonlyArray<SidebarThreadSummary>;
+  readonly threads: ReadonlyArray<SidebarThreadOrStub>;
   readonly environments: ReadonlyArray<InboxSidebarEnvironment>;
   readonly deliveryUnknownThreadKeys: ReadonlySet<string>;
   readonly localQueuedThreadKeys: ReadonlySet<string>;

@@ -15,7 +15,9 @@ import type { DraftId, DraftThreadState } from "../../composerDraftStore";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
   DEFAULT_INTERACTION_MODE,
+  isArchivedThreadStub,
   type Project,
+  type SidebarThreadOrStub,
   type SidebarThreadSummary,
   type SidebarWorktreeSummary,
 } from "../../types";
@@ -26,6 +28,7 @@ import {
   type ThreadStatusPill,
 } from "../Sidebar.logic";
 import type {
+  ActiveSidebarTreeThread,
   SidebarTreeThread,
   SidebarWorktree,
   SidebarWorktreeOrigin,
@@ -43,7 +46,8 @@ const WORKTREE_ORIGINS = new Set<SidebarWorktreeOrigin>([
 export interface SidebarTreeAdapterInput {
   lastVisitedAtByThreadKey?: ReadonlyMap<string, string | null> | undefined;
   project: SidebarProjectSnapshot;
-  threads: ReadonlyArray<SidebarThreadSummary>;
+  /** Archived threads may be stubs; they carry no status. */
+  threads: ReadonlyArray<SidebarThreadOrStub>;
   worktrees?: ReadonlyArray<SidebarWorktreeSummary> | undefined;
 }
 
@@ -125,12 +129,14 @@ export function adaptProjectForSidebarTree(
  * applies them afterwards. Returns `thread` itself when the pill is unchanged.
  * Drafts carry no status and stay as they are.
  */
-export function restatusSidebarTreeThread(
-  thread: SidebarTreeThread,
+export function restatusSidebarTreeThread<T extends SidebarTreeThread>(
+  thread: T,
   lastVisitedAt: string | null | undefined,
-): SidebarTreeThread {
-  if (thread.draftId !== undefined || !lastVisitedAt) return thread;
-  const statusPill = resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } });
+): T {
+  // A stub has no session or turn to derive a status from.
+  if (thread.draftId !== undefined || !lastVisitedAt || isArchivedThreadStub(thread)) return thread;
+  const active = thread as T & ActiveSidebarTreeThread;
+  const statusPill = resolveThreadStatusPill({ thread: { ...active, lastVisitedAt } });
   return sameStatusPill(statusPill, thread.statusPill) ? thread : { ...thread, statusPill };
 }
 
@@ -240,8 +246,19 @@ function adaptThreadForSidebarTree(input: {
   lastVisitedAt: string | null;
   logicalProjectId: ProjectId;
   sourceProjectCwd: string;
-  thread: SidebarThreadSummary;
+  thread: SidebarThreadOrStub;
 }): SidebarTreeThread {
+  if (isArchivedThreadStub(input.thread)) {
+    // An archived stub has no session or turn to derive a status from.
+    return {
+      ...input.thread,
+      projectId: input.logicalProjectId,
+      manualStatusBucket: null,
+      sourceProjectId: input.thread.projectId,
+      sourceProjectCwd: input.sourceProjectCwd,
+      statusPill: null,
+    };
+  }
   const extra = input.thread as SidebarThreadSummary & {
     manualBucket?: unknown;
     manualStatusBucket?: unknown;

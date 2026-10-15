@@ -31,6 +31,7 @@ export function readMobileSidebarUndoContext(target: ScopedThreadRef) {
   const generation = connection?.shellSnapshotReadiness.read();
   const api = readEnvironmentApi(target.environmentId);
   const state = useStore.getState();
+  // An archived stub has a revision of its own (see `sidebarUndoThreadRevision`).
   const thread = selectSidebarThreadSummaryByRef(state, target);
   const project = thread
     ? selectProjectByRef(state, {

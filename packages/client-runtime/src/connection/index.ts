@@ -23,3 +23,4 @@ export * from "./projectIconSource.ts";
 
 export * from "./threadExport.ts";
 export * from "./providerMaintenance.ts";
+export * from "./archivedThreadShellLoader.ts";

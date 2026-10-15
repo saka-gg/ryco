@@ -12,9 +12,12 @@ import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
   type WorkspaceThreadLatestTurn,
+  type WorkspaceThreadMetadata,
 } from "@ryco/client-runtime/state/workspace";
 import {
+  isArchivedThreadStub,
   isThreadLineage,
+  type ArchivedThreadStub,
   type CachedEnvironmentShellSnapshot,
 } from "@ryco/client-runtime/state/threads";
 
@@ -70,8 +73,33 @@ export function readWorkspaceMetadataSnapshot(
           ]
         : [];
     }),
-    threads: environment.threadIds.flatMap((threadId) => {
+    threads: environment.threadIds.flatMap((threadId): WorkspaceThreadMetadata[] => {
       const thread = environment.sidebarThreadSummaryById[threadId];
+      if (isArchivedThreadStub(thread)) {
+        return [
+          {
+            environmentId,
+            id: thread.id,
+            projectId: thread.projectId,
+            worktreeId: thread.worktreeId ? WorktreeId.make(thread.worktreeId) : null,
+            title: thread.title,
+            createdAt: thread.createdAt,
+            updatedAt: thread.updatedAt,
+            archivedAt: thread.archivedAt,
+            // Unknown for a stub, and marked so (`shellDetail`) rather than read.
+            modelSelection: null,
+            providerDriver: null,
+            branch: thread.branch,
+            hasPendingApprovals: false,
+            hasPendingUserInput: false,
+            hasActionableProposedPlan: false,
+            deliveryUnknown,
+            ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
+            latestUserMessageAt: thread.latestUserMessageAt,
+            shellDetail: "archived-stub" as const,
+          },
+        ];
+      }
       return thread
         ? [
             {
@@ -172,6 +200,25 @@ export function workspaceMetadataToCachedShellSnapshot(
       manualPosition: 0,
     })),
     threads: snapshot.threads.map((thread) => {
+      // Cached lineage is untrusted storage: drop it unless it is well formed.
+      if (thread.shellDetail === "archived-stub" && thread.archivedAt !== null) {
+        const stub: ArchivedThreadStub = {
+          shellDetail: "archived-stub",
+          id: thread.id,
+          environmentId: thread.environmentId,
+          projectId: thread.projectId,
+          title: thread.title,
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt ?? thread.createdAt,
+          archivedAt: thread.archivedAt,
+          branch: thread.branch,
+          worktreePath: null,
+          worktreeId: thread.worktreeId,
+          latestUserMessageAt: readCachedTimestamp(thread.latestUserMessageAt),
+          lineage: isThreadLineage(thread.lineage) ? thread.lineage : null,
+        };
+        return { shell: stub, summary: stub };
+      }
       const driver = thread.providerDriver ?? ProviderDriverKind.make("codex");
       const modelSelection = thread.modelSelection ?? {
         instanceId: defaultInstanceIdForDriver(driver),

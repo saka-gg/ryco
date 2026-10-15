@@ -47,7 +47,12 @@ import {
   useStore,
 } from "./store.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
-import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types.ts";
+import {
+  DEFAULT_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE,
+  fullThreadEntry,
+  type Thread,
+} from "./types.ts";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -2320,8 +2325,11 @@ describe("thread settlement state", () => {
         localEnvironmentId,
       );
       expect(
-        localEnvironmentStateOf(state).sidebarThreadSummaryById[ThreadId.make("thread-settlement")]
-          ?.latestCompletedTurnAt,
+        fullThreadEntry(
+          localEnvironmentStateOf(state).sidebarThreadSummaryById[
+            ThreadId.make("thread-settlement")
+          ],
+        )?.latestCompletedTurnAt,
       ).toBe(latestCompletedTurnAt);
     }
   });
@@ -2699,8 +2707,12 @@ describe("shell push coalescing", () => {
       localEnvironmentId,
     );
     const rankedEnv = selectEnvironmentState(ranked, localEnvironmentId);
-    expect(rankedEnv.sidebarThreadSummaryById[threadA]?.priority?.tier).toBe("now");
-    expect(rankedEnv.sidebarThreadSummaryById[threadB]?.priority?.tier).toBe("later");
+    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadA])?.priority?.tier).toBe(
+      "now",
+    );
+    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadB])?.priority?.tier).toBe(
+      "later",
+    );
 
     // A later ranking that leaves thread A out clears its priority; thread B's
     // unchanged row keeps its identity.
@@ -2713,7 +2725,9 @@ describe("shell push coalescing", () => {
       localEnvironmentId,
     );
     const rerankedEnv = selectEnvironmentState(reranked, localEnvironmentId);
-    expect(rerankedEnv.sidebarThreadSummaryById[threadA]?.priority).toBeUndefined();
+    expect(
+      fullThreadEntry(rerankedEnv.sidebarThreadSummaryById[threadA])?.priority,
+    ).toBeUndefined();
     expect(rerankedEnv.sidebarThreadSummaryById[threadB]).toBe(
       rankedEnv.sidebarThreadSummaryById[threadB],
     );
@@ -2919,8 +2933,10 @@ describe("usage limits on shell upserts", () => {
     };
     const limited = applyShellEvent(first, upsert(2, limit), localEnvironmentId);
     const environment = limited.environmentStateById[localEnvironmentId]!;
-    expect(environment.threadShellById[threadId]?.usageLimit).toEqual(limit);
-    expect(environment.sidebarThreadSummaryById[threadId]?.usageLimit).toEqual(limit);
+    expect(fullThreadEntry(environment.threadShellById[threadId])?.usageLimit).toEqual(limit);
+    expect(fullThreadEntry(environment.sidebarThreadSummaryById[threadId])?.usageLimit).toEqual(
+      limit,
+    );
 
     const configured = applyShellEvent(
       limited,
@@ -2928,8 +2944,9 @@ describe("usage limits on shell upserts", () => {
       localEnvironmentId,
     );
     expect(
-      configured.environmentStateById[localEnvironmentId]!.sidebarThreadSummaryById[threadId]
-        ?.usageLimit?.autoResume,
+      fullThreadEntry(
+        configured.environmentStateById[localEnvironmentId]!.sidebarThreadSummaryById[threadId],
+      )?.usageLimit?.autoResume,
     ).toBe(true);
   });
 });

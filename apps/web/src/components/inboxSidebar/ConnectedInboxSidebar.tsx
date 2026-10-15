@@ -7,6 +7,7 @@ import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import type { useThreadActions } from "../../hooks/useThreadActions";
 import { useSettings } from "../../hooks/useSettings";
+import { isUnarchivedThreadEntry } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
 import { useChatRowMenuContext } from "../sidebar/hooks/useChatRowMenuContext";
 import { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
@@ -44,13 +45,16 @@ export function ConnectedInboxSidebar(
   const appSettingsConfirmThreadArchive = useSettings((s) => s.confirmThreadArchive);
   const appSettingsConfirmThreadUnpin = useSettings((s) => s.confirmThreadUnpin);
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
+  // Menus act on inbox rows, which are all unarchived (never stubs).
   const threadByKey = useMemo(
     () =>
       new Map(
-        props.threads.map((thread) => [
-          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-          thread,
-        ]),
+        props.threads
+          .filter(isUnarchivedThreadEntry)
+          .map((thread) => [
+            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+            thread,
+          ]),
       ),
     [props.threads],
   );

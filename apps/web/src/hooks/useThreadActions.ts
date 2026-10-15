@@ -21,11 +21,14 @@ import { undoThreadDeletes } from "../threadDeleteUndo";
 import { newCommandId } from "../lib/utils";
 import { readLocalApi } from "../localApi";
 import {
+  selectEnvironmentState,
   selectSidebarThreadSummaryByRef,
   selectThreadByRef,
+  selectThreadExistsByRef,
   selectThreadsForEnvironment,
   useStore,
 } from "../store";
+import { isArchivedThreadStub } from "../types";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { useSettings } from "./useSettings";
@@ -136,6 +139,13 @@ export function useThreadActions() {
       threadRef: target,
     };
   }, []);
+  // Any listed thread, an archived stub included: deleting needs only its title and project.
+  const resolveThreadEntry = useCallback((target: ScopedThreadRef) => {
+    const entry = selectEnvironmentState(useStore.getState(), target.environmentId).threadShellById[
+      target.threadId
+    ];
+    return entry === undefined ? null : { thread: entry, threadRef: target };
+  }, []);
   const getCurrentRouteThreadRef = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteRef(currentRouteParams);
@@ -238,10 +248,18 @@ export function useThreadActions() {
     async (target, opts = {}) => {
       const api = readEnvironmentApi(target.environmentId);
       if (!api) return null;
-      const resolved = resolveThreadTarget(target);
+      const resolved = resolveThreadEntry(target);
       if (!resolved) return null;
       const { thread, threadRef } = resolved;
-      const threads = selectThreadsForEnvironment(useStore.getState(), threadRef.environmentId);
+      // Fallback candidates: every listed thread, archived stubs included.
+      const state = useStore.getState();
+      const environmentState = selectEnvironmentState(state, threadRef.environmentId);
+      const threads = [
+        ...selectThreadsForEnvironment(state, threadRef.environmentId),
+        ...environmentState.threadIds
+          .map((threadId) => environmentState.threadShellById[threadId])
+          .filter(isArchivedThreadStub),
+      ];
       const deletedIds =
         opts.deletedThreadKeys && opts.deletedThreadKeys.size > 0
           ? new Set<ThreadId>(
@@ -294,15 +312,9 @@ export function useThreadActions() {
           null;
         if (shouldNavigateToFallback) {
           if (fallbackThreadId) {
-            const fallbackThread = selectThreadByRef(
-              useStore.getState(),
-              scopeThreadRef(threadRef.environmentId, fallbackThreadId),
-            );
-            navigateTarget = fallbackThread
-              ? {
-                  kind: "fallback",
-                  ref: scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
-                }
+            const fallbackRef = scopeThreadRef(threadRef.environmentId, fallbackThreadId);
+            navigateTarget = selectThreadExistsByRef(useStore.getState(), fallbackRef)
+              ? { kind: "fallback", ref: fallbackRef }
               : { kind: "home" };
           } else {
             navigateTarget = { kind: "home" };
@@ -351,16 +363,11 @@ export function useThreadActions() {
 
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {
-          const fallbackThread = selectThreadByRef(
-            useStore.getState(),
-            scopeThreadRef(threadRef.environmentId, fallbackThreadId),
-          );
-          if (fallbackThread) {
+          const fallbackRef = scopeThreadRef(threadRef.environmentId, fallbackThreadId);
+          if (selectThreadExistsByRef(useStore.getState(), fallbackRef)) {
             await router.navigate({
               to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(
-                scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
-              ),
+              params: buildThreadRouteParams(fallbackRef),
               replace: true,
             });
             return deleted;
@@ -375,7 +382,7 @@ export function useThreadActions() {
       clearTerminalState,
       getCurrentRouteThreadRef,
       router,
-      resolveThreadTarget,
+      resolveThreadEntry,
       sidebarThreadSortOrder,
     ],
   );
@@ -385,7 +392,7 @@ export function useThreadActions() {
       const api = readEnvironmentApi(target.environmentId);
       if (!api) return;
       const localApi = readLocalApi();
-      const resolved = resolveThreadTarget(target);
+      const resolved = resolveThreadEntry(target);
       if (!resolved) return;
       const { thread } = resolved;
 
@@ -398,7 +405,7 @@ export function useThreadActions() {
 
       await deleteThread(target);
     },
-    [confirmThreadDelete, deleteThread, resolveThreadTarget],
+    [confirmThreadDelete, deleteThread, resolveThreadEntry],
   );
 
   /**

@@ -19,6 +19,7 @@ import {
   OrchestrationReadModel,
   OrchestrationSession,
   type OrchestrationShellSnapshot,
+  type OrchestrationArchivedThreadStub,
   OrchestrationThread,
   OrchestrationThreadHistoryError,
   WorktreePullRequestLink,
@@ -174,11 +175,14 @@ const ThreadOrderKeyRowSchema = Schema.Struct({
 interface ShellScope {
   readonly projectIds?: ReadonlyArray<string> | undefined;
   readonly threadIds?: ReadonlyArray<string> | undefined;
+  /** `"stub"`: archived threads become stubs, so their sessions and latest turns are not read. */
+  readonly archivedThreads?: "stub" | undefined;
 }
 const ShellScopeRequest = Schema.UndefinedOr(
   Schema.Struct({
     projectIds: Schema.optional(Schema.Array(Schema.String)),
     threadIds: Schema.optional(Schema.Array(Schema.String)),
+    archivedThreads: Schema.optional(Schema.Literal("stub")),
   }),
 );
 const ShellUpdatedAtRowSchema = Schema.Struct({
@@ -850,6 +854,9 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           : sql`AND ${sql.literal(alias)}.thread_id IN (SELECT value FROM json_each(${JSON.stringify(scope.threadIds)}))`
       }
     `;
+  // Session and latest-turn rows feed only full shells: a stubbed shell skips archived threads'.
+  const fullShellThreadFilter = (scope: ShellScope | undefined, alias: string) =>
+    scope?.archivedThreads === "stub" ? sql`AND ${sql.literal(alias)}.archived_at IS NULL` : sql``;
   // Projects (and their workspaces) in scope: the listed ones, else the scoped threads' ones.
   const scopedProjectFilter = (scope: ShellScope | undefined, column: string) =>
     scope?.projectIds !== undefined
@@ -943,6 +950,31 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           UNION ALL SELECT MAX(archived_at) FROM projection_worktrees
           UNION ALL SELECT MAX(updated_at) FROM projection_thread_sessions
         )
+      `,
+  });
+
+  // The latest-turn times of archived threads, which a stubbed shell does not read row by row
+  // but still folds into `updatedAt`, so both shell forms carry the same version.
+  const readArchivedLatestTurnUpdatedAt = SqlSchema.findOne({
+    Request: Schema.Void,
+    Result: ShellUpdatedAtRowSchema,
+    execute: () =>
+      sql`
+        SELECT NULLIF(
+          MAX(
+            COALESCE(MAX(turns.requested_at), ''),
+            COALESCE(MAX(turns.started_at), ''),
+            COALESCE(MAX(turns.completed_at), '')
+          ),
+          ''
+        ) AS "updatedAt"
+        FROM projection_threads threads
+        JOIN projection_turns turns
+          ON turns.thread_id = threads.thread_id
+          AND turns.turn_id = threads.latest_turn_id
+        WHERE threads.deleted_at IS NULL
+          AND threads.archived_at IS NOT NULL
+          AND threads.latest_turn_id IS NOT NULL
       `,
   });
 
@@ -1329,6 +1361,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         WHERE thread_id IN (
           SELECT threads.thread_id FROM projection_threads threads
           WHERE threads.deleted_at IS NULL ${scopedThreadFilter(scope, "threads")}
+            ${fullShellThreadFilter(scope, "threads")}
         )
         ORDER BY thread_id ASC
       `,
@@ -1404,6 +1437,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         WHERE threads.deleted_at IS NULL
           AND threads.latest_turn_id IS NOT NULL
           ${scopedThreadFilter(scope, "threads")}
+          ${fullShellThreadFilter(scope, "threads")}
         ORDER BY threads.thread_id ASC
       `,
   });
@@ -3118,6 +3152,16 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               ),
             ),
           ),
+          scope?.archivedThreads === "stub"
+            ? readArchivedLatestTurnUpdatedAt(undefined).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getShellSnapshot:readArchivedUpdatedAt:query",
+                    "ProjectionSnapshotQuery.getShellSnapshot:readArchivedUpdatedAt:decodeRow",
+                  ),
+                ),
+              )
+            : Effect.succeed({ updatedAt: null }),
         ]),
       )
       .pipe(
@@ -3131,8 +3175,15 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             stateRows,
             priorityRows,
             updatedAtRow,
-          ]): OrchestrationShellSnapshot => {
+            archivedUpdatedAtRow,
+          ]): OrchestrationShellSnapshot & {
+            readonly archivedThreadStubs?: ReadonlyArray<OrchestrationArchivedThreadStub>;
+          } => {
+            const stubArchived = scope?.archivedThreads === "stub";
             let updatedAt: string | null = updatedAtRow.updatedAt;
+            if (archivedUpdatedAtRow.updatedAt !== null) {
+              updatedAt = maxIso(updatedAt, archivedUpdatedAtRow.updatedAt);
+            }
             for (const row of latestTurnRows) {
               updatedAt = maxIso(updatedAt, row.requestedAt);
               if (row.startedAt !== null) {
@@ -3158,7 +3209,27 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             const sessionByThread = new Map(
               sessionRows.map((row) => [row.threadId, mapSessionRow(row)] as const),
             );
-            const scopedThreadIds = new Set<string>(threadRows.map((row) => row.threadId));
+            const archivedThreadStubs: Array<OrchestrationArchivedThreadStub> = [];
+            const fullShellRows = stubArchived
+              ? threadRows.filter((row) => {
+                  if (row.archivedAt === null) return true;
+                  archivedThreadStubs.push({
+                    id: row.threadId,
+                    projectId: row.projectId,
+                    title: row.title,
+                    branch: row.branch,
+                    worktreePath: row.worktreePath,
+                    worktreeId: row.worktreeId ?? null,
+                    createdAt: row.createdAt,
+                    updatedAt: row.updatedAt,
+                    archivedAt: row.archivedAt,
+                    latestUserMessageAt: row.latestUserMessageAt,
+                    lineage: projectionThreadLineage(row),
+                  });
+                  return false;
+                })
+              : threadRows;
+            const scopedThreadIds = new Set<string>(fullShellRows.map((row) => row.threadId));
             const priorityByThread = new Map(
               priorityRows
                 .filter((row) => scope === undefined || scopedThreadIds.has(row.threadId))
@@ -3174,7 +3245,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 ),
               ),
               worktrees: worktreeRows.map(toWorktreeShell),
-              threads: threadRows.map((row): OrchestrationThreadShell => {
+              ...(stubArchived ? { archivedThreadStubs } : {}),
+              threads: fullShellRows.map((row): OrchestrationThreadShell => {
                 const shell: OrchestrationThreadShell = withThreadLineage(
                   {
                     id: row.threadId,
@@ -3226,7 +3298,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         }),
         Effect.tap((snapshot) =>
           Effect.logDebug(
-            scope === undefined
+            scope?.projectIds === undefined && scope?.threadIds === undefined
               ? "startup shell snapshot query complete"
               : "scoped shell snapshot query complete",
             {
@@ -3242,21 +3314,37 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
   const buildShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
     buildShell(undefined);
 
+  const buildStubbedShellSnapshot: NonNullable<
+    ProjectionSnapshotQueryShape["getStubbedShellSnapshot"]
+  > = () =>
+    buildShell({ archivedThreads: "stub" }).pipe(
+      Effect.map((snapshot) => ({
+        ...snapshot,
+        archivedThreadStubs: snapshot.archivedThreadStubs ?? [],
+      })),
+    );
+
   const getScopedShellSnapshot: NonNullable<
     ProjectionSnapshotQueryShape["getScopedShellSnapshot"]
   > = (scope) => buildShell(scope);
 
-  // Subscribers refreshing on the same thread-priority batch, reconnecting clients and server
-  // callers often ask at once; they share builds instead of each building the whole shell.
-  const coalescedShellSnapshot = coalesceConcurrentRuns(buildShellSnapshot);
   // A caller inside a transaction holds the single connection: a shared build would wait for
   // that connection (a deadlock) or run on the caller's transaction, so it builds its own.
-  const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
-    Effect.serviceOption(sql.transactionService).pipe(
-      Effect.flatMap((transaction) =>
-        Option.isSome(transaction) ? buildShellSnapshot() : coalescedShellSnapshot(),
-      ),
-    );
+  const sharedOutsideTransactions = <A, E>(build: () => Effect.Effect<A, E>) => {
+    // Subscribers refreshing on the same thread-priority batch, reconnecting clients and server
+    // callers often ask at once; they share builds instead of each building the whole shell.
+    // Each shell form shares its own builds.
+    const coalesced = coalesceConcurrentRuns(build);
+    return () =>
+      Effect.serviceOption(sql.transactionService).pipe(
+        Effect.flatMap((transaction) => (Option.isSome(transaction) ? build() : coalesced())),
+      );
+  };
+  const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] =
+    sharedOutsideTransactions(buildShellSnapshot);
+  const getStubbedShellSnapshot: NonNullable<
+    ProjectionSnapshotQueryShape["getStubbedShellSnapshot"]
+  > = sharedOutsideTransactions(buildStubbedShellSnapshot);
 
   const listProjectShells: NonNullable<ProjectionSnapshotQueryShape["listProjectShells"]> = () =>
     listActiveProjectShellRows(undefined).pipe(
@@ -4580,6 +4668,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
 
   return {
     getScopedShellSnapshot,
+    getStubbedShellSnapshot,
     getCommandReadModel,
     getSnapshot,
     getShellSnapshot,
