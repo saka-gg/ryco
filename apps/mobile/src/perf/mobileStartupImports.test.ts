@@ -9,11 +9,12 @@ import { describe, expect, it } from "vite-plus/test";
 /**
  * Boundaries of the launch module graph, asserted over the source.
  *
- * Metro evaluates every statically imported module before the first frame (no
- * tree shaking for CommonJS, no inline requires), so one root-barrel import or
- * one eagerly registered screen silently puts thousands of modules or megabytes
- * of grammar JSON back on the launch path. Measured with the static graph in
- * the perf research: 8,557 → ~2,000 launch modules.
+ * Metro bundles every statically imported module (no tree shaking), and with
+ * inline requires it evaluates each one where it is first used. One root-barrel
+ * import or one eagerly registered screen therefore still puts thousands of
+ * modules or megabytes of grammar JSON into the bundle and, the moment launch
+ * code touches them, back on the launch path. Measured with the static graph
+ * in the perf research: 8,557 → ~2,000 launch modules.
  */
 
 const SRC = join(import.meta.dirname, "..");
@@ -100,8 +101,28 @@ function resolveSpecifier(specifier: string, importer: string): string | null {
     return resolveSourceFile(join(manifest.dir, target));
   }
   const parts = specifier.split("/");
+  // Effect keeps its full subpath: its root and directory indexes are barrels
+  // that evaluate every module beneath them, unlike its deep module paths.
+  if (parts[0] === "effect") return `pkg:${specifier}`;
   return `pkg:${specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]}`;
 }
+
+/**
+ * The `effect` package root and its directory indexes (`effect/rpc`,
+ * `effect/reactivity`, …), read from its exports map: each re-exports every
+ * module beneath it, so one import evaluates all of them.
+ */
+const EFFECT_BARRELS: ReadonlySet<string> = new Set(
+  Object.keys(
+    (
+      JSON.parse(readFileSync(join(MOBILE_ROOT, "node_modules/effect/package.json"), "utf8")) as {
+        exports: Record<string, unknown>;
+      }
+    ).exports,
+  )
+    .filter((key) => !key.includes("*") && !key.endsWith(".json"))
+    .map((key) => (key === "." ? "pkg:effect" : `pkg:effect/${key.slice(2)}`)),
+);
 
 /**
  * Specifiers Metro evaluates when the module runs: value imports and
@@ -225,6 +246,37 @@ describe("mobile launch graph boundaries", () => {
       staticValueImports(lazyScreens).filter((specifier) => specifier.includes("features/")),
     ).toEqual([]);
     expect(lazyScreens).toContain('require("../features/threads/ThreadRouteScreen")');
+    expect(lazyScreens).toContain('require("../features/threads/threadRoutePrewarm")');
+  });
+
+  it("warms the thread render path module by module, not only the route wrapper", () => {
+    // Under inline requires, evaluating ThreadRouteScreen runs only the wrapper:
+    // its ThreadDetailScreen import sits inside the render. The warm-up names
+    // each module itself, so every entry must resolve and stay function-scoped.
+    const prewarmFile = join(SRC, "features/threads/threadRoutePrewarm.ts");
+    const specifiers = Array.from(
+      readFileSync(prewarmFile, "utf8").matchAll(/\(\) => require\("([^"]+)"\)/gu),
+      (match) => match[1]!,
+    );
+    expect(specifiers).toEqual(
+      expect.arrayContaining([
+        "./ThreadRouteScreen",
+        "./ThreadDetailScreen",
+        "./ThreadMessage",
+        "./ThreadComposer",
+      ]),
+    );
+    for (const specifier of specifiers) {
+      const resolved = resolveSpecifier(specifier, prewarmFile);
+      expect({ specifier, resolved: resolved !== null }).toEqual({ specifier, resolved: true });
+      if (resolved?.startsWith("pkg:")) {
+        expect(existsSync(join(MOBILE_ROOT, "node_modules", resolved.slice(4)))).toBe(true);
+      }
+    }
+    expect(launchSpecifiers(prewarmFile)).toEqual([]);
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).not.toContain("apps/mobile/src/features/threads/threadRoutePrewarm.ts");
+    expect(reachable).not.toContain("apps/mobile/src/features/threads/ThreadDetailScreen.tsx");
   });
 
   it("parses no shiki grammar or theme until a highlighter is needed", () => {
@@ -249,6 +301,16 @@ describe("mobile launch graph boundaries", () => {
     // Without this, a walker that silently stopped following imports would
     // pass every boundary below.
     expect(chainsTo("src/hostedHub/runtime.ts", RELAY_E2EE_CRYPTO)).not.toEqual([]);
+  });
+
+  it("reaches no Effect barrel and no contracts root from the launch entry", () => {
+    expect(EFFECT_BARRELS).toContain("pkg:effect/rpc");
+    expect(EFFECT_BARRELS).toContain("pkg:effect/reactivity");
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    // The walker sees deep Effect modules, so an empty result is not a blind spot.
+    expect(reachable).toContain("pkg:effect/reactivity/Atom");
+    expect(reachable.filter((module) => EFFECT_BARRELS.has(module))).toEqual([]);
+    expect(reachable).not.toContain("packages/contracts/src/index.ts");
   });
 
   it("loads the hosted relay connection and E2EE session only with the hosted runtime", () => {

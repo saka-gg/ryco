@@ -82,13 +82,17 @@ config.resolver = {
 // touches (about 1,250 of 2,330 modules by the time the splash hides, measured
 // on a release build). Modules whose import registers something are imported
 // bare from index.ts, which is never inlined, so registration order is
-// unchanged. React and React Native stay eager: they are needed immediately.
+// unchanged. React and React Native stay eager: they are needed immediately,
+// and so is the React Compiler runtime. babel-preset-expo compiles for React 19,
+// whose output imports `react/compiler-runtime` (not the `react-compiler-runtime`
+// polyfill), and keeping it eager leaves one module-level binding instead of a
+// require lookup in every compiled render.
 const NON_INLINED_REQUIRES = [
   "React",
   "react",
   "react/jsx-runtime",
   "react/jsx-dev-runtime",
-  "react-compiler-runtime",
+  "react/compiler-runtime",
   "react-native",
 ];
 config.transformer = {

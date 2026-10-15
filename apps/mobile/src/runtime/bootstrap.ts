@@ -20,7 +20,12 @@ import {
   mobileHostedConnectionScopes,
   recordMobileHostedScopeLeaseReport,
 } from "../connection/hostedConnectionScopes";
-import { hostedHubController, hostedHubStore } from "@ryco/client-runtime/authorization";
+import {
+  hostedHubController,
+  hostedHubStore,
+  type HostedAccountStatus,
+} from "@ryco/client-runtime/authorization";
+import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
 import { demoteMobileHostedEnvironmentState } from "../hostedHub/nodeStateCleanup";
 import { useStore } from "../state/threadsRuntime";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
@@ -40,6 +45,11 @@ export interface MobileConnectionRegistry {
 let appCatalog: Catalog | null = null;
 let appRemoteApi: RemoteApi | null = null;
 let appDriver: MobileEnvironmentDriver | null = null;
+
+/** The account session ended; `unavailable` (the Hub could not be reached) is not an ending. */
+function isHostedAccountTeardown(status: HostedAccountStatus): boolean {
+  return status === "signed-out" || status === "signing-out" || status === "session-expired";
+}
 
 function getAppCatalog(): Catalog {
   return (appCatalog ??= createMobileSavedEnvironmentCatalog());
@@ -167,6 +177,7 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       report: recordMobileHostedScopeLeaseReport,
     });
     let previousHostedState = hostedHubStore.getState();
+    let artworkAccountId = previousHostedState.account?.id ?? null;
     stopHostedAccountWatch = hostedHubStore.subscribe(() => {
       const currentHostedState = hostedHubStore.getState();
       if (
@@ -175,6 +186,21 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       ) {
         void hostedCoordinator.releaseAll();
       }
+      // Project artwork is keyed by node and outlives a connection, not an
+      // account: it is dropped when the account session ends (sign-out,
+      // expiry, a Hub domain change) or another account signs in, never on an
+      // access check that only could not reach the Hub.
+      const currentAccountId = currentHostedState.account?.id ?? null;
+      if (
+        (isHostedAccountTeardown(currentHostedState.accountStatus) &&
+          !isHostedAccountTeardown(previousHostedState.accountStatus)) ||
+        (currentAccountId !== null &&
+          artworkAccountId !== null &&
+          currentAccountId !== artworkAccountId)
+      ) {
+        clearAllProjectIconCaches();
+      }
+      if (currentAccountId !== null) artworkAccountId = currentAccountId;
       if (
         previousHostedState.sessionStatus === "delivery-unknown" &&
         currentHostedState.sessionStatus === "ready" &&

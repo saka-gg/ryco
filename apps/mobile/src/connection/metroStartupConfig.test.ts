@@ -36,7 +36,9 @@ describe("mobile Metro startup configuration", () => {
     const { transform } = await config.transformer.getTransformOptions();
     expect(transform.inlineRequires).toBe(true);
     expect(transform.experimentalImportSupport).toBe(true);
-    expect(transform.nonInlinedRequires).toEqual(expect.arrayContaining(["react", "react-native"]));
+    expect(transform.nonInlinedRequires).toEqual(
+      expect.arrayContaining(["react", "react/compiler-runtime", "react-native"]),
+    );
   });
 
   it("resolves workspace packages through their import conditions", () => {

@@ -12,6 +12,7 @@ import {
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { runWhileBusy } from "../../lib/runWhileBusy";
 import { respondToThreadUserInput } from "./sessionActions";
 
 // §3-16: draft answers are UI-local state; the answer assembly + validation come
@@ -63,25 +64,25 @@ export function PendingUserInputCard(props: {
         : !answers || !canSubmit
     )
       return;
-    setSubmitting(true);
+    const submittedAnswers = dismiss ? {} : answers!;
     setError(null);
-    try {
-      await respondToThreadUserInput({
-        api: ensureEnvironmentApi(props.environmentId),
-        threadId: props.threadId,
-        requestId: props.userInput.requestId,
-        answers: dismiss ? {} : answers!,
-        userInputIdentity: props.userInput.userInputIdentity,
-      });
-    } catch {
-      // `ensureEnvironmentApi` throws synchronously without a connection, and
-      // the RPC itself can reject; without this catch the `void submit()`
-      // press handler turned both into a silent unhandled rejection. Bounded
-      // copy: the raw message is an internal string the user cannot act on.
-      setError("The answers could not be delivered. Reconnect and try again.");
-    } finally {
-      setSubmitting(false);
-    }
+    await runWhileBusy(setSubmitting, async () => {
+      try {
+        await respondToThreadUserInput({
+          api: ensureEnvironmentApi(props.environmentId),
+          threadId: props.threadId,
+          requestId: props.userInput.requestId,
+          answers: submittedAnswers,
+          userInputIdentity: props.userInput.userInputIdentity,
+        });
+      } catch {
+        // `ensureEnvironmentApi` throws synchronously without a connection, and
+        // the RPC itself can reject; without this catch the `void submit()`
+        // press handler turned both into a silent unhandled rejection. Bounded
+        // copy: the raw message is an internal string the user cannot act on.
+        setError("The answers could not be delivered. Reconnect and try again.");
+      }
+    });
   };
 
   return (

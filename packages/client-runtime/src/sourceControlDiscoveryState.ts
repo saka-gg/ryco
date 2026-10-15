@@ -1,5 +1,6 @@
 import type { SourceControlDiscoveryResult } from "@ryco/contracts";
-import { Atom, type AtomRegistry } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
+import type * as AtomRegistry from "effect/reactivity/AtomRegistry";
 
 /* --- Types ---------------------------------------------------------- */
 

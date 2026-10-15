@@ -325,5 +325,68 @@ describe("createSavedSessionRenewal", () => {
 
       expect(vi.getTimerCount()).toBe(0);
     });
+
+    it("reports the activated session after each in-session renewal, until stopped", async () => {
+      const store = createStore("bearer-1");
+      let current = true;
+      const issuedAt = new Map<string, number>([["bearer-1", NOW - 10 * DAY_MS]]);
+      const fetchSessionState = vi.fn(async (bearerToken: string) =>
+        bearerSession(issuedAt.get(bearerToken)! + 30 * DAY_MS - NOW, { bearerToken }),
+      );
+      const rotate = vi.fn(async () => {
+        const next = `bearer-${issuedAt.size + 1}`;
+        issuedAt.set(next, Date.now());
+        return rotation(next);
+      });
+      const onSession = vi.fn();
+      const renewal = createSavedSessionRenewal({
+        readBearerToken: store.read,
+        writeBearerToken: store.write,
+      });
+      renewal.keepRenewed({
+        environmentId,
+        session: await fetchSessionState("bearer-1"),
+        isCurrent: () => current,
+        fetchSessionState,
+        rotate,
+        onSession,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.current()).toBe("bearer-2");
+      // The successor's activation answer, not the superseded bearer's.
+      expect(onSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ bearerToken: "bearer-2" }),
+      );
+
+      current = false;
+      await vi.advanceTimersByTimeAsync(2 * DAY_MS);
+      expect(onSession).toHaveBeenCalledOnce();
+    });
+
+    it("reports a fresh answer when the node renewed the pairing elsewhere", async () => {
+      // Another client renewed it meanwhile: the check finds a session that is
+      // not due yet, and that answer is what a later launch should remember.
+      const store = createStore("bearer-1");
+      const fresh = bearerSession(29 * DAY_MS);
+      const onSession = vi.fn();
+      const rotate = vi.fn(async () => rotation("never"));
+      const renewal = createSavedSessionRenewal({
+        readBearerToken: store.read,
+        writeBearerToken: store.write,
+      });
+      renewal.keepRenewed({
+        environmentId,
+        session: bearerSession(20 * DAY_MS),
+        isCurrent: () => true,
+        fetchSessionState: async () => fresh,
+        rotate,
+        onSession,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rotate).not.toHaveBeenCalled();
+      expect(onSession).toHaveBeenCalledExactlyOnceWith(fresh);
+    });
   });
 });

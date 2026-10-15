@@ -1,4 +1,4 @@
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
 

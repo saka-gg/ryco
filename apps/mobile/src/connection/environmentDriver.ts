@@ -538,10 +538,15 @@ export function createMobileEnvironmentDriver(
       }
       registered = getSupervisor().register(connection);
       const isCurrent = () => getSupervisor().read(record.environmentId) === registered;
+      // An in-session renewal refreshes the hint, so the next cold connect
+      // starts from the rotated session instead of asking before its socket.
+      const rememberSession = (next: AuthSessionState) =>
+        sessionHints?.record(record.environmentId, next);
       stopRenewal = savedSessionRenewal.keepRenewed({
         environmentId: record.environmentId,
         session: renewal.session,
         isCurrent,
+        onSession: rememberSession,
         ...renewalCalls(record),
       });
       if (hintedSession !== null) {
@@ -574,6 +579,7 @@ export function createMobileEnvironmentDriver(
               environmentId: record.environmentId,
               session: check.session,
               isCurrent,
+              onSession: rememberSession,
               ...renewalCalls(record),
             });
           })

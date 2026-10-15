@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 
 import { appAtomRegistry } from "./atomRegistry.ts";
 import type { AppLifecycleService } from "../platform/index.ts";

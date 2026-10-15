@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
+import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import { useEffect, useState } from "react";
 
 import { readRpcClient } from "../../connection/environmentApi";
@@ -17,6 +18,32 @@ import { buildCheckSummary, type CheckRollupItemInput, type CheckSummary } from 
 // Every failure path lands on `available: false`, which renders as "unknown"
 // rather than as a neutral or green state — a device whose role or provider auth
 // forbids the call must not look like a PR with passing checks.
+
+// Lives outside the hook so React Compiler can compile it: the compiler cannot
+// lower optional or conditional expressions inside a try/catch.
+async function readCheckSummary(
+  client: WsRpcClient,
+  cwd: string,
+  prNumber: number,
+): Promise<CheckSummary> {
+  try {
+    const detail = await client.sourceControl.getChangeRequestDetail({
+      cwd,
+      reference: String(prNumber),
+    });
+    const rollup = (detail as { checkRollup?: ReadonlyArray<CheckRollupItemInput> }).checkRollup;
+    return buildCheckSummary({
+      // A detail response with no rollup field at all is not "no checks" —
+      // the provider did not tell us, so it stays unknown.
+      available: rollup !== undefined,
+      items: rollup ?? null,
+    });
+  } catch {
+    // Refused by role, provider unauthenticated, node offline — all the same
+    // to the user: we do not know.
+    return buildCheckSummary({ available: false });
+  }
+}
 
 export function useThreadChecks(input: {
   readonly environmentId: EnvironmentId;
@@ -51,29 +78,9 @@ export function useThreadChecks(input: {
       return releaseVcsScope;
     }
 
-    void (async () => {
-      try {
-        const detail = await client.sourceControl.getChangeRequestDetail({
-          cwd,
-          reference: String(prNumber),
-        });
-        if (cancelled) return;
-        const rollup = (detail as { checkRollup?: ReadonlyArray<CheckRollupItemInput> })
-          .checkRollup;
-        setSummary(
-          buildCheckSummary({
-            // A detail response with no rollup field at all is not "no checks" —
-            // the provider did not tell us, so it stays unknown.
-            available: rollup !== undefined,
-            items: rollup ?? null,
-          }),
-        );
-      } catch {
-        // Refused by role, provider unauthenticated, node offline — all the same
-        // to the user: we do not know.
-        if (!cancelled) setSummary(buildCheckSummary({ available: false }));
-      }
-    })();
+    void readCheckSummary(client, cwd, prNumber).then((next) => {
+      if (!cancelled) setSummary(next);
+    });
 
     return () => {
       cancelled = true;

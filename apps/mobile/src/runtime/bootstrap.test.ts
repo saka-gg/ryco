@@ -36,6 +36,10 @@ vi.mock("../persistence/environmentSnapshotPersistence", async (importOriginal) 
   initializeMobileSnapshotPersistence: () => persistence.initialize(),
 }));
 
+import { hostedHubStore, type HostedHubAccount } from "@ryco/client-runtime/authorization";
+import { peekProjectIconSource, readProjectIconSource } from "@ryco/client-runtime/connection";
+import { EnvironmentId, ProjectId, type EnvironmentApi } from "@ryco/contracts";
+
 import {
   createMobileConnectionRegistry,
   initializeMobileRuntime,
@@ -108,6 +112,66 @@ describe("mobile runtime bootstrap", () => {
       expect(mobileRuntimeStartupBarrier.isHydrated()).toBe(true);
     } finally {
       resetMobileRuntimeInitForTests();
+    }
+  });
+
+  it("drops cached project artwork when the hosted account session ends", async () => {
+    resetMobileRuntimeInitForTests();
+    const initial = hostedHubStore.getState();
+    const environmentId = EnvironmentId.make("artwork-node");
+    const projectId = ProjectId.make("artwork-project");
+    const api = {
+      projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+    } as unknown as EnvironmentApi;
+    try {
+      initializeMobileRuntime();
+      hostedHubStore.setState({ accountStatus: "authenticated" });
+      await readProjectIconSource(api, environmentId, projectId, null);
+      expect(peekProjectIconSource(environmentId, projectId, null)).not.toBeUndefined();
+
+      hostedHubStore.setState({ accountStatus: "signed-out" });
+
+      expect(peekProjectIconSource(environmentId, projectId, null)).toBeUndefined();
+    } finally {
+      persistence.release?.();
+      resetMobileRuntimeInitForTests();
+      hostedHubStore.setState(initial, true);
+    }
+  });
+
+  it("keeps cached project artwork through an unreachable Hub, and drops it for another account", async () => {
+    resetMobileRuntimeInitForTests();
+    const initial = hostedHubStore.getState();
+    const environmentId = EnvironmentId.make("artwork-node-offline");
+    const projectId = ProjectId.make("artwork-project-offline");
+    const api = {
+      projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+    } as unknown as EnvironmentApi;
+    const account = (id: string): HostedHubAccount => ({
+      id,
+      displayName: id,
+      role: "owner",
+      createdAt: 0,
+      disabledAt: null,
+    });
+    try {
+      initializeMobileRuntime();
+      hostedHubStore.setState({ accountStatus: "authenticated", account: account("account-a") });
+      await readProjectIconSource(api, environmentId, projectId, null);
+
+      // The access check could not reach the Hub: no session ended.
+      hostedHubStore.setState({ accountStatus: "unavailable", account: null });
+      expect(peekProjectIconSource(environmentId, projectId, null)).not.toBeUndefined();
+      hostedHubStore.setState({ accountStatus: "authenticated", account: account("account-a") });
+      expect(peekProjectIconSource(environmentId, projectId, null)).not.toBeUndefined();
+
+      hostedHubStore.setState({ accountStatus: "unavailable", account: null });
+      hostedHubStore.setState({ accountStatus: "authenticated", account: account("account-b") });
+      expect(peekProjectIconSource(environmentId, projectId, null)).toBeUndefined();
+    } finally {
+      persistence.release?.();
+      resetMobileRuntimeInitForTests();
+      hostedHubStore.setState(initial, true);
     }
   });
 });

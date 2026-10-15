@@ -1,3 +1,4 @@
+import { prewarmInIdleSlices, runWhenIdle } from "./idlePrewarm";
 import { lazyScreen } from "./lazyScreen";
 
 /**
@@ -171,36 +172,36 @@ export const ThreadRouteScreen = lazyScreen(
     ).ThreadRouteScreen,
 );
 
-/**
- * Bound the prewarm below to idle time: Hermes evaluates a required module
- * synchronously, so it must not land on top of the first frames.
- */
-function runWhenIdle(task: () => void): void {
-  if (typeof globalThis.requestIdleCallback === "function") {
-    globalThis.requestIdleCallback(() => task(), { timeout: 2_000 });
-    return;
-  }
-  globalThis.setTimeout(task, 1_000);
-}
-
 let workspacePrewarmScheduled = false;
 
 /**
  * Called once Home has painted. Opening a thread is the next thing almost every
- * launch does, so its route module is evaluated in idle time rather than on the
- * tap; the review highlighter (grammars are parsed on creation) warms after it,
- * in a separate idle slice, so the first code block in a thread is not slower
- * than before it became lazy.
+ * launch does, so the thread render path is evaluated in idle time rather than
+ * on the tap. Under Metro's inline requires, evaluating the route module alone
+ * would run only its wrapper, so the warm-up names the modules the first
+ * thread render reaches (`threadRoutePrewarm.ts`). The review highlighter
+ * (grammars are parsed on creation) warms after them, in a separate idle slice,
+ * so the first code block in a thread is not slower than before it became lazy.
  */
 export function scheduleWorkspaceRoutePrewarm(): void {
   if (workspacePrewarmScheduled) return;
   workspacePrewarmScheduled = true;
   runWhenIdle(() => {
-    ThreadRouteScreen.preload();
-    runWhenIdle(() => {
-      void import("../features/review/shikiReviewHighlighter")
-        .then((highlighter) => highlighter.prewarmReviewHighlighter())
-        .catch(() => undefined);
+    let modules: ReadonlyArray<() => unknown> = [];
+    try {
+      ThreadRouteScreen.preload();
+      modules = (
+        require("../features/threads/threadRoutePrewarm") as typeof import("../features/threads/threadRoutePrewarm")
+      ).THREAD_ROUTE_PREWARM_MODULES;
+    } catch {
+      // The tap evaluates the route instead.
+    }
+    prewarmInIdleSlices(modules, () => {
+      runWhenIdle(() => {
+        void import("../features/review/shikiReviewHighlighter")
+          .then((highlighter) => highlighter.prewarmReviewHighlighter())
+          .catch(() => undefined);
+      });
     });
   });
 }

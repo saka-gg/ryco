@@ -364,6 +364,66 @@ describe("mobile environment driver with session hints", () => {
     expect(await sessionHints.read(ENV_ID)).toBeNull();
   });
 
+  it("remembers the renewed session after an in-session renewal, so the next connect skips the check", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = createFakeCatalog();
+      fake.setBearerToken(ENV_ID, "bearer-1");
+      fake.upsert(record());
+      // Each bearer lives thirty days from when it was issued.
+      const issuedAt = new Map([["bearer-1", Date.now()]]);
+      const asked: Array<{ readonly bearer: string; readonly registered: boolean }> = [];
+      const fetchRemoteSessionState = vi.fn(async (input: { readonly bearerToken: string }) => {
+        asked.push({
+          bearer: input.bearerToken,
+          registered: driver.supervisor.read(ENV_ID) !== null,
+        });
+        return {
+          authenticated: true,
+          role: "owner",
+          sessionMethod: "bearer-session-token",
+          expiresAt: new Date(issuedAt.get(input.bearerToken)! + 30 * DAY_MS).toISOString(),
+          auth: {},
+        } as unknown as AuthSessionState;
+      });
+      const sessionHints = memoryHints();
+      const driver: ReturnType<typeof createMobileEnvironmentDriver> =
+        createMobileEnvironmentDriver({
+          catalog: fake.catalog,
+          remoteApi: {
+            ...noopRemoteApi,
+            fetchRemoteSessionState,
+            rotateRemoteBearerSession: async () => {
+              issuedAt.set("bearer-2", Date.now());
+              return { sessionToken: "bearer-2", role: "owner" } as unknown as Awaited<
+                ReturnType<(typeof noopRemoteApi)["rotateRemoteBearerSession"]>
+              >;
+            },
+          },
+          subscribeResume: () => () => {},
+          sessionHints,
+        });
+      await driver.connectSavedEnvironment(record());
+
+      // Connected for a day: the pairing renews in place.
+      await vi.advanceTimersByTimeAsync(DAY_MS + 60_000);
+      await expect(fake.catalog.readBearerToken(ENV_ID)).resolves.toBe("bearer-2");
+      expect((await sessionHints.read(ENV_ID))?.expiresAt).toBe(
+        new Date(issuedAt.get("bearer-2")! + 30 * DAY_MS).toISOString(),
+      );
+
+      // The next connect presents bearer-2 straight away and asks afterwards.
+      await driver.supervisor.remove(ENV_ID);
+      asked.length = 0;
+      await driver.connectSavedEnvironment(record());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([{ bearer: "bearer-2", registered: true }]);
+      await driver.supervisor.remove(ENV_ID);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("forgets the hint when the ws-token request rejects the bearer", async () => {
     const fake = createFakeCatalog();
     fake.setBearerToken(ENV_ID, "bearer-token");

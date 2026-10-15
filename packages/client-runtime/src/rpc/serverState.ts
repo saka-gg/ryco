@@ -9,7 +9,7 @@ import type {
 } from "@ryco/contracts";
 import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 
 import type { WsRpcClient } from "./wsRpcClient.ts";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry.ts";

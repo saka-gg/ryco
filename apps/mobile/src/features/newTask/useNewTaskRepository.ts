@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { Atom } from "effect/reactivity";
+import * as Atom from "effect/reactivity/Atom";
 import { wsConnectionStatusForEnvironmentAtom } from "@ryco/client-runtime/rpc";
 import { useEffect, useState } from "react";
 import type { EnvironmentId, VcsStatusResult } from "@ryco/contracts";

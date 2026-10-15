@@ -121,6 +121,10 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     // joining it would answer for the old one.
     registry.driver.supervisor.cancelPendingSavedEnvironmentConnection(environmentId);
     await registry.driver.supervisor.remove(environmentId).catch(() => false);
+    // Until that cancel and removal, the old attempt or connection could still
+    // record the replaced credential's answer over the forget above. Neither can
+    // now, so forget once more before the connect reads the hint.
+    registry.driver.forgetSessionHint(environmentId);
     await connect(record);
     return record;
   }

@@ -6,6 +6,7 @@ import type { AgentControlProposal, EnvironmentId } from "@ryco/contracts";
 
 import { AppText as Text } from "../../components/AppText";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { runThenSettle } from "../../lib/runWhileBusy";
 import { buildAgentControlProposalCardModel } from "../../state/agentControlRuntime";
 import { acceptAgentControlProposal, rejectAgentControlProposal } from "./agentControlActions";
 
@@ -29,24 +30,27 @@ export function AgentControlProposalCard(props: {
   const decide = async (decision: "accept" | "reject") => {
     setPending(decision);
     setError(null);
-    try {
-      const api = ensureEnvironmentApi(props.environmentId);
-      if (decision === "accept") {
-        await acceptAgentControlProposal({ api, proposalId: props.proposal.proposalId });
-      } else {
-        await rejectAgentControlProposal({ api, proposalId: props.proposal.proposalId });
-      }
-    } catch (cause) {
-      // Stale/conflicting decisions land here; the queue subscription
-      // delivers the authoritative proposal state alongside this message.
-      setError(
-        cause instanceof Error && cause.message.length > 0
-          ? cause.message
-          : "Failed to submit the decision.",
-      );
-    } finally {
-      setPending(null);
-    }
+    await runThenSettle(
+      async () => {
+        try {
+          const api = ensureEnvironmentApi(props.environmentId);
+          if (decision === "accept") {
+            await acceptAgentControlProposal({ api, proposalId: props.proposal.proposalId });
+          } else {
+            await rejectAgentControlProposal({ api, proposalId: props.proposal.proposalId });
+          }
+        } catch (cause) {
+          // Stale/conflicting decisions land here; the queue subscription
+          // delivers the authoritative proposal state alongside this message.
+          setError(
+            cause instanceof Error && cause.message.length > 0
+              ? cause.message
+              : "Failed to submit the decision.",
+          );
+        }
+      },
+      () => setPending(null),
+    );
   };
 
   return (

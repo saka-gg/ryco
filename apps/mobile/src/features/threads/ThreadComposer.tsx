@@ -16,6 +16,7 @@ import { GlassSurface } from "../../components/GlassSurface";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import type { DraftComposerAttachment } from "../../lib/composerFiles";
 import type { ChatFileUploadRecord } from "../../state/composerFileUpload";
+import { runWhileBusy } from "../../lib/runWhileBusy";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { ComposerEditor, type ComposerEditorHandle } from "../../native/ComposerEditor";
 import type { PendingComposerHandoff } from "./contextHandoffModel";
@@ -104,16 +105,13 @@ export function ThreadComposer(props: {
   const send = async () => {
     if (!canSend) return;
     const value = text;
-    setSending(true);
-    try {
+    await runWhileBusy(setSending, async () => {
       const result = await props.onSend(value, props.attachments);
       // Keep the complete draft on an explicit failure; clear on success/enqueue.
       if (result !== false) {
         setText("");
       }
-    } finally {
-      setSending(false);
-    }
+    });
   };
 
   const pasteImages = async (uris: ReadonlyArray<string>) => {
