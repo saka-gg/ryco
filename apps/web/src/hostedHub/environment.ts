@@ -5,6 +5,7 @@ import {
   suspendHostedNode,
 } from "@ryco/client-runtime/authorization";
 import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
+import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -51,6 +52,8 @@ export function clearWebHostedNodeScopedState(environmentId: EnvironmentId): voi
   // list-safe rows and environment-keyed drafts/UI while stripping live
   // sessions and liveness from only the environment that lost its channel.
   useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, Date.now());
+  // Owner-only analytics are not list-safe: never repaint them after leaving the node.
+  statisticsSnapshotCache.forget(environmentId);
   clearServerState();
 }
 
@@ -93,6 +96,7 @@ export function clearWebHostedAccountScopedState(): void {
     defaultAdvertisedEndpointKey: null,
   });
   defaultQueryClient.clear();
+  statisticsSnapshotCache.clear();
   clearServerState();
   // Project artwork outlives a connection (it is keyed by node), not an account.
   clearAllProjectIconCaches();

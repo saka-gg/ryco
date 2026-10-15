@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Layer, Schema, Scope } from "effect";
+import { Deferred, Effect, Fiber, Layer, Schema, Scheduler, Scope } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
 import { StatisticsSnapshot } from "@ryco/contracts";
@@ -1577,6 +1577,42 @@ statisticsLayer("statistics stale-while-revalidate", (it) => {
     }),
   );
 });
+
+it.live("never keeps serving a background refresh that already finished", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* clean(sql);
+    yield* insertProject(sql, "swr-latch", "Initial");
+    yield* insertThread(
+      sql,
+      "swr-latch-thread",
+      "swr-latch",
+      "codex",
+      "gpt-5.4",
+      "2026-06-10T00:00:00.000Z",
+    );
+    const statistics = yield* makeStatisticsQuery;
+    yield* statistics.getStatistics();
+    // A cache-hit refresh can finish before its forking fiber resumes when the
+    // op budget runs out right after the fork. Sweep the ops spent before the
+    // call across a whole budget so that boundary is hit, then check that new
+    // data still reaches callers. The budget must stay large enough for the
+    // forked cache-hit refresh to finish without yielding itself.
+    const budget = 256;
+    for (let preceding = 0; preceding <= budget + 32; preceding++) {
+      const title = `Title ${preceding}`;
+      let padding: Effect.Effect<void> = Effect.yieldNow;
+      for (let op = 0; op < preceding; op++) padding = Effect.andThen(padding, Effect.void);
+      yield* padding.pipe(
+        Effect.andThen(statistics.getStatistics({ maxWaitMs: 5_000 })),
+        Effect.provideService(Scheduler.MaxOpsBeforeYield, budget),
+      );
+      yield* sql`UPDATE projection_projects SET title = ${title} WHERE project_id = 'swr-latch'`;
+      const fresh = yield* statistics.getStatistics({ maxWaitMs: 5_000 });
+      assert.equal(fresh.projects[0]?.title, title, `${preceding} preceding ops`);
+    }
+  }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceMemory)),
+);
 
 statisticsLayer("statistics checkpoint file totals", (it) => {
   it.effect("sums files in SQL like the former JS parse, tolerating malformed rows", () =>

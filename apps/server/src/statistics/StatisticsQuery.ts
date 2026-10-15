@@ -616,11 +616,24 @@ export const makeStatisticsQuery = Effect.gen(function* () {
   // One background refresh at a time for stale-while-revalidate callers.
   let backgroundRefresh: Fiber.Fiber<StatisticsSnapshot, ProjectionRepositoryError> | undefined;
   const sharedRefresh = Effect.suspend(() => {
-    if (backgroundRefresh !== undefined) return Effect.succeed(backgroundRefresh);
-    return Effect.forkIn(
-      refresh.pipe(Effect.ensuring(Effect.sync(() => (backgroundRefresh = undefined)))),
-      scope,
-    ).pipe(Effect.tap((fiber) => Effect.sync(() => (backgroundRefresh = fiber))));
+    const running = backgroundRefresh;
+    if (running !== undefined && running.pollUnsafe() === undefined) {
+      return Effect.succeed(running);
+    }
+    return Effect.forkIn(refresh, scope).pipe(
+      Effect.tap((fiber) =>
+        Effect.sync(() => {
+          // The forked refresh may already have finished when this runs (a
+          // cache hit completes synchronously if this fiber yields right after
+          // the fork). The observer fires at once in that case, so the slot is
+          // always released and later callers never join a stale result.
+          backgroundRefresh = fiber;
+          fiber.addObserver(() => {
+            if (backgroundRefresh === fiber) backgroundRefresh = undefined;
+          });
+        }),
+      ),
+    );
   });
 
   const getStatistics: StatisticsQueryShape["getStatistics"] = (options) =>

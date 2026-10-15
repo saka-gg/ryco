@@ -34,7 +34,7 @@ import {
   TokensOverTimeChart,
 } from "./statistics/charts";
 import { ModelLeaderboard } from "./statistics/ModelLeaderboard";
-import { Panel, StatCard, StatePanel, StatSkeleton } from "./statistics/parts";
+import { Panel, StaleSnapshotNotice, StatCard, StatePanel, StatSkeleton } from "./statistics/parts";
 import { StatFilters } from "./statistics/StatFilters";
 import {
   aggregateByModel,
@@ -161,6 +161,7 @@ export function StatisticsPanel() {
           projects={snapshot.projects}
           models={snapshot.models}
         />
+        {error ? <StaleSnapshotNotice generatedAt={snapshot.generatedAt} error={error} /> : null}
       </div>
 
       {!hasAnyData ? (

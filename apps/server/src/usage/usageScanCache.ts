@@ -7,6 +7,7 @@ import {
   buildUsageFileAggregate,
   USAGE_KEY_VALUE_STRIDE,
   USAGE_SLOT_MS,
+  usageFileAggregateRetainedRows,
   type UsageFileAggregate,
   type UsageSlot,
 } from "./usageFileAggregate.ts";
@@ -502,20 +503,20 @@ function decodeSerializedAggregate(
 }
 
 /**
- * Bound the records held in memory. Evicts the least recently modified files
- * first, so the files most likely to be requested (and to still change) stay.
- * Returns the number of evicted files.
+ * Bound the rows held in memory (see {@link usageFileAggregateRetainedRows}).
+ * Evicts the least recently modified files first, so the files most likely to
+ * be requested (and to still change) stay. Returns the number of evicted files.
  */
-export function capUsageScanCache(cache: UsageScanCache, maxRecords: number): number {
+export function capUsageScanCache(cache: UsageScanCache, maxRetainedRows: number): number {
   let total = 0;
-  for (const entry of cache.values()) total += entry.aggregate.recordCount;
-  if (total <= maxRecords) return 0;
+  for (const entry of cache.values()) total += usageFileAggregateRetainedRows(entry.aggregate);
+  if (total <= maxRetainedRows) return 0;
   const oldestFirst = [...cache].toSorted(([, left], [, right]) => left.mtimeMs - right.mtimeMs);
   let removed = 0;
   for (const [fileKey, entry] of oldestFirst) {
-    if (total <= maxRecords) break;
+    if (total <= maxRetainedRows) break;
     cache.delete(fileKey);
-    total -= entry.aggregate.recordCount;
+    total -= usageFileAggregateRetainedRows(entry.aggregate);
     removed += 1;
   }
   return removed;

@@ -28,6 +28,8 @@ export const USAGE_TRANSCRIPT_LIMITS = {
 const TRANSCRIPT_CHUNK_BYTES = 1024 * 1024;
 /** Concurrent lstat calls while listing one directory. */
 const LISTING_STAT_CONCURRENCY = 32;
+/** Directories listed at once; each keeps at most one handle and one stat batch open. */
+const LISTING_DIRECTORY_CONCURRENCY = 16;
 
 /** Codex lines that update parser state without carrying usage themselves. */
 const CODEX_CONTEXT_MARKERS = ['"turn_context"', '"session_meta"', '"thread_settings_applied"'].map(
@@ -83,13 +85,16 @@ export async function listUsageTranscriptFiles(
   const files: UsageTranscriptFile[] = [];
   let skippedEntryCount = 0,
     errorCount = 0,
-    count = 0;
+    count = 0,
+    // Candidates seen but not stat'ed yet, so concurrent visits respect the files limit.
+    pendingCandidateCount = 0;
   const directories = [{ path: root, depth: 0 }];
+  const withinLimits = () =>
+    count < USAGE_TRANSCRIPT_LIMITS.entries &&
+    files.length + pendingCandidateCount < USAGE_TRANSCRIPT_LIMITS.files;
   // Candidate files are stat'ed in concurrent batches instead of one by one.
-  const candidates: string[] = [];
-  const statCandidates = async () => {
-    if (candidates.length === 0) return;
-    const batch = candidates.splice(0);
+  const statCandidates = async (batch: readonly string[]) => {
+    if (batch.length === 0) return;
     const stats = await Promise.all(
       batch.map((child) =>
         NodeFSP.lstat(child).then(
@@ -98,6 +103,7 @@ export async function listUsageTranscriptFiles(
         ),
       ),
     );
+    pendingCandidateCount -= batch.length;
     signal?.throwIfAborted();
     for (const [index, stat] of stats.entries()) {
       if (stat === null || !stat.isFile() || stat.isSymbolicLink()) {
@@ -114,25 +120,20 @@ export async function listUsageTranscriptFiles(
       else skippedEntryCount++;
     }
   };
-  while (
-    directories.length &&
-    count < USAGE_TRANSCRIPT_LIMITS.entries &&
-    files.length < USAGE_TRANSCRIPT_LIMITS.files
-  ) {
-    signal?.throwIfAborted();
-    const directory = directories.pop()!;
+  const visit = async (directory: { readonly path: string; readonly depth: number }) => {
+    const candidates: string[] = [];
     try {
       const directoryStat = await NodeFSP.lstat(directory.path);
       if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
         errorCount++;
-        continue;
+        return;
       }
       const entries = await NodeFSP.opendir(directory.path);
       for await (const entry of entries) {
         signal?.throwIfAborted();
         if (
           ++count >= USAGE_TRANSCRIPT_LIMITS.entries ||
-          files.length + candidates.length >= USAGE_TRANSCRIPT_LIMITS.files
+          files.length + pendingCandidateCount >= USAGE_TRANSCRIPT_LIMITS.files
         ) {
           errorCount++;
           break;
@@ -152,14 +153,53 @@ export async function listUsageTranscriptFiles(
           continue;
         }
         candidates.push(child);
-        if (candidates.length >= LISTING_STAT_CONCURRENCY) await statCandidates();
+        pendingCandidateCount++;
+        if (candidates.length >= LISTING_STAT_CONCURRENCY) {
+          await statCandidates(candidates.splice(0));
+        }
       }
     } catch {
       signal?.throwIfAborted();
       errorCount++;
     }
-    await statCandidates();
-  }
+    await statCandidates(candidates.splice(0));
+  };
+  // Real layouts hold a few transcripts per directory, so directories are
+  // visited concurrently too, with a bounded number in flight. On a failure
+  // (an abort) nothing new starts, and the walk rejects once every visit in
+  // flight has settled and closed its directory handle.
+  await new Promise<void>((resolve, reject) => {
+    let active = 0;
+    let failure: { readonly error: unknown } | undefined;
+    const fail = (error: unknown) => {
+      failure ??= { error };
+    };
+    const pump = () => {
+      if (failure === undefined && signal?.aborted === true) fail(signal.reason);
+      // Visits settle asynchronously, so none fails while this loop runs.
+      if (failure === undefined) {
+        while (active < LISTING_DIRECTORY_CONCURRENCY && directories.length > 0 && withinLimits()) {
+          const directory = directories.pop()!;
+          active++;
+          visit(directory).then(
+            () => {
+              active--;
+              pump();
+            },
+            (error: unknown) => {
+              active--;
+              fail(error);
+              pump();
+            },
+          );
+        }
+      }
+      if (active > 0) return;
+      if (failure === undefined) resolve();
+      else reject(failure.error);
+    };
+    pump();
+  });
   if (directories.length) errorCount++;
   files.sort((left, right) => left.path.localeCompare(right.path));
   return { files, skippedEntryCount, errorCount };

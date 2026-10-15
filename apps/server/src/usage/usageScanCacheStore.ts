@@ -26,10 +26,11 @@ import {
 
 export const USAGE_SCAN_CACHE_SHARD_COUNT = 64;
 /**
- * Records held in memory across all shards. The least recently modified files
- * are evicted first; the cache is also released entirely while usage is idle.
+ * Rows (slots plus keyed responses) held in memory across all shards. The
+ * least recently modified files are evicted first; the cache is also released
+ * entirely while usage is idle.
  */
-export const USAGE_SCAN_CACHE_RECORD_LIMIT = 1_000_000;
+export const USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT = 1_000_000;
 const SHARD_FILE_BYTES = 64 * 1024 * 1024;
 const LEGACY_FILE_BYTES = 64 * 1024 * 1024;
 const SHARD_READ_CONCURRENCY = 8;
@@ -178,7 +179,7 @@ export const makeUsageScanCacheStore = Effect.fn("makeUsageScanCacheStore")(func
       windowStartMs: Number.POSITIVE_INFINITY,
       retentionCutoffMs: nowMs - options.retentionMs,
     });
-    capUsageScanCache(cache, USAGE_SCAN_CACHE_RECORD_LIMIT);
+    capUsageScanCache(cache, USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT);
     loaded = true;
   });
 

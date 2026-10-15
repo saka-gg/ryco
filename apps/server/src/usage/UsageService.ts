@@ -44,6 +44,7 @@ import {
   buildUsageFileAggregate,
   EMPTY_USAGE_FILE_AGGREGATE,
   type UsageFileAggregate,
+  usageFileAggregateRetainedRows,
   UsageSlotAggregator,
 } from "./usageFileAggregate.ts";
 import {
@@ -62,7 +63,10 @@ import {
   usageCacheFileKey,
   usageCacheRootKey,
 } from "./usageScanCache.ts";
-import { makeUsageScanCacheStore, USAGE_SCAN_CACHE_RECORD_LIMIT } from "./usageScanCacheStore.ts";
+import {
+  makeUsageScanCacheStore,
+  USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT,
+} from "./usageScanCacheStore.ts";
 import {
   cursorExportSourceId,
   readCursorExportUsage,
@@ -86,7 +90,14 @@ export const LITELLM_USAGE_RATES_URL =
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 /** After a fetch attempt, wait this long before trying again (also bounds failed retries). */
 const RATES_RETRY_MS = 60 * 60 * 1000;
-const RATES_FETCH_TIMEOUT_MS = 10_000;
+/** The rates host must connect and answer with headers within this long. */
+const RATES_RESPONSE_TIMEOUT_MS = 10_000;
+/**
+ * Then the ~3 MB document may take this long. Nothing waits on a background
+ * download beyond the first-fetch cap below, so a slow link (down to about
+ * 150 kbit/s) still gets fresh rates instead of timing out every hour.
+ */
+const RATES_BODY_TIMEOUT_MS = 3 * 60_000;
 /** With no rates at all, a summary waits at most this long for the first download. */
 const RATES_FIRST_FETCH_WAIT_MS = 2_000;
 /** Refresh stale cached rates once shortly after boot, before a summary needs them. */
@@ -97,8 +108,11 @@ const PRICING_CACHE_VERSION = 2;
 const SOURCE_SCAN_BYTES = 4 * 1024 * 1024 * 1024;
 const SOURCE_SCAN_RECORDS = 100_000;
 const SOURCE_SCAN_DURATION_MS = 5_000;
-/** Aggregating a cached record costs about a microsecond; this only bounds pathological caches. */
-const SOURCE_CACHED_RECORDS = 2_000_000;
+/**
+ * Aggregating a cached row (a slot or a keyed response) costs about a
+ * microsecond; this only bounds pathological caches.
+ */
+const SOURCE_CACHED_ROWS = 2_000_000;
 const SUMMARY_SCAN_DURATION_MS = 30_000;
 const SUMMARY_SOURCE_LIMIT = 128;
 /** Independent sources are listed and read concurrently (mostly file I/O). */
@@ -400,9 +414,9 @@ const makeUsageService = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     ratesLastAttemptAtMs = now;
     const text = yield* httpClient.get(LITELLM_USAGE_RATES_URL).pipe(
+      Effect.timeout(RATES_RESPONSE_TIMEOUT_MS),
       Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.text),
-      Effect.timeout(RATES_FETCH_TIMEOUT_MS),
+      Effect.flatMap((response) => response.text.pipe(Effect.timeout(RATES_BODY_TIMEOUT_MS))),
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(null),
       ),
@@ -816,15 +830,16 @@ const makeUsageService = Effect.gen(function* () {
       if (files.length > 0) yield* loadScanCache();
       let parsedBytes = 0;
       let parsedRecords = 0;
-      let cachedRecords = 0;
+      let cachedRows = 0;
       for (const { file, rootKey, fileKey } of files) {
         const cached = scanCache.get(fileKey);
         if (matchesUsageFileCache(cached, file, source.provider)) {
-          if (cachedRecords + cached.aggregate.recordCount > SOURCE_CACHED_RECORDS) {
+          const rows = usageFileAggregateRetainedRows(cached.aggregate);
+          if (cachedRows + rows > SOURCE_CACHED_ROWS) {
             tally.budgetLimitedFileCount++;
             continue;
           }
-          cachedRecords += cached.aggregate.recordCount;
+          cachedRows += rows;
         } else {
           // Only fresh parses spend the scan budget. Later files may already be
           // cached or small enough to fit.
@@ -1082,7 +1097,7 @@ const makeUsageService = Effect.gen(function* () {
         retentionCutoffMs:
           input.startDate === undefined ? 0 : scanStartedAtMs - SCAN_CACHE_RETENTION_MS,
       });
-      capUsageScanCache(scanCache, USAGE_SCAN_CACHE_RECORD_LIMIT);
+      capUsageScanCache(scanCache, USAGE_SCAN_CACHE_RETAINED_ROW_LIMIT);
       yield* schedulePersist;
     }
 

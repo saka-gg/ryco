@@ -104,6 +104,12 @@ export class SharedRequests<T> {
     void this.#start(key, start, true, keep).promise.catch(() => undefined);
   }
 
+  /** Forget `key`'s answer and stop sharing its in-flight request (it still settles). */
+  forget(key: string): void {
+    this.#flights.delete(key);
+    this.#handoffs.delete(key);
+  }
+
   /** Forget every answer and stop sharing in-flight requests (they still settle). */
   clear(): void {
     this.#flights.clear();

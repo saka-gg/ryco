@@ -1,6 +1,12 @@
 import type { ReactNode } from "react";
-import { ArrowDownRightIcon, ArrowUpRightIcon, type LucideIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  ArrowDownRightIcon,
+  ArrowUpRightIcon,
+  type LucideIcon,
+} from "lucide-react";
 
+import { formatTimestamp } from "~/lib/statisticsFormat";
 import { cn } from "~/lib/utils";
 
 /** Section wrapper matching the settings aesthetic but without clipping (so chart tooltips can overflow). */
@@ -173,6 +179,27 @@ export function StatePanel({
         ) : null}
       </div>
       {action}
+    </div>
+  );
+}
+
+/** A refresh failed while an earlier snapshot stays on screen: say so instead of hiding it. */
+export function StaleSnapshotNotice({
+  generatedAt,
+  error,
+}: {
+  generatedAt: string;
+  error: string;
+}) {
+  return (
+    <div
+      role="status"
+      className="flex gap-2 rounded-lg border border-warning/30 bg-warning/8 px-3 py-2.5 text-xs text-muted-foreground"
+    >
+      <AlertCircleIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
+      <span>
+        Showing data from {formatTimestamp(generatedAt)}. The refresh failed: {error}
+      </span>
     </div>
   );
 }

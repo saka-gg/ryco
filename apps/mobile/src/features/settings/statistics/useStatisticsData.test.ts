@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, USAGE_CONTRACT_VERSION } from "@ryco/contracts";
 import { usageSummaryCache } from "@ryco/client-runtime/usage";
-import { cachedNodeUsage, loadNodeStatistics } from "./useStatisticsData";
+import {
+  cachedNodeUsage,
+  deriveStatisticsView,
+  loadNodeStatistics,
+  nodeAnswer,
+  type NodeAnswer,
+} from "./useStatisticsData";
 const rpc = vi.hoisted(() => ({
   server: { getStatistics: vi.fn(), getUsageSummary: vi.fn(), refreshProviders: vi.fn() },
 }));
@@ -42,6 +48,8 @@ describe("mobile statistics loading", () => {
         timeZone: expect.any(String),
         startDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       }),
+      // The shared flight's signal: abandoned requests can be withdrawn.
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
   it("rejects incompatible summaries instead of showing zero totals", async () => {
@@ -101,4 +109,73 @@ it("shows stale-contract update instructions returned by the shared transport", 
   const result = await loadNodeStatistics(environment, "usage", "30d");
   expect(result.usage?.status).toBe("stale-contract");
   expect(result.error).toContain("Update Ryco");
+});
+
+describe("progressive mobile statistics", () => {
+  const slow = { ...environment, environmentId: EnvironmentId.make("slow-device"), label: "Mini" };
+
+  it("forwards the caller's signal so a superseded range scan is withdrawn", async () => {
+    rpc.server.getUsageSummary.mockImplementation(
+      (_request: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) =>
+          options?.signal?.addEventListener("abort", () => reject(new Error("withdrawn"))),
+        ),
+    );
+    const view = new AbortController();
+    const pending = loadNodeStatistics(environment, "usage", "7d", { signal: view.signal });
+    const requestSignal = rpc.server.getUsageSummary.mock.calls[0]?.[1]?.signal as
+      | AbortSignal
+      | undefined;
+    expect(requestSignal?.aborted).toBe(false);
+    view.abort();
+    expect(requestSignal?.aborted).toBe(true);
+    expect((await pending).usage?.status).toBe("failed");
+  });
+
+  it("shows a fast device while a slow one is still loading", async () => {
+    rpc.server.getUsageSummary.mockResolvedValue({
+      contractVersion: USAGE_CONTRACT_VERSION,
+      sources: [],
+      buckets: [],
+      imports: [],
+    });
+    const fast = await loadNodeStatistics(environment, "usage", "30d");
+    const answers = new Map<EnvironmentId, NodeAnswer>([
+      [environment.environmentId, nodeAnswer(environment, "usage", "30d", 0, fast)],
+    ]);
+    const view = deriveStatisticsView([environment, slow], answers, "usage", "30d", 0);
+    expect(view.loading).toBe(true);
+    expect(view.refreshing).toBe(false);
+    expect(view.nodes).toEqual([fast]);
+    expect(view.usage?.environments.map((result) => result.environmentId)).toEqual([
+      environment.environmentId,
+    ]);
+  });
+
+  it("keeps a device's earlier answer on screen while a refresh reloads it", () => {
+    const node = { environment, activity: { generatedAt: "earlier" } as never };
+    const answers = new Map<EnvironmentId, NodeAnswer>([
+      [environment.environmentId, nodeAnswer(environment, "activity", "7d", 0, node)],
+    ]);
+    // Activity does not depend on the range: switching it keeps the answer current.
+    expect(deriveStatisticsView([environment], answers, "activity", "90d", 0)).toMatchObject({
+      nodes: [node],
+      loading: false,
+    });
+    expect(deriveStatisticsView([environment], answers, "activity", "7d", 1)).toMatchObject({
+      nodes: [node],
+      loading: true,
+      refreshing: true,
+    });
+    // Another device state is another request: its old answer is not shown.
+    expect(
+      deriveStatisticsView(
+        [{ ...environment, connectionState: "offline" as const }],
+        answers,
+        "activity",
+        "7d",
+        0,
+      ),
+    ).toMatchObject({ nodes: [], loading: true, refreshing: false });
+  });
 });

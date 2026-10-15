@@ -15,11 +15,22 @@ export type StatisticsPrefetchSearch = Pick<StatisticsSearch, "view" | "range" |
  * page's own requests join them. A session the page would refuse asks nothing.
  */
 export function prefetchStatisticsPage(search: StatisticsPrefetchSearch): void {
-  if (search.view === "usage") {
-    if (!readHostedRpcCapability(WS_METHODS.serverGetUsageSummary).allowed) return;
-    prefetchUsageSummary(search.range, search.environmentIds);
-    return;
+  switch (search.view) {
+    case "usage":
+      if (!readHostedRpcCapability(WS_METHODS.serverGetUsageSummary).allowed) return;
+      prefetchUsageSummary(search.range, search.environmentIds);
+      return;
+    case "activity":
+      if (!readHostedRpcCapability(WS_METHODS.serverGetStatistics).allowed) return;
+      prefetchStatistics();
+      return;
+    case "limits":
+      // The Limits view reads provider limits itself and never shows the
+      // activity snapshot, so there is nothing of it to start here.
+      return;
+    default: {
+      const unhandled: never = search.view;
+      return unhandled;
+    }
   }
-  if (!readHostedRpcCapability(WS_METHODS.serverGetStatistics).allowed) return;
-  prefetchStatistics();
 }

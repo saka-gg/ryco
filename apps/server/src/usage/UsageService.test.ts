@@ -524,6 +524,78 @@ it("prices with stale cached rates at once, refreshes them in the background, an
   );
 });
 
+it("lets a slow rates download finish once its headers arrived in time", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-rates-slow-body-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  const state = usageStateDir(root);
+  await FS.mkdir(state, { recursive: true });
+  await FS.writeFile(
+    join(state, "pricing-cache.json"),
+    JSON.stringify({
+      version: 2,
+      fetchedAtMs: Date.now() - 3 * 24 * 60 * 60 * 1000,
+      revision: "stale",
+      document: rateDocument,
+    }),
+  );
+  // The host answers at once, then the 2.75 MB document trickles in over a slow link.
+  let releaseBody: () => void = () => {};
+  const bodyReleased = new Promise<void>((resolve) => (releaseBody = resolve));
+  const slowBody = (request: Parameters<Parameters<typeof HttpClient.make>[0]>[0]) =>
+    Effect.succeed(
+      HttpClientResponse.fromWeb(
+        request,
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async start(controller) {
+              await bodyReleased;
+              controller.enqueue(
+                new TextEncoder().encode(
+                  JSON.stringify({
+                    "claude-test": { input_cost_per_token: 2, output_cost_per_token: 4 },
+                  }),
+                ),
+              );
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+  const settle = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* UsageService;
+      const first = yield* service.readSummary(summaryRequest);
+      expect(first.pricing).toMatchObject({ state: "cached", sourceRevision: "stale" });
+      yield* settle;
+      // Longer than the connect/headers deadline, well within the body budget.
+      yield* TestClock.adjust(Duration.seconds(20));
+      yield* settle;
+      releaseBody();
+      let latest = first;
+      for (let attempt = 0; attempt < 100 && latest.pricing.state !== "live"; attempt++) {
+        yield* settle;
+        latest = yield* service.readSummary(summaryRequest);
+      }
+      expect(latest.pricing.state).toBe("live");
+      expect(latest.buckets[0]?.estimatedCostUsd).toBe(16);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          TestClock.layer(),
+          testLayer(root, claudeSettings(claudeHome, root), {}, slowBody),
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+});
+
 it("reuses an unchanged source's result, re-reads it after a change, and shares identical scans", async () => {
   const root = await FS.mkdtemp(join(tmpdir(), "ryco-memo-summary-"));
   roots.push(root);

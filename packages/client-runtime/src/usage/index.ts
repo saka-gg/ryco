@@ -2,7 +2,9 @@ export * from "./merge.ts";
 export * from "./selectors.ts";
 export * from "./request.ts";
 export * from "./summaryCache.ts";
+export * from "./statisticsSnapshotCache.ts";
 export * from "./sharedRequests.ts";
+export * from "./supersedingLoads.ts";
 export * from "./activity.ts";
 export * from "./limits.ts";
 

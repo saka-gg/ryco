@@ -1,6 +1,6 @@
 import {
   mergeUsageEnvironmentResults,
-  UsageRequestGeneration,
+  SupersedingLoads,
   usageSummaryCache,
   type MergedUsageSummary,
   type UsageEnvironmentResult,
@@ -97,40 +97,29 @@ export function useUsageSummary(input: {
   >(() => new Map());
   // The view each environment last answered, for the effect (state stays the render source).
   const answeredViews = useRef(new Map<EnvironmentId, string>());
-  const generations = useRef(new UsageRequestGeneration());
-  // Every effect run waits through its own signal; the next run releases it.
-  const waiting = useRef<AbortController | null>(null);
+  // Settled environments merge one by one (a slow node never hides a fast
+  // one), and each run withdraws only the requests it superseded.
+  const loads = useRef(new SupersedingLoads());
   // The refresh the effect last handled: only the run it triggers skips prefetched answers.
   const handledRefreshKey = useRef(refreshKey);
 
   useEffect(() => {
-    const generation = generations.current.next();
-    const controller = new AbortController();
     const fresh = refreshKey !== handledRefreshKey.current;
     handledRefreshKey.current = refreshKey;
-    for (const connection of selectedConnections) {
+    loads.current.run(
       // A connection joining the selection must not re-ask the ones that answered.
-      if (answeredViews.current.get(connection.environmentId) === viewKey) continue;
-      // Settled environments merge one by one: a slow node never hides a fast one.
-      void usageSummaryCache
-        .load(usageTarget(connection), input.range, timeZone, {
-          signal: controller.signal,
-          fresh,
-        })
-        .then((result) => {
-          if (!generations.current.isCurrent(generation)) return;
-          answeredViews.current.set(connection.environmentId, viewKey);
-          setAnswers((previous) =>
-            new Map(previous).set(connection.environmentId, { viewKey, result }),
-          );
-        });
-    }
-    // Release the previous run only now: requests this run still wants were
-    // joined above, so only superseded ones (another range, a deselected node)
-    // are left without a waiter and withdrawn, freeing the node's scan queue.
-    // Unmounting releases nothing, so a closed view still fills the cache.
-    waiting.current?.abort();
-    waiting.current = controller;
+      selectedConnections.filter(
+        (connection) => answeredViews.current.get(connection.environmentId) !== viewKey,
+      ),
+      (connection, signal) =>
+        usageSummaryCache.load(usageTarget(connection), input.range, timeZone, { signal, fresh }),
+      (connection, result) => {
+        answeredViews.current.set(connection.environmentId, viewKey);
+        setAnswers((previous) =>
+          new Map(previous).set(connection.environmentId, { viewKey, result }),
+        );
+      },
+    );
   }, [input.range, refreshKey, selectedConnections, timeZone, viewKey]);
 
   const environments = useMemo(
