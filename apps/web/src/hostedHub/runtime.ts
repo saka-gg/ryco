@@ -101,6 +101,7 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
         new BrowserHostedRelaySocket({
           url: input.url,
           callbacks: input.callbacks,
+          relayCompression: input.relayCompression,
           serverAuthenticated: true,
           e2ee: resolveWebRelayE2eeProvider(),
           createRelaySocket: () =>

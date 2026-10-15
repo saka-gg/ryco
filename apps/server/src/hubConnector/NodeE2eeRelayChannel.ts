@@ -1,6 +1,12 @@
 import type { RelayLimits } from "@ryco/contracts/relay";
 import { e2eeChannelSizeBudget } from "@ryco/shared/relayE2eeConstants";
+import { Effect } from "effect";
 
+import {
+  RpcInboundRejectedError,
+  RpcOutputRefusedError,
+  type RpcInboundInterceptor,
+} from "../ws/RpcByteSession.ts";
 import type { NodeE2eeChannelSession } from "./NodeE2eeChannelSession.ts";
 import type { RelayRpcChannelSession } from "./RelayChannelRegistry.ts";
 
@@ -95,4 +101,37 @@ export function makeNodeE2eeRelayChannelSession(
     },
     onAccepted: () => e2ee.announce(),
   };
+}
+
+/**
+ * The RPC byte session's output sink on a relay channel: §4.2's send pipeline —
+ * the ceiling, the §9.3 admission, the pair, the AEAD, and the envelope — or
+ * plaintext on a `legacy` channel. A refused response is a value carrying its
+ * reason, not a defect, which would kill the RPC server fiber and every request
+ * on it.
+ */
+export function nodeE2eeRpcSink(
+  e2ee: NodeE2eeChannelSession,
+): (bytes: Uint8Array) => Effect.Effect<void, RpcOutputRefusedError> {
+  return (bytes) =>
+    Effect.promise(() => e2ee.emit(bytes)).pipe(
+      Effect.flatMap((result) =>
+        result === "sent" ? Effect.void : Effect.fail(new RpcOutputRefusedError(result)),
+      ),
+    );
+}
+
+/**
+ * §4.3: discrimination on the reassembled, prelude-stripped payload, and the
+ * only path to the RPC parser.
+ */
+export function nodeE2eeRpcInterceptor(e2ee: NodeE2eeChannelSession): RpcInboundInterceptor {
+  return (message) =>
+    Effect.promise(() => e2ee.intercept(message)).pipe(
+      Effect.flatMap((disposition) =>
+        disposition.kind === "rejected"
+          ? Effect.fail(new RpcInboundRejectedError())
+          : Effect.succeed(disposition),
+      ),
+    );
 }

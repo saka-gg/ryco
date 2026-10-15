@@ -1,6 +1,7 @@
 import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
 import { makeRelayE2eeInitiator } from "@ryco/client-runtime/relay/e2ee";
 import { verifyNodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeCapabilityVerify";
+import { stripRelayCompressionAdvertisement } from "@ryco/shared/relayPayloadCompression";
 import {
   E2eeClientHandshake,
   E2eeNodeHandshake,
@@ -314,7 +315,10 @@ describe("§12.1.1 the degenerate web mapping, evaluated at channel.accept", () 
     await waitPastTAdv();
     const flushed = outboundRelayPayloads(first.socket);
     expect(flushed).toHaveLength(1);
-    expect(new TextDecoder().decode(flushed[0]!)).toBe('{"buffered":1}');
+    // The plaintext flush carries the compression advertisement (§4.6) after the JSON.
+    expect(new TextDecoder().decode(stripRelayCompressionAdvertisement(flushed[0]!))).toBe(
+      '{"buffered":1}',
+    );
     expect(relayCloseReasons(first.socket)).toEqual([]);
 
     // (b) The session's first validated statement, on its own channel.

@@ -71,6 +71,7 @@ import {
 import {
   makeNodeE2eeRelayChannelSession,
   nodeE2eeChannelPlaintextCeiling,
+  type NodeE2eeChannelRpcSession,
 } from "../NodeE2eeRelayChannel.ts";
 import { RelayChannelRegistry, type RelayRpcChannelSession } from "../RelayChannelRegistry.ts";
 import { RelaySendQueue } from "../RelaySendQueue.ts";
@@ -443,6 +444,16 @@ export async function harness(
     readonly syntheticReceiveState?: E2eeSyntheticDirectionState;
     /** §13.5: the operator directory this channel publishes itself to. */
     readonly registerSession?: NodeE2eeChannelSessionSources["registerSession"];
+    /**
+     * A real RPC runtime behind the channel — an `RpcByteSession` bound to the
+     * channel session the way `HubConnectorLive` binds it — in place of the
+     * recording stand-in, which then sees nothing (`deliveredToParser` stays
+     * empty).
+     */
+    readonly rpc?: (e2ee: NodeE2eeChannelSession) => Promise<{
+      readonly session: NodeE2eeChannelRpcSession;
+      readonly release: () => Promise<void>;
+    }>;
   } = {},
 ): Promise<Harness> {
   const protocol = { protocolMajor: 1, protocolMinor: options.protocolMinor ?? 2 } as const;
@@ -571,6 +582,18 @@ export async function harness(
             : { testOnlySyntheticReceiveState: options.syntheticReceiveState }),
         });
         channelSession = e2ee;
+        if (options.rpc !== undefined) {
+          const runtime = await options.rpc(e2ee);
+          relayChannel = makeNodeE2eeRelayChannelSession({
+            e2ee,
+            rpc: runtime.session,
+            release: async () => {
+              releases += 1;
+              await runtime.release();
+            },
+          });
+          return relayChannel;
+        }
         // The binding `HubConnectorLive` uses, over the same pipeline
         // `RpcByteSession` provides: reassemble and strip the prelude, then
         // discriminate. Nothing reaches `deliveredToParser` except an `rpc`

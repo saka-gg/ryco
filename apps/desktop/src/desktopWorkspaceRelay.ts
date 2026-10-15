@@ -4,6 +4,7 @@ import type { DesktopWorkspaceTransportEvent, EnvironmentId } from "@ryco/contra
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
   HostedRelayEngine,
+  probeStreamRelayPayloadInflater,
   type HostedRelaySocketCallbacks,
   type RelayE2eeProvider,
   type RelaySocket,
@@ -22,6 +23,20 @@ import type {
 const MAX_TRANSPORTS = 8;
 const MAX_APPLICATION_FRAME_BYTES = 16 * 1024 * 1024;
 const PREPARED_LIFETIME_MS = 30_000;
+/**
+ * How long an environment's relay attempts run without payload compression
+ * after one ended on a compressed payload it could not deliver. Long enough to
+ * stop a reconnect loop; bounded so a transient fault does not cost the
+ * compression until the app restarts.
+ */
+export const RELAY_COMPRESSION_RETRY_AFTER_MS = 10 * 60_000;
+/**
+ * Relay payload compression: the main process inflates with the same
+ * `DecompressionStream("deflate-raw")` path the browser uses (Node ships it).
+ */
+const RELAY_PAYLOAD_INFLATER = probeStreamRelayPayloadInflater(
+  () => new DecompressionStream("deflate-raw"),
+);
 
 export type { DesktopWorkspaceTransportEvent } from "@ryco/contracts";
 
@@ -126,6 +141,8 @@ class DesktopWorkspaceRelaySocket {
     readonly ticketExpiresAt: number;
     readonly headers: Readonly<Record<string, string>>;
     readonly e2ee: RelayE2eeProvider;
+    /** §4.6: `false` after an earlier attempt for this environment failed on compression. */
+    readonly relayCompression: boolean;
     readonly callbacks: HostedRelaySocketCallbacks;
     readonly events: {
       readonly open: () => void;
@@ -163,6 +180,9 @@ class DesktopWorkspaceRelaySocket {
       socket: relaySocket,
       callbacks: input.callbacks,
       e2ee: input.e2ee,
+      ...(input.relayCompression && RELAY_PAYLOAD_INFLATER !== undefined
+        ? { inflater: RELAY_PAYLOAD_INFLATER }
+        : {}),
       timers: {
         now: Date.now,
         setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
@@ -221,6 +241,12 @@ export class DesktopWorkspaceRelayManager {
   readonly #now: () => number;
   readonly #socketFactory: DesktopWorkspaceRelaySocketFactory;
   readonly #transports = new Map<string, PreparedTransport>();
+  /**
+   * Environments whose relay attempts run without payload compression, because
+   * one ended on a compressed payload it could not deliver (§4.6.5), and until
+   * when. Cleared on `dispose` (an account or session change).
+   */
+  readonly #compressionDisabledUntil = new Map<EnvironmentId, number>();
 
   constructor(input: {
     readonly authority: DesktopWorkspaceRelayAuthority;
@@ -347,6 +373,7 @@ export class DesktopWorkspaceRelayManager {
         ticketExpiresAt: relayTicket.expiresAt,
         headers,
         e2ee: (host) => makeRelayE2eeInitiator({ host, attempt }),
+        relayCompression: this.#compressionAllowed(prepared.environmentId),
         callbacks: {
           onTransportStatus: () => undefined,
           onSessionStatus: () => undefined,
@@ -355,6 +382,12 @@ export class DesktopWorkspaceRelayManager {
             if (!isCurrent()) return;
             retryable = failure.retryable;
             retryAfterMs = failure.retryAfterMs;
+            if (failure.compressionFailed === true) {
+              this.#compressionDisabledUntil.set(
+                prepared.environmentId,
+                this.#now() + RELAY_COMPRESSION_RETRY_AFTER_MS,
+              );
+            }
             if (
               failure.enrollmentRevoked !== undefined &&
               target.nativeTrust === "account-trusted"
@@ -444,6 +477,15 @@ export class DesktopWorkspaceRelayManager {
     // Closing publishes an event; snapshot ownership before reentrant listeners run.
     const transportIds = Array.from(this.#transports.keys());
     for (const transportId of transportIds) this.close(transportId);
+    this.#compressionDisabledUntil.clear();
+  }
+
+  #compressionAllowed(environmentId: EnvironmentId): boolean {
+    const until = this.#compressionDisabledUntil.get(environmentId);
+    if (until === undefined) return true;
+    if (until > this.#now()) return false;
+    this.#compressionDisabledUntil.delete(environmentId);
+    return true;
   }
 
   #prune(): void {

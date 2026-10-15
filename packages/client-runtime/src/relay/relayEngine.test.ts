@@ -22,8 +22,13 @@ import {
   splitRelayMessage,
   stripRelayChunkCapabilityPrelude,
 } from "@ryco/shared/relayMessageChunks";
+import {
+  encodeCompressedRelayPayload,
+  RELAY_COMPRESSION_ADVERTISEMENT,
+} from "@ryco/shared/relayPayloadCompression";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { deflateRaw } from "../../test/deflateRaw.ts";
 import { encodeBase64Url } from "./base64url.ts";
 import {
   HostedRelayEngine,
@@ -37,9 +42,15 @@ import {
   type RelayE2eeReservation,
   type RelaySocket,
   type RelayTimers,
+  relayCompressionFailure,
   relayE2eeFailure,
   relayE2eeUnresolvedAttemptFailure,
 } from "./relayEngine.ts";
+import {
+  makeStreamRelayPayloadInflater,
+  type RawDeflateDecompressor,
+  type RelayPayloadInflater,
+} from "./relayPayloadInflation.ts";
 
 const CHANNEL_ID = "ch_cccccccccccccccccccccc" as RelayChannelId;
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
@@ -160,6 +171,7 @@ function create(
   callbackSet = callbacks(),
   timers: RelayTimers = realTimers(),
   e2ee?: RelayE2eeProvider,
+  inflater?: RelayPayloadInflater,
 ) {
   const socket = new MockRelaySocket();
   const events = {
@@ -176,6 +188,7 @@ function create(
     callbacks: callbackSet,
     events,
     ...(e2ee === undefined ? {} : { e2ee }),
+    ...(inflater === undefined ? {} : { inflater }),
   });
   return { engine, socket, callbacks: callbackSet, events };
 }
@@ -1806,6 +1819,349 @@ describe("HostedRelayEngine E2EE seams", () => {
 function closeReason(failure: { readonly closeReason?: string }): string | undefined {
   return failure.closeReason;
 }
+
+// ─── relay payload compression (docs/relay-e2ee-protocol.md §4.6) ────────────
+
+const streamInflater = makeStreamRelayPayloadInflater(
+  () => new DecompressionStream("deflate-raw") as unknown as RawDeflateDecompressor,
+);
+
+/** An inflater that holds every inflation until the test releases it. */
+function gatedInflater() {
+  const gates: Array<() => void> = [];
+  const inflater: RelayPayloadInflater = {
+    inflateRaw: async (body, cap) => {
+      await new Promise<void>((resolve) => gates.push(resolve));
+      return streamInflater.inflateRaw(body, cap);
+    },
+  };
+  return { inflater, release: () => gates.shift()?.() };
+}
+
+function bigJson(label: string, bytes = 24 * 1_024): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ label, filler: "abc ".repeat(bytes / 4) }));
+}
+
+async function compressedFrame(message: Uint8Array): Promise<Uint8Array> {
+  return encodeCompressedRelayPayload(await deflateRaw(message), message.byteLength);
+}
+
+function deliverData(socket: MockRelaySocket, sequence: number, payload: Uint8Array): void {
+  socket.frame({
+    type: "data",
+    ...VERSION,
+    channelId: CHANNEL_ID,
+    sequence: sequence as never,
+    payload,
+  });
+}
+
+function labels(calls: ReadonlyArray<ReadonlyArray<unknown>>): string[] {
+  return calls.map(([bytes]) => {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes as Uint8Array)) as { label: string };
+    return parsed.label;
+  });
+}
+
+function lastDataPayload(socket: MockRelaySocket): Uint8Array | undefined {
+  const frame = sentFrames(socket).findLast((candidate) => candidate.type === "data");
+  return frame?.type === "data" ? frame.payload : undefined;
+}
+
+function endsWithAdvertisement(bytes: Uint8Array): boolean {
+  const tail = bytes.subarray(bytes.byteLength - RELAY_COMPRESSION_ADVERTISEMENT.byteLength);
+  return tail.every((byte, index) => byte === RELAY_COMPRESSION_ADVERTISEMENT[index]);
+}
+
+describe("HostedRelayEngine payload compression", () => {
+  it("advertises inflation as trailing JSON whitespace only when it has an inflater", () => {
+    const message = new TextEncoder().encode('{"first":1}');
+    const withInflater = create(callbacks(), realTimers(), undefined, streamInflater);
+    authenticate(withInflater.socket);
+    withInflater.engine.send(message);
+    expect(lastDataPayload(withInflater.socket)).toEqual(
+      advertisedPayload(Uint8Array.from([...message, ...RELAY_COMPRESSION_ADVERTISEMENT])),
+    );
+
+    const without = create();
+    authenticate(without.socket);
+    without.engine.send(message);
+    expect(lastDataPayload(without.socket)).toEqual(advertisedPayload(message));
+  });
+
+  it("does not advertise on a message within advertisement length of the ceiling", async () => {
+    const { provider, calls } = stubProvider();
+    const { engine, socket } = create(callbacks(), realTimers(), provider, streamInflater);
+    authenticate(socket);
+    // The peer has shown it reassembles chunks, so only §4.5's ceiling binds.
+    deliverData(socket, 0, advertisedPayload(new TextEncoder().encode('{"hello":1}')));
+    await flush();
+    const ceiling = e2eeChannelSizeBudget(RELAY_INITIAL_LIMITS).plaintextCeiling;
+    engine.send(new Uint8Array(ceiling - RELAY_COMPRESSION_ADVERTISEMENT.byteLength).fill(0x20));
+    engine.send(
+      new Uint8Array(ceiling - RELAY_COMPRESSION_ADVERTISEMENT.byteLength + 1).fill(0x20),
+    );
+    expect(calls.emitted.map((message) => message.byteLength)).toEqual([ceiling, ceiling - 7]);
+  });
+
+  it("inflates a legacy compressed payload and keeps later plain payloads behind it", async () => {
+    const gate = gatedInflater();
+    const { engine, socket, events } = create(callbacks(), realTimers(), undefined, gate.inflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+
+    const frame = await compressedFrame(bigJson("compressed"));
+    deliverData(socket, 0, new TextEncoder().encode('{"label":"before"}'));
+    deliverData(socket, 1, frame);
+    deliverData(socket, 2, new TextEncoder().encode('{"label":"after"}'));
+    await flush();
+    // The plain payload ahead of it went out on its own turn; the one behind it waits.
+    expect(labels(events.onData.mock.calls)).toEqual(["before"]);
+
+    gate.release();
+    await vi.waitFor(() =>
+      expect(labels(events.onData.mock.calls)).toEqual(["before", "compressed", "after"]),
+    );
+    expect(events.onData.mock.calls[1]![0]).toEqual(bigJson("compressed"));
+  });
+
+  it("fails a channel that can inflate but never advertised when a frame arrives", async () => {
+    // The inflater alone is not consent: until a message carried the
+    // advertisement, no conforming node may have compressed for this channel.
+    const handlers = callbacks();
+    const { socket, events } = create(handlers, realTimers(), undefined, streamInflater);
+    authenticate(socket);
+    deliverData(socket, 0, await compressedFrame(bigJson("unasked")));
+    await vi.waitFor(() =>
+      expect(handlers.onFailure).toHaveBeenCalledWith(relayCompressionFailure()),
+    );
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("fails an e2ee channel that can inflate but never advertised when a record carries a frame", async () => {
+    const { provider } = stubProvider();
+    const handlers = callbacks();
+    const { socket, events } = create(handlers, realTimers(), provider, streamInflater);
+    authenticate(socket);
+    deliverData(socket, 0, await compressedFrame(bigJson("unasked")));
+    await vi.waitFor(() =>
+      expect(handlers.onFailure).toHaveBeenCalledWith(relayCompressionFailure()),
+    );
+    expect(sentFrames(socket).find((frame) => frame.type === "channel.close")).toMatchObject({
+      reason: "channel_rejected",
+    });
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("fails a legacy channel that receives a compressed payload it never advertised for", async () => {
+    const handlers = callbacks();
+    const { socket, events } = create(handlers);
+    authenticate(socket);
+    deliverData(socket, 0, await compressedFrame(bigJson("unasked")));
+    // Retryable, and flagged so the next attempt goes without compression.
+    await vi.waitFor(() =>
+      expect(handlers.onFailure).toHaveBeenCalledWith(relayCompressionFailure()),
+    );
+    expect(relayCompressionFailure()).toMatchObject({ retryable: true, compressionFailed: true });
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("does not let the advertisement push a single-frame message into needing chunks", async () => {
+    const limits = RelayLimits.make({ ...RELAY_INITIAL_LIMITS, maxDataChunkBytes: 4_096 });
+    const { engine, socket } = create(callbacks(), realTimers(), undefined, streamInflater);
+    authenticate(socket, limits);
+    const band = 4_096 - E2EE_ENVELOPE_OVERHEAD_BYTES - RELAY_COMPRESSION_ADVERTISEMENT.byteLength;
+    // At the edge of the band: still advertised. One byte in: sent as it is,
+    // and delivered — never `peer_unsupported`.
+    engine.send(new Uint8Array(band).fill(0x20));
+    expect(endsWithAdvertisement(lastDataPayload(socket)!)).toBe(true);
+    engine.send(new Uint8Array(band + 1).fill(0x20));
+    expect(stripRelayChunkCapabilityPrelude(lastDataPayload(socket)!).message.byteLength).toBe(
+      band + 1,
+    );
+    // Once the peer reassembles chunks, the band no longer matters.
+    deliverData(socket, 0, advertisedPayload(new TextEncoder().encode('{"hello":1}')));
+    await flush();
+    engine.send(new Uint8Array(band + 1).fill(0x20));
+    expect(endsWithAdvertisement(lastDataPayload(socket)!)).toBe(true);
+  });
+
+  it("holds payloads waiting behind an inflate against flow control", async () => {
+    const gate = gatedInflater();
+    const limits = RelayLimits.make({
+      ...RELAY_INITIAL_LIMITS,
+      maxDataChunkBytes: 64 * 1_024,
+      maxQueuedBytes: 600_000,
+    });
+    const handlers = callbacks();
+    const { engine, socket, events } = create(handlers, realTimers(), undefined, gate.inflater);
+    authenticate(socket, limits);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    // Declares 300 kB: half the budget is charged while it inflates.
+    const frame = await compressedFrame(bigJson("big", 300_000));
+    deliverData(socket, 0, frame);
+    const filler = new TextEncoder().encode(
+      JSON.stringify({ label: "x", pad: "p".repeat(60_000) }),
+    );
+    deliverData(socket, 1, filler);
+    deliverData(socket, 2, filler);
+    deliverData(socket, 3, filler);
+    await flush();
+    // 300 kB declared + 180 kB waiting behind it passes 75% of 600 kB.
+    expect(sentFrames(socket).some((sent) => sent.type === "flow.pause")).toBe(true);
+    expect(events.onData).not.toHaveBeenCalled();
+    // Two more would exceed the budget the held bytes still occupy.
+    deliverData(socket, 4, filler);
+    deliverData(socket, 5, filler);
+    expect(handlers.onFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "slow-consumer" }),
+    );
+    gate.release();
+  });
+
+  it("charges the declared output and fails as a slow consumer when it cannot fit", async () => {
+    const limits = RelayLimits.make({
+      ...RELAY_INITIAL_LIMITS,
+      maxControlFrameBytes: 16 * 1_024,
+      maxDataChunkBytes: 64 * 1_024,
+      maxQueuedBytes: 200_000,
+    });
+    const handlers = callbacks();
+    const { engine, socket, events } = create(handlers, realTimers(), undefined, streamInflater);
+    authenticate(socket, limits);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    deliverData(socket, 0, await compressedFrame(bigJson("too-big", 400_000)));
+    await vi.waitFor(() =>
+      expect(handlers.onFailure).toHaveBeenCalledWith(
+        // Flagged, so the reconnect runs without compression instead of
+        // failing the same way again.
+        expect.objectContaining({ kind: "slow-consumer", compressionFailed: true }),
+      ),
+    );
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("delivers nothing from an inflate the channel closed underneath", async () => {
+    const gate = gatedInflater();
+    const { engine, socket, events } = create(callbacks(), realTimers(), undefined, gate.inflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    deliverData(socket, 0, await compressedFrame(bigJson("late")));
+    deliverData(socket, 1, new TextEncoder().encode('{"label":"after"}'));
+    await flush();
+    engine.close();
+    gate.release();
+    await flush();
+    await flush();
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("hands a 0xFF payload to the machine untouched while negotiating", async () => {
+    const intercepted: Uint8Array[] = [];
+    const { provider } = stubProvider(
+      {
+        intercept: async (payload) => {
+          intercepted.push(Uint8Array.from(payload));
+          return { kind: "rejected" };
+        },
+      },
+      null,
+    );
+    const { socket, events } = create(callbacks(), realTimers(), provider, streamInflater);
+    authenticate(socket);
+    const frame = await compressedFrame(bigJson("early"));
+    deliverData(socket, 0, frame);
+    await vi.waitFor(() => expect(intercepted).toHaveLength(1));
+    // Not inflated: in `negotiating` a frame is "any other value" (§3.4), the
+    // machine's to refuse.
+    expect(intercepted[0]).toEqual(frame);
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("trips the inflate-bomb guard and delivers nothing", async () => {
+    const handlers = callbacks();
+    const { engine, socket, events } = create(handlers, realTimers(), undefined, streamInflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    // 16 MiB of zeros in a frame that declares 64 KiB.
+    const bomb = encodeCompressedRelayPayload(
+      await deflateRaw(new Uint8Array(16 * 1_024 * 1_024)),
+      65_536,
+    );
+    deliverData(socket, 0, bomb);
+    deliverData(socket, 1, new TextEncoder().encode('{"label":"after"}'));
+    await vi.waitFor(() => expect(handlers.onFailure).toHaveBeenCalled());
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("fails on a frame whose inflated length differs from its header", async () => {
+    const handlers = callbacks();
+    const { engine, socket, events } = create(handlers, realTimers(), undefined, streamInflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    const message = bigJson("liar");
+    deliverData(
+      socket,
+      0,
+      encodeCompressedRelayPayload(await deflateRaw(message), message.byteLength + 1),
+    );
+    await vi.waitFor(() => expect(handlers.onFailure).toHaveBeenCalled());
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("inflates inside the authenticated record on an e2ee channel, in order under slow inflation", async () => {
+    const gate = gatedInflater();
+    const { provider, calls } = stubProvider();
+    const { engine, socket, events } = create(callbacks(), realTimers(), provider, gate.inflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    // The advertisement travels inside the record the channel protects.
+    expect(endsWithAdvertisement(calls.emitted[0]!)).toBe(true);
+
+    const first = await compressedFrame(bigJson("first"));
+    const third = await compressedFrame(bigJson("third"));
+    deliverData(socket, 0, first);
+    deliverData(socket, 1, new TextEncoder().encode('{"label":"second"}'));
+    deliverData(socket, 2, third);
+    await flush();
+    expect(events.onData).not.toHaveBeenCalled();
+    gate.release();
+    await vi.waitFor(() => expect(labels(events.onData.mock.calls)).toEqual(["first", "second"]));
+    // The third payload is held behind its own inflation, not reordered.
+    gate.release();
+    await vi.waitFor(() =>
+      expect(labels(events.onData.mock.calls)).toEqual(["first", "second", "third"]),
+    );
+    // The channel saw the compressed frames: inflation is above the E2EE layer.
+    expect(calls.intercepted[0]![0]).toBe(0xff);
+  });
+
+  it("closes an e2ee channel whose record carries an unadvertised frame", async () => {
+    const { provider } = stubProvider();
+    const handlers = callbacks();
+    const { socket, events } = create(handlers, realTimers(), provider);
+    authenticate(socket);
+    deliverData(socket, 0, await compressedFrame(bigJson("unasked")));
+    await vi.waitFor(() =>
+      expect(handlers.onFailure).toHaveBeenCalledWith(relayCompressionFailure()),
+    );
+    expect(sentFrames(socket).find((frame) => frame.type === "channel.close")).toMatchObject({
+      reason: "channel_rejected",
+    });
+    expect(events.onData).not.toHaveBeenCalled();
+  });
+
+  it("inflates before the mode machine's legacy rows on a legacy-locked channel", async () => {
+    const { provider, calls } = stubProvider({}, "legacy");
+    const { engine, socket, events } = create(callbacks(), realTimers(), provider, streamInflater);
+    authenticate(socket);
+    engine.send(new TextEncoder().encode('{"advertise":1}'));
+    deliverData(socket, 0, await compressedFrame(bigJson("legacy")));
+    await vi.waitFor(() => expect(labels(events.onData.mock.calls)).toEqual(["legacy"]));
+    // The machine only ever saw JSON, which is all its legacy rows admit.
+    expect(calls.intercepted).toEqual([bigJson("legacy")]);
+  });
+});
 
 describe("server-authenticated channels (Hub session version 2)", () => {
   function createServerAuthenticated(callbackSet = callbacks(), timers = realTimers()) {

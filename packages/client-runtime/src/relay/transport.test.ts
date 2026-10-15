@@ -45,6 +45,7 @@ import {
   HostedDispatchUnconfirmedError,
 } from "./dispatchReplay.ts";
 import { HostedHubSession, type HubSessionSocket } from "./hostedHubSession.ts";
+import { relayCompressionFailure } from "./relayEngine.ts";
 import {
   admitHostedRequestForState,
   HostedRelayAttemptFactory,
@@ -461,6 +462,53 @@ describe("HostedRelayAttemptFactory", () => {
     factory.createSocket(await url);
     expect(createRelaySocket.mock.calls[0]?.[0].earlySocket).toBe(early);
     expect(early.discard).not.toHaveBeenCalled();
+  });
+
+  it("opens the attempts after a compression failure without compression", async () => {
+    const createRelaySocket = vi.fn(
+      (input: {
+        readonly relayCompression: boolean;
+        readonly callbacks: { readonly onFailure: (failure: HostedRelayFailure) => void };
+      }) => input,
+    );
+    const binding: HostedRelayAttemptBinding = {
+      nodeId: () => selectedNode.id,
+      generation: () => 4,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      issueRelayAttempt: async (input) => ({
+        ticket: encodeBase64Url(new Uint8Array(32).fill(1)),
+        expiresAt: Date.now() + 60_000,
+        preparedSocketContext: input.preparedSocketContext,
+      }),
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+    const factory = new HostedRelayAttemptFactory(binding);
+    factory.createSocket(await factory.nextUrl());
+    expect(createRelaySocket.mock.calls[0]?.[0].relayCompression).toBe(true);
+    // An ordinary failure leaves compression on.
+    createRelaySocket.mock.calls[0]![0].callbacks.onFailure({ kind: "network", retryable: true });
+    factory.createSocket(await factory.nextUrl());
+    expect(createRelaySocket.mock.calls[1]?.[0].relayCompression).toBe(true);
+    // A compression failure is retryable, and every later attempt goes without.
+    createRelaySocket.mock.calls[1]![0].callbacks.onFailure(relayCompressionFailure());
+    for (const attempt of [2, 3]) {
+      factory.createSocket(await factory.nextUrl());
+      expect(createRelaySocket.mock.calls[attempt]?.[0].relayCompression).toBe(false);
+    }
+    // A new connection starts with compression again.
+    factory.reset();
+    factory.createSocket(await factory.nextUrl());
+    expect(createRelaySocket.mock.calls[4]?.[0].relayCompression).toBe(true);
   });
 
   it("discards an early socket whose ticket failed and opens none on the retry", async () => {
@@ -1478,6 +1526,7 @@ describe("server-authenticated relay attempts (Hub session version 2)", () => {
     } = {},
   ) {
     const serverAuthenticated: { nodeId: string; protocolMinor: number }[] = [];
+    const serverInputs: HostedServerAuthenticatedRelayInput[] = [];
     const serverSockets: MockRelaySocket[] = [];
     const ticketSockets: MockRelaySocket[] = [];
     const ticketed: unknown[] = [];
@@ -1494,6 +1543,7 @@ describe("server-authenticated relay attempts (Hub session version 2)", () => {
       serverAuthenticatedRelayAvailable: () => session.serverMintedOpenAvailable(),
       createServerAuthenticatedRelaySocket: (input: HostedServerAuthenticatedRelayInput) => {
         serverAuthenticated.push({ nodeId: input.nodeId, protocolMinor: input.protocolMinor });
+        serverInputs.push(input);
         const socket = new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
         serverSockets.push(socket);
         return socket;
@@ -1511,8 +1561,21 @@ describe("server-authenticated relay attempts (Hub session version 2)", () => {
       protocolMinor: 2,
     });
     issue.mockClear();
-    return { serverAuthenticated, serverSockets, ticketSockets, ticketed, issue };
+    return { serverAuthenticated, serverInputs, serverSockets, ticketSockets, ticketed, issue };
   }
+
+  it("opens server-authenticated attempts after a compression failure without compression", async () => {
+    const { session, ready } = accountSession();
+    ready(2);
+    const { serverInputs } = configure(session);
+    const factory = new HostedRelayAttemptFactory();
+    factory.createSocket(await factory.nextUrl());
+    expect(serverInputs[0]?.relayCompression).toBe(true);
+    serverInputs[0]!.callbacks.onFailure(relayCompressionFailure());
+    factory.createSocket(await factory.nextUrl());
+    expect(serverInputs[1]?.relayCompression).toBe(false);
+    session.dispose();
+  });
 
   it("buys no HTTP ticket when the account session is version 2 and ready", async () => {
     const { session, ready } = accountSession();

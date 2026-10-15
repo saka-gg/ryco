@@ -408,6 +408,12 @@ export interface HostedRelayFailure {
    * node's channel and must never be read as a device-wide revocation.
    */
   readonly enrollmentRevoked?: HostedRelayEnrollmentRevocation;
+  /**
+   * The channel ended because a compressed relay payload could not be
+   * delivered (docs/relay-e2ee-protocol.md §4.6.5). The connection's next
+   * attempt runs without compression.
+   */
+  readonly compressionFailed?: true;
 }
 
 /**
@@ -441,4 +447,9 @@ export interface HostedServerAuthenticatedRelayInput {
   readonly protocolMinor: 2 | 3;
   readonly preparedSocketContext?: unknown;
   readonly callbacks: HostedRelayAttemptCallbacks;
+  /**
+   * Whether this attempt may use relay payload compression (§4.6), exactly as for a
+   * ticket-authenticated attempt.
+   */
+  readonly relayCompression: boolean;
 }

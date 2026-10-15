@@ -10,6 +10,7 @@ import {
 
 import { createMobileDpopSigner } from "../platform/dpopSigner";
 import { mobileSessionCredentials } from "../platform/sessionCredentials";
+import { fflateRelayPayloadInflater } from "./relayPayloadInflater";
 import { getMobileHostedConfig } from "./runtimeConfig";
 
 /**
@@ -98,6 +99,12 @@ export interface MobileHostedRelaySocketOptions {
    * is still usable; otherwise this socket opens its own, in the serial order.
    */
   readonly earlySocket?: HostedEarlyRelaySocket | undefined;
+  /**
+   * Relay payload compression (docs/relay-e2ee-protocol.md §4.6): `false` after
+   * an earlier attempt of this connection ended on a compressed payload it
+   * could not deliver, and then this socket neither advertises nor inflates.
+   */
+  readonly relayCompression?: boolean | undefined;
 }
 
 /**
@@ -396,6 +403,7 @@ export class MobileHostedRelaySocket {
         socket: relaySocket,
         callbacks: options.callbacks,
         ...(options.e2ee === undefined ? {} : { e2ee: options.e2ee }),
+        ...(options.relayCompression === false ? {} : { inflater: fflateRelayPayloadInflater }),
         timers: {
           // Bound wrappers: unbound platform methods throw "Illegal invocation".
           now,
