@@ -457,11 +457,12 @@ describe("resolveCrownHeadline", () => {
 });
 
 describe("visibleCrownRailItems", () => {
-  const keys = (input: { isGitRepo: boolean; notesAvailable: boolean }) =>
+  const keys = (input: Parameters<typeof visibleCrownRailItems>[0]) =>
     visibleCrownRailItems(input).map((item) => item.key);
+  const withContent = { hasPlan: true } as const;
 
   it("shows Notes only while the node's notes are available", () => {
-    assert.deepEqual(keys({ isGitRepo: true, notesAvailable: true }), [
+    assert.deepEqual(keys({ isGitRepo: true, notesAvailable: true, ...withContent }), [
       "branch",
       "changes",
       "checks",
@@ -471,19 +472,32 @@ describe("visibleCrownRailItems", () => {
       "notes",
       "ship",
     ]);
-    assert.notInclude(keys({ isGitRepo: true, notesAvailable: false }), "notes");
-    assert.deepEqual(keys({ isGitRepo: false, notesAvailable: true }), ["plan", "agents", "notes"]);
+    assert.notInclude(keys({ isGitRepo: true, notesAvailable: false, ...withContent }), "notes");
+    assert.deepEqual(keys({ isGitRepo: false, notesAvailable: true, ...withContent }), [
+      "plan",
+      "agents",
+      "notes",
+    ]);
+  });
+
+  it("hides Plan until the thread has a plan", () => {
+    assert.deepEqual(keys({ isGitRepo: true, notesAvailable: false }), [
+      "branch",
+      "changes",
+      "checks",
+      "agents",
+      "pr",
+      "ship",
+    ]);
+    assert.include(keys({ isGitRepo: true, notesAvailable: false, hasPlan: true }), "plan");
   });
 
   it("offers Turn into project only for a chat the client can promote", () => {
-    const keys = (input: Parameters<typeof visibleCrownRailItems>[0]) =>
-      visibleCrownRailItems(input).map((item) => item.key);
     assert.notInclude(keys({ isGitRepo: true, notesAvailable: true }), "project");
-    assert.deepEqual(keys({ isGitRepo: false, notesAvailable: false, chatAvailable: true }), [
-      "plan",
-      "agents",
-      "project",
-    ]);
+    assert.deepEqual(
+      keys({ isGitRepo: false, notesAvailable: false, chatAvailable: true, hasPlan: true }),
+      ["plan", "agents", "project"],
+    );
   });
 });
 

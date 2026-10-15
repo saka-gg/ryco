@@ -4,6 +4,7 @@ import { cn } from "~/lib/utils";
 
 import type { ActivePlanState } from "~/session-logic";
 import { PlanExplanation, ProposedPlanDisclosure } from "../../overviewSections";
+import { crownHasPlan } from "../crownModel.logic";
 import {
   CrownDetailEmpty,
   CrownDetailHeading,
@@ -67,10 +68,7 @@ export function PlanDetail({ layout, variant }: CrownDetailViewProps) {
   const steps = layout.activePlan?.steps ?? [];
   const completed = steps.filter((step) => step.status === "completed").length;
   const percent = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
-  const hasPlan =
-    steps.length > 0 ||
-    Boolean(layout.activePlan?.explanation) ||
-    Boolean(layout.activeProposedPlan?.planMarkdown);
+  const hasPlan = crownHasPlan(layout);
 
   return (
     <>
