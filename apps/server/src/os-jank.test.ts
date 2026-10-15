@@ -333,6 +333,7 @@ describe("fixPath", () => {
       platform: "darwin",
       readEnvironment,
       readLaunchctlPath: () => undefined,
+      userShell: "/bin/zsh",
       logWarning: () => undefined,
       cachePath,
       scheduleRefresh: (run) => {
@@ -373,6 +374,7 @@ describe("fixPath", () => {
       platform: "darwin",
       readEnvironment,
       readLaunchctlPath: () => undefined,
+      userShell: "/bin/zsh",
       logWarning: () => undefined,
       cachePath,
       scheduleRefresh: (run) => {
@@ -413,6 +415,7 @@ describe("fixPath", () => {
         throw new Error("spawnSync /bin/bash ETIMEDOUT");
       },
       readLaunchctlPath: () => undefined,
+      userShell: "/bin/bash",
       logWarning: () => undefined,
       cachePath,
       scheduleRefresh: () => undefined,

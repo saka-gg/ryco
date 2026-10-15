@@ -8,9 +8,14 @@ import {
   agentWorkflowMembers,
   isActiveSubagentStatus,
   summarizeAgentWorkflow,
+  workflowCardMembers,
   type AgentPanelModel,
+  type AgentWorkflowPhase,
   type RuntimeSubagent,
 } from "../../threadWorkspaceViewModel";
+
+/** Rows an expanded batch lists before deferring to the Agents panel. */
+export const AGENT_SPAWN_VISIBLE_LIMIT = 8;
 
 export interface AgentSpawnRef {
   /** Workflow coordinator taskId, or null for a direct-spawn batch. */
@@ -19,16 +24,23 @@ export interface AgentSpawnRef {
 }
 
 export interface AgentSpawnSummary {
-  /** The batch's agents in roster order (a workflow's members, never its coordinator). */
+  /** The batch's loaded agents in roster order (a workflow's members, never its coordinator). */
   readonly members: ReadonlyArray<RuntimeSubagent>;
+  /** What an expanded row lists: the most urgent members, kept in roster order. */
+  readonly visibleMembers: ReadonlyArray<RuntimeSubagent>;
+  /** Every agent in the batch, including a large run's members no longer loaded. */
   readonly agentCount: number;
   readonly workingCount: number;
   readonly failedCount: number;
   readonly live: boolean;
   readonly totalTokens: number;
   readonly workflowName: string | null;
+  readonly livePhase: AgentWorkflowPhase | null;
   /** The working agent that reported last: whose action the row shows. */
   readonly latestWorking: RuntimeSubagent | null;
+  /** The newest member a workflow coordinator named, for when none of its
+   * working members is loaded. */
+  readonly latestWorkflowActivity: string | null;
 }
 
 export function summarizeAgentSpawn(
@@ -53,6 +65,9 @@ export function summarizeAgentSpawn(
   );
   return {
     members,
+    visibleMembers: workflowGroup
+      ? workflowCardMembers(workflowGroup, AGENT_SPAWN_VISIBLE_LIMIT).visible
+      : members.slice(0, AGENT_SPAWN_VISIBLE_LIMIT),
     agentCount: Math.max(
       workflow?.memberCount ?? members.length,
       Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0),
@@ -69,6 +84,9 @@ export function summarizeAgentSpawn(
       workflow?.totalTokens ??
       members.reduce((sum, agent) => sum + (agent.usage?.totalTokens ?? 0), 0),
     workflowName: workflow?.name ?? null,
+    livePhase: workflow?.livePhase ?? null,
     latestWorking,
+    latestWorkflowActivity:
+      workflow?.live && workflowGroup ? workflowGroup.workflow.lastToolName : null,
   };
 }

@@ -453,6 +453,92 @@ describe("deriveAgentPanelModel", () => {
     expect(model.liveCount).toBe(0);
   });
 
+  it("keeps a large run's totals from the coordinator once member rows aged out", () => {
+    const roster = fold([
+      activity("task.progress", {
+        taskId: "wf-big",
+        taskType: "local_workflow",
+        workflowName: "recheck",
+        phases: [
+          {
+            index: 1,
+            title: "Audit",
+            memberCount: 263,
+            activeCount: 0,
+            settledCount: 263,
+            failedCount: 2,
+          },
+          {
+            index: 2,
+            title: "Verify",
+            memberCount: 263,
+            activeCount: 24,
+            settledCount: 151,
+            failedCount: 0,
+          },
+        ],
+      }),
+      // Only one verifier's rows are still retained.
+      activity("task.progress", {
+        taskId: "wf-big:wf:400",
+        title: "verify:x",
+        status: "running",
+        parentAgentId: "wf-big",
+        agentIndex: 400,
+        phaseIndex: 2,
+      }),
+    ]);
+
+    const group = deriveAgentPanelModel({ agents: roster }).workflows[0]!;
+    const summary = summarizeAgentWorkflow(group);
+
+    expect(group.phases.map((phase) => agentPhaseStatusText(phase))).toEqual([
+      "263 done",
+      "24 active · 151 done",
+    ]);
+    expect(group.phases[1]!.members.map((member) => member.id)).toEqual(["wf-big:wf:400"]);
+    expect(summary).toMatchObject({
+      memberCount: 526,
+      settledCount: 414,
+      workingCount: 24,
+      failedCount: 2,
+    });
+    expect(summary.livePhase?.title).toBe("Verify");
+  });
+
+  it("prefers retained members over a stale smaller tally", () => {
+    const roster = fold([
+      activity("task.progress", {
+        taskId: "wf-small",
+        taskType: "local_workflow",
+        phases: [
+          {
+            index: 0,
+            title: "Work",
+            memberCount: 1,
+            activeCount: 1,
+            settledCount: 0,
+            failedCount: 0,
+          },
+        ],
+      }),
+      ...["a", "b"].map((slot, agentIndex) =>
+        activity("task.progress", {
+          taskId: `wf-small:wf:${agentIndex}`,
+          title: slot,
+          status: "completed",
+          parentAgentId: "wf-small",
+          agentIndex,
+          phaseIndex: 0,
+        }),
+      ),
+    ]);
+
+    const phase = deriveAgentPanelModel({ agents: roster }).workflows[0]!.phases[0]!;
+
+    expect(phase).toMatchObject({ memberCount: 2, settledCount: 2, state: "done" });
+  });
+
   it("batches direct spawns by the turn that launched them", () => {
     const inTurn = (turnId: string | null, row: OrchestrationThreadActivity) =>
       ({ ...row, turnId }) as OrchestrationThreadActivity;
