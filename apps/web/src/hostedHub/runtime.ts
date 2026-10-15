@@ -21,6 +21,8 @@ import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket
 
 import {
   createWebHubRelaySocket,
+  createWebHubServerAuthenticatedRelaySocket,
+  isWebHubServerAuthenticatedRelayAvailable,
   isWebHubSessionOnline,
   probeWebHubSession,
   watchWebHostedHubSession,
@@ -90,6 +92,23 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
           ...input,
           e2ee: resolveWebRelayE2eeProvider(),
           createRelaySocket: createWebHubRelaySocket,
+        }),
+      // Hub session version 2: the Hub mints and consumes the node ticket for the account
+      // session itself, so the channel skips the HTTP ticket round trip and this tier never
+      // holds a ticket. The channel is otherwise the one above, E2EE machine included.
+      serverAuthenticatedRelayAvailable: isWebHubServerAuthenticatedRelayAvailable,
+      createServerAuthenticatedRelaySocket: (input) =>
+        new BrowserHostedRelaySocket({
+          url: input.url,
+          callbacks: input.callbacks,
+          relayCompression: input.relayCompression,
+          serverAuthenticated: true,
+          e2ee: resolveWebRelayE2eeProvider(),
+          createRelaySocket: () =>
+            createWebHubServerAuthenticatedRelaySocket({
+              nodeId: input.nodeId,
+              protocolMinor: input.protocolMinor,
+            }),
         }),
     },
     api,

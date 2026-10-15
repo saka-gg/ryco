@@ -307,9 +307,21 @@ const RELAY_E2EE_CLOSE_REASONS: Readonly<Record<RelayE2eeFailureKind, RelayClose
   send_path_unusable: "channel_rejected",
 };
 
-export interface RelayEngineOptions {
-  ticket: string;
-  ticketExpiresAt: number;
+/**
+ * How a logical channel authenticates to the relay.
+ *
+ * A client-held ticket is sent in the first frame. A server-authenticated stream (Hub session
+ * version 2 `openNode`) was authenticated by the Hub with a ticket it minted and consumed itself,
+ * so the engine sends no `auth` frame; everything after that — the authentication deadline, the
+ * relay `ready`, `channel.open`/`channel.accept` and the E2EE mode machine — is unchanged.
+ */
+export type RelayEngineAuthentication =
+  | { readonly ticket: string; readonly ticketExpiresAt: number }
+  | { readonly serverAuthenticated: true };
+
+export type RelayEngineOptions = RelayEngineAuthentication & RelayEngineChannelOptions;
+
+export interface RelayEngineChannelOptions {
   socket: RelaySocket;
   timers: RelayTimers;
   callbacks: HostedRelaySocketCallbacks;
@@ -477,6 +489,8 @@ export class HostedRelayEngine {
   #closed = false;
   #reported = false;
   #auth: Uint8Array | null = null;
+  /** The socket opened once; a second `open` is ignored, as the spent auth frame made it before. */
+  #opened = false;
   #authTimer: unknown = null;
   #flushTimer: unknown = null;
   #e2ee: RelayE2eeChannel | null = null;
@@ -535,20 +549,24 @@ export class HostedRelayEngine {
 
   constructor(options: RelayEngineOptions) {
     this.options = options;
-    if (options.ticketExpiresAt <= options.timers.now())
+    if ("ticket" in options) {
+      if (options.ticketExpiresAt <= options.timers.now())
+        throw new Error("Relay attempt is no longer valid.");
+      const ticket = decodeBase64Url(options.ticket);
+      try {
+        const encoded = encodeRelayFrame({
+          type: "auth",
+          peer: "client",
+          ...VERSION,
+          relayTicket: ticket,
+        });
+        if (!encoded.ok) throw new Error("Relay authentication could not be encoded.");
+        this.#auth = encoded.value;
+      } finally {
+        ticket.fill(0);
+      }
+    } else if (options.serverAuthenticated !== true) {
       throw new Error("Relay attempt is no longer valid.");
-    const ticket = decodeBase64Url(options.ticket);
-    try {
-      const encoded = encodeRelayFrame({
-        type: "auth",
-        peer: "client",
-        ...VERSION,
-        relayTicket: ticket,
-      });
-      if (!encoded.ok) throw new Error("Relay authentication could not be encoded.");
-      this.#auth = encoded.value;
-    } finally {
-      ticket.fill(0);
     }
     options.callbacks.onTransportStatus("connecting");
     options.socket.onOpen(() => this.#open());
@@ -820,17 +838,24 @@ export class HostedRelayEngine {
   }
 
   #open(): void {
-    if (this.#closed || !this.#auth) return;
+    if (this.#closed || this.#opened) return;
+    this.#opened = true;
     const auth = this.#auth;
     // Spend the frame before calling the socket: test transports and loopback
     // relays may synchronously re-enter this engine with `ready` or another
     // `open`. Neither may observe reusable ticket-bearing bytes.
     this.#auth = null;
     this.options.callbacks.onTransportStatus("authenticating");
+    // The same deadline either way: a server-authenticated stream that the Hub
+    // never answers fails exactly as an unanswered ticket would.
     this.#authTimer = this.options.timers.setTimeout(
       () => this.#fail(failure("authentication_timeout")),
       RELAY_AUTHENTICATION_DEADLINE_MS,
     );
+    // The Hub already authenticated a server-authenticated stream with a ticket
+    // it minted and consumed itself: there is no frame to send, and its first
+    // answer is the relay `ready`.
+    if (auth === null) return;
     try {
       this.options.socket.send(auth);
     } catch {

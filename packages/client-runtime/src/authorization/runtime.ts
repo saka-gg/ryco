@@ -7,7 +7,11 @@ import type {
   SessionCredentialsService,
 } from "../platform/index.ts";
 import { HostedHubApi } from "./api.ts";
-import type { HostedEarlyRelaySocket, HostedHubNode } from "./types.ts";
+import type {
+  HostedEarlyRelaySocket,
+  HostedHubNode,
+  HostedServerAuthenticatedRelayInput,
+} from "./types.ts";
 import type {
   HostedRelayFailure,
   HostedRelayTransportStatus,
@@ -94,6 +98,16 @@ export interface HostedRuntimeConfiguration {
    * {@link HostedEarlyRelaySocket}.
    */
   readonly openEarlyRelaySocket?: () => HostedEarlyRelaySocket | undefined;
+  /**
+   * Whether the account session can open a relay channel the Hub authenticates itself (Hub
+   * session version 2), so the attempt needs no HTTP ticket. Platforms without the account
+   * session omit it and keep buying tickets.
+   */
+  readonly serverAuthenticatedRelayAvailable?: () => boolean;
+  /** Open such a channel; required beside {@link serverAuthenticatedRelayAvailable}. */
+  readonly createServerAuthenticatedRelaySocket?: (
+    input: HostedServerAuthenticatedRelayInput,
+  ) => unknown;
   readonly createRelaySocket: (input: {
     readonly url: string;
     readonly ticket: string;

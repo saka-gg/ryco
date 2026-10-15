@@ -2162,3 +2162,93 @@ describe("HostedRelayEngine payload compression", () => {
     expect(calls.intercepted).toEqual([bigJson("legacy")]);
   });
 });
+
+describe("server-authenticated channels (Hub session version 2)", () => {
+  function createServerAuthenticated(callbackSet = callbacks(), timers = realTimers()) {
+    const socket = new MockRelaySocket();
+    const events = { onOpen: vi.fn(), onData: vi.fn(), onError: vi.fn(), onClose: vi.fn() };
+    const engine = new HostedRelayEngine({
+      serverAuthenticated: true,
+      socket,
+      timers,
+      callbacks: callbackSet,
+      events,
+    });
+    return { engine, socket, callbacks: callbackSet, events };
+  }
+
+  it("sends no authentication frame and opens on the relay's ready, open and accept", () => {
+    const { socket, callbacks: handlers, events } = createServerAuthenticated();
+    socket.open();
+    expect(socket.sent).toEqual([]);
+    expect(handlers.onTransportStatus).toHaveBeenLastCalledWith("authenticating");
+    socket.frame({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    expect(handlers.onTransportStatus).toHaveBeenLastCalledWith("opening-channel");
+    socket.frame({
+      type: "channel.open",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+    });
+    socket.frame({ type: "channel.accept", ...VERSION, channelId: CHANNEL_ID });
+    expect(events.onOpen).toHaveBeenCalledOnce();
+    expect(handlers.onRole).toHaveBeenCalledWith("operator");
+    // Nothing the client sent before the channel opened carried authentication.
+    expect(sentFrames(socket).some((frame) => frame.type === "auth")).toBe(false);
+  });
+
+  it("keeps the five-second authentication deadline and fails when the Hub never answers", () => {
+    vi.useFakeTimers();
+    const handlers = callbacks();
+    const { socket, events } = createServerAuthenticated(handlers);
+    socket.open();
+    vi.advanceTimersByTime(4_999);
+    expect(handlers.onFailure).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(handlers.onFailure).toHaveBeenCalledWith({
+      kind: "authentication",
+      retryable: true,
+      closeReason: "authentication_timeout",
+    });
+    expect(events.onClose).toHaveBeenCalled();
+    expect(socket.sent.every((bytes) => decodeRelayFrame(bytes).ok)).toBe(true);
+  });
+
+  it("clears the deadline once the relay answers ready", () => {
+    vi.useFakeTimers();
+    const handlers = callbacks();
+    const { socket } = createServerAuthenticated(handlers);
+    socket.open();
+    socket.frame({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    vi.advanceTimersByTime(5_000);
+    expect(handlers.onFailure).not.toHaveBeenCalled();
+  });
+
+  it("reports a Hub refusal on the stream exactly as a refused ticket", () => {
+    const handlers = callbacks();
+    const { socket } = createServerAuthenticated(handlers);
+    socket.open();
+    socket.frame({
+      type: "error",
+      ...VERSION,
+      code: "rate_limited",
+      fatal: true,
+      retryAfterMs: 1_000,
+    });
+    expect(handlers.onFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "rate-limited", retryable: true, retryAfterMs: 1_000 }),
+    );
+  });
+
+  it("ignores a duplicate open", () => {
+    vi.useFakeTimers();
+    const handlers = callbacks();
+    const { socket } = createServerAuthenticated(handlers);
+    socket.open();
+    socket.open();
+    expect(
+      handlers.onTransportStatus.mock.calls.filter(([status]) => status === "authenticating"),
+    ).toHaveLength(1);
+  });
+});

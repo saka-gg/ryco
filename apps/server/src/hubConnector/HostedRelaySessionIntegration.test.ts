@@ -102,6 +102,8 @@ const {
 } = await loadHostedWebTestModules();
 
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
+const ACCOUNT_ID = `acct_${"a".repeat(22)}`;
+const SESSION_ID = `sess_${"s".repeat(22)}`;
 const CHANNEL_ID = `ch_${"c".repeat(22)}` as RelayChannelId;
 const testGlobals = globalThis as unknown as {
   window?: unknown;
@@ -134,26 +136,68 @@ class PhysicalRelaySocket extends EventTarget {
   readonly activeStreams = new Set<number>();
   private streamId: number | null = null;
   private readonly registry: RelayChannelRegistry;
+  /**
+   * The session version this simulated Hub speaks. Version 1 is today's Hub: it ignores the
+   * client's subprotocol offer and answers version 1. Version 2 negotiates the offer.
+   */
+  readonly hubVersion: 1 | 2;
+  readonly negotiated: 1 | 2;
 
-  constructor(registry: RelayChannelRegistry) {
+  constructor(registry: RelayChannelRegistry, hubVersion: 1 | 2, protocols?: string | string[]) {
     super();
     this.registry = registry;
+    this.hubVersion = hubVersion;
+    const offered = [protocols ?? []].flat().includes("ryco.hub-session.v2");
+    this.negotiated = hubVersion === 2 && offered ? 2 : 1;
     physicalSockets.push(this);
   }
 
   open(): void {
     this.readyState = PhysicalRelaySocket.OPEN;
     this.dispatchEvent(new Event("open"));
-    this.deliverOuter({ type: "ready", protocolVersion: 1, maxChannels: 8 });
+    this.deliverOuter(
+      this.negotiated === 2
+        ? {
+            type: "ready",
+            protocolVersion: 2,
+            maxChannels: 8,
+            accountId: ACCOUNT_ID,
+            sessionId: SESSION_ID,
+          }
+        : { type: "ready", protocolVersion: 1, maxChannels: 8 },
+    );
+  }
+
+  /** What the Hub does once a stream's ticket is consumed: relay `ready`, then `channel.open`. */
+  private authenticateStream(): void {
+    this.deliver({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
+    const openFrame: RelayFrame = {
+      type: "channel.open",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      capability: "ryco.rpc",
+      effectiveRole: "operator",
+    };
+    this.deliver(openFrame);
+    void this.registry.handle(openFrame);
   }
 
   send(value: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-    const outer = decodeHubSessionFrame(toBytes(value));
+    // A version 1 Hub decodes with the version 1 codec: an `openNode` would fail closed here.
+    const outer = decodeHubSessionFrame(toBytes(value), { protocolVersion: this.negotiated });
     if (!outer.ok) throw new Error("Hosted client emitted an invalid Hub session envelope.");
     this.receivedOuterFrames.push(outer.value);
     if (outer.value.type === "open") {
       this.streamId = outer.value.streamId;
       this.activeStreams.add(outer.value.streamId);
+      return;
+    }
+    if (outer.value.type === "openNode") {
+      // The Hub minted and consumed the ticket for this session itself.
+      this.streamId = outer.value.streamId;
+      this.activeStreams.add(outer.value.streamId);
+      // A network answer: never inside the client's own `send`.
+      queueMicrotask(() => this.authenticateStream());
       return;
     }
     if (outer.value.type === "close") {
@@ -172,16 +216,7 @@ class PhysicalRelaySocket extends EventTarget {
     const frame = decoded.value;
     this.receivedFromClient.push(frame);
     if (frame.type === "auth") {
-      this.deliver({ type: "ready", ...VERSION, limits: RELAY_INITIAL_LIMITS });
-      const openFrame: RelayFrame = {
-        type: "channel.open",
-        ...VERSION,
-        channelId: CHANNEL_ID,
-        capability: "ryco.rpc",
-        effectiveRole: "operator",
-      };
-      this.deliver(openFrame);
-      void this.registry.handle(openFrame);
+      this.authenticateStream();
       return;
     }
     void this.registry.handle(frame);
@@ -239,6 +274,7 @@ interface HostedShellSession {
   readonly sessionScopes: Scope.Closeable[];
   /** Every node-to-client data payload, reassembled into whole messages. */
   readonly nodeMessages: Uint8Array[];
+  readonly issueRelayTicket: { readonly mock: { readonly calls: readonly unknown[] } };
 }
 
 /**
@@ -251,6 +287,8 @@ async function openHostedShellSession(options: {
     readonly snapshotDelivery?: "paged";
   }) => Stream.Stream<unknown>;
   readonly compressResponses?: boolean;
+  /** The Hub session protocol the fake Hub negotiates; 1 is today's Hub. */
+  readonly hubVersion?: 1 | 2;
 }): Promise<HostedShellSession> {
   const handlerLayer = WsRpcGroup.toLayer(
     Effect.succeed(
@@ -306,9 +344,10 @@ async function openHostedShellSession(options: {
       },
     },
   });
+  const hubVersion = options.hubVersion ?? 1;
   testGlobals.WebSocket = class extends PhysicalRelaySocket {
-    constructor() {
-      super(registry);
+    constructor(_url: string, protocols?: string | string[]) {
+      super(registry, hubVersion, protocols);
       queueMicrotask(() => this.open());
     }
   };
@@ -333,15 +372,15 @@ async function openHostedShellSession(options: {
   useHostedHubStore.setState({
     accountStatus: "authenticated",
     account: {
-      id: "account-public-test",
+      id: ACCOUNT_ID,
       displayName: "Test",
       role: "owner",
       createdAt: 1,
       disabledAt: null,
     },
     session: {
-      id: "session-public-test",
-      accountId: "account-public-test",
+      id: SESSION_ID,
+      accountId: ACCOUNT_ID,
       createdAt: 1,
       expiresAt: Date.now() + 60_000,
       lastSeenAt: 1,
@@ -355,7 +394,7 @@ async function openHostedShellSession(options: {
     generation: 1,
   });
   stopWatchingSession = watchWebHostedHubSession();
-  vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+  const issueRelayTicket = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
     ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
     expiresAt: Date.now() + 60_000,
   });
@@ -367,7 +406,15 @@ async function openHostedShellSession(options: {
   const client = createWsRpcClient(transport);
   const received: unknown[] = [];
   const unsubscribe = client.orchestration.subscribeShell((item) => received.push(item));
-  return { received, unsubscribe, client, registry, sessionScopes, nodeMessages };
+  return {
+    received,
+    unsubscribe,
+    client,
+    registry,
+    sessionScopes,
+    nodeMessages,
+    issueRelayTicket,
+  };
 }
 
 async function closeHostedShellSession(session: HostedShellSession): Promise<void> {
@@ -448,103 +495,135 @@ function largeShellSnapshot(threadCount: number) {
 }
 
 describe("hosted relay session integration", () => {
-  it("streams the initial shell snapshot, acknowledges it, and receives a later event", async () => {
-    const snapshot = {
-      kind: "snapshot" as const,
-      snapshot: {
-        snapshotSequence: 0,
-        projects: [],
-        worktrees: [],
-        threads: [],
-        updatedAt: "2026-07-18T00:00:00.000Z",
-      },
-    };
-    const laterEvent = {
-      kind: "project-removed" as const,
-      sequence: 1,
-      projectId: ProjectId.make("project-public-test"),
-    };
-    const session = await openHostedShellSession({
-      subscribeShell: () =>
-        Stream.concat(
-          Stream.succeed(snapshot),
+  // Version 1 is today's Hub: the new client still connects, over an HTTP ticket. Version 2
+  // authenticates the stream itself and the client requests no ticket at all.
+  it.each([1, 2] as const)(
+    "streams the initial shell snapshot, acknowledges it, and receives a later event (Hub session v%i)",
+    async (hubVersion) => {
+      const snapshot = {
+        kind: "snapshot" as const,
+        snapshot: {
+          snapshotSequence: 0,
+          projects: [],
+          worktrees: [],
+          threads: [],
+          updatedAt: "2026-07-18T00:00:00.000Z",
+        },
+      };
+      const laterEvent = {
+        kind: "project-removed" as const,
+        sequence: 1,
+        projectId: ProjectId.make("project-public-test"),
+      };
+      const session = await openHostedShellSession({
+        hubVersion,
+        subscribeShell: () =>
           Stream.concat(
-            Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
-            Stream.never,
+            Stream.succeed(snapshot),
+            Stream.concat(
+              Stream.fromEffect(Effect.sleep(10).pipe(Effect.as(laterEvent))),
+              Stream.never,
+            ),
           ),
-        ),
-    });
+      });
 
-    await vi.waitFor(() => expect(session.received).toEqual([snapshot, laterEvent]));
+      await vi.waitFor(() => expect(session.received).toEqual([snapshot, laterEvent]));
 
-    expect(useHostedHubStore.getState()).toMatchObject({
-      transportStatus: "online",
-      sessionStatus: "synchronizing",
-      effectiveRole: "operator",
-    });
-    const activePhysicalSocket = physicalSockets.at(-1);
-    if (!activePhysicalSocket) throw new Error("Expected the physical relay socket to open.");
-    expect(
-      activePhysicalSocket.receivedFromClient.filter(
-        (frame) => frame.type === "data" && frame.channelId === CHANNEL_ID,
-      ).length,
-    ).toBeGreaterThanOrEqual(2);
-    session.unsubscribe();
-    await session.client.dispose();
-    await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
-    expect(physicalSockets).toHaveLength(1);
-    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
-    expect(
-      activePhysicalSocket.receivedOuterFrames.filter((frame) => frame.type === "open"),
-    ).toHaveLength(1);
-    expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
-      true,
-    );
-    stopWatchingSession?.();
-    stopWatchingSession = undefined;
-    expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
-    await closeHostedShellSession(session);
-  });
+      expect(useHostedHubStore.getState()).toMatchObject({
+        transportStatus: "online",
+        sessionStatus: "synchronizing",
+        effectiveRole: "operator",
+      });
+      const activePhysicalSocket = physicalSockets.at(-1);
+      if (!activePhysicalSocket) throw new Error("Expected the physical relay socket to open.");
+      expect(
+        activePhysicalSocket.receivedFromClient.filter(
+          (frame) => frame.type === "data" && frame.channelId === CHANNEL_ID,
+        ).length,
+      ).toBeGreaterThanOrEqual(2);
+      session.unsubscribe();
+      await session.client.dispose();
+      await vi.waitFor(() => expect(activePhysicalSocket.activeStreams.size).toBe(0));
+      expect(physicalSockets).toHaveLength(1);
+      expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.OPEN);
+      expect(activePhysicalSocket.negotiated).toBe(hubVersion);
+      const opens = activePhysicalSocket.receivedOuterFrames.filter(
+        (frame) => frame.type === "open" || frame.type === "openNode",
+      );
+      expect(opens).toHaveLength(1);
+      if (hubVersion === 1) {
+        // Today's Hub: one HTTP ticket, presented in the stream's relay auth frame.
+        expect(session.issueRelayTicket.mock.calls).toHaveLength(1);
+        expect(opens[0]!.type).toBe("open");
+        expect(
+          activePhysicalSocket.receivedFromClient.filter((f) => f.type === "auth"),
+        ).toHaveLength(1);
+      } else {
+        // One fewer POST /api/relay/tickets per connect, and no ticket on the client at all.
+        expect(session.issueRelayTicket.mock.calls).toHaveLength(0);
+        expect(opens[0]).toMatchObject({
+          type: "openNode",
+          nodeId: "node_aaaaaaaaaaaaaaaaaaaaaa",
+          capability: "ryco.rpc",
+          protocolMajor: 1,
+          protocolMinor: 3,
+        });
+        expect(activePhysicalSocket.receivedFromClient.some((f) => f.type === "auth")).toBe(false);
+      }
+      expect(activePhysicalSocket.receivedOuterFrames.some((frame) => frame.type === "close")).toBe(
+        true,
+      );
+      stopWatchingSession?.();
+      stopWatchingSession = undefined;
+      expect(activePhysicalSocket.readyState).toBe(PhysicalRelaySocket.CLOSED);
+      await closeHostedShellSession(session);
+    },
+  );
 
-  it("carries a large paged shell snapshot compressed end to end and delivers it intact", async () => {
-    const snapshot = largeShellSnapshot(2_000);
-    const session = await openHostedShellSession({
-      subscribeShell: (input) => Stream.concat(shellItems(snapshot, input), Stream.never),
-      compressResponses: true,
-    });
+  // A Hub-authenticated (v2) stream carries the same compressed payloads: the Hub never sees them.
+  it.each([1, 2] as const)(
+    "carries a large paged shell snapshot compressed end to end and delivers it intact (Hub session v%i)",
+    async (hubVersion) => {
+      const snapshot = largeShellSnapshot(2_000);
+      const session = await openHostedShellSession({
+        hubVersion,
+        subscribeShell: (input) => Stream.concat(shellItems(snapshot, input), Stream.never),
+        compressResponses: true,
+      });
 
-    await vi.waitFor(() => expect(session.received).toHaveLength(1), { timeout: 5_000 });
-    const delivered = session.received[0] as typeof snapshot;
-    expect(delivered.kind).toBe("snapshot");
-    expect(delivered.snapshot.threads.map((thread) => thread.id)).toEqual(
-      snapshot.snapshot.threads.map((thread) => thread.id),
-    );
-    expect(delivered.snapshot.projects[0]?.scripts[0]?.command).toBe(SECRET_SCRIPT_COMMAND);
+      await vi.waitFor(() => expect(session.received).toHaveLength(1), { timeout: 5_000 });
+      const delivered = session.received[0] as typeof snapshot;
+      expect(delivered.kind).toBe("snapshot");
+      expect(delivered.snapshot.threads.map((thread) => thread.id)).toEqual(
+        snapshot.snapshot.threads.map((thread) => thread.id),
+      );
+      expect(delivered.snapshot.projects[0]?.scripts[0]?.command).toBe(SECRET_SCRIPT_COMMAND);
 
-    // The browser client advertised, so the node compressed every thread page.
-    // Each page is an acknowledged chunk, so getting past the first proves the
-    // split first message (its `snapshot-begin` alone, then its compressed
-    // threads) was acknowledged exactly once.
-    const plainBytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
-    const compressed = session.nodeMessages.filter(isCompressedRelayPayload);
-    expect(compressed.length).toBeGreaterThan(2);
-    const wire = compressed.reduce((sum, frame) => sum + frame.byteLength, 0);
-    expect(wire).toBeLessThan(plainBytes / 5);
-    // Project data travelled uncompressed, in a message of its own.
-    const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-    const withProjects = session.nodeMessages.filter((bytes) => text(bytes).includes("hunter2"));
-    expect(withProjects).toHaveLength(1);
-    expect(isCompressedRelayPayload(withProjects[0]!)).toBe(false);
-    expect(text(withProjects[0]!)).not.toContain('"snapshot-threads"');
-    const physical = physicalSockets.at(-1)!;
-    const advertised = physical.receivedFromClient.filter(
-      (frame) =>
-        frame.type === "data" &&
-        hasRelayCompressionAdvertisement(stripRelayChunkCapabilityPrelude(frame.payload).message),
-    );
-    expect(advertised.length).toBeGreaterThan(0);
-    await closeHostedShellSession(session);
-  });
+      // The browser client advertised, so the node compressed every thread page.
+      // Each page is an acknowledged chunk, so getting past the first proves the
+      // split first message (its `snapshot-begin` alone, then its compressed
+      // threads) was acknowledged exactly once.
+      const plainBytes = new TextEncoder().encode(JSON.stringify(snapshot)).byteLength;
+      const compressed = session.nodeMessages.filter(isCompressedRelayPayload);
+      expect(compressed.length).toBeGreaterThan(2);
+      const wire = compressed.reduce((sum, frame) => sum + frame.byteLength, 0);
+      expect(wire).toBeLessThan(plainBytes / 5);
+      // Project data travelled uncompressed, in a message of its own.
+      const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+      const withProjects = session.nodeMessages.filter((bytes) => text(bytes).includes("hunter2"));
+      expect(withProjects).toHaveLength(1);
+      expect(isCompressedRelayPayload(withProjects[0]!)).toBe(false);
+      expect(text(withProjects[0]!)).not.toContain('"snapshot-threads"');
+      const physical = physicalSockets.at(-1)!;
+      const advertised = physical.receivedFromClient.filter(
+        (frame) =>
+          frame.type === "data" &&
+          hasRelayCompressionAdvertisement(stripRelayChunkCapabilityPrelude(frame.payload).message),
+      );
+      expect(advertised.length).toBeGreaterThan(0);
+      await closeHostedShellSession(session);
+    },
+  );
 
   it("sends plain bytes to a client that cannot inflate, from the same compressing node", async () => {
     // An old client: it never advertises, so the node must not compress for it.

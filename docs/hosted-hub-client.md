@@ -199,7 +199,8 @@ and SSH-assisted routing keep their current URL shapes.
 
 Refresh, deep links, and history restore the routed node strictly through the ordered fail-closed
 pipeline: restore the Hub session → refresh the authorized directory → validate the routed node id
-against the directory → issue a fresh one-use relay ticket → establish the relay channel → validate
+against the directory → authorize a fresh one-use relay ticket (bought over HTTP, or minted and
+consumed by the Hub itself on a version 2 account session) → establish the relay channel → validate
 the node's signed capability advertisement and run the browser handshake, which locks the channel
 either encrypted or legacy plaintext → synchronize canonical node state → only then enable
 mutations. No application payload leaves the tab before that lock, and the lock decides which of
@@ -239,13 +240,38 @@ feature components do not know whether their ordered bytes use the direct WebSoc
 transport, or Hub relay.
 
 The browser establishes one persistent account subscription independently of node selection, using
-the [Hub session protocol](./hub-session-protocol.md). For every logical node connection attempt the adapter requests the existing grant-free short-lived ticket
-over authenticated Hub HTTP. A ticket exists only in a per-tab in-memory attempt object, is consumed
-once, and is discarded before another attempt. Cookie/browser sessions cannot request native ticket
-mode, and a response that mixes browser and native fields is rejected. The physical Hub WebSocket has no
-query credentials, cookies added by application code, or Authorization header. Each logical stream's first relay frame
-is canonical client authentication and must complete within five seconds. Native
-account-grant attempts negotiate relay 1.3 through the separate DPoP-bound API described above.
+the [Hub session protocol](./hub-session-protocol.md). Every logical node connection attempt is
+authorized by its own grant-free, short-lived, single-use ticket, in one of two custodies:
+
+- **Server-minted (Hub session version 2).** When the account socket is ready, negotiated version 2,
+  and is not under a liveness probe, the attempt sends no HTTP request. It opens the stream with
+  `openNode`; the Hub re-authorizes the socket's session, then mints and consumes the ticket for that
+  session in one operation under exactly the checks of the HTTP endpoint, and authenticates the stream
+  itself. The ticket never leaves the Hub: the client never sees, stores, or sends it, and the stream
+  carries no relay `auth` frame. The engine keeps the same five-second authentication deadline for
+  the relay's `ready`. Server-minted opens are bound to the restored session: the client offers
+  them only while the socket's `ready` names exactly the account and browser session it restored,
+  and names that session in every `openNode`. A mismatch, or a session-level refusal of such a
+  stream, goes back to the hosted lifecycle owner's revalidation (at most once per 30 seconds per
+  session). That revalidation expires a session the Hub no longer accepts, as an HTTP `401` would,
+  runs the full resume for a different session of the same account, and changes nothing for an
+  unchanged session, leaving the transport's backoff in charge.
+- **HTTP ticket (version 1, and every other tier).** Otherwise the adapter requests the ticket over
+  authenticated Hub HTTP (`POST /api/relay/tickets`, CSRF-protected). It exists only in a per-tab
+  in-memory attempt object, is consumed once, and is discarded before another attempt. The stream's
+  first relay frame is canonical client authentication carrying it and must complete within five
+  seconds. This is the path against a version 1 Hub, before the account socket is ready, while it is
+  under a probe, and for a stream whose account socket was replaced by one that negotiated version 1
+  (that stream closes retryably and the next attempt buys a ticket). The native app and the desktop
+  shell keep this path: they do not use the browser account socket.
+
+The choice is made per attempt, after socket preparation; nothing else differs. E2EE capability
+validation, the current shell snapshot gate, and generation fencing apply identically to both.
+Cookie/browser sessions cannot request native ticket mode, and a response that mixes browser and
+native fields is rejected. The physical Hub WebSocket has no query credentials, cookies added by
+application code, or Authorization header; its only client-chosen header is the subprotocol that
+advertises the session version. Native account-grant attempts negotiate relay 1.3 through the
+separate DPoP-bound API described above.
 
 The adapter consumes canonical `ready`, authorized `channel.open`, `channel.accept/reject`, data,
 flow pause/resume, ping/pong, error, and close frames. Relay frames, relay ordering, and the RPC

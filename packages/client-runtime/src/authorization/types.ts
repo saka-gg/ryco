@@ -427,3 +427,29 @@ export interface HostedRelayFailure {
 export interface HostedEarlyRelaySocket {
   readonly discard: () => void;
 }
+
+/** The relay attempt callbacks a platform relay socket reports through. */
+export interface HostedRelayAttemptCallbacks {
+  readonly onTransportStatus: (status: HostedRelayTransportStatus) => void;
+  readonly onSessionStatus: (status: HostedRycoSessionStatus) => void;
+  readonly onRole: (role: RelayEffectiveRole | null) => void;
+  readonly onFailure: (failure: HostedRelayFailure) => void;
+}
+
+/**
+ * A relay channel the Hub authenticates itself over the account session (Hub session version 2
+ * `openNode`): the Hub mints and consumes the node ticket for the session, so the client never
+ * holds one. Everything after authentication is the ordinary relay channel.
+ */
+export interface HostedServerAuthenticatedRelayInput {
+  readonly url: string;
+  readonly nodeId: string;
+  readonly protocolMinor: 2 | 3;
+  readonly preparedSocketContext?: unknown;
+  readonly callbacks: HostedRelayAttemptCallbacks;
+  /**
+   * Whether this attempt may use relay payload compression (§4.6), exactly as for a
+   * ticket-authenticated attempt.
+   */
+  readonly relayCompression: boolean;
+}

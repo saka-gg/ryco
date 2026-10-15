@@ -678,4 +678,103 @@ describe("BrowserHostedRelaySocket multiplexed carrier", () => {
     received[0]!.fill(0);
     expect([...new Uint8Array(inbound)]).toEqual([0, 0, 0]);
   });
+
+  it("opens a server-authenticated channel on a version 2 account session with no ticket", async () => {
+    const physical = new MockWebSocket();
+    const createSocket = vi.fn(
+      (_url: string, _protocols?: readonly string[]) => physical as unknown as WebSocket,
+    );
+    const manager = new HostedHubSession({
+      expectedIdentity: {
+        accountId: `acct_${"a".repeat(22)}`,
+        sessionId: `sess_${"s".repeat(22)}`,
+      },
+      createSocket: (protocols) =>
+        createBrowserRelaySocket(
+          hostedHubSessionWebSocketUrl(),
+          createSocket,
+          undefined,
+          protocols,
+        ),
+      timers: {
+        now: () => Date.now(),
+        setTimeout: (f, ms) => setTimeout(f, ms),
+        clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+        queueMicrotask,
+      },
+    });
+    manager.start();
+    expect(createSocket).toHaveBeenCalledExactlyOnceWith(
+      "wss://hub.example.test/v1/relay/session",
+      ["ryco.hub-session.v2"],
+    );
+    physical.open();
+    const ready = encodeHubSessionFrame({
+      type: "ready",
+      protocolVersion: 2,
+      maxChannels: 8,
+      accountId: `acct_${"a".repeat(22)}`,
+      sessionId: `sess_${"s".repeat(22)}`,
+    });
+    if (!ready.ok) throw new Error("invalid test ready");
+    physical.deliver(Uint8Array.from(ready.value).buffer);
+    expect(manager.serverMintedOpenAvailable()).toBe(true);
+    class Peer extends MockWebSocket {
+      override frame(frame: RelayFrame) {
+        const inner = encodeRelayFrame(frame);
+        if (!inner.ok) throw new Error("invalid test relay");
+        const outer = encodeHubSessionFrame({ type: "data", streamId: 1, payload: inner.value });
+        if (!outer.ok) throw new Error("invalid test outer");
+        physical.deliver(Uint8Array.from(outer.value).buffer);
+      }
+    }
+    try {
+      const facade = new BrowserHostedRelaySocket({
+        url: hostedRelayWebSocketUrl(),
+        serverAuthenticated: true,
+        callbacks: callbacks(),
+        createRelaySocket: () =>
+          manager.createSocket({
+            serverMinted: { nodeId: `node_${"n".repeat(22)}` as never, protocolMinor: 3 },
+          }),
+      });
+      await Promise.resolve();
+      authenticateRelay(new Peer());
+      expect(facade.readyState).toBe(WebSocket.OPEN);
+      const outer = physical.sent.map((bytes) => {
+        const frame = decodeHubSessionFrame(new Uint8Array(bytes), { protocolVersion: 2 });
+        if (!frame.ok) throw new Error("invalid outer frame");
+        return frame.value;
+      });
+      expect(outer[0]).toEqual({
+        type: "openNode",
+        streamId: 1,
+        nodeId: `node_${"n".repeat(22)}`,
+        sessionId: `sess_${"s".repeat(22)}`,
+        capability: "ryco.rpc",
+        protocolMajor: 1,
+        protocolMinor: 3,
+      });
+      // No relay frame this tier sent carries a ticket: the Hub authenticated the stream.
+      for (const frame of outer) {
+        if (frame.type !== "data") continue;
+        const inner = decodeRelayFrame(frame.payload);
+        expect(inner.ok && inner.value.type).not.toBe("auth");
+      }
+      facade.close();
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it("refuses a server-authenticated channel that is not a stream of the account session", () => {
+    expect(
+      () =>
+        new BrowserHostedRelaySocket({
+          url: hostedRelayWebSocketUrl(),
+          serverAuthenticated: true,
+          callbacks: callbacks(),
+        } as never),
+    ).toThrow("no longer valid");
+  });
 });
