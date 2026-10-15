@@ -6,6 +6,7 @@ import {
   type OrchestrationReadModel,
   ProviderInstanceId,
   type ServerConfig,
+  ThreadId,
   type TurnId,
   WS_METHODS,
 } from "@ryco/contracts";
@@ -34,6 +35,10 @@ import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import {
   setupChatViewBrowserSuite,
+  addThreadToSnapshot,
+  serverThreadPath,
+  threadKeyFor,
+  waitForURL,
   COMPACT_FOOTER_VIEWPORT,
   DEFAULT_VIEWPORT,
   LOCAL_ENVIRONMENT_ID,
@@ -1001,6 +1006,52 @@ describe("ChatView Composer (full app)", () => {
       await waitForComposerText("'quoted'");
       await pressComposerUndo();
       await waitForComposerText("quoted");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("never undoes another thread's prompt into the thread opened after it", async () => {
+    const otherThreadId = ThreadId.make("thread-undo-other");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: addThreadToSnapshot(
+        createSnapshotForTargetUser({
+          targetMessageId: "msg-user-undo-switch" as MessageId,
+          targetText: "undo across threads",
+        }),
+        otherThreadId,
+      ),
+    });
+
+    try {
+      await waitForComposerEditor();
+      await page.getByTestId("composer-editor").fill("draft for thread A");
+      await waitForComposerText("draft for thread A");
+
+      // The view (and its editor) is reused for the next thread.
+      await mounted.router.navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: otherThreadId },
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath(otherThreadId),
+        "The other thread should open.",
+      );
+      await vi.waitFor(async () =>
+        expect((await waitForComposerEditor()).textContent ?? "").toBe(""),
+      );
+
+      await pressComposerUndo();
+      await waitForLayout();
+      const otherKey = threadKeyFor(otherThreadId);
+      expect(useComposerDraftStore.getState().draftsByThreadKey[otherKey]?.prompt ?? "").toBe("");
+      expect((await waitForComposerEditor()).textContent ?? "").toBe("");
+      // Thread A's draft is untouched.
+      expect(useComposerDraftStore.getState().draftsByThreadKey[THREAD_KEY]?.prompt).toBe(
+        "draft for thread A",
+      );
     } finally {
       await mounted.cleanup();
     }

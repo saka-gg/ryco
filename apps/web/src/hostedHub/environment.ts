@@ -10,6 +10,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { setModelPickerOpen } from "../modelPickerOpenState";
 import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
@@ -69,6 +70,7 @@ export function clearWebHostedAccountScopedState(): void {
     stickyModelSelectionByProvider: {},
     stickyActiveProvider: null,
   });
+  forgetRememberedProjectPreferences();
   useTerminalStateStore.setState({
     terminalStateByThreadKey: {},
     terminalLaunchContextByThreadKey: {},

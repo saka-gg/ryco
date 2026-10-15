@@ -1,6 +1,7 @@
 import { readEnvironmentConnection } from "../environments/runtime";
 import { isHostedHubMode } from "../env";
 import {
+  hasRememberedProjectPreferences,
   readAndRememberProjectPreferences,
   readRememberedProjectPreferences,
 } from "./newDraftDefaults";
@@ -166,6 +167,15 @@ export interface SendTurnComposerDraftDeps {
     target: ComposerThreadTarget,
     context: { tokenMode: AgentTokenMode },
   ) => void;
+  /** What the draft store holds for a target: read once the view no longer shows it. */
+  readComposerDraftContent: (target: ComposerThreadTarget) => ComposerDraftContent | null;
+}
+
+/** A composer's sendable content: its prompt, attachments and terminal contexts. */
+export interface ComposerDraftContent {
+  readonly prompt: string;
+  readonly images: ReadonlyArray<ComposerImageAttachment>;
+  readonly terminalContexts: ReadonlyArray<TerminalContextDraft>;
 }
 
 export interface SendTurnDispatchDeps {
@@ -199,6 +209,14 @@ export interface SendTurnPersistSettingsDeps {
 
 export interface SendTurnReadComposer {
   readComposer: () => ChatComposerHandle | null;
+  /**
+   * Whether the view this send started from still shows its thread. ChatView
+   * follows thread navigation, so the live composer (refs, handle), the
+   * timeline's optimistic messages and its scroll are this send's only while it
+   * does; afterwards the send restores or clears its draft in the store alone.
+   * Absent: always (a send with no view of its own).
+   */
+  showsSendThread?: () => boolean;
 }
 
 export interface ExecuteChatSendTurnInput {
@@ -271,6 +289,31 @@ export type ComposerContentRefs = Pick<
   "promptRef" | "composerImagesRef" | "composerTerminalContextsRef"
 >;
 
+/** Whether a stored draft still holds exactly what a send took from it (by identity of each item). */
+function composerDraftContentMatches(
+  content: ComposerDraftContent | null,
+  sent: ComposerDraftContent,
+): boolean {
+  const sameIds = (
+    left: ReadonlyArray<{ readonly id: string }>,
+    right: ReadonlyArray<{ readonly id: string }>,
+  ) => left.length === right.length && left.every((item, index) => item.id === right[index]?.id);
+  return (
+    (content?.prompt ?? "") === sent.prompt &&
+    sameIds(content?.images ?? [], sent.images) &&
+    sameIds(content?.terminalContexts ?? [], sent.terminalContexts)
+  );
+}
+
+function composerDraftContentHasContent(content: ComposerDraftContent | null): boolean {
+  return (
+    content !== null &&
+    (content.prompt.length !== 0 ||
+      content.images.length !== 0 ||
+      content.terminalContexts.length !== 0)
+  );
+}
+
 export function composerRefsHaveContent(refs: ComposerContentRefs): boolean {
   return (
     refs.promptRef.current.length !== 0 ||
@@ -298,17 +341,23 @@ export function restoreComposerContent(input: {
   prompt: string;
   images: ComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
+  /** False once the view shows another thread: only the draft store is written. */
+  live?: boolean;
 }): void {
   const { refs, composerHandle, draft, prompt, images, terminalContexts } = input;
+  const live = input.live ?? true;
 
-  refs.promptRef.current = prompt;
-  refs.composerImagesRef.current = images;
-  refs.composerTerminalContextsRef.current = terminalContexts;
+  if (live) {
+    refs.promptRef.current = prompt;
+    refs.composerImagesRef.current = images;
+    refs.composerTerminalContextsRef.current = terminalContexts;
+  }
 
   draft.setComposerDraftPrompt(draft.composerDraftTarget, prompt);
   draft.addComposerDraftImages(draft.composerDraftTarget, images);
   draft.setComposerDraftTerminalContexts(draft.composerDraftTarget, terminalContexts);
 
+  if (!live) return;
   composerHandle.readComposer()?.resetCursorState({
     cursor: collapseExpandedComposerCursor(prompt, prompt.length),
     prompt,
@@ -336,17 +385,25 @@ export function rollbackSendTurn(input: {
     imagesSnapshot,
     terminalContextsSnapshot,
   } = input;
+  // The live refs belong to whichever thread the view shows: once that is
+  // another one, this thread's draft is what decides, in the store.
+  const live = composerHandle.showsSendThread?.() ?? true;
 
-  if (composerRefsHaveContent(refs)) {
+  if (
+    live
+      ? composerRefsHaveContent(refs)
+      : composerDraftContentHasContent(draft.readComposerDraftContent(draft.composerDraftTarget))
+  ) {
     return;
   }
 
-  removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
+  if (live) removeOptimisticUserMessage(dispatch.setOptimisticUserMessages, messageId);
 
   restoreComposerContent({
     refs,
     composerHandle,
     draft,
+    live,
     prompt: promptSnapshot,
     // The send revoked the live previews; give the retry its own blob URLs.
     images: imagesSnapshot.map(cloneComposerImageForRetry),
@@ -431,8 +488,15 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     formatOutgoingPrompt,
   } = input;
 
-  const { api, beginLocalDispatch, resetLocalDispatch, setOptimisticUserMessages, setThreadError } =
-    dispatch;
+  const { api, beginLocalDispatch, resetLocalDispatch, setThreadError } = dispatch;
+  const showsSendThread = composerHandle.showsSendThread ?? (() => true);
+  // The timeline the optimistic message goes into is the view's; it is reset
+  // when the view moves to another thread.
+  const setOptimisticUserMessages: SendTurnDispatchDeps["setOptimisticUserMessages"] = (
+    updater,
+  ) => {
+    if (showsSendThread()) dispatch.setOptimisticUserMessages(updater);
+  };
 
   refs.sendInFlightRef.current = true;
   beginLocalDispatch({
@@ -469,11 +533,20 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
   const terminalContextsSnapshot = [...composer.sendableTerminalContexts];
   const sourceControlSnapshot = [...composer.sourceControlContexts];
 
-  const draftAtStart = {
-    prompt: refs.promptRef.current,
-    images: refs.composerImagesRef.current,
-    terminalContexts: refs.composerTerminalContextsRef.current,
-  };
+  // The live refs are this thread's only while the view shows it; once the view
+  // moved on (the caller awaited before this), the stored draft is what it holds.
+  const liveAtStart = showsSendThread();
+  const draftAtStart: ComposerDraftContent = liveAtStart
+    ? {
+        prompt: refs.promptRef.current,
+        images: refs.composerImagesRef.current,
+        terminalContexts: refs.composerTerminalContextsRef.current,
+      }
+    : (draft.readComposerDraftContent(draft.composerDraftTarget) ?? {
+        prompt: "",
+        images: [],
+        terminalContexts: [],
+      });
 
   const messageCreatedAt = new Date().toISOString();
   const outgoingMessageText = buildOutgoingMessageText({
@@ -491,7 +564,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     const turnAttachments = await buildOutgoingTurnAttachments(imagesSnapshot);
 
     // Scroll to end before optimistic message for auto-pin.
-    await scroll.scrollToEndBeforeOptimistic();
+    if (showsSendThread()) await scroll.scrollToEndBeforeOptimistic();
 
     const optimisticAttachments = imagesSnapshot.map(cloneComposerImageForRetry).map((image) => ({
       type: image.type,
@@ -518,13 +591,23 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
             },
           ],
     );
-    scroll.scrollToEndAfterOptimistic();
+    if (showsSendThread()) scroll.scrollToEndAfterOptimistic();
 
+    // Edits made during preparation keep the draft. Once the view shows another
+    // thread the live refs are that thread's, so this thread's stored draft is
+    // compared instead (also when the send started away from it: its start
+    // state is the stored draft's, not the refs').
+    const liveAtConsume = liveAtStart && showsSendThread();
     const consumeDraft =
       !input.preserveComposerDraft &&
-      refs.promptRef.current === draftAtStart.prompt &&
-      refs.composerImagesRef.current === draftAtStart.images &&
-      refs.composerTerminalContextsRef.current === draftAtStart.terminalContexts;
+      (liveAtConsume
+        ? refs.promptRef.current === draftAtStart.prompt &&
+          refs.composerImagesRef.current === draftAtStart.images &&
+          refs.composerTerminalContextsRef.current === draftAtStart.terminalContexts
+        : composerDraftContentMatches(
+            draft.readComposerDraftContent(draft.composerDraftTarget),
+            draftAtStart,
+          ));
     setThreadError(thread.threadId, null);
     if (consumeDraft) {
       draft.setComposerDraftTokenMode(
@@ -555,10 +638,10 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // Queued snapshots and edits made during preparation belong to the next draft.
     if (consumeDraft) {
       composerCleared = true;
-      refs.promptRef.current = "";
+      if (liveAtConsume) refs.promptRef.current = "";
       draft.clearComposerDraftContent(draft.composerDraftTarget);
       draft.setComposerDraftTokenMode(draft.composerDraftTarget, settings.tokenMode);
-      composerHandle.readComposer()?.resetCursorState();
+      if (liveAtConsume) composerHandle.readComposer()?.resetCursorState();
     }
     let firstComposerImageName: string | null = null;
     if (imagesSnapshot.length > 0) {
@@ -599,11 +682,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // project preferences comes from the environment's live config (hosted
     // targets read it fresh: a cached one may still be another node's), the
     // branch prefix from the preferences remembered when the draft opened or
-    // worktree mode was entered, and the setup-script choice is left to the
-    // server, which resolves the same preferences while it bootstraps.
-    const remembered = needsBranchPrefix
-      ? readRememberedProjectPreferences(draft.environmentId, project.projectId)
-      : null;
+    // worktree mode was entered (while the node's settings are unchanged), and
+    // the setup-script choice is left to the server, which resolves the same
+    // preferences while it bootstraps.
     const readSettingsFallback = () =>
       api.server!.getSettings().then(
         (settings) => ({ ok: true as const, settings }),
@@ -613,11 +694,18 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     // config; its outcome, a failure included, only counts when the project
     // names no prefix.
     const settingsFallback =
-      needsBranchPrefix && api.server && !remembered ? readSettingsFallback() : undefined;
+      needsBranchPrefix &&
+      api.server &&
+      !hasRememberedProjectPreferences(draft.environmentId, project.projectId)
+        ? readSettingsFallback()
+        : undefined;
     const config = worktree.baseBranchForWorktree
       ? isHostedHubMode()
         ? await api.server?.getConfig?.()
         : (readEnvironmentServerConfig(draft.environmentId) ?? (await api.server?.getConfig?.()))
+      : null;
+    const remembered = needsBranchPrefix
+      ? readRememberedProjectPreferences(draft.environmentId, project.projectId, config ?? null)
       : null;
     const supportsPreferences = config?.environment.capabilities.projectPreferences === true;
     let worktreeBranchPrefix: string | undefined;
@@ -726,15 +814,23 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     if (!composerCleared && !input.preserveComposerDraft) {
       // A prompt edit preserves the draft, but accepted uploads cannot be sent
       // under a new command. Keep additions and replacements made during prep.
-      const consumed = refs.composerImagesRef.current.filter((live) =>
+      const live = showsSendThread();
+      const current = live
+        ? refs.composerImagesRef.current
+        : (draft.readComposerDraftContent(draft.composerDraftTarget)?.images ?? []);
+      const consumed = current.filter((image) =>
         imagesSnapshot.some(
           (sent) =>
-            sent.id === live.id && sent.uploadToken === live.uploadToken && sent.file === live.file,
+            sent.id === image.id &&
+            sent.uploadToken === image.uploadToken &&
+            sent.file === image.file,
         ),
       );
-      refs.composerImagesRef.current = refs.composerImagesRef.current.filter(
-        (live) => !consumed.includes(live),
-      );
+      if (live) {
+        refs.composerImagesRef.current = refs.composerImagesRef.current.filter(
+          (image) => !consumed.includes(image),
+        );
+      }
       for (const attachment of consumed) {
         draft.removeComposerDraftImage(draft.composerDraftTarget, attachment.id);
       }

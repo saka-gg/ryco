@@ -4,7 +4,11 @@ import { initialDraftModelSelection } from "@ryco/client-runtime/state/settings"
 import { ensureEnvironmentApi } from "../environmentApi";
 import { isHostedHubMode } from "../env";
 import { preloadRouteChunk } from "../lib/routeChunkPreload";
-import { readNewDraftDefaults } from "./newDraftDefaults";
+import {
+  readNewDraftDefaults,
+  sameSeededDraftDefaults,
+  seededDraftDefaultsOf,
+} from "./newDraftDefaults";
 import { readEnvironmentServerConfig } from "./useChatsAvailability";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
@@ -185,25 +189,26 @@ function useNewThreadState() {
               }),
             );
           const seeded = useComposerDraftStore.getState();
-          return {
-            composer: seeded.getComposerDraft(input.draftId),
-            session: seeded.draftThreadsByThreadKey[input.draftId],
-          };
+          return seededDraftDefaultsOf(
+            seeded.getComposerDraft(input.draftId),
+            seeded.draftThreadsByThreadKey[input.draftId],
+          );
         };
         const seeded = seed(effective);
         if (fresh) {
           // Opened with this session's last answer for the project. The node's
-          // current one replaces it only if it differs and the draft is exactly
-          // as seeded: a choice the user already made is never overwritten.
+          // current one replaces it only if it differs and the seeded defaults
+          // are still as seeded: a choice the user already made is never
+          // overwritten, while typing or the composer mounting does not count.
           void fresh
             .then((current) => {
               if (current === null || samePreferences(current, effective)) return;
               const state = useComposerDraftStore.getState();
-              if (
-                state.getComposerDraft(input.draftId) !== seeded.composer ||
-                state.draftThreadsByThreadKey[input.draftId] !== seeded.session
-              )
-                return;
+              const now = seededDraftDefaultsOf(
+                state.getComposerDraft(input.draftId),
+                state.draftThreadsByThreadKey[input.draftId],
+              );
+              if (!sameSeededDraftDefaults(now, seeded)) return;
               seed(current);
             })
             .catch(() => undefined);

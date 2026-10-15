@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalRequestId } from "@ryco/contracts";
 import type { SessionPhase, Thread } from "../../types";
 import {
@@ -8,6 +8,8 @@ import {
 } from "../ChatView.logic";
 
 export interface UseLocalDispatchStateInput {
+  /** The thread the view shows (its scoped key); a dispatch belongs to the thread it began on. */
+  threadKey: string | null;
   activeThread: Thread | undefined;
   activeLatestTurn: Thread["latestTurn"] | null;
   phase: SessionPhase;
@@ -16,12 +18,40 @@ export interface UseLocalDispatchStateInput {
   threadError: string | null | undefined;
 }
 
-export interface UseLocalDispatchStateResult {
+/** A send's begin and reset, bound to the thread the view showed when the send started. */
+export interface ThreadLocalDispatch {
   beginLocalDispatch: (options?: { preparingWorktree?: boolean }) => void;
   resetLocalDispatch: () => void;
+}
+
+export interface UseLocalDispatchStateResult extends ThreadLocalDispatch {
+  /**
+   * Binds a send to the shown thread. ChatView follows thread navigation, so a
+   * send still running after the user moved on must neither mark the thread now
+   * shown as busy (its server state never acknowledges a dispatch it did not
+   * make) nor clear that thread's own dispatch.
+   */
+  bindLocalDispatch: () => ThreadLocalDispatch;
   localDispatchStartedAt: string | null;
   isPreparingWorktree: boolean;
   isSendBusy: boolean;
+}
+
+/** Each thread's dispatch, kept while the view shows another so it is still busy on return. */
+type LocalDispatchSnapshots = Readonly<Record<string, LocalDispatchSnapshot>>;
+
+const NO_DISPATCHES: LocalDispatchSnapshots = {};
+
+const snapshotKeyOf = (threadKey: string | null) => threadKey ?? "";
+
+function withoutDispatch(
+  current: LocalDispatchSnapshots,
+  threadKey: string | null,
+): LocalDispatchSnapshots {
+  const key = snapshotKeyOf(threadKey);
+  if (!(key in current)) return current;
+  const { [key]: _removed, ...rest } = current;
+  return rest;
 }
 
 /**
@@ -32,29 +62,58 @@ export interface UseLocalDispatchStateResult {
 export function useLocalDispatchState(
   input: UseLocalDispatchStateInput,
 ): UseLocalDispatchStateResult {
-  const [localDispatch, setLocalDispatch] = useState<LocalDispatchSnapshot | null>(null);
+  const [localDispatchState, setLocalDispatchState] =
+    useState<LocalDispatchSnapshots>(NO_DISPATCHES);
   // A send holds this callback across awaits (a Claude resume review can run a
   // `/compact` turn first), so the snapshot must be of the thread as it is now.
   const activeThreadRef = useRef(input.activeThread);
-  useEffect(() => {
+  const threadKeyRef = useRef(input.threadKey);
+  useLayoutEffect(() => {
     activeThreadRef.current = input.activeThread;
-  }, [input.activeThread]);
+    threadKeyRef.current = input.threadKey;
+  }, [input.activeThread, input.threadKey]);
 
-  const beginLocalDispatch = useCallback((options?: { preparingWorktree?: boolean }) => {
-    const preparingWorktree = Boolean(options?.preparingWorktree);
-    setLocalDispatch((current) => {
-      if (current) {
-        return current.preparingWorktree === preparingWorktree
-          ? current
-          : { ...current, preparingWorktree };
-      }
-      return createLocalDispatchSnapshot(activeThreadRef.current, options);
-    });
+  const bindLocalDispatch = useCallback((): ThreadLocalDispatch => {
+    const threadKey = threadKeyRef.current;
+    const key = snapshotKeyOf(threadKey);
+    return {
+      beginLocalDispatch: (options) => {
+        const preparingWorktree = Boolean(options?.preparingWorktree);
+        // Once the view moved on, a new snapshot would be of another thread:
+        // only the thread's own dispatch is updated.
+        const shown = threadKeyRef.current === threadKey;
+        setLocalDispatchState((current) => {
+          const existing = current[key];
+          if (existing) {
+            return existing.preparingWorktree === preparingWorktree
+              ? current
+              : { ...current, [key]: { ...existing, preparingWorktree } };
+          }
+          if (!shown) return current;
+          return {
+            ...current,
+            [key]: createLocalDispatchSnapshot(activeThreadRef.current, options),
+          };
+        });
+      },
+      resetLocalDispatch: () => {
+        setLocalDispatchState((current) => withoutDispatch(current, threadKey));
+      },
+    };
   }, []);
 
-  const resetLocalDispatch = useCallback(() => {
-    setLocalDispatch(null);
-  }, []);
+  const beginLocalDispatch = useCallback(
+    (options?: { preparingWorktree?: boolean }) => bindLocalDispatch().beginLocalDispatch(options),
+    [bindLocalDispatch],
+  );
+
+  /** Clears the shown thread's dispatch; other threads keep theirs. */
+  const resetLocalDispatch = useCallback(
+    () => bindLocalDispatch().resetLocalDispatch(),
+    [bindLocalDispatch],
+  );
+
+  const localDispatch = localDispatchState[snapshotKeyOf(input.threadKey)] ?? null;
 
   const serverAcknowledgedLocalDispatch = useMemo(
     () =>
@@ -86,6 +145,7 @@ export function useLocalDispatchState(
   }, [resetLocalDispatch, serverAcknowledgedLocalDispatch]);
 
   return {
+    bindLocalDispatch,
     beginLocalDispatch,
     resetLocalDispatch,
     localDispatchStartedAt: localDispatch?.startedAt ?? null,

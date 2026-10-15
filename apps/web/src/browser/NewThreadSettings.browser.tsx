@@ -254,6 +254,11 @@ describe("draft settings for canonical environment identities", () => {
     await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(2));
     expect(readPreferences).toHaveBeenCalledTimes(2);
     expect(readDraft()).toMatchObject({ envMode: "worktree" });
+    // The draft view mounting (its composer clears staged attachments) and
+    // typing are not choices about the defaults.
+    const draftId = readDraft()!.draftId;
+    useComposerDraftStore.getState().clearPersistedAttachments(draftId);
+    useComposerDraftStore.getState().setPrompt(draftId, "typed before the node answered");
 
     // The node's newer defaults replace the remembered ones on the untouched draft.
     resolveAnswer({

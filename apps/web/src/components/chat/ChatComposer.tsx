@@ -56,6 +56,7 @@ import {
   mergeProjectProviderCommands,
   projectProviderCommandsKey,
   PROMPT_STASH_MAX_ENTRIES,
+  composerTargetKey,
   readProjectProviderCommands,
   stripInlineTerminalContextPlaceholders,
   subscribeProjectProviderCommands,
@@ -283,9 +284,18 @@ export interface ChatComposerHandle {
 // Props
 // --------------------------------------------------------------------------
 
+/**
+ * What suggests the user is about to write (the composer gained focus, or its
+ * first keystroke), or no longer is (focus left the composer).
+ */
+export type ComposerIntent = "focus" | "type" | "blur";
+
 export interface ChatComposerProps {
-  /** The user is about to write (focus, first keystroke): a cue to warm what the send needs. */
-  onComposerIntent?: () => void;
+  /**
+   * The user is about to write (focus, first keystroke): a cue to warm what the
+   * send needs; `blur` withdraws a focus that did not stay.
+   */
+  onComposerIntent?: (intent: ComposerIntent) => void;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -1368,6 +1378,9 @@ export const ChatComposer = memo(
         collapseExpandedComposerCursor(promptRef.current, promptRef.current.length),
       );
       setComposerTrigger(detectComposerTrigger(promptRef.current, promptRef.current.length));
+      // A picker opened on the previous thread would pick for this one (the
+      // stash picker closes on a target change below).
+      setIsComposerModelPickerOpen(false);
     }, [draftId, activeThreadId, promptRef]);
 
     // ------------------------------------------------------------------
@@ -1576,7 +1589,7 @@ export const ChatComposer = memo(
           );
           return;
         }
-        if (promptRef.current.length === 0 && nextPrompt.length > 0) onComposerIntent?.();
+        if (promptRef.current.length === 0 && nextPrompt.length > 0) onComposerIntent?.("type");
         promptRef.current = nextPrompt;
         setPrompt(nextPrompt);
         if (!terminalContextIdListsEqual(composerTerminalContexts, terminalContextIds)) {
@@ -2469,8 +2482,9 @@ export const ChatComposer = memo(
           return;
         }
         setIsComposerFocused(false);
+        onComposerIntent?.("blur");
       });
-    }, []);
+    }, [onComposerIntent]);
 
     useEffect(() => {
       return () => {
@@ -2753,7 +2767,7 @@ export const ChatComposer = memo(
               }
               setIsComposerFocused(true);
               setIsReadingChat(false);
-              onComposerIntent?.();
+              onComposerIntent?.("focus");
             }}
             onBlurCapture={() => {
               scheduleComposerCollapseCheck();
@@ -2897,6 +2911,7 @@ export const ChatComposer = memo(
 
             <ComposerPromptShell
               editorRef={composerEditorRef}
+              historyScope={composerTargetKey(composerDraftTarget)}
               isComposerCollapsedMobile={isComposerCollapsedMobile}
               hasComposerHeader={hasComposerHeader}
               isComposerApprovalState={isComposerApprovalState}

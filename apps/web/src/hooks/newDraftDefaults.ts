@@ -1,4 +1,6 @@
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
+import * as Equal from "effect/Equal";
+import type { ComposerThreadDraftState, DraftThreadState } from "../composerDraftStore";
 import type {
   EffectiveProjectPreferences,
   EnvironmentApi,
@@ -23,18 +25,54 @@ export interface NewDraftDefaults {
  * defaults), so the next new draft opens at once with them while the node is
  * asked again. Preferences change rarely, and a change is corrected by the
  * background read before the user acts on the draft in almost every case.
+ *
+ * Each answer keeps the node settings it was read under: once the node's
+ * settings differ (project or device defaults saved here or on another
+ * client), the answer is no longer trusted and the next draft waits for the
+ * node instead of opening with the old defaults.
  */
-const effectivePreferencesCache = new Map<string, EffectiveProjectPreferences>();
+interface RememberedProjectPreferences {
+  readonly settings: ServerConfig["settings"] | undefined;
+  readonly effective: EffectiveProjectPreferences;
+}
+
+const effectivePreferencesCache = new Map<string, RememberedProjectPreferences>();
 
 const preferencesCacheKey = (environmentId: EnvironmentId, projectId: ProjectId | undefined) =>
   `${environmentId}\u0000${projectId ?? ""}`;
 
-/** This session's last answer for a project's effective preferences, if any. */
+const sameSettings = (
+  left: ServerConfig["settings"] | undefined,
+  right: ServerConfig["settings"] | undefined,
+) => left === right || (left !== undefined && right !== undefined && Equal.equals(left, right));
+
+/** Whether this session has an answer for the project, before it can be checked against a config. */
+export function hasRememberedProjectPreferences(
+  environmentId: EnvironmentId,
+  projectId: ProjectId | undefined,
+): boolean {
+  return effectivePreferencesCache.has(preferencesCacheKey(environmentId, projectId));
+}
+
+/**
+ * This session's last answer for a project's effective preferences, if any,
+ * and only while `config` (the node's live config) still carries the settings
+ * it was read under.
+ */
 export function readRememberedProjectPreferences(
   environmentId: EnvironmentId,
   projectId: ProjectId | undefined,
+  config: ServerConfig | null,
 ): EffectiveProjectPreferences | null {
-  return effectivePreferencesCache.get(preferencesCacheKey(environmentId, projectId)) ?? null;
+  if (!config) return null;
+  const cacheKey = preferencesCacheKey(environmentId, projectId);
+  const remembered = effectivePreferencesCache.get(cacheKey);
+  if (!remembered) return null;
+  if (!sameSettings(remembered.settings, config.settings)) {
+    effectivePreferencesCache.delete(cacheKey);
+    return null;
+  }
+  return remembered.effective;
 }
 
 /**
@@ -48,18 +86,69 @@ export async function readAndRememberProjectPreferences(input: {
   readonly projectId?: ProjectId | undefined;
 }): Promise<EffectiveProjectPreferences | null> {
   const cacheKey = preferencesCacheKey(input.environmentId, input.projectId);
+  const settings = input.config?.settings;
   const effective = await readEffectiveProjectPreferences({
     api: input.api,
     config: input.config,
     ...(input.projectId ? { projectId: input.projectId } : {}),
   });
-  if (effective) effectivePreferencesCache.set(cacheKey, effective);
+  if (effective) effectivePreferencesCache.set(cacheKey, { settings, effective });
   else effectivePreferencesCache.delete(cacheKey);
   return effective;
 }
 
-export function resetNewDraftDefaultsCacheForTests(): void {
+/** Forgets every remembered answer (account teardown). */
+export function forgetRememberedProjectPreferences(): void {
   effectivePreferencesCache.clear();
+}
+
+export function resetNewDraftDefaultsCacheForTests(): void {
+  forgetRememberedProjectPreferences();
+}
+
+/**
+ * The draft fields a new draft's defaults seed: model, modes and work
+ * location. A later difference in any of them is the user's own choice;
+ * anything else (typing, attachments, the composer mounting) is not, so it
+ * never stops the node's newer answer from replacing the remembered one. A
+ * promoted (sent) or removed draft never matches.
+ */
+export function seededDraftDefaultsOf(
+  composer: ComposerThreadDraftState | null | undefined,
+  session: DraftThreadState | null | undefined,
+): ReadonlyArray<unknown> {
+  return [
+    composer?.modelSelectionByProvider ?? {},
+    composer?.activeProvider ?? null,
+    composer?.runtimeMode ?? null,
+    composer?.interactionMode ?? null,
+    composer?.tokenMode ?? null,
+    session === undefined || session === null,
+    session?.environmentId ?? null,
+    session?.projectId ?? null,
+    session?.runtimeMode ?? null,
+    session?.interactionMode ?? null,
+    session?.tokenMode ?? null,
+    session?.envMode ?? null,
+    session?.branch ?? null,
+    session?.worktreePath ?? null,
+    session?.worktreeSource ?? null,
+    session?.worktreeBranchName ?? null,
+    session?.fetchOrigin ?? null,
+    session?.promotedTo ?? null,
+  ];
+}
+
+export function sameSeededDraftDefaults(
+  left: ReadonlyArray<unknown>,
+  right: ReadonlyArray<unknown>,
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (value, position) => value === right[position] || Equal.equals(value, right[position]),
+    )
+  );
 }
 
 type SettledRead<A> =
@@ -112,7 +201,11 @@ export async function readNewDraftDefaults(input: {
 
   if (!input.requireFreshConfig && input.cachedConfig) {
     const config = input.cachedConfig;
-    const remembered = readRememberedProjectPreferences(input.environmentId, input.projectId);
+    const remembered = readRememberedProjectPreferences(
+      input.environmentId,
+      input.projectId,
+      config,
+    );
     // Support is decided by the live config, never by a remembered answer.
     if (remembered && config.environment.capabilities.projectPreferences === true) {
       const fresh = preferences(config);

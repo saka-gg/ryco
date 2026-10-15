@@ -268,7 +268,8 @@ function publishForkThread(): ThreadForkResult {
       settledOverride: null,
       settledAt: null,
       session: null,
-      latestUserMessageAt: fork.messages[0]?.createdAt ?? null,
+      // As the server sends it: inherited prompts are not the fork's own recency.
+      latestUserMessageAt: null,
       hasPendingApprovals: false,
       hasPendingUserInput: false,
       hasActionableProposedPlan: false,
@@ -417,6 +418,13 @@ describe("Fork from here (full app)", () => {
       await expect
         .element(page.getByTestId("fork-thread-destination-current-checkout"))
         .toHaveAttribute("aria-checked", "true");
+      // The fork opens with its inherited history on the way: it must never
+      // present as a new thread (hero and work location) in the meantime.
+      let heroShown = false;
+      const heroWatch = new MutationObserver(() => {
+        if (document.querySelector('[data-testid="new-thread-hero"]')) heroShown = true;
+      });
+      heroWatch.observe(document.body, { childList: true, subtree: true });
       await page.getByTestId("fork-thread-submit").click();
 
       await vi.waitFor(() => expect(forkRequests()).toHaveLength(1));
@@ -438,6 +446,8 @@ describe("Fork from here (full app)", () => {
 
       const divider = page.getByRole("group", { name: `Forked from “${THREAD_TITLE}”` });
       await expect.element(divider).toBeVisible();
+      heroWatch.disconnect();
+      expect(heroShown).toBe(false);
       expect(divider.element().textContent).toContain(
         "Continues an independent copy of the provider's session",
       );

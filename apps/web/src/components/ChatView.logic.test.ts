@@ -27,6 +27,7 @@ import {
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
   isServerThreadHistoryPending,
+  createThreadSendFlags,
   createThreadSubmitGuard,
   buildChatSendTitleSeed,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -1126,6 +1127,7 @@ describe("isServerThreadHistoryPending", () => {
     messageCount: 0,
     hasLatestTurn: true,
     latestUserMessageAt: "2026-10-01T00:00:00.000Z",
+    lineage: null,
   };
 
   it("is pending for a started thread whose history has not arrived", () => {
@@ -1140,6 +1142,17 @@ describe("isServerThreadHistoryPending", () => {
     ).toBe(false);
   });
 
+  it("is pending for a fresh fork, which holds its inherited history but no turn or prompt", () => {
+    const freshFork = {
+      ...base,
+      hasLatestTurn: false,
+      latestUserMessageAt: null,
+      lineage: { relationship: "forked" },
+    };
+    expect(isServerThreadHistoryPending(freshFork)).toBe(true);
+    expect(isServerThreadHistoryPending({ ...freshFork, detailLoaded: true })).toBe(false);
+  });
+
   it("is not pending once history is loaded or messages are at hand", () => {
     expect(isServerThreadHistoryPending({ ...base, detailLoaded: true })).toBe(false);
     expect(isServerThreadHistoryPending({ ...base, messageCount: 3 })).toBe(false);
@@ -1147,6 +1160,32 @@ describe("isServerThreadHistoryPending", () => {
 
   it("never applies to drafts", () => {
     expect(isServerThreadHistoryPending({ ...base, isServerThread: false })).toBe(false);
+  });
+});
+
+describe("createThreadSendFlags", () => {
+  it("keeps each thread's in-flight send to itself", () => {
+    const flags = createThreadSendFlags();
+    const threadA = flags.ref("thread-a");
+    threadA.current = true;
+    expect(flags.has("thread-a")).toBe(true);
+    // The thread the view moved on to is not blocked by it...
+    expect(flags.has("thread-b")).toBe(false);
+    // ...and its own send settling does not clear thread A's.
+    const threadB = flags.ref("thread-b");
+    threadB.current = true;
+    threadB.current = false;
+    expect(threadA.current).toBe(true);
+    threadA.current = false;
+    expect(flags.has("thread-a")).toBe(false);
+  });
+
+  it("never flags a view without a thread", () => {
+    const flags = createThreadSendFlags();
+    const none = flags.ref(null);
+    none.current = true;
+    expect(none.current).toBe(false);
+    expect(flags.has(null)).toBe(false);
   });
 });
 
