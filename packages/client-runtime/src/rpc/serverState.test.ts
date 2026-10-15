@@ -13,6 +13,9 @@ import {
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createEnvironmentConnection } from "../connection/connection.ts";
+import type { KnownEnvironment } from "../knownEnvironment.ts";
+import type { WsRpcClient } from "./wsRpcClient.ts";
 import {
   getServerConfig,
   getLegacyServerKeybindings,
@@ -97,6 +100,31 @@ const serverApi = {
   ),
 };
 
+/** A primary connection over `serverApi`, as the web shell builds it (no config handler). */
+function createPrimaryConnection() {
+  return createEnvironmentConnection({
+    kind: "primary",
+    knownEnvironment: {
+      environmentId: baseEnvironment.environmentId,
+      label: "Local environment",
+    } as unknown as KnownEnvironment,
+    client: {
+      server: serverApi,
+      orchestration: { subscribeShell: () => () => undefined },
+      terminal: { onEvent: () => () => undefined },
+      dispose: async () => undefined,
+      reconnect: async () => undefined,
+    } as unknown as WsRpcClient,
+    pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+    resetShellProjection: () => undefined,
+    applyShellEvent: () => undefined,
+    syncShellSnapshot: () => undefined,
+    applyTerminalEvent: () => undefined,
+  });
+}
+
+let connection = createPrimaryConnection();
+
 function emitLifecycleEvent(event: ServerLifecycleStreamEvent) {
   for (const listener of lifecycleListeners) {
     listener(event);
@@ -129,6 +157,7 @@ beforeEach(() => {
   lifecycleListeners.clear();
   configListeners.clear();
   resetServerStateForTests();
+  connection = createPrimaryConnection();
 });
 
 afterEach(() => {
@@ -143,7 +172,7 @@ describe("serverState", () => {
 
   it("takes the config snapshot from the subscription alone and replays it to late subscribers", async () => {
     const configListener = vi.fn();
-    const stop = startServerStateSync(serverApi);
+    const stop = startServerStateSync(connection);
     const unsubscribe = onServerConfigUpdated(configListener);
 
     emitServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
@@ -181,9 +210,9 @@ describe("serverState", () => {
     stop();
   });
 
-  it("shares one lifecycle and config subscription between holders of the same client", () => {
-    const stopEarly = startServerStateSync(serverApi);
-    const stopShell = startServerStateSync(serverApi);
+  it("shares one lifecycle and config subscription between holders of the same connection", () => {
+    const stopEarly = startServerStateSync(connection);
+    const stopShell = startServerStateSync(connection);
 
     expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
     expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
@@ -201,13 +230,13 @@ describe("serverState", () => {
     expect(configListeners.size).toBe(0);
 
     // A later holder opens fresh streams.
-    const stopAgain = startServerStateSync(serverApi);
+    const stopAgain = startServerStateSync(connection);
     expect(serverApi.subscribeConfig).toHaveBeenCalledTimes(2);
     stopAgain();
   });
 
   it("replays welcome events to late subscribers", async () => {
-    const stop = startServerStateSync(serverApi);
+    const stop = startServerStateSync(connection);
 
     const listener = vi.fn();
     const unsubscribe = onWelcome(listener);
@@ -251,7 +280,7 @@ describe("serverState", () => {
   it("merges provider, settings, and keybinding updates into the cached config", async () => {
     const configListener = vi.fn();
     const providersListener = vi.fn();
-    const stop = startServerStateSync(serverApi);
+    const stop = startServerStateSync(connection);
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
 
@@ -360,7 +389,7 @@ describe("serverState", () => {
   it("applies a provider delta onto the list the stream sent and reports it as a provider update", async () => {
     const configListener = vi.fn();
     const providersListener = vi.fn();
-    const stop = startServerStateSync(serverApi);
+    const stop = startServerStateSync(connection);
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
     const model = { slug: "gpt-5", name: "GPT-5", isCustom: false, capabilities: null };

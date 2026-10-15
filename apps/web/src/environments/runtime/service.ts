@@ -1256,6 +1256,16 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
       kind: "primary",
       knownEnvironment,
       client: createPrimaryEnvironmentClient(knownEnvironment),
+      // The hosted lifecycle owner's generation: once it moves on, this
+      // connection's config is neither published nor read.
+      ...(hostedGeneration === null
+        ? {}
+        : {
+            lifecycleGeneration: {
+              generation: hostedGeneration,
+              readCurrent: () => useHostedHubStore.getState().generation,
+            },
+          }),
       ...createEnvironmentConnectionHandlers(
         hostedGeneration,
         hostedGeneration !== null ? knownEnvironment.environmentId : undefined,

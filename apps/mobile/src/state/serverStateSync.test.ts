@@ -1,5 +1,11 @@
-import { EnvironmentId, type ServerConfig } from "@ryco/contracts";
-import { getServerConfig, resetServerStateForTests } from "@ryco/client-runtime/rpc";
+import { createEnvironmentConnection } from "@ryco/client-runtime/connection";
+import type { KnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
+import { EnvironmentId, type ServerConfig, type ServerConfigStreamEvent } from "@ryco/contracts";
+import {
+  getServerConfig,
+  resetServerStateForTests,
+  type WsRpcClient,
+} from "@ryco/client-runtime/rpc";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 // The hook runs under a minimal hook runtime (no React renderer exists in this
@@ -109,6 +115,49 @@ describe("useServerStateSync", () => {
 
     for (const cleanup of hoisted.cleanups.splice(0)) cleanup();
     expect(getServerConfig()).toBeNull();
+  });
+
+  it("leaves exactly one config stream on a real connection", () => {
+    const listeners: Array<(event: ServerConfigStreamEvent) => void> = [];
+    const server = {
+      subscribeConfig: vi.fn((listener: (event: ServerConfigStreamEvent) => void) => {
+        listeners.push(listener);
+        return () => undefined;
+      }),
+      subscribeLifecycle: vi.fn(() => () => undefined),
+    };
+    // As the environment driver builds a direct connection: its own config
+    // stream feeds the per-environment store.
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: { environmentId: NODE_A, label: "Node A" } as unknown as KnownEnvironment,
+      client: {
+        server,
+        orchestration: { subscribeShell: () => () => undefined },
+        terminal: { onEvent: () => () => undefined },
+        dispose: async () => undefined,
+        reconnect: async () => undefined,
+      } as unknown as WsRpcClient,
+      onConfigUpdated: (next) => writeEnvironmentServerConfig(NODE_A, next),
+      pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+      resetShellProjection: () => undefined,
+      applyShellEvent: () => undefined,
+      syncShellSnapshot: () => undefined,
+      applyTerminalEvent: () => undefined,
+    });
+    hoisted.activeEnvironmentId = NODE_A;
+    hoisted.connection = connection;
+
+    useServerStateSync();
+    const snapshot = config("from the one stream");
+    for (const listener of listeners) {
+      listener({ version: 1, type: "snapshot", config: snapshot } as ServerConfigStreamEvent);
+    }
+
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
+    expect(getServerConfig()?.environment.label).toBe("from the one stream");
+    for (const cleanup of hoisted.cleanups.splice(0)) cleanup();
+    void connection.dispose();
   });
 
   it("publishes nothing without an active connection", () => {

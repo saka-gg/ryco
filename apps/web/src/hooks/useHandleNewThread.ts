@@ -9,7 +9,7 @@ import {
   sameSeededDraftDefaults,
   seededDraftDefaultsOf,
 } from "./newDraftDefaults";
-import { readEnvironmentServerConfig } from "./useChatsAvailability";
+import { resolveNodeConfigSource } from "./nodeConfigSource";
 import { useDeviceName } from "../deviceName";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import {
@@ -148,17 +148,18 @@ function useNewThreadState() {
         const hosted = nodeIdForHostedEnvironment(input.environmentId) !== null;
         const leaseBefore = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
         const api = ensureEnvironmentApi(input.environmentId);
-        // Hosted targets read the config from the scoped connection: a hosted
-        // node's local descriptor may differ from its canonical identity, and
-        // the primary cache can still contain the previous node's settings
-        // while switching targets. Every other target's cached config is the
-        // live one its config stream keeps current, so only the preferences
-        // read stays on the path to the draft.
+        // Hosted targets trust only the scoped connection's live config for
+        // the current socket attempt and hosted generation: the primary cache
+        // can still contain the previous node's settings while switching
+        // targets. Without a current one they read the config fresh. Every
+        // other target's cached config is the live one its config stream keeps
+        // current, so only the preferences read stays on the path to the draft.
         const { config, effective, fresh } = await readNewDraftDefaults({
           api,
           environmentId: input.environmentId,
-          cachedConfig: readEnvironmentServerConfig(input.environmentId),
-          requireFreshConfig: hosted || isHostedHubMode(),
+          ...resolveNodeConfigSource(input.environmentId, {
+            currentOnly: hosted || isHostedHubMode(),
+          }),
           projectId: input.preferencesProjectId,
         });
         const leaseAfter = hosted ? readHostedNodeMutationLease(input.environmentId) : null;
@@ -169,6 +170,16 @@ function useNewThreadState() {
             !nodeMutationLeaseIsCurrent(leaseBefore, input.environmentId, leaseAfter))
         )
           throw new Error("The workspace connection changed. Try creating the draft again.");
+        // A background answer counts only while the hosted session that asked
+        // is still the current one.
+        const stillCurrent = () => {
+          if (!hosted || !leaseAfter) return true;
+          const leaseNow = readHostedNodeMutationLease(input.environmentId);
+          return (
+            leaseNow !== null &&
+            nodeMutationLeaseIsCurrent(leaseAfter, input.environmentId, leaseNow)
+          );
+        };
         if (input.superseded()) return input.resume();
         const seed = (preferences: EffectiveProjectPreferences | null) => {
           input.register(config, preferences);
@@ -199,7 +210,9 @@ function useNewThreadState() {
           // overwritten, while typing or the composer mounting does not count.
           void fresh
             .then((current) => {
-              if (current === null || samePreferences(current, effective)) return;
+              if (current === null || samePreferences(current, effective) || !stillCurrent()) {
+                return;
+              }
               const state = useComposerDraftStore.getState();
               const now = seededDraftDefaultsOf(
                 state.getComposerDraft(input.draftId),

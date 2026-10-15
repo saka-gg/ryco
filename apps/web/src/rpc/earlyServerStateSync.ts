@@ -1,7 +1,7 @@
 import type { ServerLifecycleWelcomePayload } from "@ryco/contracts";
 import { onWelcome, startServerStateSync } from "@ryco/client-runtime/rpc";
 
-type ServerStateClient = Parameters<typeof startServerStateSync>[0];
+type ServerStateConnection = Parameters<typeof startServerStateSync>[0];
 
 /**
  * How long the boot path holds the primary server state sync on its own. The
@@ -32,13 +32,13 @@ export interface EarlyPrimaryServerStateSyncOptions {
  * Starts the primary welcome and config subscriptions on the connection the
  * root `beforeLoad` opens early, so they ride alongside its shell subscription
  * instead of waiting for the shell chunk to load and commit. The sync is
- * reference-counted per client: `ServerStateBootstrap` takes its own hold on
+ * reference-counted per connection: `ServerStateBootstrap` takes its own hold on
  * mount and then ends this one, so no stream opens twice and none closes in
  * between. A hold ended before `after` settles never opens anything.
  * `onFirstWelcome` is dropped with the hold.
  */
 export function startEarlyPrimaryServerStateSync(
-  client: ServerStateClient,
+  connection: ServerStateConnection,
   options: EarlyPrimaryServerStateSyncOptions = {},
 ): void {
   releaseEarlyPrimaryServerStateSync();
@@ -58,7 +58,7 @@ export function startEarlyPrimaryServerStateSync(
 
   const open = () => {
     if (earlyHold !== hold) return;
-    stopSync = startServerStateSync(client);
+    stopSync = startServerStateSync(connection);
     const { onFirstWelcome } = options;
     if (!onFirstWelcome) return;
     let welcomed = false;

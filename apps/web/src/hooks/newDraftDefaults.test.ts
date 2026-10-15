@@ -9,6 +9,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { ComposerThreadDraftState, DraftThreadState } from "../composerDraftStore";
 import {
+  forgetRememberedProjectPreferences,
+  hasRememberedProjectPreferences,
+  readAndRememberProjectPreferences,
   readNewDraftDefaults,
   readRememberedProjectPreferences,
   resetNewDraftDefaultsCacheForTests,
@@ -319,5 +322,40 @@ describe("seededDraftDefaultsOf", () => {
         seeded,
       ),
     ).toBe(false);
+  });
+});
+
+describe("remembered preferences across account teardown", () => {
+  it("never lets a read that started before teardown repopulate the cache", async () => {
+    let answer!: (value: EffectiveProjectPreferences) => void;
+    const target = api({
+      getProjectPreferences: () => new Promise((resolve) => (answer = resolve)),
+    });
+    const capable = config(true, "node", { marker: "settings" });
+    const read = readAndRememberProjectPreferences({
+      api: target.api,
+      environmentId: ENVIRONMENT_ID,
+      config: capable,
+      projectId: PROJECT_ID,
+    });
+    await vi.waitFor(() => expect(answer).toBeDefined());
+
+    // Sign-out or account change while the node is still answering.
+    forgetRememberedProjectPreferences();
+    answer(EFFECTIVE);
+
+    // The caller still gets its answer; the next account's cache stays empty.
+    await expect(read).resolves.toBe(EFFECTIVE);
+    expect(hasRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID)).toBe(false);
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID, capable)).toBeNull();
+
+    // A read that starts after teardown remembers as before.
+    await readAndRememberProjectPreferences({
+      api: api({}).api,
+      environmentId: ENVIRONMENT_ID,
+      config: capable,
+      projectId: PROJECT_ID,
+    });
+    expect(readRememberedProjectPreferences(ENVIRONMENT_ID, PROJECT_ID, capable)).toBe(EFFECTIVE);
   });
 });
