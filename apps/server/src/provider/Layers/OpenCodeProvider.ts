@@ -7,6 +7,8 @@ import {
 import { Cause, Data, Effect } from "effect";
 
 import { createModelCapabilities } from "@ryco/shared/model";
+import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
+import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 
 import {
   buildServerProvider,
@@ -70,7 +72,16 @@ function formatOpenCodeProbeError(input: {
   readonly isExternalServer: boolean;
   readonly serverUrl: string;
 }): { readonly installed: boolean; readonly message: string } {
-  const detail = normalizedErrorMessage(input.cause);
+  const rawDetail = normalizedErrorMessage(input.cause);
+  // Status messages reach every client: never echo the configured URL's credentials.
+  const detail =
+    rawDetail === undefined
+      ? undefined
+      : redactDiagnosticText(
+          input.serverUrl
+            ? rawDetail.split(input.serverUrl).join(redactUrlCredentials(input.serverUrl))
+            : rawDetail,
+        );
   const lower = detail?.toLowerCase() ?? "";
 
   if (input.isExternalServer) {
@@ -97,7 +108,7 @@ function formatOpenCodeProbeError(input: {
     ) {
       return {
         installed: true,
-        message: `Couldn't reach the configured OpenCode server at ${input.serverUrl}. Check that the server is running and the URL is correct.`,
+        message: `Couldn't reach the configured OpenCode server at ${redactUrlCredentials(input.serverUrl)}. Check that the server is running and the URL is correct.`,
       };
     }
 

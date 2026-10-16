@@ -234,6 +234,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./settingsSecrets": {
+      "types": "./src/settingsSecrets.ts",
+      "import": "./src/settingsSecrets.ts"
+    },
     "./String": {
       "types": "./src/String.ts",
       "import": "./src/String.ts"

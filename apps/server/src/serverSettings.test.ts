@@ -16,6 +16,7 @@ import {
 import { createModelSelection } from "@ryco/shared/model";
 import { fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
+import { REDACTED_SETTING_SECRET } from "@ryco/shared/settingsSecrets";
 import { resolveStorageRetentionPolicy } from "@ryco/shared/storageRetention";
 import { assert, describe, it } from "@effect/vitest";
 import { Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Predicate, Schema } from "effect";
@@ -941,6 +942,262 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         roundTripped.providerInstances[instanceId]?.environment?.[0]?.value,
         "sk-or-secret",
       );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("sends clients no OpenCode password, URL credential or telemetry token", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const opencode = ProviderDriverKind.make("opencode");
+      const defaultId = ProviderInstanceId.make("opencode");
+      const serverUrl = "http://opencode:url-secret@127.0.0.1:4096/?token=query-secret";
+      const otlpTracesUrl = "https://collector.example/v1/traces?api_key=otlp-secret";
+      yield* serverSettings.updateSettings({
+        providers: { opencode: { serverPassword: "legacy-password", serverUrl } },
+        observability: { otlpTracesUrl },
+      });
+
+      const client = redactServerSettingsForClient(yield* serverSettings.getSettings);
+      const visible = JSON.stringify(client);
+      for (const secret of ["legacy-password", "url-secret", "query-secret", "otlp-secret"]) {
+        assert.notInclude(visible, secret);
+      }
+      // Clients still see that a value is set and where the endpoints are.
+      assert.equal(client.providers.opencode.serverPassword, REDACTED_SETTING_SECRET);
+      assert.equal(
+        client.providers.opencode.serverUrl,
+        `http://${REDACTED_SETTING_SECRET}:${REDACTED_SETTING_SECRET}@127.0.0.1:4096/?token=${REDACTED_SETTING_SECRET}`,
+      );
+      assert.equal(
+        client.observability.otlpTracesUrl,
+        `https://collector.example/v1/traces?api_key=${REDACTED_SETTING_SECRET}`,
+      );
+      assert.equal(client.providers.codex.binaryPath, "codex");
+
+      // An old client echoes its whole redacted copy back while saving something unrelated.
+      yield* serverSettings.updateSettings({
+        providers: client.providers,
+        observability: client.observability,
+        enableLegacyTokenStreaming: true,
+      });
+      let stored = yield* serverSettings.getSettings;
+      assert.equal(stored.enableLegacyTokenStreaming, true);
+      assert.equal(stored.providers.opencode.serverPassword, "legacy-password");
+      assert.equal(stored.providers.opencode.serverUrl, serverUrl);
+      assert.equal(stored.observability.otlpTracesUrl, otlpTracesUrl);
+
+      // Editing the default instance moves its legacy config, redacted values included,
+      // into the instance map (as the web settings panel does).
+      yield* serverSettings.updateSettings({
+        providers: { ...client.providers, opencode: DEFAULT_SERVER_SETTINGS.providers.opencode },
+        providerInstances: {
+          [defaultId]: {
+            driver: opencode,
+            enabled: true,
+            displayName: "OpenCode",
+            config: client.providers.opencode,
+          },
+        },
+      });
+      stored = yield* serverSettings.getSettings;
+      assert.equal(stored.providers.opencode.serverPassword, "");
+      assert.deepInclude(stored.providerInstances[defaultId]?.config as object, {
+        serverPassword: "legacy-password",
+        serverUrl,
+      });
+
+      // Echoing the instance map keeps the secrets; a new value replaces one.
+      const echoed = redactServerSettingsForClient(stored).providerInstances;
+      yield* serverSettings.updateSettings({ providerInstances: echoed });
+      stored = yield* serverSettings.getSettings;
+      assert.deepInclude(stored.providerInstances[defaultId]?.config as object, {
+        serverPassword: "legacy-password",
+      });
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          [defaultId]: {
+            ...echoed[defaultId]!,
+            config: {
+              ...(echoed[defaultId]!.config as object),
+              serverPassword: "new-password",
+            },
+          },
+        },
+      });
+      stored = yield* serverSettings.getSettings;
+      assert.deepInclude(stored.providerInstances[defaultId]?.config as object, {
+        serverPassword: "new-password",
+        serverUrl,
+      });
+
+      // An empty value clears the password, and so does dropping the key.
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          [defaultId]: {
+            ...echoed[defaultId]!,
+            config: { ...(echoed[defaultId]!.config as object), serverPassword: "" },
+          },
+        },
+      });
+      stored = yield* serverSettings.getSettings;
+      assert.deepInclude(stored.providerInstances[defaultId]?.config as object, {
+        serverPassword: "",
+        serverUrl,
+      });
+      const { serverPassword: _dropped, ...withoutPassword } = echoed[defaultId]!.config as Record<
+        string,
+        unknown
+      >;
+      yield* serverSettings.updateSettings({
+        providers: { opencode: { serverPassword: "legacy-again" } },
+        providerInstances: { [defaultId]: { ...echoed[defaultId]!, config: withoutPassword } },
+      });
+      stored = yield* serverSettings.getSettings;
+      assert.notProperty(stored.providerInstances[defaultId]?.config as object, "serverPassword");
+      assert.equal(stored.providers.opencode.serverPassword, "legacy-again");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("never keeps a saved password for a different server address", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const opencode = ProviderDriverKind.make("opencode");
+      const workId = ProviderInstanceId.make("opencode_work");
+      const defaultId = ProviderInstanceId.make("opencode");
+      yield* serverSettings.updateSettings({
+        providers: {
+          opencode: { serverUrl: "http://127.0.0.1:4096", serverPassword: "legacy-password" },
+        },
+        providerInstances: {
+          [workId]: {
+            driver: opencode,
+            config: { serverUrl: "http://127.0.0.1:4096", serverPassword: "work-password" },
+          },
+        },
+      });
+      const before = yield* serverSettings.getSettings;
+      const client = redactServerSettingsForClient(before);
+      const work = client.providerInstances[workId]!;
+      const withConfig = (config: Record<string, unknown>) => ({
+        providerInstances: { ...client.providerInstances, [workId]: { ...work, config } },
+      });
+
+      // Echoing the marker to another host is refused.
+      const moved = yield* serverSettings
+        .updateSettings(
+          withConfig({
+            serverUrl: "https://attacker.example",
+            serverPassword: REDACTED_SETTING_SECRET,
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.include(
+        moved.detail,
+        "serverPassword of provider instance opencode_work (its server address changed)",
+      );
+      // A partial legacy patch that only moves the URL would leave the stored
+      // password in place: it must be entered again too.
+      const legacyMoved = yield* serverSettings
+        .updateSettings({ providers: { opencode: { serverUrl: "https://attacker.example" } } })
+        .pipe(Effect.flip);
+      assert.include(legacyMoved.detail, "serverPassword of provider opencode");
+      assert.deepEqual(yield* serverSettings.getSettings, before);
+
+      // The same address (loopback names interchangeable) keeps it, and a password
+      // entered again goes with the new address.
+      yield* serverSettings.updateSettings(
+        withConfig({ serverUrl: "http://localhost:4096", serverPassword: REDACTED_SETTING_SECRET }),
+      );
+      assert.deepInclude(
+        (yield* serverSettings.getSettings).providerInstances[workId]?.config as object,
+        { serverUrl: "http://localhost:4096", serverPassword: "work-password" },
+      );
+      yield* serverSettings.updateSettings(
+        withConfig({ serverUrl: "https://new.example", serverPassword: "work-password" }),
+      );
+      yield* serverSettings.updateSettings({
+        providers: {
+          opencode: { serverUrl: "https://new.example", serverPassword: "legacy-password" },
+        },
+      });
+      const after = yield* serverSettings.getSettings;
+      assert.deepInclude(after.providerInstances[workId]?.config as object, {
+        serverUrl: "https://new.example",
+        serverPassword: "work-password",
+      });
+      assert.equal(after.providers.opencode.serverPassword, "legacy-password");
+
+      // A default instance that exists never falls back to the legacy password.
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          ...redactServerSettingsForClient(after).providerInstances,
+          [defaultId]: { driver: opencode, config: { serverUrl: "https://new.example" } },
+        },
+      });
+      const revived = yield* serverSettings
+        .updateSettings({
+          providerInstances: {
+            ...redactServerSettingsForClient(yield* serverSettings.getSettings).providerInstances,
+            [defaultId]: {
+              driver: opencode,
+              config: { serverUrl: "https://new.example", serverPassword: REDACTED_SETTING_SECRET },
+            },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(revived.detail, "serverPassword of provider instance opencode");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("rejects a redacted value that stands for no saved secret", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsService;
+      const opencode = ProviderDriverKind.make("opencode");
+      const serverUrl = "http://opencode:url-secret@127.0.0.1:4096/";
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("opencode_work")]: {
+            driver: opencode,
+            config: { serverPassword: "work-password", serverUrl },
+          },
+        },
+      });
+      const before = yield* serverSettings.getSettings;
+      const client = redactServerSettingsForClient(before);
+      const work = client.providerInstances[ProviderInstanceId.make("opencode_work")]!;
+
+      // A copy under a new id has no saved password behind its marker.
+      const copied = yield* serverSettings
+        .updateSettings({
+          providerInstances: {
+            ...client.providerInstances,
+            [ProviderInstanceId.make("opencode_copy")]: work,
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(copied.detail, "serverPassword of provider instance opencode_copy");
+
+      // Editing a URL whose credentials were hidden must re-enter it in full.
+      const edited = yield* serverSettings
+        .updateSettings({
+          providerInstances: {
+            ...client.providerInstances,
+            [ProviderInstanceId.make("opencode_work")]: {
+              ...work,
+              config: {
+                ...(work.config as object),
+                serverUrl: (work.config as { serverUrl: string }).serverUrl.replace("4096", "4097"),
+              },
+            },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(edited.detail, "serverUrl of provider instance opencode_work");
+
+      // Nothing was written, and no marker ever reaches the stored settings.
+      const after = yield* serverSettings.getSettings;
+      assert.deepEqual(after.providerInstances, before.providerInstances);
+      assert.notInclude(JSON.stringify(after), REDACTED_SETTING_SECRET);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 

@@ -65,6 +65,14 @@ import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
 import { hubKeyAddress } from "@ryco/shared/cliProxyHubUrl";
 import { validateCloudflareAccessCredentials } from "@ryco/shared/cliProxyHubCredentials";
+import {
+  PROVIDER_SECRET_CONFIG_KEYS,
+  PROVIDER_URL_CONFIG_KEYS,
+  redactSettingSecret,
+  redactUrlCredentials,
+  resolveRedactedSettingValue,
+  settingSecretAddress,
+} from "@ryco/shared/settingsSecrets";
 
 import { validateWorktreeRoot } from "./project/worktreeRoot.ts";
 import { makeWorkspaceAccessPolicy } from "./workspace/Layers/WorkspaceAccessPolicy.ts";
@@ -138,25 +146,214 @@ function withoutUrlCredentials(raw: string): string {
   }
 }
 
+// URL fields first: a secret's binding is checked against the restored URLs.
+const PROVIDER_CONFIG_SECRET_FIELDS: ReadonlyArray<{
+  readonly key: string;
+  readonly redact: (value: string) => string;
+  readonly boundToAddress: boolean;
+}> = [
+  ...PROVIDER_URL_CONFIG_KEYS.map((key) => ({
+    key,
+    redact: redactUrlCredentials,
+    boundToAddress: false,
+  })),
+  ...PROVIDER_SECRET_CONFIG_KEYS.map((key) => ({
+    key,
+    redact: redactSettingSecret,
+    boundToAddress: true,
+  })),
+];
+
+/** Whether every server URL of two provider configs names the same address. */
+function sameProviderSecretAddress(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  return PROVIDER_URL_CONFIG_KEYS.every(
+    (key) => settingSecretAddress(left[key]) === settingSecretAddress(right[key]),
+  );
+}
+
+const OBSERVABILITY_URL_KEYS = ["otlpTracesUrl", "otlpMetricsUrl"] as const;
+
+function asConfigRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** A provider config (legacy struct or instance `config` blob) as a client may see it. */
+function redactProviderConfig<T>(config: T): T {
+  const record = asConfigRecord(config);
+  if (!record) return config;
+  let redacted: Record<string, unknown> | undefined;
+  for (const field of PROVIDER_CONFIG_SECRET_FIELDS) {
+    const value = record[field.key];
+    if (typeof value !== "string") continue;
+    const visible = field.redact(value);
+    if (visible === value) continue;
+    redacted ??= { ...record };
+    redacted[field.key] = visible;
+  }
+  return (redacted ?? record) as T;
+}
+
+/**
+ * The copy of the settings every client receives (config snapshot,
+ * `settingsUpdated`, `server.getSettings`/`updateSettings` results): no
+ * secret leaves the server. See `@ryco/shared/settingsSecrets`.
+ */
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
   const providerInstances = Object.fromEntries(
-    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
-      instanceId,
-      instance.environment
+    Object.entries(settings.providerInstances).map(([instanceId, instance]) => {
+      const redacted = instance.environment
         ? {
             ...instance,
             environment: instance.environment.map(redactProviderEnvironmentVariable),
           }
-        : instance,
-    ]),
+        : { ...instance };
+      if (instance.config !== undefined) redacted.config = redactProviderConfig(instance.config);
+      return [instanceId, redacted];
+    }),
   );
+  const providers = Object.fromEntries(
+    Object.entries(settings.providers).map(([driver, config]) => [
+      driver,
+      redactProviderConfig(config),
+    ]),
+  ) as ServerSettings["providers"];
   const cliProxyHubs = Object.fromEntries(
     Object.entries(settings.cliProxyHubs).map(([hubId, hub]) => [
       hubId,
       { ...redactCliProxyHub(hub), url: withoutUrlCredentials(hub.url) },
     ]),
   ) as ServerSettings["cliProxyHubs"];
-  return { ...settings, providerInstances, cliProxyHubs };
+  const observability = {
+    otlpTracesUrl: redactUrlCredentials(settings.observability.otlpTracesUrl),
+    otlpMetricsUrl: redactUrlCredentials(settings.observability.otlpMetricsUrl),
+  };
+  return { ...settings, providers, providerInstances, cliProxyHubs, observability };
+}
+
+/**
+ * `next` (current settings with a client patch applied) with every redacted
+ * secret a client sent back replaced by the stored value it stands for, so
+ * saving an unrelated setting never overwrites a secret with its redacted
+ * form. A new default instance (id equal to its driver) resolves against the
+ * legacy `providers.<driver>` struct it was synthesized from. A saved secret
+ * is only kept while its config's server address is unchanged. Returns a
+ * message when a redacted value stands for nothing stored.
+ */
+export function restoreRedactedServerSettingsSecrets(
+  current: ServerSettings,
+  next: ServerSettings,
+  patch: ServerSettingsPatch,
+): { readonly settings: ServerSettings } | { readonly error: string } {
+  const unresolved: string[] = [];
+  const restoreConfig = <T>(
+    config: T,
+    stored: ReadonlyArray<Record<string, unknown> | undefined>,
+    where: string,
+    /** Whether the client sent `key` itself, rather than the merge keeping it. */
+    sentByClient: (key: string) => boolean,
+  ): T => {
+    const record = asConfigRecord(config);
+    if (!record) return config;
+    let restored: Record<string, unknown> | undefined;
+    for (const field of PROVIDER_CONFIG_SECRET_FIELDS) {
+      const incoming = record[field.key];
+      if (typeof incoming !== "string") continue;
+      const next = restored ?? record;
+      // A saved secret (sent back redacted, or left in place by a partial
+      // patch) never follows its config to another server address; the
+      // client must enter it again.
+      const moved =
+        field.boundToAddress &&
+        stored.some((entry) => {
+          const saved = entry?.[field.key];
+          return (
+            entry !== undefined &&
+            typeof saved === "string" &&
+            saved.length > 0 &&
+            (field.redact(saved) === incoming ||
+              (incoming === saved && !sentByClient(field.key))) &&
+            !sameProviderSecretAddress(entry, next)
+          );
+        });
+      const value = moved
+        ? undefined
+        : resolveRedactedSettingValue(
+            incoming,
+            stored.map((entry) => entry?.[field.key]),
+            field.redact,
+          );
+      if (value === undefined) {
+        unresolved.push(`${field.key} of ${where}${moved ? " (its server address changed)" : ""}`);
+        continue;
+      }
+      if (value === incoming) continue;
+      restored ??= { ...record };
+      restored[field.key] = value;
+    }
+    return (restored ?? record) as T;
+  };
+
+  const currentProviders = current.providers as Record<string, unknown>;
+  const providers = Object.fromEntries(
+    Object.entries(next.providers).map(([driver, config]) => [
+      driver,
+      restoreConfig(
+        config,
+        [asConfigRecord(currentProviders[driver])],
+        `provider ${driver}`,
+        (key) => {
+          const sent = (patch.providers as Record<string, object | undefined> | undefined)?.[
+            driver
+          ];
+          return sent !== undefined && Object.hasOwn(sent, key);
+        },
+      ),
+    ]),
+  ) as ServerSettings["providers"];
+
+  const currentInstances = current.providerInstances as Record<string, ProviderInstanceConfig>;
+  const providerInstances = Object.fromEntries(
+    Object.entries(next.providerInstances).map(([instanceId, instance]) => {
+      if (instance.config === undefined) return [instanceId, instance];
+      const stored = currentInstances[instanceId];
+      const config = restoreConfig(
+        instance.config,
+        [
+          stored?.driver === instance.driver ? asConfigRecord(stored.config) : undefined,
+          stored === undefined && instanceId === instance.driver
+            ? asConfigRecord(currentProviders[instance.driver])
+            : undefined,
+        ],
+        `provider instance ${instanceId}`,
+        // The instance map is replaced whole, so every key came from the client.
+        () => patch.providerInstances !== undefined,
+      );
+      return [instanceId, config === instance.config ? instance : { ...instance, config }];
+    }),
+  ) as ServerSettings["providerInstances"];
+
+  const observability = { ...next.observability };
+  for (const key of OBSERVABILITY_URL_KEYS) {
+    const value = resolveRedactedSettingValue(
+      next.observability[key],
+      [current.observability[key]],
+      redactUrlCredentials,
+    );
+    if (value === undefined) unresolved.push(`observability ${key}`);
+    else observability[key] = value;
+  }
+
+  if (unresolved.length > 0) {
+    return {
+      error: `Enter these values again in full; the saved value they stood for is unavailable: ${unresolved.join(", ")}.`,
+    };
+  }
+  return { settings: { ...next, providers, providerInstances, observability } };
 }
 
 export interface ServerSettingsShape {
@@ -1000,7 +1197,7 @@ export const makeServerSettings = Effect.gen(function* () {
             }
             normalizedPatch.projectWorktreeRoots = Object.fromEntries(roots);
           }
-          const rawNext = yield* Effect.try({
+          const patched = yield* Effect.try({
             try: () => applyServerSettingsPatch(current, normalizedPatch),
             catch: (cause) =>
               new ServerSettingsError({
@@ -1010,6 +1207,12 @@ export const makeServerSettings = Effect.gen(function* () {
                 cause,
               }),
           });
+          // Before any comparison: an echoed redacted secret is no change at all.
+          const restored = restoreRedactedServerSettingsSecrets(current, patched, normalizedPatch);
+          if ("error" in restored) {
+            return yield* new ServerSettingsError({ settingsPath, detail: restored.error });
+          }
+          const rawNext = restored.settings;
           const validated = yield* Schema.decodeEffect(ServerSettings)(rawNext).pipe(
             Effect.mapError(
               (cause) =>

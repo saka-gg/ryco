@@ -405,6 +405,40 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
     }),
   );
 
+  it.effect("keeps credentials in a configured server URL out of the status message", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventoryError = new Error("fetch failed");
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ serverUrl: "http://opencode:url-secret@127.0.0.1:9999/" }),
+        process.cwd(),
+      );
+
+      assert.equal(snapshot.status, "error");
+      assert.equal(
+        snapshot.message,
+        "Couldn't reach the configured OpenCode server at http://__ryco_redacted__:__ryco_redacted__@127.0.0.1:9999/. Check that the server is running and the URL is correct.",
+      );
+    }),
+  );
+
+  it.effect("keeps URL credentials out of an unrecognised connection error", () =>
+    Effect.gen(function* () {
+      const serverUrl = "http://opencode:url-secret@127.0.0.1:9999";
+      // What Node's fetch throws for such a URL; no keyword maps it to a friendly message.
+      runtimeMock.state.inventoryError = new TypeError(
+        `Request cannot be constructed from a URL that includes credentials: ${serverUrl}/config`,
+      );
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({ serverUrl }),
+        process.cwd(),
+      );
+
+      assert.equal(snapshot.status, "error");
+      assert.ok(snapshot.message?.startsWith("Request cannot be constructed from a URL"));
+      assert.ok(!snapshot.message?.includes("url-secret"), snapshot.message);
+    }),
+  );
+
   it.effect("surfaces a friendly connection error for configured servers", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventoryError = new Error(
