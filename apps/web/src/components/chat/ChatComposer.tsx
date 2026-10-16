@@ -127,6 +127,9 @@ import { describeRunningFollowUp, isFollowUpInvertModifier } from "./composerFol
 import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
+import { useLazyComponentReady } from "../../lib/preloadableLazy";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
+import { LazyDelegationDock } from "./chatViewLazySurfaces";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
 import {
   THREAD_MENTION_DROP_ZONE_PROPS,
@@ -383,6 +386,14 @@ export interface ChatComposerProps {
    */
   phoneThreadDock: PhoneThreadDockProps | null;
 
+  /**
+   * The thread's delegation dock (its delegated threads and Agent Control),
+   * docked at the top of the composer surface. `null` on the phone tier and
+   * without a thread; serializable so `memo` holds, and the dock reads its own
+   * state.
+   */
+  delegationDock: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null;
+
   // Misc
   resolvedTheme: "light" | "dark";
   settings: UnifiedSettings;
@@ -557,6 +568,7 @@ export const ChatComposer = memo(
       cliProxyHubsEnabled,
       activeThreadActivities,
       phoneThreadDock,
+      delegationDock,
       resolvedTheme,
       settings,
       keybindings,
@@ -949,6 +961,12 @@ export const ChatComposer = memo(
       LazyPhoneThreadDock,
       phoneThreadDock !== null,
     );
+    const delegationDockReady = useLazyComponentReady(LazyDelegationDock, delegationDock !== null, {
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("delegation dock", error, retry),
+    });
+    // The dock decides whether it has anything to show; the prompt below
+    // tightens its top padding under any header.
+    const [delegationDockPresent, setDelegationDockPresent] = useState(false);
     const pendingContextHandoff = useMemo(
       () =>
         derivePendingContextHandoff({
@@ -1139,6 +1157,7 @@ export const ChatComposer = memo(
       pendingUserInputs.length === 0 &&
       !(showPlanFollowUpPrompt && activeProposedPlan !== null);
     const hasComposerHeader =
+      (delegationDock !== null && delegationDockPresent) ||
       isComposerApprovalState ||
       pendingUserInputs.length > 0 ||
       (showPlanFollowUpPrompt && activeProposedPlan !== null) ||
@@ -2856,6 +2875,16 @@ export const ChatComposer = memo(
               setIsComposerFocused(true);
             }}
           >
+            {/* Above the thread's own header: delegated work stays in view
+                while this thread asks for approval or input. */}
+            {delegationDock && delegationDockReady ? (
+              <LazyDelegationDock
+                key={`${delegationDock.environmentId}:${delegationDock.threadId}`}
+                environmentId={delegationDock.environmentId}
+                threadId={delegationDock.threadId}
+                onPresenceChange={setDelegationDockPresent}
+              />
+            ) : null}
             {!isComposerCollapsedMobile &&
               (activePendingApproval ? (
                 <div className="rounded-t-[max(0px,calc(var(--radius-3xl)-3px))] border-b border-border/65 bg-muted/20">

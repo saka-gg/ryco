@@ -2442,6 +2442,70 @@ label:has(> select#reasoning-effort) select {
   }
 }
 
+/* Delegation dock (DelegationDock): opening sections rise in and a working
+   child's bar segment shimmers. Durations derive from the house steps, so
+   reduced motion (OS or the Motion preference) zeroes them. */
+.delegation-dock {
+  --delegation-dock-working: var(--color-sky-500);
+  /* Text stays AA-legible on the light composer surface. */
+  --delegation-dock-working-text: var(--color-sky-700);
+}
+
+.dark .delegation-dock {
+  --delegation-dock-working: var(--color-sky-400);
+  --delegation-dock-working-text: var(--color-sky-400);
+}
+
+.delegation-dock-rise {
+  animation: delegation-dock-rise var(--app-motion-duration-pop, 200ms) ease;
+}
+
+.delegation-dock-rise-slow {
+  animation: delegation-dock-rise calc(var(--app-motion-duration-pop, 200ms) * 1.25) ease;
+}
+
+@keyframes delegation-dock-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.delegation-dock-shimmer {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--delegation-dock-working) 45%, transparent),
+    var(--delegation-dock-working),
+    color-mix(in srgb, var(--delegation-dock-working) 45%, transparent)
+  );
+  background-size: 24px 4px;
+  animation: delegation-dock-shimmer 1.2s linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+@keyframes delegation-dock-shimmer {
+  from {
+    background-position: -24px 0;
+  }
+  to {
+    background-position: 24px 0;
+  }
+}
+
+:root[data-ryco-motion-paused] .delegation-dock-shimmer {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .delegation-dock-shimmer {
+    animation: none;
+  }
+}
+
 /* Sidebar header (SidebarPrimaryActions): the Omnifield, New thread and the
    destinations fold into one toolbar row while a sidebar list is scrolled
    (sidebarFold.ts). Every control is absolutely placed, so both layouts morph

@@ -1,6 +1,7 @@
 import "../../index.css";
 
 import { Schema } from "effect";
+import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { ServerProvider } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
@@ -690,35 +691,46 @@ describe("Inbox sidebar delegated threads", () => {
 
   const coordinatorId = ThreadId.make("Coordinator");
   const workerId = ThreadId.make("Worker");
-  const delegatedProps = (activeThreadKey: string | null): InboxSidebarProps => ({
+  const delegatedThread = (
+    id: ThreadId,
+    overrides: Partial<SidebarThreadSummary> = {},
+  ): SidebarThreadSummary => ({
+    id,
+    environmentId: ENVIRONMENT_ID,
+    projectId: PROJECT_ID,
+    title: `${id} task`,
+    interactionMode: "default",
+    session: null,
+    createdAt: "2026-09-01T00:00:00.000Z",
+    archivedAt: null,
+    latestTurn: null,
+    branch: null,
+    worktreePath: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    lineage: null,
+    ...overrides,
+  });
+  const delegatedProps = (
+    activeThreadKey: string | null,
+    worker: Partial<SidebarThreadSummary> = {},
+  ): InboxSidebarProps => ({
     projects: [],
     worktrees: [],
     environments: [],
-    threads: [coordinatorId, workerId].map((id) => ({
-      id,
-      environmentId: ENVIRONMENT_ID,
-      projectId: PROJECT_ID,
-      title: `${id} task`,
-      interactionMode: "default",
-      session: null,
-      createdAt: "2026-09-01T00:00:00.000Z",
-      archivedAt: null,
-      latestTurn: null,
-      branch: null,
-      worktreePath: null,
-      latestUserMessageAt: null,
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
-      hasActionableProposedPlan: false,
-      lineage:
-        id === workerId
-          ? {
-              parentThreadId: coordinatorId,
-              rootThreadId: coordinatorId,
-              relationship: "delegated",
-            }
-          : null,
-    })),
+    threads: [
+      delegatedThread(coordinatorId),
+      delegatedThread(workerId, {
+        lineage: {
+          parentThreadId: coordinatorId,
+          rootThreadId: coordinatorId,
+          relationship: "delegated",
+        },
+        ...worker,
+      }),
+    ],
     deliveryUnknownThreadKeys: new Set(),
     localQueuedThreadKeys: new Set(),
     activeThreadKey,
@@ -763,6 +775,65 @@ describe("Inbox sidebar delegated threads", () => {
           page.getByRole("button", { name: "Show 1 delegated thread from Coordinator task" }),
         )
         .toHaveAttribute("aria-expanded", "true");
+      expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("fits the hover highlight to an indented delegated row", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(
+      <InboxSidebar {...delegatedProps(`${ENVIRONMENT_ID}:${workerId}`)} />,
+    );
+    try {
+      await page.getByText("Worker task", { exact: true }).hover();
+      const highlight = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-sidebar"] [data-visible]',
+      )!;
+      await expect.poll(() => highlight.dataset.visible).toBe("true");
+      const child = document.querySelector<HTMLElement>('[data-inbox-row-key$=":Worker"]')!;
+      expect(child.offsetLeft).toBeGreaterThan(0);
+      expect(highlight.style.width).toBe(`${child.offsetWidth}px`);
+      expect(highlight.style.transform).toBe(
+        `translate(${child.offsetLeft}px, ${child.offsetTop}px)`,
+      );
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("folds a working child and shows its host Working in Active now", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(
+      <InboxSidebar {...delegatedProps(null, { backgroundLiveness: "working" })} />,
+    );
+    try {
+      await expect
+        .element(
+          page.getByRole("button", { name: "Show 1 delegated thread from Coordinator task" }),
+        )
+        .toHaveAttribute("aria-expanded", "false");
+      await expect.element(page.getByRole("heading", { name: "Active now" })).toBeInTheDocument();
+      expect(rowTitles()).toEqual(["Coordinator task"]);
+      await expect.element(page.getByLabelText("Working").first()).toBeInTheDocument();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("keeps a host open while its delegated child needs input", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(
+      <InboxSidebar {...delegatedProps(null, { hasPendingApprovals: true })} />,
+    );
+    try {
+      await expect
+        .element(
+          page.getByRole("button", { name: "Show 1 delegated thread from Coordinator task" }),
+        )
+        .toHaveAttribute("aria-expanded", "true");
+      await expect.element(page.getByRole("heading", { name: "Needs input" })).toBeInTheDocument();
       expect(rowTitles()).toEqual(["Coordinator task", "Worker task"]);
     } finally {
       await mounted.unmount();

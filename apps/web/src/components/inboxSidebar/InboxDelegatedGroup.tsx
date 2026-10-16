@@ -3,9 +3,10 @@ import type { ReactNode } from "react";
 
 /**
  * Compact disclosure under an inbox host row for its folded delegated children.
- * Only quiet children fold (see `planDelegatedNesting`), so collapsing never
- * hides live work. Expanded children render as ordinary inbox rows behind a
- * guide line, not inside a card.
+ * Children fold whatever their state (see `planDelegatedNesting`); the host row
+ * shows their working or needs-input state, so collapsing never hides live
+ * work. Expanded children render as ordinary inbox rows behind a guide line,
+ * not inside a card.
  */
 export function InboxDelegatedGroup(props: {
   readonly hostTitle: string;

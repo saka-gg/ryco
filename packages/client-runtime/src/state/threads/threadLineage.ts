@@ -106,13 +106,19 @@ const URGENCY_RANK: Record<DelegatedNestingUrgency, number> = {
   settled: 4,
 };
 
-/** The single attention predicate: only quiet, unplaced delegated children fold. */
+/** Every delegated child folds, whatever its state, unless the user pinned it or Focus placed it. */
 function canNest(item: DelegatedNestingItem): boolean {
+  return isDelegatedThreadLineage(item.lineage) && !item.pinned && !item.focused;
+}
+
+/**
+ * Snoozed and Settled hosts sit out of sight, so only a child at least as quiet
+ * folds under one. Any other host carries its children's state (adapter-owned).
+ */
+function canHost(host: DelegatedNestingItem, child: DelegatedNestingItem): boolean {
   return (
-    isDelegatedThreadLineage(item.lineage) &&
-    !item.pinned &&
-    !item.focused &&
-    URGENCY_RANK[item.urgency] >= URGENCY_RANK.recent
+    URGENCY_RANK[host.urgency] < URGENCY_RANK.snoozed ||
+    URGENCY_RANK[child.urgency] >= URGENCY_RANK[host.urgency]
   );
 }
 
@@ -143,9 +149,10 @@ function nearestVisibleAncestorKey(
 /**
  * Plans which delegated children fold under a top-level host (spec D7-D9).
  *
- * A child folds only when it is delegated, not pinned, not focused, quiet
- * (`recent`, `snoozed` or `settled`) and not more urgent than its nearest
- * visible ancestor. Nested descendants flatten to the topmost visible host.
+ * A delegated child folds under its nearest visible ancestor whatever its
+ * state, unless it is pinned or focused, or that ancestor is snoozed or settled
+ * and the child is more urgent. Nested descendants flatten to the topmost
+ * visible host, which therefore never hides work under Snoozed or Settled.
  * Invisible intermediates are walked through `lineageByKey`.
  */
 export function planDelegatedNesting(
@@ -161,7 +168,7 @@ export function planDelegatedNesting(
     const host = hostKey === null ? undefined : itemByKey.get(hostKey);
     if (host === undefined) continue;
     // Only the nearest visible ancestor is considered, so the result is predictable.
-    if (URGENCY_RANK[item.urgency] < URGENCY_RANK[host.urgency]) continue;
+    if (!canHost(host, item)) continue;
     candidateHostByKey.set(item.key, host.key);
   }
 

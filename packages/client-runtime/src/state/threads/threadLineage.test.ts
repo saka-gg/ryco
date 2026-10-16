@@ -64,23 +64,38 @@ describe("planDelegatedNesting", () => {
     expect(plan.childKeysByHostKey.get(keyOf("parent"))).toEqual([keyOf("child")]);
   });
 
-  it("keeps a working or needs-input child top-level", () => {
+  it("nests a working or needs-input child under a quieter parent", () => {
     const plan = planDelegatedNesting([
       item("parent", { urgency: "recent" }),
       item("working", { lineage: delegated("parent"), urgency: "active" }),
       item("asking", { lineage: delegated("parent"), urgency: "needs-input" }),
     ]);
-    expect(hostOf(plan, "working")).toBeNull();
-    expect(hostOf(plan, "asking")).toBeNull();
-    expect(plan.childKeysByHostKey.size).toBe(0);
+    expect(hostOf(plan, "working")).toBe(keyOf("parent"));
+    expect(hostOf(plan, "asking")).toBe(keyOf("parent"));
+    expect(plan.childKeysByHostKey.get(keyOf("parent"))).toEqual([
+      keyOf("working"),
+      keyOf("asking"),
+    ]);
   });
 
-  it("only nests a child that is not more urgent than its host", () => {
+  it("nests under a snoozed or settled host only a child at least as quiet", () => {
     const recentUnderSettled = planDelegatedNesting([
       item("parent", { urgency: "settled" }),
       item("child", { lineage: delegated("parent"), urgency: "recent" }),
     ]);
     expect(hostOf(recentUnderSettled, "child")).toBeNull();
+
+    const workingUnderSnoozed = planDelegatedNesting([
+      item("parent", { urgency: "snoozed" }),
+      item("child", { lineage: delegated("parent"), urgency: "active" }),
+    ]);
+    expect(hostOf(workingUnderSnoozed, "child")).toBeNull();
+
+    const settledUnderSnoozed = planDelegatedNesting([
+      item("parent", { urgency: "snoozed" }),
+      item("child", { lineage: delegated("parent"), urgency: "settled" }),
+    ]);
+    expect(hostOf(settledUnderSnoozed, "child")).toBe(keyOf("parent"));
 
     const settledUnderRecent = planDelegatedNesting([
       item("parent", { urgency: "recent" }),
@@ -89,11 +104,21 @@ describe("planDelegatedNesting", () => {
     expect(hostOf(settledUnderRecent, "child")).toBe(keyOf("parent"));
   });
 
+  it("never flattens live work under a settled topmost host", () => {
+    const plan = planDelegatedNesting([
+      item("root", { urgency: "settled" }),
+      item("child", { lineage: delegated("root"), urgency: "settled" }),
+      item("grandchild", { lineage: delegated("child", "root"), urgency: "active" }),
+    ]);
+    expect(hostOf(plan, "child")).toBe(keyOf("root"));
+    expect(hostOf(plan, "grandchild")).toBeNull();
+  });
+
   it("keeps pinned and focused children top-level", () => {
     const plan = planDelegatedNesting([
       item("parent"),
       item("pinned", { lineage: delegated("parent"), pinned: true }),
-      item("focused", { lineage: delegated("parent"), focused: true }),
+      item("focused", { lineage: delegated("parent"), focused: true, urgency: "needs-input" }),
     ]);
     expect(hostOf(plan, "pinned")).toBeNull();
     expect(hostOf(plan, "focused")).toBeNull();

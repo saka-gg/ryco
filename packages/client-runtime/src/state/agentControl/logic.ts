@@ -21,6 +21,7 @@ import type { ThreadId, ThreadLineage } from "@ryco/contracts";
 import {
   AGENT_CONTROL_QUEUE_RECENT_LIMIT_DEFAULT,
   AGENT_CONTROL_TERMINAL_PROPOSAL_STATUSES,
+  type AgentControlCompletionReturn,
   type AgentControlProposal,
   type AgentControlProposalStatus,
   type AgentControlProposalStreamEvent,
@@ -324,4 +325,45 @@ export function selectAgentControlThreadActivity(
     managerThreadId: latestManager === delegatedFromThreadId ? null : latestManager,
     delegatedFromThreadId,
   };
+}
+
+/**
+ * The returns of `parentThreadId`'s delegated threads, one per child (the
+ * server keys returns by child). They live on the parent's own `createThreads`
+ * proposals; a child created without `returnToOrigin` has none.
+ */
+export function selectCompletionReturnsByChildThreadId(
+  proposals: ReadonlyArray<AgentControlProposal>,
+  parentThreadId: ThreadId,
+): ReadonlyMap<ThreadId, AgentControlCompletionReturn> {
+  const byChild = new Map<ThreadId, AgentControlCompletionReturn>();
+  for (const proposal of proposals) {
+    for (const result of proposal.completionReturns ?? []) {
+      if (result.parentThreadId !== parentThreadId) continue;
+      const previous = byChild.get(result.childThreadId);
+      if (previous === undefined || result.revision > previous.revision) {
+        byChild.set(result.childThreadId, result);
+      }
+    }
+  }
+  return byChild;
+}
+
+/** The return reporting `childThreadId` to the thread that delegated it, if one was requested. */
+export function findCompletionReturnForChild(
+  state: AgentControlQueueState,
+  childThreadId: ThreadId,
+): AgentControlCompletionReturn | null {
+  let found: AgentControlCompletionReturn | null = null;
+  for (const proposal of Object.values(state.proposalsById)) {
+    for (const result of proposal.completionReturns ?? []) {
+      if (
+        result.childThreadId === childThreadId &&
+        (found === null || result.revision > found.revision)
+      ) {
+        found = result;
+      }
+    }
+  }
+  return found;
 }

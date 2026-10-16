@@ -35,7 +35,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("keeps external approvals actionable with no active thread and after switching chats", async () => {
+it("keeps external approvals actionable and other threads' requests out of the block", async () => {
   const external = Schema.decodeUnknownSync(AgentControlProposal)({
     proposalId: "external-request",
     requestId: "external-request-id",
@@ -89,10 +89,8 @@ it("keeps external approvals actionable with no active thread and after switchin
       recent: [],
     },
   });
-  const view = (activeThreadId: ThreadId | null) => (
-    <AgentControlApprovals environmentId={environmentId} activeThreadId={activeThreadId} />
-  );
-  const screen = await render(view(null));
+  const view = () => <AgentControlApprovals environmentId={environmentId} />;
+  const screen = await render(view());
   await expect
     .element(screen.getByRole("region", { name: "External Agent Control approval requests" }))
     .toBeVisible();
@@ -103,7 +101,7 @@ it("keeps external approvals actionable with no active thread and after switchin
   await expect.element(screen.getByText("Hidden external prompt")).not.toBeInTheDocument();
   await screen.getByRole("button", { name: "Approve", exact: true }).click();
   expect(fixture.acceptProposal).toHaveBeenCalledWith({ proposalId: "external-request" });
-  await screen.rerender(view(ThreadId.make("another-chat")));
+  await screen.rerender(view());
   await screen.getByRole("button", { name: "Reject", exact: true }).click();
   expect(fixture.rejectProposal).toHaveBeenCalledWith({ proposalId: "external-request" });
 });

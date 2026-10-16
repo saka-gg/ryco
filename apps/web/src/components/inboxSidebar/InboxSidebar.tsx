@@ -194,10 +194,13 @@ export function InboxSidebar(props: InboxSidebarProps) {
     (key === "snoozed" ? snoozedOpen : settledOpen) ||
     status === key ||
     query.trim().length > 0;
-  // A host stays open while the open thread is one of its folded children.
+  // A host stays open while one of its folded children is the open thread or
+  // needs input: the host only says that it waits, the child row is where to act.
   const isHostExpanded = (row: InboxSidebarRow) =>
     expandedHostKeys.has(row.key) ||
-    row.delegatedChildren.some((child) => child.key === props.activeThreadKey);
+    row.delegatedChildren.some(
+      (child) => child.key === props.activeThreadKey || child.state === "needs-input",
+    );
   const visibleRowKeys = (row: InboxSidebarRow) =>
     isHostExpanded(row) && row.delegatedChildren.length > 0
       ? [row.key, ...row.delegatedChildren.map((child) => child.key)]
@@ -284,7 +287,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
               <div
                 ref={highlightRef}
                 aria-hidden
-                className="pointer-events-none absolute inset-x-0 top-0 rounded-lg bg-sidebar-accent opacity-0 scale-[0.985] transition-[transform,height,opacity,scale] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:scale-100 data-[visible=true]:opacity-100"
+                className="pointer-events-none absolute top-0 left-0 w-full rounded-lg bg-sidebar-accent opacity-0 scale-[0.985] transition-[transform,width,height,opacity,scale] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none data-[visible=true]:scale-100 data-[visible=true]:opacity-100"
                 data-visible="false"
               />
               {sections.map((section) => {

@@ -222,8 +222,10 @@ export interface InboxSidebarRow {
   readonly focus: ThreadPriorityFocusMetadata | null;
   /** Server-owned provenance; null on root threads. */
   readonly lineage: ThreadLineage | null;
-  /** Quiet delegated descendants folded under this host row; empty unless it is a host. */
+  /** Delegated descendants folded under this host row; empty unless it is a host. */
   readonly delegatedChildren: ReadonlyArray<InboxSidebarRow>;
+  /** `state` is a folded delegated child's (working or needs input), not this thread's own. */
+  readonly delegatedState: boolean;
 }
 
 export interface InboxSidebarSection {
@@ -260,7 +262,7 @@ export interface BuildInboxSidebarInput {
   readonly pinnedThreadKeys?: ReadonlySet<string>;
   /** The environment rows are implicitly about; other machines are labelled. */
   readonly primaryEnvironmentId?: EnvironmentId | null;
-  /** Fold quiet delegated children under their host (default true; off on the phone tier). */
+  /** Fold delegated children under their host (default true; off on the phone tier). */
   readonly nestDelegated?: boolean;
   readonly nowMs?: number;
 }
@@ -410,7 +412,10 @@ function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
   return "input";
 }
 
-function resolveRunningSince(thread: SidebarThreadSummary): string | null {
+/** Start of the running turn; background work has no turn clock. */
+export function resolveRunningSince(
+  thread: Pick<SidebarThreadSummary, "latestTurn">,
+): string | null {
   const turn = thread.latestTurn;
   // Background liveness has no turn clock; the row falls back to recency.
   return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
@@ -463,9 +468,22 @@ export function resolveInboxThreadStatus(
   };
 }
 
+/** `resolveThreadState`'s order: a host takes a child's state only over a weaker own state. */
+const STATE_PRECEDENCE: Readonly<Record<InboxSidebarThreadState, number>> = {
+  offline: 0,
+  "needs-input": 1,
+  "delivery-unknown": 2,
+  working: 3,
+  connecting: 4,
+  limited: 5,
+  error: 6,
+  reconnecting: 7,
+  idle: 8,
+};
+
 /**
- * State-derived section. Also the delegated-nesting attention predicate: a state
- * that must never fold under a host has to map to "active" or "needs-input".
+ * State-derived section. It also ranks delegated nesting: a child more urgent
+ * than a snoozed or settled host stays top-level instead of folding out of sight.
  */
 function sectionKey(
   state: InboxSidebarThreadState,
@@ -479,8 +497,38 @@ const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
 const UNKNOWN_PROJECT_LABEL = "Unknown project";
 
 /**
- * Folds quiet delegated children under their topmost visible host (spec D7/D8).
- * Live, failing and attention children stay top-level, so section counts stay exact.
+ * A host carries what its folded children are doing: it is working while one of
+ * them works and needs input while one of them does, unless its own state is
+ * stronger. The host then sorts into that section, so folding never hides live
+ * work. A child's error stays on the child row, under its own glyph.
+ */
+function withDelegatedState(host: InboxSidebarRow): InboxSidebarRow {
+  const asking = host.delegatedChildren.find((child) => child.state === "needs-input");
+  const working = host.delegatedChildren.filter((child) => child.state === "working");
+  const inherited = asking ? "needs-input" : working.length > 0 ? "working" : null;
+  if (inherited === null || STATE_PRECEDENCE[host.state] <= STATE_PRECEDENCE[inherited]) {
+    return host;
+  }
+  // The earliest running child's clock; background work without one falls back to recency.
+  const runningSince =
+    working
+      .flatMap((child) => (child.runningSince ? [child.runningSince] : []))
+      .toSorted((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
+  return {
+    ...host,
+    state: inherited,
+    statusLabel: statusLabel(inherited, undefined, null),
+    attention: asking?.attention ?? null,
+    errorDetail: null,
+    usageLimit: null,
+    runningSince: inherited === "working" ? runningSince : null,
+    delegatedState: true,
+  };
+}
+
+/**
+ * Folds delegated children under their topmost visible host (spec D7/D8),
+ * whatever their state; the host takes on their working or needs-input state.
  */
 function nestDelegatedRows(
   rows: ReadonlyArray<InboxSidebarRow>,
@@ -515,7 +563,7 @@ function nestDelegatedRows(
         return child ? [child] : [];
       })
       .toSorted(compareRecent);
-    return [{ ...row, delegatedChildren }];
+    return [withDelegatedState({ ...row, delegatedChildren })];
   });
 }
 
@@ -591,14 +639,13 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
   return null;
 }
 
-function modelDisplayName(
+/** A model's short display name from its provider's catalog; null when the catalog lacks it. */
+export function modelDisplayName(
   selection: ModelSelection | null | undefined,
-  environment: InboxSidebarEnvironment | undefined,
+  providers: ReadonlyArray<ServerProvider> | null | undefined,
 ): string | null {
   if (!selection) return null;
-  const provider = environment?.providers?.find(
-    (provider) => provider.instanceId === selection.instanceId,
-  );
+  const provider = providers?.find((provider) => provider.instanceId === selection.instanceId);
   const model = provider?.models.find(
     (model) => model.slug === selection.model || model.aliases?.includes(selection.model),
   );
@@ -670,16 +717,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
-    const rowSection = entry.pinned
-      ? "pinned"
-      : snoozed
-        ? "snoozed"
-        : settled
-          ? "settled"
-          : entry.focus
-            ? "focus"
-            : sectionKey(state);
-    if (input.filters.status !== "all" && input.filters.status !== rowSection) continue;
     const providerDriver = resolveProviderDriver(thread);
     const rowPullRequests = resolveRowPullRequests(thread, worktree);
     rows.push({
@@ -705,7 +742,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       project: project ?? null,
       isChat,
       isWorktree: Boolean(worktree?.worktreePath ?? thread.worktreePath),
-      rankingModelLabel: modelDisplayName(entry.focus?.ranking?.modelSelection, environment),
+      rankingModelLabel: modelDisplayName(
+        entry.focus?.ranking?.modelSelection,
+        environment?.providers,
+      ),
       workspaceLabel,
       contextLabel,
       state,
@@ -725,7 +765,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         PROVIDER_OPTIONS.find((option) => option.value === providerDriver)?.label ??
         providerDriver ??
         null,
-      modelLabel: modelDisplayName(thread.modelSelection, environment),
+      modelLabel: modelDisplayName(thread.modelSelection, environment?.providers),
       modelSelection: thread.modelSelection ?? null,
       branchLabel: thread.branch ?? worktree?.branch ?? null,
       changeRequestLabel:
@@ -764,11 +804,12 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       focus: entry.focus,
       lineage: thread.lineage ?? null,
       delegatedChildren: NO_DELEGATED_CHILDREN,
+      delegatedState: false,
     });
   }
 
-  // Text search shows every match as its own row. A status filter keeps folding,
-  // but only under hosts that pass the filter themselves.
+  // Text search shows every match as its own row. A status filter keeps folding:
+  // it shows its section as the unfiltered inbox does, with each host's children.
   const topLevelRows =
     input.nestDelegated !== false && input.filters.query.trim() === ""
       ? nestDelegatedRows(rows, input.threads)
@@ -794,26 +835,29 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       ),
     );
 
+  const sections: InboxSidebarSection[] = [
+    ...(pinned.length > 0 ? [{ key: "pinned", title: "Pinned", rows: pinned } as const] : []),
+    ...(focus.length > 0 ? [{ key: "focus", title: "Focus", rows: focus } as const] : []),
+    ...(active.length > 0 ? [{ key: "active", title: "Active now", rows: active } as const] : []),
+    ...(needsInput.length > 0
+      ? [{ key: "needs-input", title: "Needs input", rows: needsInput } as const]
+      : []),
+    ...(recent.length > 0 ? [{ key: "recent", title: "Recent", rows: recent } as const] : []),
+    ...(unpinnedRows.some((row) => row.snoozedUntil)
+      ? [
+          {
+            key: "snoozed",
+            title: "Snoozed",
+            rows: unpinnedRows.filter((row) => row.snoozedUntil),
+          } as const,
+        ]
+      : []),
+    ...(settled.length > 0 ? [{ key: "settled", title: "Settled", rows: settled } as const] : []),
+  ];
+
+  const status = input.filters.status;
   return {
-    sections: [
-      ...(pinned.length > 0 ? [{ key: "pinned", title: "Pinned", rows: pinned } as const] : []),
-      ...(focus.length > 0 ? [{ key: "focus", title: "Focus", rows: focus } as const] : []),
-      ...(active.length > 0 ? [{ key: "active", title: "Active now", rows: active } as const] : []),
-      ...(needsInput.length > 0
-        ? [{ key: "needs-input", title: "Needs input", rows: needsInput } as const]
-        : []),
-      ...(recent.length > 0 ? [{ key: "recent", title: "Recent", rows: recent } as const] : []),
-      ...(unpinnedRows.some((row) => row.snoozedUntil)
-        ? [
-            {
-              key: "snoozed",
-              title: "Snoozed",
-              rows: unpinnedRows.filter((row) => row.snoozedUntil),
-            } as const,
-          ]
-        : []),
-      ...(settled.length > 0 ? [{ key: "settled", title: "Settled", rows: settled } as const] : []),
-    ],
+    sections: status === "all" ? sections : sections.filter((section) => section.key === status),
     nextSettlementEvaluationAtMs: inbox.nextSettlementEvaluationAtMs,
   };
 }

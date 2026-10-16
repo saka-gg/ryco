@@ -13,7 +13,7 @@ import { threadLinkActivityAt } from "./threadLinkActivity";
 /**
  * Rows linking to other threads: status glyph, title and relative time; a click
  * opens the thread. Renders only the row buttons, so the caller owns the
- * container (Agents on the pull request rail, Delegated threads in a chat).
+ * container (Agents on the pull request rail).
  */
 export function ThreadLinkList(props: {
   /** An archived thread may be a stub, which shows as archived (no status). */

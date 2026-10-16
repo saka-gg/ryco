@@ -97,7 +97,9 @@ export function useInboxListMotion(input: {
     }
     const wasVisible = highlight.dataset.visible === "true";
     if (!wasVisible) highlight.style.transition = "none";
-    highlight.style.transform = `translateY(${row.offsetTop}px)`;
+    // Horizontal too: folded delegated rows are indented under their host.
+    highlight.style.transform = `translate(${row.offsetLeft}px, ${row.offsetTop}px)`;
+    highlight.style.width = `${row.offsetWidth}px`;
     highlight.style.height = `${row.offsetHeight}px`;
     if (!wasVisible) {
       void highlight.offsetWidth;

@@ -144,6 +144,31 @@ describe("row hints", () => {
     ).toBe(`Working · started ${formatInboxDayTime(started)}`);
   });
 
+  it("says when the state comes from a delegated thread", () => {
+    const started = "2026-10-02T14:28:00.000Z";
+    expect(
+      inboxGlyphHint(
+        {
+          ...hintRow,
+          state: "working",
+          statusLabel: "Working",
+          runningSince: started,
+          delegatedState: true,
+        },
+        false,
+      ),
+    ).toBe(`Working in a delegated thread · started ${formatInboxDayTime(started)}`);
+    expect(
+      inboxGlyphHint(
+        { ...hintRow, state: "needs-input", attention: "approval", delegatedState: true },
+        false,
+      ),
+    ).toBe("Needs approval in a delegated thread");
+    expect(inboxAttentionDetail({ attention: "approval", delegatedState: true })).toBe(
+      "A delegated thread is waiting for your approval.",
+    );
+  });
+
   it("names the exact moment behind the compact time", () => {
     const at = "2026-10-01T09:00:00.000Z";
     const base = { runningSince: null, settled: false, snoozedUntil: null };
