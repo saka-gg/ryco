@@ -156,12 +156,17 @@ describe("canonical raw at each detail level", () => {
   const writtenRaw = (record: unknown, mode: "full" | "lifecycle") =>
     JSON.parse(serializeProviderEventLogRecord("canonical", record, mode)!).raw;
 
-  it("keeps the payload of a message the lifecycle native log drops", () => {
+  it("writes no provider content at lifecycle, even for a message the native log drops", () => {
     const taskNotification = canonical("task.completed", {
       source: "claude.sdk.message",
       method: "claude/system/task_notification",
       messageType: "system:task_notification",
-      payload: { uuid: "sdk-uuid-2", task_id: "task-1", output_file: "/tmp/out.txt" },
+      payload: {
+        uuid: "sdk-uuid-2",
+        task_id: "task-1",
+        output_file: "/tmp/out.txt",
+        summary: "provider-written task summary",
+      },
     });
     assert.isFalse(
       shouldWriteProviderEventRecord(
@@ -170,14 +175,19 @@ describe("canonical raw at each detail level", () => {
         claudeNative("claude/system/task_notification"),
       ),
     );
-    assert.deepStrictEqual(writtenRaw(taskNotification, "lifecycle"), taskNotification.raw);
-    // At full the native log holds it, so the canonical record only points there.
-    assert.deepStrictEqual(writtenRaw(taskNotification, "full"), {
+    const reference = {
       source: "claude.sdk.message",
       method: "claude/system/task_notification",
       messageType: "system:task_notification",
       nativeId: "sdk-uuid-2",
-    });
+    };
+    // The native log drops it at lifecycle, so this raw is not written anywhere there.
+    assert.deepStrictEqual(writtenRaw(taskNotification, "lifecycle"), reference);
+    const json = serializeProviderEventLogRecord("canonical", taskNotification, "lifecycle")!;
+    assert.notInclude(json, "provider-written task summary");
+    assert.notInclude(json, "/tmp/out.txt");
+    // At full the native log holds it, so the canonical record only points there.
+    assert.deepStrictEqual(writtenRaw(taskNotification, "full"), reference);
   });
 
   it("keeps only the reference when the lifecycle native log holds the message", () => {
@@ -252,12 +262,13 @@ describe("canonical raw at each detail level", () => {
       writtenRaw(canonical("turn.completed", openCodeRaw("session.idle")), "lifecycle"),
       { source: "opencode.sdk.event" },
     );
-    // session.status is not, so the canonical record keeps the event.
+    // session.status is not; lifecycle still writes only the reference.
     assert.isFalse(
       shouldWriteProviderEventRecord("lifecycle", "native", nativeOpenCode("session.status")),
     );
     const status = canonical("session.state.changed", openCodeRaw("session.status"));
-    assert.deepStrictEqual(writtenRaw(status, "lifecycle"), status.raw);
+    assert.deepStrictEqual(writtenRaw(status, "lifecycle"), { source: "opencode.sdk.event" });
+    assert.deepStrictEqual(writtenRaw(status, "full"), { source: "opencode.sdk.event" });
   });
 
   it("references Codex session notifications, which the native session envelope keeps", () => {
@@ -278,14 +289,17 @@ describe("canonical raw at each detail level", () => {
     });
   });
 
-  it("keeps a small adapter-made payload that has no native message", () => {
+  it("keeps a small adapter-made payload inline at full only", () => {
     const turnStarted = canonical("turn.started", {
       source: "claude.sdk.message",
       method: "claude/synthetic-turn-start",
       payload: { openedBy: "wake-signal" },
     });
     assert.deepStrictEqual(writtenRaw(turnStarted, "full"), turnStarted.raw);
-    assert.deepStrictEqual(writtenRaw(turnStarted, "lifecycle"), turnStarted.raw);
+    assert.deepStrictEqual(writtenRaw(turnStarted, "lifecycle"), {
+      source: "claude.sdk.message",
+      method: "claude/synthetic-turn-start",
+    });
   });
 });
 
