@@ -1105,6 +1105,16 @@ describe("delegated thread folding", () => {
     relationship: "delegated",
   });
   const working = { backgroundLiveness: "working" as const };
+  const running = (startedAt: string) => ({
+    latestTurn: {
+      turnId: TurnId.make(`turn-${startedAt}`),
+      state: "running" as const,
+      requestedAt: startedAt,
+      startedAt,
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  });
   const settled = {
     settledOverride: "settled" as const,
     settledAt: "2026-08-23T12:00:00.000Z",
@@ -1123,27 +1133,105 @@ describe("delegated thread folding", () => {
     expect(ids(section(sections, "recent")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
   });
 
-  it("keeps a working child in Active now under a Recent parent", () => {
+  it("folds working children under a Recent parent and shows the parent Working", () => {
     const sections = build({
       threads: [
         thread("parent"),
-        thread("child", { lineage: delegatedFrom("parent"), ...working }),
+        thread("late", {
+          lineage: delegatedFrom("parent"),
+          ...running("2026-08-23T11:00:00.000Z"),
+        }),
+        thread("early", {
+          lineage: delegatedFrom("parent"),
+          ...running("2026-08-23T10:30:00.000Z"),
+        }),
+        thread("done", { lineage: delegatedFrom("parent") }),
       ],
     });
-    expect(ids(section(sections, "active")?.rows)).toEqual(["child"]);
-    expect(ids(section(sections, "recent")?.rows)).toEqual(["parent"]);
-    expect(section(sections, "recent")?.rows[0]?.delegatedChildren).toEqual([]);
+    expect(sections.map((candidate) => candidate.key)).toEqual(["active"]);
+    const host = section(sections, "active")?.rows[0];
+    expect(host).toMatchObject({
+      threadId: "parent",
+      state: "working",
+      statusLabel: "Working",
+      delegatedState: true,
+      runningSince: "2026-08-23T10:30:00.000Z",
+    });
+    expect(ids(host?.delegatedChildren)).toEqual(expect.arrayContaining(["late", "early", "done"]));
+    expect(host?.delegatedChildren.map((child) => child.state)).toEqual(
+      expect.arrayContaining(["working", "working", "idle"]),
+    );
   });
 
-  it("keeps a needs-input child in Needs input under a working parent", () => {
+  it("folds a needs-input child and moves its parent to Needs input", () => {
     const sections = build({
       threads: [
         thread("parent", working),
         thread("child", { lineage: delegatedFrom("parent"), hasPendingApprovals: true }),
       ],
     });
-    expect(ids(section(sections, "active")?.rows)).toEqual(["parent"]);
-    expect(ids(section(sections, "needs-input")?.rows)).toEqual(["child"]);
+    expect(sections.map((candidate) => candidate.key)).toEqual(["needs-input"]);
+    const host = section(sections, "needs-input")?.rows[0];
+    expect(host).toMatchObject({
+      threadId: "parent",
+      state: "needs-input",
+      attention: "approval",
+      delegatedState: true,
+      runningSince: null,
+    });
+    expect(ids(host?.delegatedChildren)).toEqual(["child"]);
+  });
+
+  it("keeps the parent's own state when it is at least as strong as its children's", () => {
+    const asking = build({
+      threads: [
+        thread("parent", { hasPendingUserInput: true }),
+        thread("child", { lineage: delegatedFrom("parent"), ...working }),
+      ],
+    });
+    expect(section(asking, "needs-input")?.rows[0]).toMatchObject({
+      state: "needs-input",
+      attention: "input",
+      delegatedState: false,
+    });
+
+    const busy = build({
+      threads: [
+        thread("parent", running("2026-08-23T11:00:00.000Z")),
+        thread("child", {
+          lineage: delegatedFrom("parent"),
+          ...running("2026-08-23T10:00:00.000Z"),
+        }),
+      ],
+    });
+    expect(section(busy, "active")?.rows[0]).toMatchObject({
+      state: "working",
+      delegatedState: false,
+      runningSince: "2026-08-23T11:00:00.000Z",
+    });
+  });
+
+  it("folds an errored child without passing its error to the parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent"),
+        thread("child", {
+          lineage: delegatedFrom("parent"),
+          session: {
+            provider: ProviderDriverKind.make("codex"),
+            status: "error",
+            orchestrationStatus: "error",
+            lastError: "Provider exited",
+            createdAt: "2026-08-23T10:00:00.000Z",
+            updatedAt: "2026-08-23T10:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
+    const host = section(sections, "recent")?.rows[0];
+    expect(host).toMatchObject({ state: "idle", delegatedState: false });
+    expect(host?.delegatedChildren[0]).toMatchObject({ threadId: "child", state: "error" });
   });
 
   it("folds an idle child into a working host in Active now", () => {
@@ -1152,6 +1240,22 @@ describe("delegated thread folding", () => {
     });
     expect(sections.map((candidate) => candidate.key)).toEqual(["active"]);
     expect(ids(section(sections, "active")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
+    expect(section(sections, "active")?.rows[0]?.delegatedState).toBe(false);
+  });
+
+  it("keeps a working child top-level under a Settled parent", () => {
+    const sections = build({
+      threads: [
+        thread("parent", settled),
+        thread("child", { lineage: delegatedFrom("parent"), ...working }),
+      ],
+    });
+    expect(ids(section(sections, "active")?.rows)).toEqual(["child"]);
+    expect(ids(section(sections, "settled")?.rows)).toEqual(["parent"]);
+    expect(section(sections, "settled")?.rows[0]).toMatchObject({
+      delegatedChildren: [],
+      delegatedState: false,
+    });
   });
 
   it("folds a settled child under a Recent parent but not a Recent child under a Settled one", () => {
@@ -1230,13 +1334,17 @@ describe("delegated thread folding", () => {
     );
   });
 
-  it("leaves a child top-level when a status filter hides its host", () => {
-    const sections = build({
-      threads: [thread("parent", working), thread("child", { lineage: delegatedFrom("parent") })],
-      filters: { ...ALL_FILTERS, status: "recent" },
-    });
-    expect(sections.map((candidate) => candidate.key)).toEqual(["recent"]);
-    expect(ids(section(sections, "recent")?.rows)).toEqual(["child"]);
+  it("filters a status by the host's section, children included", () => {
+    const threads = [
+      thread("parent"),
+      thread("child", { lineage: delegatedFrom("parent"), ...working }),
+    ];
+    expect(build({ threads, filters: { ...ALL_FILTERS, status: "recent" } })).toEqual([]);
+
+    const active = build({ threads, filters: { ...ALL_FILTERS, status: "active" } });
+    expect(active.map((candidate) => candidate.key)).toEqual(["active"]);
+    expect(ids(section(active, "active")?.rows)).toEqual(["parent"]);
+    expect(ids(section(active, "active")?.rows[0]?.delegatedChildren)).toEqual(["child"]);
   });
 });
 

@@ -194,10 +194,13 @@ export function InboxSidebar(props: InboxSidebarProps) {
     (key === "snoozed" ? snoozedOpen : settledOpen) ||
     status === key ||
     query.trim().length > 0;
-  // A host stays open while the open thread is one of its folded children.
+  // A host stays open while one of its folded children is the open thread or
+  // needs input: the host only says that it waits, the child row is where to act.
   const isHostExpanded = (row: InboxSidebarRow) =>
     expandedHostKeys.has(row.key) ||
-    row.delegatedChildren.some((child) => child.key === props.activeThreadKey);
+    row.delegatedChildren.some(
+      (child) => child.key === props.activeThreadKey || child.state === "needs-input",
+    );
   const visibleRowKeys = (row: InboxSidebarRow) =>
     isHostExpanded(row) && row.delegatedChildren.length > 0
       ? [row.key, ...row.delegatedChildren.map((child) => child.key)]

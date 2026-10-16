@@ -74,9 +74,22 @@ const ATTENTION_DETAIL = {
   plan: "A plan is ready for your review.",
 } as const;
 
+const DELEGATED_ATTENTION_DETAIL = {
+  approval: "A delegated thread is waiting for your approval.",
+  input: "A delegated thread is waiting for your answer.",
+  plan: "A delegated thread has a plan ready for your review.",
+} as const;
+
+/** Whether the row's state is a folded delegated child's; optional for partial rows. */
+type DelegatedStateRow = { readonly delegatedState?: InboxSidebarRow["delegatedState"] };
+
 /** The card's sentence for a needs-input thread; its header already names the state. */
-export function inboxAttentionDetail(row: Pick<InboxSidebarRow, "attention">): string {
-  return ATTENTION_DETAIL[row.attention ?? "input"];
+export function inboxAttentionDetail(
+  row: Pick<InboxSidebarRow, "attention"> & DelegatedStateRow,
+): string {
+  return (row.delegatedState ? DELEGATED_ATTENTION_DETAIL : ATTENTION_DETAIL)[
+    row.attention ?? "input"
+  ];
 }
 
 const ERROR_FALLBACK = "The last turn failed";
@@ -137,19 +150,20 @@ export function inboxGlyphHint(
   row: Pick<
     InboxSidebarRow,
     "state" | "attention" | "statusLabel" | "errorDetail" | "runningSince" | "latestTurnCompletedAt"
-  > & { readonly usageLimit?: InboxSidebarRow["usageLimit"] },
+  > & { readonly usageLimit?: InboxSidebarRow["usageLimit"] } & DelegatedStateRow,
   unseen: boolean,
 ): string {
   const label = inboxGlyphLabel(row, unseen);
+  const where = row.delegatedState ? " in a delegated thread" : "";
   switch (row.state) {
     case "limited":
       return `${label} · ${inboxUsageLimitDetail(row)}`;
     case "needs-input":
-      return `${label} · open the thread to respond`;
+      return row.delegatedState ? `${label}${where}` : `${label} · open the thread to respond`;
     case "working":
       return row.runningSince
-        ? `${label} · started ${formatInboxDayTime(row.runningSince)}`
-        : label;
+        ? `${label}${where} · started ${formatInboxDayTime(row.runningSince)}`
+        : `${label}${where}`;
     case "error":
       return `${label} · ${row.errorDetail ?? ERROR_FALLBACK}`;
     case "idle":
