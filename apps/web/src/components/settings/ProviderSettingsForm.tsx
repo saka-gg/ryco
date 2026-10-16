@@ -7,8 +7,13 @@ import type {
   ProviderSettingsFormControl,
   ProviderSettingsFormSchemaAnnotation,
 } from "@ryco/contracts";
+import {
+  containsRedactedSettingSecret,
+  REDACTED_SETTING_SECRET,
+} from "@ryco/shared/settingsSecrets";
 
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
@@ -129,6 +134,28 @@ export function readProviderConfigBoolean(
   return typeof value === "boolean" ? value : defaultValue;
 }
 
+/**
+ * How a text field shows its value. The server never sends secrets: a saved
+ * password arrives as the redaction marker and is shown as "saved" with an
+ * empty input (typing replaces it, an empty input keeps it), and a URL whose
+ * credentials were hidden is flagged so the user knows to enter it in full.
+ */
+export function providerSettingsTextFieldDisplay(
+  field: Pick<ProviderSettingsFieldModel, "control">,
+  value: string,
+): {
+  readonly inputValue: string;
+  readonly savedSecret: boolean;
+  readonly hiddenCredentials: boolean;
+} {
+  const savedSecret = field.control === "password" && value === REDACTED_SETTING_SECRET;
+  return {
+    inputValue: savedSecret ? "" : value,
+    savedSecret,
+    hiddenCredentials: !savedSecret && containsRedactedSettingSecret(value),
+  };
+}
+
 export function nextProviderConfigWithFieldValue(
   config: unknown,
   field: ProviderSettingsFieldModel,
@@ -241,6 +268,37 @@ function ProviderSettingsFieldRow({
   }
 
   const type = field.control === "password" ? "password" : undefined;
+  const display = providerSettingsTextFieldDisplay(
+    field,
+    readProviderConfigString(value, field.key),
+  );
+  // An empty input over a saved secret keeps it; only "Clear" removes it.
+  const commit = (next: string) => {
+    if (display.savedSecret && next.length === 0) return;
+    onChange(nextProviderConfigWithFieldValue(value, field, next));
+  };
+  const placeholder = display.savedSecret
+    ? "Saved - enter a new value to replace"
+    : field.placeholder;
+  const savedSecretNote = display.savedSecret ? (
+    <span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+      <span>A value is saved.</span>
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        onClick={() => onChange(nextProviderConfigWithFieldValue(value, field, ""))}
+        aria-label={`Clear ${field.label}`}
+      >
+        Clear
+      </Button>
+    </span>
+  ) : null;
+  const hiddenCredentialsNote = display.hiddenCredentials ? (
+    <span className={descriptionClassName}>
+      Credentials in this URL are hidden. To change the URL, enter it again in full.
+    </span>
+  ) : null;
   return (
     <FieldFrame variant={variant}>
       <label htmlFor={inputId} className={cn(variant === "card" && "block")}>
@@ -251,9 +309,9 @@ function ProviderSettingsFieldRow({
             className="mt-1.5"
             type={type}
             autoComplete={field.control === "password" ? "off" : undefined}
-            value={readProviderConfigString(value, field.key)}
-            onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
-            placeholder={field.placeholder}
+            value={display.inputValue}
+            onCommit={commit}
+            placeholder={placeholder}
             spellCheck={false}
           />
         ) : (
@@ -262,16 +320,16 @@ function ProviderSettingsFieldRow({
             className="bg-background"
             type={type}
             autoComplete={field.control === "password" ? "off" : undefined}
-            value={readProviderConfigString(value, field.key)}
-            onChange={(event) =>
-              onChange(nextProviderConfigWithFieldValue(value, field, event.target.value))
-            }
-            placeholder={field.placeholder}
+            value={display.inputValue}
+            onChange={(event) => commit(event.target.value)}
+            placeholder={placeholder}
             spellCheck={false}
           />
         )}
         {description}
+        {hiddenCredentialsNote}
       </label>
+      {savedSecretNote}
     </FieldFrame>
   );
 }

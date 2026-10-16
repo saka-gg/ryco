@@ -3393,7 +3393,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         config: {
           otlpTracesUrl: "http://localhost:4318/v1/traces",
-          otlpMetricsUrl: "http://localhost:4318/v1/metrics",
+          otlpMetricsUrl: "http://localhost:4318/v1/metrics?api_key=metrics-secret",
         },
         layers: {
           keybindings: {
@@ -3435,7 +3435,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(first.config.observability.otlpTracesEnabled, true);
         // An OTLP collector consumes browser spans, so browsers are asked for them.
         assert.equal(first.config.observability.browserTracesEnabled, true);
-        assert.equal(first.config.observability.otlpMetricsUrl, "http://localhost:4318/v1/metrics");
+        // Clients learn where metrics go, never the token in the endpoint.
+        assert.equal(
+          first.config.observability.otlpMetricsUrl,
+          "http://localhost:4318/v1/metrics?api_key=__ryco_redacted__",
+        );
+        assert.notInclude(JSON.stringify(first.config), "metrics-secret");
         assert.equal(first.config.observability.otlpMetricsEnabled, true);
         assert.deepEqual(first.config.settings, DEFAULT_SERVER_SETTINGS);
       }

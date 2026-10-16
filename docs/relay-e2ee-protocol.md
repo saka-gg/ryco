@@ -1295,10 +1295,12 @@ Never compressed:
   two acknowledgements from the RPC server, which sent one chunk and waits for one.
 - Every event and delta, including `providerStatusesDelta`.
 - The server config snapshot, `settingsUpdated` and `server.getConfig`. They carry
-  `ServerSettings`, whose client copy still holds credential-bearing values in plain text: the
-  OpenCode server password, provider environment variables not marked sensitive, and telemetry
-  URLs. Only sensitive provider environment variables and the CLIProxyAPI hub keys are redacted for
-  clients (`redactServerSettingsForClient` in `apps/server/src/serverSettings.ts`).
+  `ServerSettings`. Its client copy no longer holds secrets (`redactServerSettingsForClient` in
+  `apps/server/src/serverSettings.ts`, `@ryco/shared/settingsSecrets`): sensitive provider
+  environment variables, CLIProxyAPI hub keys and the OpenCode server password are presence-only,
+  and credentials embedded in provider and telemetry URLs are replaced by a marker. Provider
+  environment variables the user did not mark sensitive are still sent as entered. Adding these
+  messages to the allowlist is now possible but is a separate decision.
 - Errors and defects, authentication, pairing and token methods, terminals, and device and
   computer streams.
 - Thread windows (`orchestration.subscribeThreadWindow` snapshots, `orchestration.getThreadWindow`

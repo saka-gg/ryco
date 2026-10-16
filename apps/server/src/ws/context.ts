@@ -78,6 +78,7 @@ import * as ProviderMaintenanceRunner from "../provider/providerMaintenanceRunne
 import { ServerLifecycleEvents } from "../serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, ServerSettingsService } from "../serverSettings.ts";
+import { redactUrlCredentials } from "@ryco/shared/settingsSecrets";
 import { TerminalManager } from "../terminal/Services/Manager.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import { WorkspaceEntries } from "../workspace/Services/WorkspaceEntries.ts";
@@ -1207,12 +1208,17 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         observability: {
           logsDirectoryPath: config.logsDir,
           localTracingEnabled: true,
-          ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
+          // Endpoints may embed tokens; clients only learn where spans go.
+          ...(config.otlpTracesUrl !== undefined
+            ? { otlpTracesUrl: redactUrlCredentials(config.otlpTracesUrl) }
+            : {}),
           otlpTracesEnabled: config.otlpTracesUrl !== undefined,
           // Browsers export spans only to a server that has a use for them.
           browserTracesEnabled:
             config.otlpTracesUrl !== undefined || config.browserTracesEnabled === true,
-          ...(config.otlpMetricsUrl !== undefined ? { otlpMetricsUrl: config.otlpMetricsUrl } : {}),
+          ...(config.otlpMetricsUrl !== undefined
+            ? { otlpMetricsUrl: redactUrlCredentials(config.otlpMetricsUrl) }
+            : {}),
           otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           localMetrics,
         },

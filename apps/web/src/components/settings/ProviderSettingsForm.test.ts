@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@ryco/contracts";
+import { REDACTED_SETTING_SECRET } from "@ryco/shared/settingsSecrets";
 
 import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
+  providerSettingsTextFieldDisplay,
   readProviderConfigBoolean,
   readProviderConfigString,
 } from "./ProviderSettingsForm";
@@ -142,5 +144,27 @@ describe("ProviderSettingsForm helpers", () => {
 
   it("reads missing boolean config values from the supplied default", () => {
     expect(readProviderConfigBoolean({}, "experimental", true)).toBe(true);
+  });
+
+  it("shows a saved secret as configured without exposing its marker", () => {
+    expect(
+      providerSettingsTextFieldDisplay({ control: "password" }, REDACTED_SETTING_SECRET),
+    ).toEqual({ inputValue: "", savedSecret: true, hiddenCredentials: false });
+    expect(providerSettingsTextFieldDisplay({ control: "password" }, "")).toEqual({
+      inputValue: "",
+      savedSecret: false,
+      hiddenCredentials: false,
+    });
+    expect(providerSettingsTextFieldDisplay({ control: "password" }, "typed")).toEqual({
+      inputValue: "typed",
+      savedSecret: false,
+      hiddenCredentials: false,
+    });
+    const url = `http://${REDACTED_SETTING_SECRET}:${REDACTED_SETTING_SECRET}@127.0.0.1:4096/`;
+    expect(providerSettingsTextFieldDisplay({ control: "text" }, url)).toEqual({
+      inputValue: url,
+      savedSecret: false,
+      hiddenCredentials: true,
+    });
   });
 });

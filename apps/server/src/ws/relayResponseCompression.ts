@@ -113,8 +113,8 @@ export const RELAY_COMPRESSION_OPT_IN_CLASSES = {
  *   server URL or CLI stderr), `updateState.output` (raw update-command output,
  *   up to 10k characters), and `auth.email`. Deltas, the server config
  *   snapshot, `settingsUpdated`, and `server.getConfig` are NOT here: the
- *   latter three carry `ServerSettings`, whose client copy still holds
- *   credential-bearing values in plain text.
+ *   latter three carry `ServerSettings`. Its client copy is redacted
+ *   (§4.6.3), but adding them is a separate decision.
  *
  * To compress thread windows too, add
  * `threadWindows: RELAY_COMPRESSION_OPT_IN_CLASSES.threadWindows,`.
