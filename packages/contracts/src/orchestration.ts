@@ -1990,6 +1990,20 @@ export const RestartContinuationGuard = Schema.Struct({
 });
 export type RestartContinuationGuard = typeof RestartContinuationGuard.Type;
 
+/** How many other threads one user message may mention for its agent to read. */
+export const MAX_THREAD_REFERENCES_PER_MESSAGE = 4;
+
+/**
+ * Threads a user message mentions (`@thread:<id>` chips). The server appends a
+ * bounded excerpt of each to the provider input, never to the stored message.
+ * Only the composer sets it: Agent Control and other server-built turns never
+ * do, so a mention cannot widen what an agent may read.
+ */
+export const ThreadReferences = Schema.Array(ThreadId).check(
+  Schema.isMaxLength(MAX_THREAD_REFERENCES_PER_MESSAGE),
+);
+export type ThreadReferences = typeof ThreadReferences.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   restartContinuationGuard: Schema.optional(RestartContinuationGuard),
@@ -2018,6 +2032,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
 });
 
@@ -2046,6 +2061,7 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
 });
 
@@ -2060,6 +2076,7 @@ export const ThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: ChatAttachments,
   }),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
   requestedAt: IsoDateTime,
 });
@@ -2076,6 +2093,7 @@ const ClientThreadTurnSteerCommand = Schema.Struct({
     text: Schema.String,
     attachments: UploadChatAttachments,
   }),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
   requestedAt: IsoDateTime,
 });
@@ -2880,6 +2898,7 @@ export const ThreadTurnSteerRequestedPayload = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
   }),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
   requestedAt: IsoDateTime,
 });
@@ -2936,6 +2955,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   contextHandoff: Schema.optional(ContextHandoffReference),
+  threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
 });
 

@@ -78,6 +78,7 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { projectEvent } from "./projector.ts";
+import { threadReferencesPayload } from "./threadReferences.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import {
   SUPERSEDED_RUNTIME_SESSION_SET_DETAIL,
@@ -1932,6 +1933,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 },
               }
             : {}),
+          ...threadReferencesPayload(command.threadReferences, command.threadId),
           createdAt: command.createdAt,
         },
       };
@@ -2057,6 +2059,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           expectedTurnId: command.expectedTurnId,
           message: command.message,
+          ...threadReferencesPayload(command.threadReferences, command.threadId),
           createdAt: command.createdAt,
           requestedAt: command.requestedAt,
         },

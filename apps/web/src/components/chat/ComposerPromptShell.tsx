@@ -1,4 +1,8 @@
-import type { ComposerSourceControlContext, ServerProviderSkill } from "@ryco/contracts";
+import type {
+  ComposerSourceControlContext,
+  EnvironmentId,
+  ServerProviderSkill,
+} from "@ryco/contracts";
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { formatAttachmentBytes } from "./attachmentPreview";
 import { memo } from "react";
@@ -36,6 +40,8 @@ export interface ComposerPromptShellProps {
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
   /** Whose prompt the editor holds; its undo history never crosses to another. */
   historyScope: string;
+  /** Thread mentions in the prompt are named from this environment's threads. */
+  environmentId: EnvironmentId;
 
   isComposerCollapsedMobile: boolean;
   hasComposerHeader: boolean;
@@ -130,6 +136,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
   const {
     editorRef,
     historyScope,
+    environmentId,
     isComposerCollapsedMobile,
     hasComposerHeader,
     isComposerApprovalState,
@@ -301,6 +308,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
           <ComposerPromptEditor
             ref={editorRef}
             historyScope={historyScope}
+            environmentId={environmentId}
             collapsed={isComposerCollapsedMobile}
             value={
               isComposerApprovalState

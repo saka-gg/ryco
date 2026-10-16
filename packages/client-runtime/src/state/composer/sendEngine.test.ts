@@ -264,6 +264,18 @@ describe("send engine — dispatch assembly", () => {
     });
     expect(turnStart).toHaveProperty("bootstrap");
     expect(turnStart).toHaveProperty("sourceControlContexts");
+    expect(turnStart).not.toHaveProperty("threadReferences");
+  });
+
+  it("lists the threads the message mentions, without the sending thread", async () => {
+    const harness = makeDispatchHarness({
+      outgoingMessageText:
+        "Compare @thread:other-a with @thread:thread-1 and @thread:other-b then @thread:other-a",
+    });
+    await commitSendTurnDispatch(harness.input);
+
+    const turnStart = harness.commands.find((command) => command.type === "thread.turn.start");
+    expect(turnStart?.threadReferences).toEqual(["other-a", "other-b"]);
   });
 });
 

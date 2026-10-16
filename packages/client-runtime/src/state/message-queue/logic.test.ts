@@ -79,6 +79,20 @@ describe("message queue", () => {
     });
   });
 
+  it("carries the threads a steered message mentions", () => {
+    const command = buildQueuedMessageSteerCommand({
+      commandId: "command-steer" as CommandId,
+      threadId: "thread-steer" as ThreadId,
+      expectedTurnId: "turn-active" as TurnId,
+      messageId: "message-steer" as MessageId,
+      text: "Reuse the fix from @thread:other and keep @thread:thread-steer as is",
+      attachments: [],
+      createdAt: "2026-08-17T10:00:00.000Z",
+      requestedAt: "2026-08-17T10:00:01.000Z",
+    });
+    expect(command.threadReferences).toEqual(["other"]);
+  });
+
   it("explains unsupported, stale-setting, and disconnected steer attempts", () => {
     expect(
       resolveQueuedMessageSteerEligibility({ ...steerable, supportsTurnSteering: false }),

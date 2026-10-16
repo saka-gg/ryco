@@ -20,6 +20,7 @@ import type {
   ThreadGoalStatus,
 } from "@ryco/contracts";
 import {
+  MAX_THREAD_REFERENCES_PER_MESSAGE,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderDriverKind,
@@ -48,6 +49,7 @@ import {
 } from "../../composer-logic";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { serializeComposerMentionPath } from "../../composerMentionSyntax";
+import { extractThreadReferences, formatThreadMentionPath } from "../../composer-editor-mentions";
 import {
   composerDraftImageDedupKey,
   encodeComposerAttachmentDataUrl,
@@ -126,6 +128,11 @@ import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { useComposerImageAttachments } from "./useComposerImageAttachments";
+import {
+  THREAD_MENTION_DROP_ZONE_PROPS,
+  ThreadMentionDropHint,
+  useComposerThreadMentionDrop,
+} from "./ComposerThreadMentionDrop";
 import { cn, randomUUID } from "~/lib/utils";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle, getProviderSupportsAskMode } from "../../providerModels";
@@ -2019,6 +2026,44 @@ export const ChatComposer = memo(
       focusComposer,
     });
 
+    // A thread dropped on the composer becomes an `@thread:` mention at the
+    // caret; the server hands the agent an excerpt of it with the message.
+    const insertThreadMention = useCallback(
+      (threadId: ThreadId) => {
+        const text = promptRef.current;
+        const mentioned = extractThreadReferences(text);
+        if (mentioned.includes(threadId)) {
+          toastManager.add({ type: "info", title: "That thread is already mentioned" });
+          return;
+        }
+        if (mentioned.length >= MAX_THREAD_REFERENCES_PER_MESSAGE) {
+          toastManager.add({
+            type: "info",
+            title: `A message can mention up to ${MAX_THREAD_REFERENCES_PER_MESSAGE} threads`,
+          });
+          return;
+        }
+        const snapshot = composerEditorRef.current?.readSnapshot();
+        const at = Math.min(snapshot?.expandedCursor ?? text.length, text.length);
+        const before = text[at - 1];
+        const after = text[at];
+        const token = `@${formatThreadMentionPath(threadId)}`;
+        applyPromptReplacement(
+          at,
+          at,
+          `${before && !/\s/.test(before) ? " " : ""}${token}${after && /\s/.test(after) ? "" : " "}`,
+        );
+      },
+      [applyPromptReplacement, promptRef],
+    );
+    const threadMentionDrop = useComposerThreadMentionDrop({
+      environmentId,
+      threadId: activeThreadId,
+      disabled: isComposerEditorDisabled,
+      onMention: insertThreadMention,
+    });
+    const isThreadMentionDragOver = threadMentionDrop.verdict?.kind === "mention";
+
     const handleRemoveSourceControlContext = useCallback(
       (id: string) => {
         removeSourceControlContextFromDraft(composerDraftTarget, id);
@@ -2656,7 +2701,8 @@ export const ChatComposer = memo(
       (isReadingChat || (!isComposerFocused && !isComposerHovered)) &&
       !isComposerModelPickerOpen &&
       !composerMenuOpen &&
-      !isDragOverComposer;
+      !isDragOverComposer &&
+      threadMentionDrop.verdict === null;
 
     // Render
     // ------------------------------------------------------------------
@@ -2710,15 +2756,25 @@ export const ChatComposer = memo(
           </>
         ) : null}
         <div
+          {...THREAD_MENTION_DROP_ZONE_PROPS}
           className={cn(
-            "group rounded-3xl p-px transition-colors duration-200",
+            "group relative rounded-3xl p-px transition-colors duration-200",
             composerProviderState.composerFrameClassName,
           )}
           onDragEnter={onComposerDragEnter}
-          onDragOver={onComposerDragOver}
-          onDragLeave={onComposerDragLeave}
-          onDrop={onComposerDrop}
+          onDragOver={(event) => {
+            if (!threadMentionDrop.onDragOver(event)) onComposerDragOver(event);
+          }}
+          onDragLeave={(event) => {
+            if (!threadMentionDrop.onDragLeave(event)) onComposerDragLeave(event);
+          }}
+          onDrop={(event) => {
+            if (!threadMentionDrop.onDrop(event)) onComposerDrop(event);
+          }}
         >
+          {threadMentionDrop.verdict ? (
+            <ThreadMentionDropHint verdict={threadMentionDrop.verdict} />
+          ) : null}
           <div
             ref={composerSurfaceRef}
             data-chat-composer-compact={!isMobileViewport ? String(isComposerCompact) : undefined}
@@ -2740,7 +2796,7 @@ export const ChatComposer = memo(
               // read as flicker — nor on focus; only a drag-over tints it,
               // because that one has to read as a drop target.
               "app-composer-surface rounded-[max(0px,calc(var(--radius-3xl)-2px))] border-0 outline-none transition-[background-color,box-shadow] duration-(--app-motion-duration-pop) ease-(--app-motion-ease)",
-              isDragOverComposer
+              isDragOverComposer || isThreadMentionDragOver
                 ? "bg-[color-mix(in_srgb,var(--accent)_38%,var(--app-composer-surface))] ring-1 ring-inset ring-primary/45"
                 : null,
               environmentUnavailable ? "opacity-75" : null,
@@ -2918,6 +2974,7 @@ export const ChatComposer = memo(
             <ComposerPromptShell
               editorRef={composerEditorRef}
               historyScope={composerTargetKey(composerDraftTarget)}
+              environmentId={environmentId}
               isComposerCollapsedMobile={isComposerCollapsedMobile}
               hasComposerHeader={hasComposerHeader}
               isComposerApprovalState={isComposerApprovalState}

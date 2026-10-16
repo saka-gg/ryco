@@ -172,6 +172,10 @@ import {
   UNEXPECTED_FAILURE_DETAIL,
 } from "../userFacingErrors.ts";
 import { classifyTurnSteerFailure } from "../turnSteerFailure.ts";
+import {
+  appendThreadReferenceContext,
+  resolveThreadReferenceContext,
+} from "../threadReferences.ts";
 
 type CallbackResponseEvent = Extract<
   ProviderIntentEvent,
@@ -1280,6 +1284,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     readonly project: OrchestrationProjectShell | undefined;
     readonly fenceSequence: number;
     readonly messageText: string;
+    /** Excerpts of the threads the message mentions; provider input only. */
+    readonly referenceContext?: string;
     readonly computerUse?: ComputerTurnIntent;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -1335,14 +1341,17 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
-    const normalizedInput = withProviderGoalPrompt({
-      message: toNonEmptyProviderInput(
-        input.computerUse
-          ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
-          : input.messageText,
-      ),
-      goal: native ? null : goal,
-    });
+    const normalizedInput = appendThreadReferenceContext(
+      withProviderGoalPrompt({
+        message: toNonEmptyProviderInput(
+          input.computerUse
+            ? (parseComputerInvocation(input.messageText)?.prompt ?? input.messageText)
+            : input.messageText,
+        ),
+        goal: native ? null : goal,
+      }),
+      input.referenceContext,
+    );
     const normalizedAttachments = input.attachments ?? [];
     const customSystemPrompt = project?.customSystemPrompt?.trim() || undefined;
     const activeSession = yield* findThreadSession(providerService, input.threadId);
@@ -2122,12 +2131,17 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
 
     const project = yield* resolveProject(thread.projectId);
+    const referenceContext = yield* resolveThreadReferenceContext(
+      projectionSnapshotQuery,
+      event.payload.threadReferences,
+    );
     const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       thread,
       project,
       fenceSequence,
       messageText: message.text,
+      ...(referenceContext !== undefined ? { referenceContext } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
@@ -2608,14 +2622,16 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   ) {
     const key = turnStartKeyForEvent(event);
     if (yield* hasHandledRecently(key)) return;
+    const steerInput = appendThreadReferenceContext(
+      toNonEmptyProviderInput(event.payload.message.text),
+      yield* resolveThreadReferenceContext(projectionSnapshotQuery, event.payload.threadReferences),
+    );
     const steer = Effect.suspend(() =>
       providerService.steerTurn({
         threadId: event.payload.threadId,
         expectedTurnId: event.payload.expectedTurnId,
         messageId: event.payload.message.messageId,
-        ...(toNonEmptyProviderInput(event.payload.message.text)
-          ? { input: toNonEmptyProviderInput(event.payload.message.text) }
-          : {}),
+        ...(steerInput ? { input: steerInput } : {}),
         ...(event.payload.message.attachments.length > 0
           ? { attachments: event.payload.message.attachments }
           : {}),

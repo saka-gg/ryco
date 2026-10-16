@@ -16,6 +16,7 @@ import { page } from "vite-plus/test/browser";
 import { render, cleanup } from "vitest-browser-react";
 import { ChatPanes } from "./ChatPanes";
 import { usePaneEffect, usePaneThreadRef, usePaneCloseGuard } from "./PaneFocus";
+import { THREAD_MENTION_DROP_ZONE_PROPS } from "./ComposerThreadMentionDrop";
 import { CHAT_PANES_STORAGE_KEY, startPaneDrag, useChatPanesStore } from "../../chatPanesStore";
 import { PANE_DRAG_TYPE, decodePaneLayout, paneLeaves, type PaneNode } from "../../chatPanes.logic";
 vi.mock("../previewFileSessions", () => ({ flushPreviewFiles: vi.fn(async () => true) }));
@@ -48,6 +49,9 @@ function ThreadContent({ threadRef }: { threadRef: typeof a }) {
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
       />
+      <div {...THREAD_MENTION_DROP_ZONE_PROPS} data-testid={`composer-${ref.threadId}`}>
+        Composer
+      </div>
     </>
   );
 }
@@ -133,6 +137,29 @@ it("drops a neighbor, transfers the only global listener, preserves drafts and c
   await expect
     .element(page.getByRole("textbox", { name: "Draft a" }))
     .toHaveValue("Keep this draft");
+});
+it("leaves a thread dropped on a composer to the composer instead of splitting", async () => {
+  await mount();
+  const composer = page.getByTestId("composer-a").element();
+  const rect = composer.getBoundingClientRect();
+  const transfer = new DataTransfer();
+  transfer.setData(PANE_DRAG_TYPE, JSON.stringify(b));
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    dataTransfer: transfer,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+  };
+  const over = new DragEvent("dragover", init);
+  composer.dispatchEvent(over);
+  // Nothing in the pane claimed the drag, so no split preview is shown.
+  expect(over.defaultPrevented).toBe(false);
+  expect(document.querySelector("[data-pane-drop]")).toBeNull();
+  composer.dispatchEvent(new DragEvent("drop", init));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(document.querySelectorAll("[data-pane-thread]")).toHaveLength(1);
+  expect(useChatPanesStore.getState().root).toBeNull();
 });
 it("resizes by keyboard and preserves a 2x2 layout across narrow desktop", async () => {
   await mount();
