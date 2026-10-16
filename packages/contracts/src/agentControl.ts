@@ -343,9 +343,31 @@ export const AgentControlTitle = TrimmedNonEmptyString.check(
   Schema.isMaxLength(AGENT_CONTROL_TITLE_MAX_CHARS),
 );
 
+/** As many artifacts as one message can carry. */
+export const AGENT_CONTROL_HANDOFF_ARTIFACTS_MAX = 8;
+
+/**
+ * One of the calling thread's artifacts, `messageId:attachmentId` as
+ * `ryco_list_artifacts` lists it (`@ryco/shared/threadArtifacts`).
+ */
+export const AgentControlArtifactId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(512),
+  Schema.isPattern(/^.+:[a-z0-9_-]{1,128}$/i),
+);
+export type AgentControlArtifactId = typeof AgentControlArtifactId.Type;
+
 export const AgentControlCreateThreadEntry = Schema.Struct({
   /** Return only this initial run to the exact originating provider turn. */
   returnToOrigin: Schema.optional(Schema.Boolean),
+  /**
+   * The caller's own artifacts to hand over: copied into the new thread and
+   * attached to its first message. Provider-session callers only.
+   */
+  artifacts: Schema.optional(
+    Schema.Array(AgentControlArtifactId).check(
+      Schema.isMaxLength(AGENT_CONTROL_HANDOFF_ARTIFACTS_MAX),
+    ),
+  ),
   projectId: ProjectId,
   title: AgentControlTitle,
   prompt: AgentControlPrompt,

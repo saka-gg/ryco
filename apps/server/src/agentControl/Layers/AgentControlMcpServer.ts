@@ -2,6 +2,7 @@ import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import { WorkspaceFileSystem } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiffQuery.ts";
 import { withInspectionTools } from "../Mcp/inspectionTools.ts";
+import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
@@ -103,10 +104,11 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
     ...(Option.isSome(diffs) ? { diffs: diffs.value } : {}),
     ...(Option.isSome(terminals) ? { terminals: terminals.value } : {}),
   });
+  const artifactTools = withArtifactTools(inspectionTools, { policy, projections });
   // Stateless ledger reads and CAS writes: no second delivery worker is forked here.
   const baseTools =
     Option.isSome(completionReturns) && Option.isSome(proposalRepository) && Option.isSome(sql)
-      ? withDelegationTools(inspectionTools, {
+      ? withDelegationTools(artifactTools, {
           policy,
           registry,
           control: makeDelegatedTaskControl({
@@ -117,7 +119,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
             sql: sql.value,
           }),
         })
-      : inspectionTools;
+      : artifactTools;
   // Tools that show an attachment in the caller's turn share one delivery, so
   // file attachments and HTML renders draw on one serialized per-turn budget.
   const deliveryDeps =

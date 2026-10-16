@@ -9,8 +9,10 @@
  * A revert that dropped the delegating turn ends the return for a manual hand-off instead.
  */
 import {
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   type AgentControlProposal,
   type AgentControlProposalId,
+  type ChatAttachment,
   type CommandId,
   type MessageId,
   type OrchestrationThreadShell,
@@ -24,9 +26,13 @@ import {
 } from "@ryco/shared/threadSettlement";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import { Context, Duration, Effect, Layer, Option, Schedule, Semaphore } from "effect";
+import { isPersistableChatAttachment } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
 import {
   CompletionReturnRepository,
   DELEGATION_WAKE_MESSAGE_PREFIX,
+  MAX_RETURNED_ARTIFACTS,
+  type CompletionReturnArtifactRef,
   type CompletionReturnBatch,
   type CompletionReturnCapture,
   type CompletionReturnOutcome,
@@ -50,6 +56,8 @@ import {
   buildDelegationReturnCommand,
   compareCodeUnits,
   deliveryExpiresAtMs,
+  isStoredAttachmentWake,
+  type DelegationWakeCommand,
   laterInstant,
   renderCompletionNotice,
   renderCompletionReturn,
@@ -57,9 +65,13 @@ import {
   type CompletionReturnNoticeOutcome,
 } from "../completionReturnMessages.ts";
 import { publishCompletionReturns } from "../completionReturnPublish.ts";
+import { copyArtifactsToThread } from "../artifactHandoff.ts";
 import { agentControlRuntimeRank } from "./AgentControlActionValidator.ts";
 
 export { renderCompletionReturn } from "../completionReturnMessages.ts";
+
+/** How many of a child's newest artifact messages a capture reads for its own artifacts. */
+const RETURNED_ARTIFACT_SCAN_LIMIT = 50;
 
 const FAILED_PROPOSAL_STATUSES: ReadonlySet<AgentControlProposal["status"]> = new Set([
   "failed",
@@ -182,6 +194,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const receipts = yield* OrchestrationCommandReceiptRepository;
   const projections = yield* ProjectionSnapshotQuery;
   const commands = yield* OrchestrationCommandApplication;
+  const config = yield* Effect.serviceOption(ServerConfig);
   const policy = yield* AgentControlPolicy;
   const providers = yield* ProviderService;
   const lock = yield* Semaphore.make(1);
@@ -252,6 +265,85 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   ) => save(record, { status, detail }, now).pipe(Effect.asVoid);
 
   const readShell = (threadId: ThreadId) => projections.getThreadShellById(threadId);
+
+  /** Returned artifacts are stored copies, which only the internal path applies. */
+  const applyWake = (command: DelegationWakeCommand) =>
+    isStoredAttachmentWake(command) ? commands.applyInternal(command) : commands.apply(command);
+
+  /**
+   * The child's own artifacts since it was delegated (never ones handed over to it), the
+   * newest `MAX_RETURNED_ARTIFACTS` oldest first. Best effort: a result is never held for them.
+   */
+  const returnableArtifacts = (record: CompletionReturnRecord) =>
+    Effect.gen(function* () {
+      const read = projections.listThreadArtifactMessages;
+      if (!read || Option.isNone(config)) return [];
+      const messages = yield* read({
+        threadId: record.childThreadId,
+        limit: RETURNED_ARTIFACT_SCAN_LIMIT,
+      });
+      const refs: CompletionReturnArtifactRef[] = [];
+      for (const message of messages) {
+        if (message.role !== "assistant" || message.createdAt < record.createdAt) continue;
+        const own = (message.attachments ?? []).filter(
+          (attachment) => isPersistableChatAttachment(attachment) && !attachment.handoff,
+        );
+        // Newest message first; its attachments keep their order once reversed below.
+        for (const attachment of own.toReversed())
+          refs.push({ messageId: message.id, attachmentId: attachment.id ?? "" });
+      }
+      return refs.slice(0, MAX_RETURNED_ARTIFACTS).toReversed();
+    }).pipe(Effect.catch(() => Effect.succeed<CompletionReturnArtifactRef[]>([])));
+
+  /**
+   * Copies the batch's returned artifacts into the parent, in batch order, up to one message's
+   * worth. One that is gone or fails to copy is left out; the result section still names it.
+   */
+  const copyReturnedArtifacts = (
+    parentThreadId: ThreadId,
+    members: ReadonlyArray<CapturedRecord>,
+  ) =>
+    Effect.gen(function* () {
+      const attachments: ChatAttachment[] = [];
+      let omitted = 0;
+      let bytes = 0;
+      for (const row of members) {
+        for (const ref of row.capture.artifacts ?? []) {
+          if (Option.isNone(config) || !projections.getThreadMessageById) {
+            omitted += 1;
+            continue;
+          }
+          const message = yield* projections
+            .getThreadMessageById({ threadId: row.childThreadId, messageId: ref.messageId })
+            .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+          const attachment = Option.getOrUndefined(message)?.attachments?.find(
+            (candidate) => candidate.id === ref.attachmentId,
+          );
+          if (
+            attachments.length >= MAX_RETURNED_ARTIFACTS ||
+            attachment === undefined ||
+            !isPersistableChatAttachment(attachment) ||
+            bytes + attachment.sizeBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES
+          ) {
+            omitted += 1;
+            continue;
+          }
+          const copied = yield* copyArtifactsToThread({
+            attachmentsDir: config.value.attachmentsDir,
+            sourceThreadId: row.childThreadId,
+            targetThreadId: parentThreadId,
+            artifacts: [{ messageId: ref.messageId, attachment }],
+          }).pipe(Effect.catch(() => Effect.succeed<ReadonlyArray<ChatAttachment>>([])));
+          if (copied.length === 0) {
+            omitted += 1;
+            continue;
+          }
+          attachments.push(...copied);
+          bytes += attachment.sizeBytes;
+        }
+      }
+      return { attachments, omitted };
+    });
   /** Parent-side terminal cancel reasons (no wake). */
   const parentCancelDetail = (parent: Option.Option<OrchestrationThreadShell>) =>
     Effect.gen(function* () {
@@ -438,13 +530,20 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     outcome: CompletionReturnOutcome,
     section: string,
     ctx: ScanContext,
+    artifacts: ReadonlyArray<CompletionReturnArtifactRef> = [],
   ) =>
     Effect.gen(function* () {
       const saved = yield* save(
         record,
         {
           status: "ready",
-          capture: { kind, outcome, capturedAt: ctx.now, section: section.slice(0, 60_000) },
+          capture: {
+            kind,
+            outcome,
+            capturedAt: ctx.now,
+            section: section.slice(0, 60_000),
+            ...(artifacts.length > 0 ? { artifacts } : {}),
+          },
           command: null,
           detail: DETAIL.captured,
         },
@@ -643,7 +742,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         )
           return;
         wakesAppliedHere.set(frozen.message.messageId, ctx.nowMs);
-        yield* commands.apply(frozen).pipe(Effect.catch(() => Effect.void));
+        yield* applyWake(frozen).pipe(Effect.catch(() => Effect.void));
         replay = false;
         applied = true;
         trigger = undefined;
@@ -795,6 +894,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         settled.state,
         renderCompletionReturn(record, output.text, { backgroundEnded: backgroundBusy }),
         ctx,
+        yield* returnableArtifacts(record),
       );
     });
 
@@ -913,6 +1013,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         .map((row) => row.childThreadId)
         .reduce((min, id) => (compareCodeUnits(id, min) < 0 ? id : min));
       const attempt = Math.max(...members.map((row) => row.deliveryAttempts ?? 0));
+      // Copied under the parent's own ids before the claim; a retry links the same copies.
+      const returned = yield* copyReturnedArtifacts(parentThreadId, members);
       const command = buildDelegationReturnCommand({
         parent: parent.value,
         latestUserMessageId: yield* repository.latestUserMessageId(parentThreadId),
@@ -920,6 +1022,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         anchorChildThreadId: anchor,
         attempt,
         now,
+        attachments: returned.attachments,
+        omittedArtifacts: returned.omitted,
       });
       const batch: CompletionReturnBatch = {
         commandId: command.commandId,
@@ -953,7 +1057,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       if (!claimed) return;
       yield* publish(members.map((row) => row.proposalId));
       wakesAppliedHere.set(command.message.messageId, ctx.nowMs);
-      yield* commands.apply(command).pipe(Effect.catch(() => Effect.void));
+      yield* applyWake(command).pipe(Effect.catch(() => Effect.void));
       yield* settleBatch(command.commandId, ctx, { replay: false, applied: true });
     });
 

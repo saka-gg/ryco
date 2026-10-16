@@ -183,7 +183,7 @@ describe("ThreadWorkspacePanel", () => {
 
     expect(launcher).not.toBeNull();
     expect(grid).not.toBeNull();
-    expect(cards).toHaveLength(6);
+    expect(cards).toHaveLength(7);
 
     const launcherRect = launcher!.getBoundingClientRect();
     const gridRect = grid!.getBoundingClientRect();

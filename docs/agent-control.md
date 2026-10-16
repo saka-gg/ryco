@@ -18,6 +18,10 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
 - `ryco_capabilities`: provider instance IDs, model slugs, grants, and the complete available catalog.
 - `ryco_create_threads`: a bounded batch of local or isolated-worktree threads, with an optional base
   ref. The caller's project, runtime permission and worktree-isolation restrictions still apply.
+  An entry's `artifacts` hands over up to 8 of the caller's own artifacts (see
+  [Handing over artifacts](#handing-over-artifacts)).
+- `ryco_list_artifacts`: the caller's own thread's artifacts, newest first, with the ids a
+  handover takes. Needs the `read` grant.
 - `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`: queue/steer work, interrupt a
   turn, rename/archive/restore, select models and options, set runtime/interaction/token modes,
   and set or clear a persistent goal.
@@ -40,7 +44,7 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
   `html.render` grant and exact active-turn authority; a render counts toward the turn's attachment
-  budget.
+  budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id.
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread
@@ -91,6 +95,28 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   Tasks and the standalone integrations' `ryco_read_task` / `ryco_wait_for_task` are separate.
   Return progress is also visible as `completionReturns` on the delegation request
   (`ryco_read_control_request`) and on its proposal card.
+- **Returned artifacts.** A finished task's result brings back copies of the pages and files it
+  published during its run (the newest 8; never ones that were handed over to it). They are
+  attached to the automatic message, so the delegating agent receives them like an upload and they
+  show in the chat's Artifacts tab, marked with the task they came from. A batch carries at most 8
+  and 50 MiB in all; the message says how many stayed in their tasks. A returned artifact that is
+  gone (its task was reverted) is left out.
+
+## Handing over artifacts
+
+A thread's artifacts are the pages it published with `ryco_html_render`, the files it attached with
+`ryco_attach_file`, and the ones handed over to it. The user's own uploads are not artifacts.
+`ryco_list_artifacts` lists them with ids of the form `messageId:attachmentId`.
+
+A `ryco_create_threads` entry's `artifacts` takes up to 8 of those ids (50 MiB in all). Each must be
+one of the calling thread's own artifacts, checked when the request is submitted and again before
+it runs, since a revert in between can drop one. Standalone integrations cannot hand over
+artifacts. The new thread gets a copy of each, attached to its first message, so its agent receives
+them like files the user uploaded (a page as its `.html` source) and they show in its Artifacts tab,
+marked with the thread they came from. A copy never shares the source's file: deleting or reverting
+either thread leaves the other's copy alone. A handed-over artifact is the receiving thread's own,
+so it can hand it on to a thread it delegates in turn. The handover is provenance only: it grants
+no access to the thread it came from.
 
 ## Ryco sessions versus standalone clients
 

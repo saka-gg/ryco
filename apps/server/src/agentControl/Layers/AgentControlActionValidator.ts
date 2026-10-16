@@ -42,11 +42,15 @@ import {
   type AgentControlActionValidatorShape,
 } from "../Services/AgentControlActionValidator.ts";
 import { assertSafeAgentControlDeviceUrl, isAgentControlDevicePlan } from "../deviceControl.ts";
+import { resolveThreadArtifacts } from "../artifactHandoff.ts";
 
 const fail = (
   reason: ConstructorParameters<typeof AgentControlPlanValidationError>[0]["reason"],
   detail: string,
 ) => Effect.fail(new AgentControlPlanValidationError({ reason, detail }));
+
+const handsOverArtifacts = (plan: AgentControlActionPlan) =>
+  plan.kind === "createThreads" && plan.entries.some((entry) => (entry.artifacts?.length ?? 0) > 0);
 
 /** Privilege order of runtime modes: lower is less privileged. */
 export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
@@ -512,6 +516,28 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       ),
     );
 
+  // Every entry's artifacts must still be the source thread's own: checked at submission and
+  // again before execution, since a revert can drop them in between.
+  const validateHandoffArtifacts = (plan: AgentControlActionPlan, sourceThreadId: ThreadId) =>
+    plan.kind !== "createThreads"
+      ? Effect.void
+      : Effect.forEach(
+          plan.entries,
+          (entry) =>
+            entry.artifacts && entry.artifacts.length > 0
+              ? resolveThreadArtifacts(deps.projections, sourceThreadId, entry.artifacts).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new AgentControlPlanValidationError({
+                        reason: "artifact-unavailable",
+                        detail: error.detail,
+                      }),
+                  ),
+                )
+              : Effect.void,
+          { discard: true },
+        );
+
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
       const { snapshot, providers } = yield* loadState([
@@ -604,6 +630,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        yield* validateHandoffArtifacts(input.plan, caller.id);
       }
 
       const targetSnapshots: Array<
@@ -638,6 +665,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail(
             "invalid-plan",
             "Completion return requires an originating provider turn; external tasks cannot opt in.",
+          );
+        }
+        if (handsOverArtifacts(input.plan)) {
+          return yield* fail(
+            "invalid-plan",
+            "Artifact handover requires an originating provider thread; external tasks cannot hand over artifacts.",
           );
         }
         if (isAgentControlDevicePlan(input.plan)) {
@@ -858,6 +891,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         if (!origin || origin.projectId !== originProjectId) {
           return yield* fail("caller-stale", "The originating thread is unavailable.");
         }
+        yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
+      } else if (handsOverArtifacts(proposal.plan)) {
+        return yield* fail(
+          "privilege-escalation",
+          "Only an originating provider thread can hand over its artifacts.",
+        );
       } else if (principal.kind === "external-integration") {
         if (deps.revalidateExternal === undefined) {
           return yield* fail("caller-stale", "The external integration is unavailable.");

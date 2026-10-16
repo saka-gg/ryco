@@ -497,6 +497,16 @@ export interface ProjectionSnapshotQueryShape {
   }) => Effect.Effect<Option.Option<OrchestrationMessage>, ProjectionRepositoryError>;
 
   /**
+   * The newest messages of a thread that may carry artifacts (newest first, up to `limit`):
+   * assistant messages with attachments and messages with handed-over attachments
+   * (`@ryco/shared/threadArtifacts`). Optional so existing test doubles stay valid.
+   */
+  readonly listThreadArtifactMessages?: (input: {
+    readonly threadId: ThreadId;
+    readonly limit: number;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationMessage>, ProjectionRepositoryError>;
+
+  /**
    * Read the newest bounded slice of one turn's messages (newest first, up to
    * `limit`). Turn completion and streaming boundaries use this so per-turn
    * finalization never triggers a full-thread read. Optional so existing test

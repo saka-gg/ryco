@@ -10,6 +10,8 @@ import {
 import { AttachmentPreviewButton } from "./AttachmentDocumentPreview";
 import { attachmentPreviewKind, formatAttachmentBytes } from "./attachmentPreview";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
+import { useTheme } from "../../hooks/useTheme";
+import { HtmlRenderCards } from "./HtmlRenderCards";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { readHtmlRenderAttachment } from "./htmlRender.logic";
 
@@ -126,10 +128,21 @@ export const MessageAttachments = memo(function MessageAttachments(
       : props.attachments.filter(
           (attachment) => readHtmlRenderAttachment(attachment) === undefined,
         );
+  const { resolvedTheme } = useTheme();
+  const { environmentId, messageId } = props;
   if (props.attachments.length === 0) return null;
   return (
     <>
-      {renders.length > 0 && (
+      {renders.length > 0 && props.variant === "user" && environmentId && messageId ? (
+        // On a user message (an artifact handed over from another thread), a
+        // page is its card: the bubble is no place for the full page.
+        <HtmlRenderCards
+          environmentId={environmentId}
+          threadId={props.threadId}
+          renders={renders.map((render) => ({ ...render, messageId }))}
+          appearance={resolvedTheme}
+        />
+      ) : renders.length > 0 ? (
         <div className="my-2 flex w-full flex-col gap-2">
           {renders.map(({ attachment, htmlRender }) => (
             <HtmlRenderFrame
@@ -142,7 +155,7 @@ export const MessageAttachments = memo(function MessageAttachments(
             />
           ))}
         </div>
-      )}
+      ) : null}
       {files.length > 0 && <AttachmentCards {...props} attachments={files} />}
     </>
   );

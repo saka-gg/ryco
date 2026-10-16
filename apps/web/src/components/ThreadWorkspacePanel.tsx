@@ -4,7 +4,8 @@ import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
+import type { ThreadPageArtifact } from "@ryco/client-runtime/state/session";
+import { type MessageId, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
   readWorktreePullRequestLinks,
@@ -25,6 +26,7 @@ import {
   MessageSquareTextIcon,
   Minimize2Icon,
   PlusIcon,
+  ShapesIcon,
   SmartphoneIcon,
   TerminalIcon,
   XIcon,
@@ -58,6 +60,7 @@ import {
   buildOpenRenderSearch,
   buildOpenWorkspaceSearch,
   buildCloseWorkspacePanelSearch,
+  formatWorkspaceRenderKey,
   parseWorkspacePullRequestReveal,
   parseWorkspaceRenderKey,
   stripWorkspaceRevealSearch,
@@ -73,6 +76,7 @@ import {
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
+import { ArtifactsPanel } from "./artifacts/ArtifactsPanel";
 import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
 import { usePaneFocus } from "./chat/PaneFocus";
 import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
@@ -89,6 +93,7 @@ import { readEnvironmentApi } from "../environmentApi";
 import { shortcutLabelForCommand } from "../keybindings";
 import type { TerminalContextSelection } from "../lib/terminalContext";
 import { useStore } from "../store";
+import { useTimelineRevealStore } from "../timelineRevealStore";
 import {
   createProjectSelectorByRef,
   createThreadSelectorByRef,
@@ -197,6 +202,7 @@ function TabIcon(props: { tab: WorkspaceTab; active: boolean }) {
   if (props.tab.key === "agents") {
     return <BotIcon className={className} />;
   }
+  if (props.tab.key === "artifacts") return <ShapesIcon className={className} />;
   if (props.tab.mode === "render") return <AppWindowIcon className={className} />;
   return <FileTextIcon className={className} />;
 }
@@ -854,6 +860,17 @@ function WorkspaceLauncher(props: {
           onClick={() => props.onSelectTab(agentsTab)}
         />
       ) : null}
+      {props.isPhoneSurface ? null : (
+        <LauncherCard
+          label="Artifacts"
+          description="Pages and files from this thread"
+          icon={ShapesIcon}
+          compact={compact}
+          onClick={() =>
+            props.onSelectTab({ key: "artifacts", label: "Artifacts", mode: "artifacts" })
+          }
+        />
+      )}
     </>
   );
 
@@ -1084,6 +1101,7 @@ export default function ThreadWorkspacePanel(props: {
             tab.mode !== "simulator" &&
             tab.mode !== "browser" &&
             tab.mode !== "pullRequest" &&
+            tab.mode !== "artifacts" &&
             tab.mode !== "render",
         )
       : built;
@@ -1107,6 +1125,7 @@ export default function ThreadWorkspacePanel(props: {
           (activeMode === "agents" ||
             activeMode === "browser" ||
             activeMode === "pullRequest" ||
+            activeMode === "artifacts" ||
             activeMode === "render")
         ? null
         : activeMode;
@@ -1251,6 +1270,54 @@ export default function ThreadWorkspacePanel(props: {
   const closePanel = useCallback(() => {
     navigateSearch((previous) => buildCloseWorkspacePanelSearch(previous));
   }, [navigateSearch]);
+
+  const openArtifactPage = useCallback(
+    (artifact: ThreadPageArtifact) =>
+      navigateSearch((previous) =>
+        buildOpenRenderSearch(
+          previous,
+          formatWorkspaceRenderKey({
+            messageId: artifact.messageId,
+            attachmentId: artifact.attachment.id,
+          }),
+        ),
+      ),
+    [navigateSearch],
+  );
+  const openArtifactSourceThread = useCallback(
+    (threadId: ThreadId) => {
+      if (!workspaceThreadRef) return;
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(workspaceThreadRef.environmentId, threadId)),
+      });
+    },
+    [navigate, workspaceThreadRef],
+  );
+  const showArtifactInThread = useCallback(
+    (messageId: MessageId) => {
+      if (!workspaceThreadRef) return;
+      useTimelineRevealStore.getState().reveal(scopedThreadKey(workspaceThreadRef), messageId);
+      // The thread must be in sight: a sheet covers it, a maximized panel
+      // replaces it. A deep link's message gives way to this one.
+      if (props.mode === "sheet") {
+        navigateSearch((previous) =>
+          buildCloseWorkspacePanelSearch({ ...previous, messageId: undefined }),
+        );
+        return;
+      }
+      if (search.messageId) navigateSearch((previous) => ({ ...previous, messageId: undefined }));
+      if (maximized) onToggleMaximized?.();
+    },
+    [
+      maximized,
+      navigateSearch,
+      onToggleMaximized,
+      props.mode,
+      search.messageId,
+      workspaceThreadRef,
+    ],
+  );
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col bg-background w-full">
@@ -1553,6 +1620,15 @@ export default function ThreadWorkspacePanel(props: {
               focusWorkflowId={agentsFocusWorkflowId}
               onFocusWorkflowHandled={clearReveal}
               onBack={() => navigateSearch((previous) => buildOpenAgentsSearch(previous))}
+            />
+          ) : activeMode === "artifacts" && !isPhoneSurface ? (
+            <ArtifactsPanel
+              environmentId={workspaceThreadRef?.environmentId ?? null}
+              threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
+              messages={activeThread?.messages}
+              onOpenPage={openArtifactPage}
+              onShowInThread={showArtifactInThread}
+              onOpenThread={openArtifactSourceThread}
             />
           ) : activeMode === "render" && renderKey && !isPhoneSurface ? (
             // The phone tier keeps its dialog; a page link there lands on the launcher.

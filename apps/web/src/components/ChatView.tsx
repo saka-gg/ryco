@@ -318,6 +318,7 @@ import {
   type SendTurnSettings,
 } from "../hooks/executeChatSendTurn";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { TIMELINE_REVEAL_SETTLE_MS, useTimelineRevealStore } from "../timelineRevealStore";
 import {
   createForegroundQueueSender,
   hasOutstandingQueuedDispatch,
@@ -1067,17 +1068,49 @@ export default function ChatView(props: ChatViewProps) {
     }).catch(() => undefined);
   }, [activeThreadMessageHistory, activeThreadRef]);
 
+  // The message the timeline brings into view: one the workspace panel asked
+  // for (an artifact's "Show in thread"), else the route's deep link.
+  const timelineReveal = useTimelineRevealStore((store) =>
+    activeThreadKey ? (store.requestsByThreadKey[activeThreadKey] ?? null) : null,
+  );
+  const settleTimelineReveal = useTimelineRevealStore((store) => store.settle);
+  const linkedMessageId = timelineReveal?.messageId ?? rawSearch.messageId;
+  const linkedMessageLoaded =
+    linkedMessageId !== undefined &&
+    (activeThread?.messages.some((message) => message.id === linkedMessageId) ?? false);
   useEffect(() => {
-    const targetMessageId = rawSearch.messageId;
-    if (!activeThreadRef || !targetMessageId || !activeThreadMessageHistory) return;
-    if (activeThread?.messages.some((message) => message.id === targetMessageId)) return;
+    if (!activeThreadRef || !linkedMessageId || !activeThreadMessageHistory) return;
+    if (linkedMessageLoaded) return;
     void loadThreadHistoryAroundMessage({
       environmentId: activeThreadRef.environmentId,
       threadId: activeThreadRef.threadId,
-      messageId: targetMessageId,
+      messageId: linkedMessageId,
       limit: 101,
-    }).catch(() => undefined);
-  }, [activeThread?.messages, activeThreadMessageHistory, activeThreadRef, rawSearch.messageId]);
+    }).catch(() => {
+      // The thread no longer has the message: nothing to bring into view.
+      if (timelineReveal && activeThreadKey) {
+        settleTimelineReveal(activeThreadKey, timelineReveal.requestId);
+      }
+    });
+  }, [
+    activeThreadKey,
+    activeThreadMessageHistory,
+    activeThreadRef,
+    linkedMessageId,
+    linkedMessageLoaded,
+    settleTimelineReveal,
+    timelineReveal,
+  ]);
+  // Once shown (and highlighted), a reveal lets go: a timeline that keeps
+  // streaming must not be pulled back to it.
+  useEffect(() => {
+    if (!timelineReveal || !activeThreadKey || !linkedMessageLoaded) return;
+    const timeoutId = window.setTimeout(
+      () => settleTimelineReveal(activeThreadKey, timelineReveal.requestId),
+      TIMELINE_REVEAL_SETTLE_MS,
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [activeThreadKey, linkedMessageLoaded, settleTimelineReveal, timelineReveal]);
 
   // Message queue: prompts composed while a turn runs are queued and auto-sent on
   // quiescence. Client-owned, keyed by the scoped thread key.
@@ -5950,10 +5983,10 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 enteringMessageId={enteringMessageId}
                 listRef={legendListRef}
-                targetMessageId={
-                  threadMessageSearchTarget?.messageId ?? rawSearch.messageId ?? null
+                targetMessageId={threadMessageSearchTarget?.messageId ?? linkedMessageId ?? null}
+                targetMessageRequestId={
+                  threadMessageSearchTarget?.requestId ?? timelineReveal?.requestId ?? 0
                 }
-                targetMessageRequestId={threadMessageSearchTarget?.requestId ?? 0}
                 targetMessageRowHighlight={threadMessageSearchTarget === null}
                 threadMessageSearchQuery={threadMessageSearchOpen ? threadMessageSearchQuery : ""}
                 threadMessageSearchOccurrencesByMessageId={

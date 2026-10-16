@@ -1,4 +1,8 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Layer, Option, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
@@ -13,8 +17,18 @@ import {
   TurnId,
   type CheckpointRevertActivityPayload,
   type CheckpointRevertStatus,
+  type ChatAttachment,
+  type ChatFileAttachment,
   type ClientOrchestrationCommand,
+  type OrchestrationMessage,
 } from "@ryco/contracts";
+import {
+  createFileAttachmentId,
+  parseThreadSegmentFromAttachmentId,
+  resolveAttachmentPath,
+  toSafeThreadAttachmentSegment,
+} from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
 import {
   CompletionReturnRepository,
   CompletionReturnRepositoryLive,
@@ -41,6 +55,7 @@ import {
   delegationWakeIds,
   renderCompletionReturn,
   renderDelegationWake,
+  type DelegationWakeCommand,
 } from "../completionReturnMessages.ts";
 import { makeCompletionReturnDelivery } from "./CompletionReturnDelivery.ts";
 
@@ -148,7 +163,13 @@ const proposalFor = (proposalId: string, parentThreadId = "parent") =>
 
 type ApplyMode = "accept" | "reject" | "lost";
 
-const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
+const setup = (
+  fixture: Partial<CompletionReturnRecord> = {},
+  options: {
+    /** A server base directory, so returned artifacts can be copied; none returns none. */
+    readonly baseDir?: string;
+  } = {},
+) =>
   Effect.gen(function* () {
     const repo = yield* CompletionReturnRepository;
     const sql = yield* SqlClient.SqlClient;
@@ -178,7 +199,9 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
     // Newest checkpoint revert per thread (ProjectionSnapshotQuery's per-thread journal read).
     const pendingReverts = new Map<string, ReturnType<typeof makeCheckpointRevertActivity>>();
     const revertReads: string[] = [];
-    const sent: Array<Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }>> = [];
+    const sent: Array<DelegationWakeCommand> = [];
+    // Messages that carry artifacts, per thread (newest first, as the projection lists them).
+    const artifactMessages = new Map<string, ReadonlyArray<OrchestrationMessage>>();
 
     // A delegated child with a completed, ingestion-bound initial turn and a final answer.
     const addChild = (
@@ -234,31 +257,58 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
               ? null
               : { activity, payload: activity.payload as CheckpointRevertActivityPayload };
           }),
+        listThreadArtifactMessages: (input: { readonly threadId: ThreadId }) =>
+          Effect.succeed(artifactMessages.get(input.threadId) ?? []),
+        getThreadMessageById: (input: {
+          readonly threadId: ThreadId;
+          readonly messageId: MessageId;
+        }) =>
+          Effect.succeed(
+            Option.fromNullishOr(
+              (artifactMessages.get(input.threadId) ?? []).find(
+                (message) => message.id === input.messageId,
+              ),
+            ),
+          ),
       } as never),
       Effect.provideService(OrchestrationCommandApplication, {
-        apply: (command: ClientOrchestrationCommand) =>
-          Effect.gen(function* () {
-            if (command.type !== "thread.turn.start") return yield* Effect.die("unexpected");
-            sent.push(command);
-            if (applyMode === "lost") return yield* Effect.fail(new Error("lost acknowledgement"));
-            yield* receipts.upsert({
-              commandId: command.commandId,
-              aggregateId: command.threadId,
-              aggregateKind: "thread",
-              acceptedAt: now,
-              resultSequence: 1,
-              status: applyMode === "accept" ? "accepted" : "rejected",
-              error: applyMode === "accept" ? null : "Delegated result origin changed.",
-            });
-            if (applyMode === "reject") return yield* Effect.fail(new Error("rejected"));
-            if (modelPendingRow)
-              yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
-                VALUES (${command.threadId}, NULL, ${command.message.messageId}, 'pending', ${command.createdAt}, '[]')`;
-            return { sequence: 1 };
-          }),
+        apply: (command: ClientOrchestrationCommand) => applyWake(command),
+        // Only a wake with returned artifacts (stored copies) takes the internal path.
+        applyInternal: (command: ClientOrchestrationCommand) =>
+          command.type === "thread.turn.start" && command.message.attachments.length > 0
+            ? applyWake(command)
+            : Effect.die("unexpected internal command"),
       } as never),
       Effect.provideService(AgentControlPolicy, { isEnabled: Effect.sync(() => enabled) } as never),
+      options.baseDir === undefined
+        ? (effect) => effect
+        : Effect.provide(
+            ServerConfig.layerTest(process.cwd(), options.baseDir).pipe(
+              Layer.provideMerge(NodeServices.layer),
+            ),
+          ),
     );
+    function applyWake(command: ClientOrchestrationCommand) {
+      return Effect.gen(function* () {
+        if (command.type !== "thread.turn.start") return yield* Effect.die("unexpected");
+        sent.push(command);
+        if (applyMode === "lost") return yield* Effect.fail(new Error("lost acknowledgement"));
+        yield* receipts.upsert({
+          commandId: command.commandId,
+          aggregateId: command.threadId,
+          aggregateKind: "thread",
+          acceptedAt: now,
+          resultSequence: 1,
+          status: applyMode === "accept" ? "accepted" : "rejected",
+          error: applyMode === "accept" ? null : "Delegated result origin changed.",
+        });
+        if (applyMode === "reject") return yield* Effect.fail(new Error("rejected"));
+        if (modelPendingRow)
+          yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
+                VALUES (${command.threadId}, NULL, ${command.message.messageId}, 'pending', ${command.createdAt}, '[]')`;
+        return { sequence: 1 };
+      });
+    }
     const worker = yield* makeWorker;
     const read = (childThreadId: string = row.childThreadId) =>
       repo.get(ThreadId.make(childThreadId)).pipe(Effect.map((record) => record!));
@@ -305,6 +355,7 @@ const setup = (fixture: Partial<CompletionReturnRecord> = {}) =>
       receipts,
       proposals,
       sent,
+      artifactMessages,
       addChild,
       appendEvent,
       appendStartFailure,
@@ -393,6 +444,112 @@ it.effect(
         worktreePath: null,
       });
     }).pipe(Effect.provide(layer)),
+);
+
+// ── returned artifacts ───────────────────────────────────────────────────
+
+const storedPage = (
+  attachmentsDir: string,
+  threadId: string,
+  title: string,
+): ChatFileAttachment => {
+  const attachment: ChatFileAttachment = {
+    type: "file",
+    id: createFileAttachmentId(threadId, `${title}.html`)!,
+    name: `${title}.html`,
+    mimeType: "text/html",
+    sizeBytes: Buffer.byteLength(`<p>${title}</p>`),
+    htmlRender: { title, height: 400 },
+  };
+  fs.writeFileSync(resolveAttachmentPath({ attachmentsDir, attachment })!, `<p>${title}</p>`);
+  return attachment;
+};
+
+const artifactMessage = (
+  id: string,
+  threadId: string,
+  role: "user" | "assistant",
+  attachments: ReadonlyArray<ChatAttachment>,
+  createdAt: string,
+) =>
+  ({
+    id: MessageId.make(id),
+    role,
+    text: " ",
+    attachments,
+    turnId: TurnId.make(`${threadId}-turn`),
+    streaming: false,
+    createdAt,
+    updatedAt: createdAt,
+  }) as OrchestrationMessage;
+
+it.effect(
+  "returns the child's own published artifacts with its result, as copies in the parent",
+  () =>
+    Effect.gen(function* () {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "completion-return-artifacts-"));
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const attachmentsDir = path.join(baseDir, "userdata", "attachments");
+      fs.mkdirSync(attachmentsDir, { recursive: true });
+      const h = yield* setup({}, { baseDir });
+      const improved = storedPage(attachmentsDir, "child", "Improved mockup");
+      // Handed over to the child by the parent: never sent back.
+      const input = {
+        ...storedPage(attachmentsDir, "child", "Original mockup"),
+        handoff: { threadId: ThreadId.make("parent"), messageId: MessageId.make("parent-page") },
+      };
+      h.artifactMessages.set("child", [
+        artifactMessage("child-page", "child", "assistant", [improved], at(2)),
+        artifactMessage("child-initial", "child", "user", [input], at(1)),
+      ]);
+      yield* h.ack();
+      h.applyMode("lost");
+      yield* h.tick(3);
+
+      const captured = yield* h.read();
+      assert.deepStrictEqual(captured.capture?.artifacts, [
+        { messageId: MessageId.make("child-page"), attachmentId: improved.id },
+      ]);
+      // The frozen wake carries the stored copy and survives the row's round trip.
+      assert.equal(captured.status, "dispatching");
+      const frozen = captured.command;
+      assert.equal(frozen?.type, "thread.turn.start");
+      if (frozen?.type !== "thread.turn.start") return;
+      const [copy] = frozen.message.attachments as ReadonlyArray<ChatAttachment>;
+      assert.deepInclude(copy, {
+        name: "Improved mockup.html",
+        handoff: { threadId: ThreadId.make("child"), messageId: MessageId.make("child-page") },
+      });
+      assert.equal(
+        parseThreadSegmentFromAttachmentId(copy!.id!),
+        toSafeThreadAttachmentSegment("parent"),
+      );
+      assert.equal(
+        fs.readFileSync(resolveAttachmentPath({ attachmentsDir, attachment: copy! })!, "utf8"),
+        "<p>Improved mockup</p>",
+      );
+      assert.include(frozen.message.text, "Attached: copies of 1 page(s)/file(s)");
+
+      h.applyMode("accept");
+      yield* h.tick(6);
+      assert.equal((yield* h.read()).status, "delivered");
+      assert.equal(h.sent.length, 2);
+      assert.deepStrictEqual(h.sent[1]!.message.attachments, frozen.message.attachments);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+);
+
+it.effect("returns no artifacts the child never published, and wakes without attachments", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.ack();
+    yield* h.tick(3);
+    assert.isUndefined((yield* h.read()).capture?.artifacts);
+    assert.equal(h.sent.length, 1);
+    assert.lengthOf(h.sent[0]!.message.attachments, 0);
+    assert.notInclude(h.sent[0]!.message.text, "Attached:");
+  }).pipe(Effect.provide(layer)),
 );
 
 it.effect("T1 batches siblings that become ready together into one parent wake", () =>

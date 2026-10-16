@@ -2098,6 +2098,69 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     `,
   });
 
+  /**
+   * Messages that may carry artifacts (`@ryco/shared/threadArtifacts`): assistant messages
+   * with attachments, and any message with a handed-over one. A `"handoff":` key can only
+   * appear unescaped as a stored attachment's own key, so the text match never misses one;
+   * callers narrow the rows with the shared predicate.
+   */
+  const artifactMessageCondition = sql`
+    attachments_json IS NOT NULL
+    AND attachments_json <> '[]'
+    AND (role = 'assistant' OR attachments_json LIKE '%"handoff":%')
+  `;
+
+  // The `"artifacts"` message filter.
+  const listThreadArtifactMessageRowsBefore = SqlSchema.findAll({
+    Request: CreatedAtHistoryBeforeQueryInput,
+    Result: ProjectionThreadMessageDbRowSchema,
+    execute: ({ threadId, beforeCreatedAt, beforeId, limit }) => sql`
+      SELECT
+        message_id AS "messageId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        role,
+        ${messageTextColumns(sql)},
+        attachments_json AS "attachments",
+        dispatch_mode AS "dispatchMode",
+        is_streaming AS "isStreaming",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND ${artifactMessageCondition}
+        AND (
+          created_at < ${beforeCreatedAt}
+          OR (created_at = ${beforeCreatedAt} AND message_id < ${beforeId})
+        )
+      ORDER BY created_at DESC, message_id DESC
+      LIMIT ${limit}
+    `,
+  });
+
+  const listThreadArtifactMessageRows = SqlSchema.findAll({
+    Request: BoundedThreadHistoryQueryInput,
+    Result: ProjectionThreadMessageDbRowSchema,
+    execute: ({ threadId, limit }) => sql`
+      SELECT
+        message_id AS "messageId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        role,
+        ${messageTextColumns(sql)},
+        attachments_json AS "attachments",
+        dispatch_mode AS "dispatchMode",
+        is_streaming AS "isStreaming",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM projection_thread_messages
+      WHERE thread_id = ${threadId}
+        AND ${artifactMessageCondition}
+      ORDER BY created_at DESC, message_id DESC
+      LIMIT ${limit}
+    `,
+  });
+
   const getThreadMessageAnchorRow = SqlSchema.findOneOption({
     Request: MessageHistoryAnchorQueryInput,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -4276,15 +4339,21 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
 
       if (input.collection === "messages") {
         const order = decodedCursor.order as CreatedAtCursorOrder;
+        const artifactsOnly = "messageFilter" in input && input.messageFilter === "artifacts";
+        // Artifact messages carry page thumbnails: fewer of them per page.
+        const pageLimit = artifactsOnly ? Math.min(limit, 50) : limit;
+        const listRows = artifactsOnly
+          ? listThreadArtifactMessageRowsBefore
+          : listThreadMessageRowsBefore;
         const [threadRow, stateRows, rawRows, boundary] = yield* runTransaction(
           Effect.all([
             threadEffect,
             stateEffect,
-            listThreadMessageRowsBefore({
+            listRows({
               threadId: input.threadId,
               beforeCreatedAt: order.createdAt,
               beforeId: order.id,
-              limit: limit + 1,
+              limit: pageLimit + 1,
             }).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -4311,7 +4380,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         );
         yield* ensureThread(threadRow);
         yield* ensureBoundary(boundary);
-        const rows = rawRows.slice(0, limit).toReversed();
+        const rows = rawRows.slice(0, pageLimit).toReversed();
         return {
           collection: "messages",
           snapshotSequence: computeSnapshotSequence(stateRows),
@@ -4323,7 +4392,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               createdAt: row.createdAt,
               id: row.messageId,
             })),
-            hasMoreBefore: rawRows.length > limit,
+            hasMoreBefore: rawRows.length > pageLimit,
           }),
         } satisfies OrchestrationThreadHistoryPage;
       }
@@ -4541,6 +4610,19 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
       Effect.map(Option.map(mapMessageRow)),
     );
 
+  const listThreadArtifactMessages: NonNullable<
+    ProjectionSnapshotQueryShape["listThreadArtifactMessages"]
+  > = (input) =>
+    listThreadArtifactMessageRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listThreadArtifactMessages:query",
+          "ProjectionSnapshotQuery.listThreadArtifactMessages:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapMessageRow)),
+    );
+
   const listThreadMessagesByTurn: NonNullable<
     ProjectionSnapshotQueryShape["listThreadMessagesByTurn"]
   > = (input) =>
@@ -4692,6 +4774,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     getCompletedSideQuestionContext,
     getThreadHistoryPage,
     getThreadMessageById,
+    listThreadArtifactMessages,
     listThreadMessagesByTurn,
     getThreadHistoryRepairContext,
     countThreadUserMessages,

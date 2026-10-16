@@ -464,3 +464,30 @@ it("loads an RPC Markdown attachment and opens its rendered preview with one cli
   expect(readChunk).toHaveBeenCalledOnce();
   await screen.unmount();
 });
+
+it("shows a page handed over on a user message as its card, not the page itself", async () => {
+  const screen = await render(
+    <MessageAttachments
+      environmentId={EnvironmentId.make("env")}
+      threadId={ThreadId.make("thread")}
+      messageId={MessageId.make("delegated")}
+      onImageExpand={() => undefined}
+      variant="user"
+      attachments={[
+        {
+          type: "file",
+          id: "thread-copy-html",
+          name: "Pricing mockup.html",
+          mimeType: "text/html",
+          sizeBytes: 2048,
+          htmlRender: { title: "Pricing mockup", height: 400 },
+          handoff: { threadId: ThreadId.make("parent"), messageId: MessageId.make("source") },
+        },
+      ]}
+    />,
+  );
+  await expect.element(page.getByRole("button", { name: "Open Pricing mockup" })).toBeVisible();
+  expect(document.querySelector("[data-html-render-frame]")).toBeNull();
+  expect(readChunk).not.toHaveBeenCalled();
+  await screen.unmount();
+});

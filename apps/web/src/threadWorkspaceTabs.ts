@@ -7,7 +7,15 @@ import {
 
 export type WorkspaceTab =
   | {
-      key: "files" | "review" | "terminal" | "simulator" | "browser" | "pullRequest" | "agents";
+      key:
+        | "files"
+        | "review"
+        | "terminal"
+        | "simulator"
+        | "browser"
+        | "pullRequest"
+        | "agents"
+        | "artifacts";
       label: string;
       mode: Exclude<RightPanelMode, "agent" | "render">;
     }
@@ -62,6 +70,9 @@ export function buildTabs(input: {
   }
   if (openedModes.has("agents") || (input.groupAgents && input.activeAgentKey)) {
     tabs.push({ key: "agents", label: "Agents", mode: "agents" });
+  }
+  if (openedModes.has("artifacts")) {
+    tabs.push({ key: "artifacts", label: "Artifacts", mode: "artifacts" });
   }
   if (input.render) {
     tabs.push({

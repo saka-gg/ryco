@@ -1,4 +1,5 @@
 import type {
+  ChatAttachmentHandoff,
   ChatHtmlRenderMetadata,
   EnvironmentId,
   ModelSelection,
@@ -58,6 +59,8 @@ export interface ChatImageAttachment {
   /** Advisory intrinsic dimensions probed server-side; absent = unknown. */
   width?: number;
   height?: number;
+  /** Present when this is an artifact handed over from another thread. */
+  handoff?: ChatAttachmentHandoff;
 }
 
 export interface ChatFileAttachment {
@@ -73,6 +76,8 @@ export interface ChatFileAttachment {
   height?: number;
   /** Present when this `text/html` file is an agent HTML render shown inline in the thread. */
   htmlRender?: ChatHtmlRenderMetadata;
+  /** Present when this is an artifact handed over from another thread. */
+  handoff?: ChatAttachmentHandoff;
 }
 
 export interface ChatUnknownAttachment {
