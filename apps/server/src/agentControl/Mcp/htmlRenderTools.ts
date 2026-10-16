@@ -40,6 +40,7 @@ import {
   normalizeHtmlRenderTitle,
 } from "@ryco/shared/htmlRender";
 import { Data, Effect, Exit, Option, Schema } from "effect";
+import { formatThreadArtifactId } from "@ryco/shared/threadArtifacts";
 import { loadSharp } from "../../loadSharp.ts";
 
 import {
@@ -138,6 +139,10 @@ const measuredText = (heights: ReadonlyArray<unknown> | undefined) =>
   heights === undefined
     ? " Not measured: the frame shrinks to the page but never grows past your height."
     : ` Measured at ${heights.length} widths.`;
+/** The id `ryco_create_threads` entries hand the stored page over with. */
+const artifactIdText = (messageId: string, attachmentId: string) =>
+  ` Artifact id: ${formatThreadArtifactId({ messageId, attachmentId })}.`;
+
 const ALREADY_RENDERED_TEXT =
   "This page is already shown to the reader above your reply. Don't publish it again or describe it.";
 
@@ -476,7 +481,7 @@ export const withHtmlRenderTools = (
                   ? removeStored(stored)
                   : Effect.void,
             );
-            const message = `${RENDERED_TEXT}${measuredText(measured?.heights)}`;
+            const message = `${RENDERED_TEXT}${measuredText(measured?.heights)}${artifactIdText(messageId, attachment.id)}`;
             return {
               content: [{ type: "text", text: message }],
               // Codex shows the model the structured content instead of the

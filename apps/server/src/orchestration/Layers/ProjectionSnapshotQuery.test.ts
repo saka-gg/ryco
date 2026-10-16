@@ -2444,6 +2444,131 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("pages only a thread's artifact messages behind its window", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_state`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json, scripts_json,
+          created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'project-artifacts', 'Artifacts', '/tmp/artifacts', NULL, '[]',
+          '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, deleted_at
+        )
+        VALUES (
+          'thread-artifacts', 'project-artifacts', 'Artifacts',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+          NULL, NULL, NULL, '2026-05-01T00:00:00.000Z', '2026-05-01T00:00:00.000Z', NULL
+        )
+      `;
+
+      const attachment = (index: number) =>
+        JSON.stringify([
+          {
+            type: "file",
+            id: `file-${index}`,
+            name: `page-${index}.html`,
+            mimeType: "text/html",
+            sizeBytes: 10,
+            // One user message carries an artifact handed over from another thread.
+            ...(index === 121
+              ? { handoff: { threadId: "thread-parent", messageId: "message-source" } }
+              : {}),
+          },
+        ]);
+      const baseTime = Date.parse("2026-05-01T01:00:00.000Z");
+      yield* sql.withTransaction(
+        Effect.forEach(
+          Array.from({ length: 300 }, (_unused, index) => index),
+          (index) => {
+            const messageId = `message-${String(index).padStart(4, "0")}`;
+            const createdAt = new Date(baseTime + index * 1_000).toISOString();
+            // Every 40th message is an artifact; the ones beside it are not (a user
+            // upload, an assistant message with no attachments left) unless handed over.
+            const role = index % 40 === 1 ? "user" : "assistant";
+            const attachments =
+              index % 40 === 0 || index % 40 === 1
+                ? attachment(index)
+                : index % 40 === 2
+                  ? "[]"
+                  : null;
+            return sql`
+              INSERT INTO projection_thread_messages (
+                message_id, thread_id, turn_id, role, text, attachments_json, is_streaming,
+                created_at, updated_at
+              )
+              VALUES (
+                ${messageId}, 'thread-artifacts', 'turn-artifacts', ${role}, ${`body ${index}`},
+                ${attachments}, 0, ${createdAt}, ${createdAt}
+              )
+            `;
+          },
+          { discard: true },
+        ),
+      );
+
+      const threadWindow = yield* snapshotQuery.getThreadWindow!({
+        threadId: ThreadId.make("thread-artifacts"),
+        limits: { messages: 100, proposedPlans: 10, activities: 10, checkpoints: 10 },
+      });
+      const windowCursor = threadWindow.history.messages.oldestCursor;
+      assert.isNotNull(windowCursor);
+      // The window holds messages 200-299; artifacts before it: 0, 40, 80, 120, 121, 160.
+      const firstPage = yield* snapshotQuery.getThreadHistoryPage!({
+        threadId: ThreadId.make("thread-artifacts"),
+        collection: "messages",
+        mode: { kind: "before", cursor: windowCursor! },
+        limit: 3,
+        messageFilter: "artifacts",
+      });
+      assert.equal(firstPage.collection, "messages");
+      if (firstPage.collection !== "messages") return;
+      assert.deepEqual(
+        firstPage.items.map((message) => message.id),
+        ["message-0120", "message-0121", "message-0160"].map(asMessageId),
+      );
+      assert.equal(firstPage.items[0]?.attachments?.[0]?.id, "file-120");
+      assert.isTrue(firstPage.page.hasMoreBefore);
+
+      const lastPage = yield* snapshotQuery.getThreadHistoryPage!({
+        threadId: ThreadId.make("thread-artifacts"),
+        collection: "messages",
+        mode: { kind: "before", cursor: firstPage.page.oldestCursor! },
+        limit: 3,
+        messageFilter: "artifacts",
+      });
+      assert.equal(lastPage.collection, "messages");
+      if (lastPage.collection !== "messages") return;
+      assert.deepEqual(
+        lastPage.items.map((message) => message.id),
+        ["message-0000", "message-0040", "message-0080"].map(asMessageId),
+      );
+      assert.isFalse(lastPage.page.hasMoreBefore);
+
+      const newest = yield* snapshotQuery.listThreadArtifactMessages!({
+        threadId: ThreadId.make("thread-artifacts"),
+        limit: 4,
+      });
+      assert.deepEqual(
+        newest.map((message) => message.id),
+        ["message-0280", "message-0240", "message-0200", "message-0160"].map(asMessageId),
+      );
+    }),
+  );
+
   it.effect("bounds a window's activities by payload bytes and pages the rest", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

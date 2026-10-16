@@ -167,6 +167,11 @@ function planPresentation(proposal: AgentControlProposal): {
                   "Completion return: result or stop notice is sent back to the originating chat automatically, batched with sibling tasks.",
                 ]
               : []),
+            ...(entry.artifacts && entry.artifacts.length > 0
+              ? [
+                  `Handed-over artifacts: ${entry.artifacts.length} of the originating chat's pages/files, copied and attached to the first message.`,
+                ]
+              : []),
             ...(entry.tokenMode === undefined ? [] : [`Token mode: ${entry.tokenMode}`]),
             ...(entry.baseRef !== undefined ? [`Base ref: ${entry.baseRef}`] : []),
             `Prompt: ${entry.prompt}`,

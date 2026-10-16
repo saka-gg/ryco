@@ -12,3 +12,4 @@ export * from "./agentActivity.ts";
 export * from "./backgroundWork.ts";
 export * from "./approvalResponses.ts";
 export * from "./htmlRenderTimeline.ts";
+export * from "./threadArtifacts.ts";

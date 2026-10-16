@@ -17,10 +17,12 @@ import {
   WorktreeId,
   type AgentControlProposal,
   type AgentControlExternalIntegration,
+  type MessageId,
+  type OrchestrationMessage,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, Ref, Schema } from "effect";
+import { Effect, Option, Ref, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceManager } from "../../device/DeviceManager.ts";
@@ -654,6 +656,145 @@ it.effect("binds external proposals to current scope and revalidates grants befo
     yield* Ref.update(integrationRef, (current) => ({ ...current, capabilities: [] }));
     const changed = yield* Effect.flip(validator.revalidateExecution(proposal));
     assert.strictEqual(changed.reason, "caller-stale");
+  }),
+);
+
+it.effect("hands over only the caller's own artifacts, checked again before execution", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const page = {
+      type: "file" as const,
+      id: "thread-caller-0f0f0f0f-0f0f-0f0f-0f0f-0f0f0f0f0f0f-html",
+      name: "mockup.html",
+      mimeType: "text/html",
+      sizeBytes: 10,
+    };
+    const message = (id: string, role: "user" | "assistant") =>
+      ({
+        id,
+        role,
+        text: " ",
+        attachments: [page],
+        turnId: null,
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      }) as unknown as OrchestrationMessage;
+    const messages = yield* Ref.make([
+      message("render-1", "assistant"),
+      message("upload-1", "user"),
+    ]);
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections: {
+        getShellSnapshot: () => Ref.get(snapshot),
+        getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+          Ref.get(messages).pipe(
+            Effect.map((list) =>
+              Option.fromNullishOr(
+                input.threadId === callerThreadId
+                  ? list.find((entry) => entry.id === input.messageId)
+                  : undefined,
+              ),
+            ),
+          ),
+      } as unknown as ProjectionSnapshotQueryShape,
+      getProviders: Ref.get(providers),
+      listRefs: () => Effect.die("unused"),
+    });
+    const planWith = (artifacts: ReadonlyArray<string>) => ({
+      kind: "createThreads" as const,
+      entries: [
+        {
+          projectId,
+          title: "Improve the mockup",
+          prompt: "Research a better layout for the handed-over mockup.",
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+          runtimeMode: "approval-required" as const,
+          envMode: "worktree" as const,
+          artifacts,
+        },
+      ],
+    });
+    const plan = planWith([`render-1:${page.id}`]);
+    const principal = yield* validator.validateSubmission({ session, authority, plan });
+
+    // A user's own upload is not an artifact, and an unknown message names none.
+    for (const artifacts of [[`upload-1:${page.id}`], [`missing:${page.id}`]]) {
+      const error = yield* Effect.flip(
+        validator.validateSubmission({ session, authority, plan: planWith(artifacts) }),
+      );
+      assert.strictEqual(error.reason, "artifact-unavailable");
+    }
+
+    const proposal: AgentControlProposal = {
+      proposalId: AgentControlProposalId.make("proposal-handoff"),
+      requestId: AgentControlRequestId.make("request-handoff"),
+      principal,
+      planVersion: 1,
+      plan,
+      planDigest: "d".repeat(64),
+      riskTags: [],
+      promptSummary: "Create 1 thread",
+      status: "approved",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      decidedAt: now,
+      result: null,
+    };
+    yield* validator.revalidateExecution(proposal);
+    // A revert since submission dropped the artifact's message.
+    yield* Ref.set(messages, []);
+    const reverted = yield* Effect.flip(validator.revalidateExecution(proposal));
+    assert.strictEqual(reverted.reason, "artifact-unavailable");
+  }),
+);
+
+it.effect("never lets an external integration hand over artifacts", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const integration: AgentControlExternalIntegration = {
+      integrationId: AgentControlIntegrationId.make("integration-handoff"),
+      displayName: "External Codex",
+      clientKind: "codex",
+      projectScope: { kind: "selected", projectIds: [projectId] },
+      capabilities: [AGENT_CONTROL_CAPABILITIES.externalCreateTask],
+      rateLimitPerMinute: 60,
+      activeTaskLimit: 1,
+      activeTaskCount: 0,
+      expiresAt: null,
+      revokedAt: null,
+      pairingState: "paired",
+      pairingCodeExpiresAt: null,
+      pairedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: null,
+    };
+    const error = yield* Effect.flip(
+      makeValidator(snapshot, providers, [], () =>
+        Effect.succeed(integration),
+      ).validateExternalSubmission({
+        integration,
+        plan: {
+          kind: "createThreads",
+          entries: [
+            {
+              projectId,
+              title: "External task",
+              prompt: "Run the focused fix.",
+              modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+              runtimeMode: "approval-required",
+              envMode: "worktree",
+              artifacts: ["render-1:thread-caller-page"],
+            },
+          ],
+        },
+      }),
+    );
+    assert.strictEqual(error.reason, "invalid-plan");
   }),
 );
 

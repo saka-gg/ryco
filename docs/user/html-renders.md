@@ -41,6 +41,25 @@ the page the same way. A page Ryco could not take a thumbnail of, such as one pu
 preview browser was installed, shows an icon instead. A turn that is only pages has no cards; it
 already ends with them.
 
+## The Artifacts tab
+
+On web and desktop, **Artifacts** in the workspace panel's launcher (the **+** in its tab bar)
+lists everything the agent published in the thread, newest first: its pages, as thumbnail cards,
+and the files it attached. Your own uploads are not listed. A page opens full size in its tab, as
+above; a file opens the way the thread shows it (click to load it, then preview or download it).
+**Show in thread** scrolls the conversation to the message that carries the artifact and highlights
+it, loading that part of the thread if it is further back. In a long thread, Ryco reads the
+artifacts further back than the loaded part of the conversation on its own, in batches, so the list
+does not depend on how far you scrolled; **Show earlier artifacts** reads the next batch.
+
+Artifacts also travel between threads. Ask the agent to delegate work on one ("research in a new
+Ryco thread how we could improve this mockup with a denser layout") and it can hand the page over:
+the new thread starts with a copy attached to its first message, so its agent can read and build on
+it. When such a task reports back, copies of the pages and files it published come back with its
+result. Either way the copy is listed in the receiving thread's Artifacts tab with **From** and the
+thread it came from, which opens that thread. On a message, a handed-over page shows as its card;
+**Open** shows it full size. See [Agent Control](../agent-control.md#handing-over-artifacts).
+
 The web app's phone layout has no workspace panel and no expand button; there a page's card opens
 the page in a full-size view. The mobile app always shows the expand button, and the button and the
 cards open the page full screen, with the agent's source; on iOS, **Share** sends the page as an

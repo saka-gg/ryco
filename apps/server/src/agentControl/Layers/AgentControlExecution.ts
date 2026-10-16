@@ -25,6 +25,7 @@ import {
   type AgentControlResultEnvelope,
   type ClientOrchestrationCommand,
   type ThreadDelegatedCreateCommand,
+  type ThreadTurnStartCommand,
 } from "@ryco/contracts";
 import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
@@ -46,6 +47,7 @@ import {
 } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { ignoreAlreadyMissingGitResource } from "../../ws/context/gitErrors.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
+import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
 import {
   assertSafeAgentControlDeviceUrl,
   isAgentControlDevicePlan,
@@ -510,13 +512,20 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
 
         const dispatch = (
           step: string,
-          command: ClientOrchestrationCommand | ThreadDelegatedCreateCommand,
+          request:
+            | ClientOrchestrationCommand
+            | ThreadDelegatedCreateCommand
+            /** A turn start whose attachments the server already stored (handed-over artifacts). */
+            | { readonly stored: ThreadTurnStartCommand },
           updateState?: (state: AgentControlOperationState) => AgentControlOperationState,
         ) =>
           Effect.gen(function* () {
-            const result = yield* command.type === "thread.delegated.create"
-              ? commandApplication.applyInternal(command)
-              : commandApplication.apply(command);
+            const command = "stored" in request ? request.stored : request;
+            const result = yield* "stored" in request
+              ? commandApplication.applyInternal(request.stored)
+              : request.type === "thread.delegated.create"
+                ? commandApplication.applyInternal(request)
+                : commandApplication.apply(request);
             const state = updateState?.(operation.state) ?? operation.state;
             yield* checkpoint(
               appendStep(
@@ -1134,22 +1143,57 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 command: null,
               });
             }
-            yield* dispatch(`turn-started:${index}`, {
-              type: "thread.turn.start",
+            // The parent's own artifacts this entry hands over, copied under the child's ids
+            // (re-checked: a revert since validation may have dropped them).
+            const artifactIds =
+              proposal.plan.kind === "createThreads"
+                ? (proposal.plan.entries[index]?.artifacts ?? [])
+                : [];
+            const handedOver =
+              delegatedParentThreadId !== null && artifactIds.length > 0
+                ? yield* resolveThreadArtifacts(
+                    projections,
+                    delegatedParentThreadId,
+                    artifactIds,
+                  ).pipe(
+                    Effect.flatMap((artifacts) =>
+                      copyArtifactsToThread({
+                        attachmentsDir: config.attachmentsDir,
+                        sourceThreadId: delegatedParentThreadId,
+                        targetThreadId: threadId,
+                        artifacts,
+                      }),
+                    ),
+                    Effect.mapError((error) => new Error(error.detail)),
+                  )
+                : [];
+            const turnStart = {
+              type: "thread.turn.start" as const,
               commandId: commandIdFor(operation.operationId, `turn-start-${index}`),
               threadId,
               message: {
                 messageId: messageIdFor(operation.operationId, `create-${index}`),
-                role: "user",
+                role: "user" as const,
                 text: entry.prompt,
                 attachments: [],
               },
               modelSelection: entry.modelSelection,
               runtimeMode: entry.runtimeMode,
-              interactionMode: "default",
+              interactionMode: "default" as const,
               tokenMode,
               createdAt,
-            });
+            };
+            yield* dispatch(
+              `turn-started:${index}`,
+              handedOver.length === 0
+                ? turnStart
+                : {
+                    stored: {
+                      ...turnStart,
+                      message: { ...turnStart.message, attachments: handedOver },
+                    },
+                  },
+            );
           }
           return operation;
         }

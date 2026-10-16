@@ -22,13 +22,25 @@ import {
   type AgentControlOperation,
   type AgentControlProposal,
   type AgentControlResultEnvelope,
+  type ChatAttachment,
+  type ChatFileAttachment,
   type ClientOrchestrationCommand,
+  type MessageId,
   type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem, Layer, Option, PubSub, Ref, Schema } from "effect";
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  createFileAttachmentId,
+  parseThreadSegmentFromAttachmentId,
+  resolveAttachmentPath,
+  toSafeThreadAttachmentSegment,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
@@ -148,6 +160,8 @@ const makeTestExecution = (input: {
   readonly workspaceAccess?: unknown;
   readonly validator?: unknown;
   readonly deviceService?: unknown;
+  /** The server's base directory; a fresh temporary one when absent. */
+  readonly baseDir?: string;
 }) =>
   makeAgentControlExecution({ disableBackground: true }).pipe(
     Effect.provideService(AgentControlProposalStore, input.proposalStore as never),
@@ -175,9 +189,10 @@ const makeTestExecution = (input: {
     ),
     Effect.provideService(ServerRuntimeStartup, {} as never),
     Effect.provide(
-      ServerConfig.layerTest(process.cwd(), {
-        prefix: "agent-control-execution-test-",
-      }).pipe(Layer.provideMerge(NodeServices.layer)),
+      ServerConfig.layerTest(
+        process.cwd(),
+        input.baseDir ?? { prefix: "agent-control-execution-test-" },
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
     ),
   );
 
@@ -1304,6 +1319,105 @@ it.effect("records provider-session createThreads children as delegated creates"
     });
     assert.include(operation.state.resources.ownedThreadIds, delegated.threadId);
   }),
+);
+
+it.effect("hands the parent's artifacts to the child as copies on its first turn", () =>
+  Effect.gen(function* () {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-control-handoff-"));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+    );
+    const attachmentsDir = path.join(baseDir, "userdata", "attachments");
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+    const parentThreadId = ThreadId.make("thread-origin");
+    const page: ChatFileAttachment = {
+      type: "file",
+      id: createFileAttachmentId(parentThreadId, "mockup.html")!,
+      name: "mockup.html",
+      mimeType: "text/html",
+      sizeBytes: 13,
+      htmlRender: { title: "Mockup", height: 400 },
+    };
+    fs.writeFileSync(resolveAttachmentPath({ attachmentsDir, attachment: page })!, "<p>mockup</p>");
+    const handoffPlan = {
+      ...createThreadsPlan,
+      entries: [
+        {
+          ...createThreadsPlan.entries[0]!,
+          artifacts: [`render-1:${page.id}`],
+        },
+      ],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: handoffPlan,
+      planDigest: computeAgentControlPlanDigest(handoffPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const viaApply: DispatchedCommand[] = [];
+    const viaApplyInternal: Array<{ readonly type: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      baseDir,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+        getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+          Effect.succeed(
+            input.threadId === parentThreadId && input.messageId === "render-1"
+              ? Option.some({
+                  id: input.messageId,
+                  role: "assistant",
+                  text: " ",
+                  attachments: [page],
+                  turnId: null,
+                  streaming: false,
+                  createdAt: now,
+                  updatedAt: now,
+                })
+              : Option.none(),
+          ),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            viaApply.push(command);
+            return { sequence: viaApply.length + viaApplyInternal.length };
+          }),
+        applyInternal: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            viaApplyInternal.push(command);
+            return { sequence: viaApply.length + viaApplyInternal.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    // No client turn start: its upload schema cannot carry stored copies.
+    assert.isFalse(viaApply.some((command) => command.type === "thread.turn.start"));
+    const turnStart = viaApplyInternal.find((command) => command.type === "thread.turn.start") as
+      | {
+          readonly threadId: ThreadId;
+          readonly message: { readonly attachments: ChatAttachment[] };
+        }
+      | undefined;
+    assert.isDefined(turnStart);
+    const [copy] = turnStart!.message.attachments;
+    assert.deepInclude(copy, {
+      name: "mockup.html",
+      sizeBytes: 13,
+      handoff: { threadId: parentThreadId, messageId: "render-1" as MessageId },
+    });
+    assert.strictEqual(
+      parseThreadSegmentFromAttachmentId(copy!.id!),
+      toSafeThreadAttachmentSegment(turnStart!.threadId),
+    );
+    assert.strictEqual(
+      fs.readFileSync(resolveAttachmentPath({ attachmentsDir, attachment: copy! })!, "utf8"),
+      "<p>mockup</p>",
+    );
+  }).pipe(Effect.scoped),
 );
 
 it.effect("keeps automation runs as plain thread creates even for provider-session owners", () =>

@@ -2,6 +2,7 @@ import type { RightPanelMode } from "./rightPanelRouteSearch";
 import {
   buildOpenAgentSearch,
   buildOpenAgentsSearch,
+  buildOpenArtifactsSearch,
   buildOpenBrowserSearch,
   buildOpenFilesSearch,
   buildOpenPullRequestSearch,
@@ -35,6 +36,7 @@ export const RIGHT_PANEL_TAB_FALLBACK_ORDER: ReadonlyArray<RightPanelTabMode> = 
   "browser",
   "pullRequest",
   "agents",
+  "artifacts",
 ];
 
 /** The frozen web phone tier only ever mounts these (AGENTS.md). */
@@ -297,6 +299,8 @@ export function buildOpenRightPanelTabSearch<T extends Record<string, unknown>>(
       return buildOpenPullRequestSearch(previous);
     case "agents":
       return buildOpenAgentsSearch(previous);
+    case "artifacts":
+      return buildOpenArtifactsSearch(previous);
   }
 }
 

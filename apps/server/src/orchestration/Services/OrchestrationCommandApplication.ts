@@ -3,6 +3,7 @@ import type {
   InternalOrchestrationCommand,
   OrchestrationCommand,
   OrchestrationDispatchCommandError,
+  ThreadTurnStartCommand,
 } from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect } from "effect";
@@ -31,10 +32,12 @@ export interface OrchestrationCommandApplicationShape {
   /**
    * Apply a server-originated internal command (no client normalization; same
    * engine dispatcher, archive follow-ups and error mapping as `apply`).
-   * Never pass decoded client input here.
+   * Also a server-built turn start whose attachments the server already
+   * stored in that thread (a handover's copies). Never pass decoded client
+   * input here.
    */
   readonly applyInternal: (
-    command: InternalOrchestrationCommand,
+    command: InternalOrchestrationCommand | ThreadTurnStartCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
 }
 

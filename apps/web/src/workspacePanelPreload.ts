@@ -97,6 +97,7 @@ const LOADING_LABELS: Record<RightPanelMode, string> = {
   browser: "Loading workspace...",
   pullRequest: "Loading pull request...",
   agents: "Loading agents...",
+  artifacts: "Loading artifacts...",
   agent: "Loading subagent thread...",
   render: "Loading page...",
 };

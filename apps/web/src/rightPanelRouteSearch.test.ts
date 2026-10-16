@@ -148,6 +148,17 @@ it("preserves an agent selection within Agents and reports the shared panel mode
   expect(getRightPanelMode(search)).toBe("agents");
 });
 
+it("opens the artifacts tab without another tab's keys", () => {
+  const search = parseRightPanelRouteSearch({
+    workspaceTab: "artifacts",
+    workspaceRender: "message-7:thread-chart-html",
+    workspacePr: "42",
+    diff: "1",
+  });
+  expect(search).toEqual({ workspaceOpen: "1", workspaceTab: "artifacts" });
+  expect(getRightPanelMode(search)).toBe("artifacts");
+});
+
 it("opens a page tab only for a render it can name, keeping a message jump", () => {
   const search = parseRightPanelRouteSearch({
     workspaceTab: "render",

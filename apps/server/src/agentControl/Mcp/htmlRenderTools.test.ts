@@ -215,8 +215,9 @@ describe("ryco_html_render", () => {
     const { call, dispatch, htmlRender, attachmentsDir, messages } = await fixture();
     const result = await call("ryco_html_render", { ...renderArgs, threadId: "other-thread" });
     expect(result.isError).toBeUndefined();
+    const attachmentId = messages[0]!.attachments![0]!.id;
     expect(textOf(result)).toBe(
-      "Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say. Measured at 2 widths.",
+      `Shown to the reader above your reply. Don't mention or describe the page; reply with only what it doesn't already say. Measured at 2 widths. Artifact id: ${messages[0]!.id}:${attachmentId}.`,
     );
     expect(htmlRender.measure).toHaveBeenCalledWith(
       page.replace("<head>", "<head><style id=ryco-theme></style>"),
@@ -267,7 +268,7 @@ describe("ryco_html_render", () => {
     });
     // The agent learns its height is the frame's cap.
     expect(textOf(result)).toMatch(
-      / Not measured: the frame shrinks to the page but never grows past your height\.$/,
+      / Not measured: the frame shrinks to the page but never grows past your height\. Artifact id: [^ ]+\.$/,
     );
   });
 

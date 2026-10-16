@@ -42,6 +42,10 @@
       "types": "./src/lruCache.ts",
       "import": "./src/lruCache.ts"
     },
+    "./threadArtifacts": {
+      "types": "./src/threadArtifacts.ts",
+      "import": "./src/threadArtifacts.ts"
+    },
     "./environmentIcon": {
       "types": "./src/environmentIcon.ts",
       "import": "./src/environmentIcon.ts"

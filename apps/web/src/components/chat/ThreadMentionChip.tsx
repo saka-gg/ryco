@@ -12,8 +12,8 @@ import {
 } from "../composerInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-/** The live title of a mentioned thread; null while unknown on this client. */
-function useThreadMentionTitle(environmentId: EnvironmentId, threadId: ThreadId): string | null {
+/** The live title of a thread; null while unknown on this client. */
+export function useThreadTitle(environmentId: EnvironmentId, threadId: ThreadId): string | null {
   const ref = useMemo(() => ({ environmentId, threadId }), [environmentId, threadId]);
   return useStore((state) => selectSidebarThreadSummaryByRef(state, ref)?.title || null);
 }
@@ -28,7 +28,7 @@ export function ThreadMentionChip(props: {
   /** Opens the thread on click (sent messages). */
   readonly linked?: boolean;
 }) {
-  const title = useThreadMentionTitle(props.environmentId, props.threadId);
+  const title = useThreadTitle(props.environmentId, props.threadId);
   const label = title ?? "Unknown thread";
   const chipClassName = cn(
     COMPOSER_INLINE_CHIP_CLASS_NAME,

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { AGENT_CONTROL_CAPABILITIES, CommandId, MessageId } from "@ryco/contracts";
+import { formatThreadArtifactId } from "@ryco/shared/threadArtifacts";
 import { Effect, Option, Schema } from "effect";
 import {
   AssistantAttachmentError,
@@ -122,7 +123,7 @@ export const withAssistantAttachmentTools = (
                 content: [
                   {
                     type: "text",
-                    text: "File attached in the timeline. The user can preview or download it. Do not attach it again in your reply.",
+                    text: `File attached in the timeline. The user can preview or download it. Do not attach it again in your reply. Artifact id: ${formatThreadArtifactId({ messageId, attachmentId: attachment.id ?? "" })}.`,
                   },
                 ],
                 structuredContent: { messageId, attachment },

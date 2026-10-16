@@ -12,6 +12,7 @@ import {
   RuntimeMode,
   RuntimeSessionId,
   ThreadId,
+  ThreadTurnStartCommand,
   TurnId,
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Schema } from "effect";
@@ -32,12 +33,26 @@ export const CompletionReturnOutcome = Schema.Literals([
 ]);
 export type CompletionReturnOutcome = typeof CompletionReturnOutcome.Type;
 
+/** One of a child's own artifacts (`@ryco/shared/threadArtifacts`), returned with its result. */
+export const CompletionReturnArtifactRef = Schema.Struct({
+  messageId: MessageId,
+  attachmentId: Schema.String.check(Schema.isMaxLength(128)),
+});
+export type CompletionReturnArtifactRef = typeof CompletionReturnArtifactRef.Type;
+
+/** As many artifacts as one message carries. */
+export const MAX_RETURNED_ARTIFACTS = 8;
+
 /** What a row returns: a child result section or a server-authored notice section. */
 export const CompletionReturnCapture = Schema.Struct({
   kind: Schema.Literals(["result", "notice"]),
   outcome: CompletionReturnOutcome,
   capturedAt: IsoDateTime,
   section: Schema.String.check(Schema.isMaxLength(60_000)),
+  /** The child's own artifacts published since it was delegated, oldest first. */
+  artifacts: Schema.optional(
+    Schema.Array(CompletionReturnArtifactRef).check(Schema.isMaxLength(MAX_RETURNED_ARTIFACTS)),
+  ),
 });
 export type CompletionReturnCapture = typeof CompletionReturnCapture.Type;
 
@@ -76,9 +91,10 @@ export const CompletionReturnRecord = Schema.Struct({
   ),
   /**
    * The anchor row of a dispatching batch holds the frozen batch command (replay source);
-   * every other row holds null. Legacy rows may hold their own per-child command.
+   * every other row holds null. Legacy rows may hold their own per-child command. A wake that
+   * returns artifacts is a turn start whose attachments are the parent's stored copies.
    */
-  command: Schema.NullOr(ClientOrchestrationCommand),
+  command: Schema.NullOr(Schema.Union([ClientOrchestrationCommand, ThreadTurnStartCommand])),
   capture: Schema.optional(Schema.NullOr(CompletionReturnCapture)),
   batch: Schema.optional(Schema.NullOr(CompletionReturnBatch)),
   /** Wake id attempt: the batch maximum plus one after each rejection, so ids stay unique. */

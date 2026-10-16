@@ -1,4 +1,5 @@
 import { type EnvironmentId, MessageId, type ThreadId, type TurnId } from "@ryco/contracts";
+import { formatThreadArtifactId, parseThreadArtifactId } from "@ryco/shared/threadArtifacts";
 
 import { stripDiffSearchParams } from "./diffRouteSearch";
 import { stripPreviewSearchParams } from "./previewRouteSearch";
@@ -12,6 +13,7 @@ export type WorkspacePanelTab =
   | "pullRequest"
   | "agent"
   | "agents"
+  | "artifacts"
   | "render";
 
 const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
@@ -23,6 +25,7 @@ const WORKSPACE_PANEL_TABS: ReadonlySet<string> = new Set<WorkspacePanelTab>([
   "pullRequest",
   "agent",
   "agents",
+  "artifacts",
   "render",
 ]);
 
@@ -111,21 +114,17 @@ export interface WorkspaceRenderTarget {
   readonly attachmentId: string;
 }
 
-// Attachment ids never contain a colon (`[a-z0-9_-]`); message ids may.
-const RENDER_ATTACHMENT_ID = /^[a-z0-9_-]{1,128}$/i;
-
+/** A render key is the render's artifact id (`@ryco/shared/threadArtifacts`). */
 export function formatWorkspaceRenderKey(target: WorkspaceRenderTarget): string {
-  return `${target.messageId}:${target.attachmentId}`;
+  return formatThreadArtifactId(target);
 }
 
 /** The render a `workspaceRender` key names, or null when it names none. */
 export function parseWorkspaceRenderKey(key: string): WorkspaceRenderTarget | null {
-  const separator = key.lastIndexOf(":");
-  if (separator <= 0) return null;
-  const messageId = key.slice(0, separator).trim();
-  const attachmentId = key.slice(separator + 1);
-  if (messageId.length === 0 || !RENDER_ATTACHMENT_ID.test(attachmentId)) return null;
-  return { messageId: MessageId.make(messageId), attachmentId };
+  const ref = parseThreadArtifactId(key);
+  return ref === null
+    ? null
+    : { messageId: MessageId.make(ref.messageId), attachmentId: ref.attachmentId };
 }
 
 function normalizeRenderKey(value: unknown): string | undefined {
@@ -393,6 +392,13 @@ export function buildOpenAgentSearch<T extends Record<string, unknown>>(
     workspaceTab: "agent",
     workspaceAgentKey: agentKey,
   });
+}
+
+/** Artifacts tab: the pages and files the agent published into the thread. */
+export function buildOpenArtifactsSearch<T extends Record<string, unknown>>(
+  params: T,
+): WorkspacePanelSearch<T, ClosedLegacySearch> {
+  return withWorkspacePanelSearch(params, { workspaceOpen: "1", workspaceTab: "artifacts" });
 }
 
 /** Page tab: one HTML render of the thread, at full size. */

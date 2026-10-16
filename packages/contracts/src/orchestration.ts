@@ -586,6 +586,18 @@ const UnknownChatAttachmentType = Schema.String.check(
   ),
 );
 
+/**
+ * Marks a stored attachment as an artifact handed over from another thread: a
+ * delegating parent's artifact copied into its delegated child, or a child's
+ * returned artifact copied back. Names the thread and message it was copied
+ * from; provenance only, never authority to read that thread.
+ */
+export const ChatAttachmentHandoff = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type ChatAttachmentHandoff = typeof ChatAttachmentHandoff.Type;
+
 export const ChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   id: ChatAttachmentId,
@@ -594,6 +606,7 @@ export const ChatImageAttachment = Schema.Struct({
   sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES)),
   width: Schema.optional(NonNegativeInt),
   height: Schema.optional(NonNegativeInt),
+  handoff: Schema.optional(ChatAttachmentHandoff),
 });
 export type ChatImageAttachment = typeof ChatImageAttachment.Type;
 
@@ -637,6 +650,7 @@ export const ChatFileAttachment = Schema.Struct({
   width: Schema.optional(NonNegativeInt),
   height: Schema.optional(NonNegativeInt),
   htmlRender: Schema.optional(ChatHtmlRenderMetadata),
+  handoff: Schema.optional(ChatAttachmentHandoff),
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
@@ -1588,6 +1602,18 @@ export const OrchestrationThreadHistoryPageMode = Schema.Struct({
 });
 export type OrchestrationThreadHistoryPageMode = typeof OrchestrationThreadHistoryPageMode.Type;
 
+/**
+ * Narrows a `messages` page to some of the thread's messages; the page's
+ * cursors and `hasMoreBefore` then page through those alone. `"artifacts"`:
+ * messages that carry artifacts (`@ryco/shared/threadArtifacts`): assistant
+ * messages with attachments, and messages with handed-over attachments. What a
+ * thread's artifacts list reads. Older servers ignore the field and send every
+ * message, which a client that asked for a filter narrows itself.
+ */
+export const OrchestrationThreadHistoryMessageFilter = Schema.Literals(["artifacts"]);
+export type OrchestrationThreadHistoryMessageFilter =
+  typeof OrchestrationThreadHistoryMessageFilter.Type;
+
 export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
   Schema.Struct({
     threadId: ThreadId,
@@ -1595,6 +1621,8 @@ export const OrchestrationGetThreadHistoryPageInput = Schema.Union([
     mode: OrchestrationThreadHistoryPageMode,
     limit: PositiveInt,
     activityPayloads: Schema.optional(OrchestrationActivityPayloadMode),
+    /** Only read for the `messages` collection. */
+    messageFilter: Schema.optional(OrchestrationThreadHistoryMessageFilter),
   }),
   Schema.Struct({
     threadId: ThreadId,
@@ -2035,6 +2063,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
   threadReferences: Schema.optional(ThreadReferences),
   createdAt: IsoDateTime,
 });
+/** A turn start as dispatched: its attachments are already stored. */
+export type ThreadTurnStartCommand = typeof ThreadTurnStartCommand.Type;
 
 export const ClientThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),

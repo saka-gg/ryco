@@ -570,7 +570,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.createThreads,
     description:
-      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to have Ryco wake this chat with the task's result, or a failure/stop notice, when it reaches a terminal state; results of tasks finishing together arrive in one automatic message, even after a restart or after this chat moved on. Confirm creation with ryco_wait_for_control_request, then end your turn instead of polling. Inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
+      "Create a bounded batch of Ryco threads, including isolated worktrees. Routine requests execute asynchronously. Keep requestId stable on retries; wait for the returned receipt to obtain created thread IDs. A completed receipt means dispatch, not task completion. Opt in per entry with returnToOrigin to have Ryco wake this chat with the task's result, or a failure/stop notice, when it reaches a terminal state; results of tasks finishing together arrive in one automatic message, even after a restart or after this chat moved on, with copies of the pages and files the task published attached. Hand this thread's artifacts (ids from ryco_list_artifacts) to a new thread with an entry's artifacts: it gets copies attached to its first message. Confirm creation with ryco_wait_for_control_request, then end your turn instead of polling. Inspect completionReturns with ryco_read_control_request. No self-approval or exactly-once provider delivery is implied.",
     inputSchema: {
       type: "object",
       properties: {
@@ -597,6 +597,14 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
                 type: "boolean",
                 description:
                   "Wake this chat with this task's result or a failure/stop notice; defaults to false.",
+              },
+              artifacts: {
+                type: "array",
+                maxItems: 8,
+                uniqueItems: true,
+                items: { type: "string", minLength: 3, maxLength: 512 },
+                description:
+                  "Artifact ids of this thread (from ryco_list_artifacts) to hand over: copied into the new thread and attached to its first message. Mention them in the prompt.",
               },
             },
             required: ["projectId", "title", "prompt", "modelSelection", "runtimeMode", "envMode"],

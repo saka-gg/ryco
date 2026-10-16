@@ -37,6 +37,22 @@ describe("right panel tabs", () => {
     expect(markRightPanelTabOpened(state, route("files"), "files")).toBe(state);
   });
 
+  it("keeps the artifacts tab last, and falls back from it like any tab", () => {
+    let state = openedTabsFromRoute(route("artifacts"));
+    state = markRightPanelTabOpened(state, route("agents"), "agents");
+    state = markRightPanelTabOpened(state, route("files"), "files");
+    expect(state.modes).toEqual(["files", "agents", "artifacts"]);
+    expect(closeRightPanelTab(state, route("artifacts"), { mode: "artifacts" })).toEqual({
+      next: {
+        scopeKey: "env:thread-1",
+        modes: ["files", "agents"],
+        agentKeys: [],
+        renderKey: null,
+      },
+      target: { kind: "tab", mode: "files" },
+    });
+  });
+
   it("starts over from the route when the scope changes", () => {
     const state = opened(["files", "review"], ["subagent:a"]);
     const otherThread = route("terminal", null, "env:thread-2");
@@ -169,6 +185,12 @@ describe("right panel tabs", () => {
     expect(
       buildRightPanelTargetSearch({ workspacePr: 7 }, { kind: "render", renderKey: "m:page" }),
     ).toMatchObject({ workspaceTab: "render", workspaceRender: "m:page", workspacePr: undefined });
+    expect(
+      buildRightPanelTargetSearch(
+        { workspaceRender: "m:page" },
+        { kind: "tab", mode: "artifacts" },
+      ),
+    ).toMatchObject({ workspaceOpen: "1", workspaceTab: "artifacts", workspaceRender: undefined });
   });
 });
 
