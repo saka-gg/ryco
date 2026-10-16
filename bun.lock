@@ -17,7 +17,7 @@
     },
     "apps/desktop": {
       "name": "@ryco/desktop",
-      "version": "0.1.31",
+      "version": "0.1.32",
       "dependencies": {
         "@effect/platform-node": "catalog:",
         "effect": "catalog:",
@@ -163,7 +163,7 @@
     },
     "apps/server": {
       "name": "ryco-cli",
-      "version": "0.1.31",
+      "version": "0.1.32",
       "bin": {
         "ryco": "dist/bin.mjs",
         "ryco-cli": "dist/bin.mjs",
@@ -205,7 +205,7 @@
     },
     "apps/web": {
       "name": "@ryco/web",
-      "version": "0.1.31",
+      "version": "0.1.32",
       "dependencies": {
         "@base-ui/react": "^1.8.0",
         "@dnd-kit/core": "^6.3.1",
@@ -292,7 +292,7 @@
     },
     "packages/contracts": {
       "name": "@ryco/contracts",
-      "version": "0.1.31",
+      "version": "0.1.32",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -424,15 +424,15 @@
   "patchedDependencies": {
     "react-native-keyboard-controller@1.21.9": "patches/react-native-keyboard-controller@1.21.9.patch",
     "effect@4.0.2": "patches/effect@4.0.2.patch",
-    "react-native-nitro-modules@0.36.5": "patches/react-native-nitro-modules@0.36.5.patch",
     "query-string@7.1.3": "patches/query-string@7.1.3.patch",
+    "@legendapp/list@3.3.10": "patches/@legendapp%2Flist@3.3.10.patch",
+    "react-native-nitro-modules@0.36.5": "patches/react-native-nitro-modules@0.36.5.patch",
     "@effect/platform-node-shared@4.0.2": "patches/@effect%2Fplatform-node-shared@4.0.2.patch",
-    "@effect/platform-node@4.0.2": "patches/@effect%2Fplatform-node@4.0.2.patch",
     "react-native-screens@4.26.2": "patches/react-native-screens@4.26.2.patch",
     "@react-navigation/native-stack@7.18.10": "patches/@react-navigation%2Fnative-stack@7.18.10.patch",
-    "expo-modules-jsi@57.1.0": "patches/expo-modules-jsi@57.1.0.patch",
-    "@legendapp/list@3.3.10": "patches/@legendapp%2Flist@3.3.10.patch",
+    "@effect/platform-node@4.0.2": "patches/@effect%2Fplatform-node@4.0.2.patch",
     "@react-native-menu/menu@2.0.0": "patches/@react-native-menu__menu@2.0.0.patch",
+    "expo-modules-jsi@57.1.0": "patches/expo-modules-jsi@57.1.0.patch",
     "@pierre/diffs@1.4.1": "patches/@pierre%2Fdiffs@1.4.1.patch",
     "react-native-gesture-handler@2.32.0": "patches/react-native-gesture-handler@2.32.0.patch",
   },
