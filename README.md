@@ -13,7 +13,7 @@ Codex · Claude · GitHub Copilot · OpenCode · Cursor (Early Access) · Grok (
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178c6.svg?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.3-fbf0df.svg?style=flat-square&logo=bun&logoColor=black)](https://bun.sh)
 [![Electron](https://img.shields.io/badge/Electron-40.9-47848f.svg?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org/)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/jn4EGJjrvv)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/)
 
 </div>
 
@@ -114,7 +114,7 @@ open /Applications/Ryco.app
 
 Ryco is **very early**. Expect bugs and breaking changes. We aren't accepting contributions yet.
 
-If you want to follow along, join the [Discord](https://discord.gg/jn4EGJjrvv) or watch the repo.
+If you want to follow along, join the [Discord](https://discord.gg/) or watch the repo.
 
 ## Development
 
