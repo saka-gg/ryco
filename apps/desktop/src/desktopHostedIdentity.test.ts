@@ -683,6 +683,60 @@ describe("Desktop hosted identity coordinator", () => {
     expect(getExternalIdentityConfiguration).toHaveBeenCalledOnce();
   });
 
+  it("starts the prepared enrollment upsert only after the credential flush succeeded", async () => {
+    const accountId = `acct_${"b".repeat(22)}`;
+    let failFlush!: (cause: Error) => void;
+    const flush = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            failFlush = reject;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    const upsertE2eeDeviceEnrollment = vi.fn<HostedHubApi["upsertE2eeDeviceEnrollment"]>(
+      async (request) => activeEnrollmentSummary(request),
+    );
+    const setup = vi.fn().mockResolvedValue({ nodeId: "node-1", localNodeHandle: "local-1" });
+    const identity = coordinator({
+      api: {
+        hasSessionMaterial: true,
+        restoreSession: vi.fn().mockResolvedValue({ account: { id: accountId } }),
+        upsertE2eeDeviceEnrollment,
+        listNodes: vi.fn().mockResolvedValue([]),
+        getAccountSecurity: vi.fn().mockRejectedValue(new Error("offline")),
+        getExternalIdentityConfiguration: vi.fn().mockRejectedValue(new Error("offline")),
+      },
+      credentials: { flush },
+      setup,
+      nativeE2eePlatform: enrollmentPlatform(async () => undefined),
+    });
+
+    identity.prepareResume();
+    await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
+    // Give a concurrently started enrollment every chance to reach the Hub.
+    for (let turn = 0; turn < 20; turn += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(upsertE2eeDeviceEnrollment).not.toHaveBeenCalled();
+
+    // The flush fails, so the resume reports unavailable and the Hub upsert
+    // never runs for it.
+    failFlush(new Error("keychain locked"));
+    await expect(identity.resume()).resolves.toEqual({ status: "unavailable" });
+    for (let turn = 0; turn < 20; turn += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(upsertE2eeDeviceEnrollment).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+
+    // The next resume flushes successfully and enrolls once.
+    await expect(identity.resume()).resolves.toMatchObject({
+      status: "ready",
+      accountId,
+      accountE2eeReady: true,
+    });
+    expect(flush).toHaveBeenCalledTimes(2);
+    expect(upsertE2eeDeviceEnrollment).toHaveBeenCalledOnce();
+  });
+
   it("drops prepared account work when the account is disconnected first", async () => {
     let finishFlush!: () => void;
     const flush = vi

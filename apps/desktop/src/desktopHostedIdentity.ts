@@ -314,11 +314,11 @@ export class DesktopHostedIdentityCoordinator {
    * now, while the backend is still starting, so the resume that follows its
    * readiness adopts the answer instead of paying that round trip after it.
    * Once the restore finds a session, the rest of the work that needs only
-   * that account session starts too: the credential flush, the account E2EE
-   * enrollment and the GitHub link read. Only the node claim and local
-   * introduction (`#setup`) need the backend, and they still run in the resume
-   * itself. Nothing is published to the workspace here; a transient failure is
-   * simply restored again by the resume.
+   * that account session starts too: the credential flush (then, once it
+   * succeeded, the account E2EE enrollment) and the GitHub link read. Only the
+   * node claim and local introduction (`#setup`) need the backend, and they
+   * still run in the resume itself. Nothing is published to the workspace here;
+   * a transient failure is simply restored again by the resume.
    */
   prepareResume(): void {
     if (this.#operation !== undefined || this.#preparedRestore !== undefined) return;
@@ -331,11 +331,20 @@ export class DesktopHostedIdentityCoordinator {
     this.#preparedRestore = prepared;
   }
 
-  /** The resume steps that need only the account session, all started at once. */
+  /**
+   * The resume steps that need only the account session. The GitHub read runs
+   * beside the credential flush; the enrollment's Hub upsert waits for the
+   * flush, because a failed flush makes the resume report `unavailable` and
+   * the enrollment must not run for it.
+   */
   #startAccountWork(accountId: string): DesktopPreparedAccountWork {
     const flushed = this.#credentials.flush();
     const github = this.#readGitHubState();
-    const enrollment = this.#nativeE2eeEnrollment?.ensure(accountId);
+    const nativeE2eeEnrollment = this.#nativeE2eeEnrollment;
+    const enrollment =
+      nativeE2eeEnrollment === undefined
+        ? undefined
+        : flushed.then(() => nativeE2eeEnrollment.ensure(accountId));
     return {
       accountId,
       flushed,
