@@ -23,7 +23,7 @@ permissions:
 jobs:
   preflight:
     name: Preflight
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
       release_channel: ${{ steps.release_meta.outputs.release_channel }}
@@ -146,7 +146,7 @@ jobs:
             target: AppImage
             arch: x64
           - label: Linux arm64
-            runner: blacksmith-2vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
             platform: linux
             target: AppImage
             arch: arm64
@@ -428,7 +428,7 @@ jobs:
     name: Publish GitHub Release
     needs: [preflight, build, publish_cli]
     if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.publish_cli.result == 'success' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -546,7 +546,7 @@ jobs:
     name: Finalize release
     if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' && needs.preflight.outputs.release_channel == 'stable' }}
     needs: [preflight, release]
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
