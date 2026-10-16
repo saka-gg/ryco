@@ -10,7 +10,10 @@ import {
   type AgentControlProposal,
 } from "@ryco/contracts";
 
-import { buildAgentControlProposalCardModel } from "./presentation.ts";
+import {
+  buildAgentControlProposalCardModel,
+  completionReturnPresentation,
+} from "./presentation.ts";
 
 function makeProposal(overrides: Partial<AgentControlProposal> = {}): AgentControlProposal {
   return {
@@ -387,4 +390,25 @@ it("shows the exact workspace path, branch and session consequences before appro
   expect(deleted.detailSections[0]?.lines).toContain(
     "Conversations: deletion requested (always refused; conversations are never deleted by workspace actions)",
   );
+});
+
+it("labels every completion return status and marks the server's pending set", () => {
+  expect(completionReturnPresentation("waiting")).toEqual({
+    label: "Result pending",
+    tone: "muted",
+    pending: true,
+  });
+  expect(completionReturnPresentation("dispatching")).toMatchObject({
+    tone: "info",
+    pending: true,
+  });
+  expect(completionReturnPresentation("delivered")).toEqual({
+    label: "Returned",
+    tone: "success",
+    pending: false,
+  });
+  for (const status of ["blocked", "failed", "uncertain"] as const) {
+    expect(completionReturnPresentation(status)).toMatchObject({ tone: "danger", pending: false });
+  }
+  expect(completionReturnPresentation("cancelled").tone).toBe("muted");
 });

@@ -264,7 +264,6 @@ import {
   resolveProviderStatusNotice,
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
-import { DelegatedThreadsSection } from "./threads/DelegatedThreadsSection";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
@@ -5580,6 +5579,13 @@ export default function ChatView(props: ChatViewProps) {
     !isPhoneTier && isServerThread && sideChatCapability.allowed,
   );
 
+  // Delegation and Agent Control dock on the composer; off the frozen phone
+  // tier (apps/mobile owns the native surface). Memoised for the composer's `memo`.
+  const delegationDock = useMemo(
+    () =>
+      isPhoneTier || activeThreadId === null ? null : { environmentId, threadId: activeThreadId },
+    [activeThreadId, environmentId, isPhoneTier],
+  );
   // The thread dock renders inside the composer, beneath the approval and
   // pending-input panels (see `ChatComposer`), so an open panel cannot carry it
   // out of the bottom third. The phone-tier gate stays here; the dock stays
@@ -6160,22 +6166,11 @@ export default function ChatView(props: ChatViewProps) {
                   ))
                 : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerStackItems} />
-              {/* Agent Control approvals stay off the frozen phone tier;
-                  apps/mobile owns the native surface. */}
-              {presentationTier !== "phone" ? (
-                <>
-                  <DelegatedThreadsSection
-                    key={`${environmentId}:${activeThreadId ?? ""}`}
-                    environmentId={environmentId}
-                    parentThreadId={activeThreadId}
-                  />
-                  {agentControlApprovalsReady ? (
-                    <LazyAgentControlApprovals
-                      environmentId={environmentId}
-                      activeThreadId={activeThreadId}
-                    />
-                  ) : null}
-                </>
+              {/* External integrations' Agent Control approvals: this thread's
+                  own live in the composer's delegation dock. Both stay off the
+                  frozen phone tier; apps/mobile owns the native surface. */}
+              {presentationTier !== "phone" && agentControlApprovalsReady ? (
+                <LazyAgentControlApprovals environmentId={environmentId} />
               ) : null}
               {showNewThreadComposerSpacer ? (
                 showNewThreadContextBar ? (
@@ -6271,6 +6266,7 @@ export default function ChatView(props: ChatViewProps) {
                   cliProxyHubsEnabled={cliProxyHubsEnabled}
                   activeThreadActivities={threadActivities}
                   phoneThreadDock={phoneThreadDock}
+                  delegationDock={delegationDock}
                   resolvedTheme={resolvedTheme}
                   settings={settings}
                   keybindings={keybindings}

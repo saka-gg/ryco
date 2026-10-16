@@ -30,6 +30,8 @@ export interface AgentControlProposalCardProps {
   readonly disabledReason: string | null;
   readonly onAccept: () => void;
   readonly onReject: () => void;
+  /** False when the decision buttons live elsewhere (the delegation dock's approval row). */
+  readonly showDecisions?: boolean | undefined;
 }
 
 /**
@@ -48,6 +50,7 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
   disabledReason,
   onAccept,
   onReject,
+  showDecisions = true,
 }: AgentControlProposalCardProps) {
   const [expanded, setExpanded] = useState(false);
   const decisionsDisabled = isSubmitting || disabledReason !== null;
@@ -195,7 +198,7 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
           </div>
         ) : null}
       </div>
-      {model.isPending ? (
+      {model.isPending && showDecisions ? (
         <div
           data-testid="agent-control-proposal-actions"
           className="flex flex-wrap items-center justify-end gap-2 px-3 pt-2 pb-3 sm:px-4"

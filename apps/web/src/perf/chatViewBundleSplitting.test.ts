@@ -30,6 +30,7 @@ describe("chat route first-frame graph", () => {
       "./worktrees/NewWorktreeDialog",
       "./chat/ExpandedImageDialog",
       "./agent-control/AgentControlApprovals",
+      "./delegation/DelegationDock",
       "./shell/phone/PhoneWorkSurface",
     ]) {
       expect(staticValueImports(chatView, specifier)).toEqual([]);
@@ -42,6 +43,10 @@ describe("chat route first-frame graph", () => {
     expect(lazySurfaces).toContain('import("../PullRequestThreadDialog")');
     expect(lazySurfaces).toContain('import("./ExpandedImageDialog")');
     expect(lazySurfaces).toContain('import("../agent-control/AgentControlApprovals")');
+    // The composer mounts the delegation dock through the same lazy registry.
+    const composer = await readSource("../components/chat/ChatComposer.tsx");
+    expect(staticValueImports(composer, "../delegation/DelegationDock")).toEqual([]);
+    expect(lazySurfaces).toContain('import("../delegation/DelegationDock")');
     // The worktree dialogs are split once for the chat and the sidebar.
     const worktreeDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
     expect(worktreeDialogs).toContain('import("./LinkedWorktreeItemDialog")');

@@ -781,6 +781,28 @@ describe("Inbox sidebar delegated threads", () => {
     }
   });
 
+  it("fits the hover highlight to an indented delegated row", async () => {
+    await page.viewport(1280, 800);
+    const mounted = await render(
+      <InboxSidebar {...delegatedProps(`${ENVIRONMENT_ID}:${workerId}`)} />,
+    );
+    try {
+      await page.getByText("Worker task", { exact: true }).hover();
+      const highlight = document.querySelector<HTMLElement>(
+        '[data-testid="inbox-sidebar"] [data-visible]',
+      )!;
+      await expect.poll(() => highlight.dataset.visible).toBe("true");
+      const child = document.querySelector<HTMLElement>('[data-inbox-row-key$=":Worker"]')!;
+      expect(child.offsetLeft).toBeGreaterThan(0);
+      expect(highlight.style.width).toBe(`${child.offsetWidth}px`);
+      expect(highlight.style.transform).toBe(
+        `translate(${child.offsetLeft}px, ${child.offsetTop}px)`,
+      );
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("folds a working child and shows its host Working in Active now", async () => {
     await page.viewport(1280, 800);
     const mounted = await render(

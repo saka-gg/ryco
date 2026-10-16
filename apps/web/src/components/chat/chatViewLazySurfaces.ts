@@ -46,6 +46,14 @@ export const LazyAgentControlApprovals = preloadableLazy(() =>
   import("../agent-control/AgentControlApprovals").then((module) => module.AgentControlApprovals),
 );
 
+/**
+ * The composer's delegation dock. Only threads that delegate, were delegated
+ * or use Agent Control show it, so it loads right after the first frame.
+ */
+export const LazyDelegationDock = preloadableLazy(() =>
+  import("../delegation/DelegationDock").then((module) => module.DelegationDock),
+);
+
 // Annotated through the component type: its props interface is module-private.
 export const LazyPullRequestThreadDialog: PreloadableLazyComponent<
   ComponentProps<typeof PullRequestThreadDialog>

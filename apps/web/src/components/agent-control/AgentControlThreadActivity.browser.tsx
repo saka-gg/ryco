@@ -49,7 +49,7 @@ function queue(proposals: AgentControlProposal[]) {
   });
 }
 
-it("keeps a busy managing thread compact and bounds expanded activity", async () => {
+it("keeps busy external activity compact and bounds its expanded details", async () => {
   const state = queue(Array.from({ length: 40 }, (_, index) => proposal(index)));
   const screen = await render(
     <AgentControlThreadActivity
@@ -62,12 +62,14 @@ it("keeps a busy managing thread compact and bounds expanded activity", async ()
       onDecide={() => {}}
     />,
   );
-  const toggle = screen.getByRole("button", { name: "Agent Control activity · 40 actions" });
+  const toggle = screen.getByRole("button", {
+    name: "External Agent Control activity · 40 actions",
+  });
   await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
   await expect.element(screen.getByText(/Queue message · Fix the flaky test/)).toBeVisible();
   await expect.element(screen.getByTestId("agent-control-proposal-card")).not.toBeInTheDocument();
   expect(
-    screen.getByTestId("agent-control-approvals").element().getBoundingClientRect().height,
+    screen.getByTestId("agent-control-external-approvals").element().getBoundingClientRect().height,
   ).toBeLessThan(50);
   await toggle.click();
   await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
@@ -79,41 +81,6 @@ it("keeps a busy managing thread compact and bounds expanded activity", async ()
   await expect
     .element(screen.getByTestId("agent-control-activity-details"))
     .not.toBeInTheDocument();
-});
-
-it("shows only a named manager notice in a managed thread and nothing in unrelated threads", async () => {
-  const state = queue([proposal(1)]);
-  const view = (threadId: ThreadId | null) => (
-    <AgentControlThreadActivity
-      key={threadId}
-      environmentId={environmentId}
-      selection={selectAgentControlThreadActivity(state, threadId)}
-      getThreadTitle={getThreadTitle}
-      submittingIds={[]}
-      decisionErrorsById={{}}
-      disabledReason={null}
-      onDecide={() => {}}
-    />
-  );
-  const screen = await render(view(child));
-  await expect.element(screen.getByText("Managed by")).toBeVisible();
-  await expect
-    .element(screen.getByRole("link", { name: "Coordinator" }))
-    .toHaveAttribute("href", "/fixture-env/parent-uuid");
-  await expect.element(screen.getByTestId("agent-control-proposal-card")).not.toBeInTheDocument();
-  await expect
-    .element(screen.getByRole("button", { name: /Agent Control activity/ }))
-    .not.toBeInTheDocument();
-  await screen.rerender(view(ThreadId.make("unrelated")));
-  await expect.element(screen.getByTestId("agent-control-approvals")).not.toBeInTheDocument();
-  await screen.rerender(view(parent));
-  await screen.getByRole("button", { name: /Agent Control activity/ }).click();
-  await expect.element(screen.getByTestId("agent-control-proposal-card")).toBeVisible();
-  await screen.rerender(view(child));
-  await screen.rerender(view(parent));
-  await expect
-    .element(screen.getByRole("button", { name: /Agent Control activity/ }))
-    .toHaveAttribute("aria-expanded", "false");
 });
 
 it("keeps approvals actionable and flags failed activity while its details are collapsed", async () => {
@@ -186,53 +153,4 @@ it("keeps pending child results and uncertain delivery visible in the compact su
     .element(screen.getByRole("button", { name: /Agent Control activity/ }))
     .toHaveAccessibleDescription("1 child result pending 1 needs attention");
   await expect.element(screen.getByTestId("agent-control-proposal-card")).not.toBeInTheDocument();
-});
-
-it("names the creating thread from server lineage alone", async () => {
-  const screen = await render(
-    <AgentControlThreadActivity
-      environmentId={environmentId}
-      selection={selectAgentControlThreadActivity(EMPTY_AGENT_CONTROL_QUEUE_STATE, child, {
-        parentThreadId: parent,
-        rootThreadId: parent,
-        relationship: "delegated",
-      })}
-      getThreadTitle={getThreadTitle}
-      submittingIds={[]}
-      decisionErrorsById={{}}
-      disabledReason={null}
-      onDecide={() => {}}
-    />,
-  );
-  await expect.element(screen.getByText("Delegated from")).toBeVisible();
-  await expect
-    .element(screen.getByRole("link", { name: "Coordinator" }))
-    .toHaveAttribute("href", "/fixture-env/parent-uuid");
-  await expect.element(screen.getByText("Managed by")).not.toBeInTheDocument();
-});
-
-it("shows the creator and a different current manager on one line", async () => {
-  const reviewer = ThreadId.make("reviewer-uuid");
-  const screen = await render(
-    <AgentControlThreadActivity
-      environmentId={environmentId}
-      selection={{
-        pending: [],
-        activity: [],
-        delegatedFromThreadId: parent,
-        managerThreadId: reviewer,
-      }}
-      getThreadTitle={(id) => (id === reviewer ? "Reviewer" : getThreadTitle(id))}
-      submittingIds={[]}
-      decisionErrorsById={{}}
-      disabledReason={null}
-      onDecide={() => {}}
-    />,
-  );
-  await expect
-    .element(screen.getByTestId("agent-control-approvals"))
-    .toMatchTextContent(/Delegated from\s*Coordinator\s*·\s*Managed by\s*Reviewer/);
-  await expect
-    .element(screen.getByRole("link", { name: "Reviewer" }))
-    .toHaveAttribute("href", "/fixture-env/reviewer-uuid");
 });

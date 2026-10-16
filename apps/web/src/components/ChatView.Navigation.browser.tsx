@@ -455,11 +455,16 @@ describe("ChatView Navigation (full app)", () => {
       await vi.waitFor(() => expect(highlight.dataset.visible).toBe("true"));
       const shell = row!.closest<HTMLElement>("[data-inbox-row-key]")!;
       expect(highlight.style.height).toBe(`${shell.offsetHeight}px`);
-      expect(highlight.style.transform).toBe(`translateY(${shell.offsetTop}px)`);
+      expect(highlight.style.width).toBe(`${shell.offsetWidth}px`);
+      expect(highlight.style.transform).toBe(
+        `translate(${shell.offsetLeft}px, ${shell.offsetTop}px)`,
+      );
       await page.getByTestId("inbox-thread-row").nth(rows.indexOf(siblingRow!)).hover();
       const siblingShell = siblingRow!.closest<HTMLElement>("[data-inbox-row-key]")!;
       await vi.waitFor(() =>
-        expect(highlight.style.transform).toBe(`translateY(${siblingShell.offsetTop}px)`),
+        expect(highlight.style.transform).toBe(
+          `translate(${siblingShell.offsetLeft}px, ${siblingShell.offsetTop}px)`,
+        ),
       );
 
       await rowLocator.click();

@@ -12,6 +12,7 @@ import {
   AGENT_CONTROL_AUTOMATION_MAX_HORIZON_MS,
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
+  type AgentControlCompletionReturn,
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
@@ -61,6 +62,34 @@ const STATUS_PRESENTATION: Record<
   expired: { label: "Expired", tone: "muted" },
   cancelled: { label: "Cancelled", tone: "muted" },
 };
+
+export interface AgentControlCompletionReturnPresentation {
+  readonly label: string;
+  readonly tone: AgentControlStatusTone;
+  /** The child's result has not reached its parent yet (the server's pending set). */
+  readonly pending: boolean;
+}
+
+const COMPLETION_RETURN_PRESENTATION: Record<
+  AgentControlCompletionReturn["status"],
+  AgentControlCompletionReturnPresentation
+> = {
+  waiting: { label: "Result pending", tone: "muted", pending: true },
+  ready: { label: "Result ready", tone: "info", pending: true },
+  dispatching: { label: "Returning…", tone: "info", pending: true },
+  delivered: { label: "Returned", tone: "success", pending: false },
+  blocked: { label: "Return blocked", tone: "danger", pending: false },
+  failed: { label: "Return failed", tone: "danger", pending: false },
+  uncertain: { label: "Return uncertain", tone: "danger", pending: false },
+  cancelled: { label: "Return cancelled", tone: "muted", pending: false },
+};
+
+/** How a delegated thread's result return reads; the server's `detail` explains it. */
+export function completionReturnPresentation(
+  status: AgentControlCompletionReturn["status"],
+): AgentControlCompletionReturnPresentation {
+  return COMPLETION_RETURN_PRESENTATION[status];
+}
 
 const shortId = (value: string): string => (value.length > 10 ? `${value.slice(0, 8)}…` : value);
 

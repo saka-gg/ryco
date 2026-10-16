@@ -16,7 +16,9 @@ import {
   AGENT_CONTROL_CLIENT_HISTORY_LIMIT,
   EMPTY_AGENT_CONTROL_QUEUE_STATE,
   applyAgentControlStreamEvent,
+  findCompletionReturnForChild,
   selectActiveAgentControlProposals,
+  selectCompletionReturnsByChildThreadId,
   selectAgentControlProposalsForThread,
   selectRecentAgentControlProposals,
   selectAgentControlExternalActivity,
@@ -698,4 +700,55 @@ it("updates child completion after dispatch completes, keeps waiting returns vis
     snapshotEvent({ revision: 0, recent: Object.values(state.proposalsById) }),
   );
   expect(restarted.proposalsById[proposal.proposalId]?.completionReturns?.[0]?.revision).toBe(3);
+});
+
+describe("delegated child returns", () => {
+  const childReturn = (child: string, revision: number, status: "waiting" | "delivered") => ({
+    revision,
+    childThreadId: ThreadId.make(child),
+    initialMessageId: MessageId.make(`initial-${child}`),
+    parentThreadId: callerThreadId,
+    parentTurnId: TurnId.make("origin"),
+    childTurnId: null,
+    status,
+    detail: status,
+    updatedAt: "2026-09-27T00:00:00.000Z",
+  });
+
+  it("keys a parent's returns by child and keeps the newest revision", () => {
+    const first = makeProposal("first", {
+      status: "completed",
+      completionReturns: [childReturn("a", 1, "waiting"), childReturn("b", 2, "delivered")],
+    });
+    const later = makeProposal("later", {
+      status: "completed",
+      completionReturns: [
+        childReturn("a", 4, "delivered"),
+        { ...childReturn("c", 1, "waiting"), parentThreadId: ThreadId.make("someone-else") },
+      ],
+    });
+    const byChild = selectCompletionReturnsByChildThreadId([first, later], callerThreadId);
+    expect([...byChild.keys()].toSorted()).toEqual(["a", "b"]);
+    expect(byChild.get(ThreadId.make("a"))).toMatchObject({ revision: 4, status: "delivered" });
+  });
+
+  it("finds the return reporting a child to its parent", () => {
+    const state = applyAgentControlStreamEvent(
+      EMPTY_AGENT_CONTROL_QUEUE_STATE,
+      snapshotEvent({
+        revision: 1,
+        active: [
+          makeProposal("delegated", {
+            status: "completed",
+            completionReturns: [childReturn("a", 2, "waiting")],
+          }),
+        ],
+      }),
+    );
+    expect(findCompletionReturnForChild(state, ThreadId.make("a"))).toMatchObject({
+      status: "waiting",
+      parentThreadId: callerThreadId,
+    });
+    expect(findCompletionReturnForChild(state, ThreadId.make("unreturned"))).toBeNull();
+  });
 });

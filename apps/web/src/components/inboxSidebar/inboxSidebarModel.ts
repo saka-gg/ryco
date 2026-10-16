@@ -412,7 +412,10 @@ function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
   return "input";
 }
 
-function resolveRunningSince(thread: SidebarThreadSummary): string | null {
+/** Start of the running turn; background work has no turn clock. */
+export function resolveRunningSince(
+  thread: Pick<SidebarThreadSummary, "latestTurn">,
+): string | null {
   const turn = thread.latestTurn;
   // Background liveness has no turn clock; the row falls back to recency.
   return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
@@ -636,14 +639,13 @@ function settlementDisabledReason(entry: ThreadInboxEntry): string | null {
   return null;
 }
 
-function modelDisplayName(
+/** A model's short display name from its provider's catalog; null when the catalog lacks it. */
+export function modelDisplayName(
   selection: ModelSelection | null | undefined,
-  environment: InboxSidebarEnvironment | undefined,
+  providers: ReadonlyArray<ServerProvider> | null | undefined,
 ): string | null {
   if (!selection) return null;
-  const provider = environment?.providers?.find(
-    (provider) => provider.instanceId === selection.instanceId,
-  );
+  const provider = providers?.find((provider) => provider.instanceId === selection.instanceId);
   const model = provider?.models.find(
     (model) => model.slug === selection.model || model.aliases?.includes(selection.model),
   );
@@ -740,7 +742,10 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       project: project ?? null,
       isChat,
       isWorktree: Boolean(worktree?.worktreePath ?? thread.worktreePath),
-      rankingModelLabel: modelDisplayName(entry.focus?.ranking?.modelSelection, environment),
+      rankingModelLabel: modelDisplayName(
+        entry.focus?.ranking?.modelSelection,
+        environment?.providers,
+      ),
       workspaceLabel,
       contextLabel,
       state,
@@ -760,7 +765,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         PROVIDER_OPTIONS.find((option) => option.value === providerDriver)?.label ??
         providerDriver ??
         null,
-      modelLabel: modelDisplayName(thread.modelSelection, environment),
+      modelLabel: modelDisplayName(thread.modelSelection, environment?.providers),
       modelSelection: thread.modelSelection ?? null,
       branchLabel: thread.branch ?? worktree?.branch ?? null,
       changeRequestLabel:
