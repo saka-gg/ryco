@@ -12,10 +12,9 @@
  *     inline base64 (attachments, images) is replaced by its size and digest.
  *   - Canonical records keep `raw` as a reference (`source`, `method`,
  *     `messageType`, `nativeId`) instead of a second copy of the native
- *     message whenever the native log holds that message at the current
- *     detail level; a provider message only the canonical record has (one
- *     the `lifecycle` native filter drops) and a small adapter-made payload
- *     stay inline.
+ *     message. At `full` a small adapter-made payload with no native message
+ *     stays inline; at `lifecycle` no raw payload is written at all, even
+ *     when the native filter dropped the message it came from.
  *
  * @module provider/providerEventLogRecords
  */
@@ -537,26 +536,19 @@ function summarizeInlineBase64(value: string): string | undefined {
 /**
  * Canonical `raw.payload` is usually the full provider message the native log
  * already holds (and, for Claude task progress, the same message on every
- * fan-out event). Keep only what finds it there, unless the native log does
- * not hold it: a provider message the `lifecycle` native filter drops, or a
- * small adapter-made payload with no native message to point at. Larger
- * adapter-made payloads (permission callbacks, Copilot synthetic events)
- * repeat the canonical payload and are referenced at every level.
+ * fan-out event). Keep only what finds it there. At `full`, a small
+ * adapter-made payload with no native message to point at stays inline.
+ * `lifecycle` is the packaged default and must write as little provider
+ * content as possible, so it always keeps only the reference, even for a
+ * message the `lifecycle` native filter drops (that raw data is then absent).
  */
 function withRawReference(record: unknown, mode: ProviderEventLogMode): unknown {
   if (!isRecord(record)) return record;
   const raw = asRecord(record.raw);
   if (!raw || raw.payload === undefined) return record;
   const payload = asRecord(raw.payload);
-  if (
-    mode === "lifecycle" &&
-    isNativeRawSource(raw.source) &&
-    !lifecycleNativeLogKeepsRaw(raw, payload)
-  ) {
-    return record;
-  }
   const nativeId = firstString(payload?.uuid, payload?.id);
-  if (nativeId === undefined && isSmallFlatRecord(payload)) return record;
+  if (mode !== "lifecycle" && nativeId === undefined && isSmallFlatRecord(payload)) return record;
   return {
     ...record,
     raw: {
@@ -566,54 +558,6 @@ function withRawReference(record: unknown, mode: ProviderEventLogMode): unknown 
       nativeId,
     },
   };
-}
-
-/**
- * Raw sources whose payload is a provider message the native log records
- * (ACP sources are all `acp.*`). The rest (`claude.sdk.permission`,
- * `copilot.sdk.synthetic`) are built by the adapter and have no native copy.
- */
-const NATIVE_RAW_SOURCES: ReadonlySet<string> = new Set([
-  "claude.sdk.message",
-  "codex.app-server.notification",
-  "codex.app-server.request",
-  "copilot.sdk.session-event",
-  "opencode.sdk.event",
-]);
-const ACP_RAW_SOURCE_PREFIX = "acp.";
-
-function isNativeRawSource(source: unknown): boolean {
-  return (
-    typeof source === "string" &&
-    (NATIVE_RAW_SOURCES.has(source) || source.startsWith(ACP_RAW_SOURCE_PREFIX))
-  );
-}
-
-/** Codex requests are native `request` envelopes, which `lifecycle` always keeps. */
-const CODEX_REQUEST_RAW_SOURCE = "codex.app-server.request";
-/** Codex `session/*` notifications come from native `session` envelopes, kept likewise. */
-const CODEX_NOTIFICATION_RAW_SOURCE = "codex.app-server.notification";
-const CODEX_SESSION_METHOD_PREFIX = "session/";
-
-/**
- * Whether the native log keeps, at `lifecycle`, the provider message a
- * canonical `raw` came from. Mirrors `isLifecycleProviderEventRecord`: the
- * native envelope kind is implied by the Codex source, and the native name is
- * the `raw.method` adapters record or, for OpenCode, the event `type`.
- */
-function lifecycleNativeLogKeepsRaw(
-  raw: Record<string, unknown>,
-  payload: Record<string, unknown> | undefined,
-): boolean {
-  if (raw.source === CODEX_REQUEST_RAW_SOURCE) return true;
-  const name = firstString(raw.method, payload?.type);
-  if (
-    raw.source === CODEX_NOTIFICATION_RAW_SOURCE &&
-    name?.startsWith(CODEX_SESSION_METHOD_PREFIX)
-  ) {
-    return true;
-  }
-  return isLifecycleNativeName(name);
 }
 
 const INLINE_RAW_MAX_KEYS = 4;

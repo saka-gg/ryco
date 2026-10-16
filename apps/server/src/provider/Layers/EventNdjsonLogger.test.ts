@@ -523,7 +523,7 @@ describe("EventNdjsonLogger", () => {
     }),
   );
 
-  it.effect("keeps canonical raw payloads the lifecycle native log does not hold", () =>
+  it.effect("writes only canonical raw references at the lifecycle level", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-provider-log-"));
       const threadId = ThreadId.make("thread-lifecycle-raw");
@@ -563,7 +563,13 @@ describe("EventNdjsonLogger", () => {
         yield* canonical.close();
 
         const records = readRecords(path.join(tempDir, "thread-lifecycle-raw.log"));
-        assert.equal(records[0]?.raw.payload.output_file, "/tmp/out.txt");
+        // The lifecycle native log drops task notifications, but the canonical
+        // record still keeps only the reference, not the provider payload.
+        assert.deepEqual(records[0]?.raw, {
+          source: "claude.sdk.message",
+          method: "claude/system/task_notification",
+          nativeId: "sdk-uuid",
+        });
         assert.deepEqual(records[1]?.raw, {
           source: "claude.sdk.message",
           method: "claude/system/init",
