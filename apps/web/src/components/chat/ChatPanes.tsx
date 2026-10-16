@@ -64,6 +64,7 @@ import {
   type PaneCloseGuard,
 } from "./PaneFocus";
 import { nextPaneReactKeys } from "./paneReactKeys.logic";
+import { isInThreadMentionDropZone } from "./ComposerThreadMentionDrop";
 
 const FULL_RECT: PaneRect = { left: 0, top: 0, width: 100, height: 100 };
 /**
@@ -690,6 +691,11 @@ export function ChatPanes({
             (narrow && split)
           )
             return;
+          // Over the composer the drop mentions the thread; it does not split.
+          if (isInThreadMentionDropZone(event.target)) {
+            hideDrop();
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           const side = paneDropSide(
@@ -709,7 +715,13 @@ export function ChatPanes({
           showDrop(key, side, verdict, rect);
         }}
         onDrop={(event) => {
-          if (leaving || !enabled || !event.dataTransfer.types.includes(PANE_DRAG_TYPE)) return;
+          if (
+            leaving ||
+            !enabled ||
+            !event.dataTransfer.types.includes(PANE_DRAG_TYPE) ||
+            isInThreadMentionDropZone(event.target)
+          )
+            return;
           event.preventDefault();
           event.stopPropagation();
           hideDrop();

@@ -5,7 +5,7 @@ import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
 import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
 import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
 import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
-import { type ServerProviderSkill } from "@ryco/contracts";
+import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 import {
   $applyNodeReplacement,
   $createRangeSelection,
@@ -62,6 +62,7 @@ import { serializeComposerMentionPath } from "~/composerMentionSyntax";
 import {
   selectionTouchesMentionBoundary,
   splitPromptIntoComposerSegments,
+  threadIdFromMentionPath,
 } from "~/composer-editor-mentions";
 import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
@@ -77,6 +78,7 @@ import {
   SKILL_CHIP_ICON_SVG,
 } from "./composerInlineChip";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
+import { ThreadMentionChip } from "./chat/ThreadMentionChip";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { formatProviderSkillDisplayName } from "~/providerSkillPresentation";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -127,13 +129,26 @@ type SerializedComposerTerminalContextNode = Spread<
   SerializedLexicalNode
 >;
 
+/** What inline chips need from their editor. */
 const ComposerTerminalContextActionsContext = createContext<{
   onRemoveTerminalContext: (contextId: string) => void;
+  /** Where the prompt's thread mentions live, to name them by their titles. */
+  environmentId: EnvironmentId | null;
 }>({
   onRemoveTerminalContext: () => {},
+  environmentId: null,
 });
 
 function ComposerMentionDecorator(props: { path: string }) {
+  const { environmentId } = useContext(ComposerTerminalContextActionsContext);
+  const threadId = threadIdFromMentionPath(props.path);
+  if (threadId && environmentId) {
+    return <ThreadMentionChip environmentId={environmentId} threadId={threadId} />;
+  }
+  return <ComposerFileMentionChip path={props.path} />;
+}
+
+function ComposerFileMentionChip(props: { path: string }) {
   const theme = resolvedThemeFromDocument();
   const chip = (
     <span
@@ -892,6 +907,8 @@ interface ComposerPromptEditorProps {
    * must never bring one thread's prompt into another's draft.
    */
   historyScope?: string;
+  /** The environment of the thread the prompt is for; thread mentions resolve in it. */
+  environmentId?: EnvironmentId;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
@@ -1425,6 +1442,7 @@ function ComposerPromptEditorInner({
   onCommandKeyDown,
   onPaste,
   historyScope,
+  environmentId,
   editorRef,
 }: ComposerPromptEditorInnerProps) {
   const [editor] = useLexicalComposerContext();
@@ -1444,8 +1462,8 @@ function ComposerPromptEditorInner({
   });
   const isApplyingControlledUpdateRef = useRef(false);
   const terminalContextActions = useMemo(
-    () => ({ onRemoveTerminalContext }),
-    [onRemoveTerminalContext],
+    () => ({ onRemoveTerminalContext, environmentId: environmentId ?? null }),
+    [environmentId, onRemoveTerminalContext],
   );
 
   useEffect(() => {
@@ -1729,6 +1747,7 @@ export const ComposerPromptEditor = forwardRef<
     value,
     cursor,
     historyScope,
+    environmentId,
     terminalContexts,
     skills,
     disabled,
@@ -1771,6 +1790,7 @@ export const ComposerPromptEditor = forwardRef<
         value={value}
         cursor={cursor}
         {...(historyScope !== undefined ? { historyScope } : {})}
+        {...(environmentId !== undefined ? { environmentId } : {})}
         terminalContexts={terminalContexts}
         skills={skills}
         disabled={disabled}

@@ -27,6 +27,7 @@ import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { createModelSelection } from "@ryco/shared/model";
 import type { ComposerAttachment } from "../../platform/index.ts";
 import { isChatProjectRetiredError } from "./chatDrafts.ts";
+import { extractThreadReferences } from "./threadMentions.ts";
 
 export interface SendTurnBootstrapInput {
   readonly requireWorktree?: boolean;
@@ -429,6 +430,7 @@ function dispatchTurnStart(
   bootstrap: SendTurnBootstrap,
   commandId: CommandId,
 ) {
+  const threadReferences = extractThreadReferences(input.outgoingMessageText, input.threadId);
   return input.api.orchestration.dispatchCommand({
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
@@ -452,6 +454,7 @@ function dispatchTurnStart(
     ...(input.sourceControlContexts.length > 0
       ? { sourceControlContexts: input.sourceControlContexts }
       : {}),
+    ...(threadReferences.length > 0 ? { threadReferences } : {}),
     createdAt: input.createdAt,
   });
 }

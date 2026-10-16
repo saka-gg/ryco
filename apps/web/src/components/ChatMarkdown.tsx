@@ -685,6 +685,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
+              environmentId,
             )}
           </p>
         );
@@ -696,6 +697,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
+              environmentId,
             )}
           </li>
         );
@@ -707,6 +709,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
+              environmentId,
             )}
           </blockquote>
         );
@@ -727,6 +730,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
+              environmentId,
             )}
           </td>
         );
@@ -738,6 +742,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
+              environmentId,
             )}
           </th>
         );

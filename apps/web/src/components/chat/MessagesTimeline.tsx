@@ -2475,6 +2475,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
               <SkillInlineText
                 text={props.text.slice(cursor, matchIndex)}
                 skills={props.skills}
+                environmentId={props.environmentId}
                 searchHighlight={searchHighlight}
               />
             </span>,
@@ -2496,6 +2497,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
               <SkillInlineText
                 text={props.text.slice(cursor)}
                 skills={props.skills}
+                environmentId={props.environmentId}
                 searchHighlight={searchHighlight}
               />
             </span>,
@@ -2530,6 +2532,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           <SkillInlineText
             text={props.text}
             skills={props.skills}
+            environmentId={props.environmentId}
             searchHighlight={searchHighlight}
           />
         </span>,
@@ -2551,7 +2554,12 @@ const UserMessageBody = memo(function UserMessageBody(props: {
 
   return (
     <div className="whitespace-pre-wrap wrap-anywhere text-sm leading-relaxed text-foreground">
-      <SkillInlineText text={props.text} skills={props.skills} searchHighlight={searchHighlight} />
+      <SkillInlineText
+        text={props.text}
+        skills={props.skills}
+        environmentId={props.environmentId}
+        searchHighlight={searchHighlight}
+      />
     </div>
   );
 });

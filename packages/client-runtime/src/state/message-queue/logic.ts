@@ -16,6 +16,7 @@ import {
   turnSteerRejectionActivityId,
   type TurnSteerRejectionActivity,
 } from "@ryco/shared/turnSteer";
+import { extractThreadReferences } from "../composer/threadMentions.ts";
 
 /**
  * The queue is deliberately independent of the UI send pipeline. The caller
@@ -58,6 +59,7 @@ export function buildQueuedMessageSteerCommand(input: {
   readonly createdAt: string;
   readonly requestedAt: string;
 }) {
+  const threadReferences = extractThreadReferences(input.text, input.threadId);
   return {
     type: "thread.turn.steer" as const,
     commandId: input.commandId,
@@ -69,6 +71,7 @@ export function buildQueuedMessageSteerCommand(input: {
       text: input.text,
       attachments: [...input.attachments],
     },
+    ...(threadReferences.length > 0 ? { threadReferences } : {}),
     createdAt: input.createdAt,
     requestedAt: input.requestedAt,
   };

@@ -1311,6 +1311,45 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("hands the agent an excerpt of each mentioned thread after the message", async () => {
+    const harness = await createHarness({ extraThreadIds: ["thread-2"] });
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-mention"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-mention"),
+          role: "user",
+          text: "Compare with @thread:thread-2",
+          attachments: [],
+        },
+        threadReferences: [ThreadId.make("thread-2"), ThreadId.make("thread-missing")],
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const input =
+      (harness.sendTurn.mock.calls[0]?.[0] as { readonly input?: string } | undefined)?.input ?? "";
+    expect(input.startsWith("Compare with @thread:thread-2\n\n<referenced_threads>")).toBe(true);
+    expect(input).toContain('<thread id="thread-2">');
+    expect(input).toContain("Title: Thread thread-2");
+    expect(input).toContain("Project: Provider Project");
+    expect(input).toContain('<thread id="thread-missing">\nNot available');
+
+    // The transcript keeps what the user wrote.
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.messages.find((entry) => entry.role === "user")?.text).toBe(
+      "Compare with @thread:thread-2",
+    );
+  });
+
   it("refuses delayed goal recovery after cleanup claims or removes a checkout", async () => {
     const harness = await createHarness({ startReactor: false });
     const checkout = await canonicalStoragePath(path.join(harness.stateDir, "missing-checkout"));
@@ -3903,6 +3942,58 @@ describe("ProviderCommandReactor", () => {
     expect(detail).toBe(STORAGE_FAILURE_DETAIL);
     expect(detail).not.toContain("PersistenceSqlError");
     expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("steers with the excerpt of a mentioned thread", async () => {
+    const steerTurn = vi
+      .fn<ProviderServiceShape["steerTurn"]>()
+      .mockImplementation(() =>
+        Effect.succeed({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") }),
+      );
+    const harness = await createHarness({ steerTurn, extraThreadIds: ["thread-2"] });
+    const now = new Date().toISOString();
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("steer-mention-session-running"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeSessionId: RuntimeSessionId.make("runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("steer-mention"),
+        threadId,
+        expectedTurnId: asTurnId("turn-1"),
+        message: {
+          messageId: asMessageId("steer-mention"),
+          role: "user",
+          text: "Also check @thread:thread-2",
+          attachments: [],
+        },
+        threadReferences: [ThreadId.make("thread-2")],
+        createdAt: now,
+        requestedAt: now,
+      }),
+    );
+
+    await waitFor(() => steerTurn.mock.calls.length === 1);
+    const input = steerTurn.mock.calls[0]?.[0]?.input ?? "";
+    expect(input.startsWith("Also check @thread:thread-2\n\n<referenced_threads>")).toBe(true);
+    expect(input).toContain("Title: Thread thread-2");
   });
 
   it("bounds steer rejection text and falls back for defects", async () => {

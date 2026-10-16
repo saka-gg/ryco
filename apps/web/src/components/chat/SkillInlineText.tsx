@@ -1,5 +1,5 @@
 import { Children, cloneElement, isValidElement, type ReactNode } from "react";
-import type { ServerProviderSkill } from "@ryco/contracts";
+import type { EnvironmentId, ServerProviderSkill, ThreadId } from "@ryco/contracts";
 
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import {
@@ -8,6 +8,8 @@ import {
   COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME,
   SKILL_CHIP_ICON_SVG,
 } from "../composerInlineChip";
+import { matchThreadMentions } from "../../composer-editor-mentions";
+import { ThreadMentionChip } from "./ThreadMentionChip";
 import {
   renderThreadMessageSearchHighlightedText,
   type ThreadMessageSearchHighlightCursor,
@@ -41,35 +43,79 @@ function renderInlineTextSegment(input: {
   });
 }
 
+type InlineChipMatch =
+  | {
+      readonly kind: "skill";
+      readonly start: number;
+      readonly end: number;
+      readonly skill: InlineSkill;
+    }
+  | {
+      readonly kind: "thread";
+      readonly start: number;
+      readonly end: number;
+      readonly threadId: ThreadId;
+    };
+
+/** Known skills and, given the message's environment, thread mentions, in text order. */
+function collectInlineChipMatches(
+  text: string,
+  skills: ReadonlyArray<InlineSkill>,
+  environmentId: EnvironmentId | undefined,
+): InlineChipMatch[] {
+  const matches: InlineChipMatch[] = [];
+  for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
+    const prefix = match[1] ?? "";
+    const name = match[2] ?? "";
+    const skill = skills.find((candidate) => candidate.name === name);
+    if (!skill) continue;
+    const start = (match.index ?? 0) + prefix.length;
+    matches.push({ kind: "skill", start, end: start + name.length + 1, skill });
+  }
+  if (environmentId) {
+    for (const mention of matchThreadMentions(text)) matches.push({ kind: "thread", ...mention });
+  }
+  return matches.toSorted((left, right) => left.start - right.start);
+}
+
 export function SkillInlineText(props: {
   text: string;
   skills: ReadonlyArray<InlineSkill>;
+  /** Renders `@thread:` mentions as links to threads of this environment. */
+  environmentId?: EnvironmentId | undefined;
   searchHighlight?: SkillInlineTextSearchHighlight | undefined;
 }) {
   const nodes: ReactNode[] = [];
   let cursor = 0;
 
-  for (const match of props.text.matchAll(SKILL_TOKEN_REGEX)) {
-    const prefix = match[1] ?? "";
-    const name = match[2] ?? "";
-    const start = (match.index ?? 0) + prefix.length;
-    const rawText = `$${name}`;
-    const skill = props.skills.find((candidate) => candidate.name === name);
-    if (!skill) {
-      continue;
-    }
-
-    if (start > cursor) {
+  for (const match of collectInlineChipMatches(props.text, props.skills, props.environmentId)) {
+    if (match.start < cursor) continue;
+    if (match.start > cursor) {
       nodes.push(
         renderInlineTextSegment({
-          text: props.text.slice(cursor, start),
+          text: props.text.slice(cursor, match.start),
           start: cursor,
           highlight: props.searchHighlight,
         }),
       );
     }
-    nodes.push(<SkillChip key={`${start}:${name}`} skill={skill} rawText={rawText} />);
-    cursor = start + rawText.length;
+    nodes.push(
+      match.kind === "skill" ? (
+        <SkillChip
+          key={`${match.start}:${match.skill.name}`}
+          skill={match.skill}
+          rawText={props.text.slice(match.start, match.end)}
+        />
+      ) : (
+        <ThreadMentionChip
+          key={`${match.start}:${match.threadId}`}
+          environmentId={props.environmentId!}
+          threadId={match.threadId}
+          linked
+        />
+      ),
+    );
+    cursor = match.end;
   }
 
   if (cursor === 0) {
@@ -99,10 +145,18 @@ export function renderSkillInlineMarkdownChildren(
   children: ReactNode,
   skills: ReadonlyArray<InlineSkill>,
   searchHighlight?: SkillInlineTextSearchHighlight | undefined,
+  environmentId?: EnvironmentId | undefined,
 ): ReactNode {
   return Children.map(children, (child) => {
     if (typeof child === "string") {
-      return <SkillInlineText text={child} skills={skills} searchHighlight={searchHighlight} />;
+      return (
+        <SkillInlineText
+          text={child}
+          skills={skills}
+          environmentId={environmentId}
+          searchHighlight={searchHighlight}
+        />
+      );
     }
     if (!isValidElement<{ children?: ReactNode }>(child)) {
       return child;
@@ -116,7 +170,12 @@ export function renderSkillInlineMarkdownChildren(
     return cloneElement(
       child,
       undefined,
-      renderSkillInlineMarkdownChildren(child.props.children, skills, searchHighlight),
+      renderSkillInlineMarkdownChildren(
+        child.props.children,
+        skills,
+        searchHighlight,
+        environmentId,
+      ),
     );
   });
 }
