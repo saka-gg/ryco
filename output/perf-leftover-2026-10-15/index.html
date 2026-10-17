@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ryco performance — what's left (2026-10-15)</title>
+<style>
+:root{
+  --bg:var(--background,#111214);--fg:var(--foreground,#e8e8ea);--mfg:var(--muted-foreground,#9a9ca3);
+  --bd:var(--border,#2a2c31);--cd:var(--card,#17181b);--mu:var(--muted,#202227);
+  --ac:var(--accent,#7c9cff);--ok:var(--success,#3fb27f);--wa:var(--warning,#d9a23b);--de:var(--destructive,#e5534b);
+  --rd:var(--radius,10px);--sans:var(--font-sans,system-ui,-apple-system,sans-serif);--mono:var(--font-mono,ui-monospace,monospace);
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 var(--sans);color:var(--fg)}
+.wrap{max-width:760px}
+h2{font-size:15px;margin:22px 0 8px}
+p{margin:6px 0}
+.muted{color:var(--mfg)}
+code{font-family:var(--mono);font-size:12px;background:var(--mu);padding:1px 4px;border-radius:4px}
+.tabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:1px solid var(--bd);margin:0 44px 14px 0}
+.tab{appearance:none;background:none;border:0;border-bottom:2px solid transparent;color:var(--mfg);font:inherit;font-weight:500;padding:8px 10px;cursor:pointer}
+.tab[aria-selected=true]{color:var(--fg);border-bottom-color:var(--ac)}
+.tab .n{font-size:11px;background:var(--mu);border-radius:9px;padding:0 6px;margin-left:4px}
+.panel[hidden]{display:none}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.stat{background:var(--cd);border:1px solid var(--bd);border-radius:var(--rd);padding:12px 14px}
+.stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--mfg)}
+.bars{display:grid;gap:10px;margin-top:6px}
+.barrow{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;font-size:12px}
+.bar{display:flex;height:16px;border-radius:5px;overflow:hidden;background:var(--mu)}
+.bar i{display:block;height:100%}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--mfg);margin-top:8px;flex-wrap:wrap}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.alert{border:1px solid var(--de);border-left-width:4px;border-radius:var(--rd);padding:12px 16px;margin:4px 0 14px;background:color-mix(in srgb,var(--de) 8%,transparent)}
+.alert b{color:var(--de)}
+.list{margin:6px 0;padding-left:18px}
+.list li{margin:4px 0}
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.chip{appearance:none;border:1px solid var(--bd);background:none;color:var(--mfg);border-radius:14px;padding:3px 10px;font:inherit;font-size:12px;cursor:pointer}
+.chip[aria-pressed=true]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.card{border:1px solid var(--bd);border-radius:var(--rd);padding:14px 16px;margin-bottom:10px;background:var(--cd)}
+.card.changed{border-color:var(--wa)}
+.head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.num{font-family:var(--mono);font-size:12px;color:var(--mfg)}
+.title{font-weight:600}
+.tags{display:flex;gap:4px;margin-left:auto}
+.tag{font-size:11px;border:1px solid var(--bd);border-radius:4px;padding:0 5px;color:var(--mfg);white-space:nowrap}
+.tag.high{color:var(--de);border-color:color-mix(in srgb,var(--de) 50%,transparent)}
+.tag.medium{color:var(--wa);border-color:color-mix(in srgb,var(--wa) 50%,transparent)}
+.left{margin:6px 0 2px}
+details{margin:2px 0 8px;font-size:13px}
+summary{cursor:pointer;color:var(--mfg);font-size:12px}
+details p{color:var(--mfg)}
+.opts{display:grid;gap:6px;margin-top:6px}
+.opt{display:grid;grid-template-columns:18px 1fr;gap:8px;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;cursor:pointer}
+.opt:has(input:checked){border-color:var(--ac);background:color-mix(in srgb,var(--ac) 9%,transparent)}
+.opt input{margin:3px 0 0;accent-color:var(--ac)}
+.opt b{font-weight:600}
+.opt .d{display:block;font-size:12.5px;color:var(--mfg)}
+.rec{font-size:11px;font-weight:600;color:var(--ok);margin-left:6px;white-space:nowrap}
+.why{font-size:12.5px;margin-top:8px;padding-left:10px;border-left:2px solid var(--ok);color:var(--mfg)}
+.why b{color:var(--fg);font-weight:600}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 12px}
+.btn{appearance:none;border:1px solid var(--bd);background:var(--mu);color:var(--fg);border-radius:8px;padding:6px 12px;font:inherit;font-size:13px;cursor:pointer}
+.btn.primary{background:var(--primary,var(--ac));color:var(--primary-foreground,#fff);border-color:transparent}
+textarea{width:100%;min-height:340px;font:12px/1.5 var(--mono);color:var(--fg);background:var(--mu);border:1px solid var(--bd);border-radius:8px;padding:10px;resize:vertical}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:7px 8px;border-bottom:1px solid var(--bd);vertical-align:top}
+th{font-weight:600;color:var(--mfg);font-size:12px}
+.top li{margin:6px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button class="tab" role="tab" data-tab="decide" aria-selected="false">Decisions<span class="n" id="decCount"></span></button>
+    <button class="tab" role="tab" data-tab="other" aria-selected="false">Other leftovers</button>
+    <button class="tab" role="tab" data-tab="picks" aria-selected="false">Your picks<span class="n" id="pickCount"></span></button>
+  </div>
+
+  <!-- OVERVIEW -->
+  <section class="panel" data-panel="overview">
+    <div class="alert"><b>PR #730 has no code in it.</b> It adds only <code>output/perf-recheck-2026-10-15/</code> (the report, plan and 263 verdict files), based on <code>ec250e386</code>. The 139 implemented items are 20 commits on the local branch <code>perf3/recheck-2026-10-15</code>: 553 files, +30,650 / −5,670. That branch isn't pushed and isn't in any PR. It is 1 commit behind <code>main</code> (#729) and merged cleanly with it when I checked.</div>
+
+    <div class="stats">
+      <div class="stat"><b>34</b><span>findings need your decision (32 cards; #46+#79 and #221+#117 are combined)</span></div>
+      <div class="stat"><b>7</b><span>items only partly done or skipped on the branch</span></div>
+      <div class="stat"><b>2</b><span>findings deliberately not scheduled</span></div>
+      <div class="stat"><b>3</b><span>surfaces never tested live</span></div>
+    </div>
+
+    <h2>How the 263 findings moved</h2>
+    <div class="bars">
+      <div class="barrow"><span>10-12 status report<br><span class="muted">main 60633eff3, after #710</span></span>
+        <div class="bar"><i style="width:68.8%;background:var(--ok)" title="181 done"></i><i style="width:24.3%;background:var(--wa)" title="64 partial"></i><i style="width:6.8%;background:var(--de)" title="18 open"></i></div></div>
+      <div class="barrow"><span>10-15 re-check<br><span class="muted">stricter, main ec250e386</span></span>
+        <div class="bar"><i style="width:64.3%;background:var(--ok)" title="169 done"></i><i style="width:32.7%;background:var(--wa)" title="86 partial"></i><i style="width:3%;background:var(--de)" title="8 open"></i></div></div>
+    </div>
+    <div class="legend"><span><i style="background:var(--ok)"></i>done 181 → 169</span><span><i style="background:var(--wa)"></i>partial 64 → 86</span><span><i style="background:var(--de)"></i>open 18 → 8</span></div>
+    <p class="muted" style="font-size:12.5px;margin-top:8px">The re-check moved 37 findings from "done" back to "partial" and found about 30 bugs in fixes that had already shipped, including Claude never getting Ryco's system prompt. The local branch fixes all of those and implements 139 items. What's left is below.</p>
+
+    <h2>My top 5 picks if you only do a few</h2>
+    <ol class="top">
+      <li><b>Ship the code</b>: push <code>perf3/recheck-2026-10-15</code> and open a code PR. Until then none of the 139 fixes reach anyone.</li>
+      <li><b>#221 Allowlisted relay compression.</b> The hosted shell snapshot drops from about 363 KiB to about 41 KiB on every connect. It needs a security review but no Hub change.</li>
+      <li><b>#95 / #124 Live config per connection on hosted.</b> Removes a 125 KB config fetch from "New thread" and the first send (100–400 ms each).</li>
+      <li><b>#46 + #79 Slim archived threads.</b> At 4.5k threads it removes most of the 5.65 MiB snapshot and its ~140 ms build. The snapshot stays complete, so the hosted readiness rules don't change.</li>
+      <li><b>#219 Hub-session protocol v2.</b> Saves 1 RTT on every hosted connect and reconnect. Bundle it with #214 and #231 so there's one Hub release and one review.</li>
+    </ol>
+    <p class="muted" style="font-size:12.5px">Every decision card has my recommendation pre-selected. Change any you disagree with, then copy the sheet from <b>Your picks</b> back into the thread.</p>
+  </section>
+
+  <!-- DECISIONS -->
+  <section class="panel" data-panel="decide" hidden>
+    <div class="filters" id="filters"></div>
+    <div id="cards"></div>
+  </section>
+
+  <!-- OTHER -->
+  <section class="panel" data-panel="other" hidden>
+    <h2 style="margin-top:4px">Before or with merging</h2>
+    <ul class="list">
+      <li><b>The code PR doesn't exist yet.</b> PR #730 (<code>feature/perf-recheck</code>) holds only the report artifacts. The 20 commits on <code>perf3/recheck-2026-10-15</code> need their own PR, or need to go onto #730.</li>
+      <li><b>Run <code>bun install</code></b> after checking out the branch. The <code>@effect/platform-node</code> patch changed but <code>bun.lock</code> didn't, and one shutdown test fails until the patch is applied again.</li>
+      <li><b>Hosted changes reach users only after a Hub pin bump and deploy</b>, which you do. That covers the hosted parts of the branch and anything you pick here marked "Hub".</li>
+    </ul>
+
+    <h2>Never tested live</h2>
+    <ul class="list">
+      <li>A packaged desktop app built from the branch (desktop boot, port pinning, the early backend).</li>
+      <li>The hosted web client against the real Hub.</li>
+      <li>The mobile app on a device (lighter thread loading, bounded caches, React Compiler on thread screens).</li>
+    </ul>
+
+    <h2>Partly done or skipped on the branch (no decision needed)</h2>
+    <table>
+      <tr><th style="width:56px">#</th><th>Item</th><th>What's still missing</th></tr>
+      <tr><td>61</td><td>Tiny startup chunks</td><td>Merging them made the startup bundle bigger in every variant measured. Only per-route file-count budgets shipped.</td></tr>
+      <tr><td>162</td><td>Terminal background polling</td><td>History is now appended instead of rewritten. macOS and Windows still spawn <code>ps</code> for process checks, but less often; Linux no longer does.</td></tr>
+      <tr><td>52</td><td>Single SQLite connection</td><td>Snapshot, history-page and search reads moved to the read worker. Engine hydration, shell builds and event replay stay on the main connection on purpose.</td></tr>
+      <tr><td>204</td><td>Redundant git calls in status</td><td>After a fetch, remote status reuses fresh local details and recomputes only the upstream counts. The rest of the pipeline is unchanged.</td></tr>
+      <tr><td>12</td><td>Synchronous work before the desktop window</td><td>The Dock icon decode is skipped for packaged builds, and computer-use start-up overlaps port selection. Other synchronous work before the window remains.</td></tr>
+      <tr><td>228</td><td>Native crypto on nodes</td><td>The corpus tests with the native provider (Part B) are done. Async AEAD on Electron (Part A) is a decision card.</td></tr>
+      <tr><td>24</td><td>Server young-generation RSS</td><td>Skipped: documented in <code>apps/server/README.md</code>, no code change.</td></tr>
+    </table>
+
+    <h2>Not scheduled (also on the Decisions tab)</h2>
+    <ul class="list">
+      <li><b>#82</b> Boot CPU micro-benchmarks: measurement only.</li>
+      <li><b>#134</b> Timeline row-height estimate: height memory was reverted on purpose in #723 while the blank-timeline bug is still open.</li>
+    </ul>
+  </section>
+
+  <!-- PICKS -->
+  <section class="panel" data-panel="picks" hidden>
+    <p id="pickSummary"></p>
+    <div class="toolbar">
+      <button class="btn primary" id="copyBtn">Copy decision sheet</button>
+      <button class="btn" id="resetBtn">Reset to my recommendations</button>
+      <span class="muted" id="copyMsg" style="font-size:12px"></span>
+    </div>
+    <textarea id="sheet" readonly></textarea>
+  </section>
+</div>
+
+<script>
+const AREAS={hub:"Hosted Hub & relay",data:"Shell & config data",server:"Server & providers",desktop:"Desktop start-up",web:"Web client",mobile:"Mobile",later:"Not scheduled"};
+const D=[
+// ---------- Hosted Hub & relay
+{id:"221+117",a:"hub",t:"Compress relay payloads",w:"medium",e:"L",r:"high",hub:false,
+ left:"Relay payloads go through E2EE uncompressed. The shell snapshot is about 363 KiB (about 41 KiB compressed), and config and thread windows count against the 4 MiB message limit. A hosted screenshot preview uses up the Hub's 50 MiB channel budget after about 17 phone frames.",
+ why:"Compressing before encrypting makes ciphertext lengths depend on content, which the Hub (the E2EE adversary) can see: a CRIME/BREACH-style side channel.",
+ o:[["Allowlisted compression after a security review","Only large node-generated messages (shell, config, thread windows), negotiated in-band inside the encrypted payload. No Hub change; mobile needs fflate."],
+    ["Compress all relay RPCs","Largest saving, widest side channel."],
+    ["Leave it",""]],rec:0,
+ rw:"About 9x smaller snapshots on every hosted connect, and cheaper on cellular. The allowlist limits which messages can leak lengths. Screenshots need their own choice (smaller or lossy frames)."},
+{id:"219",a:"hub",t:"Relay tickets over the Hub-session socket",w:"medium",e:"L",r:"medium",hub:true,
+ left:"Every hosted connect, node switch and reconnect pays a separate HTTP ticket round trip, although the account socket is already authenticated.",
+ why:"This is Hub-session protocol v2, with a new ticket custody surface. It needs a security review and a coordinated Hub release.",
+ o:[["Plan Hub-session protocol v2","Bundle it with the account/session ids on ready (#214) and the no-E2EE hint (#231): one Hub release, one review."],
+    ["Client-only interim","Request the ticket before the directory check. Reorders the fail-closed restore and can waste single-use tickets."],
+    ["Leave it",""]],rec:0,
+ rw:"−1 RTT on every connect, select and reconnect: the largest hosted latency item left. Batching keeps the security review to one pass."},
+{id:"220",a:"hub",t:"Hosted reconnect downloads the full shell again",w:"medium",e:"L",r:"high",hub:true,
+ left:"Every relay drop and every foreground resume re-downloads, decrypts and decodes about 363 KiB of shell, plus every open thread window.",
+ why:"Resuming relaxes the AGENTS.md rule that a current snapshot must be accepted before mutations are allowed, and docs/hosted-hub-client.md says \"Nothing is resumed\".",
+ o:[["Revisit after compression (#221)","Compression cuts the same transfer to about 41 KiB without touching the lifecycle rule."],
+    ["Resume with a node \"caught-up\" marker","The node sends a current marker after the resume replay, behind a capability. Needs product and security sign-off."],
+    ["Leave it",""]],rec:0,
+ rw:"Compression gets most of the gain without changing who grants mutation authority."},
+{id:"214",a:"hub",t:"Open the Hub-session socket before session restore",w:"low",e:"M",r:"medium",hub:true,
+ left:"On a hosted cold start the account socket opens one restore RTT late, and node connects wait for it (about 50–150 ms).",
+ why:"This opens an authenticated socket before the session is validated, and the Hub's ready frame can't prove which session the socket belongs to.",
+ o:[["Not now",""],["After the Hub adds ids to ready (with #219)","Safe once ready carries account and session ids."]],rec:0,
+ rw:"Small gain on cold start only; foreground resume isn't affected. Take B only if you do #219 anyway."},
+{id:"231",a:"hub",t:"Fixed 1.5 s wait for nodes without E2EE",w:"low",e:"M",r:"medium",hub:true,
+ left:"Connects to un-upgraded nodes, or nodes whose statement build failed, wait 1.5 s before any RPC flows. Since a38ecac4b a relay drop pays it once, not twice.",
+ why:"Ending the wait early changes §4.4 K13 of the E2EE protocol and needs a Hub hint plus a crypto review.",
+ o:[["Leave the wait; tell the user the node is outdated","The client already labels the channel \"legacy\". Add \"update this node for faster connects\". No protocol change."],
+    ["Hub hint + K13 amendment","A ticket-response hint ends the wait early. Bundle it with #219."],
+    ["Leave it silently",""]],rec:0,
+ rw:"Fewer nodes are affected as they update; a hint in the UI fixes the cause rather than the symptom."},
+{id:"226",a:"hub",t:"Hosted reads wait for the shell snapshot",w:"low",e:"M",r:"medium",hub:false,
+ left:"Hosted reads that a view issues before the snapshot is accepted are refused and re-run afterwards: +1 round trip for first-paint reads, on cold connect and on every reconnect.",
+ why:"Read admission before the snapshot belongs to the hosted lifecycle owner, and the rule is shared with mobile.",
+ o:[["Not now","Do #221 and #219 first."],["Admit reads (never mutations) once the session is synced","Changes the admission tests that say only session-sync is allowed before the snapshot."]],rec:0,
+ rw:"Low gain compared with the policy change."},
+{id:"212",a:"hub",t:"Session-sync timeout while the directory is stale",w:"low",e:"S",r:"low",hub:false,
+ left:"The finding is fixed. Optional: don't start the 30 s session-sync timeout until the directory is ready again.",
+ why:"It sits inside the hosted lifecycle owner.",
+ o:[["Defer the timer until the directory is ready","Grants no authority: mutations still need the replacement's own snapshot."],["Keep failing closed after 30 s",""]],rec:0,
+ rw:"Restores the behaviour before the fix without adding authority. Small and contained."},
+{id:"228",a:"hub",t:"Native AEAD on desktop-hosted nodes; §14.7 acceptance",w:"low",e:"M",r:"medium",hub:false,
+ left:"Electron's Node has no chacha20-poly1305 in createCipheriv, so desktop nodes seal with noble: about 9.5 ms per 3 MB frame on the event loop. §14.7 of the E2EE spec is still marked as awaiting owner acceptance, although its fast paths run in production.",
+ why:"Async WebCrypto AEAD changes record sealing and key lifetime. Accepting §14.7 is an owner sign-off.",
+ o:[["Accept §14.7 as it runs today; skip async AEAD","The spec matches production. No code change."],
+    ["Accept §14.7 and add async WebCrypto AEAD","Makes the record-sealing seam async; needs crypto review."],
+    ["Leave both open",""]],rec:0,
+ rw:"The spec should describe what ships. The AEAD saving is small."},
+{id:"227",a:"hub",t:"WebCrypto for the browser E2EE handshake",w:"low",e:"M",r:"medium",hub:false,
+ left:"The cost described in the finding is gone. A few ms per handshake remain, more on phones.",
+ why:"Changes which implementation computes E2EE results, and makes the DH path async.",
+ o:[["Don't do it",""],["WebCrypto fast path","Needs crypto review."]],rec:0,rw:"A few ms isn't worth a crypto review."},
+{id:"229",a:"hub",t:"Move the browser relay data plane into a Worker",w:"low",e:"L",r:"high",hub:false,
+ left:"Decrypting, copying and CBOR encoding all run on the web main thread.",
+ why:"This moves key material and the hosted lifecycle owner across threads.",
+ o:[["Don't do it","The web phone tier is frozen; desktop browsers cope."],["Move it into a Worker",""]],rec:0,rw:"High risk; the slow devices are on the native app now."},
+// ---------- Shell & config data
+{id:"46+79",a:"data",t:"Archived threads in every shell snapshot",w:"medium",e:"L",r:"medium",hub:false,
+ left:"Every archived thread is read, encoded, sent and decoded on the client main thread in every full snapshot. At 4.5k threads that's 5.65 MiB and about 140 ms to build, plus 5–25 ms of client decode.",
+ why:"Changes the subscribeShell protocol and what the archive view, sidebar counts, deep links and offline mobile have locally.",
+ o:[["Slim archived stubs, full data on demand","The snapshot stays complete (id, title, dates, lineage), so readiness rules don't change. Full shells load when one is opened. Capability-gated for old clients."],
+    ["Fully lazy archived threads","Biggest saving; the archive panel, counts and deep links need a fetch."],
+    ["Leave it",""]],rec:0,
+ rw:"Most of the saving, and because the snapshot stays complete the hosted readiness rule is untouched. No Hub change."},
+{id:"95",a:"data",t:"Full server config (~125 KB) fetched again on hosted",w:"medium",e:"M",r:"medium",hub:true,
+ left:"On hosted, \"New thread\" and the first send read the full config over the relay. Catalogs are only persisted on desktop and loopback.",
+ why:"Part A trusts a per-connection live config (hosted lifecycle). Part D stores node catalogs on hosted, remote and mobile clients (privacy).",
+ o:[["Live config per connection only (Part A)","Use the config already pushed on the current attempt, never one from a stale generation. This also settles #124 and the hosted part of #146."],
+    ["Part A + persist catalogs on all clients","Faster cold starts; keeps a copy of node data on paired devices without asking."],
+    ["Leave it",""]],rec:0,
+ rw:"Removes 100–400 ms from hosted new-thread and first send. The value is tied to the current attempt, which is what the hosted rule asks for."},
+{id:"124",a:"data",t:"Hosted \"New thread\" waits for a fresh config",w:"medium",e:"M",r:"medium",hub:true,
+ left:"Every new draft on hosted web awaits a full getConfig (100–400 ms plus a long decode frame).",why:"Same trust question as #95 Part A.",
+ o:[["Follow #95",""],["A light RPC for draft defaults","A contract change; may need a Hub pin bump."],["Leave it",""]],rec:0,rw:"One mechanism for both."},
+{id:"121",a:"data",t:"Resume the local shell from cache across restarts",w:"low",e:"L",r:"medium",hub:false,
+ left:"The cached sidebar already paints in about 73–94 ms, but each boot still downloads the full snapshot.",
+ why:"Needs a projection epoch in the protocol, a complete (uncapped) cache, and a privacy call for non-loopback browsers.",
+ o:[["Not now","The loopback gain is small."],["Build Phase 2 resume",""]],rec:0,rw:"#46 shrinks the same download more cheaply."},
+// ---------- Server & providers
+{id:"150",a:"server",t:"One codex app-server per thread",w:"low",e:"L",r:"high",hub:false,
+ left:"Prewarm hides most of the start-up latency for composer sends. Agent Control and automation threads still pay spawn + initialize, and each live Codex thread costs about 125 MiB.",
+ why:"A shared process trades per-thread failure isolation for memory.",
+ o:[["Warm standby process, no sharing","Keep one initialized spare per instance; isolation stays."],["Shared app-server per instance","Saves memory; one crash takes down every Codex thread."],["Leave it",""]],rec:0,
+ rw:"Threads started through Agent Control are never prewarmed, so they pay the full start-up. A standby fixes that without a shared failure domain."},
+{id:"146",a:"server",t:"Worktree first send runs serially",w:"medium",e:"M",r:"medium",hub:false,
+ left:"The worktree prefetch is reused for only 60 s, so a prompt that takes longer than a minute to write pays a full fetch (0.3–0.5 s) inside the send. The setup script also runs before the turn starts.",
+ why:"Keeping the prefetch warm adds background git fetches. Starting the agent before setup changes the visible order.",
+ o:[["Keep the prefetch warm","At most one base-only fetch per minute while a worktree draft is open and focused."],["Warm prefetch + start the agent before the setup script",""],["Leave it",""]],rec:0,
+ rw:"The biggest remaining win, and a small change. Running the agent before setup could break agents that rely on what setup prepares."},
+{id:"20",a:"server",t:"Codex usage limits on boot",w:"medium",e:"M",r:"medium",hub:false,
+ left:"Claude and OpenCode now refresh usage cheaply. Codex with a ChatGPT login still spawns a codex app-server on boot, and on reconnects after 5 minutes, to read usage.",
+ why:"How fresh usage must be in the composer and the Limits panel is a product choice.",
+ o:[["Keep 5-minute freshness for Codex","Today's accuracy; keeps the spawn."],["Show last-known usage with its age, refresh in the background",""],["Hide Codex usage until it's refreshed",""]],rec:0,
+ rw:"You want current per-subscription usage in Limits and the composer, and Codex has no cheap usage read without app-server."},
+{id:"148",a:"server",t:"Turn start inside a chat folder that is being moved",w:"low",e:"S",r:"low",hub:false,
+ left:"A start that holds a storage lease is admitted even while the folder has a pending relocation. Two tests assert this today.",
+ why:"Restoring the refusal reverses a choice that was tested on purpose.",
+ o:[["Restore the refusal (fence epoch)","Nothing new starts in a folder that's moving. No extra I/O."],["Keep current behaviour",""]],rec:0,rw:"Correctness first (AGENTS.md), at no performance cost."},
+{id:"261",a:"server",t:"Deleted worktrees whose parent folder is gone",w:"low",e:"S",r:"low",hub:false,
+ left:"These are never marked removed. Every sweep re-probes them, and one such row produced 47% of server.log in 2.3 days.",
+ why:"Marking them \"missing\" also auto-archives the workspace, so a temporarily unmounted volume would get archived too.",
+ o:[["Archive when the parent is gone but the volume is mounted","For example, when the Ryco worktrees root exists. Unmounted volumes stay \"unavailable\" and are retried quietly."],["Never archive; only quiet the logs",""],["Archive whenever the parent is missing",""]],rec:0,
+ rw:"Cleans up stale rows like worktree-260e10cc without archiving a disk that's just unplugged."},
+{id:"45",a:"server",t:"Routes wait for engine hydration",w:"low",e:"M",r:"medium",hub:false,
+ left:"API, auth and WebSocket routes are held until the orchestration engine has loaded, and return 503 after 10 s on a large replay.",
+ why:"Async hydration changes what \"ready\" means for the desktop, CLI and SSH probes.",
+ o:[["Don't do it","The measured gain on typical boots is about 0 ms."],["Async hydration","Only helps headless or large-DB boots."]],rec:0,rw:"No measured gain; #2 covers the slow-upgrade case."},
+// ---------- Desktop
+{id:"2",a:"desktop",t:"Slow first boot after an update (migrations)",w:"medium",e:"M",r:"medium",hub:false,
+ left:"Migrations 085, 087 and 088 scan every activity row before the server answers. On a large database the first boot after an upgrade can run past the 10 s gate and the 15 s client retry, and the desktop falls back to a reload.",
+ why:"Showing an \"upgrading data\" state, waiting longer, or moving backfills behind the router are product and boundary choices.",
+ o:[["Show \"Upgrading data\" and keep waiting","The boot page shows progress from startup-phase frames, and the gate and client stop giving up during known one-time migrations. No auth change."],
+    ["Also move backfills behind the router","The server answers sooner, but reads use fallback paths until the backfill finishes."],["Leave it","Rare: only the first launch after an upgrade."]],rec:0,
+ rw:"Fixes the reload loop people actually hit, with the least risk. B adds a second code path for every backfilled read."},
+{id:"4",a:"desktop",t:"App address changes when port 3773 is taken",w:"medium",e:"M",r:"medium",hub:false,
+ left:"Existing installs still start on 3773. When T3 Code holds it, Ryco runs on 3774 for that launch, which is a different origin: drafts, UI state, attachments and caches look empty or cold. New installs are already pinned.",
+ why:"Fixing existing installs means moving user data to a new origin.",
+ o:[["One-time move to a dedicated Ryco port","Pick a Ryco-only port once, migrate localStorage drafts, UI state and IndexedDB attachments on first launch, then persist the port."],
+    ["Do it together with the ryco:// origin (#7)","One migration, but blocked on the auth review #7 needs."],["Leave existing installs",""]],rec:0,
+ rw:"T3 Code is installed on this machine, so this is your measured case. A one-time move fixes it without the auth change #7 needs."},
+{id:"7",a:"desktop",t:"Window waits for the backend before loading app code",w:"medium",e:"M",r:"medium",hub:false,
+ left:"The backend process serves the renderer. During a long migration stall the cached sidebar can't paint. On normal launches the cost is about 100 ms.",
+ why:"Decoupling needs a new request path in Electron main or the ryco:// origin, which changes desktop auth (cookie to bearer) and CORS.",
+ o:[["Not now","Revisit after #2."],["Intercept the http origin in Electron during boot","A smaller change, but a new security-relevant request path."],["Move to ryco://app","The clean long-term fix; needs an auth review and an origin migration."]],rec:0,
+ rw:"About 100 ms on normal launches. #2 handles the stall case better."},
+// ---------- Web
+{id:"112",a:"web",t:"Saved environment connect: two HTTP round trips",w:"low",e:"M",r:"medium",hub:false,
+ left:"Web and desktop direct pairings check the session and then fetch a ws-token before every connect and reconnect. Mobile already skips the first step with cached session hints.",
+ why:"Changes the web/desktop saved-pairing auth flow and stores non-secret session metadata in localStorage.",
+ o:[["Move mobile's session hints into client-runtime and use them on web/desktop","Saves 1 RTT per connect and removes a mobile-only auth fork."],["Leave it",""]],rec:0,
+ rw:"Already proven on mobile, and it fixes the split auth policy that AGENTS.md says to avoid."},
+{id:"69",a:"web",t:"DM Sans preload on hosted",w:"low",e:"S",r:"low",hub:true,
+ left:"Hosted cold loads (first visit, new browser) see a font swap after paint. Warm loads are covered by the service worker.",
+ why:"Reverses a deliberate, test-pinned exclusion, and needs a Hub deploy.",
+ o:[["Add it in the next Hub pin bump","Check the slow-link profile first, and skip the preload when another font is selected."],["Leave it",""]],rec:0,rw:"A small, low-risk polish that can ride along with a bump you're doing anyway."},
+{id:"174",a:"web",t:"@-search from a local index",w:"low",e:"M",r:"low",hub:false,
+ left:"Every keystroke is a 9–12 KB round trip after a 120 ms debounce.",
+ why:"A client index copy costs bandwidth and memory (up to 25k entries over the relay) and needs a server push to stay fresh.",
+ o:[["Keep server search",""],["Client index + server push",""]],rec:0,rw:"Fast enough today; the protocol addition isn't worth it."},
+{id:"71",a:"web",t:"Auth waits for the full boot chain",w:"low",e:"M",r:"medium",hub:false,
+ left:"Root auth waits for the whole boot chain (about 478 KiB gzip) to load.",
+ why:"Needs reversing the measured BOOT_ROOT_MODULES trade-off, or an early session fetch outside the client-runtime auth owner.",
+ o:[["Don't do it","Since #710 the gain is a few ms locally and at most one RTT remotely."],["Early session fetch in index.html (standard builds only)",""]],rec:0,rw:"Too little left to win."},
+// ---------- Mobile
+{id:"235",a:"mobile",t:"Offline launch shows \"Reaching your Hub…\"",w:"medium",e:"M",r:"medium",hub:false,
+ left:"With a stored session and no network, mobile shows a waiting screen instead of the cached workspace that's already on disk.",
+ why:"Reverses the documented rule that the workspace mounts only after the session is revalidated.",
+ o:[["Read-only cached preview, opt-in","Like hosted web's remembered-browser preview. No mutations until the Hub confirms the session."],["Same, but on by default",""],["Keep it locked",""]],rec:0,
+ rw:"Useful offline, follows the web precedent, and mutation authority stays where AGENTS.md puts it."},
+{id:"242",a:"mobile",t:"Relay crypto and base64 on Hermes",w:"medium",e:"L",r:"medium",hub:false,
+ left:"Nobody has measured base64, ChaCha20 or the handshake on Hermes. Frames go through React Native's base64 WebSocket bridge.",
+ why:"Native AEAD on Hermes is forbidden by §14.7 today; compression is #221.",
+ o:[["Measure first","Add an on-device benchmark (no protocol impact), then decide."],["Native AEAD now (amend §14.7)",""],["Leave it",""]],rec:0,rw:"Without numbers there's nothing to weigh the spec change against."},
+{id:"230",a:"mobile",t:"Cached E2EE enrollment on mobile launch",w:"medium",e:"M",r:"medium",hub:false,
+ left:"Every mobile launch waits for a DPoP-signed enrollment upsert before the first ticket.",
+ why:"Treating a cached enrollment as ready changes E2EE enrollment semantics (revocation, epochs).",
+ o:[["Not now",""],["Persist the Hub-confirmed enrollment","Needs a security review."]],rec:0,rw:"The remaining gain is about 0 on cellular and 20–60 ms on Wi-Fi (see #241)."},
+{id:"241",a:"mobile",t:"Mobile relay start-up order",w:"low",e:"M",r:"medium",hub:false,
+ left:"The enrollment upsert and the directory-gated node selection still come before the relay ticket.",
+ why:"Changing the order affects E2EE enrollment and the hosted lifecycle owner.",
+ o:[["Not now","Most of the cost is already hidden."],["Prewarm the relay before selection",""]],rec:0,rw:"The remaining gain is about 0 on cellular."},
+{id:"239",a:"mobile",t:"Reading the bearer token again",w:"low",e:"S",r:"low",hub:false,
+ left:"Hinted mobile connects read the keychain bearer twice on the critical path.",
+ why:"Reusing a read changes superseded-bearer and locked-keychain behaviour.",
+ o:[["Keep reading it again",""],["Read once per attempt",""]],rec:0,rw:"Reading on every use was a deliberate safety choice; the cost is a keychain read."},
+// ---------- Not scheduled
+{id:"134",a:"later",t:"Timeline row-height estimate",w:"low",e:"M",r:"medium",hub:false,
+ left:"On first visit the timeline renders about twice the rows it needs (56 px estimate). Height memory was reverted in #723 while the blank-timeline bug is still open.",
+ why:"The owner reverted this on purpose.",
+ o:[["Raise only the estimate to about 100–120 px",""],["Also bring back height memory",""],["Leave it",""]],rec:0,rw:"Raising the estimate is safe on its own; height memory should wait until the blank-timeline cause is known."},
+{id:"82",a:"later",t:"Boot CPU micro-benchmarks",w:"low",e:"M",r:"low",hub:false,
+ left:"There are no committed micro-benchmarks for web boot functions, and no sidebar commit-count gate.",why:"Measurement only.",
+ o:[["Not now",""],["Add them",""]],rec:0,rw:"Low value until boot work changes again."}
+];
+const pick={};D.forEach(d=>pick[d.id]=d.rec);
+let area="all";
+const $=s=>document.querySelector(s);
+function esc(s){return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function renderFilters(){
+  const counts={};D.forEach(d=>counts[d.a]=(counts[d.a]||0)+1);
+  const keys=["all",...Object.keys(AREAS).filter(k=>counts[k])];
+  $("#filters").innerHTML=keys.map(k=>`<button class="chip" data-a="${k}" aria-pressed="${k===area}">${k==="all"?"All":AREAS[k]} ${k==="all"?D.length:counts[k]}</button>`).join("");
+}
+function renderCards(){
+  $("#cards").innerHTML=D.filter(d=>area==="all"||d.a===area).map(d=>`
+  <div class="card${pick[d.id]!==d.rec?" changed":""}" data-id="${d.id}">
+    <div class="head"><span class="num">#${d.id}</span><span class="title">${esc(d.t)}</span>
+      <span class="tags"><span class="tag ${d.w}">gain ${d.w}</span><span class="tag">effort ${d.e}</span><span class="tag ${d.r}">risk ${d.r}</span>${d.hub?'<span class="tag">Hub deploy</span>':""}</span></div>
+    <p class="left">${esc(d.left)}</p>
+    <details><summary>Why it needs a decision</summary><p>${esc(d.why)}</p></details>
+    <div class="opts">${d.o.map((o,i)=>`<label class="opt"><input type="radio" name="o${d.id}" value="${i}"${pick[d.id]===i?" checked":""}><span><b>${esc(o[0])}</b>${i===d.rec?'<span class="rec">Recommended</span>':""}${o[1]?`<span class="d">${esc(o[1])}</span>`:""}</span></label>`).join("")}</div>
+    <div class="why"><b>Why I recommend "${esc(d.o[d.rec][0])}":</b> ${esc(d.rw)}</div>
+  </div>`).join("");
+}
+function renderSheet(){
+  const changed=D.filter(d=>pick[d.id]!==d.rec).length;
+  const act=D.filter(d=>!/^(Not now|Don't do it|Leave|Keep )/.test(d.o[pick[d.id]][0]));
+  $("#decCount").textContent=D.length;
+  $("#pickCount").textContent=changed?changed+" changed":"";
+  $("#pickSummary").innerHTML=`${D.length} decisions: ${D.length-changed} use my recommendation, <b>${changed}</b> changed by you. ${act.length} lead to work and ${D.length-act.length} are "no / not now".`;
+  const lines=["Perf leftover decisions (from the 2026-10-15 re-check)","",
+    "Before anything else: push perf3/recheck-2026-10-15 and open a code PR (PR #730 has only the report).","","DO:"];
+  act.forEach(d=>lines.push(`- #${d.id} ${d.t}: ${d.o[pick[d.id]][0]}${pick[d.id]!==d.rec?"  [changed from recommendation]":""}`));
+  lines.push("","NO / NOT NOW:");
+  D.filter(d=>!act.includes(d)).forEach(d=>lines.push(`- #${d.id} ${d.t}: ${d.o[pick[d.id]][0]}${pick[d.id]!==d.rec?"  [changed from recommendation]":""}`));
+  $("#sheet").value=lines.join("\n");
+}
+document.addEventListener("click",e=>{
+  const t=e.target.closest(".tab");
+  if(t){document.querySelectorAll(".tab").forEach(x=>x.setAttribute("aria-selected",x===t));
+    document.querySelectorAll(".panel").forEach(p=>p.hidden=p.dataset.panel!==t.dataset.tab);}
+  const c=e.target.closest(".chip");
+  if(c){area=c.dataset.a;renderFilters();renderCards();}
+});
+document.addEventListener("change",e=>{
+  if(e.target.type!=="radio")return;
+  const id=e.target.name.slice(1);pick[id]=+e.target.value;
+  const d=D.find(x=>x.id===id);e.target.closest(".card").classList.toggle("changed",pick[id]!==d.rec);
+  renderSheet();
+});
+$("#resetBtn").onclick=()=>{D.forEach(d=>pick[d.id]=d.rec);renderCards();renderSheet();$("#copyMsg").textContent="Reset."};
+$("#copyBtn").onclick=async()=>{
+  const ta=$("#sheet");let ok=false;
+  try{await navigator.clipboard.writeText(ta.value);ok=true}catch(_){}
+  if(!ok){ta.focus();ta.select();try{ok=document.execCommand("copy")}catch(_){}}
+  $("#copyMsg").textContent=ok?"Copied. Paste it into the thread.":"Copy is blocked here; the text is selected, so press ⌘C.";
+};
+renderFilters();renderCards();renderSheet();
+</script>
+</body>
+</html>

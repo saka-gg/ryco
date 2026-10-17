@@ -1349,7 +1349,7 @@ export default function ThreadWorkspacePanel(props: {
           </Button>
         ) : null}
         <div
-          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto"
+          className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           role="tablist"
           aria-label="Workspace tabs"
         >
