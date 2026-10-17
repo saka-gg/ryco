@@ -37,7 +37,7 @@ export function DiffComparisonControls(props: {
         </button>
         <select
           aria-label="Comparison mode"
-          className="rounded border bg-background px-2 py-1"
+          className="app-glass-raised rounded border bg-background px-2 py-1"
           value={mode}
           onChange={(event) => setMode(event.target.value as GitComparisonSelection["mode"])}
         >
@@ -47,7 +47,7 @@ export function DiffComparisonControls(props: {
         <input
           aria-label="Branch, tag, or commit"
           placeholder="Branch, tag, or commit"
-          className="min-w-[160px] flex-1 rounded border bg-background px-2 py-1"
+          className="app-glass-raised min-w-[160px] flex-1 rounded border bg-background px-2 py-1"
           value={draft}
           maxLength={256}
           onChange={(event) => setDraft(event.target.value)}

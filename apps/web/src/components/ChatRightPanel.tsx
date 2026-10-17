@@ -218,7 +218,7 @@ export const RightPanelInlineSidebar = (props: {
         collapsible="offcanvas"
         maximized={maximized}
         className={cn(
-          "border-l border-border bg-card text-foreground",
+          "app-content-surface border-l border-border bg-card text-foreground",
           maximized
             ? "translate-x-0"
             : cn(

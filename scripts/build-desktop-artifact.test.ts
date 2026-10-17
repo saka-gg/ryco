@@ -473,6 +473,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             "Contents/Resources/cua-driver/cua-driver",
             "Contents/Resources/ryco-computer-use-helper",
             "Contents/Resources/ryco-desktop-security-helper",
+            "Contents/Resources/ryco-window-material.node",
           ],
         });
         const signed = yield* createBuildConfig(
@@ -594,6 +595,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "**/*",
       "!apps/desktop/resources/ryco-desktop-security-helper",
       "!apps/desktop/prod-resources/ryco-desktop-security-helper",
+      "!apps/desktop/resources/ryco-window-material.node",
       "!apps/desktop/prod-resources/cua-driver/**",
       "!apps/desktop/prod-resources/ryco-computer-use-helper",
       "!apps/desktop/prod-resources/ryco-computer-use-helper.exe",
@@ -662,6 +664,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         {
           from: "apps/desktop/resources/ryco-desktop-security-helper",
           to: "ryco-desktop-security-helper",
+        },
+        {
+          from: "apps/desktop/resources/ryco-window-material.node",
+          to: "ryco-window-material.node",
         },
         {
           from: "apps/server/dist/device-helper",

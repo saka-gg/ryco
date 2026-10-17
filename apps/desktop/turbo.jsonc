@@ -26,6 +26,7 @@
       "outputs": [
         "dist-electron/**",
         "resources/ryco-desktop-security-helper",
+        "resources/ryco-window-material.node",
         "resources/ryco-computer-ui-helper*",
         "resources/cua-driver/**",
         "resources/ryco-computer-use-helper*",

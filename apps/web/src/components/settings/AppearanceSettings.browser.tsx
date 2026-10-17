@@ -2,7 +2,7 @@ import { ComposerSettings } from "./ComposerSettings";
 import "../../index.css";
 
 import { page } from "vite-plus/test/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
 import {
@@ -16,12 +16,17 @@ import {
   FONT_FAMILY_MONO_OPTIONS,
   FONT_FAMILY_SANS_OPTIONS,
   PRIMARY_COLOR_OPTIONS,
-  SURFACE_TRANSPARENCY_OPTIONS,
 } from "../../themes/appearancePreferences";
+import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { useUiStateStore } from "../../uiStateStore";
 import { AppearanceSettingsPanel } from "./AppearanceSettings";
 
 describe("AppearanceSettingsPanel", () => {
+  beforeAll(() => {
+    // main.tsx activates this in the app; the tier decides the effective material.
+    syncDocumentPresentationTier();
+  });
+
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;
@@ -152,6 +157,8 @@ describe("AppearanceSettingsPanel", () => {
   });
 
   it("persists global interface controls outside the active theme", async () => {
+    await page.viewport(1100, 780);
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("desktop"));
     mounted = await render(<AppearanceSettingsPanel />);
 
     const interfaceFontLabel = "Geist";
@@ -161,9 +168,6 @@ describe("AppearanceSettingsPanel", () => {
     )?.value;
     const codeFontValue = FONT_FAMILY_MONO_OPTIONS.find(
       (option) => option.label === codeFontLabel,
-    )?.value;
-    const transparencyValue = SURFACE_TRANSPARENCY_OPTIONS.find(
-      (option) => option.label === "High",
     )?.value;
     const primaryColorValue = PRIMARY_COLOR_OPTIONS.find(
       (option) => option.label === "Teal",
@@ -179,12 +183,10 @@ describe("AppearanceSettingsPanel", () => {
     ).toBeUndefined();
     await page.getByText("Use theme color", { exact: true }).click();
     await page.getByRole("radio", { name: "Use Teal as primary color" }).click();
-    await page.getByRole("button", { name: "Set transparency to High" }).click();
 
     await vi.waitFor(() => {
       expect(interfaceFontValue).toBeDefined();
       expect(codeFontValue).toBeDefined();
-      expect(transparencyValue).toBeDefined();
       expect(primaryColorValue).toBeDefined();
       expect(JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}")).toEqual(
         expect.objectContaining({
@@ -194,7 +196,6 @@ describe("AppearanceSettingsPanel", () => {
           radius: "0rem",
           primaryColorMode: "custom",
           primaryColor: primaryColorValue,
-          surfaceTransparency: transparencyValue,
         }),
       );
     });
@@ -205,7 +206,11 @@ describe("AppearanceSettingsPanel", () => {
     expect(style?.textContent).toContain("--font-size-base: 18px");
     expect(style?.textContent).toContain("--radius: 0rem");
     expect(style?.textContent).toContain(`--primary: ${primaryColorValue}`);
-    expect(style?.textContent).toContain("--app-surface-opacity: 82.4%");
+    // The desktop has no transparency step; its surfaces stay Solid.
+    expect(style?.textContent).toContain("--app-surface-opacity: 100%");
+    await expect
+      .element(page.getByRole("button", { name: "Set transparency to High" }))
+      .not.toBeInTheDocument();
 
     await expect
       .element(page.getByRole("button", { name: "Reset interface font to default" }))
@@ -221,9 +226,6 @@ describe("AppearanceSettingsPanel", () => {
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Reset primary color to default" }))
-      .toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Reset transparency to default" }))
       .toBeInTheDocument();
   });
 

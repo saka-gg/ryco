@@ -628,7 +628,7 @@ export function ChatPanes({
         aria-label={`Thread pane ${i + 1}`}
         aria-hidden={leaving ? true : undefined}
         className={cn(
-          "group/pane absolute isolate flex min-h-0 min-w-0 flex-col overflow-hidden bg-background",
+          "app-content-surface group/pane absolute isolate flex min-h-0 min-w-0 flex-col overflow-hidden bg-background",
           animateGeometry && !leaving && PANE_GEOMETRY_TRANSITION_CLASS,
           pushed && entering && !parked && "chat-pane-enter",
           leaving && "chat-pane-exit pointer-events-none",

@@ -187,6 +187,11 @@ import {
 import { isArm64HostRunningIntelBuild, resolveDesktopRuntimeInfo } from "./runtimeArch.ts";
 import { resolveDesktopAppBranding } from "./appBranding.ts";
 import { bindFirstRevealTrigger, type RevealSubscription } from "./windowReveal.ts";
+import {
+  createWindowTranslucencyController,
+  parseDesktopWindowMaterial,
+  type WindowMaterialAddon,
+} from "./windowTranslucency.ts";
 import { validateHubOrigin } from "./hubOrigin.ts";
 import {
   parseTurnCompleteNotification,
@@ -249,6 +254,7 @@ const DESKTOP_DISABLE_GPU = readEnv("RYCO_DESKTOP_DISABLE_GPU")?.trim() === "1";
 const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
 const CONFIRM_CHANNEL = "desktop:confirm";
 const SET_THEME_CHANNEL = "desktop:set-theme";
+const SET_WINDOW_MATERIAL_CHANNEL = "desktop:set-window-material";
 const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
 const MENU_ACTION_CHANNEL = "desktop:menu-action";
@@ -4241,6 +4247,17 @@ function registerIpcHandlers(): void {
     nativeTheme.themeSource = theme;
   });
 
+  ipcMain.removeHandler(SET_WINDOW_MATERIAL_CHANNEL);
+  ipcMain.handle(SET_WINDOW_MATERIAL_CHANNEL, async (event, rawMaterial: unknown) => {
+    const material = parseDesktopWindowMaterial(rawMaterial);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!material || !window) {
+      return false;
+    }
+
+    return windowTranslucency.apply(window, material);
+  });
+
   ipcMain.removeHandler(NOTIFY_TURN_COMPLETE_CHANNEL);
   ipcMain.handle(NOTIFY_TURN_COMPLETE_CHANNEL, async (_event, rawNotification: unknown) => {
     const notification = parseTurnCompleteNotification(rawNotification);
@@ -4456,6 +4473,34 @@ function getInitialWindowBackgroundColor(): string {
   return nativeTheme.shouldUseDarkColors ? "#0b0b0c" : "#ffffff";
 }
 
+function loadWindowMaterialAddon(): WindowMaterialAddon | null {
+  const addonPath = resolveResourcePath("ryco-window-material.node");
+  if (!addonPath) {
+    console.warn("[desktop] Window blur addon not found; translucent windows use vibrancy");
+    return null;
+  }
+  try {
+    const addonModule: { exports: Partial<WindowMaterialAddon> } = { exports: {} };
+    process.dlopen(addonModule, addonPath);
+    const { setBackgroundBlurRadius } = addonModule.exports;
+    if (typeof setBackgroundBlurRadius !== "function") {
+      throw new Error("setBackgroundBlurRadius export is missing");
+    }
+    return { setBackgroundBlurRadius };
+  } catch (error) {
+    console.warn(
+      `[desktop] Window blur addon unavailable; translucent windows use vibrancy: ${formatErrorMessage(error)}`,
+    );
+    return null;
+  }
+}
+
+const windowTranslucency = createWindowTranslucencyController({
+  platform: process.platform,
+  opaqueBackgroundColor: getInitialWindowBackgroundColor,
+  loadAddon: loadWindowMaterialAddon,
+});
+
 function getWindowTitleBarOptions(): WindowTitleBarOptions {
   if (process.platform === "darwin") {
     return {
@@ -4481,7 +4526,7 @@ function syncWindowAppearance(window: BrowserWindow): void {
     return;
   }
 
-  window.setBackgroundColor(getInitialWindowBackgroundColor());
+  windowTranslucency.syncBackground(window);
   const { titleBarOverlay } = getWindowTitleBarOptions();
   if (typeof titleBarOverlay === "object") {
     window.setTitleBarOverlay(titleBarOverlay);

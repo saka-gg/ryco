@@ -1,4 +1,5 @@
 import type { EffectiveProjectPreferences } from "./settings.ts";
+import type { DesktopWindowMaterial } from "./windowMaterial.ts";
 import type {
   LifecycleSuggestions,
   TrashListResult,
@@ -929,6 +930,17 @@ export interface DesktopBridge {
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
+  /**
+   * Whether this window can let the desktop show through it (macOS vibrancy).
+   * Absent on hosts that predate the capability.
+   */
+  readonly windowTranslucencySupported?: boolean;
+  /**
+   * Apply a window material. Resolves whether it took effect as asked: `false` for a
+   * translucent request means the window server refused the custom blur and the
+   * window fell back to the system vibrancy material.
+   */
+  setWindowMaterial?: (input: DesktopWindowMaterial) => Promise<boolean>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },

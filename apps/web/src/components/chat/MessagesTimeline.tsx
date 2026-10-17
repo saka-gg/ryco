@@ -920,8 +920,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                   // The transcript scrolls without a visible scrollbar. Hiding it
                   // also removes the gutter entirely, so the content column no longer
                   // shifts when overflow appears — which is what `scrollbar-gutter:
-                  // stable` used to reserve space for.
-                  className="h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
+                  // stable` used to reserve space for. `chat-transcript-viewport`
+                  // fades its edges under the floating bars on a translucent
+                  // window (index.css).
+                  className="chat-transcript-viewport h-full overflow-x-hidden overscroll-y-contain px-3 [scrollbar-width:none] sm:px-5 [&::-webkit-scrollbar]:hidden"
                   ListHeaderComponent={listHeader}
                   ListFooterComponent={TIMELINE_LIST_FOOTER}
                 />

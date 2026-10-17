@@ -1320,7 +1320,7 @@ export default function ThreadWorkspacePanel(props: {
   );
 
   return (
-    <div className="flex h-full min-w-0 flex-1 flex-col bg-background w-full">
+    <div className="app-content-surface flex h-full min-w-0 flex-1 flex-col bg-background w-full">
       <div
         className={cn(
           "flex shrink-0 items-center gap-1 border-b border-border bg-card/40 px-2",

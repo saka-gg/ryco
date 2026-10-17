@@ -11,7 +11,7 @@ export function RoutePagePending() {
   return (
     <SidebarInset
       aria-busy="true"
-      className="h-dvh min-h-0 overflow-hidden bg-background text-foreground"
+      className="app-content-surface h-dvh min-h-0 overflow-hidden bg-background text-foreground"
     />
   );
 }

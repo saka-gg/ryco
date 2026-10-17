@@ -29,7 +29,6 @@ import {
   FONT_SIZE_OPTIONS,
   PRIMARY_COLOR_OPTIONS,
   RADIUS_OPTIONS,
-  SURFACE_TRANSPARENCY_OPTIONS,
   applyAppearancePreferencesToDocument,
   getAppearancePreferences,
   hasAppearancePreferenceOverride,
@@ -51,6 +50,7 @@ import {
   updateCustomTheme,
 } from "../../themes/registry";
 import { copyThemeToClipboard, downloadTheme, importThemeFromFile } from "../../themes/transport";
+import { isWindowTranslucencySupported } from "../../themes/windowTranslucency";
 import type { ThemeDefinition } from "../../themes/types";
 import {
   AlertDialog,
@@ -74,6 +74,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
+import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
 import { ThemeEditor } from "./ThemeEditor";
 
@@ -82,14 +83,6 @@ const VARIANT_OPTIONS = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ] as const;
-
-const TRANSPARENCY_PREVIEW_OPACITY: Record<string, number> = {
-  default: 1,
-  light: 0.92,
-  medium: 0.84,
-  high: 0.78,
-  glass: 0.72,
-};
 
 export function AppearanceSettingsPanel({
   surface = "node",
@@ -667,43 +660,13 @@ export function AppearanceSettingsPanel({
             onColorChange={handlePrimaryColorChange}
           />
         </SettingsRow>
-        <SettingsRow
-          title="Transparency"
-          description="Adjust glass and floating surfaces like dialogs, menus, popups, and toasts."
-          resetAction={
-            hasAppearancePreferenceOverride("surfaceTransparency") ? (
-              <SettingResetButton
-                label="transparency"
-                onClick={() => handleAppearancePreferenceReset("surfaceTransparency")}
-              />
-            ) : null
-          }
-          control={
-            <SliderPreferenceValue
-              options={SURFACE_TRANSPARENCY_OPTIONS}
-              value={appearancePreferences.surfaceTransparency}
-              preview={
-                <span className="relative h-8 min-w-12 overflow-hidden rounded-md border border-border/70 bg-[linear-gradient(135deg,var(--color-sky-500)_0_20%,var(--color-emerald-500)_20%_40%,var(--color-amber-500)_40%_60%,var(--color-fuchsia-500)_60%_80%,var(--color-slate-500)_80%_100%)] p-1.5 shadow-xs/5">
-                  <span
-                    className="block h-full rounded border border-border/70 bg-popover"
-                    style={{
-                      opacity:
-                        TRANSPARENCY_PREVIEW_OPACITY[appearancePreferences.surfaceTransparency] ??
-                        TRANSPARENCY_PREVIEW_OPACITY.default,
-                    }}
-                  />
-                </span>
-              }
-            />
-          }
-        >
-          <AppearancePreferenceSlider
-            ariaLabel="Transparency"
-            options={SURFACE_TRANSPARENCY_OPTIONS}
-            value={appearancePreferences.surfaceTransparency}
-            onChange={(value) => handleAppearancePreferenceChange("surfaceTransparency", value)}
+        {!isHub && isWindowTranslucencySupported() ? (
+          <WindowTranslucencySettings
+            preferences={appearancePreferences}
+            onChange={handleAppearancePreferenceChange}
+            onReset={handleAppearancePreferenceReset}
           />
-        </SettingsRow>
+        ) : null}
       </SettingsSection>
 
       <AlertDialog

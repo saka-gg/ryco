@@ -27,7 +27,7 @@ export function NoActiveThreadState(
   const appSidebarCollapsed = useAppSidebarCollapsed();
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+      <div className="app-content-surface flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
         <header
           className={cn(
             "border-b border-border pr-3 sm:pr-5",

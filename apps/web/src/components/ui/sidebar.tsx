@@ -637,7 +637,7 @@ function SidebarInset({ className, ...props }: React.ComponentProps<"main">) {
   return (
     <main
       className={cn(
-        "relative flex min-w-0 w-full flex-1 flex-col bg-background",
+        "app-content-surface relative flex min-w-0 w-full flex-1 flex-col bg-background",
         // Inset margins follow the tier (not width) so they engage exactly
         // when the tier-gated desktop sidebar peer renders.
         "not-phone:peer-data-[variant=inset]:peer-data-[state=collapsed]:ms-2 not-phone:peer-data-[variant=inset]:m-2 not-phone:peer-data-[variant=inset]:ms-0 not-phone:peer-data-[variant=inset]:rounded-xl not-phone:peer-data-[variant=inset]:shadow-sm/5",
