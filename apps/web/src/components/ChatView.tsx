@@ -5886,6 +5886,9 @@ export default function ChatView(props: ChatViewProps) {
             activeThreadTitle={activeThread.title}
             // An unsent chat draft has no project yet but is already a chat.
             activeProjectName={isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name}
+            activeProjectId={isChatContext ? null : (activeProject?.id ?? null)}
+            activeProjectCwd={isChatContext ? null : (activeProject?.cwd ?? null)}
+            activeProjectAvatarContentHash={activeProject?.customAvatarContentHash ?? null}
             // A chat has no Git to miss: no "No Git" badge (promotion offers Git instead).
             isGitRepo={isGitRepo || isChatContext}
             chatProject={chatProjectHeaderTarget}
@@ -5896,9 +5899,6 @@ export default function ChatView(props: ChatViewProps) {
             }
             keybindings={keybindings}
             availableEditors={availableEditors}
-            worktreeBranch={activeWorktreeSummary?.branch ?? activeThread.branch ?? null}
-            worktreeTitle={activeWorktreeSummary?.title ?? null}
-            worktreeOrigin={activeWorktreeSummary?.origin ?? null}
             worktreeIssueNumber={activeWorktreeSummary?.issueNumber ?? null}
             worktreeIssueState={activeWorktreeSummary?.issueState ?? null}
             worktreePrNumber={headerPullRequest?.number ?? null}

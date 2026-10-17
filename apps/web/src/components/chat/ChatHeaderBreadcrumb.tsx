@@ -1,44 +1,52 @@
+import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { ChevronRightIcon } from "lucide-react";
 import { Fragment, memo, type ReactNode } from "react";
-import { cn } from "~/lib/utils";
-import {
-  shouldShowWorktreeBreadcrumbSegment,
-  type WorktreeOriginLike,
-} from "./ChatHeaderBreadcrumb.logic";
+import { ProjectFavicon } from "../ProjectFavicon";
+
+/** What the project segment needs to draw the project's artwork beside its name. */
+export interface ChatHeaderBreadcrumbProjectIcon {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly projectId: ProjectId;
+  readonly customAvatarContentHash: string | null;
+}
 
 export interface ChatHeaderBreadcrumbProps {
   projectName: string | null | undefined;
-  worktreeBranch: string | null | undefined;
-  worktreeTitle: string | null | undefined;
-  worktreeOrigin: WorktreeOriginLike;
+  projectIcon?: ChatHeaderBreadcrumbProjectIcon | null | undefined;
   sessionTitle: string;
   onSelectProject?: (() => void) | undefined;
-  onSelectWorktree?: (() => void) | undefined;
 }
 
 export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
   props: ChatHeaderBreadcrumbProps,
 ) {
-  const showWorktree = shouldShowWorktreeBreadcrumbSegment({
-    origin: props.worktreeOrigin,
-    branch: props.worktreeBranch,
-  });
-  const worktreeLabel = (props.worktreeTitle?.trim() || props.worktreeBranch?.trim()) ?? null;
   const projectName = props.projectName?.trim() || null;
+  const projectIcon = props.projectIcon ?? null;
 
   // A chevron only ever separates two segments: never one in front of the
-  // first, so a missing project or worktree leaves no empty step behind.
+  // first, so a missing project leaves no empty step behind.
   const segments: Array<{ readonly key: string; readonly node: ReactNode }> = [];
   if (projectName) {
     segments.push({
       key: "project",
-      node: <Segment label={projectName} onSelect={props.onSelectProject} prominent />,
-    });
-  }
-  if (showWorktree && worktreeLabel) {
-    segments.push({
-      key: "worktree",
-      node: <Segment label={worktreeLabel} onSelect={props.onSelectWorktree} mono />,
+      node: (
+        <Segment
+          label={projectName}
+          icon={
+            projectIcon ? (
+              <ProjectFavicon
+                environmentId={projectIcon.environmentId}
+                cwd={projectIcon.cwd}
+                projectId={projectIcon.projectId}
+                customAvatarContentHash={projectIcon.customAvatarContentHash}
+                className="size-4 shrink-0"
+              />
+            ) : null
+          }
+          onSelect={props.onSelectProject}
+        />
+      ),
     });
   }
   segments.push({
@@ -71,37 +79,27 @@ export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
   );
 });
 
-function Segment(props: {
-  label: string;
-  onSelect: (() => void) | undefined;
-  prominent?: boolean;
-  mono?: boolean;
-}) {
-  const text = (
-    <span
-      className={cn("min-w-0 truncate", props.mono ? "font-mono text-xs" : "")}
-      title={props.label}
-    >
-      {props.label}
-    </span>
+function Segment(props: { label: string; icon: ReactNode; onSelect: (() => void) | undefined }) {
+  const content = (
+    <>
+      {props.icon}
+      <span className="min-w-0 truncate" title={props.label}>
+        {props.label}
+      </span>
+    </>
   );
   if (props.onSelect) {
     return (
       <button
         type="button"
         onClick={props.onSelect}
-        className={cn(
-          "inline-flex min-w-0 items-center rounded-md px-1 py-0.5 -mx-1 text-foreground/80 hover:bg-accent/50 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-          props.prominent ? "text-foreground" : "",
-        )}
+        className="inline-flex min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 -mx-1 text-foreground hover:bg-accent/50 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
       >
-        {text}
+        {content}
       </button>
     );
   }
   return (
-    <span className={cn("min-w-0", props.prominent ? "text-foreground" : "text-foreground/80")}>
-      {text}
-    </span>
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-foreground">{content}</span>
   );
 }

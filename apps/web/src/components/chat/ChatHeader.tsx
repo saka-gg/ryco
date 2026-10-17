@@ -1,10 +1,11 @@
 import {
   type EnvironmentId,
   type EditorId,
+  type ProjectId,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
 } from "@ryco/contracts";
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import { ListChecksIcon, PanelRightIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScriptsControl";
@@ -13,8 +14,8 @@ import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
 import { ChatHeaderBar, type ChatHeaderBarProps } from "./ChatHeaderBar";
+import type { ChatHeaderBreadcrumbProjectIcon } from "./ChatHeaderBreadcrumb";
 import type { ChatProjectTarget } from "./ChatProjectActions";
-import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
 import { HEADER_CHROME_ICON_BUTTON_CLASS_NAME } from "./headerChrome";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import { usePerfMark, useDevPropDiff } from "../../perf/tabSwitchInstrumentation";
@@ -25,6 +26,13 @@ interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
+  /**
+   * The project's identity for the breadcrumb's artwork. Primitives, not one
+   * object, so the memoized header does not re-render on every parent pass.
+   */
+  activeProjectId?: ProjectId | null;
+  activeProjectCwd?: string | null;
+  activeProjectAvatarContentHash?: string | null;
   isGitRepo: boolean;
   /** The "No project" chat this thread lives in, if any (chat actions replace Git chrome). */
   chatProject?: ChatProjectTarget | null;
@@ -36,9 +44,6 @@ interface ChatHeaderProps {
   // New, optional props for the breadcrumb. When omitted the header still
   // renders correctly with degraded info (no worktree segment, no
   // source-control counts).
-  worktreeBranch?: string | null;
-  worktreeTitle?: string | null;
-  worktreeOrigin?: WorktreeOriginLike;
   worktreeIssueNumber?: number | null;
   worktreePrNumber?: number | null;
   worktreeIssueState?: "open" | "closed" | null;
@@ -53,7 +58,6 @@ interface ChatHeaderProps {
   worktreeWorkItemState?: "open" | "in_progress" | "done" | "closed" | "unknown" | null;
   worktreeWorkItemStateName?: string | null;
   onSelectProject?: () => void;
-  onSelectWorktree?: () => void;
   onOpenLinkedWorktreeItem?: (item: LinkedWorktreeItem) => void;
   workspacePanelOpen: boolean;
   /** Running/pending + waiting agents; pass zero while the roster is visible. */
@@ -95,6 +99,21 @@ export const ChatHeader = memo(function ChatHeader({
     activeThreadEnvironmentId: props.activeThreadEnvironmentId,
     primaryEnvironmentId,
   });
+
+  const { activeThreadEnvironmentId, activeProjectId, activeProjectCwd } = props;
+  const activeProjectAvatarContentHash = props.activeProjectAvatarContentHash ?? null;
+  const projectIcon = useMemo<ChatHeaderBreadcrumbProjectIcon | null>(
+    () =>
+      activeProjectId && activeProjectCwd
+        ? {
+            environmentId: activeThreadEnvironmentId,
+            cwd: activeProjectCwd,
+            projectId: activeProjectId,
+            customAvatarContentHash: activeProjectAvatarContentHash,
+          }
+        : null,
+    [activeProjectAvatarContentHash, activeProjectCwd, activeProjectId, activeThreadEnvironmentId],
+  );
 
   const inlineActions = (
     <>
@@ -175,11 +194,9 @@ export const ChatHeader = memo(function ChatHeader({
     <div className="flex min-w-0 flex-1 items-center gap-2 py-3">
       <ChatHeaderBar
         projectName={props.activeProjectName}
+        projectIcon={projectIcon}
         isGitRepo={props.isGitRepo}
         chatProject={props.chatProject ?? null}
-        worktreeBranch={props.worktreeBranch}
-        worktreeTitle={props.worktreeTitle}
-        worktreeOrigin={props.worktreeOrigin}
         worktreeIssueNumber={props.worktreeIssueNumber}
         worktreeIssueState={props.worktreeIssueState}
         worktreePrNumber={props.worktreePrNumber}
@@ -195,7 +212,6 @@ export const ChatHeader = memo(function ChatHeader({
         worktreeWorkItemStateName={props.worktreeWorkItemStateName}
         sessionTitle={props.activeThreadTitle}
         {...(props.onSelectProject ? { onSelectProject: props.onSelectProject } : {})}
-        {...(props.onSelectWorktree ? { onSelectWorktree: props.onSelectWorktree } : {})}
         {...(props.onOpenLinkedWorktreeItem
           ? { onOpenLinkedWorktreeItem: props.onOpenLinkedWorktreeItem }
           : {})}

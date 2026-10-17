@@ -29,48 +29,19 @@ describe("ChatHeaderBar", () => {
 
     // No project (e.g. a thread whose project is not loaded): just the title.
     mounted = await render(
-      <ChatHeaderBar
-        projectName={undefined}
-        isGitRepo
-        worktreeBranch={null}
-        worktreeTitle={null}
-        worktreeOrigin={null}
-        sessionTitle="New thread"
-      />,
+      <ChatHeaderBar projectName={undefined} isGitRepo sessionTitle="New thread" />,
     );
     await expect.element(page.getByText("New thread")).toBeInTheDocument();
     expect(chevrons()).toBe(0);
     expect(breadcrumb().firstElementChild?.textContent).toBe("New thread");
 
-    // A worktree without a project leads with the worktree.
+    // Project and title: one separator, and no worktree segment between them.
     await mounted.rerender(
-      <ChatHeaderBar
-        projectName=""
-        isGitRepo
-        worktreeBranch="feature/x"
-        worktreeTitle={null}
-        worktreeOrigin="branch"
-        sessionTitle="Implementation"
-      />,
-    );
-    await expect.element(page.getByText("Implementation")).toBeInTheDocument();
-    expect(chevrons()).toBe(1);
-    expect(breadcrumb().firstElementChild?.textContent).toBe("feature/x");
-
-    // All three segments: two separators.
-    await mounted.rerender(
-      <ChatHeaderBar
-        projectName="Ryco"
-        isGitRepo
-        worktreeBranch="feature/x"
-        worktreeTitle={null}
-        worktreeOrigin="branch"
-        sessionTitle="Implementation"
-      />,
+      <ChatHeaderBar projectName="Ryco" isGitRepo sessionTitle="Implementation" />,
     );
     await expect.element(page.getByText("Ryco")).toBeInTheDocument();
-    expect(chevrons()).toBe(2);
-    expect(breadcrumb().textContent).toBe("Rycofeature/xImplementation");
+    expect(chevrons()).toBe(1);
+    expect(breadcrumb().textContent).toBe("RycoImplementation");
   });
 
   it("shows the active worktree issue number and opens the linked item dialog action", async () => {
@@ -80,9 +51,6 @@ describe("ChatHeaderBar", () => {
       <ChatHeaderBar
         projectName="Ryco"
         isGitRepo
-        worktreeBranch="issue/112"
-        worktreeTitle="Top bar issue number"
-        worktreeOrigin="issue"
         worktreeIssueNumber={112}
         worktreeIssueState="open"
         sessionTitle="Implementation"
@@ -102,9 +70,6 @@ describe("ChatHeaderBar", () => {
       <ChatHeaderBar
         projectName="Ryco"
         isGitRepo
-        worktreeBranch="pr/113"
-        worktreeTitle="Top bar PR number"
-        worktreeOrigin="pr"
         worktreePrNumber={113}
         worktreePrState="open"
         worktreePrIsDraft={false}
@@ -120,9 +85,6 @@ describe("ChatHeaderBar", () => {
       <ChatHeaderBar
         projectName="Ryco"
         isGitRepo
-        worktreeBranch="feature/link-both"
-        worktreeTitle="Linked issue and PR"
-        worktreeOrigin="pr"
         worktreeIssueNumber={112}
         worktreeIssueState="closed"
         worktreePrNumber={113}
@@ -139,14 +101,7 @@ describe("ChatHeaderBar", () => {
 
   it("does not show a source-control identifier when the worktree is unassigned", async () => {
     mounted = await render(
-      <ChatHeaderBar
-        projectName="Ryco"
-        isGitRepo
-        worktreeBranch="feature/no-linked-item"
-        worktreeTitle="No linked item"
-        worktreeOrigin="manual"
-        sessionTitle="Implementation"
-      />,
+      <ChatHeaderBar projectName="Ryco" isGitRepo sessionTitle="Implementation" />,
     );
 
     expect(document.querySelector("[data-linked-worktree-item]")).toBeNull();
@@ -160,9 +115,6 @@ describe("ChatHeaderBar", () => {
         <ChatHeaderBar
           projectName="A very long project name that should truncate before the badges"
           isGitRepo
-          worktreeBranch="feature/super-long-worktree-branch-name-that-keeps-going"
-          worktreeTitle="Extremely long worktree title that should give space to the identifiers"
-          worktreeOrigin="pr"
           worktreeIssueNumber={112}
           worktreeIssueState="open"
           worktreePrNumber={113}
