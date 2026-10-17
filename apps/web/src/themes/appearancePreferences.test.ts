@@ -21,8 +21,10 @@ import {
   PRIMARY_COLOR_OPTIONS,
   SURFACE_TRANSPARENCY_OPTIONS,
   applyAppearancePreferencesToDocument,
+  buildAppearancePreferencesCss,
   getAppearancePreferences,
   getEffectiveSurfaceTransparency,
+  getRequestedWindowTranslucencyScope,
   hasAppearancePreferenceOverride,
   isSurfaceTransparencyReducedBySystem,
   normalizePrimaryColor,
@@ -136,6 +138,58 @@ describe("appearance preferences", () => {
     expect(getAppearancePreferences().diffLayout).toBe("stacked");
   });
 
+  it("validates the translucent window scope, opacity and blur", () => {
+    expect(getAppearancePreferences().windowTranslucency).toBe("off");
+    expect(getAppearancePreferences().windowTranslucencyOpacity).toBe("80");
+    expect(getAppearancePreferences().windowTranslucencyBlur).toBe("64");
+
+    setAppearancePreference("windowTranslucency", "sidebar");
+    setAppearancePreference("windowTranslucencyOpacity", "40");
+    setAppearancePreference("windowTranslucencyBlur", "12");
+    expect(getAppearancePreferences()).toMatchObject({
+      windowTranslucency: "sidebar",
+      windowTranslucencyOpacity: "40",
+      windowTranslucencyBlur: "12",
+    });
+
+    for (const [key, value] of [
+      ["windowTranslucency", "on"],
+      ["windowTranslucencyOpacity", "14"],
+      ["windowTranslucencyOpacity", "101"],
+      ["windowTranslucencyOpacity", "50.5"],
+      ["windowTranslucencyBlur", "0"],
+      ["windowTranslucencyBlur", "65"],
+      ["windowTranslucencyBlur", "-3"],
+    ] as const) {
+      setAppearancePreference(key, value);
+    }
+    expect(getAppearancePreferences()).toMatchObject({
+      windowTranslucency: "sidebar",
+      windowTranslucencyOpacity: "40",
+      windowTranslucencyBlur: "12",
+    });
+  });
+
+  it("resolves the translucent window scope, off while the OS reduces transparency", () => {
+    installMatchMedia([]);
+    expect(getRequestedWindowTranslucencyScope()).toBe("none");
+    setAppearancePreference("windowTranslucency", "window");
+    expect(getRequestedWindowTranslucencyScope()).toBe("window");
+    installMatchMedia(["(prefers-reduced-transparency: reduce)"]);
+    expect(getRequestedWindowTranslucencyScope()).toBe("none");
+  });
+
+  it("derives the raised glass from the coat opacity", () => {
+    installMatchMedia([]);
+    expect(buildAppearancePreferencesCss()).toContain(
+      "--app-window-coat-opacity: 80%; --app-glass-raised-light-alpha: 28%; --app-glass-raised-dark-alpha: 50%;",
+    );
+    setAppearancePreference("windowTranslucencyOpacity", "40");
+    expect(buildAppearancePreferencesCss()).toContain(
+      "--app-window-coat-opacity: 40%; --app-glass-raised-light-alpha: 16%; --app-glass-raised-dark-alpha: 30%;",
+    );
+  });
+
   it("returns defaults when no overrides are stored", () => {
     expect(getAppearancePreferences()).toEqual(DEFAULT_APPEARANCE_PREFERENCES);
     expect(hasAppearancePreferenceOverride("fontFamilySans")).toBe(false);
@@ -228,7 +282,6 @@ describe("appearance preferences", () => {
     setAppearancePreference("radius", "0rem");
     setAppearancePreference("primaryColorMode", "custom");
     setAppearancePreference("primaryColor", "#0EA5E9");
-    setAppearancePreference("surfaceTransparency", "high");
     applyAppearancePreferencesToDocument();
 
     const css = style.read();
@@ -245,9 +298,19 @@ describe("appearance preferences", () => {
     expect(css).toContain(
       ":root, :root.dark { --primary: #0ea5e9; --ring: #0ea5e9; --primary-foreground: #ffffff; }",
     );
-    expect(css).toContain("--app-surface-opacity: 82.4%;");
-    expect(css).toContain("--app-glass-light-popover-alpha: 88%;");
-    expect(css).toContain("--app-dialog-viewport-light-alpha: 37%;");
+  });
+
+  it("pins the desktop tier to Solid whatever step is stored", () => {
+    // The desktop has no step control (the translucent window replaced it), so a
+    // step stored earlier, or by the phone tier, must not thin its surfaces.
+    setAppearancePreference("surfaceTransparency", "glass");
+    const style = installStyleDocument();
+    applyAppearancePreferencesToDocument();
+
+    expect(getEffectiveSurfaceTransparency()).toBe("default");
+    expect(getAppearancePreferences().surfaceTransparency).toBe("glass");
+    expect(style.read()).toContain("--app-surface-opacity: 100%;");
+    expect(style.read()).toContain("--app-glass-dark-popover-alpha: 100%;");
   });
 
   it("keeps floating surfaces solid at the default transparency setting", () => {
@@ -304,7 +367,7 @@ describe("phone Material step resolution", () => {
     );
   });
 
-  it("honours an explicit selection exactly on both tiers, including Solid on a phone", () => {
+  it("honours an explicit selection exactly on the phone, including Solid", () => {
     // Solid equals the desktop default, so it would be indistinguishable from
     // "never chose" if it were not persisted.
     environment.tier = "phone";
@@ -314,12 +377,12 @@ describe("phone Material step resolution", () => {
 
     setAppearancePreference("surfaceTransparency", "glass");
     expect(getEffectiveSurfaceTransparency()).toBe("glass");
+    // The desktop tier stays Solid whatever the phone stored.
     environment.tier = "desktop";
-    expect(getEffectiveSurfaceTransparency()).toBe("glass");
-
-    // Resetting returns each tier to its own unstored default.
-    resetAppearancePreference("surfaceTransparency");
     expect(getEffectiveSurfaceTransparency()).toBe("default");
+
+    // Resetting returns the phone to its own unstored default.
+    resetAppearancePreference("surfaceTransparency");
     environment.tier = "phone";
     expect(getEffectiveSurfaceTransparency()).toBe(PHONE_DEFAULT_SURFACE_TRANSPARENCY);
   });
@@ -386,6 +449,7 @@ describe("material and motion tokens", () => {
   });
 
   it("splits the Glass step into a thin material plus a scrim that restores the coverage", () => {
+    environment.tier = "phone";
     setAppearancePreference("surfaceTransparency", "glass");
     const style = installStyleDocument();
     applyAppearancePreferencesToDocument();
@@ -443,11 +507,12 @@ describe("material and motion tokens", () => {
 });
 
 /**
- * The desktop tier must not move. This pins the five options, the unstored
- * desktop default, and the exact value of every `--app-*` variable that existed
- * before the phone material system, at every step.
+ * The step variables must not move. This pins the five options and the exact
+ * value of every `--app-*` variable that existed before the phone material
+ * system, at every step. The steps only apply on the phone tier now (the
+ * desktop is pinned to Solid), so they are read there.
  */
-describe("desktop appearance regression", () => {
+describe("surface step regression", () => {
   const EXISTING_SURFACE_VARIABLES: Record<string, ReadonlyArray<string>> = {
     default: [
       "--app-surface-opacity: 100%;",
@@ -543,7 +608,7 @@ describe("desktop appearance regression", () => {
     Reflect.deleteProperty(globalThis, "HTMLStyleElement");
   });
 
-  it("keeps the five desktop options and the unstored desktop default", () => {
+  it("keeps the five steps and the Solid desktop default", () => {
     expect(SURFACE_TRANSPARENCY_OPTIONS.map((option) => option.value)).toEqual([
       "default",
       "light",
@@ -563,6 +628,7 @@ describe("desktop appearance regression", () => {
   });
 
   it("keeps every pre-existing --app-* value at every step", () => {
+    environment.tier = "phone";
     for (const [step, expected] of Object.entries(EXISTING_SURFACE_VARIABLES)) {
       const style = installStyleDocument();
       setAppearancePreference("surfaceTransparency", step);
@@ -575,6 +641,7 @@ describe("desktop appearance regression", () => {
   });
 
   it("keeps every pre-existing --app-* value under prefers-reduced-transparency too", () => {
+    environment.tier = "phone";
     // The OS setting is enforced in CSS, not in this derivation. If it were
     // folded in here it would silently move the desktop dialog, sheet and
     // command scrims — which the pre-existing reduced-transparency CSS block
@@ -592,6 +659,7 @@ describe("desktop appearance regression", () => {
   });
 
   it("pins the toast material floor at every step", () => {
+    environment.tier = "phone";
     // Like the composer, the toast keeps translucent, blurred material even at
     // Solid; steps above Solid thin with the popover plate under the same
     // legibility floors. The OS reduced-transparency override lives in CSS.

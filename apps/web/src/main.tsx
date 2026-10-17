@@ -15,6 +15,8 @@ import { syncDocumentHubSurface } from "./lib/hubSurface";
 import { syncDocumentPresentationTier } from "./lib/presentationTier";
 import { syncDocumentVisualViewportInsets } from "./lib/visualViewportInsets";
 import { syncAppearancePreferenceEnvironment } from "./themes/appearancePreferences";
+import { isWindowTranslucencySupported } from "./themes/windowTranslucency";
+import { installGlassOverlayCutout } from "./lib/glassOverlayCutout";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
 import { initializeWsConnectionState } from "./rpc/wsConnectionState";
 import { syncDocumentMotionVisibility } from "./lib/perf/motion";
@@ -71,7 +73,16 @@ if (hostedPwaLifecycle) {
   void hostedPwaLifecycle.start({ enabled: import.meta.env.PROD && isHostedHubMode() });
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+const rootElement = document.getElementById("root") as HTMLElement;
+
+// On a translucent window, floating overlays get the page cut out from under
+// them (the macOS desktop only; inert while the window is opaque).
+if (isWindowTranslucencySupported()) {
+  const disposeGlassOverlayCutout = installGlassOverlayCutout(rootElement);
+  if (import.meta.hot) import.meta.hot.dispose(disposeGlassOverlayCutout);
+}
+
+ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <RouterProvider router={router} />
     {isElectron && (

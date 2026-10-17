@@ -265,7 +265,7 @@ function WorkspacePullRequestReader(props: {
           ref={rootRef}
           tabIndex={-1}
           data-slot="workspace-pull-request"
-          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground outline-none"
+          className="app-content-surface relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background text-foreground outline-none"
         >
           {model.selection ? <PullRequestReader /> : null}
         </div>

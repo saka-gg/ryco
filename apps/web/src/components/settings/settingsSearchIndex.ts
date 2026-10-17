@@ -4,7 +4,7 @@ export interface SettingsSearchEntry {
   readonly section: SettingsSectionId;
   readonly owner: "client" | "node";
   readonly localOnboardingOnly?: boolean;
-  readonly desktopCapability?: "computerUse" | "quitShortcut";
+  readonly desktopCapability?: "computerUse" | "quitShortcut" | "windowTranslucencySupported";
   readonly title: string;
   readonly description: string;
   /** Extra match terms not present in title/description. */
@@ -260,10 +260,11 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
-    title: "Transparency",
+    title: "Translucent window",
     owner: "client",
-    description: "Glass and floating surfaces like dialogs, menus, popups.",
-    keywords: "glass blur liquid material solid",
+    desktopCapability: "windowTranslucencySupported",
+    description: "Let the desktop show through the app window, blurred.",
+    keywords: "vibrancy glass transparency translucent see-through wallpaper blur opacity macos",
   },
   {
     section: "appearance",

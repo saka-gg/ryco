@@ -31,8 +31,8 @@ function subscribe(onChange: () => void): () => void {
  * which falls back to the default when no override is stored.
  *
  * With `{ effective: true }` the value is the selection that actually drives the
- * document variables: `surfaceTransparency` then carries the phone tier's
- * unstored default instead of the desktop one. It is republished through the
+ * document variables: `surfaceTransparency` then resolves to Solid on the
+ * desktop tier and to the stored step or the phone default on the phone tier. It is republished through the
  * same change event, so the same subscription covers it.
  */
 export function useAppearancePreference(

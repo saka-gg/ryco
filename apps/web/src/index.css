@@ -536,8 +536,8 @@
   --app-glass-dark-popover-alpha: 100%;
   /* Phone material tiers. These are the `Solid` step: opaque, unblurred, no
      scrim. `themes/appearancePreferences.ts` rewrites all of them from the
-     active Material step (the same `surfaceTransparency` axis the desktop
-     control writes), so these values are what renders before that runs. */
+     active Material step (`surfaceTransparency`, written by the phone tier's
+     Material control), so these values are what renders before that runs. */
   --app-glass-sheet-filter: none;
   --app-glass-sheet-light-alpha: 100%;
   --app-glass-sheet-light-scrim-alpha: 0%;
@@ -3594,4 +3594,249 @@ label:has(> select#reasoning-effort) select {
 }
 .settings-range:focus-visible::-moz-range-thumb {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent);
+}
+
+/* ─── Translucent window ──────────────────────────────────────────────────────
+   Settings → Appearance → Translucent window (macOS desktop; the model is
+   Synara's). The window server blurs the desktop behind a clear window at the
+   chosen radius (apps/desktop/src/windowTranslucency.ts); themes/
+   windowTranslucency.ts stamps the scope on the root:
+
+   • `window`: body paints ONE translucent coat for the whole window and every
+     layout surface above it goes clear. Painting the fill per surface would
+     stack it wherever surfaces nest and turn those regions nearly opaque.
+     Raised chrome (composer, cards) takes one denser pane of the popover tone,
+     with NO backdrop-filter: Chromium paints a filtered backdrop over the
+     backdrop it sampled, so a blur lays a second copy of the coat under the
+     surface. Floating overlays take the same pane, and the page is cut out
+     from under them (lib/glassOverlayCutout.ts) so they show the glass rather
+     than the text they cover.
+   • `sidebar`: only the sidebar paints the coat; the content stays opaque.
+
+   The coat opacity and raised alphas come from appearancePreferences.ts. */
+:root[data-window-translucency] {
+  --app-window-glass: color-mix(
+    in srgb,
+    var(--background) var(--app-window-coat-opacity, 80%),
+    transparent
+  );
+  --app-glass-raised-surface: color-mix(
+    in srgb,
+    var(--popover) var(--app-glass-raised-light-alpha, 28%),
+    transparent
+  );
+  --app-overlay-surface: color-mix(in srgb, var(--popover) 55%, transparent);
+  background: transparent;
+}
+
+/* Dark coats deepen toward black so the glass reads as charcoal, not grey. */
+:root.dark[data-window-translucency] {
+  --app-window-glass: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--background) 80%, var(--color-black))
+      var(--app-window-coat-opacity, 80%),
+    transparent
+  );
+  --app-glass-raised-surface: color-mix(
+    in srgb,
+    var(--popover) var(--app-glass-raised-dark-alpha, 50%),
+    transparent
+  );
+}
+
+:root[data-window-translucency] body {
+  background: transparent;
+}
+
+/* The ambient lighting is for frosting opaque chrome; the desktop replaces it. */
+:root[data-window-translucency] .app-ambient {
+  display: none;
+}
+
+:root[data-window-translucency="window"] body {
+  background: var(--app-window-glass);
+}
+
+/* `.app-content-surface` marks a route-level surface that sits directly on the
+   shell (sidebar inset, chat column and panes, route wrappers, terminal);
+   `.app-chrome-glass` is the sidebar and the chat header. All clear over the coat. */
+:root[data-window-translucency="window"] :is(.app-content-surface, .app-chrome-glass) {
+  background-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root[data-window-translucency="sidebar"]
+  [data-slot="sidebar"][data-side="left"]
+  [data-slot="sidebar-inner"] {
+  background-color: var(--app-window-glass);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Raised chrome over the coat. Layered, so an explicit fill utility (the
+   composer's drag-over tint) still wins; the specificity beats the base plates. */
+@layer components {
+  :root[data-window-translucency="window"] .app-composer-surface {
+    background-color: var(--app-glass-raised-surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* Cards inside the page (`bg-card`: settings, statistics, empty states) and
+   `.app-glass-raised` (any other surface that paints an opaque fill of its own,
+   such as a filled control) take the raised pane, so they do not read as solid
+   blocks on the glass. Portaled cards are excluded: nothing is cut out under
+   them. Content surfaces that keep `bg-card` for opaque windows stay clear. */
+:root[data-window-translucency="window"]
+  :is(#root .bg-card:not(.app-content-surface), .app-glass-raised) {
+  background-color: var(--app-glass-raised-surface);
+}
+
+/* Interactive cards lift one more step on hover, in place of their own hover fill. */
+:root[data-window-translucency="window"]
+  :is(#root .bg-card:not(.app-content-surface), .app-glass-raised):is(
+    button,
+    [role="button"],
+    [role="radio"]
+  ):hover {
+  background:
+    linear-gradient(var(--app-glass-raised-surface), var(--app-glass-raised-surface)),
+    var(--app-glass-raised-surface);
+}
+
+/* The Crown rail's docked islands sit in their own gutter with only the coat
+   behind them, so the always-dark mat thins to smoked glass. Light windows keep
+   it denser: its light icons need a dark ground over the white coat. Its
+   flyouts float over the transcript and keep the solid mat. */
+:root[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
+  background: color-mix(in srgb, #0d0d0e var(--app-glass-raised-dark-alpha, 50%), transparent);
+}
+
+:root:not(.dark)[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
+  background: color-mix(in srgb, #0d0d0e 82%, transparent);
+}
+
+/* ─── Floating overlays on a translucent window ─────────────────────────────
+   Menus, selects, comboboxes, pickers, popovers and toasts portaled next to the
+   app root: the page is cut out from under them, so the blur is dropped (it
+   would only lay a second copy of the coat under the fill). Sidebar-only glass
+   has no body coat, so the overlay carries it itself. Keep the selector in step
+   with GLASS_OVERLAY_SELECTOR (lib/glassOverlayCutout.ts). */
+:root[data-window-translucency="window"]
+  body
+  > :not(#root)
+  :is(.selection-glass-surface, [data-slot="popover-popup"], [data-slot="autocomplete-popup"]) {
+  background: var(--app-glass-raised-surface);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root[data-window-translucency="sidebar"]
+  body
+  > :not(#root)
+  :is(.selection-glass-surface, [data-slot="popover-popup"], [data-slot="autocomplete-popup"]) {
+  background:
+    linear-gradient(var(--app-overlay-surface), var(--app-overlay-surface)), var(--app-window-glass);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Toasts keep their status tone over the glass pane. */
+:root[data-window-translucency="window"] .app-toast-surface {
+  background-color: color-mix(
+    in srgb,
+    var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
+    var(--app-glass-raised-surface)
+  );
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root[data-window-translucency="sidebar"] .app-toast-surface {
+  background:
+    linear-gradient(
+      color-mix(
+        in srgb,
+        var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
+        var(--app-overlay-surface)
+      ),
+      color-mix(
+        in srgb,
+        var(--app-toast-tone, var(--popover)) var(--app-toast-tone-strength, 0%),
+        var(--app-overlay-surface)
+      )
+    ),
+    var(--app-window-glass);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Nothing is cut out from under these, so a thin fill would leave what they
+   cover readable: an overlay on another portaled layer (`data-glass-backed`, a
+   select inside a dialog), hover cards (never cut out: opening one per row
+   crossing must not re-clip the app), and glass surfaces inside the page. */
+:root[data-window-translucency]
+  :is(
+    [data-glass-backed],
+    [data-slot="tooltip-popup"],
+    [data-slot="preview-card-popup"],
+    #root :is(.selection-glass-surface, .app-toast-surface)
+  ) {
+  background: color-mix(in srgb, var(--popover) 96%, transparent);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* A raised surface floating inside the page (the side chat) has the content
+   beside it cut out from under it while registered (lib/glassOverlayCutout.ts),
+   so it takes the raised pane like a portaled overlay. */
+:root[data-window-translucency="window"] #root [data-glass-in-page] {
+  background: var(--app-glass-raised-surface);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* A glass surface nested in an overlay is part of its content: the overlay
+   already paints the pane. */
+:root[data-window-translucency]
+  body
+  > :not(#root)
+  :is(.selection-glass-surface, .app-toast-surface, [data-slot="popover-popup"])
+  :is(.selection-glass-surface, .app-toast-surface) {
+  background: transparent;
+}
+
+/* ─── Transcript under the floating bars ─────────────────────────────────────
+   The header and composer float over the transcript and can no longer occlude
+   it, so the transcript dissolves at both edges instead, under the clearances
+   ChatView publishes for the bars, and the composer scrim's fill is dropped. */
+:root[data-window-translucency="window"] .app-composer-scrim {
+  background: none;
+}
+
+:root[data-window-translucency="window"] .chat-transcript-viewport {
+  --chat-transcript-fade-top: var(--chat-header-clearance, 0px);
+  --chat-transcript-fade-bottom: calc(100% - var(--chat-composer-clearance, 0px) + 8px);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent var(--chat-transcript-fade-top),
+    black calc(var(--chat-transcript-fade-top) + 1.5rem),
+    black calc(var(--chat-transcript-fade-bottom) - 2.5rem),
+    transparent var(--chat-transcript-fade-bottom)
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent var(--chat-transcript-fade-top),
+    black calc(var(--chat-transcript-fade-top) + 1.5rem),
+    black calc(var(--chat-transcript-fade-bottom) - 2.5rem),
+    transparent var(--chat-transcript-fade-bottom)
+  );
+}
+
+/* Terminals follow the glass: their xterm theme resolves a clear background
+   (ThreadTerminalDrawer.tsx), and xterm backs its viewport with black. */
+:root[data-window-translucency="window"] .xterm .xterm-viewport {
+  background-color: transparent;
 }

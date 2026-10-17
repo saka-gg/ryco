@@ -59,7 +59,7 @@ import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import { resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import type { HostedHubNode } from "../../hostedHub/types";
-import { syncDocumentPresentationTier } from "../../lib/presentationTier";
+import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
 import {
   applyAppearancePreferencesToDocument,
   resetAppearancePreference,
@@ -343,6 +343,9 @@ describe("hosted connection controls", () => {
     // The pill renders on the `chip` material tier: at the Glass step it is
     // translucent and blurred, with the tier's own (smaller) blur radius. The
     // contrast that makes this safe is asserted in `GlassSurface.browser.tsx`.
+    // Material steps only apply on the phone tier; the resize's media-query
+    // change can land after the viewport call resolves.
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
     setAppearancePreference("surfaceTransparency", "glass");
     applyAppearancePreferencesToDocument();
     const pillStyle = getComputedStyle(pillElement);

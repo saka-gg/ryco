@@ -8,6 +8,7 @@ test-results/
 apps/*/dist
 .perf-results/
 apps/desktop/resources/ryco-desktop-security-helper
+apps/desktop/resources/ryco-window-material.node
 .astro
 packages/*/dist
 .env

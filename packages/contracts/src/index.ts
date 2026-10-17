@@ -10,6 +10,7 @@ export * from "./localIntroduction.ts";
 export * from "./desktopNativeNodeClaim.ts";
 export * from "./hubConnector.ts";
 export * from "./ipc.ts";
+export * from "./windowMaterial.ts";
 export * from "./terminal.ts";
 export * from "./provider.ts";
 export * from "./providerInstance.ts";

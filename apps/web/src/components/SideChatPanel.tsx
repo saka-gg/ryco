@@ -28,6 +28,7 @@ import { sideChatStore, useSideChatStore } from "../sideChatStore";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import { useDelayedUnmount } from "../hooks/useDelayedUnmount";
+import { registerInPageGlassOverlay } from "../lib/glassOverlayCutout";
 import { useSettings } from "../hooks/useSettings";
 import { readMotionDurationMs } from "../lib/perf/motion";
 import { cn, randomUUID } from "../lib/utils";
@@ -71,6 +72,13 @@ export function SideChatPanel({
   );
   const panelMounted = useDelayedUnmount(open, exitMs);
   const panelRef = useRef<HTMLElement>(null);
+  // On a whole-window glass shell the panel is a pane of glass with the
+  // transcript cut out from under it (lib/glassOverlayCutout.ts).
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panelMounted || !panel) return;
+    return registerInPageGlassOverlay(panel);
+  }, [panelMounted]);
   if (!chat) return null;
   return (
     <>

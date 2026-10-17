@@ -1,4 +1,13 @@
+import {
+  DESKTOP_WINDOW_BLUR_RADIUS_MAX,
+  DESKTOP_WINDOW_BLUR_RADIUS_MIN,
+} from "@ryco/contracts/window-material";
+
 import { getPresentationTier, subscribeToPresentationTier } from "../lib/presentationTier";
+import {
+  applyWindowTranslucencyToDocument,
+  type WindowTranslucencyScope,
+} from "./windowTranslucency";
 
 export const APPEARANCE_PREFERENCES_STORAGE_KEY = "ryco:appearance-preferences";
 export const APPEARANCE_PREFERENCES_STYLE_ELEMENT_ID = "ryco-appearance-preferences";
@@ -15,6 +24,9 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "motion",
   "dockDensity",
   "diffLayout",
+  "windowTranslucency",
+  "windowTranslucencyOpacity",
+  "windowTranslucencyBlur",
 ] as const;
 
 export type AppearancePreferenceKey = (typeof APPEARANCE_PREFERENCE_KEYS)[number];
@@ -110,6 +122,12 @@ export const RADIUS_OPTIONS = [
   { value: "1.125rem", label: "Round", description: "18 px" },
 ] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
 
+/**
+ * The material steps of the frozen web phone tier's Material control. The
+ * desktop tier has no transparency step: it is always {@link
+ * SOLID_SURFACE_TRANSPARENCY}, and the translucent window
+ * (`windowTranslucency`) is its one see-through setting.
+ */
 export const SURFACE_TRANSPARENCY_OPTIONS = [
   { value: "default", label: "Solid", description: "0%" },
   { value: "light", label: "Light", description: "8%" },
@@ -133,7 +151,7 @@ export const PHONE_MATERIAL_OPTIONS = [
 /**
  * The step the phone tier resolves to when no `surfaceTransparency` override is
  * stored. This is a tier **default**, not a floor: an explicit selection is
- * honoured exactly on both tiers, including a deliberate `default` (Solid).
+ * honoured exactly on the phone, including a deliberate `default` (Solid).
  * `Standard` is the phone default because it is the single-layer path, and a
  * first run on a mid-range device is where a dropped-frame impression costs
  * most.
@@ -160,6 +178,21 @@ export const DOCK_DENSITY_OPTIONS = [
   { value: "comfortable", label: "Comfortable", description: "Roomier capsule" },
   { value: "compact", label: "Compact", description: "Tighter capsule" },
 ] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
+
+/**
+ * The translucent window on the macOS desktop app: the desktop shows through,
+ * blurred, across the whole window or only behind the sidebar. See
+ * `windowTranslucency.ts`.
+ */
+export const WINDOW_TRANSLUCENCY_OPTIONS = [
+  { value: "off", label: "Off", description: "Opaque window" },
+  { value: "window", label: "Whole window", description: "One glass coat" },
+  { value: "sidebar", label: "Sidebar only", description: "Opaque content" },
+] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
+
+/** Thinnest glass coat: below this the window reads as see-through rather than as glass. */
+export const WINDOW_TRANSLUCENCY_OPACITY_MIN = 15;
+export const WINDOW_TRANSLUCENCY_OPACITY_MAX = 100;
 
 export const MOTION_OPTIONS = [
   { value: "system", label: "System", description: "Follow OS" },
@@ -192,6 +225,9 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   motion: MOTION_OPTIONS[0].value,
   dockDensity: DOCK_DENSITY_OPTIONS[0].value,
   diffLayout: "stacked",
+  windowTranslucency: "off",
+  windowTranslucencyOpacity: "80",
+  windowTranslucencyBlur: String(DESKTOP_WINDOW_BLUR_RADIUS_MAX),
 };
 
 const RADIUS_TOKEN_OFFSETS_PX = {
@@ -204,7 +240,19 @@ const RADIUS_TOKEN_OFFSETS_PX = {
   "4xl": 16,
 } as const;
 
-const OPTION_VALUES: Record<AppearancePreferenceKey, ReadonlySet<string>> = {
+/** Integer-valued keys, stored as decimal strings and validated against a range. */
+const NUMERIC_RANGES: Partial<Record<AppearancePreferenceKey, { min: number; max: number }>> = {
+  windowTranslucencyOpacity: {
+    min: WINDOW_TRANSLUCENCY_OPACITY_MIN,
+    max: WINDOW_TRANSLUCENCY_OPACITY_MAX,
+  },
+  windowTranslucencyBlur: {
+    min: DESKTOP_WINDOW_BLUR_RADIUS_MIN,
+    max: DESKTOP_WINDOW_BLUR_RADIUS_MAX,
+  },
+};
+
+const OPTION_VALUES: Partial<Record<AppearancePreferenceKey, ReadonlySet<string>>> = {
   fontFamilySans: new Set(FONT_FAMILY_SANS_OPTIONS.map((option) => option.value)),
   fontFamilyMono: new Set(FONT_FAMILY_MONO_OPTIONS.map((option) => option.value)),
   fontSizeBase: new Set(FONT_SIZE_OPTIONS.map((option) => option.value)),
@@ -215,6 +263,7 @@ const OPTION_VALUES: Record<AppearancePreferenceKey, ReadonlySet<string>> = {
   motion: new Set(MOTION_OPTIONS.map((option) => option.value)),
   dockDensity: new Set(DOCK_DENSITY_OPTIONS.map((option) => option.value)),
   diffLayout: new Set(["stacked", "split"]),
+  windowTranslucency: new Set(WINDOW_TRANSLUCENCY_OPTIONS.map((option) => option.value)),
 };
 
 /**
@@ -290,7 +339,14 @@ export function isValidPreferenceValue(
 ): value is string {
   if (typeof value !== "string") return false;
   if (key === "primaryColor") return normalizePrimaryColor(value) !== null;
-  return OPTION_VALUES[key].has(value);
+  const range = NUMERIC_RANGES[key];
+  if (range) {
+    const number = Number(value);
+    return (
+      /^\d+$/.test(value) && Number.isInteger(number) && number >= range.min && number <= range.max
+    );
+  }
+  return OPTION_VALUES[key]?.has(value) ?? false;
 }
 
 export function getAppearancePreferences(): AppearancePreferences {
@@ -302,10 +358,12 @@ export function hasAppearancePreferenceOverride(key: AppearancePreferenceKey): b
 }
 
 /**
- * The `surfaceTransparency` step the user has selected: the stored override, or
- * the tier's unstored default. With no override stored the phone tier resolves
- * to {@link PHONE_DEFAULT_SURFACE_TRANSPARENCY} and the desktop tier keeps the
- * unstored `default`; an explicit selection is never overridden on either tier.
+ * The `surfaceTransparency` step in effect. The desktop tier is always
+ * {@link SOLID_SURFACE_TRANSPARENCY}: it has no step control (the translucent
+ * window is its see-through setting), so a step stored before that control was
+ * removed, or by the phone tier in the same browser, must not leave its
+ * surfaces thinned. The phone tier honours the stored override exactly, and
+ * resolves to {@link PHONE_DEFAULT_SURFACE_TRANSPARENCY} without one.
  *
  * `prefers-reduced-transparency` is deliberately **not** applied here. It is
  * enforced in CSS (see the `prefers-reduced-transparency` block in
@@ -315,11 +373,8 @@ export function hasAppearancePreferenceOverride(key: AppearancePreferenceKey): b
  * See {@link isSurfaceTransparencyReducedBySystem}.
  */
 export function getEffectiveSurfaceTransparency(): string {
-  const stored = parseStoredOverrides().surfaceTransparency;
-  if (stored !== undefined) return stored;
-  return getPresentationTier() === "phone"
-    ? PHONE_DEFAULT_SURFACE_TRANSPARENCY
-    : DEFAULT_APPEARANCE_PREFERENCES.surfaceTransparency;
+  if (getPresentationTier() !== "phone") return SOLID_SURFACE_TRANSPARENCY;
+  return parseStoredOverrides().surfaceTransparency ?? PHONE_DEFAULT_SURFACE_TRANSPARENCY;
 }
 
 /**
@@ -330,6 +385,17 @@ export function getEffectiveSurfaceTransparency(): string {
  */
 export function isSurfaceTransparencyReducedBySystem(): boolean {
   return matchesMedia(REDUCED_TRANSPARENCY_MEDIA_QUERY);
+}
+
+/**
+ * Which surfaces should let the desktop show through: the selected scope, or
+ * `none` while the OS reduces transparency (the user asked for solid surfaces
+ * everywhere). Host support is checked where the document is painted.
+ */
+export function getRequestedWindowTranslucencyScope(): WindowTranslucencyScope {
+  const selected = getAppearancePreferences().windowTranslucency;
+  if (matchesMedia(REDUCED_TRANSPARENCY_MEDIA_QUERY)) return "none";
+  return selected === "window" || selected === "sidebar" ? selected : "none";
 }
 
 /** Whether motion is reduced, by the stored preference or by the OS setting. */
@@ -367,7 +433,7 @@ export function resetAppearancePreference(key: AppearancePreferenceKey): void {
 /** The stylesheet text {@link applyAppearancePreferencesToDocument} writes. */
 export function buildAppearancePreferencesCss(): string {
   const preferences = getEffectiveAppearancePreferences();
-  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} }${buildPrimaryColorCssRule(preferences)}`;
+  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} ${buildWindowTranslucencyCssVariables(Number(preferences.windowTranslucencyOpacity))} }${buildPrimaryColorCssRule(preferences)}`;
 }
 
 /**
@@ -398,6 +464,10 @@ export function applyAppearancePreferencesToDocument(): boolean {
   if (changed) {
     style.textContent = textContent;
   }
+  applyWindowTranslucencyToDocument({
+    scope: getRequestedWindowTranslucencyScope(),
+    blurRadius: Number(getAppearancePreferences().windowTranslucencyBlur),
+  });
   // Subscribers still hear about environment changes that emit no CSS
   // (e.g. prefers-reduced-transparency, which the settings UI reports).
   dispatchAppearancePreferencesChangeEvent();
@@ -413,7 +483,8 @@ export function applyAppearancePreferencesToDocument(): boolean {
  * - `prefers-reduced-motion`, which collapses the emitted motion durations;
  * - `prefers-reduced-transparency`, which changes no variable at all — it is
  *   enforced in CSS — but must still reach the settings UI so it can report
- *   that a system setting is overriding the selected material.
+ *   that a system setting is overriding the selected material, and turns
+ *   window translucency off while it holds.
  *
  * Returns a teardown, and is a no-op outside a browser.
  */
@@ -730,6 +801,34 @@ const DOCK_DENSITY_PADDING_PX: Record<string, number> = { comfortable: 8, compac
 function buildDockDensityCssVariables(dockDensity: string): string {
   const padding = DOCK_DENSITY_PADDING_PX[dockDensity] ?? DOCK_DENSITY_PADDING_PX["comfortable"]!;
   return `--app-dock-padding: ${padding}px;`;
+}
+
+/**
+ * Raised glass on a whole-window translucent shell (composer, cards, floating
+ * overlays): a denser pane of the popover tone over the window's coat. Its fill
+ * tracks the coat's opacity from a floor, so it keeps its contrast against the
+ * window at every opacity. Light runs thinner: a white pane reads as solid at a
+ * fill a dark pane of the same strength does not.
+ */
+const RAISED_GLASS_OPACITY = {
+  light: { floor: 4, ratio: 0.3 },
+  dark: { floor: 10, ratio: 0.5 },
+} as const;
+
+/**
+ * The window coat's opacity and the raised-glass alphas derived from it. Inert
+ * until `data-window-translucency` is set (index.css).
+ */
+function buildWindowTranslucencyCssVariables(opacity: number): string {
+  const raised = (scheme: "light" | "dark") =>
+    Math.round(RAISED_GLASS_OPACITY[scheme].floor + opacity * RAISED_GLASS_OPACITY[scheme].ratio);
+  return [
+    ["--app-window-coat-opacity", formatPercent(opacity)],
+    ["--app-glass-raised-light-alpha", formatPercent(raised("light"))],
+    ["--app-glass-raised-dark-alpha", formatPercent(raised("dark"))],
+  ]
+    .map(([name, value]) => `${name}: ${value};`)
+    .join(" ");
 }
 
 /** Generate CSS rule for custom primary color, including the computed foreground color for contrast. */

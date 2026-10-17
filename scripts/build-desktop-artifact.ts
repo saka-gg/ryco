@@ -762,6 +762,7 @@ export const DESKTOP_BUILD_FILES = [
   "**/*",
   "!apps/desktop/resources/ryco-desktop-security-helper",
   "!apps/desktop/prod-resources/ryco-desktop-security-helper",
+  "!apps/desktop/resources/ryco-window-material.node",
   // Shipped as extraResources and run from there; binaries inside app.asar
   // cannot execute. prod-resources only needs to carry the icons.
   "!apps/desktop/prod-resources/cua-driver/**",
@@ -984,6 +985,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         from: "apps/desktop/resources/ryco-desktop-security-helper",
         to: "ryco-desktop-security-helper",
       },
+      { from: "apps/desktop/resources/ryco-window-material.node", to: "ryco-window-material.node" },
       {
         from: "apps/server/dist/device-helper",
         to: "device-helper",
@@ -1018,6 +1020,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         "Contents/Resources/cua-driver/cua-driver",
         "Contents/Resources/ryco-computer-use-helper",
         "Contents/Resources/ryco-desktop-security-helper",
+        "Contents/Resources/ryco-window-material.node",
       ],
     };
     if (macUnsignedInstallAssets) {

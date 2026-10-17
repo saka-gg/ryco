@@ -16,6 +16,7 @@ import {
   appearancePreferencesDocumentNeedsUpdate,
   applyAppearancePreferencesToDocument,
 } from "../themes/appearancePreferences";
+import { getDocumentWindowTranslucencyScope } from "../themes/windowTranslucency";
 
 type Theme = "light" | "dark" | "system";
 type ThemeSnapshot = {
@@ -94,6 +95,9 @@ function resolveBrowserChromeSurface(): HTMLElement {
 
 export function syncBrowserChromeTheme() {
   if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return;
+  // A translucent window's html/body stay clear for the glass (index.css); an
+  // opaque inline fill here would cover it.
+  if (getDocumentWindowTranslucencyScope() !== "none") return;
   const surfaceColor = normalizeThemeColor(
     getComputedStyle(resolveBrowserChromeSurface()).backgroundColor,
   );

@@ -1066,7 +1066,7 @@ export default function PreviewPanel({ mode = "inline" }: PreviewPanelProps) {
               aria-label="Resize workspace tree"
               aria-hidden={isTreeVisible ? undefined : true}
               className={cn(
-                "group relative shrink-0 overflow-hidden bg-background transition-[width,opacity,background-color] duration-[360ms] ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-accent/40 motion-reduce:transition-none",
+                "group relative shrink-0 overflow-hidden bg-transparent transition-[width,opacity,background-color] duration-[360ms] ease-[cubic-bezier(0.16,1,0.3,1)] hover:bg-accent/40 motion-reduce:transition-none",
                 isTreeVisible ? "w-2 cursor-ew-resize opacity-100" : "w-0 opacity-0",
               )}
               disabled={!isTreeVisible}

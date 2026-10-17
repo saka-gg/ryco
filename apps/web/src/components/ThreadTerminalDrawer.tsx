@@ -35,6 +35,10 @@ import { type TerminalContextSelection } from "~/lib/terminalContext";
 import { openInPreferredEditor } from "../editorPreferences";
 import { APPEARANCE_PREFERENCES_CHANGE_EVENT } from "../themes/appearancePreferences";
 import {
+  WINDOW_TRANSLUCENCY_ATTRIBUTE,
+  getDocumentWindowTranslucencyScope,
+} from "../themes/windowTranslucency";
+import {
   collectWrappedTerminalLinkLine,
   extractTerminalLinks,
   isTerminalLinkActivation,
@@ -275,6 +279,15 @@ function normalizeComputedColor(value: string | null | undefined, fallback: stri
   return value ?? fallback;
 }
 
+/**
+ * On a whole-window translucent window the terminal is clear like the surface
+ * around it, so the window's glass shows through (index.css). xterm only paints
+ * a non-opaque background when created with `allowTransparency`.
+ */
+function terminalFollowsWindowGlass(): boolean {
+  return getDocumentWindowTranslucencyScope() === "window";
+}
+
 function terminalThemeFromApp(mountElement?: HTMLElement | null): ITheme {
   const isDark = document.documentElement.classList.contains("dark");
   const fallbackBackground = isDark ? "rgb(14, 18, 24)" : "rgb(255, 255, 255)";
@@ -285,10 +298,12 @@ function terminalThemeFromApp(mountElement?: HTMLElement | null): ITheme {
     document.body;
   const drawerStyles = getComputedStyle(drawerSurface);
   const bodyStyles = getComputedStyle(document.body);
-  const background = normalizeComputedColor(
-    drawerStyles.backgroundColor,
-    normalizeComputedColor(bodyStyles.backgroundColor, fallbackBackground),
-  );
+  const background = terminalFollowsWindowGlass()
+    ? "rgba(0, 0, 0, 0)"
+    : normalizeComputedColor(
+        drawerStyles.backgroundColor,
+        normalizeComputedColor(bodyStyles.backgroundColor, fallbackBackground),
+      );
   const foreground = normalizeComputedColor(
     drawerStyles.color,
     normalizeComputedColor(bodyStyles.color, fallbackForeground),
@@ -528,6 +543,7 @@ export function TerminalViewport({
         fontSize: 12,
         scrollback: 5_000,
         fontFamily: readTerminalFontFamily(),
+        allowTransparency: terminalFollowsWindowGlass(),
         theme: terminalThemeFromApp(mount),
       });
       terminal.loadAddon(fitAddon);
@@ -798,7 +814,7 @@ export function TerminalViewport({
     });
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class", "style"],
+      attributeFilter: ["class", "style", WINDOW_TRANSLUCENCY_ATTRIBUTE],
     });
 
     const applyTerminalEvent = (event: TerminalEvent) => {
@@ -1299,7 +1315,7 @@ export function TerminalViewport({
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full overflow-hidden rounded-[4px] bg-background"
+      className="app-content-surface relative h-full w-full overflow-hidden rounded-[4px] bg-background"
     />
   );
 }
@@ -1752,8 +1768,8 @@ export default function ThreadTerminalDrawer({
     <aside
       className={
         isPanelLayout
-          ? "thread-terminal-drawer relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background"
-          : "thread-terminal-drawer relative flex min-w-0 shrink-0 animate-[terminal-drawer-in_220ms_ease-out] flex-col overflow-hidden border-border/80 border-t bg-background"
+          ? "app-content-surface thread-terminal-drawer relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+          : "app-content-surface thread-terminal-drawer relative flex min-w-0 shrink-0 animate-[terminal-drawer-in_220ms_ease-out] flex-col overflow-hidden border-border/80 border-t bg-background"
       }
       style={isPanelLayout ? undefined : { height: `${drawerHeight}px` }}
     >

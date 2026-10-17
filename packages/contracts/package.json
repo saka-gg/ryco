@@ -26,6 +26,11 @@
       "import": "./src/settings.ts",
       "require": "./src/settings.ts"
     },
+    "./window-material": {
+      "types": "./src/windowMaterial.ts",
+      "import": "./src/windowMaterial.ts",
+      "require": "./src/windowMaterial.ts"
+    },
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts",
