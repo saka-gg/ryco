@@ -151,6 +151,8 @@ export const BranchToolbar = memo(function BranchToolbar({
     <div className="mx-auto flex w-full max-w-208 items-center gap-1 px-2.5 pb-3 pt-1 sm:px-3">
       {contextControlsHoisted ? null : (
         <div className="flex min-w-0 shrink items-center gap-0.5">
+          {/* A started thread already names its project in the header breadcrumb;
+              only a draft keeps the switcher, since it can still move. */}
           {canChooseEnvMode && draftId ? (
             <ProjectSwitcher
               activeProjectId={activeProject.id}
@@ -159,11 +161,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               draftId={draftId}
               label={activeProject.name}
             />
-          ) : (
-            <span className="inline-flex min-w-0 items-center gap-1.5 px-2 py-1 font-medium text-muted-foreground/70 text-xs">
-              <span className="min-w-0 truncate">{activeProject.name}</span>
-            </span>
-          )}
+          ) : null}
 
           {showEnvironmentPicker && availableEnvironments && onEnvironmentChange && (
             <BranchToolbarEnvironmentSelector

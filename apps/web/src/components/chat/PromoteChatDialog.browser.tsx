@@ -249,9 +249,6 @@ function Harness() {
         projectName="No project"
         isGitRepo
         chatProject={CHAT_TARGET}
-        worktreeBranch={null}
-        worktreeTitle={null}
-        worktreeOrigin={null}
         sessionTitle={CHAT_TITLE}
       />
       {/* Stands in for the sidebar row the promoted project lands in. */}

@@ -1,6 +1,5 @@
 import { memo, type Ref } from "react";
-import { ChatHeaderBreadcrumb } from "./ChatHeaderBreadcrumb";
-import type { WorktreeOriginLike } from "./ChatHeaderBreadcrumb.logic";
+import { ChatHeaderBreadcrumb, type ChatHeaderBreadcrumbProjectIcon } from "./ChatHeaderBreadcrumb";
 import { ChatProjectHeaderActions, type ChatProjectTarget } from "./ChatProjectActions";
 import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
 import type { WorktreePullRequestLink } from "@ryco/shared/worktreePullRequests";
@@ -9,15 +8,13 @@ import type { WorktreePullRequestsToggle } from "../worktrees/WorktreeSourceCont
 
 export interface ChatHeaderBarProps {
   projectName: string | null | undefined;
+  projectIcon?: ChatHeaderBreadcrumbProjectIcon | null | undefined;
   isGitRepo: boolean;
   /**
    * Set when the thread's project is a "No project" chat: its Git chrome (the
    * "No Git" badge) gives way to "Turn into project…" and "Reveal folder".
    */
   chatProject?: ChatProjectTarget | null | undefined;
-  worktreeBranch: string | null | undefined;
-  worktreeTitle: string | null | undefined;
-  worktreeOrigin: WorktreeOriginLike;
   worktreeIssueNumber?: number | null | undefined;
   worktreePrNumber?: number | null | undefined;
   worktreeIssueState?: "open" | "closed" | null | undefined;
@@ -34,7 +31,6 @@ export interface ChatHeaderBarProps {
   worktreeWorkItemStateName?: string | null | undefined;
   sessionTitle: string;
   onSelectProject?: (() => void) | undefined;
-  onSelectWorktree?: (() => void) | undefined;
   onOpenLinkedWorktreeItem?: ((item: LinkedWorktreeItem) => void) | undefined;
   inlineActions?: React.ReactNode;
 }
@@ -48,12 +44,9 @@ export const ChatHeaderBar = memo(function ChatHeaderBar({
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
         <ChatHeaderBreadcrumb
           projectName={props.projectName}
-          worktreeBranch={props.worktreeBranch}
-          worktreeTitle={props.worktreeTitle}
-          worktreeOrigin={props.worktreeOrigin}
+          projectIcon={props.projectIcon ?? null}
           sessionTitle={props.sessionTitle}
           {...(props.onSelectProject ? { onSelectProject: props.onSelectProject } : {})}
-          {...(props.onSelectWorktree ? { onSelectWorktree: props.onSelectWorktree } : {})}
         />
         <WorktreeSourceControlBadges
           issueNumber={props.worktreeIssueNumber}
