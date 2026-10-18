@@ -99,15 +99,15 @@ export const OpenInPicker = memo(function OpenInPicker({
         >
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
-        <MenuPopup align="end" className="min-w-52">
+        <MenuPopup align="end" className="min-w-40">
           {options.length === 0 && <MenuItem disabled>No installed editors found</MenuItem>}
           {options.map(({ label, Icon, value }) => (
             <MenuItem
               key={value}
-              className="gap-2.5 sm:min-h-8"
+              className="sm:min-h-6.5 sm:text-xs"
               onClick={() => openInEditor(value)}
             >
-              <Icon aria-hidden="true" className="size-5 opacity-100" />
+              <Icon aria-hidden="true" className="size-4 opacity-100 sm:size-3.5" />
               {label}
               {value === preferredEditor && openFavoriteEditorShortcutLabel && (
                 <MenuShortcut>{openFavoriteEditorShortcutLabel}</MenuShortcut>
