@@ -430,6 +430,10 @@
       "import": "./src/turnSteer.ts"
     },
     "./workspaceLifecycle": "./src/workspaceLifecycle.ts",
+    "./localTasks": {
+      "types": "./src/localTasks.ts",
+      "import": "./src/localTasks.ts"
+    },
     "./automationSchedule": {
       "types": "./src/automationSchedule.ts",
       "import": "./src/automationSchedule.ts"

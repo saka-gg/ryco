@@ -63,6 +63,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
   /** Server-owned worktree notes (`notes.list` / `notes.command`); absent on older servers. */
   worktreeNotes: Schema.optionalKey(Schema.Boolean),
+  /**
+   * Tasks with links, files and several chats each (`server.*LocalTask*`, bootstrap
+   * starts, task file uploads); absent on older servers.
+   */
+  localTasks: Schema.optionalKey(Schema.Boolean),
   /** `threads.fork` (chat forking); absent on older servers. */
   threadFork: Schema.optionalKey(Schema.Boolean),
   /**

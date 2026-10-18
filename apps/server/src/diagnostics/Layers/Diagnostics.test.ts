@@ -128,6 +128,7 @@ const makeDiagnosticsConfig = (tempDir: string): ServerConfigShape => {
     worktreesDir: path.join(tempDir, "worktrees"),
     chatsDir: path.join(tempDir, "chats"),
     attachmentsDir: path.join(tempDir, "attachments"),
+    taskFilesDir: path.join(tempDir, "task-files"),
     logsDir,
     serverLogPath: path.join(logsDir, "server.log"),
     serverTracePath: path.join(logsDir, "server.trace.ndjson"),

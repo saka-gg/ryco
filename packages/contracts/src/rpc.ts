@@ -8,6 +8,9 @@ import {
   LocalTaskListInput,
   LocalTaskListResult,
   LocalTaskDelegateInput,
+  LocalTaskFileUploadInput,
+  LocalTaskAddFileInput,
+  LocalTaskRemoveFileInput,
 } from "./localTasks.ts";
 import { NotesCommand, NotesError, NotesListInput, NotesSnapshot } from "./notes.ts";
 import { DailyRecapRequest, DailyRecapSnapshot, DailyRecapReadError } from "./dailyRecap.ts";
@@ -524,6 +527,9 @@ export const WS_METHODS = {
   serverUpdateLocalTask: "server.updateLocalTask",
   serverDeleteLocalTask: "server.deleteLocalTask",
   serverDelegateLocalTask: "server.delegateLocalTask",
+  serverCreateLocalTaskFileUpload: "server.createLocalTaskFileUpload",
+  serverAddLocalTaskFile: "server.addLocalTaskFile",
+  serverRemoveLocalTaskFile: "server.removeLocalTaskFile",
   serverGetDailyRecap: "server.getDailyRecap",
 
   // Worktree notes
@@ -941,6 +947,27 @@ export const WsServerDelegateLocalTaskRpc = Rpc.make(WS_METHODS.serverDelegateLo
   payload: LocalTaskDelegateInput,
   success: LocalTask,
   error: Schema.Union([LocalTaskError, AuthRpcError, OrchestrationDispatchCommandError]),
+});
+
+export const WsServerCreateLocalTaskFileUploadRpc = Rpc.make(
+  WS_METHODS.serverCreateLocalTaskFileUpload,
+  {
+    payload: LocalTaskFileUploadInput,
+    success: FileAttachmentCreateUploadUrlResult,
+    error: Schema.Union([LocalTaskError, AuthRpcError]),
+  },
+);
+
+export const WsServerAddLocalTaskFileRpc = Rpc.make(WS_METHODS.serverAddLocalTaskFile, {
+  payload: LocalTaskAddFileInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerRemoveLocalTaskFileRpc = Rpc.make(WS_METHODS.serverRemoveLocalTaskFile, {
+  payload: LocalTaskRemoveFileInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
 });
 
 export const WsNotesListRpc = Rpc.make(WS_METHODS.notesList, {
@@ -2430,6 +2457,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerUpdateLocalTaskRpc
   | typeof WsServerDeleteLocalTaskRpc
   | typeof WsServerDelegateLocalTaskRpc
+  | typeof WsServerCreateLocalTaskFileUploadRpc
+  | typeof WsServerAddLocalTaskFileRpc
+  | typeof WsServerRemoveLocalTaskFileRpc
   | typeof WsNotesListRpc
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
@@ -2644,6 +2674,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerUpdateLocalTaskRpc,
   WsServerDeleteLocalTaskRpc,
   WsServerDelegateLocalTaskRpc,
+  WsServerCreateLocalTaskFileUploadRpc,
+  WsServerAddLocalTaskFileRpc,
+  WsServerRemoveLocalTaskFileRpc,
   WsNotesListRpc,
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,

@@ -10,7 +10,9 @@ import {
   createAttachmentId,
   createFileAttachmentId,
   deleteThreadAttachmentFiles,
+  derivedAttachmentId,
   inheritedAttachmentId,
+  linkOrCopyAttachmentFile,
   inheritedChatAttachment,
   materializeInheritedAttachment,
   parseThreadSegmentFromAttachmentId,
@@ -183,5 +185,91 @@ describe("deleteThreadAttachmentFiles", () => {
     expect(
       fs.readFileSync(path.join(attachmentsDir, attachmentRelativePath(source)!), "utf8"),
     ).toBe("keep");
+  });
+});
+
+describe("derivedAttachmentId", () => {
+  it("is deterministic per (thread, source) and lives in the thread's segment", () => {
+    const id = derivedAttachmentId({
+      threadId: FORK,
+      sourceId: "task-x-file",
+      extensionSegment: "PDF",
+    });
+    expect(id).toBe(
+      derivedAttachmentId({ threadId: FORK, sourceId: "task-x-file", extensionSegment: "PDF" }),
+    );
+    expect(id).toMatch(/-pdf$/);
+    expect(parseThreadSegmentFromAttachmentId(id!)).toBe(FORK);
+    expect(
+      derivedAttachmentId({ threadId: FORK, sourceId: "task-y-file", extensionSegment: "pdf" }),
+    ).not.toBe(id);
+  });
+
+  it("gives an image id without an extension segment, so its file is id plus extension", () => {
+    const id = derivedAttachmentId({
+      threadId: FORK,
+      sourceId: "task-x-png",
+      extensionSegment: null,
+    })!;
+    expect(id.split("-")).toHaveLength(7);
+    expect(
+      attachmentRelativePath({
+        type: "image",
+        id,
+        name: "shot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      }),
+    ).toBe(`${id}.png`);
+  });
+
+  it("refuses ids longer than an attachment id may be", () => {
+    // An 80-character thread segment, a uuid and a 12-character extension exceed 128.
+    expect(
+      derivedAttachmentId({
+        threadId: "t".repeat(80),
+        sourceId: "x",
+        extensionSegment: "a".repeat(12),
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("linkOrCopyAttachmentFile", () => {
+  it("hard-links once and counts an existing destination as done", async () => {
+    const source = path.join(attachmentsDir, "source.bin");
+    const destination = path.join(attachmentsDir, "copy.bin");
+    fs.writeFileSync(source, "abc");
+    const input = { source, destination, attachmentsDir, sizeBytes: 3, name: "notes.txt" };
+    expect(await linkOrCopyAttachmentFile(input)).toEqual({ created: true });
+    expect(fs.statSync(destination).ino).toBe(fs.statSync(source).ino);
+    expect(await linkOrCopyAttachmentFile(input)).toEqual({ created: false });
+  });
+
+  it("refuses a source that changed size or is a symlink", async () => {
+    const source = path.join(attachmentsDir, "source.bin");
+    fs.writeFileSync(source, "abc");
+    await expect(
+      linkOrCopyAttachmentFile({
+        source,
+        destination: path.join(attachmentsDir, "copy.bin"),
+        attachmentsDir,
+        sizeBytes: 4,
+        name: "notes.txt",
+      }),
+    ).rejects.toThrow("Attachment 'notes.txt' is missing or changed.");
+    const linked = path.join(attachmentsDir, "linked.bin");
+    fs.symlinkSync(source, linked);
+    await expect(
+      linkOrCopyAttachmentFile({
+        source: linked,
+        destination: path.join(attachmentsDir, "other.bin"),
+        attachmentsDir,
+        sizeBytes: 3,
+        name: "notes.txt",
+      }),
+    ).rejects.toThrow();
+    expect(fs.existsSync(path.join(attachmentsDir, "copy.bin"))).toBe(false);
+    expect(fs.existsSync(path.join(attachmentsDir, "other.bin"))).toBe(false);
   });
 });

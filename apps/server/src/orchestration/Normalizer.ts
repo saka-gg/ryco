@@ -6,19 +6,20 @@ import {
   OrchestrationDispatchCommandError,
   ProjectMetadataDir,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
-  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type UploadChatAttachment,
   type UploadChatFileAttachment,
   type UploadChatImageAttachment,
 } from "@ryco/contracts";
 import { isChatProject } from "@ryco/shared/projectKind";
 
-import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
+import {
+  createAttachmentId,
+  decodeUploadAttachmentDataUrl,
+  resolveAttachmentPath,
+} from "../attachmentStore.ts";
 import { probeAttachmentMediaDimensions } from "../attachmentMedia.ts";
 import { ChatAttachmentUploads } from "../attachmentUpload.ts";
 import { ServerConfig } from "../config.ts";
-import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
@@ -250,45 +251,17 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
               message: `Attachment '${attachment.name}' must include inline attachment data.`,
             });
           }
-          const parsed = parseBase64DataUrl(dataUrl);
-          if (!parsed) {
-            return yield* new OrchestrationDispatchCommandError({
-              message: `Attachment '${attachment.name}' must use a valid base64 data URL.`,
-            });
+          const decoded = decodeUploadAttachmentDataUrl({
+            type: attachment.type,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+            dataUrl,
+          });
+          if (!decoded.ok) {
+            return yield* new OrchestrationDispatchCommandError({ message: decoded.message });
           }
-
-          const normalizedMimeType = parsed.mimeType.toLowerCase();
-          if (normalizedMimeType !== attachment.mimeType.toLowerCase()) {
-            return yield* new OrchestrationDispatchCommandError({
-              message: `Attachment '${attachment.name}' declares '${attachment.mimeType}' but its payload is '${parsed.mimeType}'.`,
-            });
-          }
-          if (attachment.type === "image" && !normalizedMimeType.startsWith("image/")) {
-            return yield* new OrchestrationDispatchCommandError({
-              message: `Image attachment '${attachment.name}' must use an image MIME type.`,
-            });
-          }
-
-          const normalizedBase64 = parsed.base64.replace(/\s+/g, "");
-          const bytes = Buffer.from(normalizedBase64, "base64");
-          if (
-            bytes.byteLength === 0 ||
-            bytes.toString("base64") !== normalizedBase64 ||
-            bytes.byteLength !== attachment.sizeBytes
-          ) {
-            return yield* new OrchestrationDispatchCommandError({
-              message: `Attachment '${attachment.name}' has invalid base64 data or mismatched size metadata.`,
-            });
-          }
-          const attachmentLimit =
-            attachment.type === "image"
-              ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
-              : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
-          if (bytes.byteLength > attachmentLimit) {
-            return yield* new OrchestrationDispatchCommandError({
-              message: `Attachment '${attachment.name}' is ${bytes.byteLength} bytes; limit is ${attachmentLimit} bytes.`,
-            });
-          }
+          const { bytes, mimeType: normalizedMimeType } = decoded;
 
           const attachmentId = createAttachmentId(command.threadId);
           if (!attachmentId) {

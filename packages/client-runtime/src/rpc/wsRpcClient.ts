@@ -382,6 +382,11 @@ export interface WsRpcClient {
     readonly updateLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverUpdateLocalTask>;
     readonly deleteLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDeleteLocalTask>;
     readonly delegateLocalTask: RpcUnaryMethod<typeof WS_METHODS.serverDelegateLocalTask>;
+    readonly createLocalTaskFileUpload: RpcUnaryMethod<
+      typeof WS_METHODS.serverCreateLocalTaskFileUpload
+    >;
+    readonly addLocalTaskFile: RpcUnaryMethod<typeof WS_METHODS.serverAddLocalTaskFile>;
+    readonly removeLocalTaskFile: RpcUnaryMethod<typeof WS_METHODS.serverRemoveLocalTaskFile>;
     readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
     readonly prewarmProviderSession: RpcUnaryMethod<typeof WS_METHODS.providerPrewarmSession>;
     readonly readProjectProviderCommands: RpcUnaryMethod<
@@ -940,6 +945,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverDeleteLocalTask](input)),
       delegateLocalTask: (input) =>
         transport.request((client) => client[WS_METHODS.serverDelegateLocalTask](input)),
+      createLocalTaskFileUpload: (input) =>
+        transport.request((client) => client[WS_METHODS.serverCreateLocalTaskFileUpload](input)),
+      addLocalTaskFile: (input) =>
+        transport.request((client) => client[WS_METHODS.serverAddLocalTaskFile](input)),
+      removeLocalTaskFile: (input) =>
+        transport.request((client) => client[WS_METHODS.serverRemoveLocalTaskFile](input)),
       getDailyRecap: (input) =>
         transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
       prewarmProviderSession: (input) =>

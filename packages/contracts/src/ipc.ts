@@ -1053,6 +1053,15 @@ export interface LocalApi {
     delegateLocalTask?: (
       input: import("./localTasks.ts").LocalTaskDelegateInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTaskFileUpload?: (
+      input: import("./localTasks.ts").LocalTaskFileUploadInput,
+    ) => Promise<import("./orchestration.ts").FileAttachmentCreateUploadUrlResult>;
+    addLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskAddFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    removeLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskRemoveFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
@@ -1155,6 +1164,15 @@ export interface EnvironmentApi {
     ) => Promise<{ readonly deleted: true }>;
     delegateLocalTask?: (
       input: import("./localTasks.ts").LocalTaskDelegateInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTaskFileUpload?: (
+      input: import("./localTasks.ts").LocalTaskFileUploadInput,
+    ) => Promise<import("./orchestration.ts").FileAttachmentCreateUploadUrlResult>;
+    addLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskAddFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    removeLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,

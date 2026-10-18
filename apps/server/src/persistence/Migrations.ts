@@ -134,6 +134,9 @@ import Migration0090 from "./Migrations/090_AuthAccessLinks.ts";
 import Migration0091, {
   ensureGuardedLatestCompletedTurnTrigger,
 } from "./Migrations/091_GuardedLatestCompletedTurnTrigger.ts";
+import Migration0092, {
+  ensureLocalTaskDelegationsTable,
+} from "./Migrations/092_LocalTaskDelegations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -236,6 +239,7 @@ export const migrationEntries = [
   [89, "RetireThreadTrash", Migration0089],
   [90, "AuthAccessLinks", Migration0090],
   [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
+  [92, "LocalTaskDelegations", Migration0092],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -574,6 +578,17 @@ export const repairGuardedLatestCompletedTurnTrigger = Effect.fn(
   }
 });
 
+// Local task chat starts: run 092 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). Its backfill commits with the table, so this is
+// one lookup per boot once it has run.
+export const repairLocalTaskDelegationsTable = Effect.fn("repairLocalTaskDelegationsTable")(
+  function* () {
+    if (yield* ensureLocalTaskDelegationsTable) {
+      yield* Effect.log("Repaired local task delegations table");
+    }
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -771,6 +786,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 91) {
         yield* repairGuardedLatestCompletedTurnTrigger();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 92) {
+        yield* repairLocalTaskDelegationsTable();
       }
     }),
   );

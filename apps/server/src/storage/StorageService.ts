@@ -148,6 +148,7 @@ export function makeStorageService(deps: {
         config.dbPath + "-wal",
         config.dbPath + "-shm",
         config.attachmentsDir,
+        config.taskFilesDir,
         config.logsDir,
         config.settingsPath,
         config.secretsDir,
@@ -556,6 +557,14 @@ export function makeStorageService(deps: {
                   label: "Persistent attachments",
                   path: config.attachmentsDir,
                   reason: "Persistent message attachments are protected.",
+                },
+                {
+                  id: "task-files",
+                  projectId: null,
+                  category: "attachments" as const,
+                  label: "Task files",
+                  path: config.taskFilesDir,
+                  reason: "Files kept with tasks are protected.",
                 },
                 {
                   id: "logs",

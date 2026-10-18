@@ -38,6 +38,12 @@ export interface ServerDerivedPaths {
   /** Default root for "No project" chat folders; created lazily on the first chat. */
   readonly chatsDir: string;
   readonly attachmentsDir: string;
+  /**
+   * Files kept with local tasks, outside every chat. Kept apart from `attachmentsDir`: the
+   * projection prunes that by thread prefix and `/attachments` serves it to any signed-in
+   * session, while task files are owner-only.
+   */
+  readonly taskFilesDir: string;
   readonly logsDir: string;
   readonly serverLogPath: string;
   readonly serverTracePath: string;
@@ -339,6 +345,7 @@ export const deriveServerPaths = Effect.fn(function* (
     worktreesDir: join(baseDir, "worktrees"),
     chatsDir: join(baseDir, "chats"),
     attachmentsDir,
+    taskFilesDir: join(stateDir, "task-files"),
     logsDir,
     // Written by the server itself in desktop mode (see serverLogger.ts).
     serverLogPath: join(logsDir, SERVER_LOG_FILE_NAME),
@@ -363,6 +370,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
     derivedPaths.providerLogsDir,
     derivedPaths.terminalLogsDir,
     derivedPaths.attachmentsDir,
+    derivedPaths.taskFilesDir,
     derivedPaths.worktreesDir,
     path.dirname(derivedPaths.keybindingsConfigPath),
     path.dirname(derivedPaths.settingsPath),

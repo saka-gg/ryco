@@ -49,6 +49,7 @@ describe("pre-auth server environment descriptor", () => {
       "cliProxyHubs",
       "environmentIcon",
       "fileAttachments",
+      "localTasks",
       "projectIcons",
       "projectPreferences",
       "projectSearchEmptyQuery",

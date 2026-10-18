@@ -784,6 +784,9 @@ function buildMotionCssVariables(reducedMotion: boolean): string {
     ["--app-motion-duration-pop", `${200 * scale}ms`],
     // Split chat panes: geometry, enter and exit share one pacing.
     ["--app-motion-duration-pane", `${360 * scale}ms`],
+    // A row or section opening in place (a task's details): long enough for
+    // the content below to visibly make room, shorter than a pane.
+    ["--app-motion-duration-disclosure", `${320 * scale}ms`],
   ]
     .map(([name, value]) => `${name}: ${value};`)
     .join(" ");

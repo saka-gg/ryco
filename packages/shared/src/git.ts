@@ -63,18 +63,27 @@ export function resolveAutoFeatureBranchName(
   const resolvedBase = sanitizeFeatureBranchName(
     preferred && preferred.length > 0 ? preferred : AUTO_FEATURE_BRANCH_FALLBACK,
   );
-  const existingNames = new Set(existingBranchNames.map((refName) => refName.toLowerCase()));
+  return resolveUniqueRefName(resolvedBase, existingBranchNames);
+}
 
-  if (!existingNames.has(resolvedBase)) {
-    return resolvedBase;
+/**
+ * `base` when no existing ref has that name (case-insensitively), otherwise
+ * `base-N` with the smallest free `N` starting at `firstSuffix`.
+ */
+export function resolveUniqueRefName(
+  base: string,
+  existingRefNames: readonly string[],
+  firstSuffix = 2,
+): string {
+  const existingNames = new Set(existingRefNames.map((refName) => refName.toLowerCase()));
+  if (!existingNames.has(base.toLowerCase())) {
+    return base;
   }
-
-  let suffix = 2;
-  while (existingNames.has(`${resolvedBase}-${suffix}`)) {
+  let suffix = firstSuffix;
+  while (existingNames.has(`${base}-${suffix}`.toLowerCase())) {
     suffix += 1;
   }
-
-  return `${resolvedBase}-${suffix}`;
+  return `${base}-${suffix}`;
 }
 
 /**

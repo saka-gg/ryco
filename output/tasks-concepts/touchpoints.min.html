@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ryco — Tasks across the app</title>
+<style>
+ :root{--c-bg: var(--background,#0b0b0c);--c-fg: var(--foreground,#ececed);--c-muted-fg: var(--muted-foreground,#a3a3aa);--c-card: var(--card,#151516);--c-popover: var(--popover,#1b1b1d);--c-border: var(--border,rgba(255,255,255,0.09));--c-muted: var(--muted,rgba(255,255,255,0.06));--c-accent: var(--accent,rgba(255,255,255,0.09));--c-primary: var(--primary,#e4e4e5);--c-primary-fg: var(--primary-foreground,#0b0b0c);--c-success: var(--success,#10b981);--c-warning: var(--warning,#f59e0b);--c-info: var(--info,#3b82f6);--c-danger: var(--destructive,#ef4444);--c-sans: var(--font-sans,"DM Sans",-apple-system,BlinkMacSystemFont,system-ui,sans-serif);--c-mono: var(--font-mono,"SF Mono",ui-monospace,Menlo,monospace);--c-faint: color-mix(in srgb,var(--c-muted-fg) 70%,transparent);--c-sidebar: color-mix(in srgb,#000 34%,var(--c-bg));--c-plan: #a78bfa;--c-merged: #c084fc;--ease: cubic-bezier(0.16,1,0.3,1);--snappy: cubic-bezier(0.3,1.36,0.44,1);--shadow-lg: 0 24px 60px -20px rgba(0,0,0,0.6),0 2px 10px rgba(0,0,0,0.28);}
+html.standalone{background: var(--c-bg);}
+html.standalone body{padding: 24px;}
+*{box-sizing: border-box;}
+body{margin: 0;font-family: var(--c-sans);font-size: 13px;color: var(--c-fg);-webkit-font-smoothing: antialiased;}
+button,input{font: inherit;color: inherit;}
+button{cursor: pointer;}
+svg.i{width: 14px;height: 14px;flex: none;stroke: currentColor;fill: none;stroke-width: 2;stroke-linecap: round;stroke-linejoin: round;}
+.mono{font-family: var(--c-mono);font-size: 11.5px;}
+.tabs{display: inline-flex;padding: 2px;gap: 2px;border-radius: 9px;background: var(--c-muted);margin-bottom: 12px;flex-wrap: wrap;}
+.tabs button{height: 26px;padding: 0 11px;border: 0;border-radius: 7px;background: transparent;color: var(--c-muted-fg);font-size: 12.5px;transition: background 160ms var(--ease),color 160ms var(--ease);}
+.tabs button[aria-selected="true"]{background: var(--c-card);color: var(--c-fg);box-shadow: 0 1px 2px rgba(0,0,0,0.2);}
+.stage{position: relative;min-height: 470px;}
+.scene{display: none;animation: fade 260ms var(--ease);}
+.scene.on{display: block;}
+.cap{font-size: 12.5px;color: var(--c-muted-fg);line-height: 1.5;margin: 0 0 10px;max-width: 640px;}
+.cap b{color: var(--c-fg);font-weight: 600;}
+.win{position: relative;border-radius: 12px;border: 1px solid var(--c-border);background: var(--c-bg);overflow: hidden;}
+.split{display: grid;grid-template-columns: 248px minmax(0,1fr);min-height: 420px;}
+.sb{background: var(--c-sidebar);border-right: 1px solid var(--c-border);padding: 10px 8px;display: flex;flex-direction: column;gap: 2px;}
+.sb-head{display: flex;align-items: center;gap: 4px;padding: 0 2px 8px;}
+.logo{width: 22px;height: 22px;border-radius: 6px;display: grid;place-items: center;font-weight: 800;font-size: 13px;background: var(--c-fg);color: var(--c-bg);}
+.sb-ic{width: 24px;height: 24px;display: grid;place-items: center;border-radius: 6px;color: var(--c-muted-fg);}
+.sb-ic.on{background: var(--c-accent);color: var(--c-fg);}
+.omni{display: flex;gap: 6px;margin-bottom: 6px;}
+.omni .f{flex: 1;height: 28px;border-radius: 9px;border: 1px solid var(--c-border);display: flex;align-items: center;gap: 6px;padding: 0 8px;font-size: 12px;color: var(--c-faint);}
+.omni .plus{width: 28px;height: 28px;border-radius: 10px;border: 0;background: var(--c-primary);color: var(--c-primary-fg);display: grid;place-items: center;}
+.dest{display: flex;align-items: center;gap: 8px;height: 28px;padding: 0 8px;border-radius: 8px;font-size: 12px;color: color-mix(in srgb,var(--c-muted-fg) 80%,transparent);border: 0;background: transparent;width: 100%;text-align: left;transition: background 140ms var(--ease),color 140ms var(--ease);}
+.dest:hover{background: var(--c-accent);color: var(--c-fg);}
+.dest.cur{background: var(--c-accent);color: var(--c-fg);}
+.dest .badge{margin-left: auto;min-width: 16px;height: 16px;padding: 0 4px;border-radius: 999px;font-size: 10px;font-weight: 700;display: grid;place-items: center;background: var(--c-warning);color: #1a1406;}
+.dest.new{box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--c-info) 50%,transparent);}
+.sb-sec{font-size: 10.5px;font-weight: 600;letter-spacing: 0.06em;color: var(--c-faint);padding: 12px 8px 4px;text-transform: uppercase;}
+.trow{display: grid;grid-template-columns: 10px minmax(0,1fr) auto;gap: 8px;align-items: center;padding: 6px 8px;border-radius: 8px;font-size: 12.5px;}
+.trow:hover{background: var(--c-accent);}
+.trow .tt{overflow: hidden;text-overflow: ellipsis;white-space: nowrap;}
+.trow .sub{display: flex;align-items: center;gap: 4px;font-size: 11px;color: var(--c-faint);overflow: hidden;white-space: nowrap;margin-top: 1px;}
+.trow .tm{font-size: 11px;color: var(--c-faint);align-self: start;padding-top: 1px;}
+.taskmark{display: inline-flex;align-items: center;gap: 3px;padding: 0 4px;height: 15px;border-radius: 4px;background: color-mix(in srgb,var(--c-info) 14%,transparent);color: color-mix(in srgb,var(--c-info) 75%,var(--c-fg));font-size: 10.5px;font-weight: 500;}
+.dot{width: 7px;height: 7px;border-radius: 50%;background: var(--c-faint);align-self: start;margin-top: 5px;}
+.dot.run{background: var(--c-info);animation: pulse 1.6s var(--ease) infinite;}
+.dot.warn{background: var(--c-warning);}
+.dot.ok{background: var(--c-success);}
+.notes{padding: 18px 20px;display: flex;flex-direction: column;gap: 12px;}
+.note{display: grid;grid-template-columns: 22px 1fr;gap: 10px;font-size: 12.5px;line-height: 1.5;color: var(--c-muted-fg);}
+.note b{color: var(--c-fg);font-weight: 600;}
+.num{width: 20px;height: 20px;border-radius: 50%;background: color-mix(in srgb,var(--c-info) 18%,transparent);color: color-mix(in srgb,var(--c-info) 80%,var(--c-fg));font-size: 11px;font-weight: 700;display: grid;place-items: center;}
+code,.kbd{font-family: var(--c-mono);font-size: 11px;padding: 1px 5px;border-radius: 5px;background: var(--c-muted);color: var(--c-fg);}
+.chat{display: flex;flex-direction: column;min-height: 440px;}
+.chat-h{display: flex;align-items: center;gap: 6px;height: 44px;padding: 0 12px;border-bottom: 1px solid var(--c-border);font-size: 12.5px;white-space: nowrap;position: relative;}
+.crumb{color: var(--c-muted-fg);display: inline-flex;align-items: center;gap: 5px;min-width: 0;}
+.crumb.cur{color: var(--c-fg);font-weight: 600;overflow: hidden;text-overflow: ellipsis;}
+.pi{width: 16px;height: 16px;border-radius: 4px;display: grid;place-items: center;font-size: 9.5px;font-weight: 700;color: #fff;flex: none;}
+.taskchip{margin-left: auto;display: inline-flex;align-items: center;gap: 6px;height: 26px;padding: 0 9px;border-radius: 8px;border: 1px solid var(--c-border);background: transparent;font-size: 12px;transition: background 140ms var(--ease);}
+.taskchip:hover,.taskchip[aria-expanded="true"]{background: var(--c-muted);}
+.taskchip .st{display: inline-flex;align-items: center;gap: 5px;color: color-mix(in srgb,var(--c-success) 75%,var(--c-fg));}
+.pop{position: absolute;top: 40px;right: 12px;width: 300px;z-index: 5;padding: 12px;border-radius: 12px;background: var(--c-popover);border: 1px solid var(--c-border);box-shadow: var(--shadow-lg);white-space: normal;display: none;animation: pop 200ms var(--snappy);}
+.pop.on{display: block;}
+.pop h4{margin: 0 0 6px;font-size: 13px;font-weight: 600;}
+.pop .ck{display: flex;gap: 8px;align-items: flex-start;font-size: 12px;padding: 3px 0;color: var(--c-muted-fg);cursor: pointer;}
+.pop .ck .bx{width: 14px;height: 14px;border-radius: 4px;border: 1px solid color-mix(in srgb,var(--c-fg) 30%,transparent);flex: none;margin-top: 1px;display: grid;place-items: center;}
+.pop .ck.on .bx{background: var(--c-success);border-color: var(--c-success);}
+.pop .ck.on span:last-child{text-decoration: line-through;color: var(--c-faint);}
+.row{display: flex;gap: 6px;align-items: center;flex-wrap: wrap;}
+.tag{display: inline-flex;align-items: center;gap: 4px;height: 20px;padding: 0 6px;border-radius: 6px;background: var(--c-muted);color: var(--c-muted-fg);font-size: 11.5px;white-space: nowrap;}
+.tag svg.i{width: 12px;height: 12px;}
+.btn{display: inline-flex;align-items: center;gap: 6px;height: 26px;padding: 0 10px;border-radius: 7px;border: 1px solid var(--c-border);background: transparent;font-size: 12px;font-weight: 500;white-space: nowrap;transition: background 140ms var(--ease),transform 120ms var(--ease);}
+.btn:hover{background: var(--c-muted);}
+.btn:active{transform: scale(0.97);}
+.btn.primary{background: var(--c-primary);color: var(--c-primary-fg);border-color: transparent;}
+.btn.ghost{border-color: transparent;color: var(--c-muted-fg);}
+.msgs{flex: 1;padding: 16px 18px;display: flex;flex-direction: column;gap: 14px;}
+.umsg{align-self: flex-end;max-width: 78%;border-radius: 14px;padding: 9px 12px;background: color-mix(in srgb,var(--c-fg) 7%,var(--c-bg));font-size: 12.5px;line-height: 1.5;}
+.from{display: flex;align-items: center;gap: 5px;font-size: 11px;color: var(--c-faint);margin-bottom: 4px;}
+.amsg{font-size: 12.5px;line-height: 1.6;color: var(--c-fg);max-width: 92%;}
+.amsg p{margin: 0 0 6px;position: relative;border-radius: 6px;padding: 2px 4px;margin-left: -4px;transition: background 140ms var(--ease);}
+.amsg p.hov:hover{background: var(--c-muted);}
+.amsg p .mk{position: absolute;right: -6px;top: -12px;opacity: 0;transform: translateY(3px);transition: opacity 140ms var(--ease),transform 200ms var(--snappy);}
+.amsg p.hov:hover .mk,.amsg p .mk.force{opacity: 1;transform: none;}
+.mk .btn{background: var(--c-popover);box-shadow: var(--shadow-lg);height: 24px;}
+.composer{margin: 0 14px 14px;border-radius: 14px;background: color-mix(in srgb,var(--c-fg) 6.5%,var(--c-bg));padding: 8px 10px;}
+.composer .ctx{display: flex;gap: 6px;margin-bottom: 6px;}
+.ctxchip{display: inline-flex;align-items: center;gap: 5px;height: 22px;padding: 0 7px;border-radius: 6px;border: 1px solid var(--c-border);font-size: 11.5px;color: var(--c-fg);}
+.composer .ph{color: var(--c-faint);font-size: 12.5px;padding: 2px 0 6px;}
+.composer .bar{display: flex;align-items: center;gap: 8px;font-size: 11.5px;color: var(--c-muted-fg);}
+.send{margin-left: auto;width: 26px;height: 26px;border-radius: 50%;background: var(--c-muted);display: grid;place-items: center;color: var(--c-faint);}
+.two{display: grid;grid-template-columns: minmax(0,1.15fr) minmax(0,1fr);gap: 12px;}
+.panel{border-radius: 12px;border: 1px solid var(--c-border);background: var(--c-popover);overflow: hidden;}
+.panel-h{font-size: 11px;font-weight: 600;letter-spacing: 0.05em;text-transform: uppercase;color: var(--c-faint);padding: 10px 12px 4px;}
+.pal-in{display: flex;align-items: center;gap: 8px;padding: 10px 12px;border-bottom: 1px solid var(--c-border);}
+.pal-in input{flex: 1;border: 0;outline: 0;background: transparent;font-size: 13.5px;}
+.opt{display: flex;align-items: center;gap: 9px;padding: 8px 12px;font-size: 12.5px;cursor: pointer;}
+.opt.on,.opt:hover{background: var(--c-accent);}
+.opt .k{margin-left: auto;color: var(--c-faint);font-size: 11px;}
+.opt .d{color: var(--c-muted-fg);}
+.sugg{padding: 12px;display: flex;flex-direction: column;gap: 8px;}
+.sg{display: flex;gap: 8px;align-items: flex-start;font-size: 12.5px;cursor: pointer;user-select: none;}
+.sg .bx{width: 15px;height: 15px;border-radius: 4px;border: 1px solid color-mix(in srgb,var(--c-fg) 30%,transparent);flex: none;margin-top: 2px;display: grid;place-items: center;transition: background 140ms var(--ease);}
+.sg.on .bx{background: var(--c-info);border-color: var(--c-info);}
+.sg .bx svg{width: 11px;height: 11px;stroke: #fff;stroke-width: 3;opacity: 0;}
+.sg.on .bx svg{opacity: 1;}
+.sg small{display: block;color: var(--c-faint);font-size: 11.5px;margin-top: 1px;}
+.mini-inbox{display: flex;flex-direction: column;gap: 6px;padding: 10px 12px 12px;min-height: 90px;}
+.mcard{border-radius: 9px;border: 1px solid var(--c-border);background: var(--c-card);padding: 7px 9px;font-size: 12px;animation: drop 360ms var(--snappy) both;}
+.mcard .row{margin-top: 4px;}
+.empty{font-size: 11.5px;color: var(--c-faint);border: 1px dashed var(--c-border);border-radius: 9px;padding: 12px;text-align: center;}
+.comment{border-radius: 10px;border: 1px solid var(--c-border);background: var(--c-card);padding: 10px 12px;font-size: 12.5px;line-height: 1.5;}
+.comment .who{display: flex;align-items: center;gap: 6px;font-size: 11.5px;color: var(--c-muted-fg);margin-bottom: 4px;}
+.av{width: 18px;height: 18px;border-radius: 50%;background: linear-gradient(135deg,#f472b6,#8b5cf6);}
+.file{font-family: var(--c-mono);font-size: 11px;color: var(--c-muted-fg);padding: 4px 8px;border-radius: 6px;background: var(--c-muted);display: inline-block;margin-bottom: 6px;}
+.src{display: flex;align-items: center;gap: 8px;padding: 8px 10px;border-radius: 9px;font-size: 12.5px;}
+.src:hover{background: var(--c-muted);}
+.src .t{flex: 1;min-width: 0;overflow: hidden;text-overflow: ellipsis;white-space: nowrap;}
+.src .btn{opacity: 0.85;}
+.sched{display: flex;align-items: center;gap: 10px;padding: 10px 12px;border-radius: 10px;border: 1px dashed var(--c-border);font-size: 12.5px;}
+.toast{position: absolute;left: 50%;bottom: 10px;transform: translate(-50%,14px);opacity: 0;display: flex;align-items: center;gap: 8px;padding: 8px 12px;border-radius: 10px;background: var(--c-popover);border: 1px solid var(--c-border);box-shadow: var(--shadow-lg);font-size: 12.5px;pointer-events: none;transition: opacity 200ms var(--ease),transform 260ms var(--snappy);z-index: 9;white-space: nowrap;}
+.toast.on{opacity: 1;transform: translate(-50%,0);}
+@keyframes fade{from{opacity: 0;transform: translateY(4px);}
+}
+@keyframes pop{from{opacity: 0;transform: translateY(-4px) scale(0.97);}
+}
+@keyframes drop{from{opacity: 0;transform: translateY(-10px) scale(0.96);}
+}
+@keyframes pulse{0%{box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-info) 55%,transparent);}
+70%,100%{box-shadow: 0 0 0 5px transparent;}
+}
+@media (max-width: 640px){.split{grid-template-columns: 1fr;}
+.two{grid-template-columns: 1fr;}
+}
+
+</style>
+</head>
+<body>
+<div class="tabs" role="tablist">
+<button role="tab" data-tab="sidebar" aria-selected="true">Sidebar</button>
+<button role="tab" data-tab="chat" aria-selected="false">Inside a chat</button>
+<button role="tab" data-tab="capture" aria-selected="false">Capture from anywhere</button>
+<button role="tab" data-tab="sources" aria-selected="false">From PRs, issues &amp; schedules</button>
+</div>
+<div class="stage" id="stage">
+<section class="scene on" data-scene="sidebar">
+<div class="win">
+<div class="split">
+<div class="sb">
+<div class="sb-head">
+<span class="logo">R</span>
+<span class="sb-ic on" title="Inbox"><svg class="i" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /></svg></span>
+<span style="flex: 1"></span>
+<span class="sb-ic"><svg class="i" viewBox="0 0 24 24"><path d="M3 3v18h18M18 17V9M13 17V5M8 17v-3" /></svg></span>
+<span class="sb-ic"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg></span>
+</div>
+<div class="omni">
+<div class="f"><svg class="i" viewBox="0 0 24 24" style="width: 12px; height: 12px"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" /></svg>Filter, or type @ or is:</div>
+<button class="plus" title="New thread"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14" /></svg></button>
+</div>
+<button class="dest"><svg class="i" viewBox="0 0 24 24"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5M16 2v4M8 2v4M3 10h5" /><path d="M17.5 17.5 16 16.3V14" /><circle cx="16" cy="16" r="6" /></svg>Automations</button>
+<button class="dest new" id="tasksDest" title="New destination">
+<svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg>Tasks<span class="badge" title="2 tasks need you">2</span>
+</button>
+<button class="dest"><svg class="i" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" x2="6" y1="9" y2="21" /></svg>Pull requests</button>
+<button class="dest"><svg class="i" viewBox="0 0 24 24"><path d="M20 17a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.9a2 2 0 0 1-1.69-.9l-.81-1.2a2 2 0 0 0-1.67-.9H8a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2Z" /><path d="M2 8v11a2 2 0 0 0 2 2h14" /></svg>Projects</button>
+<div class="sb-sec">Needs you</div>
+<div class="trow">
+<span class="dot warn"></span>
+<div style="min-width: 0">
+<div class="tt">Upgrade Effect to 4.1 in the server</div>
+<div class="sub"><span class="taskmark">Task</span> Needs approval</div>
+</div>
+<span class="tm">1m</span>
+</div>
+<div class="sb-sec">Active</div>
+<div class="trow">
+<span class="dot run"></span>
+<div style="min-width: 0">
+<div class="tt">Migrate weapon paints store to Pinia</div>
+<div class="sub"><span class="taskmark">Task</span> Working · task/pinia-store</div>
+</div>
+<span class="tm">12m</span>
+</div>
+<div class="sb-sec">Recent</div>
+<div class="trow">
+<span class="dot ok"></span>
+<div style="min-width: 0">
+<div class="tt">Translucent window: tune blur</div>
+<div class="sub"><span class="taskmark">Task</span> Completed · PR #746</div>
+</div>
+<span class="tm">41m</span>
+</div>
+<div class="trow">
+<span class="dot"></span>
+<div style="min-width: 0">
+<div class="tt">Why does the relay reconnect twice?</div>
+<div class="sub">ryco · main</div>
+</div>
+<span class="tm">2h</span>
+</div>
+</div>
+<div class="notes">
+<div class="note"><span class="num">1</span><span><b>Tasks becomes a destination</b> next to Automations, Pull requests and Projects. The amber badge counts tasks whose chat is waiting on you, so you can ignore it the rest of the time.</span></div>
+<div class="note"><span class="num">2</span><span><b>Chats keep their place in the inbox.</b> A chat started from a task carries a small <span class="taskmark">Task</span> mark. Hovering it shows the task; <code>is:task</code> in the filter narrows the inbox to task chats.</span></div>
+<div class="note"><span class="num">3</span><span><b>One task, many chats.</b> A planning chat, two attempts and a follow-up fix all roll up into one card. The card's column comes from whichever chat is most urgent.</span></div>
+<div class="note"><span class="num">4</span><span><b>Nothing new to learn for chats</b>: approvals, plans and diffs still happen in the chat. The board only collects them.</span></div>
+</div>
+</div>
+</div>
+</section>
+<section class="scene" data-scene="chat">
+<div class="win">
+<div class="chat">
+<div class="chat-h">
+<span class="crumb"><span class="pi" style="background: #6366f1">R</span>ryco</span>
+<span class="crumb" style="color: var(--c-faint)">›</span>
+<span class="crumb mono">task/fix-login-redirect-loop-hosted</span>
+<span class="crumb" style="color: var(--c-faint)">›</span>
+<span class="crumb cur">Fix login redirect loop</span>
+<button class="taskchip" id="taskChip" aria-expanded="false">
+<svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg>
+Task
+<span class="st"><svg class="i" viewBox="0 0 24 24" style="width: 12px; height: 12px"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0" /><circle cx="12" cy="12" r="3" /></svg>Review</span>
+</button>
+<div class="pop" id="taskPop">
+<h4>Fix login redirect loop on hosted Hub</h4>
+<div class="row" style="margin-bottom: 8px">
+<span class="tag"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="1" /></svg>#231</span>
+<span class="tag" style="color: var(--c-muted-fg)"><svg class="i" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" x2="6" y1="9" y2="21" /></svg>#761 draft</span>
+<span class="tag">Due Tue</span>
+</div>
+<div style="font-size: 11px; color: var(--c-faint); margin: 2px 0 2px">Acceptance (from the description)</div>
+<div class="ck on"><span class="bx"><svg class="i" viewBox="0 0 24 24" style="width: 10px; height: 10px; stroke: #fff; stroke-width: 3"><path d="M20 6 9 17l-5-5" /></svg></span><span>Expired session lands on /pair once</span></div>
+<div class="ck"><span class="bx"></span><span>No redirect loop with a stale cookie</span></div>
+<div class="ck"><span class="bx"></span><span>Regression test in the auth gate</span></div>
+<div class="row" style="margin-top: 10px">
+<button class="btn primary" data-toast="Task marked done · chat stays open">Mark done</button>
+<button class="btn" data-toast="Would open the task on the board">Open on board</button>
+<button class="btn ghost" data-toast="Would start another chat with this task as context">Another chat</button>
+</div>
+</div>
+</div>
+<div class="msgs">
+<div class="umsg">
+<div class="from"><svg class="i" viewBox="0 0 24 24" style="width: 11px; height: 11px"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg>Started from task · issue #231 and 2 files attached</div>
+Task: Fix login redirect loop on hosted Hub. After the session cookie expires, /pair redirects to / which redirects back to /pair…
+</div>
+<div class="amsg">
+<p>The loop comes from the auth gate treating an expired Hub session as “unpaired” while the root route still sees the stale cookie. I now clear the pairing cookie before redirecting and added a regression test.</p>
+<p class="hov" id="followPara">
+I also noticed <code>/pair</code> never revalidates a hosted session on focus, so a tab left open overnight shows a stale role.
+<span class="mk" id="followMk"><button class="btn" id="followBtn"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14" /></svg>Create follow-up task</button></span>
+</p>
+<p style="color: var(--c-muted-fg)">+45 −18 across 4 files · draft PR #761 opened.</p>
+</div>
+</div>
+<div class="composer">
+<div class="ctx"><span class="ctxchip"><svg class="i" viewBox="0 0 24 24" style="width: 12px; height: 12px"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg>Task · Fix login redirect loop</span></div>
+<div class="ph">Ask for follow-up changes…</div>
+<div class="bar"><span>Claude Opus 5.5</span><span>·</span><span>Build</span><span class="send"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5" /></svg></span></div>
+</div>
+</div>
+<div class="toast" id="toast2"></div>
+</div>
+<p class="cap" style="margin-top: 10px">
+Click the <b>Task</b> chip in the header, and hover the second paragraph of the reply. The task chip replaces nothing: breadcrumbs stay as they are (#745).
+</p>
+</section>
+<section class="scene" data-scene="capture">
+<div class="two">
+<div class="panel">
+<div class="pal-in">
+<svg class="i" viewBox="0 0 24 24" style="color: var(--c-faint)"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+<input id="palIn" value="task: bump vite to 7 #inspect !low" spellcheck="false" />
+<span class="kbd">⌘K</span>
+</div>
+<div class="panel-h">Tasks</div>
+<div class="opt on" data-pal="add"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14" /></svg><span>Add “<span id="palTitle">bump vite to 7</span>”<span class="d" id="palMeta"> · cs2inspect-web · low</span></span><span class="k">↵</span></div>
+<div class="opt" data-pal="start"><svg class="i" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3" /></svg><span>Add &amp; start a chat in a new worktree</span><span class="k">⌘↵</span></div>
+<div class="opt" data-pal="open"><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg><span>Open Tasks</span><span class="k">G then T</span></div>
+<div class="panel-h" style="padding-top: 12px">Desktop</div>
+<div class="opt" style="cursor: default"><svg class="i" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10" /></svg><span>Global quick capture, even when Ryco is in the background</span><span class="k">⌥ Space</span></div>
+</div>
+<div class="panel">
+<div class="panel-h">End of turn · agent suggests follow-ups</div>
+<div class="sugg">
+<div class="sg on" data-sg="0"><span class="bx"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span><span>Revalidate hosted session on window focus<small>ryco · found while fixing #231</small></span></div>
+<div class="sg on" data-sg="1"><span class="bx"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span><span>Remove the dead <code>legacyPairRedirect</code> helper<small>ryco · unused since #702</small></span></div>
+<div class="sg" data-sg="2"><span class="bx"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span><span>Flaky test: hostedLifecycle.browser.tsx<small>ryco · failed once in 3 runs</small></span></div>
+<div class="row" style="margin-top: 4px"><button class="btn primary" id="addSugg">Add 2 to Tasks</button><button class="btn ghost" data-toast3="Dismissed">Dismiss</button></div>
+</div>
+<div class="panel-h" style="border-top: 1px solid var(--c-border); padding-top: 10px">Inbox</div>
+<div class="mini-inbox" id="miniInbox"><div class="empty">Tasks you add show up here.</div></div>
+</div>
+</div>
+<p class="cap" style="margin-top: 10px">
+Type in the palette (<code>#project</code>, <code>!priority</code>, <code>due:fri</code> work everywhere), or let an agent hand you its follow-ups instead of burying them in a reply. Agents could also file tasks themselves through Agent Control, if you allow it.
+</p>
+<div class="toast" id="toast3"></div>
+</section>
+<section class="scene" data-scene="sources">
+<div class="two">
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div class="comment">
+<div class="who"><span class="av"></span><b style="color: var(--c-fg)">reviewer</b> commented on <span class="mono">PR #746</span></div>
+<span class="file">apps/web/src/themes/windowTranslucency.ts · L42</span>
+<div>The 55% alpha on raised panes makes the diff view hard to read in light mode. Can we clamp it there?</div>
+<div class="row" style="margin-top: 8px"><button class="btn" id="commentTask"><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 7v7M12 7v4M16 7v9" /></svg>Make it a task</button><button class="btn ghost">Reply</button></div>
+</div>
+<div class="panel">
+<div class="panel-h">GitHub issues · ryco</div>
+<div class="src"><svg class="i" viewBox="0 0 24 24" style="color: var(--c-success)"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="1" /></svg><span class="t">#240 Composer loses its draft after a reload</span><button class="btn" data-src="#240 Composer loses its draft after a reload">Add to Tasks</button></div>
+<div class="src"><svg class="i" viewBox="0 0 24 24" style="color: var(--c-success)"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="1" /></svg><span class="t">#238 Statistics page ignores the time zone</span><button class="btn" data-src="#238 Statistics page ignores the time zone">Add to Tasks</button></div>
+<div class="panel-h">Jira · RYC</div>
+<div class="src"><svg class="i" viewBox="0 0 24 24" style="color: var(--c-info)"><path d="M12 2 2 12l10 10 10-10Z" /><path d="m12 8-4 4 4 4 4-4Z" /></svg><span class="t">RYC-42 Audit export for the Hub</span><button class="btn" data-src="RYC-42 Audit export for the Hub">Add to Tasks</button></div>
+</div>
+<div class="sched">
+<svg class="i" viewBox="0 0 24 24" style="color: var(--c-plan)"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5M16 2v4M8 2v4M3 10h5" /><path d="M17.5 17.5 16 16.3V14" /><circle cx="16" cy="16" r="6" /></svg>
+<span style="flex: 1"><b>Every Monday 09:00</b> · create “Dependency audit” and start a chat with Sonnet <span style="color: var(--c-faint)">(an Automation that outputs tasks)</span></span>
+</div>
+</div>
+<div class="panel">
+<div class="panel-h">Inbox</div>
+<div class="mini-inbox" id="srcInbox"><div class="empty">Turn a review comment, an issue or a schedule into a task. The link back is kept, so starting a chat later checks out the right branch.</div></div>
+</div>
+</div>
+<div class="toast" id="toast4"></div>
+</section>
+</div>
+<script>
+(() => {
+if (!getComputedStyle(document.documentElement).getPropertyValue("--background").trim()) {
+document.documentElement.classList.add("standalone");
+}
+const $ = (s) => document.querySelector(s);
+const toastIn = (id) => {
+let t;
+return (html) => {
+const el = $(id);
+el.innerHTML = html;
+el.classList.add("on");
+clearTimeout(t);
+t = setTimeout(() => el.classList.remove("on"), 2400);
+};
+};
+const toast2 = toastIn("#toast2");
+const toast3 = toastIn("#toast3");
+const toast4 = toastIn("#toast4");
+const boardIcon =
+'<svg class="i" viewBox="0 0 24 24" style="width:12px;height:12px"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7M12 7v4M16 7v9"/></svg>';
+document.querySelectorAll("[data-tab]").forEach((b) =>
+b.addEventListener("click", () => {
+document.querySelectorAll("[data-tab]").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+document.querySelectorAll(".scene").forEach((s) => s.classList.toggle("on", s.dataset.scene === b.dataset.tab));
+}),
+);
+// chat scene
+const chip = $("#taskChip");
+chip.addEventListener("click", (e) => {
+e.stopPropagation();
+const on = !$("#taskPop").classList.contains("on");
+$("#taskPop").classList.toggle("on", on);
+chip.setAttribute("aria-expanded", String(on));
+});
+document.addEventListener("click", (e) => {
+if (!e.target.closest("#taskPop") && !e.target.closest("#taskChip")) {
+$("#taskPop").classList.remove("on");
+chip.setAttribute("aria-expanded", "false");
+}
+});
+document.querySelectorAll(".pop .ck").forEach((c) => {
+c.addEventListener("click", () => {
+c.classList.toggle("on");
+c.querySelector(".bx").innerHTML = c.classList.contains("on")
+? '<svg class="i" viewBox="0 0 24 24" style="width:10px;height:10px;stroke:#fff;stroke-width:3"><path d="M20 6 9 17l-5-5"/></svg>'
+: "";
+});
+});
+document.querySelectorAll("[data-toast]").forEach((b) =>
+b.addEventListener("click", () => {
+$("#taskPop").classList.remove("on");
+toast2(`${boardIcon} ${b.dataset.toast}`);
+}),
+);
+$("#followBtn").addEventListener("click", () => {
+toast2(`${boardIcon} “Revalidate hosted session on focus” added to Inbox · linked to this chat`);
+$("#followBtn").innerHTML = '<svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Task created';
+});
+// capture scene
+const PROJ = { ryco: "ryco", inspect: "cs2inspect-web", paints: "weaponpaints" };
+const parse = (v) => {
+let s = v.replace(/^\s*(task|todo|t)\s*:\s*/i, "");
+let project = null,
+prio = null,
+due = null;
+s = s.replace(/(^|\s)#([\w-]+)/g, (m, a, p) => {
+const k = Object.keys(PROJ).find((k) => k === p.toLowerCase() || PROJ[k].startsWith(p.toLowerCase()));
+if (!k) return m;
+project = PROJ[k];
+return a;
+});
+s = s.replace(/(^|\s)!(low|high|urgent)\b/gi, (m, a, p) => {
+prio = p.toLowerCase();
+return a;
+});
+s = s.replace(/(^|\s)(due:|@)(\w+)/gi, (m, a, _, d) => {
+due = d;
+return a;
+});
+return { title: s.trim(), meta: [project, prio, due && `due ${due}`].filter(Boolean) };
+};
+const palIn = $("#palIn");
+const syncPal = () => {
+const p = parse(palIn.value);
+$("#palTitle").textContent = p.title || "…";
+$("#palMeta").textContent = p.meta.length ? ` · ${p.meta.join(" · ")}` : "";
+};
+palIn.addEventListener("input", syncPal);
+const inbox = $("#miniInbox");
+const pushCard = (box, title, sub) => {
+box.querySelector(".empty")?.remove();
+const el = document.createElement("div");
+el.className = "mcard";
+el.innerHTML = `<div>${title}</div><div class="row">${sub}</div>`;
+box.prepend(el);
+};
+const addPal = (start) => {
+const p = parse(palIn.value);
+if (!p.title) return;
+pushCard(inbox, p.title, p.meta.map((m) => `<span class="tag">${m}</span>`).join("") + (start ? `<span class="tag" style="color:var(--c-info)">● Working</span>` : ""));
+toast3(`${boardIcon} ${start ? "Added and started in a new worktree" : "Added to Inbox"}`);
+palIn.value = "";
+syncPal();
+};
+palIn.addEventListener("keydown", (e) => {
+if (e.key === "Enter") addPal(e.metaKey || e.ctrlKey);
+});
+document.querySelectorAll("[data-pal]").forEach((o) =>
+o.addEventListener("click", () => {
+if (o.dataset.pal === "open") return toast3(`${boardIcon} Would open the Tasks board`);
+addPal(o.dataset.pal === "start");
+}),
+);
+const sgs = [...document.querySelectorAll(".sg")];
+const syncSugg = () => {
+const n = sgs.filter((s) => s.classList.contains("on") && s.style.display !== "none").length;
+const left = sgs.some((s) => s.style.display !== "none");
+$("#addSugg").textContent = n ? `Add ${n} to Tasks` : left ? "Pick some" : "All added";
+};
+sgs.forEach((s) =>
+s.addEventListener("click", () => {
+s.classList.toggle("on");
+syncSugg();
+}),
+);
+$("#addSugg").addEventListener("click", () => {
+const picked = sgs.filter((s) => s.classList.contains("on") && s.style.display !== "none");
+picked.forEach((s, i) =>
+setTimeout(() => {
+const label = s.querySelector("span:last-child").cloneNode(true);
+label.querySelector("small")?.remove();
+pushCard(inbox, label.innerHTML.trim(), `<span class="tag">ryco</span><span class="tag">from chat · Fix login redirect loop</span>`);
+s.style.display = "none";
+s.classList.remove("on");
+syncSugg();
+}, i * 140),
+);
+if (picked.length) toast3(`${boardIcon} ${picked.length} follow-up${picked.length > 1 ? "s" : ""} added, linked to the chat`);
+});
+// sources scene
+const srcBox = $("#srcInbox");
+$("#commentTask").addEventListener("click", (e) => {
+pushCard(
+srcBox,
+"Clamp raised-pane alpha in light mode",
+`<span class="tag">ryco</span><span class="tag" style="color:color-mix(in srgb,var(--c-success) 72%,var(--c-fg))">PR #746</span><span class="tag">review comment · L42</span>`,
+);
+e.currentTarget.innerHTML = '<svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>Task created';
+toast4(`${boardIcon} Task created · “Start” will reuse the PR #746 worktree`);
+});
+document.querySelectorAll("[data-src]").forEach((b) =>
+b.addEventListener("click", () => {
+const [key, ...rest] = b.dataset.src.split(" ");
+pushCard(srcBox, rest.join(" "), `<span class="tag">ryco</span><span class="tag">${key}</span>`);
+b.textContent = "Added";
+b.disabled = true;
+b.style.opacity = ".5";
+toast4(`${boardIcon} ${key} added · title, body and comments stay in sync`);
+}),
+);
+})();
+</script>
+</body>
+</html>

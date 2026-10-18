@@ -10,6 +10,8 @@ import {
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
+  resolveAutoFeatureBranchName,
+  resolveUniqueRefName,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
 
@@ -192,5 +194,37 @@ describe("configurable worktree namespaces", () => {
     expect(buildGeneratedWorktreeBranchName("A".repeat(100), "team/agents")).toBe(
       `team/agents/${"a".repeat(64)}`,
     );
+  });
+});
+
+describe("resolveUniqueRefName", () => {
+  it("keeps a free name", () => {
+    expect(resolveUniqueRefName("task/fix-login", [])).toBe("task/fix-login");
+    expect(resolveUniqueRefName("task/fix-login", ["task/fix-login-2", "main"])).toBe(
+      "task/fix-login",
+    );
+  });
+
+  it("takes the smallest free suffix, comparing names case-insensitively", () => {
+    expect(resolveUniqueRefName("task/fix-login", ["Task/Fix-Login"])).toBe("task/fix-login-2");
+    expect(
+      resolveUniqueRefName("task/fix-login", [
+        "task/fix-login",
+        "TASK/FIX-LOGIN-2",
+        "task/fix-login-4",
+      ]),
+    ).toBe("task/fix-login-3");
+  });
+
+  it("starts numbering at firstSuffix", () => {
+    expect(resolveUniqueRefName("task/fix-login", ["task/fix-login"], 3)).toBe("task/fix-login-3");
+    expect(resolveUniqueRefName("task/fix-login", ["task/fix-login", "task/fix-login-3"], 3)).toBe(
+      "task/fix-login-4",
+    );
+  });
+
+  it("backs resolveAutoFeatureBranchName", () => {
+    expect(resolveAutoFeatureBranchName(["feature/update"])).toBe("feature/update-2");
+    expect(resolveAutoFeatureBranchName(["feature/login"], "Login")).toBe("feature/login-2");
   });
 });

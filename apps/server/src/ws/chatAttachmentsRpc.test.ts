@@ -20,12 +20,15 @@ const uploadsDouble: ChatAttachmentUploadsShape = {
       expiresAt: "2026-01-01T00:10:00.000Z",
       maxUploadBytes: 1024,
     }),
+  createForTask: () => Effect.die("not used"),
   beginUpload: () => Effect.die("not used"),
   completeUpload: () => Effect.die("not used"),
   abortUpload: () => Effect.die("not used"),
   commitAdoption: () => Effect.void,
   releaseAdoption: () => Effect.void,
   claimForAdoption: () => Effect.die("not used"),
+  claimForTask: () => Effect.die("not used"),
+  releaseTaskClaim: () => Effect.void,
 };
 
 const makeContext = (uploads: ChatAttachmentUploadsShape | undefined) =>

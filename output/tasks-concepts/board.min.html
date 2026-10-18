@@ -1,0 +1,1589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ryco — Tasks board prototype</title>
+<style>
+ :root{--c-bg: var(--background,#0b0b0c);--c-fg: var(--foreground,#ececed);--c-muted-fg: var(--muted-foreground,#a3a3aa);--c-card: var(--card,#151516);--c-popover: var(--popover,#1b1b1d);--c-border: var(--border,rgba(255,255,255,0.09));--c-muted: var(--muted,rgba(255,255,255,0.06));--c-accent: var(--accent,rgba(255,255,255,0.09));--c-primary: var(--primary,#e4e4e5);--c-primary-fg: var(--primary-foreground,#0b0b0c);--c-success: var(--success,#10b981);--c-warning: var(--warning,#f59e0b);--c-info: var(--info,#3b82f6);--c-danger: var(--destructive,#ef4444);--c-radius: var(--radius,10px);--c-sans: var(--font-sans,"DM Sans",-apple-system,BlinkMacSystemFont,system-ui,sans-serif);--c-mono: var(--font-mono,"SF Mono",ui-monospace,Menlo,monospace);--c-lane: color-mix(in srgb,var(--c-fg) 3%,transparent);--c-faint: color-mix(in srgb,var(--c-muted-fg) 70%,transparent);--c-plan: #a78bfa;--c-merged: #c084fc;--ease: cubic-bezier(0.16,1,0.3,1);--spring: cubic-bezier(0.22,1,0.36,1);--snappy: cubic-bezier(0.3,1.36,0.44,1);--shadow: 0 1px 2px rgba(0,0,0,0.18);--shadow-lg: 0 24px 60px -20px rgba(0,0,0,0.6),0 2px 10px rgba(0,0,0,0.28);}
+html.standalone{background: var(--c-bg);color: var(--c-fg);}
+html.standalone body{padding: 24px;}
+*{box-sizing: border-box;}
+body{margin: 0;font-family: var(--c-sans);font-size: 13px;color: var(--c-fg);-webkit-font-smoothing: antialiased;}
+button,input,textarea,select{font: inherit;color: inherit;}
+button{cursor: pointer;}
+svg.i{width: 14px;height: 14px;flex: none;stroke: currentColor;fill: none;stroke-width: 2;stroke-linecap: round;stroke-linejoin: round;}
+.mono{font-family: var(--c-mono);font-size: 11.5px;}
+.page{position: relative;min-height: 760px;display: flex;flex-direction: column;gap: 12px;overflow: hidden;}
+.head{display: flex;align-items: center;gap: 10px;padding-right: 44px;flex-wrap: wrap;row-gap: 8px;}
+.title{display: flex;align-items: center;gap: 8px;font-size: 15px;font-weight: 600;letter-spacing: -0.01em;}
+.title .count{font-size: 12px;font-weight: 500;color: var(--c-muted-fg);}
+.seg{display: inline-flex;padding: 2px;border-radius: 8px;background: var(--c-muted);gap: 2px;}
+.seg button{display: inline-flex;align-items: center;gap: 6px;height: 24px;padding: 0 9px;border: 0;border-radius: 6px;background: transparent;color: var(--c-muted-fg);font-size: 12px;transition: background 160ms var(--ease),color 160ms var(--ease);}
+.seg button[aria-pressed="true"]{background: var(--c-card);color: var(--c-fg);box-shadow: var(--shadow);}
+.chips{display: flex;gap: 4px;flex-wrap: wrap;}
+.chip{display: inline-flex;align-items: center;gap: 5px;height: 24px;padding: 0 8px;border-radius: 999px;border: 1px solid var(--c-border);background: transparent;color: var(--c-muted-fg);font-size: 12px;white-space: nowrap;transition: background 160ms var(--ease),color 160ms var(--ease),border-color 160ms var(--ease);}
+.chip:hover{color: var(--c-fg);background: var(--c-muted);}
+.chip[aria-pressed="true"]{color: var(--c-fg);background: var(--c-accent);border-color: transparent;}
+.spacer{flex: 1;}
+.toggle{display: inline-flex;align-items: center;gap: 7px;font-size: 12px;color: var(--c-muted-fg);user-select: none;cursor: pointer;}
+.switch{position: relative;width: 26px;height: 15px;border-radius: 999px;background: var(--c-accent);transition: background 200ms var(--ease);}
+.switch::after{content: "";position: absolute;top: 2px;left: 2px;width: 11px;height: 11px;border-radius: 50%;background: var(--c-fg);transition: transform 220ms var(--snappy);}
+.toggle[aria-checked="true"] .switch{background: var(--c-info);}
+.toggle[aria-checked="true"] .switch::after{transform: translateX(11px);background: #fff;}
+.btn{display: inline-flex;align-items: center;justify-content: center;gap: 6px;height: 28px;padding: 0 11px;border-radius: 8px;border: 1px solid var(--c-border);background: transparent;color: var(--c-fg);font-size: 12.5px;font-weight: 500;white-space: nowrap;transition: background 160ms var(--ease),transform 120ms var(--ease),opacity 160ms var(--ease);}
+.btn:hover{background: var(--c-muted);}
+.btn:active{transform: scale(0.97);}
+.btn.primary{background: var(--c-primary);color: var(--c-primary-fg);border-color: transparent;}
+.btn.primary:hover{opacity: 0.9;}
+.btn.sm{height: 24px;padding: 0 8px;font-size: 12px;border-radius: 7px;}
+.btn.ghost{border-color: transparent;color: var(--c-muted-fg);}
+.btn.ghost:hover{color: var(--c-fg);}
+.btn.warn{background: color-mix(in srgb,var(--c-warning) 16%,transparent);border-color: color-mix(in srgb,var(--c-warning) 35%,transparent);color: color-mix(in srgb,var(--c-warning) 70%,var(--c-fg));}
+.btn.ok{background: color-mix(in srgb,var(--c-success) 14%,transparent);border-color: color-mix(in srgb,var(--c-success) 32%,transparent);color: color-mix(in srgb,var(--c-success) 70%,var(--c-fg));}
+.capture{border-radius: 14px;background: color-mix(in srgb,var(--c-fg) 5.5%,var(--c-bg));border: 1px solid var(--c-border);padding: 10px 12px 8px;transition: border-color 200ms var(--ease),box-shadow 200ms var(--ease);}
+.capture:focus-within{border-color: color-mix(in srgb,var(--c-fg) 22%,transparent);box-shadow: 0 0 0 4px color-mix(in srgb,var(--c-fg) 4%,transparent);}
+.capture textarea{display: block;width: 100%;min-height: 22px;max-height: 140px;resize: none;border: 0;outline: 0;background: transparent;font-size: 13.5px;line-height: 1.5;padding: 0;}
+.capture textarea::placeholder{color: var(--c-faint);}
+.capture-foot{display: flex;align-items: center;gap: 6px;margin-top: 6px;min-height: 22px;flex-wrap: wrap;}
+.capture-foot .hint{font-size: 11.5px;color: var(--c-faint);}
+.capture-foot kbd,kbd{font-family: var(--c-sans);font-size: 10.5px;padding: 1px 4px;border-radius: 4px;background: var(--c-muted);color: var(--c-muted-fg);}
+.parse{display: inline-flex;align-items: center;gap: 4px;height: 20px;padding: 0 7px;border-radius: 6px;font-size: 11.5px;background: var(--c-muted);color: var(--c-fg);animation: pop 200ms var(--snappy);}
+.board-wrap{position: relative;flex: 1;min-height: 0;}
+.board{display: flex;gap: 8px;align-items: flex-start;overflow-x: auto;padding-bottom: 8px;scrollbar-width: thin;scroll-snap-type: x proximity;}
+.col{flex: 0 0 236px;min-width: 0;display: flex;flex-direction: column;min-height: 560px;border-radius: 12px;background: var(--c-lane);padding: 6px;scroll-snap-align: start;transition: background 160ms var(--ease),box-shadow 160ms var(--ease),flex-basis 260ms var(--ease);}
+.col.drop{background: color-mix(in srgb,var(--c-info) 9%,transparent);box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--c-info) 40%,transparent);}
+.col.drop.auto{background: color-mix(in srgb,var(--c-warning) 8%,transparent);box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--c-warning) 35%,transparent);}
+.col-head{display: flex;align-items: center;gap: 7px;height: 30px;padding: 0 6px;font-size: 12.5px;font-weight: 600;}
+.col-head .n{font-weight: 500;color: var(--c-faint);}
+.col-head .auto-tag{margin-left: auto;display: inline-flex;align-items: center;gap: 4px;font-size: 10.5px;font-weight: 500;color: var(--c-faint);padding: 1px 6px;border-radius: 999px;border: 1px dashed var(--c-border);}
+.col-head .add{margin-left: auto;width: 22px;height: 22px;display: grid;place-items: center;border: 0;border-radius: 6px;background: transparent;color: var(--c-faint);}
+.col-head .add:hover{background: var(--c-muted);color: var(--c-fg);}
+.glyph{width: 14px;height: 14px;flex: none;}
+.cards{display: flex;flex-direction: column;gap: 6px;flex: 1;padding-top: 2px;}
+.empty{display: grid;place-items: center;text-align: center;padding: 18px 10px;border-radius: 9px;border: 1px dashed var(--c-border);font-size: 11.5px;color: var(--c-faint);line-height: 1.45;}
+.card{position: relative;min-width: 0;overflow-wrap: anywhere;border-radius: 10px;background: var(--c-card);border: 1px solid var(--c-border);box-shadow: var(--shadow);padding: 9px 10px 8px;cursor: grab;user-select: none;transition: border-color 160ms var(--ease),box-shadow 200ms var(--ease),opacity 160ms var(--ease);}
+.card:hover{border-color: color-mix(in srgb,var(--c-fg) 18%,transparent);}
+.card.selected{border-color: color-mix(in srgb,var(--c-info) 60%,transparent);box-shadow: 0 0 0 3px color-mix(in srgb,var(--c-info) 16%,transparent);}
+.card.dragging{opacity: 0.35;}
+.card.enter{animation: enter 320ms var(--spring) both;}
+.card.flash{animation: flash 900ms var(--ease);}
+.card-top{display: flex;align-items: flex-start;gap: 7px;}
+.card-title{font-size: 13px;font-weight: 500;line-height: 1.38;flex: 1;text-wrap: pretty;}
+.card.done .card-title{color: var(--c-muted-fg);}
+.card-desc{margin-top: 3px;font-size: 12px;line-height: 1.4;color: var(--c-muted-fg);display: -webkit-box;-webkit-line-clamp: 2;-webkit-box-orient: vertical;overflow: hidden;}
+.meta{display: flex;align-items: center;flex-wrap: wrap;gap: 4px;margin-top: 7px;}
+.tag{display: inline-flex;align-items: center;gap: 4px;height: 20px;padding: 0 6px;border-radius: 6px;background: var(--c-muted);color: var(--c-muted-fg);font-size: 11.5px;white-space: nowrap;max-width: 100%;overflow: hidden;text-overflow: ellipsis;}
+.tag svg.i{width: 12px;height: 12px;}
+.tag .tx{min-width: 0;overflow: hidden;text-overflow: ellipsis;}
+.tag.overdue,.tag.soon{color: color-mix(in srgb,var(--c-warning) 75%,var(--c-fg));background: color-mix(in srgb,var(--c-warning) 12%,transparent);}
+.tag.overdue{color: color-mix(in srgb,var(--c-danger) 75%,var(--c-fg));background: color-mix(in srgb,var(--c-danger) 12%,transparent);}
+.tag.pr-open{color: color-mix(in srgb,var(--c-success) 72%,var(--c-fg));}
+.tag.pr-merged{color: color-mix(in srgb,var(--c-merged) 80%,var(--c-fg));}
+.tag.pr-draft{color: var(--c-muted-fg);}
+.proj{display: inline-flex;align-items: center;gap: 5px;height: 20px;padding: 0 6px 0 3px;border-radius: 6px;background: var(--c-muted);font-size: 11.5px;color: var(--c-fg);white-space: nowrap;}
+.pi{width: 14px;height: 14px;border-radius: 4px;display: grid;place-items: center;font-size: 9px;font-weight: 700;color: #fff;flex: none;}
+.prio{display: inline-flex;align-items: flex-end;gap: 1.5px;height: 12px;margin-top: 3px;flex: none;}
+.prio i{width: 3px;border-radius: 1px;background: var(--c-faint);opacity: 0.35;}
+.prio i:nth-child(1){height: 5px;}
+.prio i:nth-child(2){height: 8px;}
+.prio i:nth-child(3){height: 11px;}
+.prio i.on{opacity: 1;background: var(--c-muted-fg);}
+.prio.urgent{width: 14px;height: 14px;border-radius: 4px;background: var(--c-danger);color: #fff;font-size: 10px;font-weight: 800;display: grid;place-items: center;margin-top: 2px;}
+.runs{margin: 8px -10px -8px;padding: 6px 10px 7px;border-top: 1px solid var(--c-border);display: flex;flex-direction: column;gap: 5px;}
+.run{display: flex;align-items: center;gap: 6px;font-size: 11.5px;color: var(--c-muted-fg);min-height: 18px;}
+.run .who{color: var(--c-fg);font-weight: 500;white-space: nowrap;}
+.run .what{flex: 1;min-width: 0;overflow: hidden;text-overflow: ellipsis;white-space: nowrap;}
+.run .when{color: var(--c-faint);font-variant-numeric: tabular-nums;}
+.run.archived{opacity: 0.45;text-decoration: line-through;}
+.av{width: 16px;height: 16px;border-radius: 5px;display: grid;place-items: center;font-size: 9px;font-weight: 700;flex: none;color: #fff;}
+.av.claude{background: #d97757;}
+.av.codex{background: #10a37f;}
+.av.sonnet{background: #b4624a;}
+.dot{width: 7px;height: 7px;border-radius: 50%;flex: none;background: var(--c-faint);}
+.dot.running{background: var(--c-info);box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-info) 60%,transparent);animation: pulse 1.6s var(--ease) infinite;}
+.dot.starting{background: transparent;border: 1.5px solid var(--c-info);border-right-color: transparent;animation: spin 800ms linear infinite;width: 9px;height: 9px;}
+.dot.needs{background: var(--c-warning);animation: pulse-warn 1.6s var(--ease) infinite;}
+.dot.review{background: var(--c-success);}
+.dot.plan{background: var(--c-plan);animation: pulse-plan 1.6s var(--ease) infinite;}
+.dot.failed{background: var(--c-danger);}
+.ask{margin-top: 2px;padding: 7px 8px;border-radius: 8px;background: color-mix(in srgb,var(--c-warning) 9%,transparent);border: 1px solid color-mix(in srgb,var(--c-warning) 22%,transparent);font-size: 11.5px;line-height: 1.4;}
+.ask.plan{background: color-mix(in srgb,var(--c-plan) 10%,transparent);border-color: color-mix(in srgb,var(--c-plan) 26%,transparent);}
+.ask code{font-family: var(--c-mono);font-size: 11px;word-break: break-all;}
+.ask .row{display: flex;gap: 4px;margin-top: 6px;}
+.diffstat{font-family: var(--c-mono);font-size: 11px;}
+.diffstat .a{color: color-mix(in srgb,var(--c-success) 80%,var(--c-fg));}
+.diffstat .d{color: color-mix(in srgb,var(--c-danger) 80%,var(--c-fg));}
+.card-actions{display: flex;gap: 4px;margin-top: 2px;flex-wrap: wrap;}
+.list{display: flex;flex-direction: column;gap: 14px;}
+.group-h{display: flex;align-items: center;gap: 7px;font-size: 12px;font-weight: 600;padding: 0 8px 4px;color: var(--c-fg);}
+.group-h .n{color: var(--c-faint);font-weight: 500;}
+.rowi{display: grid;grid-template-columns: 16px minmax(0,1fr) auto;align-items: center;gap: 10px;padding: 7px 8px;border-radius: 8px;cursor: pointer;transition: background 140ms var(--ease);}
+.rowi:hover{background: var(--c-muted);}
+.rowi .t{min-width: 0;overflow: hidden;text-overflow: ellipsis;white-space: nowrap;font-weight: 500;}
+.rowi .r{display: flex;align-items: center;gap: 4px;}
+.scrim{position: absolute;inset: 0;background: rgba(0,0,0,0.18);opacity: 0;pointer-events: none;transition: opacity 260ms var(--ease);z-index: 4;}
+.scrim.on{opacity: 1;pointer-events: auto;}
+.sheet{position: absolute;top: 0;right: 0;bottom: 0;width: min(440px,100%);background: var(--c-popover);border: 1px solid var(--c-border);border-radius: 14px;box-shadow: var(--shadow-lg);transform: translateX(calc(100% + 24px));transition: transform 360ms var(--ease);z-index: 5;display: flex;flex-direction: column;overflow: hidden;}
+.sheet.on{transform: none;}
+.sheet-head{display: flex;align-items: center;gap: 6px;padding: 10px 52px 10px 10px;border-bottom: 1px solid var(--c-border);}
+.icon-btn{width: 28px;height: 28px;display: grid;place-items: center;border: 0;border-radius: 7px;background: transparent;color: var(--c-muted-fg);}
+.icon-btn:hover{background: var(--c-muted);color: var(--c-fg);}
+.sheet-body{flex: 1;overflow-y: auto;padding: 14px 16px 24px;scrollbar-width: thin;}
+.sheet-title{width: 100%;border: 0;outline: 0;background: transparent;font-size: 17px;font-weight: 600;letter-spacing: -0.01em;line-height: 1.3;padding: 0;resize: none;field-sizing: content;}
+.props{display: grid;grid-template-columns: 84px 1fr;gap: 4px 8px;margin: 12px 0 14px;align-items: center;}
+.props .k{font-size: 12px;color: var(--c-faint);}
+.props select,.props input{height: 26px;border-radius: 7px;border: 1px solid transparent;background: transparent;padding: 0 6px;font-size: 12.5px;width: fit-content;max-width: 100%;outline: 0;color-scheme: dark light;}
+.props select:hover,.props input:hover,.props select:focus,.props input:focus{background: var(--c-muted);border-color: var(--c-border);}
+.sec{margin-top: 16px;}
+.sec-h{display: flex;align-items: center;gap: 6px;font-size: 11.5px;font-weight: 600;color: var(--c-muted-fg);text-transform: uppercase;letter-spacing: 0.04em;margin-bottom: 6px;}
+.sec-h .btn{margin-left: auto;text-transform: none;letter-spacing: 0;}
+.desc{width: 100%;min-height: 96px;border-radius: 9px;border: 1px solid var(--c-border);background: transparent;padding: 9px 10px;line-height: 1.5;font-size: 13px;resize: vertical;outline: 0;field-sizing: content;}
+.desc:focus{border-color: color-mix(in srgb,var(--c-fg) 24%,transparent);}
+.lrow{display: flex;align-items: center;gap: 8px;padding: 6px 8px;border-radius: 8px;font-size: 12.5px;}
+.lrow:hover{background: var(--c-muted);}
+.lrow .sub{color: var(--c-faint);font-size: 11.5px;margin-left: auto;white-space: nowrap;}
+.lrow .main{min-width: 0;overflow: hidden;text-overflow: ellipsis;white-space: nowrap;}
+.files{display: flex;flex-wrap: wrap;gap: 6px;}
+.file{display: inline-flex;align-items: center;gap: 6px;height: 30px;padding: 0 9px;border-radius: 8px;border: 1px solid var(--c-border);font-size: 12px;background: var(--c-card);}
+.file .thumb{width: 18px;height: 18px;border-radius: 4px;background: linear-gradient(135deg,#64748b,#1e293b);}
+.drop-zone{display: inline-flex;align-items: center;gap: 6px;height: 30px;padding: 0 10px;border-radius: 8px;border: 1px dashed var(--c-border);color: var(--c-faint);font-size: 12px;cursor: pointer;transition: background 160ms var(--ease),border-color 160ms var(--ease);}
+.drop-zone:hover,.drop-zone.over{background: var(--c-muted);border-color: color-mix(in srgb,var(--c-fg) 25%,transparent);color: var(--c-fg);}
+.menu{position: absolute;z-index: 9;min-width: 210px;padding: 4px;border-radius: 10px;background: var(--c-popover);border: 1px solid var(--c-border);box-shadow: var(--shadow-lg);animation: pop 180ms var(--ease);}
+.menu button{display: flex;align-items: center;gap: 8px;width: 100%;height: 30px;padding: 0 8px;border: 0;border-radius: 6px;background: transparent;font-size: 12.5px;text-align: left;}
+.menu button:hover{background: var(--c-accent);}
+.menu .sub{margin-left: auto;color: var(--c-faint);font-size: 11px;}
+.inline-input{display: flex;gap: 6px;margin-top: 6px;animation: pop 180ms var(--ease);}
+.inline-input input{flex: 1;height: 28px;border-radius: 7px;border: 1px solid var(--c-border);background: transparent;padding: 0 8px;outline: 0;font-size: 12.5px;}
+.activity{display: flex;flex-direction: column;gap: 6px;font-size: 12px;color: var(--c-muted-fg);}
+.activity div{display: flex;gap: 8px;align-items: baseline;}
+.activity .ts{margin-left: auto;color: var(--c-faint);font-size: 11px;white-space: nowrap;}
+.startbar{padding: 10px 16px;border-top: 1px solid var(--c-border);display: flex;gap: 6px;align-items: center;}
+.dlg-scrim{position: absolute;inset: 0;z-index: 7;background: rgba(0,0,0,0.36);display: grid;place-items: start center;padding-top: 40px;opacity: 0;pointer-events: none;transition: opacity 200ms var(--ease);}
+.dlg-scrim.on{opacity: 1;pointer-events: auto;}
+.dlg{width: min(560px,calc(100% - 24px));max-height: calc(100% - 60px);overflow-y: auto;border-radius: 16px;background: var(--c-popover);border: 1px solid var(--c-border);box-shadow: var(--shadow-lg);transform: translateY(6px) scale(0.97);transition: transform 260ms var(--snappy);scrollbar-width: thin;}
+.dlg-scrim.on .dlg{transform: none;}
+.dlg-h{padding: 16px 18px 4px;}
+.dlg-h .eyebrow{font-size: 11.5px;color: var(--c-faint);}
+.dlg-h h3{margin: 3px 0 0;font-size: 15px;font-weight: 600;letter-spacing: -0.01em;}
+.dlg-b{padding: 10px 18px 6px;display: flex;flex-direction: column;gap: 14px;}
+.field-l{font-size: 11.5px;font-weight: 600;color: var(--c-muted-fg);margin-bottom: 6px;display: flex;align-items: center;gap: 6px;}
+.field-l .opt{font-weight: 400;color: var(--c-faint);}
+.where{display: grid;grid-template-columns: repeat(3,minmax(0,1fr));gap: 6px;}
+.where button{text-align: left;border-radius: 10px;border: 1px solid var(--c-border);background: transparent;padding: 9px 10px;display: flex;flex-direction: column;gap: 3px;transition: border-color 160ms var(--ease),background 160ms var(--ease);}
+.where button:hover{background: var(--c-muted);}
+.where button[aria-pressed="true"]{border-color: color-mix(in srgb,var(--c-info) 65%,transparent);background: color-mix(in srgb,var(--c-info) 8%,transparent);}
+.where .wt{display: flex;align-items: center;gap: 6px;font-weight: 600;font-size: 12.5px;}
+.where .wd{font-size: 11.5px;color: var(--c-muted-fg);line-height: 1.35;}
+.branch-line{display: flex;align-items: center;gap: 6px;margin-top: 8px;font-size: 12px;color: var(--c-muted-fg);flex-wrap: wrap;}
+.branch-line input{height: 26px;border-radius: 7px;border: 1px solid var(--c-border);background: transparent;padding: 0 8px;font-family: var(--c-mono);font-size: 11.5px;outline: 0;min-width: 220px;flex: 1;}
+.pills{display: flex;flex-wrap: wrap;gap: 5px;}
+.pill{display: inline-flex;align-items: center;gap: 6px;height: 28px;padding: 0 10px;border-radius: 8px;border: 1px solid var(--c-border);background: transparent;font-size: 12.5px;transition: border-color 160ms var(--ease),background 160ms var(--ease);}
+.pill[aria-pressed="true"]{border-color: color-mix(in srgb,var(--c-info) 65%,transparent);background: color-mix(in srgb,var(--c-info) 8%,transparent);}
+.two{display: grid;grid-template-columns: 1fr auto;gap: 14px;align-items: start;}
+.prompt{width: 100%;min-height: 150px;border-radius: 10px;border: 1px solid var(--c-border);background: color-mix(in srgb,var(--c-fg) 3%,transparent);padding: 10px;font-family: var(--c-mono);font-size: 11.5px;line-height: 1.55;resize: vertical;outline: 0;color: var(--c-fg);}
+.checks{display: flex;flex-direction: column;gap: 7px;}
+.check{display: flex;align-items: center;gap: 8px;font-size: 12.5px;cursor: pointer;user-select: none;}
+.box{width: 15px;height: 15px;border-radius: 4px;border: 1px solid color-mix(in srgb,var(--c-fg) 30%,transparent);display: grid;place-items: center;transition: background 140ms var(--ease),border-color 140ms var(--ease);}
+.box svg{width: 11px;height: 11px;stroke: #fff;stroke-width: 3;opacity: 0;transform: scale(0.6);transition: opacity 140ms var(--ease),transform 200ms var(--snappy);}
+.check[aria-checked="true"] .box{background: var(--c-info);border-color: var(--c-info);}
+.check[aria-checked="true"] .box svg{opacity: 1;transform: none;}
+.dlg-f{display: flex;align-items: center;gap: 8px;padding: 12px 18px 16px;}
+.dlg-f .note{font-size: 11.5px;color: var(--c-faint);margin-right: auto;}
+.cmp{display: grid;gap: 6px;}
+.cmp-row{display: grid;grid-template-columns: 16px 1fr auto auto;gap: 8px;align-items: center;padding: 8px;border-radius: 9px;border: 1px solid var(--c-border);font-size: 12px;}
+.cmp-row .s{color: var(--c-muted-fg);font-size: 11.5px;}
+.toast{position: absolute;left: 50%;bottom: 14px;transform: translate(-50%,16px);opacity: 0;z-index: 10;display: flex;align-items: center;gap: 8px;padding: 8px 12px;border-radius: 10px;background: var(--c-popover);border: 1px solid var(--c-border);box-shadow: var(--shadow-lg);font-size: 12.5px;pointer-events: none;transition: opacity 200ms var(--ease),transform 260ms var(--snappy);max-width: calc(100% - 32px);}
+.toast.on{opacity: 1;transform: translate(-50%,0);}
+@keyframes pop{from{opacity: 0;transform: scale(0.96);}
+}
+@keyframes enter{from{opacity: 0;transform: translateY(-8px) scale(0.97);}
+}
+@keyframes flash{0%{box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-info) 50%,transparent);}
+100%{box-shadow: 0 0 0 10px transparent;}
+}
+@keyframes pulse{0%{box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-info) 55%,transparent);}
+70%,100%{box-shadow: 0 0 0 6px transparent;}
+}
+@keyframes pulse-warn{0%{box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-warning) 55%,transparent);}
+70%,100%{box-shadow: 0 0 0 6px transparent;}
+}
+@keyframes pulse-plan{0%{box-shadow: 0 0 0 0 color-mix(in srgb,var(--c-plan) 55%,transparent);}
+70%,100%{box-shadow: 0 0 0 6px transparent;}
+}
+@keyframes spin{to{transform: rotate(360deg);}
+}
+@media (max-width: 560px){.where{grid-template-columns: 1fr;}
+.col{flex-basis: 216px;}
+}
+
+</style>
+</head>
+<body>
+<div class="page" id="page">
+<div class="head">
+<div class="title">
+<svg class="i" viewBox="0 0 24 24" style="width: 16px; height: 16px">
+<rect width="18" height="18" x="3" y="3" rx="2" />
+<path d="M8 7v7M12 7v4M16 7v9" />
+</svg>
+Tasks <span class="count" id="count"></span>
+</div>
+<div class="seg" role="group" aria-label="View">
+<button data-view="board" aria-pressed="true">Board</button>
+<button data-view="list" aria-pressed="false">List</button>
+</div>
+<div class="chips" id="projChips"></div>
+<div class="spacer"></div>
+<div
+class="toggle"
+id="followToggle"
+role="switch"
+aria-checked="true"
+title="When on, cards with a chat move between In progress, Needs you and Review by themselves"
+>
+<span class="switch"></span> Columns follow chats
+</div>
+</div>
+<div class="capture">
+<textarea
+id="capture"
+rows="1"
+placeholder="Write down a problem or idea…   #project  !high  due:fri   (paste a list to add many)"
+></textarea>
+<div class="capture-foot" id="captureFoot">
+<span class="hint"
+><kbd>↵</kbd> add to Inbox &nbsp;·&nbsp; <kbd>⌘↵</kbd> add &amp; start a chat</span
+>
+</div>
+</div>
+<div class="board-wrap" id="boardWrap"></div>
+<div class="scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="Task details"></aside>
+<div class="dlg-scrim" id="dlgScrim"><div class="dlg" id="dlg"></div></div>
+<div class="toast" id="toast"></div>
+</div>
+<script>
+(() => {
+if (!getComputedStyle(document.documentElement).getPropertyValue("--background").trim()) {
+document.documentElement.classList.add("standalone");
+}
+// ── icons (lucide) ───────────────────────────────────
+const P = {
+branch:
+'<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+pr: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
+merged:
+'<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
+issue: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
+jira: '<path d="M12 2 2 12l10 10 10-10Z"/><path d="m12 8-4 4 4 4 4-4Z"/>',
+clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+cal: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+plus: '<path d="M5 12h14M12 5v14"/>',
+x: '<path d="M18 6 6 18M6 6l12 12"/>',
+check: '<path d="M20 6 9 17l-5-5"/>',
+play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+fork: '<circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9M12 12v3"/>',
+folder:
+'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+laptop:
+'<rect width="18" height="12" x="3" y="4" rx="2"/><path d="M2 20h20"/>',
+file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+more: '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+ext: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+split:
+'<path d="M16 3h5v5M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3M15 9l6-6"/>',
+trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+inbox:
+'<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+circle: '<circle cx="12" cy="12" r="9"/>',
+loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+alert: '<circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>',
+eye: '<path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/>',
+done: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+list: '<path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13"/>',
+url: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+task: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/>',
+back: '<path d="m15 18-6-6 6-6"/>',
+};
+const ic = (n, s) =>
+`<svg class="i" viewBox="0 0 24 24"${s ? ` style="width:${s}px;height:${s}px"` : ""}>${P[n]}</svg>`;
+// ── data ─────────────────────────────────────────────
+const PROJECTS = {
+ryco: { name: "ryco", color: "#6366f1", letter: "R" },
+inspect: { name: "cs2inspect-web", color: "#0ea5e9", letter: "C" },
+paints: { name: "weaponpaints", color: "#f97316", letter: "W" },
+};
+const MODELS = {
+opus: { label: "Claude Opus 5.5", short: "Opus 5.5", av: "claude", letter: "C" },
+sonnet: { label: "Claude Sonnet 5.5", short: "Sonnet 5.5", av: "sonnet", letter: "S" },
+terra: { label: "GPT-5.6-Terra", short: "GPT-5.6", av: "codex", letter: "G" },
+};
+const COLS = [
+{ id: "inbox", name: "Inbox", glyph: "inbox", empty: "Quick-captured ideas land here." },
+{ id: "todo", name: "Todo", glyph: "circle", empty: "Triaged and ready to start." },
+{
+id: "progress",
+name: "In progress",
+glyph: "loader",
+auto: true,
+empty: "Drop a task here to start a chat for it.",
+},
+{
+id: "needs",
+name: "Needs you",
+glyph: "alert",
+auto: true,
+empty: "Approvals, questions and plans waiting on you.",
+},
+{
+id: "review",
+name: "Review",
+glyph: "eye",
+auto: true,
+empty: "Agent finished. Check the diff, open a PR.",
+},
+{ id: "done", name: "Done", glyph: "done", empty: "Nothing finished yet." },
+];
+const COL_COLOR = {
+inbox: "var(--c-muted-fg)",
+todo: "var(--c-muted-fg)",
+progress: "var(--c-info)",
+needs: "var(--c-warning)",
+review: "var(--c-success)",
+done: "var(--c-merged)",
+};
+const day = 86400000;
+const today = new Date(2026, 9, 18);
+const inDays = (n) => new Date(today.getTime() + n * day);
+const now = () => Date.now();
+let seq = 100;
+const uid = (p) => `${p}${++seq}`;
+const tasks = [
+{
+id: "t1",
+col: "inbox",
+title: "Sidebar flickers when a worktree is archived",
+desc: "Thread rows jump for one frame when archiving from the overview rail. Optimistic removal racing the snapshot?",
+project: "ryco",
+prio: 2,
+due: null,
+links: [],
+files: [{ name: "flicker.mov", kind: "video" }],
+chats: [],
+log: [["Captured from quick add", "2h"]],
+},
+{
+id: "t2",
+col: "inbox",
+title: "Idea: show per-subscription usage in the composer",
+desc: "CLIProxyAPI routes several Claude subscriptions. Show which one a turn bills and how much is left.",
+project: "ryco",
+prio: 1,
+due: null,
+links: [],
+files: [],
+chats: [],
+log: [["Captured from quick add", "1d"]],
+},
+{
+id: "t3",
+col: "inbox",
+title: "Check Steam inspect-link rate limits",
+desc: "",
+project: "inspect",
+prio: 2,
+due: null,
+links: [],
+files: [],
+chats: [],
+log: [["Captured from quick add", "3d"]],
+},
+{
+id: "t4",
+col: "todo",
+title: "Fix login redirect loop on hosted Hub",
+desc: "After the session cookie expires, /pair redirects to / which redirects back to /pair.\n\nRepro: let the session expire in a hosted tab, then reload.",
+project: "ryco",
+prio: 3,
+due: inDays(2),
+links: [{ type: "issue", label: "#231", title: "Redirect loop after session expiry", state: "open" }],
+files: [
+{ name: "session.har", kind: "file" },
+{ name: "loop.png", kind: "image" },
+],
+chats: [],
+log: [
+["Linked GitHub issue #231", "1d"],
+["Created", "1d"],
+],
+},
+{
+id: "t5",
+col: "todo",
+title: "Float range filter in skin search",
+desc: "Two-thumb slider 0.00–1.00, persisted in the URL query.",
+project: "inspect",
+prio: 2,
+due: inDays(6),
+links: [],
+files: [{ name: "filter-mock.png", kind: "image" }],
+chats: [],
+log: [["Created", "4d"]],
+},
+{
+id: "t10",
+col: "todo",
+title: "Renew Apple developer certificate",
+desc: "Expires Oct 19. Needed for the notarized desktop build.",
+project: null,
+prio: 4,
+due: inDays(1),
+links: [{ type: "url", label: "developer.apple.com", title: "Certificates" }],
+files: [],
+chats: [],
+log: [["Created", "6d"]],
+},
+{
+id: "t6",
+col: "progress",
+title: "Migrate weapon paints store to Pinia",
+desc: "Replace the hand-rolled reactive store with Pinia, keep the persisted loadout format.",
+project: "paints",
+prio: 2,
+due: null,
+links: [{ type: "branch", label: "task/pinia-store", title: "worktree" }],
+files: [],
+chats: [
+{ id: "c6", model: "terra", status: "running", what: "Editing stores/loadout.ts", since: now() - 12 * 60000 },
+],
+log: [
+["Chat started in worktree task/pinia-store", "12m"],
+["Created", "2d"],
+],
+},
+{
+id: "t7",
+col: "needs",
+title: "Upgrade Effect to 4.1 in the server",
+desc: "Bump effect + @effect/* together, fix the Schema.TaggedError call sites.",
+project: "ryco",
+prio: 3,
+due: null,
+links: [{ type: "branch", label: "task/effect-4-1", title: "worktree" }],
+files: [],
+chats: [
+{
+id: "c7",
+model: "opus",
+status: "needs",
+ask: "approve",
+cmd: "bun install --frozen-lockfile",
+since: now() - 26 * 60000,
+},
+],
+log: [
+["Chat asked for approval", "1m"],
+["Chat started in worktree task/effect-4-1", "26m"],
+],
+},
+{
+id: "t8",
+col: "review",
+title: "Translucent window: tune blur radius",
+desc: "Match Synara's look: 90% coat on body, raised panes at 55%/31%.",
+project: "ryco",
+prio: 2,
+due: null,
+links: [
+{ type: "branch", label: "task/translucent-blur", title: "worktree" },
+{ type: "pr", label: "#746", title: "Add translucent window design", state: "open" },
+],
+files: [{ name: "synara-ref.png", kind: "image" }],
+chats: [
+{ id: "c8", model: "opus", status: "review", diff: [214, 38, 9], since: now() - 95 * 60000 },
+],
+log: [
+["PR #746 opened by the chat", "40m"],
+["Chat finished", "41m"],
+],
+},
+{
+id: "t9",
+col: "done",
+title: "Simplify chat header breadcrumbs",
+desc: "",
+project: "ryco",
+prio: 1,
+due: null,
+links: [{ type: "pr", label: "#745", title: "Simplify chat header breadcrumbs", state: "merged" }],
+files: [],
+chats: [{ id: "c9", model: "terra", status: "review", diff: [96, 141, 6], since: now() - 30 * 3600000 }],
+log: [["PR #745 merged → moved to Done", "1d"]],
+},
+];
+const state = {
+view: "board",
+project: "all",
+follow: true,
+selected: null,
+dlg: null,
+menu: null,
+linkDraft: null,
+compare: false,
+};
+// ── helpers ──────────────────────────────────────────
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) =>
+String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const slug = (s) =>
+s
+.toLowerCase()
+.replace(/^idea:\s*/, "")
+.replace(/[^a-z0-9]+/g, "-")
+.replace(/^-|-$/g, "")
+.split("-")
+.filter((w) => !STOP.has(w))
+.slice(0, 5)
+.join("-");
+const STOP = new Set(["a", "an", "the", "on", "in", "to", "for", "of", "when", "is", "and", "with"]);
+const byId = (id) => tasks.find((t) => t.id === id);
+const ago = (ts) => {
+const m = Math.max(0, Math.round((now() - ts) / 60000));
+if (m < 1) return "now";
+if (m < 60) return `${m}m`;
+const h = Math.round(m / 60);
+return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+};
+const dueLabel = (d) => {
+const diff = Math.round((d - today) / day);
+if (diff < 0) return { text: `${-diff}d overdue`, cls: "overdue" };
+if (diff === 0) return { text: "Today", cls: "soon" };
+if (diff === 1) return { text: "Tomorrow", cls: "soon" };
+if (diff < 7)
+return { text: d.toLocaleDateString("en", { weekday: "short" }), cls: diff <= 2 ? "soon" : "" };
+return { text: d.toLocaleDateString("en", { month: "short", day: "numeric" }), cls: "" };
+};
+const projChip = (p) => {
+if (!p) return `<span class="tag">${ic("laptop", 12)} No project</span>`;
+const pr = PROJECTS[p];
+return `<span class="proj"><span class="pi" style="background:${pr.color}">${pr.letter}</span>${esc(pr.name)}</span>`;
+};
+const prioGlyph = (n) =>
+n === 4
+? `<span class="prio urgent" title="Urgent">!</span>`
+: `<span class="prio" title="${["", "Low", "Medium", "High"][n]} priority">${[1, 2, 3]
+.map((k) => `<i class="${k <= n ? "on" : ""}"></i>`)
+.join("")}</span>`;
+const linkTag = (l) => {
+if (l.type === "branch") return `<span class="tag mono" title="${esc(l.label)}">${ic("branch", 12)}<span class="tx">${esc(l.label)}</span></span>`;
+if (l.type === "pr")
+return `<span class="tag pr-${l.state}" title="Pull request · ${l.state}">${ic(l.state === "merged" ? "merged" : "pr", 12)}${esc(l.label)}</span>`;
+if (l.type === "issue") return `<span class="tag" title="GitHub issue">${ic("issue", 12)}${esc(l.label)}</span>`;
+if (l.type === "jira") return `<span class="tag" title="Jira">${ic("jira", 12)}${esc(l.label)}</span>`;
+if (l.type === "chat") return `<span class="tag" title="Linked chat">${ic("chat", 12)}${esc(l.label)}</span>`;
+return `<span class="tag" title="Link">${ic("url", 12)}${esc(l.label)}</span>`;
+};
+// Where a card belongs right now. With "follow chats" on, live chats decide the
+// middle columns; Inbox, Todo and Done stay manual.
+const effectiveCol = (t) => {
+if (!state.follow || t.col === "done" || !t.chats.length) return t.col;
+const live = t.chats.filter((c) => !c.archived);
+if (live.some((c) => c.status === "needs" || c.status === "plan")) return "needs";
+if (live.some((c) => c.status === "running" || c.status === "starting")) return "progress";
+if (live.some((c) => c.status === "review")) return "review";
+return t.col;
+};
+const visible = () => tasks.filter((t) => state.project === "all" || t.project === state.project);
+// ── rendering ────────────────────────────────────────
+const runRow = (t, c) => {
+const m = MODELS[c.model];
+let what = "";
+let dot = c.status;
+if (c.status === "starting") what = c.what || "Creating worktree…";
+else if (c.status === "running") what = c.what || "Working";
+else if (c.status === "needs") what = c.ask === "approve" ? "Needs approval" : "Needs your answer";
+else if (c.status === "plan") {
+what = "Plan ready for review";
+} else if (c.status === "review")
+what = `<span class="diffstat"><span class="a">+${c.diff[0]}</span> <span class="d">−${c.diff[1]}</span></span> · ${c.diff[2]} files`;
+const attempt = c.attempt ? ` <span class="when">#${c.attempt}</span>` : "";
+return `<div class="run${c.archived ? " archived" : ""}" data-chat="${c.id}">
+<span class="dot ${dot}"></span>
+<span class="av ${m.av}">${m.letter}</span>
+<span class="who">${m.short}${attempt}</span>
+<span class="what">${what}</span>
+<span class="when">${ago(c.since)}</span>
+</div>`;
+};
+const cardActions = (t) => {
+const live = t.chats.filter((c) => !c.archived);
+const out = [];
+const needs = live.find((c) => c.status === "needs");
+const plan = live.find((c) => c.status === "plan");
+if (needs && needs.ask === "approve")
+out.push(`<div class="ask">Run <code>${esc(needs.cmd)}</code> in <span class="mono">${esc(branchOf(t) || "worktree")}</span>?
+<div class="row"><button class="btn sm warn" data-act="approve" data-chat="${needs.id}">${ic("check", 12)} Approve</button><button class="btn sm ghost" data-act="open-chat">Open chat</button></div></div>`);
+if (plan)
+out.push(`<div class="ask plan">Plan: ${esc(plan.planSummary)}
+<div class="row"><button class="btn sm" data-act="approve-plan" data-chat="${plan.id}">${ic("check", 12)} Approve plan</button><button class="btn sm ghost" data-act="open-chat">Read plan</button></div></div>`);
+const reviewing = live.filter((c) => c.status === "review");
+if (t.col !== "done" && effectiveCol(t) === "review") {
+const pr = t.links.find((l) => l.type === "pr");
+const multi = reviewing.length > 1;
+const btns = [];
+if (multi) btns.push(`<button class="btn sm" data-act="compare">${ic("split", 12)} Compare ${reviewing.length}</button>`);
+else if (!pr) btns.push(`<button class="btn sm ok" data-act="open-pr">${ic("pr", 12)} Open PR</button>`);
+else if (pr.state !== "merged") btns.push(`<button class="btn sm" data-act="merge-pr">${ic("merged", 12)} Merge ${esc(pr.label)}</button>`);
+btns.push(`<button class="btn sm ghost" data-act="mark-done">${ic("check", 12)} Done</button>`);
+out.push(`<div class="card-actions">${btns.join("")}</div>`);
+}
+return out.join("");
+};
+const branchOf = (t) => t.links.find((l) => l.type === "branch")?.label;
+const cardHtml = (t) => {
+const col = effectiveCol(t);
+const meta = [];
+meta.push(projChip(t.project));
+if (t.due) {
+const d = dueLabel(t.due);
+meta.push(`<span class="tag ${t.col === "done" ? "" : d.cls}">${ic("cal", 12)}${d.text}</span>`);
+}
+for (const l of t.links) meta.push(linkTag(l));
+if (t.files.length) meta.push(`<span class="tag" title="Attachments">${ic("clip", 12)}${t.files.length}</span>`);
+const runs = t.chats.length
+? `<div class="runs">${t.chats.map((c) => runRow(t, c)).join("")}${cardActions(t)}</div>`
+: "";
+return `<div class="card${t.col === "done" ? " done" : ""}${state.selected === t.id ? " selected" : ""}" draggable="true" data-id="${t.id}" data-col="${col}">
+<div class="card-top">${prioGlyph(t.prio)}<div class="card-title">${esc(t.title)}</div></div>
+${t.desc && !t.chats.length ? `<div class="card-desc">${esc(t.desc)}</div>` : ""}
+<div class="meta">${meta.join("")}</div>
+${runs}
+</div>`;
+};
+const renderHead = () => {
+$("#count").textContent = String(visible().filter((t) => t.col !== "done").length) + " open";
+const chips = [["all", "All projects"], ...Object.entries(PROJECTS).map(([k, v]) => [k, v.name])];
+$("#projChips").innerHTML = chips
+.map(
+([k, label]) =>
+`<button class="chip" data-proj="${k}" aria-pressed="${state.project === k}">${
+k === "all" ? "" : `<span class="pi" style="background:${PROJECTS[k].color};width:10px;height:10px;border-radius:3px"></span>`
+}${esc(label)}</button>`,
+)
+.join("");
+document.querySelectorAll(".seg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === state.view)));
+$("#followToggle").setAttribute("aria-checked", String(state.follow));
+};
+const renderBoard = () => {
+const list = visible();
+const html = COLS.map((col) => {
+const items = list.filter((t) => effectiveCol(t) === col.id);
+const auto = col.auto && state.follow;
+return `<section class="col${auto ? " auto" : ""}" data-col="${col.id}">
+<div class="col-head">
+<span style="color:${COL_COLOR[col.id]};display:inline-flex">${ic(col.glyph, 14)}</span>
+${col.name} <span class="n">${items.length}</span>
+${
+auto
+? `<span class="auto-tag" title="Cards with a chat move here by themselves">${ic("chat", 10)} auto</span>`
+: col.id === "inbox" || col.id === "todo"
+? `<button class="add" data-add="${col.id}" title="Add task">${ic("plus", 14)}</button>`
+: ""
+}
+</div>
+<div class="cards">${items.map(cardHtml).join("") || `<div class="empty">${col.empty}</div>`}</div>
+</section>`;
+}).join("");
+return `<div class="board" id="board">${html}</div>`;
+};
+const renderList = () => {
+const list = visible();
+return `<div class="list">${COLS.map((col) => {
+const items = list.filter((t) => effectiveCol(t) === col.id);
+if (!items.length) return "";
+return `<div><div class="group-h"><span style="color:${COL_COLOR[col.id]};display:inline-flex">${ic(col.glyph, 14)}</span>${col.name}<span class="n">${items.length}</span></div>
+${items
+.map((t) => {
+const live = t.chats.filter((c) => !c.archived);
+const st = live[0];
+const right = [
+...t.links.map(linkTag),
+t.due ? `<span class="tag ${dueLabel(t.due).cls}">${ic("cal", 12)}${dueLabel(t.due).text}</span>` : "",
+st ? `<span class="tag"><span class="dot ${st.status}"></span>${MODELS[st.model].short}${live.length > 1 ? ` +${live.length - 1}` : ""}</span>` : "",
+projChip(t.project),
+].join("");
+return `<div class="rowi" data-open="${t.id}">${prioGlyph(t.prio)}<div class="t">${esc(t.title)}</div><div class="r">${right}</div></div>`;
+})
+.join("")}</div>`;
+}).join("")}</div>`;
+};
+// FLIP so cards glide when the board changes underneath them.
+const render = (opts = {}) => {
+const before = new Map();
+document.querySelectorAll(".card[data-id]").forEach((el) => before.set(el.dataset.id, el.getBoundingClientRect()));
+renderHead();
+$("#boardWrap").innerHTML = state.view === "board" ? renderBoard() : renderList();
+if (state.view === "board") {
+document.querySelectorAll(".card[data-id]").forEach((el) => {
+const id = el.dataset.id;
+const a = before.get(id);
+if (!a) {
+if (opts.enter?.includes(id)) el.classList.add("enter");
+return;
+}
+const b = el.getBoundingClientRect();
+const dx = a.left - b.left;
+const dy = a.top - b.top;
+if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
+duration: 420,
+easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+});
+if (opts.flash?.includes(id)) el.classList.add("flash");
+});
+if (opts.scrollTo) {
+const el = document.querySelector(`.card[data-id="${opts.scrollTo}"]`);
+const board = $("#board");
+if (el && board) {
+const col = el.closest(".col");
+const target = col.offsetLeft - 8;
+if (target < board.scrollLeft || target + col.offsetWidth > board.scrollLeft + board.clientWidth)
+board.scrollTo({ left: target, behavior: "smooth" });
+}
+}
+}
+if (state.selected) renderSheet();
+};
+// ── toast ────────────────────────────────────────────
+let toastTimer;
+const toast = (html) => {
+const el = $("#toast");
+el.innerHTML = html;
+el.classList.add("on");
+clearTimeout(toastTimer);
+toastTimer = setTimeout(() => el.classList.remove("on"), 2600);
+};
+// ── quick capture ────────────────────────────────────
+const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const parseLine = (raw) => {
+let text = raw;
+const out = { project: null, prio: 2, due: null, title: "" };
+text = text.replace(/(^|\s)#([\w-]+)/g, (m, s, p) => {
+const key = Object.keys(PROJECTS).find((k) => k === p.toLowerCase() || PROJECTS[k].name.startsWith(p.toLowerCase()));
+if (key) {
+out.project = key;
+return s;
+}
+return m;
+});
+text = text.replace(/(^|\s)!(low|med|medium|high|urgent|1|2|3|4)\b/gi, (m, s, p) => {
+out.prio = { low: 1, med: 2, medium: 2, high: 3, urgent: 4, 1: 4, 2: 3, 3: 2, 4: 1 }[p.toLowerCase()];
+return s;
+});
+text = text.replace(/(^|\s)(?:due:|@)(today|tomorrow|tmr|mon|tue|wed|thu|fri|sat|sun)\b/gi, (m, s, d) => {
+d = d.toLowerCase();
+if (d === "today") out.due = inDays(0);
+else if (d === "tomorrow" || d === "tmr") out.due = inDays(1);
+else {
+const target = DAYS.indexOf(d);
+let diff = (target - today.getDay() + 7) % 7;
+if (diff === 0) diff = 7;
+out.due = inDays(diff);
+}
+return s;
+});
+out.title = text.replace(/\s+/g, " ").trim();
+return out;
+};
+const capture = $("#capture");
+const renderCaptureFoot = () => {
+const lines = capture.value.split("\n").map((l) => l.replace(/^\s*[-*•]\s*|\s*\d+[.)]\s*/, "")).filter((l) => l.trim());
+const foot = $("#captureFoot");
+if (!lines.length) {
+foot.innerHTML = `<span class="hint"><kbd>↵</kbd> add to Inbox &nbsp;·&nbsp; <kbd>⌘↵</kbd> add &amp; start a chat</span>`;
+return;
+}
+if (lines.length > 1) {
+foot.innerHTML = `<span class="parse">${ic("list", 12)} ${lines.length} tasks</span><span class="hint">one per line &nbsp;·&nbsp; <kbd>↵</kbd> add all to Inbox</span>`;
+return;
+}
+const p = parseLine(lines[0]);
+const bits = [];
+if (p.project) bits.push(`<span class="parse"><span class="pi" style="background:${PROJECTS[p.project].color};width:10px;height:10px;border-radius:3px"></span>${PROJECTS[p.project].name}</span>`);
+if (p.prio !== 2) bits.push(`<span class="parse">${prioGlyph(p.prio)} ${["", "Low", "Medium", "High", "Urgent"][p.prio]}</span>`);
+if (p.due) bits.push(`<span class="parse">${ic("cal", 12)} ${dueLabel(p.due).text}</span>`);
+foot.innerHTML = `${bits.join("")}<span class="hint">${bits.length ? "&nbsp;" : ""}<kbd>↵</kbd> add &nbsp;·&nbsp; <kbd>⌘↵</kbd> add &amp; start</span>`;
+};
+const addFromCapture = (start) => {
+const lines = capture.value.split("\n").map((l) => l.replace(/^\s*[-*•]\s*|^\s*\d+[.)]\s*/, "")).filter((l) => l.trim());
+if (!lines.length) return;
+const ids = [];
+for (const line of lines) {
+const p = parseLine(line);
+if (!p.title) continue;
+const t = {
+id: uid("t"),
+col: "inbox",
+title: p.title,
+desc: "",
+project: p.project ?? (state.project !== "all" ? state.project : null),
+prio: p.prio,
+due: p.due,
+links: [],
+files: [],
+chats: [],
+log: [["Captured from quick add", "now"]],
+};
+tasks.unshift(t);
+ids.push(t.id);
+}
+capture.value = "";
+capture.style.height = "";
+renderCaptureFoot();
+if (state.view !== "board") state.view = "board";
+render({ enter: ids });
+const b = $("#board");
+if (b) b.scrollTo({ left: 0, behavior: "smooth" });
+if (start && ids.length === 1) openStart(ids[0]);
+else toast(`${ic("inbox")} ${ids.length === 1 ? "Added to Inbox" : `${ids.length} tasks added to Inbox`}`);
+};
+capture.addEventListener("input", () => {
+capture.style.height = "auto";
+capture.style.height = capture.scrollHeight + "px";
+renderCaptureFoot();
+});
+capture.addEventListener("keydown", (e) => {
+if (e.key === "Enter" && !e.shiftKey) {
+e.preventDefault();
+addFromCapture(e.metaKey || e.ctrlKey);
+}
+});
+// ── sheet (task details) ─────────────────────────────
+const openSheet = (id) => {
+state.selected = id;
+state.compare = false;
+state.linkDraft = null;
+renderSheet();
+$("#sheet").classList.add("on");
+$("#scrim").classList.add("on");
+document.querySelectorAll(".card").forEach((c) => c.classList.toggle("selected", c.dataset.id === id));
+};
+const closeSheet = () => {
+state.selected = null;
+$("#sheet").classList.remove("on");
+$("#scrim").classList.remove("on");
+closeMenu();
+document.querySelectorAll(".card.selected").forEach((c) => c.classList.remove("selected"));
+};
+const LINK_TYPES = [
+["branch", "Branch", "branch", "task/…"],
+["pr", "Pull request", "pr", "#123 or URL"],
+["issue", "GitHub issue", "issue", "#123"],
+["jira", "Jira issue", "jira", "RYC-42"],
+["chat", "Existing chat", "chat", "search chats"],
+["url", "Web link", "url", "https://"],
+];
+const renderSheet = () => {
+const t = byId(state.selected);
+if (!t) return closeSheet();
+const col = effectiveCol(t);
+const colDef = COLS.find((c) => c.id === col);
+const live = t.chats.filter((c) => !c.archived);
+const statusOptions = COLS.map(
+(c) => `<option value="${c.id}" ${c.id === col ? "selected" : ""} ${c.auto && state.follow && !live.length ? "disabled" : ""}>${c.name}${c.auto && state.follow ? " (auto)" : ""}</option>`,
+).join("");
+const projOptions = [`<option value="">No project</option>`, ...Object.entries(PROJECTS).map(([k, v]) => `<option value="${k}" ${t.project === k ? "selected" : ""}>${v.name}</option>`)].join("");
+const dueVal = t.due ? `${t.due.getFullYear()}-${String(t.due.getMonth() + 1).padStart(2, "0")}-${String(t.due.getDate()).padStart(2, "0")}` : "";
+const linksHtml = t.links.length
+? t.links
+.map((l, i) => {
+const type = LINK_TYPES.find((x) => x[0] === l.type);
+const sub =
+l.type === "pr" ? l.state : l.type === "issue" ? l.state ?? "" : l.type === "branch" ? (live.length ? "worktree · live" : "worktree") : "";
+return `<div class="lrow">${ic(type[2])}<span class="main"><span class="${l.type === "branch" ? "mono" : ""}">${esc(l.label)}</span>${
+l.title && l.type !== "branch" ? ` <span style="color:var(--c-muted-fg)">${esc(l.title)}</span>` : ""
+}</span><span class="sub">${esc(sub)}</span><button class="icon-btn" style="width:22px;height:22px" data-unlink="${i}" title="Remove link">${ic("x", 12)}</button></div>`;
+})
+.join("")
+: `<div style="font-size:12px;color:var(--c-faint);padding:2px 8px 4px">Link a branch, pull request, issue or chat.</div>`;
+const linkInput = state.linkDraft
+? `<div class="inline-input"><input id="linkInput" placeholder="${LINK_TYPES.find((x) => x[0] === state.linkDraft)[3]}" /><button class="btn sm primary" data-act="save-link">Link</button></div>`
+: "";
+const filesHtml =
+t.files.map((f) => `<span class="file">${f.kind === "image" ? `<span class="thumb"></span>` : ic(f.kind === "video" ? "play" : "file")}${esc(f.name)}</span>`).join("") +
+`<label class="drop-zone" id="dropZone">${ic("plus", 12)}Drop files or click<input type="file" multiple hidden id="fileInput" /></label>`;
+const chatsHtml = t.chats.length
+? t.chats
+.map((c) => {
+const m = MODELS[c.model];
+const label = {
+starting: "Starting",
+running: c.what || "Working",
+needs: "Needs approval",
+plan: "Plan ready",
+review: `+${c.diff?.[0]} −${c.diff?.[1]} · ${c.diff?.[2]} files`,
+}[c.status];
+return `<div class="lrow${c.archived ? " archived" : ""}" style="${c.archived ? "opacity:.45;text-decoration:line-through" : ""}"><span class="dot ${c.status}"></span><span class="av ${m.av}">${m.letter}</span><span class="main">${m.label}${c.attempt ? ` · attempt ${c.attempt}` : ""} <span style="color:var(--c-muted-fg)">· ${esc(label)}</span></span><span class="sub">${ago(c.since)}</span></div>`;
+})
+.join("")
+: `<div style="font-size:12px;color:var(--c-faint);padding:2px 8px 4px">No chats yet. Start one and it shows up here, with its worktree, diff and PR.</div>`;
+const reviewing = live.filter((c) => c.status === "review");
+const compareHtml =
+state.compare && reviewing.length > 1
+? `<div class="sec"><div class="sec-h">${ic("split", 12)} Compare attempts</div><div class="cmp">${reviewing
+.map(
+(c) =>
+`<div class="cmp-row"><span class="av ${MODELS[c.model].av}">${MODELS[c.model].letter}</span><div><div style="font-weight:500">${MODELS[c.model].label} · attempt ${c.attempt}</div><div class="s">${c.summary}</div></div><span class="diffstat"><span class="a">+${c.diff[0]}</span> <span class="d">−${c.diff[1]}</span></span><button class="btn sm" data-keep="${c.id}">Keep</button></div>`,
+)
+.join("")}</div><div style="font-size:11.5px;color:var(--c-faint);margin-top:6px">Keeping one archives the other chats and removes their worktrees.</div></div>`
+: "";
+$("#sheet").innerHTML = `
+<div class="sheet-head">
+<button class="icon-btn" data-act="close" title="Close (Esc)">${ic("back", 16)}</button>
+<span style="color:${COL_COLOR[col]};display:inline-flex">${ic(colDef.glyph, 14)}</span>
+<select id="statusSel" style="border:0;background:transparent;font-weight:600;font-size:12.5px;outline:0;color-scheme:dark light">${statusOptions}</select>
+<span style="flex:1"></span>
+<button class="icon-btn" data-act="delete" title="Delete task">${ic("trash", 14)}</button>
+</div>
+<div class="sheet-body">
+<textarea class="sheet-title" id="titleInput" rows="1">${esc(t.title)}</textarea>
+<div class="props">
+<span class="k">Project</span><select id="projSel">${projOptions}</select>
+<span class="k">Priority</span><select id="prioSel">${["Low", "Medium", "High", "Urgent"].map((n, i) => `<option value="${i + 1}" ${t.prio === i + 1 ? "selected" : ""}>${n}</option>`).join("")}</select>
+<span class="k">Due</span><input type="date" id="dueInput" value="${dueVal}" />
+</div>
+<textarea class="desc" id="descInput" placeholder="Describe the problem, the idea, acceptance criteria… Markdown works. This becomes the chat's first message.">${esc(t.desc)}</textarea>
+<div class="sec">
+<div class="sec-h">${ic("clip", 12)} Files</div>
+<div class="files">${filesHtml}</div>
+</div>
+<div class="sec" style="position:relative">
+<div class="sec-h">${ic("link", 12)} Links <button class="btn sm ghost" data-act="link-menu">${ic("plus", 12)} Link</button></div>
+${linksHtml}${linkInput}
+</div>
+<div class="sec">
+<div class="sec-h">${ic("chat", 12)} Chats &amp; worktrees</div>
+${chatsHtml}
+</div>
+${compareHtml}
+<div class="sec">
+<div class="sec-h">Activity</div>
+<div class="activity">${t.log.map(([what, ts]) => `<div><span>${esc(what)}</span><span class="ts">${ts}</span></div>`).join("")}</div>
+</div>
+</div>
+<div class="startbar">
+<button class="btn primary" data-act="start" ${t.col === "done" ? "disabled style='opacity:.5'" : ""}>${ic("play", 12)} ${live.length ? "Start another chat" : "Start chat"}</button>
+<button class="btn" data-act="attach-chat">${ic("chat", 12)} Link existing chat</button>
+<span style="flex:1"></span>
+${t.col !== "done" ? `<button class="btn ghost" data-act="mark-done">${ic("check", 12)} Done</button>` : `<button class="btn ghost" data-act="reopen">Reopen</button>`}
+</div>`;
+const ta = $("#titleInput");
+ta.addEventListener("input", () => {
+t.title = ta.value.replace(/\n/g, " ");
+const card = document.querySelector(`.card[data-id="${t.id}"] .card-title`);
+if (card) card.textContent = t.title;
+});
+$("#descInput").addEventListener("input", (e) => (t.desc = e.target.value));
+$("#projSel").addEventListener("change", (e) => {
+t.project = e.target.value || null;
+render();
+});
+$("#prioSel").addEventListener("change", (e) => {
+t.prio = Number(e.target.value);
+render();
+});
+$("#dueInput").addEventListener("change", (e) => {
+t.due = e.target.value ? new Date(e.target.value + "T00:00") : null;
+render();
+});
+$("#statusSel").addEventListener("change", (e) => moveTo(t.id, e.target.value));
+const fi = $("#fileInput");
+fi.addEventListener("change", () => {
+for (const f of fi.files) t.files.push({ name: f.name, kind: f.type.startsWith("image") ? "image" : "file" });
+t.log.unshift([`Attached ${fi.files.length} file${fi.files.length > 1 ? "s" : ""}`, "now"]);
+render();
+});
+const dz = $("#dropZone");
+dz.addEventListener("dragover", (e) => {
+if (!e.dataTransfer.types.includes("Files")) return;
+e.preventDefault();
+dz.classList.add("over");
+});
+dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+dz.addEventListener("drop", (e) => {
+e.preventDefault();
+dz.classList.remove("over");
+for (const f of e.dataTransfer.files) t.files.push({ name: f.name, kind: f.type.startsWith("image") ? "image" : "file" });
+t.log.unshift([`Attached ${e.dataTransfer.files.length} file(s)`, "now"]);
+render();
+});
+const li = $("#linkInput");
+if (li) {
+li.focus();
+li.addEventListener("keydown", (e) => {
+if (e.key === "Enter") saveLink();
+if (e.key === "Escape") {
+state.linkDraft = null;
+renderSheet();
+}
+});
+}
+};
+const saveLink = () => {
+const t = byId(state.selected);
+const v = $("#linkInput")?.value.trim();
+if (!t || !v) return;
+const type = state.linkDraft;
+let link;
+if (type === "pr") {
+const n = v.match(/(\d+)\s*$/)?.[1] ?? v;
+link = { type, label: `#${n}`, title: "Fetched title shows here", state: "open" };
+} else if (type === "issue") {
+const n = v.match(/(\d+)\s*$/)?.[1] ?? v;
+link = { type, label: `#${n}`, title: "Issue title, body and comments are pulled in", state: "open" };
+} else if (type === "branch") link = { type, label: v, title: "branch" };
+else if (type === "jira") link = { type, label: v.toUpperCase(), title: "Jira summary" };
+else if (type === "chat") link = { type, label: v, title: "chat" };
+else link = { type: "url", label: v.replace(/^https?:\/\//, "").slice(0, 32), title: "" };
+t.links.push(link);
+t.log.unshift([`Linked ${LINK_TYPES.find((x) => x[0] === type)[1].toLowerCase()} ${link.label}`, "now"]);
+state.linkDraft = null;
+render();
+};
+// ── menus ────────────────────────────────────────────
+const closeMenu = () => {
+document.querySelectorAll(".menu").forEach((m) => m.remove());
+state.menu = null;
+};
+const openMenu = (anchor, items, onPick) => {
+closeMenu();
+const page = $("#page").getBoundingClientRect();
+const r = anchor.getBoundingClientRect();
+const m = document.createElement("div");
+m.className = "menu";
+m.innerHTML = items.map(([id, label, icon, sub]) => `<button data-pick="${id}">${ic(icon)}${label}<span class="sub">${sub ?? ""}</span></button>`).join("");
+$("#page").appendChild(m);
+const w = m.offsetWidth;
+m.style.left = Math.max(8, Math.min(r.right - page.left - w, page.width - w - 8)) + "px";
+m.style.top = r.bottom - page.top + 4 + "px";
+m.addEventListener("click", (e) => {
+const b = e.target.closest("[data-pick]");
+if (!b) return;
+e.stopPropagation();
+closeMenu();
+onPick(b.dataset.pick);
+});
+state.menu = m;
+};
+// ── moving cards ─────────────────────────────────────
+const moveTo = (id, colId) => {
+const t = byId(id);
+if (!t) return;
+const col = COLS.find((c) => c.id === colId);
+const live = t.chats.filter((c) => !c.archived);
+if (col.auto && state.follow && !live.length) {
+if (colId === "progress") return openStart(id);
+toast(`${ic("chat")} Only a chat can move a task to ${col.name}`);
+return render();
+}
+if (colId === "done") {
+t.col = "done";
+t.log.unshift(["Marked done", "now"]);
+toast(`${ic("done")} Done${live.length ? " · its chats stay in the sidebar" : ""}`);
+} else {
+t.col = colId;
+t.log.unshift([`Moved to ${col.name}`, "now"]);
+}
+render({ scrollTo: id });
+};
+// DnD between columns
+let dragId = null;
+document.addEventListener("dragstart", (e) => {
+const card = e.target.closest?.(".card[data-id]");
+if (!card) return;
+dragId = card.dataset.id;
+e.dataTransfer.effectAllowed = "move";
+e.dataTransfer.setData("text/plain", dragId);
+requestAnimationFrame(() => card.classList.add("dragging"));
+});
+document.addEventListener("dragend", () => {
+document.querySelectorAll(".dragging").forEach((c) => c.classList.remove("dragging"));
+document.querySelectorAll(".col.drop").forEach((c) => c.classList.remove("drop"));
+dragId = null;
+});
+document.addEventListener("dragover", (e) => {
+if (!dragId) return;
+const col = e.target.closest?.(".col");
+document.querySelectorAll(".col.drop").forEach((c) => c !== col && c.classList.remove("drop"));
+if (!col) return;
+e.preventDefault();
+col.classList.add("drop");
+});
+document.addEventListener("drop", (e) => {
+if (!dragId) return;
+const col = e.target.closest?.(".col");
+if (!col) return;
+e.preventDefault();
+const id = dragId;
+dragId = null;
+document.querySelectorAll(".col.drop").forEach((c) => c.classList.remove("drop"));
+if (effectiveCol(byId(id)) !== col.dataset.col) moveTo(id, col.dataset.col);
+});
+// ── start dialog ─────────────────────────────────────
+const defaultWhere = (t) => {
+if (t.links.some((l) => l.type === "pr" && l.state !== "merged")) return "pr";
+if (t.links.some((l) => l.type === "branch")) return "existing";
+return "new";
+};
+const promptFor = (t, d) => {
+const lines = [`Task: ${t.title}`];
+if (t.desc) lines.push("", t.desc);
+const issue = t.links.find((l) => l.type === "issue" || l.type === "jira");
+if (issue) lines.push("", `Linked issue ${issue.label}: ${issue.title} (full body and comments attached)`);
+if (t.files.length) lines.push("", `Attached: ${t.files.map((f) => f.name).join(", ")}`);
+if (d.mode === "plan") lines.push("", "Start with a plan. Wait for my approval before editing files.");
+else if (d.mode === "ask") lines.push("", "Investigate and answer. Do not change any files.");
+else lines.push("", `When you're done, commit on ${d.branch} and summarize what changed.`);
+return lines.join("\n");
+};
+const openStart = (id) => {
+const t = byId(id);
+if (!t) return;
+const where = defaultWhere(t);
+const pr = t.links.find((l) => l.type === "pr");
+state.dlg = {
+id,
+project: t.project ?? "ryco",
+where,
+branch: where === "pr" ? `pr-${pr.label.slice(1)}` : where === "existing" ? branchOf(t) : `task/${slug(t.title)}`,
+base: "main",
+models: ["opus"],
+attempts: 1,
+mode: "build",
+openPr: true,
+autoDone: true,
+focus: false,
+promptEdited: false,
+};
+state.dlg.prompt = promptFor(t, state.dlg);
+renderDlg();
+$("#dlgScrim").classList.add("on");
+};
+const closeDlg = () => {
+state.dlg = null;
+$("#dlgScrim").classList.remove("on");
+};
+const renderDlg = () => {
+const d = state.dlg;
+const t = byId(d.id);
+const pr = t.links.find((l) => l.type === "pr" && l.state !== "merged");
+const br = branchOf(t);
+const whereOpts = [
+["new", "fork", "New worktree", `Fresh branch from ${d.base}. Isolated, safe to run in parallel.`],
+pr
+? ["pr", "pr", `PR ${pr.label}`, "Check out the pull request's branch in a worktree."]
+: ["existing", "branch", "Existing branch", br ? `Reuse ${br} and its worktree.` : "Pick a branch or worktree."],
+["local", "laptop", "Local checkout", "Work in the project folder on its current branch."],
+];
+const branchLine =
+d.where === "new"
+? `<div class="branch-line">${ic("branch", 12)} branch <input id="branchInput" value="${esc(d.branch)}" /> from <span class="tag mono">${esc(d.base)}</span></div>`
+: d.where === "pr"
+? `<div class="branch-line">${ic("pr", 12)} worktree on the branch of ${esc(pr.label)} · pushes update the PR</div>`
+: d.where === "existing"
+? `<div class="branch-line">${ic("branch", 12)} <span class="mono">${esc(br ?? "choose a branch…")}</span></div>`
+: `<div class="branch-line">${ic("laptop", 12)} ${esc(PROJECTS[d.project]?.name ?? "project")} on its checked-out branch · not isolated</div>`;
+const modelPills = Object.entries(MODELS)
+.map(([k, m]) => `<button class="pill" data-model="${k}" aria-pressed="${d.models.includes(k)}"><span class="av ${m.av}">${m.letter}</span>${m.label}</button>`)
+.join("");
+$("#dlg").innerHTML = `
+<div class="dlg-h">
+<div class="eyebrow">Start work on task</div>
+<h3>${esc(t.title)}</h3>
+</div>
+<div class="dlg-b">
+${
+t.project
+? ""
+: `<div><div class="field-l">Project</div><div class="pills">${Object.entries(PROJECTS)
+.map(([k, v]) => `<button class="pill" data-proj-pick="${k}" aria-pressed="${d.project === k}"><span class="pi" style="background:${v.color}">${v.letter}</span>${v.name}</button>`)
+.join("")}</div></div>`
+}
+<div>
+<div class="field-l">Where</div>
+<div class="where">${whereOpts
+.map(([k, icon, title, desc]) => `<button data-where="${k}" aria-pressed="${d.where === k}"><span class="wt">${ic(icon)}${title}</span><span class="wd">${desc}</span></button>`)
+.join("")}</div>
+${branchLine}
+</div>
+<div>
+<div class="field-l">Agent <span class="opt">· pick several to race them in separate worktrees</span></div>
+<div class="pills">${modelPills}</div>
+</div>
+<div class="two">
+<div>
+<div class="field-l">Mode</div>
+<div class="pills">
+${[
+["build", "Build"],
+["plan", "Plan first"],
+["ask", "Just ask"],
+]
+.map(([k, l]) => `<button class="pill" data-mode="${k}" aria-pressed="${d.mode === k}">${l}</button>`)
+.join("")}
+</div>
+</div>
+<div>
+<div class="field-l">Attempts per agent</div>
+<div class="pills">${[1, 2, 3].map((n) => `<button class="pill" data-attempts="${n}" aria-pressed="${d.attempts === n}" style="min-width:32px;justify-content:center">${n}</button>`).join("")}</div>
+</div>
+</div>
+<div>
+<div class="field-l">First message <span class="opt">· built from the task, edit freely</span></div>
+<textarea class="prompt" id="promptInput">${esc(d.prompt)}</textarea>
+</div>
+<div class="checks">
+${[
+["openPr", "Open a draft PR when the agent finishes"],
+["autoDone", "Move the task to Done when its PR merges"],
+["focus", "Open the chat now (otherwise it runs in the background)"],
+]
+.map(([k, l]) => `<div class="check" data-check="${k}" aria-checked="${d[k]}"><span class="box"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>${l}</div>`)
+.join("")}
+</div>
+</div>
+<div class="dlg-f">
+<span class="note">${chatCount(d)} chat${chatCount(d) > 1 ? "s" : ""}${d.where === "new" || chatCount(d) > 1 ? ` · ${chatCount(d)} worktree${chatCount(d) > 1 ? "s" : ""}` : ""}</span>
+<button class="btn" data-act="cancel-dlg">Cancel</button>
+<button class="btn primary" data-act="confirm-start">${ic("play", 12)} Start <kbd style="background:transparent;color:inherit;opacity:.6">⌘↵</kbd></button>
+</div>`;
+const pi = $("#promptInput");
+pi.addEventListener("input", () => {
+d.prompt = pi.value;
+d.promptEdited = true;
+});
+const bi = $("#branchInput");
+if (bi)
+bi.addEventListener("input", () => {
+d.branch = bi.value;
+if (!d.promptEdited) {
+d.prompt = promptFor(t, d);
+$("#promptInput").value = d.prompt;
+}
+});
+};
+const chatCount = (d) => d.models.length * d.attempts;
+const refreshPrompt = () => {
+const d = state.dlg;
+if (!d.promptEdited) d.prompt = promptFor(byId(d.id), d);
+};
+const SUMMARIES = [
+"Smallest change, reuses the existing components",
+"New component with its own tests",
+"Broader refactor of the shared helper first",
+"Most tests, touches two packages",
+];
+const confirmStart = () => {
+const d = state.dlg;
+const t = byId(d.id);
+if (!t.project) t.project = d.project;
+const multi = chatCount(d) > 1;
+const branch = d.where === "new" ? d.branch : d.where === "existing" ? branchOf(t) : d.where === "pr" ? d.branch : null;
+if (branch && d.where === "new" && !multi && !t.links.some((l) => l.type === "branch" && l.label === branch))
+t.links.unshift({ type: "branch", label: branch, title: "worktree" });
+let n = 0;
+const created = [];
+for (const model of d.models)
+for (let a = 1; a <= d.attempts; a++) {
+n++;
+const c = {
+id: uid("c"),
+model,
+status: "starting",
+what: d.where === "new" || multi ? "Creating worktree…" : "Starting…",
+since: now(),
+attempt: multi ? n : null,
+mode: d.mode,
+summary: SUMMARIES[(n - 1) % SUMMARIES.length],
+};
+t.chats.push(c);
+created.push(c);
+}
+t.openPr = d.openPr;
+t.autoDone = d.autoDone;
+if (t.col === "inbox" || t.col === "todo") t.col = "progress";
+t.log.unshift([multi ? `Started ${n} chats in parallel worktrees` : `Chat started${branch ? ` in ${d.where === "local" ? "local checkout" : `worktree ${branch}`}` : ""}`, "now"]);
+closeDlg();
+render({ scrollTo: t.id, flash: [t.id] });
+toast(
+d.focus
+? `${ic("chat")} Opening chat… <span style="color:var(--c-faint)">(prototype stays here)</span>`
+: `${ic("play")} ${multi ? `${n} chats started` : "Chat started"} · running in the background`,
+);
+created.forEach((c, i) => simulate(t.id, c.id, i));
+};
+// ── simulated chat lifecycle ─────────────────────────
+const WHATS = ["Reading the auth gate", "Running the focused tests", "Editing routes/pair.tsx", "Typechecking"];
+const later = (ms, fn) => setTimeout(() => {
+fn();
+render();
+}, ms);
+const simulate = (tid, cid, i) => {
+const jitter = i * 700 + Math.random() * 600;
+const get = () => byId(tid)?.chats.find((c) => c.id === cid);
+later(1300 + jitter, () => {
+const c = get();
+if (!c || c.archived) return;
+c.status = "running";
+c.what = WHATS[0];
+});
+later(2600 + jitter, () => {
+const c = get();
+if (c && c.status === "running") c.what = WHATS[1 + (i % 3)];
+});
+if (byId(tid).chats.find((c) => c.id === cid).mode === "plan") {
+later(4200 + jitter, () => {
+const c = get();
+if (!c || c.archived) return;
+c.status = "plan";
+c.planSummary = "5 steps · touch auth gate, pair route, 2 tests";
+const t = byId(tid);
+t.log.unshift([`${MODELS[c.model].short} proposed a plan`, "now"]);
+});
+} else if (i === 0) {
+later(4600 + jitter, () => {
+const c = get();
+if (!c || c.archived) return;
+c.status = "needs";
+c.ask = "approve";
+c.cmd = "bun run test apps/web/src/routes";
+byId(tid).log.unshift([`${MODELS[c.model].short} asked for approval`, "now"]);
+});
+} else finishLater(tid, cid, 5200 + jitter);
+};
+const finishLater = (tid, cid, ms) => {
+later(ms, () => {
+const t = byId(tid);
+const c = t?.chats.find((x) => x.id === cid);
+if (!c || c.archived) return;
+c.status = "review";
+c.diff = [40 + Math.round(Math.random() * 120), Math.round(Math.random() * 40), 2 + Math.round(Math.random() * 5)];
+c.since = now();
+t.log.unshift([`${MODELS[c.model].short} finished${c.attempt ? ` attempt ${c.attempt}` : ""}`, "now"]);
+const live = t.chats.filter((x) => !x.archived);
+if (t.openPr && live.length === 1 && !t.links.some((l) => l.type === "pr")) {
+t.links.push({ type: "pr", label: `#${750 + Math.round(Math.random() * 40)}`, title: t.title, state: "draft" });
+t.log.unshift(["Draft PR opened by the chat", "now"]);
+}
+});
+};
+// ── clicks ───────────────────────────────────────────
+document.addEventListener("click", (e) => {
+const target = e.target;
+if (state.menu && !target.closest(".menu")) closeMenu();
+const v = target.closest("[data-view]");
+if (v) {
+state.view = v.dataset.view;
+return render();
+}
+const pc = target.closest("[data-proj]");
+if (pc) {
+state.project = pc.dataset.proj;
+return render();
+}
+if (target.closest("#followToggle")) {
+state.follow = !state.follow;
+toast(state.follow ? `${ic("chat")} Cards with a chat now move by themselves` : `${ic("task")} Every column is manual now`);
+return render();
+}
+const add = target.closest("[data-add]");
+if (add) {
+capture.focus();
+return;
+}
+if (target.closest("#scrim")) return closeSheet();
+if (target === $("#dlgScrim")) return closeDlg();
+// dialog
+if (state.dlg) {
+const d = state.dlg;
+const w = target.closest("[data-where]");
+if (w) {
+d.where = w.dataset.where;
+const t = byId(d.id);
+const pr = t.links.find((l) => l.type === "pr");
+d.branch = d.where === "pr" ? `pr-${pr.label.slice(1)}` : d.where === "existing" ? branchOf(t) : `task/${slug(t.title)}`;
+refreshPrompt();
+return renderDlg();
+}
+const m = target.closest("[data-model]");
+if (m) {
+const k = m.dataset.model;
+d.models = d.models.includes(k) ? (d.models.length > 1 ? d.models.filter((x) => x !== k) : d.models) : [...d.models, k];
+if (chatCount(d) > 1 && d.where === "local") d.where = "new";
+return renderDlg();
+}
+const md = target.closest("[data-mode]");
+if (md) {
+d.mode = md.dataset.mode;
+refreshPrompt();
+return renderDlg();
+}
+const at = target.closest("[data-attempts]");
+if (at) {
+d.attempts = Number(at.dataset.attempts);
+if (chatCount(d) > 1 && d.where === "local") d.where = "new";
+return renderDlg();
+}
+const pp = target.closest("[data-proj-pick]");
+if (pp) {
+d.project = pp.dataset.projPick;
+return renderDlg();
+}
+const ck = target.closest("[data-check]");
+if (ck) {
+d[ck.dataset.check] = !d[ck.dataset.check];
+return renderDlg();
+}
+}
+const keep = target.closest("[data-keep]");
+if (keep) {
+const t = byId(state.selected);
+for (const c of t.chats) if (c.status === "review" && c.id !== keep.dataset.keep) c.archived = true;
+const kept = t.chats.find((c) => c.id === keep.dataset.keep);
+t.links = t.links.filter((l) => l.type !== "branch");
+t.links.unshift({ type: "branch", label: `task/${slug(t.title)}-${kept.attempt}`, title: "worktree" });
+if (t.openPr) t.links.push({ type: "pr", label: `#${760 + kept.attempt}`, title: t.title, state: "draft" });
+t.log.unshift([`Kept attempt ${kept.attempt}, archived the others`, "now"]);
+state.compare = false;
+toast(`${ic("check")} Kept attempt ${kept.attempt}${t.openPr ? " · draft PR opened" : ""}`);
+return render();
+}
+const unlink = target.closest("[data-unlink]");
+if (unlink) {
+const t = byId(state.selected);
+t.links.splice(Number(unlink.dataset.unlink), 1);
+return render();
+}
+const act = target.closest("[data-act]");
+const cardEl = target.closest(".card[data-id]");
+const tid = cardEl?.dataset.id ?? state.selected;
+if (act) {
+const a = act.dataset.act;
+const t = tid ? byId(tid) : null;
+e.stopPropagation();
+switch (a) {
+case "close":
+return closeSheet();
+case "start":
+return openStart(state.selected);
+case "cancel-dlg":
+return closeDlg();
+case "confirm-start":
+return confirmStart();
+case "approve": {
+const c = t.chats.find((x) => x.id === act.dataset.chat);
+c.status = "running";
+c.what = "Running the focused tests";
+t.log.unshift(["You approved a command", "now"]);
+finishLater(t.id, c.id, 2600);
+return render({ scrollTo: t.id });
+}
+case "approve-plan": {
+const c = t.chats.find((x) => x.id === act.dataset.chat);
+c.status = "running";
+c.what = "Implementing step 1 of 5";
+t.log.unshift(["You approved the plan", "now"]);
+finishLater(t.id, c.id, 3600);
+return render({ scrollTo: t.id });
+}
+case "open-chat":
+return toast(`${ic("chat")} Would open the chat in its own tab`);
+case "open-pr": {
+t.links.push({ type: "pr", label: `#${750 + Math.round(Math.random() * 40)}`, title: t.title, state: "open" });
+t.log.unshift(["Opened a pull request", "now"]);
+toast(`${ic("pr")} Pull request opened and linked`);
+return render();
+}
+case "merge-pr": {
+const pr = t.links.find((l) => l.type === "pr");
+pr.state = "merged";
+t.log.unshift([`${pr.label} merged`, "now"]);
+if (t.autoDone !== false) {
+t.col = "done";
+t.log.unshift(["Moved to Done because its PR merged", "now"]);
+toast(`${ic("merged")} ${pr.label} merged · task moved to Done`);
+}
+return render({ scrollTo: t.id });
+}
+case "compare":
+openSheet(t.id);
+state.compare = true;
+return renderSheet();
+case "mark-done":
+return moveTo(t.id, "done");
+case "reopen":
+t.col = "todo";
+t.log.unshift(["Reopened", "now"]);
+return render();
+case "delete": {
+const i = tasks.findIndex((x) => x.id === t.id);
+tasks.splice(i, 1);
+closeSheet();
+toast(`${ic("trash")} Task deleted · chats are kept`);
+return render();
+}
+case "attach-chat":
+return openMenu(act, [
+["c-a", "Fix flaky composer test", "chat", "2h"],
+["c-b", "Hub reconnect investigation", "chat", "yesterday"],
+["c-c", "Perf re-check", "chat", "3d"],
+], (pick) => {
+const label = { "c-a": "Fix flaky composer test", "c-b": "Hub reconnect investigation", "c-c": "Perf re-check" }[pick];
+t.links.push({ type: "chat", label, title: "chat" });
+t.log.unshift([`Linked chat “${label}”`, "now"]);
+render();
+});
+case "link-menu":
+return openMenu(act, LINK_TYPES.map(([id, label, icon, sub]) => [id, label, icon, sub]), (pick) => {
+state.linkDraft = pick;
+renderSheet();
+});
+case "save-link":
+return saveLink();
+}
+return;
+}
+const row = target.closest("[data-open]");
+if (row) return openSheet(row.dataset.open);
+if (cardEl && !target.closest("button")) openSheet(cardEl.dataset.id);
+});
+document.addEventListener("keydown", (e) => {
+if (e.key === "Escape") {
+if (state.menu) return closeMenu();
+if (state.dlg) return closeDlg();
+if (state.selected) return closeSheet();
+}
+if (state.dlg && e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+e.preventDefault();
+confirmStart();
+}
+});
+// keep relative times fresh
+setInterval(() => {
+if (!dragId && !state.dlg) {
+document.querySelectorAll(".run[data-chat]").forEach((el) => {
+const t = tasks.find((x) => x.chats.some((c) => c.id === el.dataset.chat));
+const c = t?.chats.find((x) => x.id === el.dataset.chat);
+if (c) el.querySelector(".when:last-child").textContent = ago(c.since);
+});
+}
+}, 30000);
+render();
+renderCaptureFoot();
+})();
+</script>
+</body>
+</html>

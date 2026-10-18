@@ -15,6 +15,7 @@ import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as PullRequestsRouteImport } from './routes/pull-requests'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StatisticsRouteImport } from './routes/statistics'
+import { Route as TasksRouteImport } from './routes/tasks'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/_settings.diagnostics'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
@@ -48,6 +49,11 @@ const SettingsRoute = SettingsRouteImport.update({
 const StatisticsRoute = StatisticsRouteImport.update({
   id: '/statistics',
   path: '/statistics',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TasksRoute = TasksRouteImport.update({
+  id: '/tasks',
+  path: '/tasks',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatIndexRoute = ChatIndexRouteImport.update({
@@ -85,6 +91,7 @@ export interface FileRoutesByFullPath {
   '/pull-requests': typeof PullRequestsRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
+  '/tasks': typeof TasksRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -96,6 +103,7 @@ export interface FileRoutesByTo {
   '/pull-requests': typeof PullRequestsRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
+  '/tasks': typeof TasksRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -110,6 +118,7 @@ export interface FileRoutesById {
   '/pull-requests': typeof PullRequestsRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
+  '/tasks': typeof TasksRoute
   '/_settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -125,6 +134,7 @@ export interface FileRouteTypes {
     | '/pull-requests'
     | '/settings'
     | '/statistics'
+    | '/tasks'
     | '/diagnostics'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -136,6 +146,7 @@ export interface FileRouteTypes {
     | '/pull-requests'
     | '/settings'
     | '/statistics'
+    | '/tasks'
     | '/diagnostics'
     | '/'
     | '/$environmentId/$threadId'
@@ -149,6 +160,7 @@ export interface FileRouteTypes {
     | '/pull-requests'
     | '/settings'
     | '/statistics'
+    | '/tasks'
     | '/_settings/diagnostics'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
@@ -163,6 +175,7 @@ export interface RootRouteChildren {
   PullRequestsRoute: typeof PullRequestsRoute
   SettingsRoute: typeof SettingsRoute
   StatisticsRoute: typeof StatisticsRoute
+  TasksRoute: typeof TasksRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   NativeAuthorizeHandoffIdRoute: typeof NativeAuthorizeHandoffIdRoute
 }
@@ -209,6 +222,13 @@ declare module '@tanstack/react-router' {
       path: '/statistics'
       fullPath: '/statistics'
       preLoaderRoute: typeof StatisticsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tasks': {
+      id: '/tasks'
+      path: '/tasks'
+      fullPath: '/tasks'
+      preLoaderRoute: typeof TasksRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_chat/': {
@@ -270,6 +290,7 @@ const rootRouteChildren: RootRouteChildren = {
   PullRequestsRoute: PullRequestsRoute,
   SettingsRoute: SettingsRoute,
   StatisticsRoute: StatisticsRoute,
+  TasksRoute: TasksRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   NativeAuthorizeHandoffIdRoute: NativeAuthorizeHandoffIdRoute,
 }
