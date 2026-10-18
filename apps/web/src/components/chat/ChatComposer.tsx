@@ -949,7 +949,6 @@ export const ChatComposer = memo(
     const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
     const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
     const [isComposerFocused, setIsComposerFocused] = useState(false);
-    const [isComposerHovered, setIsComposerHovered] = useState(false);
     const [isReadingChat, setIsReadingChat] = useState(false);
     const [isStashPickerOpen, setIsStashPickerOpen] = useState(false);
     // The collapse-to-pill behavior follows the presentation tier (not the
@@ -2576,7 +2575,6 @@ export const ChatComposer = memo(
             !isInsideComposerFloatingLayer(document.activeElement ?? document.body)
           ) {
             setIsReadingChat(true);
-            setIsComposerHovered(false);
           }
         },
         focusAtEnd: () => {
@@ -2717,7 +2715,7 @@ export const ChatComposer = memo(
     const isComposerCompact =
       !isMobileViewport &&
       activeThreadStarted &&
-      (isReadingChat || (!isComposerFocused && !isComposerHovered)) &&
+      (isReadingChat || !isComposerFocused) &&
       !isComposerModelPickerOpen &&
       !composerMenuOpen &&
       !isDragOverComposer &&
@@ -2797,13 +2795,6 @@ export const ChatComposer = memo(
           <div
             ref={composerSurfaceRef}
             data-chat-composer-compact={!isMobileViewport ? String(isComposerCompact) : undefined}
-            onPointerEnter={(event) => {
-              if (event.pointerType === "mouse") {
-                setIsComposerHovered(true);
-                setIsReadingChat(false);
-              }
-            }}
-            onPointerLeave={() => setIsComposerHovered(false)}
             onPointerDownCapture={() => setIsReadingChat(false)}
             onKeyDownCapture={() => setIsReadingChat(false)}
             data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}

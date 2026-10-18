@@ -578,7 +578,7 @@ describe("ChatView Composer (full app)", () => {
     }
   });
 
-  it("shrinks the desktop composer at rest and while reading, then expands without losing the draft", async () => {
+  it("shrinks the desktop composer at rest and while reading, expands only on focus, and keeps the draft", async () => {
     const mounted = await mountChatView({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createSnapshotForTargetUser({
@@ -596,18 +596,12 @@ describe("ChatView Composer (full app)", () => {
       (document.activeElement as HTMLElement | null)?.blur();
       await vi.waitFor(() => expect(editor.getBoundingClientRect().height).toBeCloseTo(26, 0));
 
+      // Hover alone never expands it; only focusing the editor does.
       surface.dispatchEvent(
         new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" }),
       );
-      await vi.waitFor(() => expect(editor.getBoundingClientRect().height).toBeGreaterThan(60));
-      surface.dispatchEvent(
-        new PointerEvent("pointerout", {
-          bubbles: true,
-          pointerType: "mouse",
-          relatedTarget: document.body,
-        }),
-      );
-      await vi.waitFor(() => expect(editor.getBoundingClientRect().height).toBeCloseTo(26, 0));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(editor.getBoundingClientRect().height).toBeCloseTo(26, 0);
 
       editor.focus();
       await vi.waitFor(() => expect(editor.getBoundingClientRect().height).toBeGreaterThan(60));
