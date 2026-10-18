@@ -14,7 +14,8 @@ const task = (id: string, done = false): TaskView => ({
   files: [],
   chats: [],
   status: null,
-  whereOptions: [],
+  startHint: null,
+  hasDraft: false,
   starting: false,
   projectLocked: false,
 });

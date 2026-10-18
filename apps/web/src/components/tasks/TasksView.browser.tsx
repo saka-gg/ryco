@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { ProjectId, ThreadId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId, ProviderDriverKind, ThreadId } from "@ryco/contracts";
 import { useMemo, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
@@ -20,7 +20,6 @@ import type {
   TaskChatOption,
   TaskProjectOption,
   TaskView,
-  TaskWhereOption,
   TasksViewHandlers,
   TasksViewModel,
 } from "./tasksViewModel";
@@ -29,32 +28,17 @@ import type {
 const NOW = new Date(2026, 9, 18, 10).getTime();
 const dueIn = (days: number) => dueAtForDay(new Date(2026, 9, 18 + days).getTime());
 
-const project = (id: string, name: string, color: string): TaskProjectOption => ({
+const project = (id: string, name: string): TaskProjectOption => ({
   projectId: ProjectId.make(id),
   name,
-  color,
+  environmentId: EnvironmentId.make("environment-test"),
+  cwd: `/tmp/${name}`,
+  avatarHash: null,
 });
-const RYCO = project("p-ryco", "ryco", "#6366f1");
-const INSPECT = project("p-inspect", "cs2inspect-web", "#0ea5e9");
-const PAINTS = project("p-paints", "weaponpaints", "#f97316");
+const RYCO = project("p-ryco", "ryco");
+const INSPECT = project("p-inspect", "cs2inspect-web");
+const PAINTS = project("p-paints", "weaponpaints");
 const PROJECTS = [RYCO, INSPECT, PAINTS];
-
-const NEW_WORKTREE: TaskWhereOption = {
-  id: "worktree",
-  kind: "worktree",
-  label: "New worktree",
-  detail: "task/fix-login-redirect-loop from main",
-  hintPrefix: "a new worktree",
-  hintRef: "task/fix-login-redirect-loop",
-};
-const PROJECT_FOLDER: TaskWhereOption = {
-  id: "project",
-  kind: "project",
-  label: "Project folder",
-  detail: "No worktree, current branch",
-  hintPrefix: "the project folder",
-  hintRef: null,
-};
 
 function task(overrides: Partial<TaskView> & Pick<TaskView, "id" | "title">): TaskView {
   return {
@@ -66,7 +50,8 @@ function task(overrides: Partial<TaskView> & Pick<TaskView, "id" | "title">): Ta
     files: [],
     chats: [],
     status: null,
-    whereOptions: [NEW_WORKTREE, PROJECT_FOLDER],
+    startHint: { prefix: "a new worktree", ref: "task/fix-login-redirect-loop" },
+    hasDraft: false,
     starting: false,
     projectLocked: false,
     ...overrides,
@@ -102,6 +87,7 @@ function fixtures(): TaskView[] {
           threadId: EFFECT_THREAD,
           title: "Effect migration chat",
           modelLabel: "Opus 5.5",
+          providerDriver: ProviderDriverKind.make("claudeAgent"),
           status: "needs-you",
           branch: "task/effect-4-1",
           linked: false,
@@ -115,6 +101,7 @@ function fixtures(): TaskView[] {
       projectId: INSPECT.projectId,
       dueAt: dueIn(6),
       files: [{ key: "up-1", name: "spec.pdf", type: "file", progress: 0.4, error: null }],
+      hasDraft: true,
     }),
     task({ id: "t4", title: "Renew Apple developer certificate", dueAt: dueIn(-1) }),
     task({
@@ -129,6 +116,7 @@ function fixtures(): TaskView[] {
           threadId: ThreadId.make("thread-pinia"),
           title: null,
           modelLabel: "GPT-5.6",
+          providerDriver: ProviderDriverKind.make("codex"),
           status: "running",
           branch: "task/pinia-store",
           linked: false,
@@ -449,17 +437,18 @@ describe("TasksView", () => {
     expect(details.inert).toBe(true);
   });
 
-  it("starts in the default place, or in the one picked from the ▾ menu", async () => {
+  it("starts a chat by opening its draft, and reopens a draft not sent yet", async () => {
     const spies = await mount();
     await openRow("t1", "Fix login redirect loop on hosted Hub");
     await userEvent.click(rowButton("t1", "Start chat"));
     expect(spies.onStart).toHaveBeenLastCalledWith("t1");
+    // No place menu: the draft is where the worktree is picked.
+    expect(rowElement("t1")!.querySelector('[aria-label="Where"]')).toBeNull();
 
-    await userEvent.click(rowButton("t1", "Where"));
-    await expect.element(page.getByRole("menuitem", { name: /New worktree/ })).toBeVisible();
-    await expect.element(page.getByText("task/fix-login-redirect-loop from main")).toBeVisible();
-    await page.getByRole("menuitem", { name: /Project folder/ }).click();
-    expect(spies.onStart).toHaveBeenLastCalledWith("t1", "project");
+    await openRow("t3", "Float range filter in skin search");
+    expect(rowElement("t3")!.textContent).toContain("Not sent yet");
+    await userEvent.click(rowButton("t3", "Open draft"));
+    expect(spies.onStart).toHaveBeenLastCalledWith("t3");
   });
 
   it("starts from the row's hover Start, and only while the task has no chats", async () => {
@@ -478,7 +467,11 @@ describe("TasksView", () => {
     const spies = await mount();
     await openRow("t2", "Upgrade Effect to 4.1 in the server");
     expect(rowButton("t2", "Another chat")).toBeTruthy();
-    await userEvent.click(rowButton("t2", /Open chat/));
+    const chat = rowButton("t2", /^Opus 5\.5/);
+    expect(chat.textContent).toContain("Needs you");
+    expect(chat.textContent).toContain("task/effect-4-1");
+    expect(chat.querySelector("svg")).not.toBeNull();
+    await userEvent.click(chat);
     expect(spies.onOpenChat).toHaveBeenCalledWith("t2", EFFECT_THREAD);
     await userEvent.click(rowButton("t2", "Delete"));
     expect(spies.onDelete).toHaveBeenCalledWith("t2");
@@ -572,21 +565,32 @@ describe("TasksView", () => {
     expect(onDelete).toHaveBeenCalledWith("t-start");
   });
 
-  it("links a pull request and an existing chat from the Link popover", async () => {
+  it("links from the new-worktree source picker, a pasted URL or an existing chat", async () => {
     const spies = await mount();
     await openRow("t3", "Float range filter in skin search");
     await userEvent.click(rowButton("t3", "Link"));
-    await page.getByRole("button", { name: /Pull request/ }).click();
-    const field = page.getByRole("textbox", { name: "Pull request" });
+    // The same segments the new thread's worktree source is picked from, then the task's own.
+    await expect
+      .poll(() =>
+        page
+          .getByRole("tab")
+          .elements()
+          .map((tab) => tab.textContent),
+      )
+      .toEqual(["Branch", "Pull requests", "Issues", "Jira", "Chats", "URL"]);
+    await page.getByRole("tab", { name: "URL" }).click();
+    const field = page.getByRole("textbox", { name: "Link URL" });
     await field.fill("https://github.com/acme/app/issues/9");
-    await expect.element(page.getByText("Adds Issue #9")).toBeVisible();
-    await field.fill("#752");
-    await expect.element(page.getByText("Adds Pull request #752")).toBeVisible();
+    await expect.element(page.getByText("Enter links Issue #9")).toBeVisible();
     await userEvent.keyboard("{Enter}");
-    expect(spies.onAddLink).toHaveBeenCalledWith("t3", { kind: "pr", number: 752 });
+    expect(spies.onAddLink).toHaveBeenCalledWith("t3", {
+      kind: "issue",
+      number: 9,
+      url: "https://github.com/acme/app/issues/9",
+    });
 
     await userEvent.click(rowButton("t3", "Link"));
-    await page.getByRole("button", { name: /Existing chat/ }).click();
+    await page.getByRole("tab", { name: "Chats" }).click();
     await page.getByRole("combobox", { name: "Search chats" }).fill("pwa");
     await page.getByRole("option", { name: /PWA install prompt/ }).click();
     expect(spies.onAddLink).toHaveBeenLastCalledWith("t3", {
@@ -664,6 +668,14 @@ describe("TasksView", () => {
       child.textContent?.includes("cs2inspect-web"),
     )!;
     expect(getComputedStyle(shown).display).not.toBe("none");
+  });
+
+  it("says what the page is for when nothing is open", async () => {
+    const spies = await mount();
+    await page.getByRole("button", { name: "weaponpaints", exact: true }).click();
+    expect(spies.onFilterChange).toHaveBeenCalledWith(PAINTS.projectId);
+    await userEvent.click(rowButton("t6", /^Done:/));
+    await expect.element(page.getByText("Nothing open in this project")).toBeVisible();
   });
 
   it("stays still under reduced motion: no entrance, no disclosure, paused status", async () => {

@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   hasTaskLink,
   LOCAL_TASKS_FOCUS_REFRESH_MS,
@@ -11,6 +11,7 @@ import {
   taskLiveStatus,
   taskProjectLocked,
   useLocalTasksStore,
+  type LocalTaskChat,
   type LocalTaskView,
   type LocalTasksEnvironmentState,
 } from "@ryco/client-runtime/state/tasks";
@@ -30,28 +31,26 @@ import { useRouter } from "@tanstack/react-router";
 import { CloudOffIcon, LockIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
 import { prefetchWorktreeSend } from "~/hooks/worktreeSendPrefetch";
+import { preloadRouteChunk } from "~/lib/routeChunkPreload";
 import { adoptHostedEnvironmentRoute } from "~/hostedHub/adoptHostedEnvironmentRoute";
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
 import { getProjectOrderKey } from "~/logicalProject";
 import { selectEnvironmentState, useStore } from "~/store";
 import { buildThreadRouteParams } from "~/threadRoutes";
-import type { Project, SidebarWorktreeSummary } from "~/types";
+import type { Project } from "~/types";
 import { useUiStateStore } from "~/uiStateStore";
 
 import { modelDisplayName } from "../inboxSidebar/inboxSidebarModel";
-import { deriveProjectMonogram } from "../projectMonogram";
 import { StatePanel } from "../settings/statistics/parts";
 import { orderItemsByPreferredIds } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
-import { startTaskChat } from "./startTaskChat";
-import {
-  buildTaskWhereOptions,
-  projectRepositoryKey,
-  resolveTaskStartPlace,
-} from "./startTaskChat.logic";
+import { openTaskDraft } from "./taskDraft";
+import { projectRepositoryKey, taskDraftPlacement, taskStartHint } from "./taskDraft.logic";
 import {
   addTaskFiles,
   cancelPendingTaskFile,
@@ -69,7 +68,6 @@ import type {
   TaskProjectOption,
   TaskStatusWord,
   TaskView,
-  TaskWhereOption,
   TasksViewHandlers,
   TasksViewModel,
 } from "./tasksViewModel";
@@ -128,8 +126,6 @@ function UnsupportedPanel() {
 const selectProviders = (config: ServerConfig | null): ReadonlyArray<ServerProvider> | null =>
   config?.providers ?? null;
 
-const NO_IDS: ReadonlySet<string> = new Set();
-const NO_MODELS: ReadonlyMap<ThreadId, ModelSelection> = new Map();
 const CHAT_OPTION_LIMIT = 50;
 
 /** What every task's view is built from, besides the task itself. */
@@ -138,14 +134,10 @@ interface TaskViewContext {
   readonly projectById: ReadonlyMap<ProjectId, Project>;
   readonly providers: ReadonlyArray<ServerProvider> | null;
   readonly uploads: Readonly<Record<string, ReadonlyArray<PendingTaskFile>>>;
-  /** Tasks whose start is being prepared (defaults, contexts, a worktree). */
-  readonly preparing: ReadonlySet<string>;
-  /** The model each chat started from here was sent with, for chats not in the store yet. */
-  readonly startModels: ReadonlyMap<ThreadId, ModelSelection>;
-  /** The node can check linked pull requests and branches out. */
-  readonly linkedWorktrees: boolean;
-  /** The branch of a pull request's worktree, by `projectId\0number`. */
-  readonly pullRequestBranches: ReadonlyMap<string, string>;
+  /** The node can create a worktree for a pull request, issue or Jira item. */
+  readonly sourceWorktrees: boolean;
+  /** The node's unsent task drafts (`useTaskDraftKeys`). */
+  readonly draftKeys: ReadonlySet<string>;
 }
 
 function chatThreadIds(task: LocalTaskView): ThreadId[] {
@@ -170,88 +162,79 @@ const taskViewCache = new WeakMap<
   { readonly deps: ReadonlyArray<unknown>; readonly view: TaskView }
 >();
 
-function chatModelLabel(
+function chatModel(
   summary: { readonly modelSelection?: ModelSelection | undefined } | undefined,
-  started: ModelSelection | undefined,
   providers: ReadonlyArray<ServerProvider> | null,
-): string {
-  const selection = summary?.modelSelection ?? started;
-  return modelDisplayName(selection, providers) ?? selection?.model ?? "Chat";
+): Pick<TaskChatView, "modelLabel" | "providerDriver"> {
+  const selection = summary?.modelSelection;
+  return {
+    modelLabel: modelDisplayName(selection, providers) ?? selection?.model ?? "Chat",
+    providerDriver:
+      providers?.find((provider) => provider.instanceId === selection?.instanceId)?.driver ?? null,
+  };
 }
 
-function pullRequestBranchOf(
-  task: LocalTaskView,
-  context: Pick<TaskViewContext, "pullRequestBranches">,
-): (number: number) => string | null {
-  return (number) =>
-    task.projectId
-      ? (context.pullRequestBranches.get(`${task.projectId}\u0000${number}`) ?? null)
-      : null;
+/**
+ * Whether a task's chat is listed: a deleted chat leaves the list (there is
+ * nothing left to open), while one this client keeps only a stub of (an
+ * archived chat) stays, as archived.
+ */
+function isListedChat(
+  chat: Pick<LocalTaskChat, "status" | "threadId">,
+  summaries: TaskViewContext["summaries"],
+): boolean {
+  return chat.status !== "unavailable" || summaries[chat.threadId] !== undefined;
 }
 
-/** Where a task's chat can start; nowhere without a project (the start asks for one). */
-function taskWhereOptions(
-  task: LocalTaskView,
-  project: Project | null,
-  context: Pick<TaskViewContext, "linkedWorktrees" | "pullRequestBranches">,
-): TaskWhereOption[] {
-  if (!project) return [];
-  return buildTaskWhereOptions({
-    title: task.title,
-    links: task.links,
-    projectRepository: projectRepositoryKey(project.repositoryIdentity),
-    startBranches: [...task.delegations, ...task.optimisticStarts].flatMap((start) =>
-      start.branch ? [start.branch] : [],
-    ),
-    linkedWorktrees: context.linkedWorktrees,
-    pullRequestBranch: pullRequestBranchOf(task, context),
-  });
+/** The branches a task's earlier starts asked for (new worktrees only). */
+function taskStartBranches(task: LocalTaskView): string[] {
+  return [...task.delegations, ...task.optimisticStarts].flatMap((start) =>
+    start.branch ? [start.branch] : [],
+  );
 }
 
 function buildTaskView(task: LocalTaskView, context: TaskViewContext): TaskView {
   const threadIds = chatThreadIds(task);
   const project = task.projectId ? (context.projectById.get(task.projectId) ?? null) : null;
-  const pullRequestBranch = pullRequestBranchOf(task, context);
-  const preparing = context.preparing.has(task.taskId);
+  const hasDraft = context.draftKeys.has(taskDraftKey(task.taskId, task.projectId));
   const deps = [
-    preparing,
+    hasDraft,
     context.uploads[task.taskId],
     project,
     context.providers,
-    context.linkedWorktrees,
+    context.sourceWorktrees,
     ...threadIds.map((threadId) => context.summaries[threadId]),
-    ...threadIds.map((threadId) => context.startModels.get(threadId)),
-    ...task.links.map((link) => (link.kind === "pr" ? pullRequestBranch(link.number) : null)),
   ];
   const cached = taskViewCache.get(task);
   if (cached && sameDeps(cached.deps, deps)) return cached.view;
 
   const getSummary = (threadId: ThreadId) => fullThreadEntry(context.summaries[threadId]);
-  const chats: TaskChatView[] = listTaskChats(task, getSummary).map((chat) => {
+  const chats: TaskChatView[] = listTaskChats(task, getSummary).flatMap((chat) => {
+    if (!isListedChat(chat, context.summaries)) return [];
     const summary = getSummary(chat.threadId);
-    return {
-      key: chat.key,
-      threadId: chat.threadId,
-      title: summary?.title.trim() || null,
-      modelLabel: chatModelLabel(
-        summary,
-        context.startModels.get(chat.threadId),
-        context.providers,
-      ),
-      status: chat.status === "failed" && !chat.startFailed ? "error" : chat.status,
-      branch: chat.branch,
-      linked: chat.linked,
-      error: chat.error,
-    };
+    return [
+      {
+        key: chat.key,
+        threadId: chat.threadId,
+        title: summary?.title.trim() || null,
+        ...chatModel(summary, context.providers),
+        status:
+          chat.status === "unavailable"
+            ? "archived"
+            : chat.status === "failed" && !chat.startFailed
+              ? "error"
+              : chat.status,
+        branch: chat.branch,
+        linked: chat.linked,
+        error: chat.error,
+      },
+    ];
   });
   const aggregate = taskLiveStatus(task, getSummary);
   // The row says "Failed to start" only when a start itself failed; chats that
   // ran and then stopped on an error read "Error", as in the sidebar.
-  const live: TaskStatusWord | null =
+  const status: TaskStatusWord | null =
     aggregate === "failed" && !chats.some((chat) => chat.status === "failed") ? "error" : aggregate;
-  // A start being prepared has no chat yet, but the row already says so;
-  // only a chat waiting on the user outranks it.
-  const status: TaskStatusWord | null = preparing && live !== "needs-you" ? "starting" : live;
   const view: TaskView = {
     id: task.taskId,
     title: task.title,
@@ -263,8 +246,19 @@ function buildTaskView(task: LocalTaskView, context: TaskViewContext): TaskView 
     files: taskFileViews(task.files, context.uploads[task.taskId]),
     chats,
     status,
-    whereOptions: taskWhereOptions(task, project, context),
-    starting: preparing || task.optimisticStarts.length > 0,
+    startHint: project
+      ? taskStartHint(
+          taskDraftPlacement({
+            title: task.title,
+            links: task.links,
+            projectRepository: projectRepositoryKey(project.repositoryIdentity),
+            startBranches: taskStartBranches(task),
+            sourceWorktrees: context.sourceWorktrees,
+          }),
+        )
+      : null,
+    hasDraft,
+    starting: task.optimisticStarts.length > 0,
     // The node fixes the project while a start may have a chat in it.
     projectLocked: taskProjectLocked(task, (threadId) => context.summaries[threadId] !== undefined),
   };
@@ -295,7 +289,9 @@ function sameProjectOptions(
       return (
         option.projectId === other.projectId &&
         option.name === other.name &&
-        option.color === other.color
+        option.environmentId === other.environmentId &&
+        option.cwd === other.cwd &&
+        option.avatarHash === other.avatarHash
       );
     })
   );
@@ -319,6 +315,26 @@ function useLocalDayNow(): number {
     };
   }, [now]);
   return now;
+}
+
+/** A task's unsent draft in a project, as `useTaskDraftKeys` lists it. */
+const taskDraftKey = (taskId: string, projectId: ProjectId | null) =>
+  `${taskId}\u0000${projectId ?? ""}`;
+
+/**
+ * The node's unsent task drafts (`taskDraftKey`); the same set while they
+ * stay the same. Start reopens a task's draft only in the task's project.
+ */
+function useTaskDraftKeys(environmentId: EnvironmentId): ReadonlySet<string> {
+  const key = useComposerDraftStore((state) => {
+    const keys: string[] = [];
+    for (const draft of Object.values(state.draftThreadsByThreadKey)) {
+      if (draft.environmentId === environmentId && draft.localTaskId && !draft.promotedTo)
+        keys.push(taskDraftKey(draft.localTaskId, draft.projectId));
+    }
+    return keys.toSorted().join("\n");
+  });
+  return useMemo(() => new Set(key ? key.split("\n") : []), [key]);
 }
 
 let taskIdSequence = 0;
@@ -351,6 +367,7 @@ function TasksPageContent(props: {
   }, [environmentId]);
   const writer = localTaskWriterFor(environmentId);
   const router = useRouter({ warn: false });
+  const { handleNewTaskChat } = useNewThreadHandler();
 
   const tasksState = useLocalTasksStore((state) =>
     selectLocalTasksEnvironment(state, environmentId),
@@ -362,18 +379,14 @@ function TasksPageContent(props: {
   const projectRecord = useStore(
     (state) => selectEnvironmentState(state, environmentId).projectById,
   );
-  const worktreeById = useStore(
-    (state) => selectEnvironmentState(state, environmentId).worktreeById,
-  );
   const projectOrder = useUiStateStore((state) => state.projectOrder);
   const providers = useEnvironmentServerConfigSelector(environmentId, selectProviders);
   const uploads = useTaskFileUploadsStore((state) => state.byTask);
-  const linkedWorktrees = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject).allowed;
+  const sourceWorktrees = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject).allowed;
+  const draftKeys = useTaskDraftKeys(environmentId);
 
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [showDone, setShowDone] = useState(false);
-  const [preparing, setPreparing] = useState(NO_IDS);
-  const [startModels, setStartModels] = useState(NO_MODELS);
   const now = useLocalDayNow();
 
   // ── Projects of the tasks' node, in sidebar order ───────────────────
@@ -395,7 +408,9 @@ function TasksPageContent(props: {
       orderedProjects.map((project): TaskProjectOption => ({
         projectId: project.id,
         name: project.name,
-        color: deriveProjectMonogram(project.name).color,
+        environmentId: project.environmentId,
+        cwd: project.cwd,
+        avatarHash: project.customAvatarContentHash ?? null,
       })),
     [orderedProjects],
   );
@@ -404,15 +419,6 @@ function TasksPageContent(props: {
   if (projects !== nextProjectOptions && !sameProjectOptions(projects, nextProjectOptions)) {
     setProjects(nextProjectOptions);
   }
-
-  const pullRequestBranches = useMemo(() => {
-    const branches = new Map<string, string>();
-    for (const worktree of Object.values<SidebarWorktreeSummary>(worktreeById ?? {})) {
-      if (worktree.prNumber !== null && worktree.branch)
-        branches.set(`${worktree.projectId}\u0000${worktree.prNumber}`, worktree.branch);
-    }
-    return branches;
-  }, [worktreeById]);
 
   // ── The tasks shown ──────────────────────────────────────────────────
   const filterProjectId = props.search.project ? ProjectId.make(props.search.project) : null;
@@ -426,26 +432,8 @@ function TasksPageContent(props: {
   const everyDoneId = selectTaskIds(slice, environmentId, { done: true, projectId: null });
 
   const context = useMemo<TaskViewContext>(
-    () => ({
-      summaries,
-      projectById,
-      providers,
-      uploads,
-      preparing,
-      startModels,
-      linkedWorktrees,
-      pullRequestBranches,
-    }),
-    [
-      linkedWorktrees,
-      preparing,
-      projectById,
-      providers,
-      pullRequestBranches,
-      startModels,
-      summaries,
-      uploads,
-    ],
+    () => ({ summaries, projectById, providers, uploads, sourceWorktrees, draftKeys }),
+    [draftKeys, projectById, providers, sourceWorktrees, summaries, uploads],
   );
   const openTasks = useMemo(
     () => buildTaskViews(openIds, slice, environmentId, context),
@@ -492,9 +480,16 @@ function TasksPageContent(props: {
   );
 
   // ── Handlers: one object for the page's life, reading the latest state ─
-  const latestRef = useRef({ model, context, onSearchChange: props.onSearchChange, router });
+  const latest = {
+    model,
+    context,
+    onSearchChange: props.onSearchChange,
+    router,
+    openDraft: handleNewTaskChat,
+  };
+  const latestRef = useRef(latest);
   useLayoutEffect(() => {
-    latestRef.current = { model, context, onSearchChange: props.onSearchChange, router };
+    latestRef.current = latest;
   });
 
   const handlers = useMemo<TasksViewHandlers>(() => {
@@ -512,7 +507,13 @@ function TasksPageContent(props: {
       )?.title ?? null;
     const chatCount = (taskId: string) => {
       const task = readTask(taskId);
-      return task ? listTaskChats(task, readSummary).length : 0;
+      const summaries = selectEnvironmentState(
+        useStore.getState(),
+        environmentId,
+      ).sidebarThreadSummaryById;
+      return task
+        ? listTaskChats(task, readSummary).filter((chat) => isListedChat(chat, summaries)).length
+        : 0;
     };
     const setLinks = (
       taskId: string,
@@ -522,38 +523,28 @@ function TasksPageContent(props: {
       if (task) writer.update(taskId, { links: update(task.links) });
     };
 
-    const start = (taskId: string, whereId?: string) => {
+    const start = (taskId: string) => {
       const task = readTask(taskId);
       if (!task || task.state === "done") return;
       const project = readProject(task);
       if (!project) {
-        // The start needs a project to run in: open the row on its project chip.
+        // The chat needs a project to run in: open the row on its project chip.
         if (latestRef.current.model.expandedTaskId !== taskId) setExpandedTaskId(taskId);
         toastManager.add({ type: "info", title: "Pick a project for this task first" });
         return;
       }
-      // Read from the task itself: one added a moment ago has no row yet.
-      const options = taskWhereOptions(task, project, latestRef.current.context);
-      const place = resolveTaskStartPlace(options, whereId);
-      if (!place) return;
-      setPreparing((current) => new Set(current).add(taskId));
-      void startTaskChat({
+      void openTaskDraft({
         environmentId,
         taskId,
-        place,
-        project: { projectId: project.id, cwd: project.cwd },
-        writer,
+        project: {
+          projectRef: scopeProjectRef(environmentId, project.id),
+          cwd: project.cwd,
+          repository: projectRepositoryKey(project.repositoryIdentity),
+        },
+        sourceWorktrees: latestRef.current.context.sourceWorktrees,
         describeThread: readThreadTitle,
-        onModel: (threadId, modelSelection) =>
-          setStartModels((current) => new Map(current).set(threadId, modelSelection)),
-      }).finally(() =>
-        setPreparing((current) => {
-          if (!current.has(taskId)) return current;
-          const next = new Set(current);
-          next.delete(taskId);
-          return next.size === 0 ? NO_IDS : next;
-        }),
-      );
+        open: latestRef.current.openDraft,
+      });
     };
 
     return {
@@ -638,6 +629,8 @@ function TasksPageContent(props: {
         });
       },
       onPrepareStart: (taskId) => {
+        // The draft Start opens loads while the pointer is still on its way.
+        void preloadRouteChunk("/_chat/draft/$draftId");
         const project = readProject(readTask(taskId));
         if (!project) return;
         // Fetches the new worktree's base and reads the project's defaults; it

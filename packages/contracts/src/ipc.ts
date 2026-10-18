@@ -1062,6 +1062,10 @@ export interface LocalApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
+    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    subscribeLocalTaskChanges?: (
+      listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+    ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
@@ -1174,6 +1178,10 @@ export interface EnvironmentApi {
     removeLocalTaskFile?: (
       input: import("./localTasks.ts").LocalTaskRemoveFileInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
+    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    subscribeLocalTaskChanges?: (
+      listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+    ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;

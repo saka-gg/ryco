@@ -1,4 +1,11 @@
-import type { LocalTaskDelegationStatus } from "@ryco/contracts";
+import type {
+  LocalTaskDelegationStatus,
+  LocalTaskLink,
+  ThreadId,
+  WorkItemProviderKind,
+} from "@ryco/contracts";
+
+import { formatThreadMentionPath, isThreadMentionableId } from "./threadMentions.ts";
 
 /** A task's status while it is open, worked out from the chats started for it. */
 export type LocalTaskChatAggregate = "todo" | Exclude<LocalTaskDelegationStatus, "unavailable">;
@@ -35,4 +42,72 @@ export function aggregateLocalTaskStatus(
     }
   }
   return best;
+}
+
+const WORK_ITEM_PROVIDER_LABELS: Record<WorkItemProviderKind, string> = { jira: "Jira" };
+
+export interface TaskStartPromptInput {
+  readonly title: string;
+  readonly notes: string;
+  readonly links: ReadonlyArray<LocalTaskLink>;
+  /** Words written after a linked chat's mention, e.g. its title. */
+  readonly describeThread?: (threadId: ThreadId) => string | null | undefined;
+}
+
+function withUrl(text: string, url: string | undefined): string {
+  return url ? `${text} ${url}` : text;
+}
+
+/** "Pull request #746: Fix the login loop" when the link kept a title. */
+function withTitle(label: string, title: string | undefined): string {
+  return title ? `${label}: ${title}` : label;
+}
+
+function describeTaskLink(
+  link: LocalTaskLink,
+  describeThread: TaskStartPromptInput["describeThread"],
+): string {
+  switch (link.kind) {
+    case "pr":
+      return withUrl(withTitle(`Pull request #${link.number}`, link.title), link.url);
+    case "issue":
+      return withUrl(withTitle(`Issue #${link.number}`, link.title), link.url);
+    case "workItem":
+      return withUrl(
+        withTitle(`${WORK_ITEM_PROVIDER_LABELS[link.provider]} ${link.key}`, link.title),
+        link.url,
+      );
+    case "branch":
+      return `Branch ${link.name}`;
+    case "thread": {
+      // The mention token becomes one of the message's `threadReferences`,
+      // so the node hands the agent an excerpt of that chat.
+      const mention = isThreadMentionableId(link.threadId)
+        ? `@${formatThreadMentionPath(link.threadId)}`
+        : `Chat ${link.threadId}`;
+      const description = describeThread?.(link.threadId)?.replace(/\s+/g, " ").trim();
+      return description ? `${mention} (${description})` : mention;
+    }
+    case "url":
+      return withUrl(link.label ?? "", link.url).trim();
+  }
+}
+
+/**
+ * The first message of a chat started from a task: its title, its notes, then
+ * what it links to, one bullet per link. Chats are written as `@thread:<id>`
+ * mentions so they travel as thread references.
+ */
+export function buildTaskStartPrompt(input: TaskStartPromptInput): string {
+  const sections = [input.title.trim()];
+  const notes = input.notes.trim();
+  if (notes) sections.push(notes);
+  if (input.links.length > 0)
+    sections.push(
+      [
+        "Linked:",
+        ...input.links.map((link) => `- ${describeTaskLink(link, input.describeThread)}`),
+      ].join("\n"),
+    );
+  return sections.join("\n\n");
 }

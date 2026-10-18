@@ -62,6 +62,8 @@ export interface ComposerPromptShellProps {
   // Source-control context chips
   composerSourceControlContexts: ReadonlyArray<ComposerSourceControlContext>;
   onRemoveSourceControlContext: (id: string) => void;
+  /** Chips shown before the source-control contexts (a task draft's task). */
+  leadingContextChips?: React.ReactNode;
 
   // Image attachments
   composerImages: ComposerImageAttachment[];
@@ -152,6 +154,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     onSelectComposerItem,
     composerSourceControlContexts,
     onRemoveSourceControlContext,
+    leadingContextChips,
     composerImages,
     nonPersistedComposerImageIdSet,
     fileUploadRecords,
@@ -213,8 +216,9 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       {!isComposerCollapsedMobile &&
         !isComposerApprovalState &&
         pendingUserInputCount === 0 &&
-        composerSourceControlContexts.length > 0 && (
+        (leadingContextChips || composerSourceControlContexts.length > 0) && (
           <div className="mb-2 flex flex-wrap gap-1.5">
+            {leadingContextChips}
             {composerSourceControlContexts.map((ctx) => (
               <SourceControlContextChip
                 key={ctx.id}

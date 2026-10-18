@@ -176,6 +176,11 @@
       "import": "./src/workspaceLifecycle.ts",
       "require": "./src/workspaceLifecycle.ts"
     },
+    "./work-items": {
+      "types": "./src/workItems.ts",
+      "import": "./src/workItems.ts",
+      "require": "./src/workItems.ts"
+    },
     "./worktree": {
       "types": "./src/worktree.ts",
       "import": "./src/worktree.ts",

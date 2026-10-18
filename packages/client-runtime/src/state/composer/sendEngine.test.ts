@@ -279,6 +279,42 @@ describe("send engine — dispatch assembly", () => {
   });
 });
 
+describe("send engine — task drafts", () => {
+  it("starts the turn through the task's delegate instead of a dispatch", async () => {
+    const delegated: Array<{ type: string; [key: string]: unknown }> = [];
+    const harness = makeDispatchHarness({
+      isServerThread: false,
+      bootstrap: { runSetupScript: true },
+      localTask: {
+        delegate: async (command) => {
+          harness.calls.push(`delegate:${command.type}`);
+          delegated.push(command);
+        },
+      },
+    });
+    await commitSendTurnDispatch(harness.input);
+
+    expect(harness.calls).toEqual(["beginLocalDispatch", "delegate:thread.turn.start"]);
+    expect(harness.commands).toEqual([]);
+    // The same command a dispatch would have sent, bootstrap included.
+    expect(delegated[0]).toMatchObject({
+      commandId: "composer-send:thread-1:message-1",
+      threadId: "thread-1",
+      bootstrap: { runSetupScript: true },
+      message: { messageId: "message-1", role: "user", text: "hello", attachments: [] },
+    });
+  });
+
+  it("fails the send when the delegate rejects", async () => {
+    const harness = makeDispatchHarness({
+      isServerThread: false,
+      localTask: { delegate: () => Promise.reject(new Error("The task was deleted.")) },
+    });
+    await expect(commitSendTurnDispatch(harness.input)).rejects.toThrow("The task was deleted.");
+    expect(harness.commands).toEqual([]);
+  });
+});
+
 describe("send engine — onBeforeTurnStart", () => {
   it("runs exactly once, after beginLocalDispatch and immediately before turn.start", async () => {
     const harness = makeDispatchHarness({ isFirstMessage: true });

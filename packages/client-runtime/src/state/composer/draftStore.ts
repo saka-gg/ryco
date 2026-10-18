@@ -165,6 +165,13 @@ export interface DraftSessionState {
   worktreeSource?: DraftWorktreeSource | null;
   fetchOrigin?: boolean;
   worktreeBranchName?: string | null;
+  /**
+   * The task this draft starts a chat for (a node's local task id). Its first
+   * send goes out as `server.delegateLocalTask`, so the node records the chat
+   * under the task and attaches the task's files. Dropped when the draft moves
+   * to another project: a task's chats run in its own project.
+   */
+  localTaskId?: string | null;
   promotedTo?: ScopedThreadRef | null;
   /**
    * A "No project" chat whose project does not exist yet: `projectId` is
@@ -233,6 +240,12 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
    * chat entry points resume it instead of piling up empty chat drafts.
    */
   getPendingChatDraftSession: (environmentId: EnvironmentId) => ProjectDraftSession | null;
+  /** The newest unsent draft that starts a chat for the node's task (in `projectId`), if any. */
+  getLocalTaskDraftSession: (
+    environmentId: EnvironmentId,
+    taskId: string,
+    projectId?: ProjectId,
+  ) => ProjectDraftSession | null;
   /** Reads mutable draft-session metadata by `DraftId`. */
   getDraftSession: (draftId: DraftId) => DraftSessionState | null;
   /** Resolves a server-thread ref back to a matching draft session when one exists. */
@@ -266,6 +279,8 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
       tokenMode?: AgentTokenMode;
       /** Creates a "No project" chat draft; see `DraftSessionState.pendingChat`. */
       pendingChat?: boolean;
+      /** See `DraftSessionState.localTaskId`. */
+      localTaskId?: string | null;
     },
   ) => void;
   /** Creates or updates the draft session tracked for a concrete project ref. */
@@ -292,6 +307,7 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
       worktreeSource?: DraftWorktreeSource | null;
       fetchOrigin?: boolean;
       worktreeBranchName?: string | null;
+      localTaskId?: string | null;
       projectRef?: ScopedProjectRef;
       createdAt?: string;
       envMode?: DraftThreadEnvMode;
@@ -762,6 +778,7 @@ function createDraftThreadState(
     interactionMode?: ProviderInteractionMode;
     tokenMode?: AgentTokenMode;
     pendingChat?: boolean;
+    localTaskId?: string | null;
   },
 ): DraftThreadState {
   const projectChanged =
@@ -816,6 +833,11 @@ function createDraftThreadState(
       : options?.worktreeBranchName === undefined
         ? (existingThread?.worktreeBranchName ?? null)
         : options.worktreeBranchName,
+    localTaskId: projectChanged
+      ? null
+      : options?.localTaskId === undefined
+        ? (existingThread?.localTaskId ?? null)
+        : options.localTaskId,
     branch: nextBranch,
     worktreePath: nextWorktreePath,
     // A source belongs to the repository it was picked from, so it is dropped
@@ -865,6 +887,7 @@ function draftThreadsEqual(left: DraftThreadState | undefined, right: DraftThrea
     left.branch === right.branch &&
     left.worktreePath === right.worktreePath &&
     left.envMode === right.envMode &&
+    (left.localTaskId ?? null) === (right.localTaskId ?? null) &&
     isPendingChatDraft(left) === isPendingChatDraft(right) &&
     scopedThreadRefsEqual(left.promotedTo, right.promotedTo)
   );
@@ -1050,6 +1073,23 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
             }
             return latest;
           },
+          getLocalTaskDraftSession: (environmentId, taskId, projectId) => {
+            let latest: ProjectDraftSession | null = null;
+            for (const [draftId, draftThread] of Object.entries(get().draftThreadsByThreadKey)) {
+              if (
+                draftThread.environmentId !== environmentId ||
+                draftThread.localTaskId !== taskId ||
+                (projectId !== undefined && draftThread.projectId !== projectId) ||
+                isDraftThreadPromoting(draftThread)
+              ) {
+                continue;
+              }
+              if (latest === null || draftThread.createdAt > latest.createdAt) {
+                latest = toProjectDraftSession(DraftId.make(draftId), draftThread);
+              }
+            }
+            return latest;
+          },
           getDraftSession: (draftId) => get().draftThreadsByThreadKey[draftId] ?? null,
           getDraftSessionByRef: (threadRef) => {
             for (const draftSession of Object.values(get().draftThreadsByThreadKey)) {
@@ -1222,6 +1262,11 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                   : options.worktreeBranchName === undefined
                     ? (existing.worktreeBranchName ?? null)
                     : options.worktreeBranchName,
+                localTaskId: projectChanged
+                  ? null
+                  : options.localTaskId === undefined
+                    ? (existing.localTaskId ?? null)
+                    : options.localTaskId,
                 branch: nextBranch,
                 worktreePath: nextWorktreePath,
                 worktreeSource: nextWorktreeSource,
@@ -1245,6 +1290,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
                 nextDraftThread.tokenMode === existing.tokenMode &&
                 nextDraftThread.fetchOrigin === (existing.fetchOrigin ?? true) &&
                 nextDraftThread.worktreeBranchName === (existing.worktreeBranchName ?? null) &&
+                nextDraftThread.localTaskId === (existing.localTaskId ?? null) &&
                 nextDraftThread.branch === existing.branch &&
                 nextDraftThread.worktreePath === existing.worktreePath &&
                 Equal.equals(nextDraftThread.worktreeSource, existing.worktreeSource ?? null) &&

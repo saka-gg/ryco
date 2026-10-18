@@ -1,5 +1,5 @@
 import { taskLinkKey } from "@ryco/client-runtime/state/tasks";
-import { LaptopIcon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -7,7 +7,7 @@ import { TaskDuePopover } from "./TaskDuePopover";
 import { TaskFileAddChip, TaskFileChips } from "./TaskFileChips";
 import { TaskLinkIcon } from "./TaskLinkIcon";
 import { TaskLinkPopover } from "./TaskLinkPopover";
-import { TaskProjectDot } from "./TaskRowMeta";
+import { TaskProjectIcon } from "./TaskRowMeta";
 import { describeTaskLink, taskLinkLabelIn } from "./taskLinks.logic";
 import {
   TASK_CHIP_CLASS,
@@ -46,7 +46,7 @@ export function TaskChips(props: {
       />
       <TaskLinkChips task={task} handlers={handlers} />
       <TaskFileChips taskId={task.id} files={task.files} onRemoveFile={handlers.onRemoveFile} />
-      <TaskLinkPopover task={task} handlers={handlers} />
+      <TaskLinkPopover task={task} project={project} handlers={handlers} />
       <TaskFileAddChip
         taskId={task.id}
         fileCount={task.files.length}
@@ -59,7 +59,7 @@ export function TaskChips(props: {
 function ProjectChipContent(props: { readonly project: TaskProjectOption | null }) {
   return props.project ? (
     <>
-      <TaskProjectDot color={props.project.color} />
+      <TaskProjectIcon project={props.project} />
       <span className={TASK_CHIP_LABEL_CLASS}>{props.project.name}</span>
     </>
   ) : (
@@ -110,7 +110,7 @@ function TaskProjectChip(props: {
             className={TASK_MENU_ITEM_CLASS}
             onClick={() => props.onProjectChange(task.id, option.projectId)}
           >
-            <LaptopIcon className="size-3.5 shrink-0" aria-hidden />
+            <TaskProjectIcon project={option} className="mt-px size-4" />
             <span className="min-w-0 truncate">{option.name}</span>
           </MenuItem>
         ))}
@@ -119,16 +119,30 @@ function TaskProjectChip(props: {
   );
 }
 
-/** Each link as a chip (a linked chat by its title, which follows the chat); hovering shows the × that unlinks it. */
+/**
+ * Each link as a chip, a pull request, issue or Jira item with the title it
+ * was linked with and a linked chat by its title (which follows the chat);
+ * hovering shows the × that unlinks it.
+ */
 function TaskLinkChips(props: {
   readonly task: TaskView;
   readonly handlers: Pick<TasksViewHandlers, "onRemoveLink">;
 }) {
   const { task, handlers } = props;
   return task.links.map((link, index) => (
-    <span key={taskLinkKey(link)} className={TASK_CHIP_CLASS} data-removable="">
+    <span
+      key={taskLinkKey(link)}
+      className={TASK_CHIP_CLASS}
+      data-removable=""
+      title={"title" in link ? link.title : undefined}
+    >
       <TaskLinkIcon kind={link.kind} className="size-3 shrink-0" />
-      <span className={TASK_CHIP_LABEL_CLASS}>{taskLinkLabelIn(link, task.chats)}</span>
+      <span className={TASK_CHIP_LABEL_CLASS}>
+        {taskLinkLabelIn(link, task.chats)}
+        {"title" in link && link.title ? (
+          <span className="text-(--task-faint)"> {link.title}</span>
+        ) : null}
+      </span>
       <button
         type="button"
         className={TASK_CHIP_REMOVE_CLASS}

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { Effect, Option } from "effect";
+import { Effect, Option, Stream } from "effect";
 import { WS_METHODS, LocalTaskError, OrchestrationDispatchCommandError } from "@ryco/contracts";
 import { rpcAccessFor } from "@ryco/shared/rpcAccessPolicy";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +41,7 @@ const methods = [
   WS_METHODS.serverAddLocalTaskFile,
   WS_METHODS.serverRemoveLocalTaskFile,
 ] as const;
-const ownerEffect = (role: RpcPrincipalRole) => (method: string, effect: Effect.Effect<unknown>) =>
+const authorizeOwner = (role: RpcPrincipalRole, method: string) =>
   authorizeRpcPrincipal(
     {
       role,
@@ -51,7 +51,15 @@ const ownerEffect = (role: RpcPrincipalRole) => (method: string, effect: Effect.
     } satisfies RpcPrincipal,
     "owner",
     method,
-  ).pipe(Effect.andThen(effect));
+  );
+const ownerEffect = (role: RpcPrincipalRole) => (method: string, effect: Effect.Effect<unknown>) =>
+  authorizeOwner(role, method).pipe(Effect.andThen(effect));
+const ownerStream =
+  (role: RpcPrincipalRole) =>
+  <A, E>(method: string, stream: Stream.Stream<A, E>) =>
+    Stream.unwrap(authorizeOwner(role, method).pipe(Effect.as(stream)));
+
+type ChangeStream = Stream.Stream<{ readonly taskId: string }, { readonly status?: number }>;
 
 let commandSequence = 0;
 /** Unique per test: the flights are process-wide, keyed by command id. */
@@ -126,6 +134,7 @@ function setup(role: RpcPrincipalRole = "owner") {
     ),
     addFile: vi.fn(() => Effect.succeed(task)),
     removeFile: vi.fn(() => Effect.succeed(task)),
+    changes: Stream.make({ taskId: "task" }, { taskId: "other" }),
   };
   normalize.mockImplementation((command: { commandId: string; bootstrap?: unknown }) =>
     Effect.succeed(
@@ -149,6 +158,7 @@ function setup(role: RpcPrincipalRole = "owner") {
   );
   const ctx = {
     ownerEffect: ownerEffect(role),
+    ownerStream: ownerStream(role),
     localTaskService: Option.some(service),
     chatAttachmentUploads: Option.some(uploads),
     config,
@@ -177,6 +187,27 @@ describe("local task RPC", () => {
       expect(apply).not.toHaveBeenCalled();
     });
   }
+
+  it("streams the node's task changes to the owner only", async () => {
+    const owner = setup();
+    const changes = await Effect.runPromise(
+      Stream.runCollect(
+        owner.handlers[WS_METHODS.serverSubscribeLocalTaskChanges]({}) as unknown as ChangeStream,
+      ),
+    );
+    expect([...changes]).toEqual([{ taskId: "task" }, { taskId: "other" }]);
+    expect(rpcAccessFor(WS_METHODS.serverSubscribeLocalTaskChanges)).toBe("owner");
+    const viewer = setup("viewer");
+    await expect(
+      Effect.runPromise(
+        Stream.runCollect(
+          viewer.handlers[WS_METHODS.serverSubscribeLocalTaskChanges](
+            {},
+          ) as unknown as ChangeStream,
+        ),
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  });
 
   it("reserves durably, dispatches through normal orchestration, marks it and answers with the task", async () => {
     const { calls, handlers, ctx, service } = setup();

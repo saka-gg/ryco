@@ -122,41 +122,46 @@ function threadActivityOf(environmentId: EnvironmentId): LocalTasksThreadActivit
 }
 
 /**
- * Keeps `environmentId`'s tasks retained while mounted and `enabled`. The
- * environment's current connection is bound: a new client swaps the shared
- * reader (and reads again), and the same client delivering a fresh shell
- * snapshot after a reconnect re-reads what changed while it was away
- * (`refreshOnShellReadiness`, once per environment). A lost connection keeps
- * the last tasks on screen until the next one.
+ * Keeps `environmentId`'s tasks retained until the returned release is
+ * called. The environment's current connection is bound: a new client swaps
+ * the shared reader (and reads again), and the same client delivering a
+ * fresh shell snapshot after a reconnect re-reads what changed while it was
+ * away (`refreshOnShellReadiness`, once per environment). A lost connection
+ * keeps the last tasks on screen until the next one.
  */
+export function retainLocalTasksFor(environmentId: EnvironmentId): () => void {
+  let release: (() => void) | null = null;
+  let boundList: unknown = null;
+
+  const bind = () => {
+    const client = readEnvironmentConnection(environmentId)?.client ?? null;
+    const api = readEnvironmentApiForConnection(environmentId, client)?.server;
+    if (!api) return;
+    // The api object is rebuilt per lookup; its methods tell connections apart.
+    if (release && api.listLocalTasks === boundList) return;
+    const previous = release;
+    boundList = api.listLocalTasks;
+    // Retained before the old one is released, so the tasks stay in the store.
+    release = retainLocalTasks(api, environmentId, {
+      triggers: taskRefreshTriggers(environmentId),
+      threadActivity: threadActivityOf(environmentId),
+    });
+    previous?.();
+  };
+
+  const unsubscribe = subscribeEnvironmentConnections(bind);
+  bind();
+  return () => {
+    unsubscribe();
+    release?.();
+  };
+}
+
+/** Keeps `environmentId`'s tasks retained while mounted and `enabled` (`retainLocalTasksFor`). */
 export function useLocalTasksSync(environmentId: EnvironmentId | null, enabled: boolean): void {
   useEffect(() => {
     if (!enabled || !environmentId) return;
-    let release: (() => void) | null = null;
-    let boundList: unknown = null;
-
-    const bind = () => {
-      const client = readEnvironmentConnection(environmentId)?.client ?? null;
-      const api = readEnvironmentApiForConnection(environmentId, client)?.server;
-      if (!api) return;
-      // The api object is rebuilt per lookup; its methods tell connections apart.
-      if (release && api.listLocalTasks === boundList) return;
-      const previous = release;
-      boundList = api.listLocalTasks;
-      // Retained before the old one is released, so the tasks stay in the store.
-      release = retainLocalTasks(api, environmentId, {
-        triggers: taskRefreshTriggers(environmentId),
-        threadActivity: threadActivityOf(environmentId),
-      });
-      previous?.();
-    };
-
-    const unsubscribe = subscribeEnvironmentConnections(bind);
-    bind();
-    return () => {
-      unsubscribe();
-      release?.();
-    };
+    return retainLocalTasksFor(environmentId);
   }, [enabled, environmentId]);
 }
 

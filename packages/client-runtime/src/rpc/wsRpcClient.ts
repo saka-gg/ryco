@@ -387,6 +387,9 @@ export interface WsRpcClient {
     >;
     readonly addLocalTaskFile: RpcUnaryMethod<typeof WS_METHODS.serverAddLocalTaskFile>;
     readonly removeLocalTaskFile: RpcUnaryMethod<typeof WS_METHODS.serverRemoveLocalTaskFile>;
+    readonly subscribeLocalTaskChanges: RpcStreamMethod<
+      typeof WS_METHODS.serverSubscribeLocalTaskChanges
+    >;
     readonly getDailyRecap: RpcUnaryMethod<typeof WS_METHODS.serverGetDailyRecap>;
     readonly prewarmProviderSession: RpcUnaryMethod<typeof WS_METHODS.providerPrewarmSession>;
     readonly readProjectProviderCommands: RpcUnaryMethod<
@@ -951,6 +954,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverAddLocalTaskFile](input)),
       removeLocalTaskFile: (input) =>
         transport.request((client) => client[WS_METHODS.serverRemoveLocalTaskFile](input)),
+      subscribeLocalTaskChanges: (listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.serverSubscribeLocalTaskChanges]({}),
+          listener,
+          { ...options, tag: WS_METHODS.serverSubscribeLocalTaskChanges },
+        ),
       getDailyRecap: (input) =>
         transport.request((client) => client[WS_METHODS.serverGetDailyRecap](input)),
       prewarmProviderSession: (input) =>

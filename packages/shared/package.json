@@ -434,6 +434,10 @@
       "types": "./src/localTasks.ts",
       "import": "./src/localTasks.ts"
     },
+    "./threadMentions": {
+      "types": "./src/threadMentions.ts",
+      "import": "./src/threadMentions.ts"
+    },
     "./automationSchedule": {
       "types": "./src/automationSchedule.ts",
       "import": "./src/automationSchedule.ts"

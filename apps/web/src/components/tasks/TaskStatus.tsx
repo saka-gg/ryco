@@ -10,7 +10,7 @@ export const TASK_STATUS_WORDS: Readonly<Record<TaskStatusWord, string>> = {
   review: "Ready to review",
   failed: "Failed to start",
   error: "Error",
-  unavailable: "Chat deleted",
+  archived: "Archived",
 };
 
 /**

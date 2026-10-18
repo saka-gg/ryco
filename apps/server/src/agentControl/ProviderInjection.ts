@@ -166,6 +166,8 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.controlDevices,
   AGENT_CONTROL_CAPABILITIES.controlComputer,
   AGENT_CONTROL_CAPABILITIES.controlBrowser,
+  AGENT_CONTROL_CAPABILITIES.readLocalTasks,
+  AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
 ] as const;
 
 const lifecycle = (input: {

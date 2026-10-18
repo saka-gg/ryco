@@ -1,101 +1,52 @@
-import {
-  ChevronDownIcon,
-  GitBranchIcon,
-  GitForkIcon,
-  GitPullRequestIcon,
-  LaptopIcon,
-  PlayIcon,
-} from "lucide-react";
+import { MessageSquareDashedIcon, PlayIcon, Trash2Icon } from "lucide-react";
 
-import { cn } from "~/lib/utils";
+import type { TaskView, TasksViewHandlers } from "./tasksViewModel";
 
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
-import { TASK_MENU_DETAIL_CLASS, TASK_MENU_ITEM_CLASS, TASK_MENU_POPUP_CLASS } from "./tasksUi";
-import type { TaskView, TaskWhereKind, TasksViewHandlers } from "./tasksViewModel";
-
-const SPLIT_BUTTON_CLASS =
-  "inline-flex h-[28px] items-center gap-[6px] border-0 bg-primary text-[12.5px] font-medium text-primary-foreground outline-none disabled:cursor-default disabled:opacity-60";
-
-function WhereIcon(props: { readonly kind: TaskWhereKind }) {
-  const className = "size-3.5 shrink-0";
-  switch (props.kind) {
-    case "pr":
-      return <GitPullRequestIcon className={className} aria-hidden />;
-    case "branch":
-      return <GitBranchIcon className={className} aria-hidden />;
-    case "worktree":
-      return <GitForkIcon className={className} aria-hidden />;
-    case "project":
-      return <LaptopIcon className={className} aria-hidden />;
-  }
+/** What Start says: its unsent draft when it has one, else a first or another chat. */
+export function taskStartLabel(task: Pick<TaskView, "hasDraft" | "chats">): string {
+  if (task.hasDraft) return "Open draft";
+  return task.chats.length > 0 ? "Another chat" : "Start chat";
 }
 
 /**
- * The open task's footer: "▶ Start chat" (or "Another chat" once it has
- * one) in the default place, ▾ for the other places, the hint naming where
- * the default goes, and a quiet Delete. Start and Delete wait while a start
- * is in flight (deleting then would leave its worktree and chat behind);
- * pointing at Start warms the start path.
+ * The open task's footer: Start, which opens the chat's draft prefilled with
+ * the task (the model, modes and worktree are picked there), the hint naming
+ * where that draft's worktree comes from, and Delete. Delete waits while a
+ * chat's first message is on its way (deleting then would leave its chat
+ * behind); pointing at Start warms the start path.
  */
 export function TaskStartButton(props: {
   readonly task: TaskView;
   readonly handlers: Pick<TasksViewHandlers, "onStart" | "onDelete" | "onPrepareStart">;
 }) {
   const { task, handlers } = props;
-  const fallback = task.whereOptions[0] ?? null;
+  const hint = task.startHint;
   const prepare = () => handlers.onPrepareStart(task.id);
+  const StartIcon = task.hasDraft ? MessageSquareDashedIcon : PlayIcon;
   return (
     <div className="flex min-w-0 items-center gap-[8px]">
-      <span
-        className="tsk-split inline-flex shrink-0 overflow-hidden rounded-[8px]"
+      <button
+        type="button"
+        className="tsk-start inline-flex h-[28px] shrink-0 items-center gap-[6px] rounded-[8px] border-0 bg-primary px-[11px] text-[12.5px] font-medium text-primary-foreground outline-none"
         onPointerEnter={prepare}
+        onFocus={prepare}
+        onClick={() => handlers.onStart(task.id)}
       >
-        <button
-          type="button"
-          className={cn(SPLIT_BUTTON_CLASS, "px-[11px]")}
-          disabled={task.starting}
-          onFocus={prepare}
-          onClick={() => handlers.onStart(task.id)}
-        >
-          <PlayIcon className="size-3.5 shrink-0" aria-hidden />
-          {task.chats.length > 0 ? "Another chat" : "Start chat"}
-        </button>
-        <Menu>
-          <MenuTrigger
-            className={cn(
-              SPLIT_BUTTON_CLASS,
-              "border-l border-l-[color:color-mix(in_srgb,var(--primary-foreground)_18%,transparent)] px-[7px]",
-            )}
-            aria-label="Where"
-            disabled={task.starting || task.whereOptions.length === 0}
-          >
-            <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden />
-          </MenuTrigger>
-          <MenuPopup align="start" className={TASK_MENU_POPUP_CLASS}>
-            {task.whereOptions.map((option) => (
-              <MenuItem
-                key={option.id}
-                className={TASK_MENU_ITEM_CLASS}
-                onClick={() => handlers.onStart(task.id, option.id)}
-              >
-                <WhereIcon kind={option.kind} />
-                <span className="min-w-0">
-                  <span className="block">{option.label}</span>
-                  <small className={TASK_MENU_DETAIL_CLASS}>{option.detail}</small>
-                </span>
-              </MenuItem>
-            ))}
-          </MenuPopup>
-        </Menu>
-      </span>
-      {fallback ? (
+        <StartIcon className="size-3.5 shrink-0" aria-hidden />
+        {taskStartLabel(task)}
+      </button>
+      {task.hasDraft ? (
         <span className="min-w-0 truncate text-[12px] text-(--task-faint)">
-          in {fallback.hintPrefix}
-          {fallback.hintRef !== null ? (
+          Not sent yet · pick up where you left off
+        </span>
+      ) : hint ? (
+        <span className="min-w-0 truncate text-[12px] text-(--task-faint)">
+          in {hint.prefix}
+          {hint.ref !== null ? (
             <>
               {" · "}
               <b className="font-mono text-[11.5px] font-medium text-muted-foreground">
-                {fallback.hintRef}
+                {hint.ref}
               </b>
             </>
           ) : null}
@@ -103,10 +54,12 @@ export function TaskStartButton(props: {
       ) : null}
       <button
         type="button"
-        className="tsk-del ml-auto shrink-0 rounded-[6px] border-0 bg-transparent px-[6px] py-[4px] text-[12px] text-(--task-faint) outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
+        className="tsk-del ml-auto inline-flex shrink-0 items-center gap-[5px] rounded-[6px] border-0 bg-transparent px-[7px] py-[4px] text-[12px] text-(--task-faint) outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
         disabled={task.starting}
+        title={task.starting ? "Wait for the chat to start" : undefined}
         onClick={() => handlers.onDelete(task.id)}
       >
+        <Trash2Icon className="size-3.5 shrink-0" aria-hidden />
         Delete
       </button>
     </div>

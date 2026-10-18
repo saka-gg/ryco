@@ -171,6 +171,8 @@ export class AgentControlPlanValidationError extends Schema.TaggedError<AgentCon
       "automation-limit",
       "schedule-invalid",
       "artifact-unavailable",
+      "task-unavailable",
+      "task-stale",
     ]),
     detail: Schema.String,
   },

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
@@ -174,11 +174,23 @@ describe("local task service", () => {
         assert.equal(recovered?.delegations[0]?.dispatched, true);
         assert.equal(recovered?.revision, 1);
         assert.equal((yield* tasks.getSettledDelegation(input))?.revision, 1);
+        // A resend restamps the message, so the same thread and message are the same start.
+        assert.equal(
+          (yield* tasks.getSettledDelegation({
+            ...input,
+            command: { ...command(), createdAt: "2026-10-02T00:09:00.000Z" },
+          }))?.revision,
+          1,
+        );
+        // The same command id for another message is another command.
         assert.equal(
           (yield* tasks
             .getSettledDelegation({
               ...input,
-              command: { ...command(), message: { ...command().message, text: "Changed prompt" } },
+              command: {
+                ...command(),
+                message: { ...command().message, messageId: MessageId.make("message-other") },
+              },
             })
             .pipe(Effect.flip)).reason,
           "conflict",
@@ -388,9 +400,18 @@ describe("local task service", () => {
         const saved = yield* tasks.get("task");
         assert.equal(saved.revision, 1);
         assert.equal(saved.status, "starting");
-        const changed = { ...command(), message: { ...command().message, text: "Different work" } };
+        // A resend of a start still to run (restamped) replays it, and is what runs.
+        const resent = { ...command(), createdAt: "2026-10-02T00:07:00.000Z" };
+        const replayed = yield* tasks.reserveDelegation({ taskId: "task", command: resent });
+        assert.deepEqual([replayed.replayed, replayed.needsDispatch], [true, true]);
+        assert.deepEqual(replayed.command, resent);
+        // The same command id for another message is another command.
+        const other = {
+          ...command(),
+          message: { ...command().message, messageId: MessageId.make("message-other") },
+        };
         assert.equal(
-          (yield* tasks.reserveDelegation({ taskId: "task", command: changed }).pipe(Effect.flip))
+          (yield* tasks.reserveDelegation({ taskId: "task", command: other }).pipe(Effect.flip))
             .reason,
           "conflict",
         );
@@ -557,6 +578,44 @@ describe("local task service", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("creates a permanently deleted thread's id again, never a trashed one's", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const tasks = yield* LocalTaskService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* tasks.create(create());
+      // A failed first send deleted the thread it created; its resend creates it again.
+      yield* addThread("thread-again");
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-10-02T00:00:00.000Z' WHERE thread_id = 'thread-again'`;
+      const again = {
+        ...command("again", "thread-again"),
+        bootstrap: { createThread: createThreadBootstrap() },
+      };
+      const reserved = yield* tasks.reserveDelegation({ taskId: "task", command: again });
+      assert.isTrue(reserved.needsDispatch);
+      // Without a bootstrap that creates it, the deleted thread is still unavailable.
+      yield* addThread("thread-gone");
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-10-02T00:00:00.000Z' WHERE thread_id = 'thread-gone'`;
+      const gone = yield* tasks
+        .reserveDelegation({ taskId: "task", command: command("gone", "thread-gone") })
+        .pipe(Effect.flip);
+      assert.equal(gone.reason, "invalid");
+      // A trashed thread can come back from the trash, so its id is still taken.
+      yield* addThread("thread-trashed");
+      yield* sql`UPDATE projection_threads SET deleted_at = '2026-10-02T00:00:00.000Z', trashed_at = '2026-10-02T00:00:00.000Z' WHERE thread_id = 'thread-trashed'`;
+      const trashed = yield* tasks
+        .reserveDelegation({
+          taskId: "task",
+          command: {
+            ...command("trashed", "thread-trashed"),
+            bootstrap: { createThread: createThreadBootstrap() },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(trashed.reason, "invalid");
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("refuses starts whose target thread and bootstrap disagree", () =>
     Effect.gen(function* () {
       yield* seed;
@@ -615,6 +674,36 @@ describe("local task service", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("publishes each task a change touched, deletions and starts included", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const tasks = yield* LocalTaskService;
+      const seen = yield* tasks.changes.pipe(
+        Stream.map((change) => change.taskId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      // The subscription is live before the first change.
+      yield* Effect.yieldNow;
+      const created = yield* tasks.create(create("one"));
+      const updated = yield* tasks.update({
+        taskId: "one",
+        expectedRevision: created.revision,
+        title: "Renamed",
+      });
+      yield* tasks.create(create("two"));
+      yield* tasks.reserveDelegation({ taskId: "two", command: command() });
+      yield* tasks.markDelegated(command().commandId);
+      yield* tasks.remove({ taskId: "one", expectedRevision: updated.revision });
+      // A failed write changes nothing, so it says nothing.
+      yield* tasks
+        .update({ taskId: "two", expectedRevision: 99, title: "Stale" })
+        .pipe(Effect.flip);
+      assert.deepEqual([...(yield* Fiber.join(seen))], ["one", "one", "two", "two", "two", "one"]);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("records a failed start once, unless orchestration accepted it", () =>
     Effect.gen(function* () {
       yield* seed;
@@ -628,16 +717,36 @@ describe("local task service", () => {
       const failed = yield* tasks.get("task");
       assert.equal(failed.status, "failed");
       assert.equal(failed.delegations[0]?.error, "Worktree setup failed.");
-      // A failed start never dispatches again, and its retry reports the failure rather than a
-      // chat that isn't there; a new start (new command) is how the user tries again.
-      const settled = yield* tasks
-        .getSettledDelegation({ taskId: "task", command: command() })
+      // Orchestration never took the failed command, so its resend runs. A resend restamps the
+      // message: the changed command replaces the failed start (same sequence, no error).
+      assert.isNull(yield* tasks.getSettledDelegation({ taskId: "task", command: command() }));
+      const resent = { ...command(), createdAt: "2026-10-02T00:05:00.000Z" };
+      const reserved = yield* tasks.reserveDelegation({ taskId: "task", command: resent });
+      assert.deepEqual([reserved.replayed, reserved.needsDispatch], [false, true]);
+      const retried = yield* tasks.get("task");
+      assert.deepEqual(
+        retried.delegations.map((delegation) => [
+          delegation.commandId,
+          delegation.sequence,
+          delegation.status,
+          delegation.error,
+        ]),
+        [["command-one", 1, "starting", null]],
+      );
+      // The same command id for another message is another command.
+      const other = yield* tasks
+        .reserveDelegation({
+          taskId: "task",
+          command: {
+            ...command(),
+            message: { ...command().message, messageId: MessageId.make("message-other") },
+          },
+        })
         .pipe(Effect.flip);
-      const replayed = yield* tasks
-        .reserveDelegation({ taskId: "task", command: command() })
-        .pipe(Effect.flip);
-      for (const refused of [settled, replayed])
-        assert.deepEqual([refused.reason, refused.message], ["conflict", "Worktree setup failed."]);
+      assert.deepEqual(
+        [other.reason, other.message],
+        ["conflict", "The chat start command changed."],
+      );
       yield* tasks.reserveDelegation({ taskId: "task", command: command("accepted") });
       yield* acceptReceipt(command("accepted").commandId);
       assert.isFalse(
@@ -680,13 +789,13 @@ describe("local task service", () => {
       );
       // Resending a start answers with what became of it: the chat it reached, or why it can
       // never run (so a client starts again with a new command instead of reporting a chat).
+      // One the restart cut off before orchestration took it is not settled: it runs again.
       const resend = (suffix: string) =>
         restarted.getSettledDelegation({ taskId: "task", command: command(suffix) });
       assert.equal((yield* resend("accepted"))?.taskId, "task");
       const refused = yield* resend("rejected").pipe(Effect.flip);
       assert.deepEqual([refused.reason, refused.message], ["conflict", "Model unavailable."]);
-      const lost = yield* resend("lost").pipe(Effect.flip);
-      assert.deepEqual([lost.reason, lost.message], ["conflict", INTERRUPTED_START_ERROR]);
+      assert.isNull(yield* resend("lost"));
     }).pipe(Effect.provide(layer)),
   );
 

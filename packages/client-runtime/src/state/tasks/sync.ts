@@ -22,6 +22,7 @@ export type LocalTasksApi = Pick<
   | "createLocalTaskFileUpload"
   | "addLocalTaskFile"
   | "removeLocalTaskFile"
+  | "subscribeLocalTaskChanges"
 >;
 
 export const LOCAL_TASKS_PAGE_SIZE = 100;
@@ -35,6 +36,10 @@ export const LOCAL_TASKS_MAX_PAGES = 200;
 export const LOCAL_TASKS_FOCUS_REFRESH_MS = 15_000;
 /** How long a change in a task chat's live state waits before the tasks are re-read. */
 export const LOCAL_TASKS_THREAD_REFRESH_DELAY_MS = 750;
+/** How long changes the node reports are gathered before the changed tasks are read. */
+export const LOCAL_TASKS_CHANGE_READ_DELAY_MS = 200;
+/** More changed tasks than this at once are read as one list instead. */
+const LOCAL_TASKS_CHANGE_READ_MAX = 10;
 
 export const LOCAL_TASKS_READ_ERROR: LocalTasksError = {
   kind: "read",
@@ -152,6 +157,8 @@ interface RetainedTasks {
   /** Installed once per retained environment, however many surfaces share it. */
   stopTriggers: (() => void) | null;
   threadWatch: ThreadWatch | null;
+  /** The node's change stream on the current connection, while it has one. */
+  stopChanges: (() => void) | null;
 }
 
 const retained = new Map<EnvironmentId, RetainedTasks>();
@@ -246,12 +253,61 @@ function watchThreads(
 }
 
 /**
+ * Follows the node's task changes (another client, an agent through Agent
+ * Control): each burst reads the tasks it names, and a task that cannot be
+ * read (deleted) or a large burst reads the whole list. `isCurrent` says
+ * whether the read still belongs to the retained connection.
+ */
+function watchChanges(
+  environmentId: EnvironmentId,
+  api: LocalTasksApi,
+  isCurrent: () => boolean,
+  refresh: () => void,
+): (() => void) | null {
+  const subscribe = api.subscribeLocalTaskChanges;
+  if (!subscribe) return null;
+  const get = api.getLocalTask;
+  const pending = new Set<string>();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    timer = null;
+    const taskIds = [...pending];
+    pending.clear();
+    if (!isCurrent()) return;
+    if (!get || taskIds.length > LOCAL_TASKS_CHANGE_READ_MAX) {
+      refresh();
+      return;
+    }
+    for (const taskId of taskIds)
+      get({ taskId }).then(
+        (task) => {
+          if (isCurrent()) useLocalTasksStore.getState().applyTask(environmentId, task);
+        },
+        // Deleted, or unreadable now: the list says what is left.
+        () => {
+          if (isCurrent()) refresh();
+        },
+      );
+  };
+  const unsubscribe = subscribe((change) => {
+    pending.add(change.taskId);
+    if (timer === null) timer = setTimeout(flush, LOCAL_TASKS_CHANGE_READ_DELAY_MS);
+  });
+  return () => {
+    unsubscribe();
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+}
+
+/**
  * Keeps one environment's tasks in `useLocalTasksStore` while retained. Every
  * surface showing them (the Tasks page, the sidebar badge) shares one reader,
  * which reads every page when it starts; retaining with a new connection's
  * `api` swaps the reader for all of them and reads again. The last release
  * stops at the end of the task, so an effect re-running hands the sync over
- * instead of dropping the tasks. The first retainer's `triggers` and
+ * instead of dropping the tasks. Changes the node reports on its change stream
+ * are read as they come (`watchChanges`). The first retainer's `triggers` and
  * `threadActivity` are installed once and re-read once per signal. A node
  * without `listLocalTasks` leaves the environment in `error` with
  * `LOCAL_TASKS_UNSUPPORTED_ERROR`. Returns the (idempotent) release.
@@ -273,6 +329,7 @@ export function retainLocalTasks(
       teardownScheduled: false,
       stopTriggers: null,
       threadWatch: null,
+      stopChanges: null,
     };
     entry = created;
     retained.set(environmentId, created);
@@ -287,6 +344,16 @@ export function retainLocalTasks(
 
   const refresh = (refreshOptions?: LocalTasksRefreshOptions) =>
     void refreshEntry(environmentId, held, refreshOptions);
+  if (fresh) {
+    held.stopChanges?.();
+    const listing = api.listLocalTasks;
+    held.stopChanges = watchChanges(
+      environmentId,
+      api,
+      () => retained.get(environmentId) === held && held.api.listLocalTasks === listing,
+      () => refresh(),
+    );
+  }
   if (options.triggers && held.stopTriggers === null) held.stopTriggers = options.triggers(refresh);
   if (options.threadActivity && held.threadWatch === null)
     held.threadWatch = watchThreads(environmentId, options.threadActivity, () => refresh());
@@ -306,6 +373,7 @@ export function retainLocalTasks(
       held.reader.stop();
       held.stopTriggers?.();
       held.threadWatch?.stop();
+      held.stopChanges?.();
       useLocalTasksStore.getState().clear(environmentId);
     });
   };

@@ -1,9 +1,10 @@
-import { rm, writeFile } from "node:fs/promises";
+import { link, rm, writeFile } from "node:fs/promises";
 
 import {
   type ChatAttachment,
   LocalTaskError,
   type LocalTaskFile,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@ryco/contracts";
 import { Effect } from "effect";
@@ -18,7 +19,11 @@ import {
   deleteThreadAttachmentFiles,
   derivedAttachmentId,
   resolveAttachmentPath,
+  toSafeFileAttachmentExtensionSegment,
+  toSafeThreadAttachmentSegment,
+  uuidFromSha256Hex,
 } from "../attachmentStore.ts";
+import { stageWorkspaceFile } from "../assistantAttachments.ts";
 import { inferImageExtension } from "../imageMime.ts";
 
 /**
@@ -108,6 +113,78 @@ export const writeTaskFileFromDataUrl = (input: {
     });
     const dimensions = yield* probeAttachmentMediaDimensions(filePath, decoded.mimeType);
     return dimensions ? { fileId, width: dimensions.width, height: dimensions.height } : { fileId };
+  });
+
+/**
+ * Stores a regular file of a workspace (`cwd`, a relative path, the same rules as
+ * `ryco_attach_file`) as a task file, under an id derived from the task, the path, the name and
+ * the bytes: adding the same file again names the same task file, so a retry adds nothing twice.
+ * The caller owns the file until a task references it.
+ */
+export const storeTaskFileFromWorkspace = (input: {
+  readonly taskFilesDir: string;
+  readonly taskId: string;
+  readonly cwd: string;
+  readonly relativePath: string;
+  readonly name?: string | undefined;
+}): Effect.Effect<
+  {
+    readonly fileId: string;
+    readonly name: string;
+    readonly mimeType: string;
+    readonly sizeBytes: number;
+    readonly width?: number;
+    readonly height?: number;
+  },
+  LocalTaskError
+> =>
+  Effect.gen(function* () {
+    const segment = toSafeThreadAttachmentSegment(taskFileSegment(input.taskId));
+    if (!segment) return yield* invalid("Failed to create a safe id for the task file.");
+    const staged = yield* Effect.tryPromise({
+      try: (signal) =>
+        stageWorkspaceFile({
+          cwd: input.cwd,
+          relativePath: input.relativePath,
+          name: input.name,
+          stagingDir: input.taskFilesDir,
+          maxBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+          hashSeed: (name) => JSON.stringify([input.taskId, input.relativePath, name]),
+          signal,
+        }),
+      catch: (cause) =>
+        invalid(
+          cause instanceof Error && cause.message
+            ? cause.message
+            : "The file could not be read from the workspace.",
+        ),
+    });
+    const fileId = `${segment}-${uuidFromSha256Hex(staged.contentHash)}-${toSafeFileAttachmentExtensionSegment(staged.name)}`;
+    const filePath = taskFilePath(input.taskFilesDir, fileId);
+    yield* Effect.tryPromise({
+      try: async () => {
+        try {
+          if (filePath === null) throw new Error("unsafe task file id");
+          // Never overwrites: the same id is the same snapshot.
+          await link(staged.temporary, filePath).catch((error: unknown) => {
+            if (!(error instanceof Error && "code" in error && error.code === "EEXIST"))
+              throw error;
+          });
+        } finally {
+          await rm(staged.temporary, { force: true });
+        }
+      },
+      catch: () => storageError(`Failed to store task file '${staged.name}'.`),
+    });
+    const dimensions =
+      filePath === null ? null : yield* probeAttachmentMediaDimensions(filePath, staged.mimeType);
+    return {
+      fileId,
+      name: staged.name,
+      mimeType: staged.mimeType,
+      sizeBytes: staged.sizeBytes,
+      ...(dimensions ? { width: dimensions.width, height: dimensions.height } : {}),
+    };
   });
 
 /** Deletes task files by id. Best effort: a missing or undeletable file is left as it is. */

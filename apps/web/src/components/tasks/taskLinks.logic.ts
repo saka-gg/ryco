@@ -1,14 +1,8 @@
-import type { LocalTaskLink } from "@ryco/contracts";
+import { LOCAL_TASK_LINK_TITLE_MAX_LENGTH, type LocalTaskLink } from "@ryco/contracts";
 
 import { parsePullRequestReferenceNumber } from "../../pullRequestReference";
+import type { NewThreadSource } from "../chat/SourcePickerPanel";
 import type { TaskChatView } from "./tasksViewModel";
-
-/**
- * What the Link popover's text field accepts. The kind picked first decides
- * how a bare `#42` or name reads; a pasted URL says what it is itself, so a
- * GitHub issue URL typed under "Pull request" still becomes an issue.
- */
-export type TaskLinkInputKind = "pr" | "issue" | "branch";
 
 // Mirrors the contract's URL and work item key checks, so a parsed link always encodes.
 const MAX_URL_LENGTH = 2048;
@@ -20,7 +14,6 @@ const JIRA_BROWSE_URL =
   /^https?:\/\/[^/\s]+\/(?:\S*\/)?browse\/([A-Za-z][A-Za-z0-9_]*-\d+)(?:[/?#].*)?$/;
 const JIRA_SELECTED_ISSUE = /[?&]selectedIssue=([A-Za-z][A-Za-z0-9_]*-\d+)(?:[&#]|$)/;
 const JIRA_KEY = /^[A-Za-z][A-Za-z0-9_]*-\d+$/;
-const ISSUE_NUMBER = /^#?(\d+)$/;
 // `git check-ref-format --branch`, minus the rules no one types by accident.
 const INVALID_BRANCH =
   // oxlint-disable-next-line no-control-regex -- control characters are exactly what git rejects
@@ -35,6 +28,60 @@ function workItemKey(raw: string | undefined): string | null {
   if (raw === undefined) return null;
   const key = raw.toUpperCase();
   return key.length <= MAX_WORK_ITEM_KEY_LENGTH ? key : null;
+}
+
+/** A URL a link can keep: an http(s) address within the contract's length. */
+function linkUrl(url: string | undefined): { readonly url: string } | Record<never, never> {
+  const trimmed = url?.trim();
+  return trimmed && trimmed.length <= MAX_URL_LENGTH && HTTP_URL.test(trimmed)
+    ? { url: trimmed }
+    : {};
+}
+
+/** A title a link can keep: one line, within the contract's length; nothing when blank. */
+function linkTitle(title: string | undefined): { readonly title: string } | Record<never, never> {
+  const line = title?.replace(/\s+/g, " ").trim().slice(0, LOCAL_TASK_LINK_TITLE_MAX_LENGTH).trim();
+  return line ? { title: line } : {};
+}
+
+/**
+ * The link a pick from the source picker makes: a branch by name; a pull
+ * request, issue or Jira item with its URL and its title as it reads now.
+ * `null` for a pick the task can't hold (a name git would refuse).
+ */
+export function taskLinkFromSource(source: NewThreadSource): LocalTaskLink | null {
+  switch (source.kind) {
+    case "branch":
+      return isTaskBranchName(source.branchName)
+        ? { kind: "branch", name: source.branchName }
+        : null;
+    case "pr":
+      return {
+        kind: "pr",
+        number: source.changeRequest.number,
+        ...linkUrl(source.changeRequest.url),
+        ...linkTitle(source.changeRequest.title),
+      };
+    case "issue":
+      return {
+        kind: "issue",
+        number: source.issue.number,
+        ...linkUrl(source.issue.url),
+        ...linkTitle(source.issue.title),
+      };
+    case "workItem": {
+      const key = workItemKey(source.workItem.key);
+      return key !== null && JIRA_KEY.test(key)
+        ? {
+            kind: "workItem",
+            provider: source.workItem.provider,
+            key,
+            ...linkUrl(source.workItem.url),
+            ...linkTitle(source.workItem.title),
+          }
+        : null;
+    }
+  }
 }
 
 /** A link from a pasted URL: a pull request, a GitHub issue, a Jira issue, else the URL itself. */
@@ -54,25 +101,15 @@ export function isTaskBranchName(name: string): boolean {
   return name.length > 0 && name.length <= MAX_BRANCH_NAME_LENGTH && !INVALID_BRANCH.test(name);
 }
 
-/** The link the popover's text field describes, or `null` while it describes none. */
-export function parseTaskLinkInput(kind: TaskLinkInputKind, raw: string): LocalTaskLink | null {
+/**
+ * The link pasted text names: a URL (a pull request, issue or Jira URL is
+ * read as one) or a Jira key; `null` for anything else.
+ */
+export function parseTaskLinkPaste(raw: string): LocalTaskLink | null {
   const text = raw.trim();
-  if (text.length === 0) return null;
   if (HTTP_URL.test(text)) return parseTaskLinkUrl(text);
-  switch (kind) {
-    case "pr": {
-      const number = parsePullRequestReferenceNumber(text);
-      return number === null ? null : { kind: "pr", number };
-    }
-    case "issue": {
-      const number = positiveNumber(ISSUE_NUMBER.exec(text)?.[1]);
-      if (number !== null) return { kind: "issue", number };
-      const key = JIRA_KEY.test(text) ? workItemKey(text) : null;
-      return key === null ? null : { kind: "workItem", provider: "jira", key };
-    }
-    case "branch":
-      return isTaskBranchName(text) ? { kind: "branch", name: text } : null;
-  }
+  const key = JIRA_KEY.test(text) ? workItemKey(text) : null;
+  return key === null ? null : { kind: "workItem", provider: "jira", key };
 }
 
 /** A URL without its scheme, `www.` or trailing slash: "github.com/acme/app/wiki". */

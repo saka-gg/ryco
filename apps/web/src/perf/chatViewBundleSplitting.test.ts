@@ -52,8 +52,9 @@ describe("chat route first-frame graph", () => {
     expect(worktreeDialogs).toContain('import("./LinkedWorktreeItemDialog")');
     expect(worktreeDialogs).toContain('import("./NewWorktreeDialog")');
     // The new-thread source picker sits in the hero; its PR, issue and Jira
-    // lists load with the picker's first open.
-    const sourcePicker = await readSource("../components/chat/NewThreadSourcePicker.tsx");
+    // lists (in the panel it shares with the Tasks page) load with the
+    // picker's first open.
+    const sourcePicker = await readSource("../components/chat/SourcePickerPanel.tsx");
     for (const specifier of [
       "../projectExplorer/PullRequestsTab",
       "../projectExplorer/IssuesTab",

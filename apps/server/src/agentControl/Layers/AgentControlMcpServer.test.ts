@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
+  AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOLS,
   AgentControlProposalId,
   AgentControlRequestId,
@@ -44,6 +45,7 @@ import { ServerSettingsService, type ServerSettingsShape } from "../../serverSet
 import { describeStartupPhasesOverlapping } from "../../startupStallMonitor.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { HtmlRender } from "../../htmlRender/HtmlRender.ts";
+import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -790,6 +792,39 @@ it.live("installs the HTML render tools on the private listener when the service
       );
       assert.include(missing.listed, AGENT_CONTROL_MCP_TOOLS.context);
       assert.notInclude(missing.listed, "ryco_html_render");
+      // The node's Tasks: the tools exist only where the service does, offered by grant.
+      assert.notInclude(missing.listed, AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS.list);
+      const withTasks = yield* Layer.build(
+        makeDeliveryLayer(settings).pipe(
+          Layer.provideMerge(
+            Layer.succeed(LocalTaskService, {
+              list: die("list"),
+            } as unknown as LocalTaskServiceShape),
+          ),
+        ),
+      );
+      const reader = yield* listFor(
+        withTasks,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.readLocalTasks],
+        "runtime-tasks-read",
+      );
+      assert.include(reader.listed, AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS.list);
+      assert.include(reader.advertised ?? [], AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS.read);
+      assert.notInclude(reader.listed, AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS.update);
+      const manager = yield* listFor(
+        withTasks,
+        [
+          AGENT_CONTROL_CAPABILITIES.read,
+          AGENT_CONTROL_CAPABILITIES.readLocalTasks,
+          AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+          AGENT_CONTROL_CAPABILITIES.createThreads,
+        ],
+        "runtime-tasks-manage",
+      );
+      for (const name of Object.values(AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS)) {
+        assert.include(manager.listed, name);
+        assert.include(manager.advertised ?? [], name);
+      }
     }),
   ),
 );

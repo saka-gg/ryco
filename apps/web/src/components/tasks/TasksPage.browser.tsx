@@ -1,11 +1,19 @@
 import "../../index.css";
 
+const navigate = vi.fn(async (_options: unknown) => undefined);
+const router = { state: { matches: [] }, navigate };
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  useRouter: () => router,
+}));
+
 import { appAtomRegistry, serverConfigAtom } from "@ryco/client-runtime/rpc";
 import { useLocalTasksStore } from "@ryco/client-runtime/state/tasks";
 import {
+  CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
-  LocalTaskError,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -24,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
+import { useComposerDraftStore } from "../../composerDraftStore";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -32,12 +41,13 @@ import {
   resetPrimaryEnvironmentDescriptorForTests,
   writePrimaryEnvironmentDescriptor,
 } from "../../environments/primary";
+import { resetNewDraftDefaultsCacheForTests } from "../../hooks/newDraftDefaults";
 import { resetWorktreeSendPrefetchForTests } from "../../hooks/worktreeSendPrefetch";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { useStore } from "../../store";
 import { SidebarProvider } from "../ui/sidebar";
-import { toastManager } from "../ui/toast";
 import { TasksPage } from "./TasksPage";
+import { taskDraftSend } from "./taskDraft";
 import { useTaskFileUploadsStore } from "./taskFiles";
 
 const ENV = EnvironmentId.make("env-tasks-page");
@@ -248,7 +258,19 @@ async function openRow(taskId: string, title: string) {
 
 beforeEach(() => {
   resetWorktreeSendPrefetchForTests();
+  navigate.mockClear();
+  useComposerDraftStore.setState({
+    draftsByThreadKey: {},
+    draftThreadsByThreadKey: {},
+    logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+    stickyModelSelectionByProvider: {},
+    stickyActiveProvider: null,
+  });
 });
+
+/** The draft the task's Start opened. */
+const taskDraft = (taskId: string) =>
+  useComposerDraftStore.getState().getLocalTaskDraftSession(ENV, taskId);
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -257,6 +279,7 @@ afterEach(async () => {
   // The retained sync lets go at the end of the task that released it.
   await new Promise((resolve) => setTimeout(resolve, 0));
   __resetEnvironmentApiOverridesForTests();
+  resetNewDraftDefaultsCacheForTests();
   appAtomRegistry.set(serverConfigAtom, null);
   resetPrimaryEnvironmentDescriptorForTests();
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
@@ -334,7 +357,7 @@ describe("TasksPage", () => {
     await expect.element(page.getByRole("button", { name: "Completed · 1" })).toBeVisible();
   });
 
-  it("starts a chat in a new worktree on the task's own branch", async () => {
+  it("opens a draft prefilled with the task, in a new worktree on the task's own branch", async () => {
     const node = fakeNode([
       task({
         taskId: "t-login",
@@ -352,102 +375,51 @@ describe("TasksPage", () => {
       .toBeVisible();
     await userEvent.click(rowButton("t-login", "Start chat"));
 
-    await vi.waitFor(() => expect(node.server.delegateLocalTask).toHaveBeenCalledTimes(1));
-    const { taskId, command } = node.server.delegateLocalTask.mock.calls[0]![0];
-    expect(taskId).toBe("t-login");
-    expect(command.commandId).toBe(`task-start:t-login:${command.message.messageId}`);
-    expect(command.message).toMatchObject({
-      role: "user",
-      text: "Fix the login redirect loop\n\nAfter the cookie expires.",
-      attachments: [],
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    const draft = taskDraft("t-login")!;
+    expect(navigate).toHaveBeenLastCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: draft.draftId },
     });
-    expect(command).toMatchObject({
-      type: "thread.turn.start",
-      modelSelection: MODEL,
-      titleSeed: "Fix the login redirect loop",
+    expect(draft).toMatchObject({
+      projectId: PROJECT,
+      envMode: "worktree",
+      branch: null,
+      worktreePath: null,
+      worktreeSource: null,
+      fetchOrigin: true,
       runtimeMode: "full-access",
-      interactionMode: "default",
     });
-    // The branch the task would take exists, so the next free one is used.
-    expect(command.bootstrap).toMatchObject({
-      requireWorktree: true,
-      createThread: { projectId: PROJECT, modelSelection: MODEL, worktreePath: null },
-      prepareWorktree: {
-        projectCwd: "/repo/ryco",
-        baseBranch: "origin/HEAD",
-        fetchOrigin: true,
-        branch: "task/fix-login-redirect-loop-2",
-      },
-    });
-    expect(node.git.createWorktreeForProject).not.toHaveBeenCalled();
-    // The chat shows on the task; the project is fixed now.
-    await vi.waitFor(() => expect(rowElement("t-login")!.textContent).toContain("Starting"));
-  });
-
-  it("retries a start the node recorded as failed as a new start, never calling it started", async () => {
-    const node = fakeNode([task({ taskId: "t-retry", title: "Fix the login redirect loop" })]);
-    // The worktree could not be created: the node records the start failed and says why.
-    node.server.delegateLocalTask.mockImplementationOnce(
-      async ({ taskId, command }: LocalTaskDelegateInput) => {
-        const current = node.tasks.get(taskId)!;
-        node.tasks.set(taskId, {
-          ...current,
-          status: "failed",
-          delegations: [
-            {
-              commandId: command.commandId,
-              threadId: command.threadId,
-              messageId: command.message.messageId,
-              sequence: 1,
-              branch: command.bootstrap?.prepareWorktree?.branch ?? null,
-              dispatched: false,
-              status: "failed",
-              error: "Worktree setup failed.",
-              createdAt: new Date().toISOString(),
-            },
-          ],
-        });
-        throw new LocalTaskError({ reason: "persistence", message: "Worktree setup failed." });
-      },
+    expect(useComposerDraftStore.getState().getComposerDraft(draft.draftId)?.prompt).toBe(
+      "Fix the login redirect loop\n\nAfter the cookie expires.",
     );
-    const toasts = vi.spyOn(toastManager, "add");
-    seedNode(true);
-    await mount(node);
-    await vi.waitFor(() => expect(rowElement("t-retry")).not.toBeNull());
-    await openRow("t-retry", "Fix the login redirect loop");
-    await userEvent.click(rowButton("t-retry", "Start chat"));
-
-    const failureToast = () =>
-      toasts.mock.calls.find(([toast]) => toast.title === "Couldn’t start the chat")?.[0];
-    await vi.waitFor(() => expect(failureToast()).toBeDefined());
-    // The failure is read back from the node before Retry decides what to send.
-    await vi.waitFor(() => expect(rowElement("t-retry")!.textContent).toContain("Failed to start"));
-    const retry = failureToast()!.actionProps as { onClick: () => void };
-    retry.onClick();
-
-    await vi.waitFor(() => expect(node.server.delegateLocalTask).toHaveBeenCalledTimes(2), {
-      timeout: 10_000,
-    });
-    const [failed, fresh] = node.server.delegateLocalTask.mock.calls.map(
-      ([input]) => input.command,
-    );
-    expect(fresh!.commandId).not.toBe(failed!.commandId);
-    expect(fresh!.message.messageId).not.toBe(failed!.message.messageId);
-    expect(fresh!.threadId).not.toBe(failed!.threadId);
-    // The failed start's branch counts as taken.
-    expect(failed!.bootstrap?.prepareWorktree?.branch).toBe("task/fix-login-redirect-loop-2");
-    expect(fresh!.bootstrap?.prepareWorktree?.branch).toBe("task/fix-login-redirect-loop-3");
+    // The task's branch exists already: the draft moves on to the next free one.
     await vi.waitFor(() =>
-      expect(toasts.mock.calls.filter(([toast]) => toast.type === "success")).toHaveLength(1),
+      expect(taskDraft("t-login")?.worktreeBranchName).toBe("task/fix-login-redirect-loop-2"),
     );
+    // Nothing is sent from here: the draft is where the model and worktree are picked.
+    expect(node.server.delegateLocalTask).not.toHaveBeenCalled();
+    expect(node.git.createWorktreeForProject).not.toHaveBeenCalled();
+
+    // Start again reopens the draft not sent yet.
+    await vi.waitFor(() => expect(rowButton("t-login", "Open draft")).toBeTruthy());
+    await userEvent.click(rowButton("t-login", "Open draft"));
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(2));
+    expect(navigate).toHaveBeenLastCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: draft.draftId },
+    });
+    expect(Object.keys(useComposerDraftStore.getState().draftThreadsByThreadKey)).toEqual([
+      draft.draftId,
+    ]);
   });
 
-  it("starts a pull request task in that pull request's worktree", async () => {
+  it("picks a linked pull request as the draft's worktree source", async () => {
     const node = fakeNode([
       task({
         taskId: "t-pr",
         title: "Address review on 746",
-        links: [{ kind: "pr", number: 746 }],
+        links: [{ kind: "pr", number: 746, title: "Fix login" }],
       }),
     ]);
     seedNode(true);
@@ -458,42 +430,184 @@ describe("TasksPage", () => {
     await expect.element(page.getByText("in the PR #746 worktree")).toBeVisible();
     await userEvent.click(rowButton("t-pr", "Start chat"));
 
-    await vi.waitFor(() => expect(node.server.delegateLocalTask).toHaveBeenCalledTimes(1));
-    expect(node.git.createWorktreeForProject).toHaveBeenCalledWith({
-      projectId: PROJECT,
-      intent: { kind: "pr", number: 746 },
-      fetchOrigin: true,
+    await vi.waitFor(() => expect(taskDraft("t-pr")).not.toBeNull());
+    expect(taskDraft("t-pr")).toMatchObject({
+      envMode: "worktree",
+      worktreeSource: { kind: "pr", number: 746, label: "#746 Fix login" },
+      worktreeBranchName: null,
     });
-    const { command } = node.server.delegateLocalTask.mock.calls[0]![0];
-    expect(command.threadId).toBe("thread-pr-746");
-    expect(command).not.toHaveProperty("bootstrap");
-    expect(command.message.text).toBe("Address review on 746\n\nLinked:\n- Pull request #746");
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(taskDraft("t-pr")!.draftId)?.prompt,
+    ).toBe("Address review on 746\n\nLinked:\n- Pull request #746: Fix login");
+    // The worktree is created when the draft is sent, not now.
+    expect(node.git.createWorktreeForProject).not.toHaveBeenCalled();
   });
 
-  it("starts in the project folder from the where menu, creating only the thread", async () => {
-    const node = fakeNode([task({ taskId: "t-local", title: "Tidy the changelog" })]);
+  it("takes a linked branch as it is in the checkout, on a new task branch", async () => {
+    const node = fakeNode([
+      task({
+        taskId: "t-branch",
+        title: "Finish the parser",
+        links: [{ kind: "branch", name: "feature/parser" }],
+      }),
+    ]);
     seedNode(true);
     await mount(node);
-    await vi.waitFor(() => expect(rowElement("t-local")).not.toBeNull());
+    await vi.waitFor(() => expect(rowElement("t-branch")).not.toBeNull());
 
-    await openRow("t-local", "Tidy the changelog");
-    await userEvent.click(rowButton("t-local", "Where"));
-    await page.getByRole("menuitem", { name: /Project folder/ }).click();
-
-    // Without a live status for the checkout, its branch is read for a moment first.
-    await vi.waitFor(() => expect(node.server.delegateLocalTask).toHaveBeenCalledTimes(1), {
-      timeout: 10_000,
+    await openRow("t-branch", "Finish the parser");
+    await userEvent.click(rowButton("t-branch", "Start chat"));
+    await vi.waitFor(() => expect(taskDraft("t-branch")).not.toBeNull());
+    // Not origin's copy: the branch may have commits that were never pushed.
+    expect(taskDraft("t-branch")).toMatchObject({
+      envMode: "worktree",
+      branch: "feature/parser",
+      fetchOrigin: false,
+      worktreeSource: null,
+      worktreeBranchName: "task/finish-parser",
     });
-    const { command } = node.server.delegateLocalTask.mock.calls[0]![0];
-    expect(command.bootstrap).toEqual({
-      createThread: expect.objectContaining({
-        projectId: PROJECT,
-        title: "Tidy the changelog",
-        worktreePath: null,
-        branch: null,
+  });
+
+  it("lists an archived linked chat as archived, and a deleted one not at all", async () => {
+    const archived = ThreadId.make("thread-archived");
+    const node = fakeNode([
+      task({
+        taskId: "t-linked",
+        title: "Collect the findings",
+        links: [
+          { kind: "thread", threadId: archived },
+          { kind: "thread", threadId: ThreadId.make("thread-gone") },
+        ],
       }),
+    ]);
+    seedNode(true);
+    // This client keeps only a stub of an archived chat.
+    useStore.setState((state) => {
+      const environment = state.environmentStateById[ENV]!;
+      return {
+        environmentStateById: {
+          ...state.environmentStateById,
+          [ENV]: {
+            ...environment,
+            sidebarThreadSummaryById: {
+              ...environment.sidebarThreadSummaryById,
+              [archived]: {
+                shellDetail: "archived-stub",
+                id: archived,
+                environmentId: ENV,
+                projectId: PROJECT,
+                title: "Old findings",
+                createdAt: CREATED_AT,
+                updatedAt: CREATED_AT,
+                archivedAt: CREATED_AT,
+                branch: null,
+                worktreePath: null,
+                worktreeId: null,
+                latestUserMessageAt: null,
+                lineage: null,
+              },
+            },
+          },
+        },
+      };
     });
-    expect(node.vcs.listRefs).not.toHaveBeenCalled();
+    await mount(node);
+    await vi.waitFor(() => expect(rowElement("t-linked")).not.toBeNull());
+
+    await openRow("t-linked", "Collect the findings");
+    const chats = rowElement("t-linked")!.querySelectorAll(".tsk-chat");
+    expect(chats).toHaveLength(1);
+    expect(chats[0]!.textContent).toContain("Archived");
+  });
+
+  it("checks a task draft's task before anything is created for the send", async () => {
+    const node = fakeNode([
+      task({ taskId: "t-done", title: "Shipped already", state: "done", status: "done" }),
+    ]);
+    seedNode(true);
+    await mount(node);
+    await vi.waitFor(() => expect(node.server.listLocalTasks).toHaveBeenCalled());
+
+    await expect(taskDraftSend(ENV, "t-done").preflight()).rejects.toThrow("The task is done");
+    await expect(taskDraftSend(ENV, "t-missing").preflight()).rejects.toThrow(
+      "The task was deleted",
+    );
+  });
+
+  it("sends a task draft's first message as the task's chat", async () => {
+    const node = fakeNode([task({ taskId: "t-send", title: "Tidy the changelog" })]);
+    seedNode(true);
+    await mount(node);
+    await vi.waitFor(() => expect(rowElement("t-send")).not.toBeNull());
+
+    const threadId = ThreadId.make("thread-send");
+    const messageId = MessageId.make("message-send");
+    const command: LocalTaskDelegateInput["command"] = {
+      type: "thread.turn.start",
+      commandId: CommandId.make(`composer-send:${threadId}:${messageId}`),
+      threadId,
+      message: { messageId, role: "user", text: "Tidy the changelog", attachments: [] },
+      modelSelection: MODEL,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      bootstrap: {
+        createThread: {
+          projectId: PROJECT,
+          title: "Tidy the changelog",
+          modelSelection: MODEL,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: CREATED_AT,
+        },
+        prepareWorktree: {
+          projectCwd: "/repo/ryco",
+          baseBranch: "origin/HEAD",
+          branch: "task/tidy-changelog",
+        },
+      },
+      createdAt: CREATED_AT,
+    };
+    await taskDraftSend(ENV, "t-send").delegate(command);
+
+    expect(node.server.delegateLocalTask).toHaveBeenCalledWith({ taskId: "t-send", command });
+    await vi.waitFor(() => expect(rowElement("t-send")!.textContent).toContain("Starting"));
+
+    // A task the node no longer has refuses the send, so the composer keeps the message.
+    await expect(taskDraftSend(ENV, "t-missing").delegate(command)).rejects.toThrow(
+      "The task was deleted",
+    );
+  });
+
+  it("leaves a deleted chat off the task, which reads as having none", async () => {
+    const node = fakeNode([
+      task({
+        taskId: "t-deleted",
+        title: "Old experiment",
+        delegations: [
+          {
+            commandId: CommandId.make("command-old"),
+            threadId: ThreadId.make("thread-old"),
+            messageId: MessageId.make("message-old"),
+            sequence: 1,
+            branch: "task/old-experiment",
+            dispatched: true,
+            status: "unavailable",
+            error: null,
+            createdAt: CREATED_AT,
+          },
+        ],
+      }),
+    ]);
+    seedNode(true);
+    await mount(node);
+    await vi.waitFor(() => expect(rowElement("t-deleted")).not.toBeNull());
+
+    await openRow("t-deleted", "Old experiment");
+    expect(rowElement("t-deleted")!.querySelector(".tsk-chat")).toBeNull();
+    expect(rowElement("t-deleted")!.textContent).not.toContain("Chat deleted");
+    expect(rowButton("t-deleted", "Start chat")).toBeTruthy();
   });
 
   it("adds a file inline when the node can't take streamed uploads", async () => {

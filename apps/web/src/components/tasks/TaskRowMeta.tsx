@@ -1,22 +1,29 @@
+import { taskLinkKey } from "@ryco/client-runtime/state/tasks";
 import { PaperclipIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
 
+import { ProjectFavicon } from "../ProjectFavicon";
 import { TaskLinkIcon } from "./TaskLinkIcon";
 import { TaskStatus } from "./TaskStatus";
 import { dueLabel, isDueSoon } from "./taskDue.logic";
-import { taskLinkKey } from "@ryco/client-runtime/state/tasks";
-
 import { taskLinkLabelIn } from "./taskLinks.logic";
 import type { TaskProjectOption, TaskView } from "./tasksViewModel";
 
-/** A project's 8px colour square (its monogram colour). */
-export function TaskProjectDot(props: { readonly color: string }) {
+/** A project's logo (its coloured initials without one), as the sidebar shows it. */
+export function TaskProjectIcon(props: {
+  readonly project: TaskProjectOption;
+  readonly className?: string;
+}) {
+  const { project } = props;
   return (
-    <span
-      aria-hidden
-      className="size-[8px] shrink-0 rounded-[3px]"
-      style={{ background: props.color }}
+    <ProjectFavicon
+      environmentId={project.environmentId}
+      cwd={project.cwd}
+      projectId={project.projectId}
+      customAvatarContentHash={project.avatarHash}
+      fallbackName={project.name}
+      className={cn("size-3.5 shrink-0", props.className)}
     />
   );
 }
@@ -62,7 +69,7 @@ export function TaskRowMeta(props: {
       ) : null}
       {project ? (
         <span className={cn(META_ITEM_CLASS, "@max-[560px]/tasks:hidden")}>
-          <TaskProjectDot color={project.color} />
+          <TaskProjectIcon project={project} className="size-3" />
           {project.name}
         </span>
       ) : null}

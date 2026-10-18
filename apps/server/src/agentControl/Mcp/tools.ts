@@ -207,7 +207,7 @@ const isPrivateDeviceContentResult = (value: unknown): value is PrivateDeviceCon
   "_tag" in value &&
   value._tag === "PrivateDeviceContentResult";
 
-const modelSelectionSchema = {
+export const modelSelectionSchema = {
   type: "object",
   properties: {
     instanceId: { type: "string", description: "Provider instance ID from ryco_capabilities." },
@@ -605,6 +605,12 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
                 items: { type: "string", minLength: 3, maxLength: 512 },
                 description:
                   "Artifact ids of this thread (from ryco_list_artifacts) to hand over: copied into the new thread and attached to its first message. Mention them in the prompt.",
+              },
+              localTaskId: {
+                type: "string",
+                maxLength: 128,
+                description:
+                  "Start the thread as this Task's chat (see ryco_start_local_task_chat): recorded under the task, with the task's files on its first message. Not with artifacts.",
               },
             },
             required: ["projectId", "title", "prompt", "modelSelection", "runtimeMode", "envMode"],
@@ -1095,6 +1101,58 @@ const proposalVisibleToSession = (
   proposal.principal.kind === "provider-session" &&
   proposal.principal.threadId === session.threadId;
 
+/**
+ * Submits a validated mutation plan for the caller's exact turn: routine plans execute, the rest
+ * wait for the user's approval. Answers with the durable receipt, as every mutation tool does.
+ */
+export const submitAgentControlMutation = (
+  deps: Pick<AgentControlMcpToolDeps, "validator" | "proposals">,
+  input: {
+    readonly session: AgentControlSessionRecord;
+    readonly authority: AgentControlTurnAuthority;
+    readonly requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"];
+    readonly plan: AgentControlActionPlan;
+  },
+) =>
+  Effect.gen(function* () {
+    if (deps.validator === undefined || deps.proposals.submit === undefined) {
+      return yield* failTool("Control request creation is unavailable.");
+    }
+    const principal = yield* deps.validator.validateSubmission({
+      session: input.session,
+      authority: input.authority,
+      plan: input.plan,
+    });
+    const now = new Date();
+    const submitted = yield* deps.proposals.submit({
+      authorizeRoutine: true,
+      principal,
+      requestId: input.requestId,
+      plan: input.plan,
+      riskTags: agentControlRiskTagsForPlan(input.plan),
+      promptSummary: agentControlPromptSummaryForPlan(input.plan),
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
+    });
+    return Schema.encodeSync(AgentControlMcpMutationResult)({
+      receipt: toAgentControlProposalReceipt(submitted.proposal),
+      replayed: submitted.replayed,
+    });
+  }).pipe(
+    Effect.mapError((error) => {
+      switch (error._tag) {
+        case "AgentControlDuplicateRequestError":
+          return new ToolFailure("Request ID was already used with a different plan.");
+        case "AgentControlDisabledError":
+          return new ToolFailure("Agent Control is disabled.");
+        case "AgentControlPlanValidationError":
+          return new ToolFailure(error.detail.slice(0, 500));
+        default:
+          return new ToolFailure("Control request creation failed.");
+      }
+    }),
+  );
+
 // ── Factory ───────────────────────────────────────────────────────────
 
 export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentControlMcpTools => {
@@ -1214,50 +1272,8 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       });
     });
 
-  const submitMutation = (input: {
-    readonly session: AgentControlSessionRecord;
-    readonly authority: AgentControlTurnAuthority;
-    readonly requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"];
-    readonly plan: AgentControlActionPlan;
-  }) =>
-    Effect.gen(function* () {
-      if (deps.validator === undefined || deps.proposals.submit === undefined) {
-        return yield* failTool("Control request creation is unavailable.");
-      }
-      const principal = yield* deps.validator.validateSubmission({
-        session: input.session,
-        authority: input.authority,
-        plan: input.plan,
-      });
-      const now = new Date();
-      const submitted = yield* deps.proposals.submit({
-        authorizeRoutine: true,
-        principal,
-        requestId: input.requestId,
-        plan: input.plan,
-        riskTags: agentControlRiskTagsForPlan(input.plan),
-        promptSummary: agentControlPromptSummaryForPlan(input.plan),
-        now: now.toISOString(),
-        expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
-      });
-      return Schema.encodeSync(AgentControlMcpMutationResult)({
-        receipt: toAgentControlProposalReceipt(submitted.proposal),
-        replayed: submitted.replayed,
-      });
-    }).pipe(
-      Effect.mapError((error) => {
-        switch (error._tag) {
-          case "AgentControlDuplicateRequestError":
-            return new ToolFailure("Request ID was already used with a different plan.");
-          case "AgentControlDisabledError":
-            return new ToolFailure("Agent Control is disabled.");
-          case "AgentControlPlanValidationError":
-            return new ToolFailure(error.detail.slice(0, 500));
-          default:
-            return new ToolFailure("Control request creation failed.");
-        }
-      }),
-    );
+  const submitMutation = (input: Parameters<typeof submitAgentControlMutation>[1]) =>
+    submitAgentControlMutation(deps, input);
 
   const createThreads = (
     session: AgentControlSessionRecord,

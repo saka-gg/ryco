@@ -1,93 +1,62 @@
 import { hasTaskLink } from "@ryco/client-runtime/state/tasks";
 import type { LocalTaskLink, ThreadId } from "@ryco/contracts";
 import { LOCAL_TASK_MAX_LINKS } from "@ryco/contracts/local-tasks";
-import {
-  ChevronLeftIcon,
-  CircleDotIcon,
-  GitBranchIcon,
-  GitPullRequestIcon,
-  LinkIcon,
-  MessageSquareIcon,
-} from "lucide-react";
+import { LinkIcon, MessageSquareIcon, SearchIcon } from "lucide-react";
 import { type KeyboardEvent, useId, useMemo, useState } from "react";
 
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { type TaskLinkInputKind, describeTaskLink, parseTaskLinkInput } from "./taskLinks.logic";
 import {
-  TASK_CHIP_CLASS,
-  TASK_MENU_DETAIL_CLASS,
-  TASK_MENU_POPUP_CLASS,
-  TASK_POPOVER_INPUT_CLASS,
-  TASK_POPOVER_ITEM_CLASS,
-} from "./tasksUi";
-import type { TaskChatOption, TaskView, TasksViewHandlers } from "./tasksViewModel";
-
-type LinkStep =
-  | { readonly kind: "pick" }
-  | { readonly kind: "input"; readonly input: TaskLinkInputKind }
-  | { readonly kind: "chat" };
-
-const KINDS = [
-  {
-    id: "pr",
-    Icon: GitPullRequestIcon,
-    label: "Pull request",
-    detail: "Paste a URL or #number",
-    placeholder: "https://github.com/…/pull/42 or #42",
-  },
-  {
-    id: "issue",
-    Icon: CircleDotIcon,
-    label: "Issue",
-    detail: "GitHub issue or Jira key",
-    placeholder: "#42, ABC-123 or a URL",
-  },
-  {
-    id: "branch",
-    Icon: GitBranchIcon,
-    label: "Branch",
-    detail: "Start chats on it",
-    placeholder: "feature/login-loop",
-  },
-] as const;
-
-const CHAT_KIND = {
-  label: "Existing chat",
-  detail: "Attach a chat you already had",
-} as const;
-
-/** Why the typed text adds nothing yet, in the field's own terms. */
-const UNREAD_HINT: Readonly<Record<TaskLinkInputKind, string>> = {
-  pr: "Not a pull request URL or number",
-  issue: "Not an issue number, Jira key or URL",
-  branch: "Not a valid branch name",
-};
+  preloadSourceItemTabs,
+  SourcePickerPanel,
+  useSourcePickerState,
+  type NewThreadSource,
+} from "../chat/SourcePickerPanel";
+import { Input } from "../ui/input";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { toastManager } from "../ui/toast";
+import { describeTaskLink, parseTaskLinkPaste, taskLinkFromSource } from "./taskLinks.logic";
+import { TASK_CHIP_CLASS, TASK_MENU_DETAIL_CLASS, TASK_POPOVER_ITEM_CLASS } from "./tasksUi";
+import type {
+  TaskChatOption,
+  TaskProjectOption,
+  TaskView,
+  TasksViewHandlers,
+} from "./tasksViewModel";
 
 /**
- * The dashed "Link" chip and its two steps: what to link (pull request,
- * issue, branch, an existing chat), then a field that reads what was typed
- * or pasted, or a filterable list of the project's chats. Enter adds.
+ * The dashed "Link" chip: the picker a new worktree's source is picked from
+ * (a branch, pull request, issue or Jira item of the task's project), plus
+ * the project's chats and a field for any pasted link. Picking adds the link
+ * and closes it; one the task has already is not added twice.
  */
 export function TaskLinkPopover(props: {
   readonly task: TaskView;
+  readonly project: TaskProjectOption | null;
   readonly handlers: Pick<TasksViewHandlers, "onAddLink" | "getChatOptions">;
 }) {
-  const { task, handlers } = props;
+  const { task, project, handlers } = props;
   const [open, setOpen] = useState(false);
-  const [step, setStep] = useState<LinkStep>({ kind: "pick" });
+  const pickerState = useSourcePickerState(project ? "branches" : "chats");
   const full = task.links.length >= LOCAL_TASK_MAX_LINKS;
 
   const add = (link: LocalTaskLink) => {
-    handlers.onAddLink(task.id, link);
     setOpen(false);
+    if (hasTaskLink(task.links, link)) {
+      toastManager.add({ type: "info", title: `${describeTaskLink(link)} is already linked` });
+      return;
+    }
+    handlers.onAddLink(task.id, link);
+  };
+  const pick = (source: NewThreadSource) => {
+    const link = taskLinkFromSource(source);
+    if (link) add(link);
+    else toastManager.add({ type: "error", title: "That can’t be linked to a task" });
   };
 
   return (
     <Popover
       open={open}
       onOpenChange={(next) => {
-        // A fresh open starts at the first step; closing keeps the step so the exit doesn't swap content.
-        if (next) setStep({ kind: "pick" });
+        if (next && project) preloadSourceItemTabs();
         setOpen(next);
       }}
     >
@@ -104,124 +73,50 @@ export function TaskLinkPopover(props: {
       <PopoverPopup
         side="bottom"
         align="start"
-        className={`${TASK_MENU_POPUP_CLASS} w-[280px]`}
-        viewportClassName="p-1"
+        className="tsk-pop w-[30rem] overflow-hidden rounded-[10px] p-0"
+        viewportClassName="p-0 [--viewport-inline-padding:0px]"
         aria-label="Link"
       >
-        {step.kind === "pick" ? (
-          <div className="flex flex-col">
-            {KINDS.map((kind) => (
-              <button
-                key={kind.id}
-                type="button"
-                className={TASK_POPOVER_ITEM_CLASS}
-                onClick={() => setStep({ kind: "input", input: kind.id })}
-              >
-                <kind.Icon className="mt-[2px] size-3.5 shrink-0" aria-hidden />
-                <span className="min-w-0">
-                  <span className="block">{kind.label}</span>
-                  <small className={TASK_MENU_DETAIL_CLASS}>{kind.detail}</small>
-                </span>
-              </button>
-            ))}
-            <button
-              type="button"
-              className={TASK_POPOVER_ITEM_CLASS}
-              onClick={() => setStep({ kind: "chat" })}
-            >
-              <MessageSquareIcon className="mt-[2px] size-3.5 shrink-0" aria-hidden />
-              <span className="min-w-0">
-                <span className="block">{CHAT_KIND.label}</span>
-                <small className={TASK_MENU_DETAIL_CLASS}>{CHAT_KIND.detail}</small>
-              </span>
-            </button>
-          </div>
-        ) : step.kind === "input" ? (
-          <LinkInputStep
-            kind={step.input}
-            links={task.links}
-            onBack={() => setStep({ kind: "pick" })}
-            onAdd={add}
-          />
-        ) : (
-          <LinkChatStep
-            task={task}
-            getChatOptions={handlers.getChatOptions}
-            onBack={() => setStep({ kind: "pick" })}
-            onAdd={(threadId) => add({ kind: "thread", threadId })}
-          />
-        )}
+        <SourcePickerPanel
+          state={pickerState}
+          repository={
+            project
+              ? {
+                  environmentId: project.environmentId,
+                  projectId: project.projectId,
+                  cwd: project.cwd,
+                }
+              : null
+          }
+          onSelect={pick}
+          extraTabs={[
+            {
+              id: "chats",
+              label: "Chats",
+              render: () => (
+                <LinkChatList
+                  task={task}
+                  getChatOptions={handlers.getChatOptions}
+                  onAdd={(threadId) => add({ kind: "thread", threadId })}
+                />
+              ),
+            },
+            {
+              id: "url",
+              label: "URL",
+              render: () => <LinkPasteField links={task.links} onAdd={add} />,
+            },
+          ]}
+        />
       </PopoverPopup>
     </Popover>
   );
 }
 
-function StepHeader(props: { readonly label: string; readonly onBack: () => void }) {
-  return (
-    <div className="flex items-center gap-[4px] pb-[4px] text-[12px] text-muted-foreground">
-      <button
-        type="button"
-        aria-label="Back"
-        className="tsk-pop-item grid size-[22px] place-items-center rounded-[6px] border-0 bg-transparent text-muted-foreground"
-        onClick={props.onBack}
-      >
-        <ChevronLeftIcon className="size-3.5" aria-hidden />
-      </button>
-      {props.label}
-    </div>
-  );
-}
-
-function LinkInputStep(props: {
-  readonly kind: TaskLinkInputKind;
-  readonly links: ReadonlyArray<LocalTaskLink>;
-  readonly onBack: () => void;
-  readonly onAdd: (link: LocalTaskLink) => void;
-}) {
-  const kind = KINDS.find((entry) => entry.id === props.kind) ?? KINDS[0];
-  const [text, setText] = useState("");
-  const link = parseTaskLinkInput(props.kind, text);
-  const duplicate = link !== null && hasTaskLink(props.links, link);
-  const hint =
-    text.trim().length === 0
-      ? kind.detail
-      : link === null
-        ? UNREAD_HINT[props.kind]
-        : duplicate
-          ? `${describeTaskLink(link)} is already linked`
-          : `Adds ${describeTaskLink(link)}`;
-  return (
-    <div className="flex flex-col p-[4px]">
-      <StepHeader label={kind.label} onBack={props.onBack} />
-      <input
-        autoFocus
-        className={TASK_POPOVER_INPUT_CLASS}
-        value={text}
-        placeholder={kind.placeholder}
-        aria-label={kind.label}
-        spellCheck={false}
-        autoComplete="off"
-        onChange={(event) => setText(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-          event.preventDefault();
-          if (link !== null && !duplicate) props.onAdd(link);
-        }}
-      />
-      <p
-        className="m-0 min-h-[18px] truncate px-[2px] pt-[5px] text-[11.5px] text-(--task-faint)"
-        aria-live="polite"
-      >
-        {hint}
-      </p>
-    </div>
-  );
-}
-
-function LinkChatStep(props: {
+/** The project's recent chats the task doesn't have yet, filterable; Enter links the highlighted one. */
+function LinkChatList(props: {
   readonly task: TaskView;
   readonly getChatOptions: (taskId: string) => ReadonlyArray<TaskChatOption>;
-  readonly onBack: () => void;
   readonly onAdd: (threadId: ThreadId) => void;
 }) {
   const { task, getChatOptions } = props;
@@ -261,33 +156,37 @@ function LinkChatStep(props: {
   };
 
   return (
-    <div className="flex flex-col p-[4px]">
-      <StepHeader label={CHAT_KIND.label} onBack={props.onBack} />
-      <input
-        autoFocus
-        className={TASK_POPOVER_INPUT_CLASS}
-        value={query}
-        placeholder="Search chats"
-        aria-label="Search chats"
-        role="combobox"
-        aria-expanded
-        aria-controls={listId}
-        aria-activedescendant={activeOption ? `${listId}-${activeIndex}` : undefined}
-        autoComplete="off"
-        onChange={(event) => {
-          setQuery(event.currentTarget.value);
-          setActive(0);
-        }}
-        onKeyDown={onKeyDown}
-      />
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-border/40 border-b px-2 py-1.5">
+        <div className="relative">
+          <SearchIcon className="-translate-y-1/2 absolute top-1/2 left-2 size-3.5 text-muted-foreground" />
+          <Input
+            autoFocus
+            value={query}
+            placeholder="Search chats..."
+            aria-label="Search chats"
+            role="combobox"
+            aria-expanded
+            aria-controls={listId}
+            aria-activedescendant={activeOption ? `${listId}-${activeIndex}` : undefined}
+            autoComplete="off"
+            className="h-8 pl-7 text-sm"
+            onChange={(event) => {
+              setQuery(event.currentTarget.value);
+              setActive(0);
+            }}
+            onKeyDown={onKeyDown}
+          />
+        </div>
+      </div>
       <div
         id={listId}
         role="listbox"
         aria-label="Chats"
-        className="-mx-[4px] mt-[4px] max-h-[240px] overflow-y-auto"
+        className="min-h-0 flex-1 overflow-y-auto p-1"
       >
         {filtered.length === 0 ? (
-          <p className="m-0 px-[8px] py-[7px] text-[12px] text-(--task-faint)">
+          <p className="m-0 px-[8px] py-[7px] text-sm text-muted-foreground">
             {options.length === 0 ? "No other chats in this project" : "No chats match"}
           </p>
         ) : (
@@ -312,6 +211,49 @@ function LinkChatStep(props: {
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+/** A field for a pasted link: a pull request, issue or Jira URL (or key), or any web page. */
+function LinkPasteField(props: {
+  readonly links: ReadonlyArray<LocalTaskLink>;
+  readonly onAdd: (link: LocalTaskLink) => void;
+}) {
+  const [text, setText] = useState("");
+  const link = parseTaskLinkPaste(text);
+  const duplicate = link !== null && hasTaskLink(props.links, link);
+  const hint =
+    text.trim().length === 0
+      ? "A pull request, issue or Jira URL is linked as one; any other URL as a page."
+      : link === null
+        ? "Not a URL or a Jira key"
+        : duplicate
+          ? `${describeTaskLink(link)} is already linked`
+          : `Enter links ${describeTaskLink(link)}`;
+  return (
+    <div className="flex flex-col gap-1.5 p-2">
+      <div className="relative">
+        <LinkIcon className="-translate-y-1/2 absolute top-1/2 left-2 size-3.5 text-muted-foreground" />
+        <Input
+          autoFocus
+          value={text}
+          placeholder="https://… or ABC-123"
+          aria-label="Link URL"
+          spellCheck={false}
+          autoComplete="off"
+          className="h-8 pl-7 text-sm"
+          onChange={(event) => setText(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            if (link !== null && !duplicate) props.onAdd(link);
+          }}
+        />
+      </div>
+      <p className="m-0 truncate px-[2px] text-xs text-muted-foreground" aria-live="polite">
+        {hint}
+      </p>
     </div>
   );
 }

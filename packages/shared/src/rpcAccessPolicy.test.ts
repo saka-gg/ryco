@@ -100,6 +100,7 @@ describe("shared RPC access policy", () => {
       WS_METHODS.serverCreateLocalTaskFileUpload,
       WS_METHODS.serverAddLocalTaskFile,
       WS_METHODS.serverRemoveLocalTaskFile,
+      WS_METHODS.serverSubscribeLocalTaskChanges,
     ]) {
       expect(rpcAccessFor(method)).toBe("owner");
       expect(hostedRoleAllows("operator", method)).toBe(false);

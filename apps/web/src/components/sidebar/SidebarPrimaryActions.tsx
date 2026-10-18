@@ -4,8 +4,8 @@ import {
   CalendarClockIcon,
   FoldersIcon,
   GitPullRequestIcon,
+  ListTodoIcon,
   PlusIcon,
-  SquareKanbanIcon,
 } from "lucide-react";
 import { type CSSProperties, memo, type ReactElement, type ReactNode, useEffect } from "react";
 
@@ -190,7 +190,7 @@ export function destinationStyle(index: number): CSSProperties {
 }
 
 const DESTINATION_ICONS = {
-  Tasks: SquareKanbanIcon,
+  Tasks: ListTodoIcon,
   "Pull requests": GitPullRequestIcon,
   Projects: FoldersIcon,
 } as const;

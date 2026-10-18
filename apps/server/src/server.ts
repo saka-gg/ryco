@@ -599,7 +599,6 @@ const RuntimeDependenciesLive = RestartContinuationLive.pipe(
 // the public HTTP server, router, or any client-visible state.
 const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
-  LocalTaskServiceLive,
   WorktreeNotesServiceLive,
   StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
   SessionImportLive,
@@ -658,6 +657,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),
+  // The node's Tasks, beneath the services: the task RPCs and Agent Control (its tools, validator
+  // and execution) share one instance, and with it one stream of task changes.
+  Layer.provideMerge(LocalTaskServiceLive),
   // The chat fork ledger: read by the fork service and by startup's orphan-chat sweep.
   Layer.provideMerge(ThreadForkRepositoryLive),
   // One lifecycle authority for sidebar, Inbox, workspace management and Agent Control.

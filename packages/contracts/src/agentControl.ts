@@ -63,6 +63,7 @@ import {
   DEVICE_SWIPE_DURATION_MAX_MS,
   DEVICE_SWIPE_DURATION_MIN_MS,
 } from "./device.ts";
+import { LocalTaskId, LocalTaskTitle } from "./localTasks.ts";
 
 // ── Identifiers ───────────────────────────────────────────────────────
 
@@ -224,6 +225,10 @@ export const AGENT_CONTROL_CAPABILITIES = {
   controlDevices: AgentControlCapability.make("devices.control"),
   controlComputer: AgentControlCapability.make("computer.control"),
   controlBrowser: AgentControlCapability.make("browser.control"),
+  /** Read the node's Tasks (the user's to-do list, not delegated runs). */
+  readLocalTasks: AgentControlCapability.make("local-tasks.read"),
+  /** Create, edit, complete, delete (with approval) Tasks and start their chats. */
+  manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),
@@ -269,6 +274,7 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceStartRecording",
   "deviceStopRecording",
   "deviceShutdown",
+  "deleteLocalTask",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
@@ -318,6 +324,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceStartRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceStopRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceShutdown: AGENT_CONTROL_CAPABILITIES.controlDevices,
+  deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -378,6 +385,11 @@ export const AgentControlCreateThreadEntry = Schema.Struct({
   envMode: ThreadEnvMode,
   /** Base ref for worktree creation; the project default when absent. */
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  /**
+   * Starts the thread as this Task's chat: the node records it under the task and
+   * attaches the task's files to the first message. Provider-session callers only.
+   */
+  localTaskId: Schema.optional(LocalTaskId),
 }).pipe(rejectExcessProperties);
 export type AgentControlCreateThreadEntry = typeof AgentControlCreateThreadEntry.Type;
 
@@ -831,6 +843,20 @@ export const AgentControlDeviceActionPlan = Schema.Union([
 ]);
 export type AgentControlDeviceActionPlan = typeof AgentControlDeviceActionPlan.Type;
 
+/**
+ * Deletes one of the node's Tasks with its files and its record of started chats
+ * (the chats themselves stay). Always approved by the user.
+ */
+export const AgentControlDeleteLocalTaskPlan = Schema.Struct({
+  kind: Schema.Literal("deleteLocalTask"),
+  taskId: LocalTaskId,
+  /** The revision the user approves deleting; a task edited since fails closed. */
+  expectedRevision: NonNegativeInt,
+  /** Shown on the approval card. */
+  title: LocalTaskTitle,
+}).pipe(rejectExcessProperties);
+export type AgentControlDeleteLocalTaskPlan = typeof AgentControlDeleteLocalTaskPlan.Type;
+
 export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateThreadsPlan,
   AgentControlSendMessagePlan,
@@ -846,6 +872,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlCancelAutomationPlan,
   AgentControlAutomationRunPlan,
   AgentControlDeviceActionPlan,
+  AgentControlDeleteLocalTaskPlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;
 
@@ -881,6 +908,7 @@ export const AGENT_CONTROL_RISK_TAGS = {
   deviceMutation: AgentControlRiskTag.make("device-mutation"),
   deviceLifecycle: AgentControlRiskTag.make("device-lifecycle"),
   deviceOpenWorld: AgentControlRiskTag.make("device-open-world"),
+  removesLocalTask: AgentControlRiskTag.make("removes-local-task"),
 } as const;
 
 /**

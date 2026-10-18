@@ -1,4 +1,4 @@
-import { Cause, Effect, Option, Schema } from "effect";
+import { Cause, Effect, Option, Schema, Stream } from "effect";
 import {
   LOCAL_TASK_MAX_FILE_TOTAL_BYTES,
   LOCAL_TASK_MAX_FILES,
@@ -146,6 +146,11 @@ export function makeLocalTaskHandlers(ctx: WsRpcContext) {
     ).pipe(Effect.mapError(toFlightError));
 
   return defineWsHandlers({
+    [WS_METHODS.serverSubscribeLocalTaskChanges]: (_input) =>
+      ctx.ownerStream(
+        WS_METHODS.serverSubscribeLocalTaskChanges,
+        Stream.unwrap(service.pipe(Effect.map((tasks) => tasks.changes))),
+      ),
     [WS_METHODS.serverListLocalTasks]: (input) =>
       ctx.ownerEffect(
         WS_METHODS.serverListLocalTasks,

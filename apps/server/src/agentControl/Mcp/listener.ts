@@ -67,6 +67,8 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +
+  "The user's Tasks page (their to-do list) is read and edited with the ryco_*_local_task tools; " +
+  "deleting a task waits for user approval. They are not the runs ryco_task_status reports. " +
   `${AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS} ` +
   "Respect local denials and verify results.";
 

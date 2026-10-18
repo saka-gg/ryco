@@ -6,6 +6,7 @@ import {
   LOCAL_TASK_MAX_FILE_TOTAL_BYTES,
   LOCAL_TASK_MAX_FILES,
   type LocalTask,
+  type LocalTaskChange,
   LocalTaskCreateInput,
   type LocalTaskDelegation,
   type LocalTaskDelegationStatus,
@@ -21,7 +22,7 @@ import {
   type ProjectId,
 } from "@ryco/contracts";
 import { aggregateLocalTaskStatus } from "@ryco/shared/localTasks";
-import { Context, Effect, Layer, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, PubSub, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { ServerConfig } from "../config.ts";
@@ -40,7 +41,7 @@ export interface LocalTaskDelegationReservation {
   readonly replayed: boolean;
   /**
    * False once the start reached orchestration: dispatching it again could only repeat work. (A
-   * replay of a start that failed or was refused is not reserved at all; it fails.)
+   * replay of a start orchestration refused is not reserved at all; it fails.)
    */
   readonly needsDispatch: boolean;
 }
@@ -52,14 +53,15 @@ export interface LocalTaskServiceShape {
   readonly update: (input: LocalTaskUpdateInput) => TaskEffect<LocalTask>;
   readonly remove: (input: LocalTaskDeleteInput) => TaskEffect<{ deleted: true }>;
   /**
-   * The task, when this exact start already reached its chat and needs no dispatch; otherwise
-   * null. A start that failed or was refused fails again with its error (see `reserveDelegation`).
+   * The task, when this start already reached its chat and needs no dispatch; otherwise null. A
+   * start orchestration refused fails again with its error (see `reserveDelegation`).
    */
   readonly getSettledDelegation: (input: LocalTaskDelegateInput) => TaskEffect<LocalTask | null>;
   /**
-   * Reserves a new start, or replays one with the same command. A replay of a start that failed
-   * or that orchestration refused fails with that error instead of answering: its command can
-   * never run, and a client resending it (a Retry) must start again with a new one.
+   * Reserves a new start, or replays one with the same command id. A replay of a start that
+   * orchestration refused fails with that error instead of answering: its command can never run,
+   * and a client resending it (a Retry) must start again with a new one. A start that failed
+   * before orchestration took it is reserved again with the resent command.
    */
   readonly reserveDelegation: (
     input: LocalTaskDelegateInput,
@@ -77,6 +79,8 @@ export interface LocalTaskServiceShape {
     readonly file: LocalTaskFile;
   }) => TaskEffect<LocalTask>;
   readonly removeFile: (input: LocalTaskRemoveFileInput) => TaskEffect<LocalTask>;
+  /** Each task a call above changed (created, edited, deleted, a file or a chat start), from now on. */
+  readonly changes: Stream.Stream<LocalTaskChange>;
 }
 export class LocalTaskService extends Context.Service<LocalTaskService, LocalTaskServiceShape>()(
   "ryco/tasks/LocalTaskService",
@@ -103,7 +107,7 @@ const encodeRecord = (record: LocalTaskRecord) =>
 const MAX_START_ERROR_CHARS = 2_000;
 export const INTERRUPTED_START_ERROR = "The chat start was interrupted by a restart.";
 const FAILED_START_ERROR = "The chat could not be started.";
-/** A replayed start that can never run: start the chat again with a new command. */
+/** A replayed start orchestration rejected: it can never run, so the chat starts again with a new command. */
 const startFailed = (message: string | null) =>
   error("conflict", message?.trim() ? message : FAILED_START_ERROR);
 /** Leaves a file alone while an upload or add that wrote it may still be on its way. */
@@ -371,39 +375,69 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
       );
 
     /**
-     * The stored start with this command id, checked to be the same command for the same task;
-     * null when there is none. An unsent start whose command orchestration accepted is marked
+     * The stored start with this command id, checked to be the same start: the same task, thread
+     * and message (a resend restamps the message's time and may refresh its attached context, so
+     * the rest of the command can differ, as it may for orchestration's own command ids); null
+     * when there is none. An unsent start whose command orchestration accepted is marked
      * dispatched here (its first attempt lost the race with a restart or a dropped response). A
-     * start that failed, or whose command orchestration refused, fails with its error: it can
-     * never run, and answering it like a start that did would report a chat that isn't there.
+     * start whose command orchestration refused fails with its error: it can never run, and
+     * answering it like a start that did would report a chat that isn't there. A start that
+     * failed before orchestration took its command (its worktree setup failed, or a restart cut
+     * it off) never ran: it is `superseded`, and the command (changed or not, since a resend
+     * restamps the message) is reserved again in its place, the way a draft resends a failed
+     * worktree launch.
      */
-    const findStart = (taskId: string, command: TurnStartCommand, expectedDigest: string) =>
+    const findStart = (taskId: string, command: TurnStartCommand) =>
       Effect.gen(function* () {
         const start = (yield* sql<StartRow>`SELECT command_id, task_id, sequence, thread_id,
             message_id, branch, command_digest, file_ids_json, dispatched, failed_at, error, created_at
           FROM local_task_delegations WHERE command_id = ${command.commandId}`)[0];
         if (!start) return null;
-        if (start.task_id !== taskId || start.command_digest !== expectedDigest)
+        if (start.task_id !== taskId)
           return yield* Effect.fail(error("conflict", "The chat start command changed."));
-        if (start.failed_at !== null) return yield* Effect.fail(startFailed(start.error));
-        if (start.dispatched === 1) return { start, needsDispatch: false };
-        const receipt = (yield* sql<{
-          status: string;
-          aggregate_id: string;
-          error: string | null;
-        }>`SELECT status, aggregate_id, error FROM orchestration_command_receipts WHERE command_id = ${command.commandId}`)[0];
+        // A dispatched start needs no receipt: orchestration took it.
+        const receipt =
+          start.dispatched === 1
+            ? null
+            : (yield* sql<{
+                status: string;
+                aggregate_id: string;
+                error: string | null;
+              }>`SELECT status, aggregate_id, error FROM orchestration_command_receipts WHERE command_id = ${command.commandId}`)[0];
+        if (start.failed_at !== null && receipt === undefined)
+          return { start, needsDispatch: true, superseded: true };
+        if (start.thread_id !== command.threadId || start.message_id !== command.message.messageId)
+          return yield* Effect.fail(error("conflict", "The chat start command changed."));
+        if (start.dispatched === 1) return { start, needsDispatch: false, superseded: false };
         if (receipt?.status === "accepted" && receipt.aggregate_id === command.threadId) {
-          yield* sql`UPDATE local_task_delegations SET dispatched = 1 WHERE command_id = ${command.commandId}`;
-          return { start: { ...start, dispatched: 1 }, needsDispatch: false };
+          yield* sql`UPDATE local_task_delegations SET dispatched = 1, failed_at = NULL, error = NULL
+            WHERE command_id = ${command.commandId}`;
+          return {
+            start: { ...start, dispatched: 1, failed_at: null, error: null },
+            needsDispatch: false,
+            superseded: false,
+          };
         }
-        if (receipt?.status === "rejected") return yield* Effect.fail(startFailed(receipt.error));
+        if (receipt?.status === "rejected")
+          return yield* Effect.fail(startFailed(receipt.error ?? start.error));
         // Orchestration answers a repeated command id from its receipt; only an unseen one runs.
-        return { start, needsDispatch: receipt === undefined };
+        return { start, needsDispatch: receipt === undefined, superseded: false };
       });
     const startFiles = (start: StartRow, record: LocalTaskRecord) => {
       const fileIds = new Set(JSON.parse(start.file_ids_json) as ReadonlyArray<string>);
       return record.files.filter((file) => fileIds.has(file.fileId));
     };
+
+    const changes = yield* PubSub.unbounded<LocalTaskChange>();
+    const changed = (taskId: string) => PubSub.publish(changes, { taskId }).pipe(Effect.asVoid);
+    /** The task a start belongs to, for its change: none once the start is gone. */
+    const changedStart = (commandId: string) =>
+      sql<{
+        task_id: string;
+      }>`SELECT task_id FROM local_task_delegations WHERE command_id = ${commandId}`.pipe(
+        Effect.flatMap((rows) => (rows[0] ? changed(rows[0].task_id) : Effect.void)),
+        Effect.ignore,
+      );
 
     const service: LocalTaskServiceShape = {
       get,
@@ -451,7 +485,10 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return { ...record, status: "todo", delegations: [] } satisfies LocalTask;
             }),
           )
-          .pipe(Effect.mapError(mapError)),
+          .pipe(
+            Effect.tap((task) => changed(task.taskId)),
+            Effect.mapError(mapError),
+          ),
       update: (input) =>
         sql
           .withTransaction(
@@ -495,7 +532,10 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return yield* present(saved);
             }),
           )
-          .pipe(Effect.mapError(mapError)),
+          .pipe(
+            Effect.tap((task) => changed(task.taskId)),
+            Effect.mapError(mapError),
+          ),
       remove: (input) =>
         Effect.gen(function* () {
           const fileIds = yield* sql.withTransaction(
@@ -511,6 +551,7 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return record.files.map((file) => file.fileId);
             }),
           );
+          yield* changed(input.taskId);
           // The chats keep their own copies; only the task's originals go.
           yield* deleteTaskFiles(taskFilesDir, fileIds);
           return { deleted: true as const };
@@ -520,8 +561,7 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
           .withTransaction(
             Effect.gen(function* () {
               const decoded = yield* Schema.decodeUnknownEffect(LocalTaskDelegateInput)(input);
-              const { digest: expectedDigest } = yield* commandDigest(decoded.command);
-              const replay = yield* findStart(decoded.taskId, decoded.command, expectedDigest);
+              const replay = yield* findStart(decoded.taskId, decoded.command);
               if (!replay || replay.needsDispatch) return null;
               return yield* rowFor(decoded.taskId).pipe(Effect.flatMap(present));
             }),
@@ -536,8 +576,17 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               const stored = yield* commandDigest(command);
               let row = yield* rowFor(decoded.taskId);
               const record = yield* recordFor(row);
-              const replay = yield* findStart(decoded.taskId, command, stored.digest);
-              if (replay) {
+              const replay = yield* findStart(decoded.taskId, command);
+              // A start that never ran gives way to its resend, which is checked like a new one.
+              if (replay?.superseded)
+                yield* sql`DELETE FROM local_task_delegations WHERE command_id = ${command.commandId}`;
+              else if (replay) {
+                // A resend that still has to run is what runs: keep it as the start's command.
+                if (replay.needsDispatch && replay.start.command_digest !== stored.digest)
+                  yield* sql`UPDATE local_task_delegations
+                    SET command_json = ${stored.json}, command_digest = ${stored.digest},
+                      branch = ${command.bootstrap?.prepareWorktree?.branch ?? null}
+                    WHERE command_id = ${command.commandId}`;
                 return {
                   task: yield* present(row),
                   command,
@@ -566,10 +615,20 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
                 return yield* Effect.fail(
                   error("invalid", "A task's chat starts in a project, not as a chat without one."),
                 );
-              const thread = (yield* sql<{
+              const found = (yield* sql<{
                 project_id: ProjectId;
                 deleted_at: string | null;
-              }>`SELECT project_id, deleted_at FROM projection_threads WHERE thread_id = ${command.threadId}`)[0];
+                trashed_at: string | null;
+              }>`SELECT project_id, deleted_at, trashed_at FROM projection_threads WHERE thread_id = ${command.threadId}`)[0];
+              // A permanently deleted thread's id can be created again, as orchestration allows: a
+              // draft keeps its id across retries, and a failed first send deletes the thread it made.
+              const thread =
+                found &&
+                bootstrap?.createThread !== undefined &&
+                found.deleted_at !== null &&
+                found.trashed_at === null
+                  ? undefined
+                  : found;
               let projectId: ProjectId;
               if (thread) {
                 if (thread.deleted_at !== null)
@@ -628,9 +687,13 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               };
             }),
           )
-          .pipe(Effect.mapError(mapError)),
+          .pipe(
+            Effect.tap((reservation) => changed(reservation.task.taskId)),
+            Effect.mapError(mapError),
+          ),
       markDelegated: (commandId) =>
         sql`UPDATE local_task_delegations SET dispatched = 1 WHERE command_id = ${commandId}`.pipe(
+          Effect.andThen(changedStart(commandId)),
           Effect.asVoid,
           Effect.mapError(mapError),
         ),
@@ -651,7 +714,10 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return true;
             }),
           )
-          .pipe(Effect.mapError(mapError)),
+          .pipe(
+            Effect.tap(() => changedStart(commandId)),
+            Effect.mapError(mapError),
+          ),
       addFile: (input) =>
         sql
           .withTransaction(
@@ -681,7 +747,10 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return yield* present(yield* save(row, { ...record, files }));
             }),
           )
-          .pipe(Effect.mapError(mapError)),
+          .pipe(
+            Effect.tap((task) => changed(task.taskId)),
+            Effect.mapError(mapError),
+          ),
       removeFile: (input) =>
         Effect.gen(function* () {
           const task = yield* sql.withTransaction(
@@ -699,9 +768,11 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return yield* present(saved);
             }),
           );
+          yield* changed(task.taskId);
           yield* deleteTaskFiles(taskFilesDir, [input.fileId]);
           return task;
         }).pipe(Effect.mapError(mapError)),
+      changes: Stream.fromPubSub(changes),
     };
     return service;
   });

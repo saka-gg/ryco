@@ -64,6 +64,12 @@ const DECISION_ERROR_CODES = {
 const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlAuditMetadata => {
   const planMetadata: AgentControlAuditMetadata = (() => {
     switch (proposal.plan.kind) {
+      case "deleteLocalTask":
+        // The title stays in the proposal row: titles never enter audit rows.
+        return {
+          localTaskId: proposal.plan.taskId,
+          expectedRevision: String(proposal.plan.expectedRevision),
+        };
       case "createProject":
         return { projectId: proposal.plan.projectId };
       case "updateProject":

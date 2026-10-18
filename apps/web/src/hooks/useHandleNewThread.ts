@@ -36,6 +36,7 @@ import {
   type DraftThreadEnvMode,
   type DraftThreadState,
   type DraftId,
+  type DraftWorktreeSource,
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { newDraftId, newProjectId, newThreadId } from "../lib/utils";
@@ -84,6 +85,25 @@ export interface NewThreadOptions {
     tokenMode: AgentTokenMode;
     isCurrent: () => boolean;
   };
+}
+
+/** A task's draft (`components/tasks/taskDraft.ts`): its first message and its new worktree. */
+export interface TaskChatDraftSeed {
+  readonly taskId: string;
+  readonly prompt: string;
+  /** A pull request, issue or Jira item the worktree is created for. */
+  readonly worktreeSource: DraftWorktreeSource | null;
+  /** The branch the new worktree branches from; `null` for the default branch. */
+  readonly baseBranch: string | null;
+  readonly worktreeBranchName: string | null;
+  /** Whether the worktree starts from the origin's copy of `baseBranch` (fetched first). */
+  readonly fetchOrigin: boolean;
+}
+
+/** The task's draft that opened; `created` is false for its unsent draft reopened. */
+export interface OpenedTaskChatDraft {
+  readonly draftId: DraftId;
+  readonly created: boolean;
 }
 
 function useNewThreadState() {
@@ -140,6 +160,8 @@ function useNewThreadState() {
         config: ServerConfig,
         effective: EffectiveProjectPreferences | null,
       ) => void;
+      /** Writes the draft's content once, after its first seed (a later reseed leaves it alone). */
+      readonly seedContent?: () => void;
       readonly failureTitle: string;
     }): Promise<void> =>
       (async () => {
@@ -203,6 +225,7 @@ function useNewThreadState() {
           );
         };
         const seeded = seed(effective);
+        input.seedContent?.();
         if (fresh) {
           // Opened with this session's last answer for the project. The node's
           // current one replaces it only if it differs and the seeded defaults
@@ -384,7 +407,9 @@ function useNewThreadState() {
           latestActiveDraftThread &&
           currentRouteTarget?.kind === "draft" &&
           latestActiveDraftThread.logicalProjectKey === logicalProjectKey &&
-          latestActiveDraftThread.promotedTo == null
+          latestActiveDraftThread.promotedTo == null &&
+          // A task's draft stays the task's: a new thread gets a draft of its own.
+          !latestActiveDraftThread.localTaskId
         ) {
           if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
             setDraftThreadContext(currentRouteTarget.draftId, {
@@ -514,15 +539,111 @@ function useNewThreadState() {
     },
     [adoptHostedTarget, createAndOpenDraft, getCurrentRouteTarget, pendingHostedLease, router],
   );
-  return { handleNewThread, handleNewChat };
+
+  /**
+   * Opens the draft that starts a chat for a task: the task's unsent draft in
+   * the project when there is one, else a fresh draft beside the project's own
+   * (which stays untouched) with the task's message and worktree, seeded with
+   * the project's defaults like any new thread. The draft keeps the task, so
+   * its first message starts the task's chat. `null` when no draft opened.
+   */
+  const handleNewTaskChat = useCallback(
+    (
+      projectRef: ScopedProjectRef,
+      seed: TaskChatDraftSeed,
+    ): Promise<OpenedTaskChatDraft | null> => {
+      const taskDraftOf = (environmentId: EnvironmentId) =>
+        useComposerDraftStore
+          .getState()
+          .getLocalTaskDraftSession(environmentId, seed.taskId, projectRef.projectId);
+      const openTaskChat = (): Promise<OpenedTaskChatDraft | null> => {
+        const leaseWait = pendingHostedLease(projectRef.environmentId);
+        if (leaseWait) return leaseWait.then((ready) => (ready ? openTaskChat() : null));
+        const existing = taskDraftOf(projectRef.environmentId);
+        if (existing) {
+          const opened = { draftId: existing.draftId, created: false };
+          const currentRouteTarget = getCurrentRouteTarget();
+          if (
+            currentRouteTarget?.kind === "draft" &&
+            currentRouteTarget.draftId === existing.draftId
+          )
+            return Promise.resolve(opened);
+          adoptHostedTarget(projectRef.environmentId);
+          return router
+            .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
+            .then(() => opened);
+        }
+        const project = projects.find(
+          (candidate) =>
+            candidate.id === projectRef.projectId &&
+            candidate.environmentId === projectRef.environmentId,
+        );
+        const logicalProjectKey = project
+          ? deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)
+          : scopedProjectKey(projectRef);
+        const draftId = newDraftId();
+        const threadId = newThreadId();
+        const createdAt = new Date().toISOString();
+        let created = false;
+        return createAndOpenDraft({
+          environmentId: projectRef.environmentId,
+          draftId,
+          preferencesProjectId: projectRef.projectId,
+          explicitModelSelection: undefined,
+          superseded: () => taskDraftOf(projectRef.environmentId) !== null,
+          resume: () => openTaskChat().then(() => undefined),
+          register: (config) => {
+            const drafts = useComposerDraftStore.getState();
+            drafts.createDetachedDraftSession(logicalProjectKey, projectRef, draftId, {
+              threadId,
+              createdAt,
+              branch: seed.baseBranch,
+              worktreePath: null,
+              envMode: "worktree",
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              tokenMode: config.settings.defaultAgentTokenMode,
+              localTaskId: seed.taskId,
+            });
+            drafts.setDraftThreadContext(draftId, {
+              worktreeSource: seed.worktreeSource,
+              worktreeBranchName: seed.worktreeBranchName,
+              fetchOrigin: seed.fetchOrigin,
+            });
+          },
+          seedContent: () => {
+            useComposerDraftStore.getState().setPrompt(draftId, seed.prompt);
+            created = true;
+          },
+          failureTitle: "Could not open the task’s draft",
+        }).then(() => {
+          if (created) return { draftId, created };
+          // Another start of the task opened its draft meanwhile (or this one failed).
+          const draft = taskDraftOf(projectRef.environmentId);
+          return draft ? { draftId: draft.draftId, created: false } : null;
+        });
+      };
+      return openTaskChat();
+    },
+    [
+      adoptHostedTarget,
+      createAndOpenDraft,
+      getCurrentRouteTarget,
+      pendingHostedLease,
+      projectGroupingSettings,
+      projects,
+      router,
+    ],
+  );
+  return { handleNewThread, handleNewChat, handleNewTaskChat };
 }
 
 export function useNewThreadHandler() {
-  const { handleNewThread, handleNewChat } = useNewThreadState();
+  const { handleNewThread, handleNewChat, handleNewTaskChat } = useNewThreadState();
 
   return {
     handleNewThread,
     handleNewChat,
+    handleNewTaskChat,
   };
 }
 

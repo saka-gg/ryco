@@ -1,4 +1,9 @@
-import { ThreadId } from "@ryco/contracts";
+import {
+  ThreadId,
+  type ChangeRequest,
+  type SourceControlIssueSummary,
+  type WorkItemSummary,
+} from "@ryco/contracts";
 import { LocalTaskLink } from "@ryco/contracts/local-tasks";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
@@ -6,39 +11,22 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   describeTaskLink,
   isTaskBranchName,
-  parseTaskLinkInput,
+  parseTaskLinkPaste,
+  taskLinkFromSource,
   taskLinkLabel,
   taskLinkLabelIn,
 } from "./taskLinks.logic";
 
 const encodes = Schema.is(LocalTaskLink);
 
-describe("parseTaskLinkInput", () => {
-  it("reads a pull request number or URL under Pull request", () => {
-    expect(parseTaskLinkInput("pr", "#746")).toEqual({ kind: "pr", number: 746 });
-    expect(parseTaskLinkInput("pr", " 12 ")).toEqual({ kind: "pr", number: 12 });
-    expect(parseTaskLinkInput("pr", "gh pr checkout 31")).toEqual({ kind: "pr", number: 31 });
-    const url = "https://github.com/acme/app/pull/752/files";
-    expect(parseTaskLinkInput("pr", url)).toEqual({ kind: "pr", number: 752, url });
-    expect(parseTaskLinkInput("pr", "ABC-12")).toBeNull();
-    expect(parseTaskLinkInput("pr", "#0")).toBeNull();
-  });
-
-  it("reads an issue number, a Jira key or their URLs under Issue", () => {
-    expect(parseTaskLinkInput("issue", "#231")).toEqual({ kind: "issue", number: 231 });
-    expect(parseTaskLinkInput("issue", "abc-123")).toEqual({
-      kind: "workItem",
-      provider: "jira",
-      key: "ABC-123",
-    });
+describe("parseTaskLinkPaste", () => {
+  it("lets a pasted URL say what it is", () => {
+    const pr = "https://github.com/acme/app/pull/752/files";
+    expect(parseTaskLinkPaste(pr)).toEqual({ kind: "pr", number: 752, url: pr });
     const issueUrl = "https://github.com/acme/app/issues/240#issuecomment-1";
-    expect(parseTaskLinkInput("issue", issueUrl)).toEqual({
-      kind: "issue",
-      number: 240,
-      url: issueUrl,
-    });
+    expect(parseTaskLinkPaste(issueUrl)).toEqual({ kind: "issue", number: 240, url: issueUrl });
     const browse = "https://acme.atlassian.net/browse/OPS-42";
-    expect(parseTaskLinkInput("issue", browse)).toEqual({
+    expect(parseTaskLinkPaste(browse)).toEqual({
       kind: "workItem",
       provider: "jira",
       key: "OPS-42",
@@ -46,50 +34,85 @@ describe("parseTaskLinkInput", () => {
     });
     const board =
       "https://acme.atlassian.net/jira/software/projects/OPS/boards/1?selectedIssue=OPS-7";
-    expect(parseTaskLinkInput("issue", board)).toMatchObject({ kind: "workItem", key: "OPS-7" });
-    expect(parseTaskLinkInput("issue", "fix the thing")).toBeNull();
-  });
-
-  it("lets a pasted URL say what it is, whatever kind was picked", () => {
-    expect(parseTaskLinkInput("pr", "https://github.com/acme/app/issues/9")).toMatchObject({
-      kind: "issue",
-      number: 9,
-    });
-    expect(parseTaskLinkInput("branch", "https://github.com/acme/app/pull/3")).toMatchObject({
-      kind: "pr",
-      number: 3,
-    });
-    expect(parseTaskLinkInput("issue", "https://linear.app/acme/issue/ENG-1")).toEqual({
+    expect(parseTaskLinkPaste(board)).toMatchObject({ kind: "workItem", key: "OPS-7" });
+    expect(parseTaskLinkPaste(" https://linear.app/acme/issue/ENG-1 ")).toEqual({
       kind: "url",
       url: "https://linear.app/acme/issue/ENG-1",
     });
-    expect(parseTaskLinkInput("pr", `https://example.com/${"a".repeat(2048)}`)).toBeNull();
+    expect(parseTaskLinkPaste(`https://example.com/${"a".repeat(2048)}`)).toBeNull();
   });
 
-  it("reads a branch name under Branch", () => {
-    expect(parseTaskLinkInput("branch", " feature/login-loop ")).toEqual({
-      kind: "branch",
-      name: "feature/login-loop",
+  it("reads a Jira key, and nothing else that isn't a URL", () => {
+    expect(parseTaskLinkPaste("abc-123")).toEqual({
+      kind: "workItem",
+      provider: "jira",
+      key: "ABC-123",
     });
-    expect(parseTaskLinkInput("branch", "has space")).toBeNull();
-    expect(parseTaskLinkInput("branch", "")).toBeNull();
+    expect(parseTaskLinkPaste("#42")).toBeNull();
+    expect(parseTaskLinkPaste("fix the thing")).toBeNull();
+    expect(parseTaskLinkPaste("")).toBeNull();
   });
 
   it("only produces links the contract accepts", () => {
-    const inputs: ReadonlyArray<readonly ["pr" | "issue" | "branch", string]> = [
-      ["pr", "#746"],
-      ["pr", "https://github.com/acme/app/pull/752"],
-      ["issue", "#1"],
-      ["issue", "abc_def-9"],
-      ["issue", "https://acme.atlassian.net/browse/OPS-42"],
-      ["issue", "http://intranet.example/wiki"],
-      ["branch", "release/2026.10"],
-    ];
-    for (const [kind, raw] of inputs) {
-      const link = parseTaskLinkInput(kind, raw);
+    for (const raw of [
+      "https://github.com/acme/app/pull/752",
+      "abc_def-9",
+      "https://acme.atlassian.net/browse/OPS-42",
+      "http://intranet.example/wiki",
+    ]) {
+      const link = parseTaskLinkPaste(raw);
       expect(link, raw).not.toBeNull();
       expect(encodes(link), raw).toBe(true);
     }
+  });
+});
+
+describe("taskLinkFromSource", () => {
+  it("keeps a picked item's URL and title, as the contract holds them", () => {
+    const pr = taskLinkFromSource({
+      kind: "pr",
+      changeRequest: {
+        number: 746,
+        title: "  Fix the\nlogin   loop ",
+        url: "https://github.com/acme/app/pull/746",
+      } as ChangeRequest,
+    });
+    expect(pr).toEqual({
+      kind: "pr",
+      number: 746,
+      url: "https://github.com/acme/app/pull/746",
+      title: "Fix the login loop",
+    });
+    const issue = taskLinkFromSource({
+      kind: "issue",
+      issue: { number: 12, title: "x".repeat(400), url: "not a url" } as SourceControlIssueSummary,
+    });
+    expect(issue).toEqual({ kind: "issue", number: 12, title: "x".repeat(300) });
+    const workItem = taskLinkFromSource({
+      kind: "workItem",
+      workItem: {
+        provider: "jira",
+        key: "ops-7",
+        title: "Rotate keys",
+        url: "https://acme.atlassian.net/browse/OPS-7",
+      } as WorkItemSummary,
+    });
+    expect(workItem).toEqual({
+      kind: "workItem",
+      provider: "jira",
+      key: "OPS-7",
+      url: "https://acme.atlassian.net/browse/OPS-7",
+      title: "Rotate keys",
+    });
+    for (const link of [pr, issue, workItem]) expect(encodes(link)).toBe(true);
+  });
+
+  it("links a branch by name, and refuses one git would", () => {
+    expect(taskLinkFromSource({ kind: "branch", branchName: "origin/feature/x" })).toEqual({
+      kind: "branch",
+      name: "origin/feature/x",
+    });
+    expect(taskLinkFromSource({ kind: "branch", branchName: "a..b" })).toBeNull();
   });
 });
 

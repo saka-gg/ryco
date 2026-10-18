@@ -412,3 +412,40 @@ it("labels every completion return status and marks the server's pending set", (
   }
   expect(completionReturnPresentation("cancelled").tone).toBe("muted");
 });
+
+it("asks before deleting a task, naming it and what stays", () => {
+  const model = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: { kind: "deleteLocalTask", taskId: "task-old", expectedRevision: 4, title: "Old idea" },
+      promptSummary: 'Delete task "Old idea" with its files; its chats are kept',
+    }),
+  );
+  expect(model.actionLabel).toBe("Delete task");
+  expect(model.targetLabel).toBe("Old idea");
+  expect(model.isDestructive).toBe(true);
+  expect(model.isPending).toBe(true);
+  expect(model.detailSections[0]?.lines).toContain("Expected revision: 4");
+  expect(model.detailSections[0]?.lines.join("\n")).toContain("chats started from it are kept");
+});
+
+it("says which created thread starts a task's chat", () => {
+  const model = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "createThreads",
+        entries: [
+          {
+            projectId: ProjectId.make("project-1"),
+            title: "Fix the login loop",
+            prompt: "Fix the login loop",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "approval-required",
+            envMode: "worktree",
+            localTaskId: "task-1",
+          },
+        ],
+      },
+    }),
+  );
+  expect(model.detailSections[0]?.lines.join("\n")).toContain("chat of task task-1");
+});

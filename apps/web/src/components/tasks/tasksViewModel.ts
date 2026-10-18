@@ -1,4 +1,12 @@
-import type { LocalTaskLink, ProjectId, ThreadId } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  LocalTaskLink,
+  ProjectId,
+  ProviderDriverKind,
+  ThreadId,
+} from "@ryco/contracts";
+
+import type { TaskStartHint } from "./taskDraft.logic";
 
 /**
  * The Tasks page's view model: everything the presentational components
@@ -11,7 +19,7 @@ import type { LocalTaskLink, ProjectId, ThreadId } from "@ryco/contracts";
 /**
  * The word a task or chat shows for its chats; `null` on a task means it has
  * none. `failed` is a start that never got going; `error` a chat that ran and
- * then stopped on an error.
+ * then stopped on an error; `archived` (chats only) a chat that was archived.
  */
 export type TaskStatusWord =
   | "starting"
@@ -20,13 +28,15 @@ export type TaskStatusWord =
   | "review"
   | "failed"
   | "error"
-  | "unavailable";
+  | "archived";
 
 export interface TaskProjectOption {
   readonly projectId: ProjectId;
   readonly name: string;
-  /** The project's colour (its monogram colour), used for the dot. */
-  readonly color: string;
+  /** Where the project's logo is read from (`ProjectFavicon`). */
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly avatarHash: string | null;
 }
 
 export interface TaskChatView {
@@ -37,6 +47,8 @@ export interface TaskChatView {
   readonly title: string | null;
   /** The model's display name, e.g. "Opus 5.5". */
   readonly modelLabel: string;
+  /** The provider the chat runs on, for its icon; `null` when unknown. */
+  readonly providerDriver: ProviderDriverKind | null;
   readonly status: TaskStatusWord;
   /** The branch or worktree the chat runs on; `null` when unknown. */
   readonly branch: string | null;
@@ -44,21 +56,6 @@ export interface TaskChatView {
   readonly linked: boolean;
   /** Why the start failed, when it did. */
   readonly error: string | null;
-}
-
-export type TaskWhereKind = "pr" | "branch" | "worktree" | "project";
-
-/** One entry of the Start button's ▾ menu; a task's first option is the default. */
-export interface TaskWhereOption {
-  readonly id: string;
-  readonly kind: TaskWhereKind;
-  /** Menu title, e.g. "PR #746 worktree", "New worktree", "Project folder". */
-  readonly label: string;
-  /** Menu subtitle, e.g. "task/fix-login-redirect-loop from main". */
-  readonly detail: string;
-  /** The hint beside the button: `in ${hintPrefix} · <b>${hintRef}</b>`. */
-  readonly hintPrefix: string;
-  readonly hintRef: string | null;
 }
 
 export interface TaskFileView {
@@ -84,8 +81,11 @@ export interface TaskView {
   readonly chats: ReadonlyArray<TaskChatView>;
   /** The most urgent chat's status; `null` when the task has no live chat. */
   readonly status: TaskStatusWord | null;
-  readonly whereOptions: ReadonlyArray<TaskWhereOption>;
-  /** A start is in flight; Start is disabled until it settles. */
+  /** Where Start's draft creates its worktree; `null` while the task has no project. */
+  readonly startHint: TaskStartHint | null;
+  /** The task has an unsent draft: Start reopens it. */
+  readonly hasDraft: boolean;
+  /** A chat's first message is on its way; Delete waits for it. */
   readonly starting: boolean;
   /** The project can no longer change: one of the task's starts may have a chat in it. */
   readonly projectLocked: boolean;
@@ -134,8 +134,8 @@ export interface TasksViewHandlers {
   readonly onRemoveLink: (taskId: string, index: number) => void;
   readonly onAddFiles: (taskId: string, files: ReadonlyArray<File>) => void;
   readonly onRemoveFile: (taskId: string, fileKey: string) => void;
-  /** Starts a chat; `whereId` is a `TaskWhereOption.id`, or the task's default when omitted. */
-  readonly onStart: (taskId: string, whereId?: string) => void;
+  /** Opens the draft that starts the task's chat (its unsent one when it has one). */
+  readonly onStart: (taskId: string) => void;
   readonly onOpenChat: (taskId: string, threadId: ThreadId) => void;
   readonly onDelete: (taskId: string) => void;
   /** Called when a row opens or the pointer enters Start, to warm the start path. */

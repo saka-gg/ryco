@@ -5,12 +5,10 @@ import type {
   LocalTaskDelegationStatus,
   LocalTaskLink,
   ThreadId,
-  WorkItemProviderKind,
 } from "@ryco/contracts";
 import { resolveUniqueRefName, sanitizeBranchFragment } from "@ryco/shared/git";
 import { aggregateLocalTaskStatus, type LocalTaskChatAggregate } from "@ryco/shared/localTasks";
 
-import { formatThreadMentionPath, isThreadMentionableId } from "../composer/threadMentions.ts";
 import { deriveThreadActivityStatus } from "../threads/threadActivityStatus.ts";
 import type {
   LocalTaskOptimisticStart,
@@ -21,9 +19,11 @@ import type {
 
 /**
  * Pure task rules shared by every client: how a chat's live state reads on a
- * task, the first message a task's chat starts with, its branch name, and the
- * order tasks are listed in.
+ * task, its branch name, and the order tasks are listed in. The first message
+ * a task's chat starts with is `@ryco/shared/localTasks`' (the node writes it
+ * too, for chats agents start).
  */
+export { buildTaskStartPrompt, type TaskStartPromptInput } from "@ryco/shared/localTasks";
 
 /** The start a chat came from, as far as its status needs it. */
 export type TaskChatStart = Pick<LocalTaskDelegation, "messageId" | "createdAt">;
@@ -205,8 +205,7 @@ export function taskLiveStatus(
 /**
  * Whether the start the node recorded for `commandId` failed before its chat
  * could run: its dispatch failed, orchestration refused it, or a restart cut it
- * off. Resending that same command only reports the failure again, so trying
- * again takes a new start (new command, message and, for a new thread, thread).
+ * off. Resending the command runs it again unless orchestration refused it.
  */
 export function taskStartFailed(
   task: Pick<LocalTask, "delegations">,
@@ -295,66 +294,6 @@ export function delegatedThreadSignature(
     for (const link of task.links) if (link.kind === "thread") add(link.threadId);
   }
   return signature;
-}
-
-const WORK_ITEM_PROVIDER_LABELS: Record<WorkItemProviderKind, string> = { jira: "Jira" };
-
-export interface TaskStartPromptInput {
-  readonly title: string;
-  readonly notes: string;
-  readonly links: ReadonlyArray<LocalTaskLink>;
-  /** Words written after a linked chat's mention, e.g. its title. */
-  readonly describeThread?: (threadId: ThreadId) => string | null | undefined;
-}
-
-function withUrl(text: string, url: string | undefined): string {
-  return url ? `${text} ${url}` : text;
-}
-
-function describeTaskLink(
-  link: LocalTaskLink,
-  describeThread: TaskStartPromptInput["describeThread"],
-): string {
-  switch (link.kind) {
-    case "pr":
-      return withUrl(`Pull request #${link.number}`, link.url);
-    case "issue":
-      return withUrl(`Issue #${link.number}`, link.url);
-    case "workItem":
-      return withUrl(`${WORK_ITEM_PROVIDER_LABELS[link.provider]} ${link.key}`, link.url);
-    case "branch":
-      return `Branch ${link.name}`;
-    case "thread": {
-      // The mention token becomes one of the message's `threadReferences`,
-      // so the node hands the agent an excerpt of that chat.
-      const mention = isThreadMentionableId(link.threadId)
-        ? `@${formatThreadMentionPath(link.threadId)}`
-        : `Chat ${link.threadId}`;
-      const description = describeThread?.(link.threadId)?.replace(/\s+/g, " ").trim();
-      return description ? `${mention} (${description})` : mention;
-    }
-    case "url":
-      return withUrl(link.label ?? "", link.url).trim();
-  }
-}
-
-/**
- * The first message of a chat started from a task: its title, its notes, then
- * what it links to, one bullet per link. Chats are written as `@thread:<id>`
- * mentions so they travel as thread references.
- */
-export function buildTaskStartPrompt(input: TaskStartPromptInput): string {
-  const sections = [input.title.trim()];
-  const notes = input.notes.trim();
-  if (notes) sections.push(notes);
-  if (input.links.length > 0)
-    sections.push(
-      [
-        "Linked:",
-        ...input.links.map((link) => `- ${describeTaskLink(link, input.describeThread)}`),
-      ].join("\n"),
-    );
-  return sections.join("\n\n");
 }
 
 /** Words a branch name skips: they make it longer without telling tasks apart. */

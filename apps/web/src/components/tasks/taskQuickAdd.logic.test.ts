@@ -1,4 +1,4 @@
-import { ProjectId } from "@ryco/contracts";
+import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { dueAtForDay } from "./taskDue.logic";
@@ -16,7 +16,9 @@ const day = (date: number) => dueAtForDay(new Date(2026, 9, date).getTime());
 const project = (id: string, name: string): TaskProjectOption => ({
   projectId: ProjectId.make(id),
   name,
-  color: "#6366f1",
+  environmentId: EnvironmentId.make("environment-test"),
+  cwd: `/tmp/${id}`,
+  avatarHash: null,
 });
 const RYCO = project("p-ryco", "ryco");
 const INSPECT = project("p-inspect", "cs2inspect-web");

@@ -190,10 +190,10 @@
 .tsk-st[data-status="error"] .tsk-st-dot {
   background: var(--destructive);
 }
-.tsk-st[data-status="unavailable"] {
+.tsk-st[data-status="archived"] {
   color: var(--task-faint);
 }
-.tsk-st[data-status="unavailable"] .tsk-st-dot {
+.tsk-st[data-status="archived"] .tsk-st-dot {
   background: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
 }
 @keyframes tsk-pulse {
@@ -208,6 +208,20 @@
 @keyframes tsk-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ── Loading placeholder ───────────────────────────────────────── */
+.tsk-placeholder {
+  animation: tsk-breathe 1.6s var(--task-ease) infinite alternate;
+  animation-play-state: var(--app-motion-activity-play-state);
+}
+@keyframes tsk-breathe {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
   }
 }
 
@@ -311,20 +325,35 @@
 .tsk-chat:hover {
   background: var(--muted);
 }
+.tsk-chat-open {
+  transition: color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-chat:hover .tsk-chat-open,
+.tsk-chat:focus-visible .tsk-chat-open {
+  color: var(--foreground);
+}
 .tsk-chat:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
-.tsk-split > button:hover:not(:disabled) {
+.tsk-start {
+  transition: opacity var(--task-dur-fade) var(--task-ease);
+}
+.tsk-start:hover {
   opacity: 0.9;
 }
-.tsk-split > button:focus-visible {
+.tsk-start:focus-visible {
   outline: 2px solid var(--ring);
-  outline-offset: -2px;
+  outline-offset: 2px;
 }
-.tsk-del:hover {
-  color: var(--foreground);
-  background: var(--muted);
+.tsk-del {
+  transition:
+    color var(--task-dur-fade) var(--task-ease),
+    background-color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-del:hover:not(:disabled) {
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
 }
 
 /* ── Completed toggle ─────────────────────────────────────────── */

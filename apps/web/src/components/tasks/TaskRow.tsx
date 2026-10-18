@@ -1,4 +1,4 @@
-import { CheckIcon, PlayIcon } from "lucide-react";
+import { CheckIcon, MessageSquareDashedIcon, PlayIcon } from "lucide-react";
 import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { TaskDetails } from "./TaskDetails";
@@ -22,8 +22,8 @@ export interface TaskRowProps {
 }
 
 /**
- * One task: the checkbox, the title, a hover-revealed "▶ Start" while it
- * has no chats, and the meta line; clicking anywhere on the line opens the
+ * One task: the checkbox, the title, a hover-revealed "▶ Start" (or its
+ * unsent "Draft") while it has no chats, and the meta line; clicking anywhere on the line opens the
  * details beneath it. The title is a button laid over the whole line (the
  * checkbox, Start and, while open, the title field sit above it), so the
  * line is one keyboard stop with `aria-expanded` and no button nests in
@@ -111,17 +111,22 @@ export const TaskRow = memo(function TaskRow(props: TaskRowProps) {
             type="button"
             className="tsk-go relative z-[1] inline-flex shrink-0 cursor-pointer items-center gap-[5px] rounded-[6px] border-0 bg-transparent px-[7px] py-[3px] text-[12px] text-muted-foreground"
             title={
-              task.whereOptions[0]
-                ? `Start a chat in ${task.whereOptions[0].hintPrefix}`
-                : "Start a chat"
+              task.hasDraft
+                ? "Open the chat’s unsent draft"
+                : task.startHint
+                  ? `Start a chat in ${task.startHint.prefix}`
+                  : "Start a chat"
             }
-            disabled={task.starting}
             onPointerEnter={() => handlers.onPrepareStart(task.id)}
             onFocus={() => handlers.onPrepareStart(task.id)}
             onClick={() => handlers.onStart(task.id)}
           >
-            <PlayIcon className="size-3.5 shrink-0" aria-hidden />
-            Start
+            {task.hasDraft ? (
+              <MessageSquareDashedIcon className="size-3.5 shrink-0" aria-hidden />
+            ) : (
+              <PlayIcon className="size-3.5 shrink-0" aria-hidden />
+            )}
+            {task.hasDraft ? "Draft" : "Start"}
           </button>
         ) : null}
         <TaskRowMeta task={task} project={props.project} now={props.now} />

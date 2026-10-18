@@ -55,9 +55,13 @@ before connecting a new client surface.
 Tasks belong to the selected node; a node that supports what follows advertises the
 `localTasks` capability. All methods are owner-only: `server.listLocalTasks`,
 `getLocalTask`, `createLocalTask`, `updateLocalTask`, `deleteLocalTask`,
-`delegateLocalTask`, `createLocalTaskFileUpload`, `addLocalTaskFile`, and
-`removeLocalTaskFile`. There is no external task service or task push subscription in this
-implementation; reread the task after mutations or relevant thread events.
+`delegateLocalTask`, `createLocalTaskFileUpload`, `addLocalTaskFile`, `removeLocalTaskFile`,
+and the stream `server.subscribeLocalTaskChanges`, which sends `{ taskId }` for each task a
+change touches from then on (created, edited, deleted, a file, a chat start), whoever made it:
+another client or an agent through Agent Control (see [Agent Control](./agent-control.md#tasks)).
+Read the task (or the list, when it is gone) on a change; the stream carries no task content and
+nothing that happened before it was opened, so read the list when it (re)connects. There is no
+external task service; status changes of a task's chats arrive with the chats themselves.
 
 Create supplies `taskId`, `title`, `notes`, `priority`, `dueAt`, and nullable `projectId`.
 Priorities are `low`, `normal`, `high`, and `urgent`; `dueAt` is an ISO instant or null.
@@ -70,7 +74,8 @@ Refresh and resolve a revision conflict instead of blindly repeating an outdated
 `updateLocalTask` accepts `links`, which replaces the task's whole list (at most 20). A link
 is a pull request (`pr`, number and optional URL), an issue (`issue`), a Jira work item
 (`workItem`, key such as `ABC-123`), a `branch`, an existing chat (`thread`), or a `url`
-with an optional label. Because the list is replaced, a client that retries a link edit after
+with an optional label. A pull request, issue or work item may keep the `title` it had when it
+was linked (up to 300 characters). Because the list is replaced, a client that retries a link edit after
 a revision conflict should apply its own additions and removals to the reloaded list rather
 than resend the list it built before.
 
@@ -107,12 +112,18 @@ failed), the task's project can no longer change; a start that failed before its
 or whose chat was deleted, no longer holds it.
 
 The node records each start before dispatching it through normal orchestration and keys it by
-the command id. Retry an ambiguous start with the identical command and command id: a
-concurrent or later retry joins the running start or answers with the task once the start
-reached its chat, and never dispatches twice. A different command under a used command id is
-a conflict. A start that fails before its chat can run is kept as `failed` with its `error`,
-and its file copies are deleted; resending that command fails again with the same error
-(reason `conflict`), because it can never run: start again with a new command, message and,
+the command id. Retry an ambiguous start with the same command id: a concurrent or later
+retry joins the running start or answers with the task once the start reached its chat, and
+never dispatches twice. A command id names one start, for one thread and message; the resend
+may differ otherwise (a client restamps the message's time), and a resend of a start that has
+not reached orchestration yet is what runs. The same command id for another thread or message
+is a conflict. A start that fails before orchestration takes its command (its worktree setup
+failed, say) is kept as `failed` with its `error`, and its file copies are deleted. Resending
+that command id starts it again: the resent command replaces the failed start and is checked
+like a new one, the way a draft resends a failed worktree launch. Its bootstrap may create a
+thread id the failed attempt created and deleted again, as orchestration allows for any
+permanently deleted (not trashed) thread. A start whose command orchestration refused fails
+again with the same error (reason `conflict`): start again with a new command, message and,
 for a new thread, thread id. When the node
 restarts, an unsent start whose command orchestration had accepted counts as dispatched, and
 any other unsent start fails with "The chat start was interrupted by a restart." Files in the
@@ -136,6 +147,11 @@ chat for later work does not change which turn belongs to the task.
 
 Deleting a task deletes its starts and its files; the copies inside its chats belong to those
 chats and stay.
+
+Agents work with the same tasks through the private Agent Control tools (see
+[Agent Control](./agent-control.md#tasks)): their edits are these calls, a chat they start is a
+start like any other (recorded before it is dispatched, with the task's files), and a delete they
+ask for runs only once the user approves it.
 
 ## Daily recap
 

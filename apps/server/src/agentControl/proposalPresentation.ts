@@ -15,6 +15,8 @@ export const agentControlRiskTagsForPlan = (
   plan: AgentControlActionPlan,
 ): Array<AgentControlRiskTag> => {
   switch (plan.kind) {
+    case "deleteLocalTask":
+      return [AGENT_CONTROL_RISK_TAGS.removesLocalTask];
     case "createThreads": {
       const tags = [
         AGENT_CONTROL_RISK_TAGS.createsThreads,
@@ -79,8 +81,13 @@ export const agentControlRiskTagsForPlan = (
 
 export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): string => {
   switch (plan.kind) {
-    case "createThreads":
-      return `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;
+    case "deleteLocalTask":
+      return `Delete task "${plan.title.slice(0, 200)}" with its files; its chats are kept`;
+    case "createThreads": {
+      const tasks = plan.entries.filter((entry) => entry.localTaskId !== undefined).length;
+      const threads = `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;
+      return tasks === 0 ? threads : `${threads}, ${tasks} started from a task`;
+    }
     case "sendMessage":
       return `Send a message to thread ${plan.threadId}`;
     case "interruptThread":

@@ -1,11 +1,12 @@
 import "./tasks.css";
 
 import type { ProjectId } from "@ryco/contracts";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon, ListTodoIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { TaskAddRow } from "./TaskAddRow";
 import { TaskRow } from "./TaskRow";
+import { TaskProjectIcon } from "./TaskRowMeta";
 import {
   type SettlingTask,
   type TaskListEntry,
@@ -159,6 +160,7 @@ export function TasksView(props: {
             <FilterButton
               key={project.projectId}
               label={project.name}
+              icon={<TaskProjectIcon project={project} className="size-3" />}
               pressed={model.filterProjectId === project.projectId}
               onClick={() => handlers.onFilterChange(project.projectId)}
             />
@@ -174,6 +176,11 @@ export function TasksView(props: {
       <div className="flex flex-col" data-task-list="open">
         {renderRows(lists.open)}
       </div>
+      {model.loading ? (
+        <TaskListPlaceholder />
+      ) : lists.open.length === 0 ? (
+        <TaskListEmpty filtered={model.filterProjectId !== null} />
+      ) : null}
       {model.loading ? null : (
         <>
           <button
@@ -202,17 +209,51 @@ export function TasksView(props: {
 
 function FilterButton(props: {
   readonly label: string;
+  readonly icon?: React.ReactNode;
   readonly pressed: boolean;
   readonly onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      className="tsk-filter max-w-[180px] cursor-pointer truncate rounded-[6px] border-0 bg-transparent px-[7px] py-[3px] text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="tsk-filter inline-flex max-w-[180px] cursor-pointer items-center gap-[5px] rounded-[6px] border-0 bg-transparent px-[7px] py-[3px] text-[12px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
       aria-pressed={props.pressed}
       onClick={props.onClick}
     >
-      {props.label}
+      {props.icon}
+      <span className="min-w-0 truncate">{props.label}</span>
     </button>
+  );
+}
+
+/** While the list loads: three quiet rows where the tasks will be. */
+function TaskListPlaceholder() {
+  return (
+    <div className="tsk-placeholder flex flex-col" aria-hidden>
+      {[62, 44, 53].map((width) => (
+        <div key={width} className="flex h-[40px] items-center gap-[12px] px-[10px]">
+          <span className="size-[18px] shrink-0 rounded-full border-[1.5px] border-border" />
+          <span className="h-[9px] rounded-full bg-muted" style={{ width: `${width}%` }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** No open tasks (in the project filtered to): what the page is for, in two lines. */
+function TaskListEmpty(props: { readonly filtered: boolean }) {
+  return (
+    <div className="flex flex-col items-center gap-[6px] px-[10px] pt-[36px] pb-[12px] text-center">
+      <span className="mb-[4px] grid size-[34px] place-items-center rounded-[10px] bg-muted text-muted-foreground">
+        <ListTodoIcon className="size-4" aria-hidden />
+      </span>
+      <p className="m-0 text-[13px] font-medium text-foreground">
+        {props.filtered ? "Nothing open in this project" : "Nothing open"}
+      </p>
+      <p className="m-0 max-w-[340px] text-[12.5px] leading-[1.5] text-(--task-faint)">
+        Write down a problem or an idea above. Open it to add notes, links and files, then start a
+        chat from it.
+      </p>
+    </div>
   );
 }

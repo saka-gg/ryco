@@ -24,8 +24,16 @@ import {
 import { WorkItemProviderKind } from "./workItems.ts";
 
 export const LocalTaskId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,128}$/));
-const Title = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(500));
-const Notes = Schema.String.check(Schema.isMaxLength(20_000));
+export type LocalTaskId = typeof LocalTaskId.Type;
+export const LOCAL_TASK_TITLE_MAX_LENGTH = 500;
+export const LOCAL_TASK_NOTES_MAX_LENGTH = 20_000;
+export const LocalTaskTitle = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(LOCAL_TASK_TITLE_MAX_LENGTH),
+);
+const Title = LocalTaskTitle;
+export const LocalTaskNotes = Schema.String.check(Schema.isMaxLength(LOCAL_TASK_NOTES_MAX_LENGTH));
+const Notes = LocalTaskNotes;
 export const LocalTaskPriority = Schema.Literals(["low", "normal", "high", "urgent"]);
 const LocalTaskFields = {
   title: Title,
@@ -46,6 +54,11 @@ const LocalTaskUrl = TrimmedNonEmptyString.check(
   Schema.isMaxLength(2048),
   Schema.isPattern(/^https?:\/\/\S+$/i),
 );
+/** The title a linked pull request, issue or work item had when it was linked. */
+export const LOCAL_TASK_LINK_TITLE_MAX_LENGTH = 300;
+const LocalTaskLinkTitle = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(LOCAL_TASK_LINK_TITLE_MAX_LENGTH),
+);
 /** A Jira-style issue key such as `ABC-123`. */
 export const LocalTaskWorkItemKey = TrimmedNonEmptyString.check(
   Schema.isMaxLength(64),
@@ -62,17 +75,20 @@ export const LocalTaskLink = Schema.Union([
     kind: Schema.Literal("pr"),
     number: PositiveInt,
     url: Schema.optionalKey(LocalTaskUrl),
+    title: Schema.optionalKey(LocalTaskLinkTitle),
   }),
   Schema.Struct({
     kind: Schema.Literal("issue"),
     number: PositiveInt,
     url: Schema.optionalKey(LocalTaskUrl),
+    title: Schema.optionalKey(LocalTaskLinkTitle),
   }),
   Schema.Struct({
     kind: Schema.Literal("workItem"),
     provider: WorkItemProviderKind,
     key: LocalTaskWorkItemKey,
     url: Schema.optionalKey(LocalTaskUrl),
+    title: Schema.optionalKey(LocalTaskLinkTitle),
   }),
   Schema.Struct({
     kind: Schema.Literal("branch"),
@@ -265,6 +281,13 @@ export const LocalTaskRemoveFileInput = Schema.Struct({
   fileId: ChatAttachmentId,
 });
 export type LocalTaskRemoveFileInput = typeof LocalTaskRemoveFileInput.Type;
+
+/**
+ * A task changed on the node (created, edited, deleted, a file or a chat
+ * start): clients that show tasks read them again.
+ */
+export const LocalTaskChange = Schema.Struct({ taskId: LocalTaskId });
+export type LocalTaskChange = typeof LocalTaskChange.Type;
 
 export class LocalTaskError extends Schema.TaggedError<LocalTaskError>()("LocalTaskError", {
   reason: Schema.Literals(["not-found", "conflict", "invalid", "persistence"]),

@@ -2,7 +2,7 @@ import type { ProjectId } from "@ryco/contracts";
 import { CalendarIcon, PlusIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { TaskProjectDot } from "./TaskRowMeta";
+import { TaskProjectIcon } from "./TaskRowMeta";
 import { dueLabel } from "./taskDue.logic";
 import { parseTaskQuickAdd, splitPastedTaskLines } from "./taskQuickAdd.logic";
 import { TASK_CHIP_CLASS, TASK_CHIP_LABEL_CLASS, TASK_TITLE_MAX_LENGTH } from "./tasksUi";
@@ -72,7 +72,7 @@ export function TaskAddRow(props: {
           {parsed.chips.map((chip) =>
             chip.kind === "project" ? (
               <span key="project" className={TASK_CHIP_CLASS}>
-                <TaskProjectDot color={chip.project.color} />
+                <TaskProjectIcon project={chip.project} className="size-3" />
                 <span className={TASK_CHIP_LABEL_CLASS}>{chip.project.name}</span>
               </span>
             ) : (

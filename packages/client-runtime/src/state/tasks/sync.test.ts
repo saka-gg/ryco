@@ -20,6 +20,7 @@ import {
   LOCAL_TASKS_MAX_PAGES,
   LOCAL_TASKS_PAGE_SIZE,
   LOCAL_TASKS_READ_ERROR,
+  LOCAL_TASKS_CHANGE_READ_DELAY_MS,
   LOCAL_TASKS_THREAD_REFRESH_DELAY_MS,
   LOCAL_TASKS_UNSUPPORTED_ERROR,
   refreshLocalTasks,
@@ -353,6 +354,51 @@ describe("retainLocalTasks", () => {
     expect(list).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(list).toHaveBeenCalledTimes(2);
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the tasks the node reports changed, and the list once one is gone", async () => {
+    vi.useFakeTimers();
+    const list = vi
+      .fn<ListFn>()
+      .mockResolvedValueOnce(page([task("a"), task("b")]))
+      .mockResolvedValue(page([task("a", { revision: 2, title: "Renamed by an agent" })]));
+    const get = vi.fn((input: { readonly taskId: string }) =>
+      input.taskId === "a"
+        ? Promise.resolve(task("a", { revision: 2, title: "Renamed by an agent" }))
+        : Promise.reject(new Error("Task not found.")),
+    );
+    let emit: (change: { readonly taskId: string }) => void = () => {};
+    const unsubscribe = vi.fn();
+    const api: LocalTasksApi = {
+      listLocalTasks: list,
+      getLocalTask: get as never,
+      subscribeLocalTaskChanges: (listener) => {
+        emit = listener;
+        return unsubscribe;
+      },
+    };
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    // A burst for one task reads that task once, not the list.
+    emit({ taskId: "a" });
+    emit({ taskId: "a" });
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_CHANGE_READ_DELAY_MS);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(environment().tasks["a"]?.title).toBe("Renamed by an agent");
+
+    // A task that can no longer be read (deleted) re-reads the list, which drops it.
+    emit({ taskId: "b" });
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_CHANGE_READ_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(taskIds()).toEqual(["a"]);
 
     release();
     await vi.advanceTimersByTimeAsync(0);
