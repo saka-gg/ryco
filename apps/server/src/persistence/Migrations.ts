@@ -137,6 +137,9 @@ import Migration0091, {
 import Migration0092, {
   ensureLocalTaskDelegationsTable,
 } from "./Migrations/092_LocalTaskDelegations.ts";
+import Migration0093, {
+  dropUnusedOrchestrationIndexes,
+} from "./Migrations/093_DropUnusedOrchestrationIndexes.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -240,6 +243,7 @@ export const migrationEntries = [
   [90, "AuthAccessLinks", Migration0090],
   [91, "GuardedLatestCompletedTurnTrigger", Migration0091],
   [92, "LocalTaskDelegations", Migration0092],
+  [93, "DropUnusedOrchestrationIndexes", Migration0093],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -589,6 +593,16 @@ export const repairLocalTaskDelegationsTable = Effect.fn("repairLocalTaskDelegat
   },
 );
 
+// Unused orchestration indexes: run 093 again as a repair when a later id was recorded first
+// (parallel branches claim the same next id). One catalog lookup per boot once they are gone.
+export const repairUnusedOrchestrationIndexes = Effect.fn("repairUnusedOrchestrationIndexes")(
+  function* () {
+    if (yield* dropUnusedOrchestrationIndexes) {
+      yield* Effect.log("Dropped unused orchestration indexes");
+    }
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -789,6 +803,9 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       }
       if (toMigrationInclusive === undefined || toMigrationInclusive >= 92) {
         yield* repairLocalTaskDelegationsTable();
+      }
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 93) {
+        yield* repairUnusedOrchestrationIndexes();
       }
     }),
   );
