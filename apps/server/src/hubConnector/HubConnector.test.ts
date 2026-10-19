@@ -29,8 +29,12 @@ import {
   stubNativeNodeClaimService,
 } from "./testUtils/e2eeOperatorStub.ts";
 import type { HubRelaySocket, HubRelaySocketEventMap } from "./HubRelayTransport.ts";
-import { HubConnector, type HubConnectorScheduler } from "./HubConnector.ts";
-import type { RelayChannelSendHandle } from "./RelayChannelRegistry.ts";
+import {
+  HubConnector,
+  type HubConnectorScheduler,
+  RelayInboundFrameOrder,
+} from "./HubConnector.ts";
+import type { RelayChannelSendHandle, RelayRpcChannelSession } from "./RelayChannelRegistry.ts";
 
 class FakeSocket implements HubRelaySocket {
   bufferedAmount = 0;
@@ -1510,6 +1514,292 @@ describe("HubConnector", () => {
     expect(socket.closeCalls).toBe(1);
     expect(connector.status()).toMatchObject({ state: "degraded", failure: "protocol_invalid" });
     await connector.stop();
+  });
+
+  describe("inbound frame order", () => {
+    const liveChannel = `ch_${"L".repeat(22)}` as RelayChannelId;
+    const openingChannel = `ch_${"P".repeat(22)}` as RelayChannelId;
+
+    function gate() {
+      let release!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    }
+
+    /**
+     * An online connector whose channel sessions record what they receive.
+     * `holdOpen` keeps one channel's session in preparation until released.
+     */
+    async function onlineConnector(
+      options: {
+        readonly protocolMinor?: 2 | 3;
+        readonly onE2eeEnrollmentRevoked?: () => Promise<void>;
+        readonly receive?: (channelId: RelayChannelId, bytes: Uint8Array) => Promise<boolean>;
+      } = {},
+    ) {
+      const protocolMinor = options.protocolMinor ?? 2;
+      const socket = new FakeSocket();
+      const clock = scheduler();
+      const received: string[] = [];
+      const closed: RelayChannelId[] = [];
+      const preparing = new Map<string, Promise<void>>();
+      const activeIdentity = identity();
+      const open = vi.fn(async ({ channelId }: { readonly channelId: RelayChannelId }) => {
+        await preparing.get(channelId as string);
+        return {
+          receive: async (bytes: Uint8Array) => {
+            if (options.receive !== undefined) return options.receive(channelId, bytes);
+            received.push(`${channelId}:${bytes[0]}`);
+            return true;
+          },
+          queuedBytes: async () => 0,
+          supportsChunkedMessages: () => false,
+          close: async () => {
+            closed.push(channelId);
+          },
+        } satisfies RelayRpcChannelSession;
+      });
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity({
+          createRelayAuthenticationFrame: async () => {
+            const frame = await activeIdentity.createRelayAuthenticationFrame(
+              "https://relay.example",
+              { protocolMajor: 1, protocolMinor },
+            );
+            return { ...frame, protocolMinor } as RelayNodeAuthHandshake;
+          },
+        }),
+        transport: { open: () => socket },
+        channels: { open },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+        ...(options.onE2eeEnrollmentRevoked === undefined
+          ? {}
+          : { onE2eeEnrollmentRevoked: options.onE2eeEnrollmentRevoked }),
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      socket.emit("message", {
+        data: encoded({
+          type: "ready",
+          protocolMajor: 1,
+          protocolMinor,
+          limits: RELAY_INITIAL_LIMITS,
+        }),
+      } as MessageEvent);
+      await starting;
+      expect(connector.status().state).toBe("online");
+      return {
+        connector,
+        socket,
+        received,
+        closed,
+        open,
+        deliver: (frame: RelayFrame) => {
+          socket.emit("message", { data: encoded(frame) } as MessageEvent);
+        },
+        holdOpen: (channelId: RelayChannelId) => {
+          const preparation = gate();
+          preparing.set(channelId as string, preparation.promise);
+          return preparation.release;
+        },
+        channelOpen: (channelId: RelayChannelId): RelayFrame => ({
+          type: "channel.open",
+          protocolMajor: 1,
+          protocolMinor,
+          channelId,
+          capability: "ryco.rpc",
+          effectiveRole: "operator",
+        }),
+        channelData: (channelId: RelayChannelId, sequence: number, byte: number): RelayFrame => ({
+          type: "data",
+          protocolMajor: 1,
+          protocolMinor,
+          channelId,
+          sequence: sequence as never,
+          payload: Uint8Array.of(byte),
+        }),
+      };
+    }
+
+    it("handles a live channel's frames while another channel's session is still opening", async () => {
+      const relay = await onlineConnector();
+      relay.deliver(relay.channelOpen(liveChannel));
+      await settle(50);
+      const finishOpen = relay.holdOpen(openingChannel);
+      relay.deliver(relay.channelOpen(openingChannel));
+      await settle(50);
+      expect(relay.open).toHaveBeenCalledTimes(2);
+
+      relay.deliver(relay.channelData(liveChannel, 0, 1));
+      relay.deliver(relay.channelData(liveChannel, 1, 2));
+      await settle(50);
+      // Delivered while the other session is still being prepared.
+      expect(relay.received).toEqual([`${liveChannel}:1`, `${liveChannel}:2`]);
+
+      finishOpen();
+      await settle(50);
+      const accepted = relay.socket.sent
+        .map((bytes) => decodeRelayFrame(bytes))
+        .flatMap((result) =>
+          result.ok && result.value.type === "channel.accept" ? [result.value.channelId] : [],
+        );
+      expect(accepted).toEqual([liveChannel, openingChannel]);
+      expect(relay.connector.status()).toMatchObject({ state: "online", activeChannels: 2 });
+      await relay.connector.stop();
+    });
+
+    it("holds a channel's own frames until its session has opened", async () => {
+      const relay = await onlineConnector();
+      const finishOpen = relay.holdOpen(openingChannel);
+      relay.deliver(relay.channelOpen(openingChannel));
+      relay.deliver(relay.channelData(openingChannel, 0, 7));
+      relay.deliver(relay.channelData(openingChannel, 1, 8));
+      await settle(50);
+      expect(relay.received).toEqual([]);
+
+      finishOpen();
+      await settle(50);
+      expect(relay.received).toEqual([`${openingChannel}:7`, `${openingChannel}:8`]);
+      expect(relay.connector.status()).toMatchObject({ state: "online", activeChannels: 1 });
+      await relay.connector.stop();
+    });
+
+    it("orders a connection-scoped frame after the frames before it and before the frames after it", async () => {
+      const revocation = gate();
+      const revoked: string[] = [];
+      const relay = await onlineConnector({
+        protocolMinor: 3,
+        onE2eeEnrollmentRevoked: async () => {
+          revoked.push("started");
+          await revocation.promise;
+          revoked.push("finished");
+        },
+      });
+      relay.deliver(relay.channelOpen(liveChannel));
+      await settle(50);
+      const finishOpen = relay.holdOpen(openingChannel);
+      relay.deliver(relay.channelOpen(openingChannel));
+      relay.deliver({
+        type: "e2ee.enrollment-revoked",
+        protocolMajor: 1,
+        protocolMinor: 3,
+        enrollmentId: `enr_${"E".repeat(22)}`,
+        enrollmentRevision: 1,
+        accountAuthEpoch: 1,
+        deviceAuthEpoch: 2,
+      } as unknown as RelayFrame);
+      relay.deliver(relay.channelData(liveChannel, 0, 1));
+      await settle(50);
+      // The revocation waits for the open received before it, and the live
+      // channel's data received after it waits for the revocation.
+      expect(revoked).toEqual([]);
+      expect(relay.received).toEqual([]);
+
+      finishOpen();
+      await settle(50);
+      expect(revoked).toEqual(["started"]);
+      expect(relay.received).toEqual([]);
+
+      revocation.release();
+      await settle(50);
+      expect(revoked).toEqual(["started", "finished"]);
+      expect(relay.received).toEqual([`${liveChannel}:1`]);
+      await relay.connector.stop();
+    });
+
+    it.each([
+      {
+        name: "a frame for a channel that never existed",
+        failure: "protocol_invalid",
+        frame: (relay: Awaited<ReturnType<typeof onlineConnector>>) =>
+          relay.channelData(`ch_${"U".repeat(22)}` as RelayChannelId, 0, 1),
+        receive: undefined,
+      },
+      {
+        name: "a channel session that throws",
+        failure: "internal_error",
+        frame: (relay: Awaited<ReturnType<typeof onlineConnector>>) =>
+          relay.channelData(liveChannel, 0, 1),
+        receive: async () => {
+          throw new Error("session failed");
+        },
+      },
+    ] as const)(
+      "fails the connection on $name while another channel is opening",
+      async ({ failure, frame, receive }) => {
+        const relay = await onlineConnector(receive === undefined ? {} : { receive });
+        relay.deliver(relay.channelOpen(liveChannel));
+        await settle(50);
+        const finishOpen = relay.holdOpen(openingChannel);
+        relay.deliver(relay.channelOpen(openingChannel));
+        await settle(50);
+
+        relay.deliver(frame(relay));
+        await settle(50);
+        expect(relay.socket.closeCalls).toBe(1);
+        expect(relay.connector.status()).toMatchObject({ state: "degraded", failure });
+
+        // The session still being prepared never goes live: it is closed as
+        // soon as it exists.
+        finishOpen();
+        await settle(50);
+        expect(relay.closed).toEqual([liveChannel, openingChannel]);
+        await relay.connector.stop();
+      },
+    );
+
+    it("forgets a channel's queue once its frames are handled", async () => {
+      const failures: unknown[] = [];
+      const order = new RelayInboundFrameOrder(async (error) => {
+        failures.push(error);
+      });
+      const handled: string[] = [];
+      const preparation = gate();
+      const frame = (
+        type: "channel.open" | "channel.close",
+        channelId: RelayChannelId,
+      ): RelayFrame =>
+        type === "channel.open"
+          ? {
+              type,
+              protocolMajor: 1,
+              protocolMinor: 2,
+              channelId,
+              capability: "ryco.rpc",
+              effectiveRole: "operator",
+            }
+          : { type, protocolMajor: 1, protocolMinor: 2, channelId };
+
+      order.schedule(frame("channel.open", openingChannel), async () => {
+        await preparation.promise;
+        handled.push("opening:open");
+      });
+      order.schedule(frame("channel.close", openingChannel), async () => {
+        handled.push("opening:close");
+      });
+      order.schedule(frame("channel.open", liveChannel), async () => {
+        handled.push("live:open");
+      });
+      order.schedule(frame("channel.close", liveChannel), async () => {
+        throw new Error("close failed");
+      });
+      await settle(50);
+      expect(handled).toEqual(["live:open"]);
+      // A failed handler is reported and does not keep its channel queued.
+      expect(failures).toEqual([new Error("close failed")]);
+      expect(order.queuedChannels).toBe(1);
+
+      preparation.release();
+      await order.settled();
+      expect(handled).toEqual(["live:open", "opening:open", "opening:close"]);
+      expect(order.queuedChannels).toBe(0);
+    });
   });
 
   describe("liveness watch", () => {

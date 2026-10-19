@@ -209,9 +209,9 @@ export interface RelayRpcChannelSession {
    * entry exists. What the registry guarantees is narrower than "first on the
    * wire", and a carrier protocol should read it exactly:
    *
-   * - it is awaited inside the `channel.open` handling, so a caller that
-   *   serializes frame delivery — as the connection does — processes no further
-   *   frame, on this channel or any other, until it settles; and
+   * - it is awaited inside the `channel.open` handling, so a caller that orders
+   *   each channel's frames behind its open — as the connection does — delivers
+   *   no further frame on this channel until it settles; and
    * - nothing on this channel has been able to send before it.
    *
    * The registry does **not** stop a concurrent `RelayChannelRegistry.send` for
@@ -219,15 +219,14 @@ export interface RelayRpcChannelSession {
    * apart from the announcement. A protocol that owns sequence 0 must be the
    * channel's only out-of-band sender until this returns.
    *
-   * **It MUST NOT perform slow work.** It occupies the connection's serialized
-   * frame chain, where a `ping` waiting behind it is a `pong` the peer's
-   * dead-connection timer is not receiving. Anything expensive — building and
-   * signing a capability statement, reading key custody — belongs ahead of it,
-   * with the bytes prepared before the channel opens, leaving the announcement
-   * itself a single `send`. The registry enforces that bound rather than
-   * trusting it: an announcement still outstanding after a quarter of the
-   * negotiated heartbeat interval loses its channel, so no announcement can
-   * hold the connection long enough for the peer to declare it dead.
+   * **It MUST NOT perform slow work.** Every connection-scoped frame received
+   * after the open — a statement acknowledgement, an enrollment revocation —
+   * waits for it, on top of this channel's own traffic. Anything expensive —
+   * building and signing a capability statement, reading key custody — belongs
+   * ahead of it, with the bytes prepared before the channel opens, leaving the
+   * announcement itself a single `send`. The registry enforces that bound rather
+   * than trusting it: an announcement still outstanding after a quarter of the
+   * negotiated heartbeat interval loses its channel.
    *
    * A rejection, a throw, or an overrun of that bound closes the channel
    * exactly as any other open-time session failure does.
@@ -357,6 +356,8 @@ export class RelayChannelRegistry {
   readonly #channels = new Map<string, ChannelEntry>();
   readonly #preparing = new Set<string>();
   readonly #recentlyClosed = new Set<string>();
+  /** Settles when the inbound delivery in progress finishes; see `#data`. */
+  #delivering: Promise<void> | undefined;
   #stopping = false;
 
   constructor(options: {
@@ -415,6 +416,12 @@ export class RelayChannelRegistry {
     return this.#channels.has(channelId as string);
   }
 
+  /**
+   * Handle one inbound channel frame.
+   *
+   * Frames of one channel must be handed over one at a time, in arrival order;
+   * frames of different channels may be handled concurrently, including opens.
+   */
   async handle(frame: RelayFrame): Promise<void> {
     switch (frame.type) {
       case "channel.open":
@@ -629,7 +636,8 @@ export class RelayChannelRegistry {
   }
 
   /**
-   * How long an acceptance announcement may hold the connection's frame chain.
+   * How long an acceptance announcement may hold its channel, and the
+   * connection-scoped frames received after its open.
    *
    * Derived from the connection's own liveness parameters rather than invented:
    * the relay contract holds `deadConnectionTimeoutMs` at no less than twice
@@ -698,6 +706,10 @@ export class RelayChannelRegistry {
 
   async #open(frame: RelayChannelOpenFrame): Promise<void> {
     const key = frame.channelId as string;
+    // Opens of different channels run concurrently, so the capacity check and
+    // the `#preparing` claim below stay in one synchronous step: a second open
+    // that starts while this one prepares counts it, and the two can never
+    // both take the last slot.
     const rejected =
       this.#stopping ||
       frame.capability !== "ryco.rpc" ||
@@ -809,6 +821,9 @@ export class RelayChannelRegistry {
           });
         },
       });
+      // The connection may have been torn down while the session was being
+      // prepared. `closeAll` only reaches live channels, so a channel still
+      // preparing then is closed here and rejected rather than going live.
       if (this.#stopping) {
         await session.close().catch(() => undefined);
         throw new Error("stopping");
@@ -850,9 +865,10 @@ export class RelayChannelRegistry {
     // which the send handle will actually take it. Awaited rather than
     // fire-and-forget: an asynchronous announcement that raced the first
     // inbound frame would emit its "first" message after other traffic, which
-    // is exactly what a sequence-0 carrier cannot do. Awaiting it here is what
-    // costs the connection's frame chain, which is why the announcement
-    // contract bounds what it may do and `#announce` enforces that bound.
+    // is exactly what a sequence-0 carrier cannot do. Awaiting it here holds
+    // this channel's later frames and every connection-scoped frame received
+    // after the open, which is why the announcement contract bounds what it may
+    // do and `#announce` enforces that bound.
     const accepted = this.#channels.get(key);
     const onAccepted = accepted?.session.onAccepted;
     if (accepted === undefined || accepted.closed || onAccepted === undefined) return;
@@ -895,19 +911,36 @@ export class RelayChannelRegistry {
         return;
       }
     }
-    const aggregateQueued = (
-      await Promise.all(
-        [...this.#channels.values()].map((channel) => channel.session.queuedBytes()),
-      )
-    ).reduce((total, value) => total + value, 0);
-    if (
-      aggregateQueued + frame.payload.byteLength >
-      this.#limits.maxQueuedBytes - this.#limits.maxControlFrameBytes
-    ) {
-      await this.closeChannel(frame.channelId, "slow_consumer");
-      return;
+    // One delivery at a time across every channel. Frames of different
+    // channels are handled concurrently, and the aggregate budget is read from
+    // every session across an await, so two channels checking at once could
+    // each admit a payload the other never counted. A delivery only queues
+    // bytes in its session, so the wait is short and never spans an open; an
+    // uncontended delivery does not wait at all.
+    while (this.#delivering !== undefined) await this.#delivering;
+    let finishDelivery!: () => void;
+    this.#delivering = new Promise<void>((resolve) => {
+      finishDelivery = resolve;
+    });
+    let accepted = false;
+    try {
+      // A channel that closed while it waited has nowhere to deliver to.
+      if (entry.closed) return;
+      const aggregateQueued = (
+        await Promise.all(
+          [...this.#channels.values()].map((channel) => channel.session.queuedBytes()),
+        )
+      ).reduce((total, value) => total + value, 0);
+      if (
+        aggregateQueued + frame.payload.byteLength <=
+        this.#limits.maxQueuedBytes - this.#limits.maxControlFrameBytes
+      ) {
+        accepted = await entry.session.receive(Uint8Array.from(frame.payload));
+      }
+    } finally {
+      this.#delivering = undefined;
+      finishDelivery();
     }
-    const accepted = await entry.session.receive(Uint8Array.from(frame.payload));
     if (!accepted) {
       await this.closeChannel(frame.channelId, "slow_consumer");
       return;
