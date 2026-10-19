@@ -580,6 +580,16 @@ export interface DesktopWorkspaceStateProjection {
   readonly accountE2ee?: "ready" | "securing" | "unavailable" | "revoked";
 }
 
+/** The state without its snapshot bodies, which can reach megabytes. */
+export type DesktopWorkspaceStateSummary = Omit<DesktopWorkspaceStateProjection, "snapshots">;
+
+/**
+ * A state pushed to the renderer. `snapshots` is absent when they are the same
+ * as in the previous push, so the renderer keeps the ones it holds.
+ */
+export type DesktopWorkspaceStatePush = DesktopWorkspaceStateSummary &
+  Partial<Pick<DesktopWorkspaceStateProjection, "snapshots">>;
+
 export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
@@ -840,31 +850,35 @@ export interface DesktopBridge {
     readonly totpCode?: string;
   }) => Promise<DesktopHostedIdentityActionResult>;
   cancelHostedGitHubConnection?: () => Promise<void>;
-  /** Secret-free native workspace client projection and scoped operations. */
+  /**
+   * Secret-free native workspace client projection and scoped operations. Only
+   * the state read carries snapshot bodies; the replies to commands are
+   * summaries, and changed snapshots arrive through `onDesktopWorkspaceState`.
+   */
   getDesktopWorkspaceState?: () => Promise<DesktopWorkspaceStateProjection>;
   renameDesktopWorkspaceDevice?: (input: {
     readonly environmentId: EnvironmentId;
     readonly label: string;
-  }) => Promise<DesktopWorkspaceStateProjection>;
-  refreshDesktopWorkspaceCatalog?: () => Promise<DesktopWorkspaceStateProjection>;
+  }) => Promise<DesktopWorkspaceStateSummary>;
+  refreshDesktopWorkspaceCatalog?: () => Promise<DesktopWorkspaceStateSummary>;
   publishDesktopWorkspaceSnapshot?: (
     snapshot: DesktopWorkspaceMetadataProjection,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   retainDesktopWorkspaceScope?: (input: {
     readonly environmentId: EnvironmentId;
     readonly scope: DesktopWorkspaceScopeProjection;
   }) => Promise<{
     readonly leaseId: string;
-    readonly state: DesktopWorkspaceStateProjection;
+    readonly state: DesktopWorkspaceStateSummary;
   }>;
-  renewDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateProjection>;
-  releaseDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateProjection>;
+  renewDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateSummary>;
+  releaseDesktopWorkspaceScope?: (leaseId: string) => Promise<DesktopWorkspaceStateSummary>;
   setDesktopWorkspaceBackgrounded?: (
     backgrounded: boolean,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   purgeDesktopWorkspaceCache?: (
     environmentId?: EnvironmentId,
-  ) => Promise<DesktopWorkspaceStateProjection>;
+  ) => Promise<DesktopWorkspaceStateSummary>;
   beginDesktopWorkspaceVerification?: (input: {
     readonly nodeId: string;
     readonly environmentId: EnvironmentId;
@@ -874,10 +888,8 @@ export interface DesktopBridge {
     readonly nodeId: string;
     readonly environmentId: EnvironmentId;
     readonly payload: string;
-  }) => Promise<DesktopWorkspaceStateProjection>;
-  onDesktopWorkspaceState?: (
-    listener: (state: DesktopWorkspaceStateProjection) => void,
-  ) => () => void;
+  }) => Promise<DesktopWorkspaceStateSummary>;
+  onDesktopWorkspaceState?: (listener: (state: DesktopWorkspaceStatePush) => void) => () => void;
   onDesktopWorkspaceConnectionCommand?: (
     listener: (command: DesktopWorkspaceConnectionCommand) => void,
   ) => () => void;
