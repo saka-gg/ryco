@@ -7,9 +7,9 @@ import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeThreadForkHandlers } from "./threadForkRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
-import { Effect, Layer, Option } from "effect";
+import { Effect, Layer, Option, type Scope, type Stream } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
-import { RpcSerialization } from "effect/rpc";
+import { type Rpc, type RpcGroup, RpcSerialization } from "effect/rpc";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
 import { makeWsRpcContext } from "./context.ts";
@@ -77,8 +77,42 @@ export const makeDeviceWsRpcLayer = (principal: RpcPrincipal) =>
     Layer.provideMerge(RpcSerialization.layerJson),
   );
 
-export const makeWsRpcLayer = (principal: RpcPrincipal) =>
-  WsRpcGroup.toLayer(makeWsRpcHandlers(principal));
+type HandlerResultServices<Result> =
+  Result extends Rpc.Wrapper<infer Inner>
+    ? HandlerResultServices<Inner>
+    : Result extends Effect.Effect<infer _A, infer _E, infer R>
+      ? R
+      : Result extends Stream.Stream<infer _A, infer _E, infer R>
+        ? R
+        : never;
+
+/**
+ * The services a handler map's effects and streams need, one handler at a time.
+ * `RpcGroup.toLayer` infers the same union, but its inference is quadratic in the number of
+ * RPCs and the application group outgrew TypeScript's instantiation budget. The group has no
+ * middleware, so nothing beyond the handlers' own services is provided or required.
+ */
+type HandlerMapServices<Handlers> = {
+  [K in keyof Handlers]: Handlers[K] extends (...args: never) => infer Result
+    ? HandlerResultServices<Result>
+    : never;
+}[keyof Handlers];
+
+export const makeWsRpcLayer = (principal: RpcPrincipal) => {
+  const build = makeWsRpcHandlers(principal);
+  // `WsRpcGroup.of` in `makeWsRpcHandlers` already checks every RPC has its handler.
+  const toLayer = WsRpcGroup.toLayer as unknown as (
+    handlers: typeof build,
+  ) => Layer.Layer<
+    Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
+    Effect.Error<typeof build>,
+    Exclude<
+      Effect.Services<typeof build> | HandlerMapServices<Effect.Success<typeof build>>,
+      Scope.Scope
+    >
+  >;
+  return toLayer.call(WsRpcGroup, build);
+};
 
 export const makeDirectWsRpcLayer = (session: AuthenticatedSession) =>
   makeWsRpcLayer(directRpcPrincipal(session));

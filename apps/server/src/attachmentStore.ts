@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
-import { link, lstat, open, rm, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, link, lstat, open, rm, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -15,7 +15,11 @@ import {
   normalizeAttachmentRelativePath,
   resolveAttachmentRelativePath,
 } from "./attachmentPaths.ts";
-import { inferImageExtension, SAFE_IMAGE_FILE_EXTENSIONS } from "./imageMime.ts";
+import {
+  inferImageExtension,
+  parseBase64DataUrl,
+  SAFE_IMAGE_FILE_EXTENSIONS,
+} from "./imageMime.ts";
 
 const ATTACHMENT_FILENAME_EXTENSIONS = [...SAFE_IMAGE_FILE_EXTENSIONS, ".bin"];
 const ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS = 80;
@@ -88,7 +92,26 @@ export function createFileAttachmentId(threadId: string, name: string): string |
   if (!threadSegment) {
     return null;
   }
-  return `${threadSegment}-${randomUUID()}-${toSafeFileAttachmentExtensionSegment(name)}`;
+  return composeAttachmentId(
+    threadSegment,
+    randomUUID(),
+    toSafeFileAttachmentExtensionSegment(name),
+  );
+}
+
+/**
+ * `<segment>-<uuid>`, then `-<extension>` when there is one, the extension shortened so the id
+ * keeps within an attachment id's 128 characters: the longest segment (80) leaves it 10.
+ */
+export function composeAttachmentId(
+  segment: string,
+  uuid: string,
+  extension: string | null | undefined,
+): string {
+  const base = `${segment}-${uuid}`;
+  return extension
+    ? `${base}-${extension.slice(0, ATTACHMENT_ID_MAX_CHARS - base.length - 1)}`
+    : base;
 }
 
 /** The first 32 hex digits of a sha-256 digest, formatted like a UUID (no version bits). */
@@ -161,6 +184,63 @@ function attachmentByteLimit(attachment: ChatAttachment): number {
   return attachment.type === "image"
     ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
     : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
+}
+
+export type DecodedUploadAttachmentDataUrl =
+  | { readonly ok: true; readonly bytes: Buffer; readonly mimeType: string }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * Decodes an inline (`data:` URL) attachment and checks it against what the sender declared: the
+ * MIME type, the exact byte count, canonical base64 and the per-type size limit. Chat commands
+ * and task files both accept exactly the payloads this accepts. The returned MIME type is
+ * lowercased.
+ */
+export function decodeUploadAttachmentDataUrl(input: {
+  readonly type: "image" | "file";
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly dataUrl: string;
+}): DecodedUploadAttachmentDataUrl {
+  const parsed = parseBase64DataUrl(input.dataUrl);
+  if (!parsed) {
+    return { ok: false, message: `Attachment '${input.name}' must use a valid base64 data URL.` };
+  }
+  const mimeType = parsed.mimeType.toLowerCase();
+  if (mimeType !== input.mimeType.toLowerCase()) {
+    return {
+      ok: false,
+      message: `Attachment '${input.name}' declares '${input.mimeType}' but its payload is '${parsed.mimeType}'.`,
+    };
+  }
+  if (input.type === "image" && !mimeType.startsWith("image/")) {
+    return {
+      ok: false,
+      message: `Image attachment '${input.name}' must use an image MIME type.`,
+    };
+  }
+  const normalizedBase64 = parsed.base64.replace(/\s+/g, "");
+  const bytes = Buffer.from(normalizedBase64, "base64");
+  if (
+    bytes.byteLength === 0 ||
+    bytes.toString("base64") !== normalizedBase64 ||
+    bytes.byteLength !== input.sizeBytes
+  ) {
+    return {
+      ok: false,
+      message: `Attachment '${input.name}' has invalid base64 data or mismatched size metadata.`,
+    };
+  }
+  const limit =
+    input.type === "image" ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
+  if (bytes.byteLength > limit) {
+    return {
+      ok: false,
+      message: `Attachment '${input.name}' is ${bytes.byteLength} bytes; limit is ${limit} bytes.`,
+    };
+  }
+  return { ok: true, bytes, mimeType };
 }
 
 /**
@@ -303,6 +383,27 @@ export function attachmentIdExtensionSegment(attachmentId: string): string | nul
 }
 
 /**
+ * A deterministic attachment id in `threadId`'s segment, derived from (thread, source id): a
+ * retried copy links the same file again, and deleting or reverting the source never touches the
+ * copy. `extensionSegment` is for ids whose on-disk name is exactly the id (streamed uploads);
+ * pass null for an image, whose file is the id plus its image extension (`attachmentRelativePath`).
+ */
+export function derivedAttachmentId(input: {
+  readonly threadId: string;
+  readonly sourceId: string;
+  readonly extensionSegment: string | null;
+}): string | null {
+  const threadSegment = toSafeThreadAttachmentSegment(input.threadId);
+  if (!threadSegment) {
+    return null;
+  }
+  const uuid = uuidFromSha256Hex(
+    createHash("sha256").update(`${input.threadId}\0${input.sourceId}`, "utf8").digest("hex"),
+  );
+  return composeAttachmentId(threadSegment, uuid, input.extensionSegment?.toLowerCase());
+}
+
+/**
  * The id a fork's copy of an inherited attachment gets: in the fork's own thread segment, so
  * deleting or reverting the source never touches it, and derived from (fork, source id), so a
  * retried fork links the same file again. The extension segment of a streamed-upload id is
@@ -312,18 +413,12 @@ export function inheritedAttachmentId(input: {
   readonly forkThreadId: string;
   readonly sourceAttachmentId: string;
 }): string | null {
-  const threadSegment = toSafeThreadAttachmentSegment(input.forkThreadId);
-  if (!threadSegment) {
-    return null;
-  }
-  const extension = input.sourceAttachmentId.match(ATTACHMENT_ID_WITH_EXTENSION_PATTERN)?.[3];
-  const uuid = uuidFromSha256Hex(
-    createHash("sha256")
-      .update(`${input.forkThreadId}\0${input.sourceAttachmentId}`, "utf8")
-      .digest("hex"),
-  );
-  const id = `${threadSegment}-${uuid}${extension ? `-${extension.toLowerCase()}` : ""}`;
-  return id.length <= ATTACHMENT_ID_MAX_CHARS ? id : null;
+  return derivedAttachmentId({
+    threadId: input.forkThreadId,
+    sourceId: input.sourceAttachmentId,
+    extensionSegment:
+      input.sourceAttachmentId.match(ATTACHMENT_ID_WITH_EXTENSION_PATTERN)?.[3] ?? null,
+  });
 }
 
 /**
@@ -345,29 +440,18 @@ function errorCode(cause: unknown): string | undefined {
   return cause instanceof Error && "code" in cause ? String(cause.code) : undefined;
 }
 
-/** Copy through a private staging file, then publish without overwriting. */
-async function copyAttachmentFile(source: string, destination: string, attachmentsDir: string) {
+/**
+ * Fills a private staging file in `attachmentsDir`, then publishes it at `destination` without
+ * overwriting. False when the destination already existed (nothing was written).
+ */
+async function publishStagedFile(
+  attachmentsDir: string,
+  destination: string,
+  fill: (staging: string) => Promise<void>,
+): Promise<boolean> {
   const staging = path.join(attachmentsDir, `.${randomUUID()}.part`);
-  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-  let input: FileHandle | undefined;
-  let output: FileHandle | undefined;
   try {
-    input = await open(source, constants.O_RDONLY | noFollow);
-    output = await open(staging, "wx", 0o600);
-    const chunk = Buffer.allocUnsafe(64 * 1024);
-    for (let offset = 0; ;) {
-      const { bytesRead } = await input.read(chunk, 0, chunk.length, offset);
-      if (bytesRead === 0) break;
-      let written = 0;
-      while (written < bytesRead) {
-        const result = await output.write(chunk, written, bytesRead - written, offset + written);
-        written += result.bytesWritten;
-      }
-      offset += bytesRead;
-    }
-    await output.sync();
-    await output.close();
-    output = undefined;
+    await fill(staging);
     try {
       await link(staging, destination);
       return true;
@@ -376,17 +460,130 @@ async function copyAttachmentFile(source: string, destination: string, attachmen
       throw cause;
     }
   } finally {
-    await input?.close();
-    await output?.close();
     await rm(staging, { force: true });
   }
 }
 
+/** Copy through a private staging file, then publish without overwriting. */
+function copyAttachmentFile(source: string, destination: string, attachmentsDir: string) {
+  return publishStagedFile(attachmentsDir, destination, async (staging) => {
+    const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    let input: FileHandle | undefined;
+    let output: FileHandle | undefined;
+    try {
+      input = await open(source, constants.O_RDONLY | noFollow);
+      output = await open(staging, "wx", 0o600);
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      for (let offset = 0; ;) {
+        const { bytesRead } = await input.read(chunk, 0, chunk.length, offset);
+        if (bytesRead === 0) break;
+        let written = 0;
+        while (written < bytesRead) {
+          const result = await output.write(chunk, written, bytesRead - written, offset + written);
+          written += result.bytesWritten;
+        }
+        offset += bytesRead;
+      }
+      await output.sync();
+    } finally {
+      await input?.close();
+      await output?.close();
+    }
+  });
+}
+
+async function assertAttachmentSource(input: {
+  readonly source: string;
+  readonly sizeBytes: number;
+  readonly name: string;
+}): Promise<void> {
+  const sourceInfo = await lstat(input.source);
+  if (!sourceInfo.isFile() || sourceInfo.size !== input.sizeBytes) {
+    throw new Error(`Attachment '${input.name}' is missing or changed.`);
+  }
+}
+
+async function assertAttachmentCopy(input: {
+  readonly destination: string;
+  readonly sizeBytes: number;
+  readonly name: string;
+}): Promise<void> {
+  const copied = await lstat(input.destination);
+  if (!copied.isFile() || copied.size !== input.sizeBytes) {
+    throw new Error(`Attachment '${input.name}' could not be copied.`);
+  }
+}
+
 /**
- * Materializes a fork's copy of an inherited attachment: a hard link to the source file (no
- * bytes copied), or a staged copy when the link crosses filesystems. Never follows a symlink and
- * never overwrites: an existing copy (a retry) counts as done. Returns the rewritten attachment;
- * `created` is false when nothing was written.
+ * Publishes `source` at `destination`: a hard link (no bytes copied), or a copy staged in
+ * `attachmentsDir` when the link crosses filesystems or the filesystem refuses links. Never
+ * follows a symlink and never overwrites: an existing destination (a retry) counts as done. Both
+ * ends must be regular files of `sizeBytes`; `name` only labels the errors. `created` is false
+ * when nothing was written.
+ */
+export async function linkOrCopyAttachmentFile(input: {
+  readonly source: string;
+  readonly destination: string;
+  readonly attachmentsDir: string;
+  readonly sizeBytes: number;
+  readonly name: string;
+}): Promise<{ readonly created: boolean }> {
+  await assertAttachmentSource(input);
+  let created: boolean;
+  try {
+    await link(input.source, input.destination);
+    created = true;
+  } catch (cause) {
+    const code = errorCode(cause);
+    if (code === "EEXIST") {
+      created = false;
+    } else if (code === "EXDEV" || code === "EPERM" || code === "ENOTSUP") {
+      created = await copyAttachmentFile(input.source, input.destination, input.attachmentsDir);
+    } else {
+      throw cause;
+    }
+  }
+  await assertAttachmentCopy(input);
+  return { created };
+}
+
+/**
+ * Publishes a private copy of `source` at `destination`, one that never shares the source's
+ * inode, so writing to the copy (an agent editing its attachment in place) cannot change the
+ * source. It is a copy-on-write clone where the filesystem has them (APFS, btrfs, XFS: no bytes
+ * duplicated) and a byte copy elsewhere, staged in `attachmentsDir` and published without
+ * overwriting: an existing destination (a retry) counts as done. Same checks and `created` as
+ * `linkOrCopyAttachmentFile`.
+ */
+export async function cloneAttachmentFile(input: {
+  readonly source: string;
+  readonly destination: string;
+  readonly attachmentsDir: string;
+  readonly sizeBytes: number;
+  readonly name: string;
+}): Promise<{ readonly created: boolean }> {
+  await assertAttachmentSource(input);
+  const created = await publishStagedFile(
+    input.attachmentsDir,
+    input.destination,
+    async (staging) => {
+      await copyFile(input.source, staging, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+      // A byte copy is only durable once synced, like `copyAttachmentFile`'s.
+      const handle = await open(staging, constants.O_RDONLY);
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+  await assertAttachmentCopy(input);
+  return { created };
+}
+
+/**
+ * Materializes a fork's copy of an inherited attachment through `linkOrCopyAttachmentFile`.
+ * Returns the rewritten attachment; `created` is false when nothing was written.
  */
 export async function materializeInheritedAttachment(input: {
   readonly attachmentsDir: string;
@@ -411,28 +608,13 @@ export async function materializeInheritedAttachment(input: {
   if (!source || !destination) {
     throw new Error(`Invalid attachment id '${input.attachment.id}'.`);
   }
-  const sourceInfo = await lstat(source);
-  if (!sourceInfo.isFile() || sourceInfo.size !== input.attachment.sizeBytes) {
-    throw new Error(`Attachment '${input.attachment.name}' is missing or changed.`);
-  }
-  let created: boolean;
-  try {
-    await link(source, destination);
-    created = true;
-  } catch (cause) {
-    const code = errorCode(cause);
-    if (code === "EEXIST") {
-      created = false;
-    } else if (code === "EXDEV" || code === "EPERM" || code === "ENOTSUP") {
-      created = await copyAttachmentFile(source, destination, input.attachmentsDir);
-    } else {
-      throw cause;
-    }
-  }
-  const copied = await lstat(destination);
-  if (!copied.isFile() || copied.size !== input.attachment.sizeBytes) {
-    throw new Error(`Attachment '${input.attachment.name}' could not be inherited.`);
-  }
+  const { created } = await linkOrCopyAttachmentFile({
+    source,
+    destination,
+    attachmentsDir: input.attachmentsDir,
+    sizeBytes: input.attachment.sizeBytes,
+    name: input.attachment.name,
+  });
   return { attachment: copy, created };
 }
 

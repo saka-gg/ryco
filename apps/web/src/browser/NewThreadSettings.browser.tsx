@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   type EffectiveProjectPreferences,
   type EnvironmentApi,
   type ServerConfig,
@@ -14,7 +15,10 @@ import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 const navigate = vi.fn(async () => undefined);
-const router = { state: { matches: [] }, navigate };
+const router = {
+  state: { matches: [] as Array<{ params: Record<string, string> }> },
+  navigate,
+};
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   useRouter: () => router,
@@ -29,7 +33,7 @@ vi.mock("../hooks/useSettings", () => ({
   __resetClientSettingsPersistenceForTests: vi.fn(),
 }));
 
-import { useComposerDraftStore } from "../composerDraftStore";
+import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -107,6 +111,7 @@ let mounted: Awaited<ReturnType<typeof render>> | null = null;
 beforeEach(() => {
   localStorage.clear();
   navigate.mockClear();
+  router.state.matches = [];
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   useComposerDraftStore.setState({
     draftsByThreadKey: {},
@@ -312,5 +317,43 @@ describe("draft settings for canonical environment identities", () => {
     resolveAnswer({ ...effective, defaultThreadEnvMode: { value: "worktree", source: "node" } });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(readDraft()).toMatchObject({ envMode: "local" });
+  });
+  it("leaves a task's draft to its task when a new thread is opened from it", async () => {
+    const primaryConfig = config(canonicalId);
+    writePrimaryEnvironmentDescriptor(primaryConfig.environment);
+    setServerConfigSnapshot(primaryConfig);
+    __setEnvironmentApiOverrideForTests(canonicalId, {
+      server: { getProjectPreferences: async () => effective },
+    } as unknown as EnvironmentApi);
+    const taskDraftId = DraftId.make("draft-task");
+    const projectRef = { environmentId: canonicalId, projectId };
+    useComposerDraftStore
+      .getState()
+      .createDetachedDraftSession(scopedProjectKey(projectRef), projectRef, taskDraftId, {
+        threadId: ThreadId.make("thread-task"),
+        envMode: "worktree",
+        branch: "feature/parser",
+        worktreePath: null,
+        localTaskId: "task-1",
+      });
+    // On the task's draft, New thread for the same project.
+    router.state.matches = [{ params: { draftId: taskDraftId } }];
+    mounted = await render(<NewDraft environmentId={canonicalId} />);
+    await page.getByRole("button", { name: "New draft" }).click();
+
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+    const projectDraft = useComposerDraftStore
+      .getState()
+      .getDraftSessionByLogicalProjectKey(scopedProjectKey(projectRef));
+    expect(projectDraft?.draftId).not.toBe(taskDraftId);
+    expect(projectDraft?.localTaskId ?? null).toBeNull();
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/draft/$draftId",
+      params: { draftId: projectDraft!.draftId },
+    });
+    expect(useComposerDraftStore.getState().getDraftSession(taskDraftId)).toMatchObject({
+      localTaskId: "task-1",
+      branch: "feature/parser",
+    });
   });
 });

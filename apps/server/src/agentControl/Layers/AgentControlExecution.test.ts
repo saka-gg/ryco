@@ -12,6 +12,7 @@ import {
   AgentControlOperationId,
   AgentControlProposalId,
   AgentControlRequestId,
+  LocalTaskError,
   OrchestrationThreadShell,
   ProjectId,
   ProviderInstanceId,
@@ -50,6 +51,7 @@ import { DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
+import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   WorkspaceLifecycle,
@@ -1844,4 +1846,236 @@ it.effect(
         CompletionReturnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
       ),
     ),
+);
+
+it.effect("deletes exactly the approved task revision, once", () =>
+  Effect.gen(function* () {
+    const deletePlan = {
+      kind: "deleteLocalTask" as const,
+      taskId: "task-old",
+      expectedRevision: 4,
+      title: "Old idea",
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: deletePlan,
+      planDigest: computeAgentControlPlanDigest(deletePlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const removed: unknown[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {},
+      commandApplication: {},
+    }).pipe(
+      Effect.provideService(LocalTaskService, {
+        remove: (input: unknown) =>
+          Effect.sync(() => {
+            removed.push(input);
+            return { deleted: true as const };
+          }),
+      } as never),
+    );
+    yield* executor.executeApproved(proposal.proposalId);
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    assert.deepEqual(removed, [{ taskId: "task-old", expectedRevision: 4 }]);
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.include(operation.state.completedSteps, "local-task-deleted");
+  }),
+);
+
+it.effect("completes a delete a restart interrupted once the task is gone", () =>
+  Effect.gen(function* () {
+    const deletePlan = {
+      kind: "deleteLocalTask" as const,
+      taskId: "task-old",
+      expectedRevision: 4,
+      title: "Old idea",
+    };
+    const executing: AgentControlProposal = {
+      ...approvedProposal,
+      plan: deletePlan,
+      planDigest: computeAgentControlPlanDigest(deletePlan),
+      status: "executing",
+    };
+    const running: AgentControlOperation = {
+      operationId: AgentControlOperationId.make("operation-delete-interrupted"),
+      proposalId: executing.proposalId,
+      actionKind: "deleteLocalTask",
+      status: "running",
+      attempt: 1,
+      // Deleted, but the server stopped before the checkpoint said so.
+      state: {
+        completedSteps: [],
+        resources: { threadIds: [], ownedThreadIds: [], worktreeIds: [], ownedWorktrees: [] },
+        commandReceipts: [],
+      },
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const proposalRef = yield* Ref.make(executing);
+    const operationRef = yield* Ref.make(running);
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.modify(proposalRef, (current) => {
+            const next: AgentControlProposal = {
+              ...current,
+              status: input.result.outcome === "completed" ? "completed" : "failed",
+              result: input.result,
+            };
+            return [next, next];
+          }),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+      },
+      projections: {},
+      commandApplication: {},
+    }).pipe(
+      Effect.provideService(LocalTaskService, {
+        get: () =>
+          Effect.fail(new LocalTaskError({ reason: "not-found", message: "Task not found." })),
+      } as never),
+    );
+    yield* execution.recoverIncomplete;
+    assert.strictEqual((yield* Ref.get(proposalRef)).status, "completed");
+    const operation = yield* Ref.get(operationRef);
+    assert.strictEqual(operation.status, "completed");
+    assert.include(operation.state.completedSteps, "local-task-deleted");
+  }),
+);
+
+it.effect("starts an agent's task chat as the task's, with copies of the task's files", () =>
+  Effect.gen(function* () {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-control-task-start-"));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+    );
+    const taskFilesDir = path.join(baseDir, "userdata", "task-files");
+    fs.mkdirSync(taskFilesDir, { recursive: true });
+    const taskFile = {
+      fileId: "task-task-1-00000000-0000-0000-0000-000000000001-md",
+      type: "file" as const,
+      name: "plan.md",
+      mimeType: "text/markdown",
+      sizeBytes: 7,
+      addedAt: now,
+    };
+    fs.writeFileSync(path.join(taskFilesDir, taskFile.fileId), "# Plan\n");
+    const taskPlan = {
+      ...createThreadsPlan,
+      entries: [
+        {
+          ...createThreadsPlan.entries[0]!,
+          prompt: "Fix the login loop\n\nLinked:\n- @thread:thread-linked (Old chat)",
+          localTaskId: "task-1",
+        },
+      ],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan: taskPlan,
+      planDigest: computeAgentControlPlanDigest(taskPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const calls: Array<readonly [string, unknown]> = [];
+    const viaApplyInternal: Array<{ readonly type: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      baseDir,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            viaApplyInternal.push(command);
+            return { sequence: viaApplyInternal.length };
+          }),
+        applyInternal: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            viaApplyInternal.push(command);
+            return { sequence: viaApplyInternal.length };
+          }),
+      },
+    }).pipe(
+      Effect.provideService(LocalTaskService, {
+        reserveDelegation: (
+          input: {
+            readonly taskId: string;
+            readonly command: { readonly commandId: string };
+          },
+          options: { readonly branch?: string | null },
+        ) =>
+          Effect.sync(() => {
+            calls.push(["reserve", input]);
+            // Agent Control makes a worktree itself: its branch comes along, not in a bootstrap.
+            assert.deepEqual(options, { branch: null });
+            return {
+              task: {} as never,
+              command: input.command,
+              files: [taskFile],
+              replayed: false,
+              needsDispatch: true,
+            };
+          }),
+        markDelegated: (commandId: string) =>
+          Effect.sync(() => {
+            calls.push(["delegated", commandId]);
+          }),
+        markDelegationFailed: () => Effect.die("unexpected failure"),
+      } as never),
+    );
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const turnStart = viaApplyInternal.find((command) => command.type === "thread.turn.start") as
+      | {
+          readonly commandId: string;
+          readonly threadId: ThreadId;
+          readonly threadReferences?: ReadonlyArray<string>;
+          readonly message: { readonly attachments: ChatAttachment[] };
+        }
+      | undefined;
+    assert.isDefined(turnStart);
+    // Recorded under the task before it runs, and marked once it did.
+    assert.deepEqual(
+      calls.map(([step]) => step),
+      ["reserve", "delegated"],
+    );
+    const reserved = calls[0]![1] as {
+      readonly taskId: string;
+      readonly command: { readonly commandId: string; readonly threadId: string };
+    };
+    assert.strictEqual(reserved.taskId, "task-1");
+    assert.strictEqual(reserved.command.commandId, turnStart!.commandId);
+    assert.strictEqual(reserved.command.threadId, turnStart!.threadId);
+    assert.strictEqual(calls[1]![1], turnStart!.commandId);
+    // The chat links the task's linked chats, and gets its own copy of the task's file.
+    assert.deepEqual(turnStart!.threadReferences, ["thread-linked"]);
+    const [copy] = turnStart!.message.attachments;
+    assert.deepInclude(copy, { name: "plan.md", sizeBytes: 7 });
+    assert.strictEqual(
+      parseThreadSegmentFromAttachmentId(copy!.id!),
+      toSafeThreadAttachmentSegment(turnStart!.threadId),
+    );
+  }).pipe(Effect.scoped),
 );

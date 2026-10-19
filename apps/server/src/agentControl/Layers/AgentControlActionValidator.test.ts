@@ -15,8 +15,10 @@ import {
   ThreadId,
   TurnId,
   WorktreeId,
+  LocalTaskError,
   type AgentControlProposal,
   type AgentControlExternalIntegration,
+  type LocalTask,
   type MessageId,
   type OrchestrationMessage,
   type OrchestrationShellSnapshot,
@@ -1224,5 +1226,165 @@ it.effect("external workspace lifecycle requires its grant, project scope, and n
       (yield* Effect.flip(validator.revalidateExecution(proposal))).reason,
       "caller-stale",
     );
+  }),
+);
+
+it.effect("starts a task's chat only for an open task of the entry's project", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const tasks = yield* Ref.make<Record<string, LocalTask>>({});
+    const localTask = (taskId: string, overrides: Partial<LocalTask> = {}): LocalTask => ({
+      taskId,
+      revision: 3,
+      title: "Fix the login loop",
+      notes: "",
+      priority: "normal",
+      dueAt: null,
+      projectId,
+      links: [],
+      files: [],
+      state: "todo",
+      createdAt: now,
+      updatedAt: now,
+      status: "todo",
+      delegations: [],
+      ...overrides,
+    });
+    yield* Ref.set(tasks, {
+      open: localTask("open"),
+      unassigned: localTask("unassigned", { projectId: null }),
+      done: localTask("done", { state: "done", status: "done" }),
+      elsewhere: localTask("elsewhere", { projectId: ProjectId.make("project-other") }),
+    });
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections: {
+        getShellSnapshot: () => Ref.get(snapshot),
+      } as unknown as ProjectionSnapshotQueryShape,
+      getProviders: Ref.get(providers),
+      listRefs: () => Effect.die("unused"),
+      localTasks: {
+        get: (taskId) =>
+          Ref.get(tasks).pipe(
+            Effect.flatMap((all) =>
+              all[taskId]
+                ? Effect.succeed(all[taskId]!)
+                : Effect.fail(
+                    new LocalTaskError({ reason: "not-found", message: "Task not found." }),
+                  ),
+            ),
+          ),
+      },
+    });
+    const planFor = (localTaskId: string, extra: { readonly artifacts?: string[] } = {}) => ({
+      kind: "createThreads" as const,
+      entries: [
+        {
+          projectId,
+          title: "Fix the login loop",
+          prompt: "Fix the login loop",
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+          runtimeMode: "approval-required" as const,
+          envMode: "worktree" as const,
+          localTaskId,
+          ...extra,
+        },
+      ],
+    });
+    const principal = yield* validator.validateSubmission({
+      session,
+      authority,
+      plan: planFor("open"),
+    });
+    // A task without a project joins the one its chat starts in.
+    yield* validator.validateSubmission({ session, authority, plan: planFor("unassigned") });
+    const refusals: ReadonlyArray<readonly [string, { readonly artifacts?: string[] }, string]> = [
+      ["done", {}, "task-stale"],
+      ["elsewhere", {}, "project-scope"],
+      ["missing", {}, "task-unavailable"],
+      ["open", { artifacts: ["render-1:thread-caller-page"] }, "invalid-plan"],
+    ];
+    for (const [taskId, extra, reason] of refusals) {
+      const error = yield* Effect.flip(
+        validator.validateSubmission({ session, authority, plan: planFor(taskId, extra) }),
+      );
+      assert.strictEqual(error.reason, reason, taskId);
+    }
+
+    // Completed before the approved start executes: it does not run.
+    const proposal = approvedProposal(principal, planFor("open"));
+    yield* validator.revalidateExecution(proposal);
+    yield* Ref.update(tasks, (all) => ({
+      ...all,
+      open: localTask("open", { state: "done", status: "done" }),
+    }));
+    const stale = yield* Effect.flip(validator.revalidateExecution(proposal));
+    assert.strictEqual(stale.reason, "task-stale");
+
+    // Never from an external integration.
+    const external = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: externalIntegration([AGENT_CONTROL_CAPABILITIES.externalCreateTask]),
+        plan: planFor("unassigned"),
+      }),
+    );
+    assert.strictEqual(external.reason, "privilege-escalation");
+  }),
+);
+
+it.effect("deletes only the task revision the user approves, and only for a provider thread", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const revision = yield* Ref.make(4);
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections: {
+        getShellSnapshot: () => Ref.get(snapshot),
+      } as unknown as ProjectionSnapshotQueryShape,
+      getProviders: Ref.get(providers),
+      listRefs: () => Effect.die("unused"),
+      localTasks: {
+        get: (taskId) =>
+          Ref.get(revision).pipe(
+            Effect.map((current): LocalTask => ({
+              taskId,
+              revision: current,
+              title: "Old idea",
+              notes: "",
+              priority: "normal",
+              dueAt: null,
+              // Tasks of another project are the node's own list too.
+              projectId: ProjectId.make("project-other"),
+              links: [],
+              files: [],
+              state: "todo",
+              createdAt: now,
+              updatedAt: now,
+              status: "todo",
+              delegations: [],
+            })),
+          ),
+      },
+    });
+    const plan = {
+      kind: "deleteLocalTask" as const,
+      taskId: "task-old",
+      expectedRevision: 4,
+      title: "Old idea",
+    };
+    const principal = yield* validator.validateSubmission({ session, authority, plan });
+    yield* validator.revalidateExecution(approvedProposal(principal, plan));
+    yield* Ref.set(revision, 5);
+    const changed = yield* Effect.flip(
+      validator.revalidateExecution(approvedProposal(principal, plan)),
+    );
+    assert.strictEqual(changed.reason, "task-stale");
+    const external = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: externalIntegration([AGENT_CONTROL_CAPABILITIES.externalCreateTask]),
+        plan,
+      }),
+    );
+    assert.strictEqual(external.reason, "privilege-escalation");
   }),
 );

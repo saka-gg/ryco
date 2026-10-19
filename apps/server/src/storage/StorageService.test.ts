@@ -151,6 +151,7 @@ const fixture = Effect.gen(function* () {
     stateDir: root,
     dbPath: path.join(root, "node.sqlite"),
     attachmentsDir: path.join(root, "attachments"),
+    taskFilesDir: path.join(root, "task-files"),
     logsDir: path.join(root, "logs"),
   } as ServerConfigShape;
   const policy = yield* makeWorkspaceAccessPolicy(undefined);

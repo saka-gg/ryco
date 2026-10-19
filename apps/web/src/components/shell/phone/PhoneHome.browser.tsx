@@ -578,6 +578,7 @@ describe("PhoneHome", () => {
     vi.mocked(useNewThreadHandler).mockReturnValue({
       handleNewThread,
       handleNewChat: vi.fn(async () => undefined),
+      handleNewTaskChat: vi.fn(async () => null),
     });
     const state = environmentState();
     useStore.setState({

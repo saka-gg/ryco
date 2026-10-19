@@ -57,7 +57,18 @@ export const hasTurnStartEnded = (
     Effect.flatMap((failed) => (failed ? Effect.succeed(true) : hasTurnStartCancelled(sql, input))),
   );
 
-export const readDelegatedRunState = (
+/** A delegated run's state, and whether a turn ever bound to the delegated message. */
+export interface DelegatedRun {
+  readonly state: DelegatedRunState;
+  /**
+   * A turn bound to the message, so the run did start, whatever ended it: an `interrupted` or
+   * `failed` run with a bound turn was stopped or broke while it ran, while one without never
+   * got going (its start failed, was refused or was cancelled before any turn).
+   */
+  readonly turnBound: boolean;
+}
+
+export const readDelegatedRun = (
   sql: SqlClient.SqlClient,
   input: {
     readonly threadId: string;
@@ -65,13 +76,14 @@ export const readDelegatedRunState = (
     readonly commandId?: string;
     readonly dispatched?: boolean;
   },
-): Effect.Effect<DelegatedRunState, SqlError> =>
+): Effect.Effect<DelegatedRun, SqlError> =>
   Effect.gen(function* () {
+    const unbound = (state: DelegatedRunState): DelegatedRun => ({ state, turnBound: false });
     if (input.commandId !== undefined) {
       const receipts = yield* sql<{
         status: string;
       }>`SELECT status FROM orchestration_command_receipts WHERE command_id = ${input.commandId}`;
-      if (receipts[0]?.status === "rejected") return "rejected" as const;
+      if (receipts[0]?.status === "rejected") return unbound("rejected");
     }
     const threads = yield* sql<{
       deleted_at: string | null;
@@ -80,9 +92,9 @@ export const readDelegatedRunState = (
     }>`
       SELECT deleted_at, pending_approval_count, pending_user_input_count FROM projection_threads WHERE thread_id = ${input.threadId}`;
     const thread = threads[0];
-    if (!thread) return input.dispatched ? ("unavailable" as const) : ("starting" as const);
-    if (thread.deleted_at !== null) return "unavailable" as const;
-    if (yield* hasTurnStartFailure(sql, input)) return "failed" as const;
+    if (!thread) return unbound(input.dispatched ? "unavailable" : "starting");
+    if (thread.deleted_at !== null) return unbound("unavailable");
+    if (yield* hasTurnStartFailure(sql, input)) return unbound("failed");
     const turns = yield* sql<{
       state: string;
       turn_id: string | null;
@@ -95,20 +107,26 @@ export const readDelegatedRunState = (
     const turn = turns[0];
     // A start a Stop cancelled loses its pending row (the cancel activity removes it).
     if (!turn) {
-      return (yield* hasTurnStartCancelled(sql, input))
-        ? ("interrupted" as const)
-        : ("starting" as const);
+      return unbound((yield* hasTurnStartCancelled(sql, input)) ? "interrupted" : "starting");
     }
-    if (turn.state === "error") return "failed" as const;
-    if (turn.state === "interrupted") return "interrupted" as const;
+    const bound = (state: DelegatedRunState): DelegatedRun => ({
+      state,
+      turnBound: turn.turn_id !== null,
+    });
+    if (turn.state === "error") return bound("failed");
+    if (turn.state === "interrupted") return bound("interrupted");
     const active = turn.turn_id !== null && turn.active_turn_id === turn.turn_id;
     if (active && (thread.pending_approval_count > 0 || thread.pending_user_input_count > 0))
-      return "needs-you" as const;
-    if (active || turn.state === "running") return "running" as const;
-    if (turn.state === "completed") return "completed" as const;
-    if (turn.state !== "pending") return "failed" as const;
+      return bound("needs-you");
+    if (active || turn.state === "running") return bound("running");
+    if (turn.state === "completed") return bound("completed");
+    if (turn.state !== "pending") return bound("failed");
     // A start a Stop cancelled before the cancel activity removed pending rows.
-    return (yield* hasTurnStartCancelled(sql, input))
-      ? ("interrupted" as const)
-      : ("starting" as const);
+    return bound((yield* hasTurnStartCancelled(sql, input)) ? "interrupted" : "starting");
   });
+
+export const readDelegatedRunState = (
+  sql: SqlClient.SqlClient,
+  input: Parameters<typeof readDelegatedRun>[1],
+): Effect.Effect<DelegatedRunState, SqlError> =>
+  readDelegatedRun(sql, input).pipe(Effect.map((run) => run.state));

@@ -48,6 +48,9 @@ import {
 import { ignoreAlreadyMissingGitResource } from "../../ws/context/gitErrors.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { copyArtifactsToThread, resolveThreadArtifacts } from "../artifactHandoff.ts";
+import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
+import { copyTaskFilesToThread, deleteTaskFileCopies } from "../../tasks/taskFiles.ts";
+import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import {
   assertSafeAgentControlDeviceUrl,
   isAgentControlDevicePlan,
@@ -262,6 +265,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const workspaceLifecycleOption = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
+    const localTasks = yield* Effect.serviceOption(LocalTaskService);
     const config = yield* ServerConfig;
     const startup = yield* ServerRuntimeStartup;
 
@@ -826,6 +830,21 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           return operation;
         }
 
+        if (proposal.plan.kind === "deleteLocalTask") {
+          if (operation.state.completedSteps.includes("local-task-deleted")) return operation;
+          if (Option.isNone(localTasks))
+            return yield* Effect.fail(new Error("Tasks are unavailable on this node."));
+          yield* validator.revalidateExecution(proposal);
+          yield* localTasks.value
+            .remove({
+              taskId: proposal.plan.taskId,
+              expectedRevision: proposal.plan.expectedRevision,
+            })
+            .pipe(Effect.mapError((error) => new Error(error.message)));
+          yield* checkpoint(appendStep(operation.state, "local-task-deleted"));
+          return operation;
+        }
+
         if (proposal.plan.kind === "changeSettings") {
           if (operation.state.completedSteps.includes("settings-updated")) return operation;
           if (Option.isNone(settingsService))
@@ -1167,6 +1186,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                     Effect.mapError((error) => new Error(error.detail)),
                   )
                 : [];
+            const localTaskId =
+              proposal.plan.kind === "createThreads"
+                ? proposal.plan.entries[index]?.localTaskId
+                : undefined;
+            const threadReferences =
+              localTaskId === undefined ? [] : extractThreadReferences(entry.prompt, threadId);
             const turnStart = {
               type: "thread.turn.start" as const,
               commandId: commandIdFor(operation.operationId, `turn-start-${index}`),
@@ -1181,8 +1206,71 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               runtimeMode: entry.runtimeMode,
               interactionMode: "default" as const,
               tokenMode,
+              // A task's chat links the chats its task links to, as a sent message would.
+              ...(threadReferences.length > 0 ? { threadReferences } : {}),
               createdAt,
             };
+            if (localTaskId !== undefined) {
+              // The chat starts as the task's: recorded under the task first (a replay after a
+              // restart finds the same start), then given copies of the task's files.
+              if (Option.isNone(localTasks))
+                return yield* Effect.fail(new Error("Tasks are unavailable on this node."));
+              const tasks = localTasks.value;
+              const reservation = yield* tasks
+                .reserveDelegation(
+                  { taskId: localTaskId, command: turnStart },
+                  { branch: worktree?.branch ?? null },
+                )
+                .pipe(Effect.mapError((error) => new Error(error.message)));
+              const copies = yield* copyTaskFilesToThread({
+                taskFilesDir: config.taskFilesDir,
+                attachmentsDir: config.attachmentsDir,
+                threadId,
+                files: reservation.files,
+              }).pipe(
+                Effect.tapError((error) =>
+                  tasks
+                    .markDelegationFailed(turnStart.commandId, error.message)
+                    .pipe(Effect.ignore),
+                ),
+                Effect.mapError((error) => new Error(error.message)),
+              );
+              yield* dispatch(
+                `turn-started:${index}`,
+                copies.attachments.length === 0
+                  ? turnStart
+                  : {
+                      stored: {
+                        ...turnStart,
+                        message: { ...turnStart.message, attachments: copies.attachments },
+                      },
+                    },
+              ).pipe(
+                Effect.tapError((error) =>
+                  tasks
+                    .markDelegationFailed(
+                      turnStart.commandId,
+                      error instanceof Error && error.message
+                        ? error.message
+                        : "The chat could not be started.",
+                    )
+                    .pipe(
+                      Effect.flatMap((failed) =>
+                        failed
+                          ? deleteTaskFileCopies({
+                              attachmentsDir: config.attachmentsDir,
+                              threadId,
+                              attachmentIds: copies.createdIds,
+                            })
+                          : Effect.void,
+                      ),
+                      Effect.ignore,
+                    ),
+                ),
+              );
+              yield* tasks.markDelegated(turnStart.commandId).pipe(Effect.ignore);
+              continue;
+            }
             yield* dispatch(
               `turn-started:${index}`,
               handedOver.length === 0
@@ -1464,6 +1552,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             message:
               isProjectAction(executing) ||
               executing.plan.kind === "changeSettings" ||
+              executing.plan.kind === "deleteLocalTask" ||
               executing.plan.kind === "createAutomation" ||
               executing.plan.kind === "updateAutomation" ||
               executing.plan.kind === "cancelAutomation"
@@ -1579,6 +1668,39 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 attempt: operation.attempt,
                 state,
                 result,
+                updatedAt: new Date().toISOString(),
+              });
+              yield* proposals.settleExecution({
+                proposalId: proposal.proposalId,
+                result: completedResult(completed),
+                now: new Date().toISOString(),
+              });
+              continue;
+            }
+          }
+          // Deleted, and only the checkpoint was lost: the task being gone is the outcome.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "deleteLocalTask" &&
+            Option.isSome(localTasks)
+          ) {
+            const gone = yield* localTasks.value.get(proposal.plan.taskId).pipe(
+              Effect.as(false),
+              Effect.catch((error) => Effect.succeed(error.reason === "not-found")),
+            );
+            if (gone) {
+              const state = {
+                ...operation.state,
+                completedSteps: unique([...operation.state.completedSteps, "local-task-deleted"]),
+              };
+              const completed = yield* operations.transition({
+                operationId: operation.operationId,
+                expectedStatus: "running",
+                nextStatus: "completed",
+                actor: "executor",
+                attempt: operation.attempt,
+                state,
+                result: completedResult({ ...operation, state }),
                 updatedAt: new Date().toISOString(),
               });
               yield* proposals.settleExecution({

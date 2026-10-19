@@ -2552,8 +2552,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       Effect.provide(NodeServices.layer),
     );
     yield* fileSystem.makeDirectory(derivedPaths.attachmentsDir, { recursive: true });
+    yield* fileSystem.makeDirectory(derivedPaths.taskFilesDir, { recursive: true });
     const uploads = yield* makeChatAttachmentUploads({
       attachmentsDir: derivedPaths.attachmentsDir,
+      taskFilesDir: derivedPaths.taskFilesDir,
     }).pipe(Effect.provide(NodeServices.layer));
     const config = yield* buildAppUnderTest({
       config: { baseDir },
@@ -2634,6 +2636,44 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         body: HttpBody.uint8Array(new TextEncoder().encode("abc")),
       });
       assert.equal(reuseResponse.status, 409);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("streams a task file upload into the task-file store, out of chat attachments", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const { config, uploads } = yield* makeUploadTestContext;
+      const created = yield* uploads.createForTask({
+        taskId: "task-1",
+        name: "spec.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 3,
+      });
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const response = yield* postAttachmentUpload({
+        uploadToken: created.uploadToken,
+        cookie,
+        body: HttpBody.uint8Array(new TextEncoder().encode("pdf")),
+      });
+      assert.equal(response.status, 200);
+      const payload = (yield* response.json) as { readonly id: string };
+      assert.isTrue(payload.id.startsWith("task-task-1-"));
+      assert.deepEqual(yield* fileSystem.readDirectory(config.taskFilesDir), [payload.id]);
+      assert.equal(yield* fileSystem.readFileString(`${config.taskFilesDir}/${payload.id}`), "pdf");
+      assert.deepEqual(yield* fileSystem.readDirectory(config.attachmentsDir), []);
+      // Task files are owner-only; the chat attachment route never serves them.
+      const getResponse = yield* HttpClient.get(`/attachments/${payload.id}`, {
+        headers: { cookie },
+      });
+      assert.equal(getResponse.status, 404);
+      const claimed = yield* uploads.claimForTask({
+        uploadToken: created.uploadToken,
+        taskId: "task-1",
+        name: "spec.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 3,
+      });
+      assert.equal(claimed.attachmentId, payload.id);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

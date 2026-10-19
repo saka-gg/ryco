@@ -4,7 +4,12 @@ import {
   type ClaudeCacheReviewPresentation,
   type SubscribedClaudeReviewState,
 } from "./claudeCacheReview.ts";
-import type { ClaudeResumeGuard, ComputerTurnIntent, UsageLimitResumeGuard } from "@ryco/contracts";
+import type {
+  ClaudeResumeGuard,
+  ComputerTurnIntent,
+  LocalTaskDelegateInput,
+  UsageLimitResumeGuard,
+} from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
 import type {
   EnvironmentApi,
@@ -342,6 +347,15 @@ export interface CommitSendTurnDispatchInput {
     interactionMode: ProviderInteractionMode;
     tokenMode: AgentTokenMode;
   }) => Promise<void>;
+  /**
+   * A task draft's first send: the turn start goes to `delegate` instead of a
+   * plain dispatch, which starts it as the task's chat
+   * (`server.delegateLocalTask`), so the node records the chat under the task
+   * and attaches the task's files in the same step. It rejects like a dispatch.
+   */
+  readonly localTask?: {
+    readonly delegate: (command: LocalTaskDelegateInput["command"]) => Promise<void>;
+  };
 }
 
 /**
@@ -431,7 +445,7 @@ function dispatchTurnStart(
   commandId: CommandId,
 ) {
   const threadReferences = extractThreadReferences(input.outgoingMessageText, input.threadId);
-  return input.api.orchestration.dispatchCommand({
+  const command: LocalTaskDelegateInput["command"] = {
     type: "thread.turn.start",
     ...(input.computerUse ? { computerUse: input.computerUse } : {}),
     commandId,
@@ -456,5 +470,8 @@ function dispatchTurnStart(
       : {}),
     ...(threadReferences.length > 0 ? { threadReferences } : {}),
     createdAt: input.createdAt,
-  });
+  };
+  return input.localTask
+    ? input.localTask.delegate(command)
+    : input.api.orchestration.dispatchCommand(command);
 }

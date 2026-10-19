@@ -4,6 +4,8 @@ import { CheckpointDiffQuery } from "../../checkpointing/Services/CheckpointDiff
 import { withInspectionTools } from "../Mcp/inspectionTools.ts";
 import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
+import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
+import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
@@ -82,6 +84,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
   const proposalRepository = yield* Effect.serviceOption(AgentControlProposalRepository);
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const localTasks = yield* Effect.serviceOption(LocalTaskService);
   const toolDeps = {
     policy,
     proposals,
@@ -170,7 +173,20 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         )
       : undefined;
   if (beta) yield* Effect.addFinalizer(() => Effect.promise(() => beta.dispose()));
-  const tools = withCompleteAgentControlCatalog(beta?.tools ?? legacyComputerTools);
+  const computerTools = beta?.tools ?? legacyComputerTools;
+  const taskTools = Option.isSome(localTasks)
+    ? withLocalTaskTools(computerTools, {
+        policy,
+        registry,
+        proposals,
+        ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+        tasks: localTasks.value,
+        projections,
+        ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
+        ...(Option.isSome(config) ? { taskFilesDir: config.value.taskFilesDir } : {}),
+      })
+    : computerTools;
+  const tools = withCompleteAgentControlCatalog(taskTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

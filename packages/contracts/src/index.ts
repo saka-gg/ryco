@@ -50,6 +50,7 @@ export * from "./projectBrowser.ts";
 
 export * from "./agentControlInspection.ts";
 export * from "./agentControlDelegation.ts";
+export * from "./agentControlLocalTasks.ts";
 
 export * from "./acpRegistry.ts";
 

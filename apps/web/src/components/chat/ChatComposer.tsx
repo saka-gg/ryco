@@ -123,6 +123,7 @@ import {
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
+import { ComposerTaskChip } from "../tasks/ComposerTaskChip";
 import { describeRunningFollowUp, isFollowUpInvertModifier } from "./composerFollowUp";
 import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
@@ -616,6 +617,22 @@ export const ChatComposer = memo(
     const composerTerminalContexts = composerDraft.terminalContexts;
     const composerSourceControlContexts = composerDraft.sourceControlContexts;
     const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
+    // The task an unsent task draft starts a chat for.
+    const draftLocalTaskId = useComposerDraftStore((store) => {
+      const draft = draftId ? store.getDraftSession(draftId) : null;
+      return draft && !draft.promotedTo ? (draft.localTaskId ?? null) : null;
+    });
+    const taskChip = useMemo(
+      () =>
+        draftId && draftLocalTaskId ? (
+          <ComposerTaskChip
+            environmentId={environmentId}
+            draftId={draftId}
+            taskId={draftLocalTaskId}
+          />
+        ) : null,
+      [draftId, draftLocalTaskId, environmentId],
+    );
 
     const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
     const insertComposerDraftTerminalContext = useComposerDraftStore(
@@ -3010,6 +3027,7 @@ export const ChatComposer = memo(
               onSelectComposerItem={onSelectComposerItem}
               composerSourceControlContexts={composerSourceControlContexts}
               onRemoveSourceControlContext={handleRemoveSourceControlContext}
+              leadingContextChips={taskChip}
               composerImages={composerImages}
               nonPersistedComposerImageIdSet={nonPersistedComposerImageIdSet}
               fileUploadRecords={fileUploadRecords}

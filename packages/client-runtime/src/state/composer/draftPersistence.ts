@@ -1,5 +1,6 @@
 import type { ScopedProjectRef, ScopedThreadRef } from "@ryco/contracts";
 import { type EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts/base-schemas";
+import { WorkItemState } from "@ryco/contracts/work-items";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -174,6 +175,32 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
   LegacyStickyModelFields &
   LegacyV2StoreFields;
 
+/** A new worktree's source as a draft keeps it (`DraftWorktreeSource`). */
+const PersistedDraftWorktreeSource = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("pr"),
+    number: Schema.Number,
+    label: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("issue"),
+    number: Schema.Number,
+    title: Schema.String,
+    label: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("workItem"),
+    provider: Schema.Literal("jira"),
+    key: Schema.String,
+    title: Schema.String,
+    state: Schema.optional(WorkItemState),
+    stateName: Schema.optional(Schema.String),
+    url: Schema.optional(Schema.String),
+    label: Schema.String,
+  }),
+]);
+const isPersistedDraftWorktreeSource = Schema.is(PersistedDraftWorktreeSource);
+
 export const PersistedDraftThreadState = Schema.Struct({
   threadId: ThreadId,
   environmentId: Schema.String,
@@ -187,34 +214,10 @@ export const PersistedDraftThreadState = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   fetchOrigin: Schema.optionalKey(Schema.Boolean),
   worktreeBranchName: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  // Optional so drafts persisted before task drafts existed still decode.
+  localTaskId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   // Optional so drafts persisted before sources existed still decode.
-  worktreeSource: Schema.optionalKey(
-    Schema.NullOr(
-      Schema.Union([
-        Schema.Struct({
-          kind: Schema.Literal("pr"),
-          number: Schema.Number,
-          label: Schema.String,
-        }),
-        Schema.Struct({
-          kind: Schema.Literal("issue"),
-          number: Schema.Number,
-          title: Schema.String,
-          label: Schema.String,
-        }),
-        Schema.Struct({
-          kind: Schema.Literal("workItem"),
-          provider: Schema.Literal("jira"),
-          key: Schema.String,
-          title: Schema.String,
-          state: Schema.optional(Schema.String),
-          stateName: Schema.optional(Schema.String),
-          url: Schema.optional(Schema.String),
-          label: Schema.String,
-        }),
-      ]),
-    ),
-  ),
+  worktreeSource: Schema.optionalKey(Schema.NullOr(PersistedDraftWorktreeSource)),
   envMode: DraftThreadEnvModeSchema,
   promotedTo: Schema.optionalKey(
     Schema.NullOr(
@@ -819,6 +822,14 @@ function normalizePersistedDraftThreads(
           typeof candidateDraftThread.worktreeBranchName === "string"
             ? candidateDraftThread.worktreeBranchName
             : null,
+        worktreeSource: isPersistedDraftWorktreeSource(candidateDraftThread.worktreeSource)
+          ? candidateDraftThread.worktreeSource
+          : null,
+        localTaskId:
+          typeof candidateDraftThread.localTaskId === "string" &&
+          candidateDraftThread.localTaskId.length > 0
+            ? candidateDraftThread.localTaskId
+            : null,
         branch: typeof branch === "string" ? branch : null,
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
@@ -1286,6 +1297,8 @@ export function toHydratedDraftThreadState(
     tokenMode: persistedDraftThread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
     fetchOrigin: persistedDraftThread.fetchOrigin ?? true,
     worktreeBranchName: persistedDraftThread.worktreeBranchName ?? null,
+    localTaskId: persistedDraftThread.localTaskId ?? null,
+    worktreeSource: persistedDraftThread.worktreeSource ?? null,
     branch: persistedDraftThread.branch,
     worktreePath: persistedDraftThread.worktreePath,
     envMode: persistedDraftThread.envMode,

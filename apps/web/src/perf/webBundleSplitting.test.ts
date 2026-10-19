@@ -31,6 +31,7 @@ describe("web bundle splitting boundaries", () => {
       "../routes/statistics.tsx",
       "../routes/pull-requests.tsx",
       "../routes/projects.tsx",
+      "../routes/tasks.tsx",
       "../routes/_settings.diagnostics.tsx",
       "../routes/native.authorize.$handoffId.tsx",
     ];
@@ -101,10 +102,17 @@ describe("web bundle splitting boundaries", () => {
       ["../components/pullRequests/PullRequestsPage.tsx", "./pullRequests.css"],
       ["../components/pullRequests/workspace/WorkspacePullRequestPanel.tsx", "../pullRequests.css"],
       ["../components/projects/ProjectsPage.tsx", "./projects.css"],
+      ["../components/tasks/TasksView.tsx", "./tasks.css"],
       ["../components/automations/dialog/AutomationsDialog.tsx", "../styles/automations.css"],
       ["../components/overview/crown/CrownOverview.tsx", "../overview.css"],
     ];
-    for (const sheet of ["pullRequests.css", "projects.css", "automations.css", "overview.css"]) {
+    for (const sheet of [
+      "pullRequests.css",
+      "projects.css",
+      "tasks.css",
+      "automations.css",
+      "overview.css",
+    ]) {
       expect(indexCss).not.toContain(sheet);
     }
     for (const [owner, sheet] of owners) {
@@ -141,6 +149,7 @@ describe("web bundle splitting boundaries", () => {
     const statisticsRoute = await readSource("../routes/statistics.tsx");
     const pullRequestsRoute = await readSource("../routes/pull-requests.tsx");
     const projectsRoute = await readSource("../routes/projects.tsx");
+    const tasksRoute = await readSource("../routes/tasks.tsx");
     const settingsRoute = await readSource("../routes/settings.tsx");
     const diagnosticsRoute = await readSource("../routes/_settings.diagnostics.tsx");
     const nativeAuthorizationRoute = await readSource("../routes/native.authorize.$handoffId.tsx");
@@ -158,6 +167,8 @@ describe("web bundle splitting boundaries", () => {
     expect(pullRequestsRoute).not.toContain("components/pullRequests/PullRequestsPage");
     expect(projectsRoute).toContain('import("../components/routeViews/ProjectsRouteView")');
     expect(projectsRoute).not.toContain("components/projects/ProjectsPage");
+    expect(tasksRoute).toContain('import("../components/routeViews/TasksRouteView")');
+    expect(tasksRoute).not.toContain("components/tasks/TasksPage");
     expect(settingsRouteModule).toContain('import("./components/routeViews/SettingsRouteView")');
     expect(settingsRouteModule).not.toContain('from "./components/settings/SettingsPage"');
     expect(settingsRoute).not.toContain("components/settings/SettingsPage");

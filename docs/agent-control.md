@@ -40,6 +40,10 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
 - `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
   with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
+- `ryco_list_local_tasks`, `ryco_read_local_task`, `ryco_create_local_task`,
+  `ryco_update_local_task`, `ryco_add_local_task_file`, `ryco_remove_local_task_file`,
+  `ryco_start_local_task_chat`, `ryco_propose_local_task_delete`: the user's Tasks page (see
+  [Tasks](#tasks)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
@@ -101,6 +105,40 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   show in the chat's Artifacts tab, marked with the task they came from. A batch carries at most 8
   and 50 MiB in all; the message says how many stayed in their tasks. A returned artifact that is
   gone (its task was reverted) is left out.
+
+## Tasks
+
+The Tasks page is the user's to-do list on the node (problems, ideas, follow-ups), each task with
+notes, a due day, a project, links (pull requests, issues, Jira items, branches, chats, pages) and
+up to 8 files. Agents use it with the `ryco_*_local_task` tools. They are a different thing from
+the runs a chat delegates (`ryco_task_status`).
+
+- **Reading** needs the `local-tasks.read` grant: `ryco_list_local_tasks` (open, done or all tasks,
+  by project or text, newest change first, with a notes preview; `offset` pages past the first
+  answer's `nextOffset`) and `ryco_read_local_task` (one
+  task whole, with its files and the chats started from it).
+- **Changing** needs `local-tasks.manage` and exact active-turn authority, and runs at once.
+  `ryco_create_local_task` takes a `requestId` that names the task, so a retry answers with the
+  same one. `ryco_update_local_task` edits the title, notes, priority, due day, project or links
+  (the whole list), and completes (`state: done`) or reopens a task; it passes the revision last
+  read, and a task changed since fails until it is read again. `ryco_add_local_task_file` adds a
+  regular file of the caller's workspace (a relative path, the same rules as `ryco_attach_file`);
+  adding the same file again adds nothing. `ryco_remove_local_task_file` removes one.
+- **Starting a chat**, `ryco_start_local_task_chat`, also needs `threads.create`. It submits a
+  `ryco_create_threads` request with the entry's `localTaskId`, so the chat runs under that tool's
+  project, runtime-mode and worktree rules, and `returnToOrigin` works as there. The first message
+  is the task's title, notes and links unless a `prompt` is given. The chat is recorded under the
+  task before it is dispatched and gets copies of the task's files; a task without a project joins
+  the caller's, and one in another project can't be started from here. A completed task starts
+  nothing. Starting a task's chat through `ryco_create_threads` needs `local-tasks.manage` too. A `ryco_create_threads` entry can carry
+  `localTaskId` itself, but not together with `artifacts`.
+- **Deleting** is never immediate: `ryco_propose_local_task_delete` asks the user, with the task's
+  revision. The approved delete removes the task, its links and its files (its chats are kept), and
+  fails if the task changed after it was requested.
+
+Tasks are the node's own list, not one project's: these tools read and edit tasks of every
+project. Only starting a chat is bound to the caller's project. Changes reach the Tasks page as
+they happen. Standalone integrations have no task tools and cannot start a task's chat.
 
 ## Handing over artifacts
 

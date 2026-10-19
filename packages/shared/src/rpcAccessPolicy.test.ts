@@ -89,6 +89,31 @@ describe("shared RPC access policy", () => {
     expect(rpcDeliveryEffectFor(WS_METHODS.notesCommand)).toBe("mutation");
   });
 
+  it("keeps every local task method, task files included, owner-only", () => {
+    for (const method of [
+      WS_METHODS.serverListLocalTasks,
+      WS_METHODS.serverGetLocalTask,
+      WS_METHODS.serverCreateLocalTask,
+      WS_METHODS.serverUpdateLocalTask,
+      WS_METHODS.serverDeleteLocalTask,
+      WS_METHODS.serverDelegateLocalTask,
+      WS_METHODS.serverCreateLocalTaskFileUpload,
+      WS_METHODS.serverAddLocalTaskFile,
+      WS_METHODS.serverRemoveLocalTaskFile,
+      WS_METHODS.serverSubscribeLocalTaskChanges,
+    ]) {
+      expect(rpcAccessFor(method)).toBe("owner");
+      expect(hostedRoleAllows("operator", method)).toBe(false);
+    }
+    for (const method of [
+      WS_METHODS.serverCreateLocalTaskFileUpload,
+      WS_METHODS.serverAddLocalTaskFile,
+      WS_METHODS.serverRemoveLocalTaskFile,
+    ]) {
+      expect(rpcDeliveryEffectFor(method)).toBe("mutation");
+    }
+  });
+
   it("fails closed for missing or stale hosted roles", () => {
     for (const method of [
       WS_METHODS.serverSignalDiagnosticProcess,

@@ -13,11 +13,28 @@ import {
   makeChatAttachmentUploads,
 } from "./attachmentUpload.ts";
 
-const makeRegistry = (input?: { readonly ttlMs?: number }) =>
+const makeRegistry = (input?: { readonly ttlMs?: number; readonly taskFilesDir?: string }) =>
   makeChatAttachmentUploads({
     attachmentsDir: fs.mkdtempSync(path.join(os.tmpdir(), "ryco-upload-")),
+    ...(input?.taskFilesDir !== undefined ? { taskFilesDir: input.taskFilesDir } : {}),
     ...(input?.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
   });
+
+const taskUpload = {
+  taskId: "task-1",
+  name: "spec.pdf",
+  mimeType: "application/pdf",
+  sizeBytes: 3,
+};
+
+/** A task upload whose bytes are in place, as the HTTP upload route leaves it. */
+const uploadTaskFile = Effect.fn("uploadTaskFile")(function* (uploads: ChatAttachmentUploadsShape) {
+  const created = yield* uploads.createForTask(taskUpload);
+  const lease = yield* uploads.beginUpload(created.uploadToken);
+  fs.writeFileSync(lease.finalPath, "pdf");
+  yield* uploads.completeUpload(created.uploadToken);
+  return { created, lease };
+});
 
 const createUpload = Effect.fn("createUpload")(function* (
   uploads: ChatAttachmentUploadsShape,
@@ -270,5 +287,108 @@ describe("chat attachment uploads", () => {
       const error = yield* Effect.flip(uploads.beginUpload(created.uploadToken));
       expect(error.reason).toBe("invalid-token");
     }),
+  );
+
+  it.effect("stores a task upload in the task-file store and hands it to its task only", () =>
+    Effect.gen(function* () {
+      const taskFilesDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-task-upload-"));
+      const uploads = yield* makeRegistry({ taskFilesDir });
+      const { created, lease } = yield* uploadTaskFile(uploads);
+      expect(lease.scope).toEqual({ kind: "task", taskId: "task-1" });
+      expect(path.dirname(lease.finalPath)).toBe(path.resolve(taskFilesDir));
+      expect(lease.attachmentId.startsWith("task-task-1-")).toBe(true);
+      expect(lease.attachmentId.endsWith("-pdf")).toBe(true);
+
+      // Never adoptable into a chat command, whatever thread it names.
+      const adopted = yield* Effect.flip(
+        uploads.claimForAdoption({
+          commandId: "chat-command",
+          uploadToken: created.uploadToken,
+          threadId: ThreadId.make("task-task-1"),
+          ...taskUpload,
+        }),
+      );
+      expect(adopted.reason).toBe("invalid-request");
+      const otherTask = yield* Effect.flip(
+        uploads.claimForTask({ ...taskUpload, uploadToken: created.uploadToken, taskId: "task-2" }),
+      );
+      expect(otherTask.reason).toBe("invalid-request");
+      const mismatch = yield* Effect.flip(
+        uploads.claimForTask({ ...taskUpload, uploadToken: created.uploadToken, sizeBytes: 4 }),
+      );
+      expect(mismatch.reason).toBe("invalid-request");
+
+      const claimed = yield* uploads.claimForTask({
+        ...taskUpload,
+        uploadToken: created.uploadToken,
+      });
+      expect(claimed.attachmentId).toBe(lease.attachmentId);
+      // A retried add claims the same file again.
+      const again = yield* uploads.claimForTask({
+        ...taskUpload,
+        uploadToken: created.uploadToken,
+      });
+      expect(again.attachmentId).toBe(lease.attachmentId);
+    }),
+  );
+
+  it.effect("refuses to hand a chat upload to a task, and task uploads without a store", () =>
+    Effect.gen(function* () {
+      const uploads = yield* makeRegistry();
+      const unavailable = yield* Effect.flip(uploads.createForTask(taskUpload));
+      expect(unavailable.reason).toBe("invalid-request");
+      const created = yield* createUpload(uploads);
+      yield* uploads.beginUpload(created.uploadToken);
+      yield* uploads.completeUpload(created.uploadToken);
+      const claimed = yield* Effect.flip(
+        uploads.claimForTask({
+          uploadToken: created.uploadToken,
+          taskId: "task-1",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 3,
+        }),
+      );
+      expect(claimed.reason).toBe("invalid-request");
+    }),
+  );
+
+  it.live("deletes the file of a task upload nobody claimed before it expired", () =>
+    Effect.gen(function* () {
+      const taskFilesDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-task-upload-"));
+      const uploads = yield* makeRegistry({ ttlMs: 150, taskFilesDir });
+      const unclaimed = yield* uploadTaskFile(uploads);
+      const claimed = yield* uploadTaskFile(uploads);
+      yield* uploads.claimForTask({ ...taskUpload, uploadToken: claimed.created.uploadToken });
+      yield* Effect.sleep("300 millis");
+      // Any later registry call prunes expired tokens.
+      yield* createUpload(uploads);
+      expect(fs.existsSync(unclaimed.lease.finalPath)).toBe(false);
+      expect(fs.existsSync(claimed.lease.finalPath)).toBe(true);
+      const expired = yield* Effect.flip(
+        uploads.claimForTask({ ...taskUpload, uploadToken: unclaimed.created.uploadToken }),
+      );
+      expect(expired.reason).toBe("invalid-token");
+    }),
+  );
+
+  it.live(
+    "hands a claim whose add failed back, so it retries or expires like an unclaimed one",
+    () =>
+      Effect.gen(function* () {
+        const taskFilesDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-task-upload-"));
+        const uploads = yield* makeRegistry({ ttlMs: 150, taskFilesDir });
+        const retried = yield* uploadTaskFile(uploads);
+        const token = { ...taskUpload, uploadToken: retried.created.uploadToken };
+        yield* uploads.claimForTask(token);
+        // Another task's release leaves the claim alone.
+        yield* uploads.releaseTaskClaim({ uploadToken: token.uploadToken, taskId: "task-2" });
+        yield* uploads.releaseTaskClaim({ uploadToken: token.uploadToken, taskId: "task-1" });
+        expect((yield* uploads.claimForTask(token)).attachmentId).toBe(retried.lease.attachmentId);
+        yield* uploads.releaseTaskClaim({ uploadToken: token.uploadToken, taskId: "task-1" });
+        yield* Effect.sleep("300 millis");
+        yield* createUpload(uploads);
+        expect(fs.existsSync(retried.lease.finalPath)).toBe(false);
+      }),
   );
 });

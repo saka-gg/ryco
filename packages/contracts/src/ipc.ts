@@ -1053,6 +1053,19 @@ export interface LocalApi {
     delegateLocalTask?: (
       input: import("./localTasks.ts").LocalTaskDelegateInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTaskFileUpload?: (
+      input: import("./localTasks.ts").LocalTaskFileUploadInput,
+    ) => Promise<import("./orchestration.ts").FileAttachmentCreateUploadUrlResult>;
+    addLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskAddFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    removeLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskRemoveFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    subscribeLocalTaskChanges?: (
+      listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+    ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;
@@ -1156,6 +1169,19 @@ export interface EnvironmentApi {
     delegateLocalTask?: (
       input: import("./localTasks.ts").LocalTaskDelegateInput,
     ) => Promise<import("./localTasks.ts").LocalTask>;
+    createLocalTaskFileUpload?: (
+      input: import("./localTasks.ts").LocalTaskFileUploadInput,
+    ) => Promise<import("./orchestration.ts").FileAttachmentCreateUploadUrlResult>;
+    addLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskAddFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    removeLocalTaskFile?: (
+      input: import("./localTasks.ts").LocalTaskRemoveFileInput,
+    ) => Promise<import("./localTasks.ts").LocalTask>;
+    /** Each task that changes on the node from now on; returns the unsubscribe. */
+    subscribeLocalTaskChanges?: (
+      listener: (change: import("./localTasks.ts").LocalTaskChange) => void,
+    ) => () => void;
     getDailyRecap?: (
       input: import("./dailyRecap.ts").DailyRecapRequest,
     ) => Promise<import("./dailyRecap.ts").DailyRecapSnapshot>;

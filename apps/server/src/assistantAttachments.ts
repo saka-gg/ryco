@@ -19,6 +19,7 @@ import {
   resolveAttachmentPath,
   toSafeThreadAttachmentSegment,
   toSafeFileAttachmentExtensionSegment,
+  composeAttachmentId,
   uuidFromSha256Hex,
 } from "./attachmentStore.ts";
 
@@ -144,10 +145,13 @@ async function publishStagedAttachment(input: {
     readonly htmlRender?: ChatHtmlRenderMetadata;
   };
 }): Promise<PublishedAssistantAttachment> {
-  const suffix = input.extensionSegment === undefined ? "" : `-${input.extensionSegment}`;
   const attachment = Schema.decodeUnknownSync(ChatAttachment)({
     ...input.fields,
-    id: `${input.thread}-${uuidFromSha256Hex(input.contentHash)}${suffix}`,
+    id: composeAttachmentId(
+      input.thread,
+      uuidFromSha256Hex(input.contentHash),
+      input.extensionSegment,
+    ),
   });
   const destination = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
   if (!destination) throw new Error("Invalid attachment destination.");
@@ -162,17 +166,35 @@ async function publishStagedAttachment(input: {
   }
 }
 
-/** Copy in bounded chunks; opaque deterministic ids make delivery retries idempotent. */
-export async function persistAssistantAttachment(input: {
-  attachmentsDir: string;
-  cwd: string;
-  threadId: string;
-  deliveryId: string;
-  file: AssistantAttachmentFile;
-  remainingBytes?: number;
-  signal?: AbortSignal;
-}): Promise<ChatAttachment> {
-  const relative = input.file.path;
+/** A workspace file copied into a staging file; the caller publishes it, then removes `temporary`. */
+export interface StagedWorkspaceFile {
+  readonly temporary: string;
+  /** The requested name, else the file's own. */
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  /** A raster image (identified by its bytes) within the inline image limit. */
+  readonly inlineImage: boolean;
+  /** Seeded by `hashSeed(name)`, then the bytes: the same file names the same snapshot. */
+  readonly contentHash: string;
+  readonly sourceBaseName: string;
+}
+
+/**
+ * Copies a regular file of the workspace `cwd` (a relative path without links, parent traversal
+ * or hard links) into a fresh `.part` staging file in `stagingDir`, in bounded chunks, and fails
+ * when the file changes while it is read. At most `maxBytes`, never empty.
+ */
+export async function stageWorkspaceFile(input: {
+  readonly cwd: string;
+  readonly relativePath: string;
+  readonly name?: string | undefined;
+  readonly stagingDir: string;
+  readonly maxBytes: number;
+  readonly hashSeed: (name: string) => string;
+  readonly signal?: AbortSignal | undefined;
+}): Promise<StagedWorkspaceFile> {
+  const relative = input.relativePath;
   if (
     path.isAbsolute(relative) ||
     /^[A-Za-z]:/.test(relative) ||
@@ -197,6 +219,7 @@ export async function persistAssistantAttachment(input: {
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
   let temporary: string | undefined;
+  let staged = false;
   try {
     const info = await handle.stat();
     if (sourceInfo.isSymbolicLink() || sourceInfo.dev !== info.dev || sourceInfo.ino !== info.ino) {
@@ -204,13 +227,9 @@ export async function persistAssistantAttachment(input: {
     }
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Only regular files without hard links can be attached.");
-    const limit = Math.min(
-      PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-      input.remainingBytes ?? PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
-    );
-    if (info.size <= 0 || info.size > limit)
+    if (info.size <= 0 || info.size > input.maxBytes)
       throw new Error("File is empty or exceeds the 50 MiB attachment budget.");
-    const name = input.file.name ?? path.basename(source);
+    const name = input.name ?? path.basename(source);
     // Generated raster images are identified by bytes. Other formats are downloads or native media.
     const header = Buffer.alloc(16);
     await handle.read(header, 0, header.length, 0);
@@ -225,12 +244,8 @@ export async function persistAssistantAttachment(input: {
             : undefined;
     const inlineImage = rasterMime !== undefined && info.size <= PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
     const mimeType = rasterMime ?? Mime.getType(source) ?? "application/octet-stream";
-    const thread = toSafeThreadAttachmentSegment(input.threadId);
-    if (!thread) throw new Error("Invalid attachment thread.");
-    const contentHash = createHash("sha256").update(
-      JSON.stringify([input.threadId, input.deliveryId, relative, name]),
-    );
-    const staging = await openStagingFile(input.attachmentsDir);
+    const contentHash = createHash("sha256").update(input.hashSeed(name));
+    const staging = await openStagingFile(input.stagingDir);
     temporary = staging.temporary;
     const output = staging.output;
     try {
@@ -268,20 +283,66 @@ export async function persistAssistantAttachment(input: {
       await output.close();
     }
     input.signal?.throwIfAborted();
+    staged = true;
+    return {
+      temporary,
+      name,
+      mimeType,
+      sizeBytes: info.size,
+      inlineImage,
+      contentHash: contentHash.digest("hex"),
+      sourceBaseName: path.basename(source),
+    };
+  } finally {
+    await handle.close();
+    if (temporary && !staged) await fs.rm(temporary, { force: true });
+  }
+}
+
+/** Copy in bounded chunks; opaque deterministic ids make delivery retries idempotent. */
+export async function persistAssistantAttachment(input: {
+  attachmentsDir: string;
+  cwd: string;
+  threadId: string;
+  deliveryId: string;
+  file: AssistantAttachmentFile;
+  remainingBytes?: number;
+  signal?: AbortSignal;
+}): Promise<ChatAttachment> {
+  const thread = toSafeThreadAttachmentSegment(input.threadId);
+  if (!thread) throw new Error("Invalid attachment thread.");
+  const relative = input.file.path;
+  const staged = await stageWorkspaceFile({
+    cwd: input.cwd,
+    relativePath: relative,
+    name: input.file.name,
+    stagingDir: input.attachmentsDir,
+    maxBytes: Math.min(
+      PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+      input.remainingBytes ?? PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+    ),
+    hashSeed: (name) => JSON.stringify([input.threadId, input.deliveryId, relative, name]),
+    signal: input.signal,
+  });
+  try {
     const published = await publishStagedAttachment({
       attachmentsDir: input.attachmentsDir,
-      temporary,
+      temporary: staged.temporary,
       thread,
-      contentHash: contentHash.digest("hex"),
-      extensionSegment: inlineImage
+      contentHash: staged.contentHash,
+      extensionSegment: staged.inlineImage
         ? undefined
-        : toSafeFileAttachmentExtensionSegment(path.basename(source)),
-      fields: { type: inlineImage ? "image" : "file", name, mimeType, sizeBytes: info.size },
+        : toSafeFileAttachmentExtensionSegment(staged.sourceBaseName),
+      fields: {
+        type: staged.inlineImage ? "image" : "file",
+        name: staged.name,
+        mimeType: staged.mimeType,
+        sizeBytes: staged.sizeBytes,
+      },
     });
     return published.attachment;
   } finally {
-    await handle.close();
-    if (temporary) await fs.rm(temporary, { force: true });
+    await fs.rm(staged.temporary, { force: true });
   }
 }
 

@@ -1,0 +1,382 @@
+/*
+ * Tasks page: states, pseudo-elements and motion. Layout is Tailwind in the
+ * components. Ported from the approved checklist prototype; its durations
+ * are derived from the house motion tokens with calc(), so reduced motion
+ * (the OS setting or the Motion preference) zeroes every one of them, and
+ * the keyframes pause on the activity play state.
+ */
+/* The due popover's calendar and quick picks reuse the automations pickers. */
+@import "../automations/styles/pickers.css";
+
+/* `.tsk` is the page column; `.tsk-pop` marks its menus and popovers, which render in a portal. */
+.tsk,
+.tsk-pop {
+  --task-faint: color-mix(in srgb, var(--muted-foreground) 70%, transparent);
+  --task-soon: color-mix(in srgb, var(--warning) 80%, var(--foreground));
+  --task-ease: var(--app-motion-ease);
+  --task-snappy: var(--app-motion-spring-snappy);
+  /* 160ms: row, add row and checkbox fills. */
+  --task-dur-row: calc(var(--app-motion-duration-chip) * 4 / 3);
+  /* 140ms: fades (the check mark, chips, the hover Start). */
+  --task-dur-fade: calc(var(--app-motion-duration-chip) * 7 / 6);
+  /* 220ms: the check mark's pop and the Completed chevron. */
+  --task-dur-check: calc(var(--app-motion-duration-stack) * 11 / 13);
+  /* 200ms: the title dimming when checked. */
+  --task-dur-title: var(--app-motion-duration-pop);
+  /* 360ms: a new row settling in. */
+  --task-dur-enter: var(--app-motion-duration-pane);
+  /* 320ms: a row's details opening. */
+  --task-dur-open: var(--app-motion-duration-disclosure);
+}
+
+/* ── Header filter ─────────────────────────────────────────────── */
+.tsk-filter {
+  color: var(--task-faint);
+}
+.tsk-filter:hover {
+  color: var(--foreground);
+}
+.tsk-filter[aria-pressed="true"] {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+/* ── Add row ───────────────────────────────────────────────────── */
+.tsk-add {
+  transition: background-color var(--task-dur-row) var(--task-ease);
+}
+.tsk-add:focus-within {
+  background: var(--muted);
+}
+.tsk-add-input::placeholder {
+  color: var(--task-faint);
+}
+
+/* ── Rows ──────────────────────────────────────────────────────── */
+.tsk-row {
+  transition: background-color var(--task-dur-row) var(--task-ease);
+}
+.tsk-row:hover,
+.tsk-row[data-open] {
+  background: color-mix(in srgb, var(--foreground) 3.5%, transparent);
+}
+.tsk-row[data-enter] {
+  animation: tsk-row-enter var(--task-dur-enter) var(--task-snappy) both;
+  animation-play-state: var(--app-motion-activity-play-state);
+}
+@keyframes tsk-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+/* The title button covers the whole line; the checkbox, title field and Start sit above it. */
+.tsk-hit {
+  outline: none;
+}
+.tsk-hit:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ring);
+}
+
+.tsk-box {
+  border: 1.5px solid color-mix(in srgb, var(--foreground) 32%, transparent);
+  transition:
+    background-color var(--task-dur-row) var(--task-ease),
+    border-color var(--task-dur-row) var(--task-ease),
+    transform var(--task-dur-row) var(--task-snappy);
+}
+.tsk-box:hover {
+  border-color: var(--foreground);
+}
+.tsk-box:active {
+  transform: scale(0.85);
+}
+.tsk-box:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.tsk-box > svg {
+  stroke: var(--background);
+  opacity: 0;
+  transform: scale(0.5);
+  transition:
+    opacity var(--task-dur-fade) var(--task-ease),
+    transform var(--task-dur-check) var(--task-snappy);
+}
+.tsk-row[data-done] .tsk-box {
+  background: var(--success);
+  border-color: var(--success);
+}
+.tsk-row[data-done] .tsk-box > svg {
+  opacity: 1;
+  transform: none;
+}
+
+.tsk-title {
+  transition: color var(--task-dur-title) var(--task-ease);
+}
+.tsk-row[data-done] .tsk-title {
+  color: var(--task-faint);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--task-faint) 60%, transparent);
+}
+
+/* The quick Start: shown with its line (hover, keyboard focus), always on touch. */
+.tsk-go {
+  opacity: 0;
+  transition:
+    opacity var(--task-dur-fade) var(--task-ease),
+    background-color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-line:hover .tsk-go,
+.tsk-line:has(:focus-visible) .tsk-go {
+  opacity: 1;
+}
+.tsk-go:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.tsk-go:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+@media (pointer: coarse) {
+  .tsk-go {
+    opacity: 1;
+  }
+}
+
+/* ── Status: dot + word ────────────────────────────────────────── */
+.tsk-st {
+  color: var(--muted-foreground);
+}
+.tsk-st-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.tsk-st[data-status="running"] .tsk-st-dot {
+  background: var(--info);
+  animation: tsk-pulse 1.6s var(--task-ease) infinite;
+  animation-play-state: var(--app-motion-activity-play-state);
+}
+.tsk-st[data-status="starting"] .tsk-st-dot {
+  width: 9px;
+  height: 9px;
+  background: transparent;
+  border: 1.5px solid var(--info);
+  border-right-color: transparent;
+  animation: tsk-spin 800ms linear infinite;
+  animation-play-state: var(--app-motion-activity-play-state);
+}
+.tsk-st[data-status="needs-you"] {
+  color: var(--task-soon);
+}
+.tsk-st[data-status="needs-you"] .tsk-st-dot {
+  background: var(--warning);
+}
+.tsk-st[data-status="review"] {
+  color: color-mix(in srgb, var(--success) 80%, var(--foreground));
+}
+.tsk-st[data-status="review"] .tsk-st-dot {
+  background: var(--success);
+}
+.tsk-st[data-status="failed"],
+.tsk-st[data-status="error"] {
+  color: color-mix(in srgb, var(--destructive) 80%, var(--foreground));
+}
+.tsk-st[data-status="failed"] .tsk-st-dot,
+.tsk-st[data-status="error"] .tsk-st-dot {
+  background: var(--destructive);
+}
+.tsk-st[data-status="archived"] {
+  color: var(--task-faint);
+}
+.tsk-st[data-status="archived"] .tsk-st-dot {
+  background: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+}
+@keyframes tsk-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--info) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+@keyframes tsk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Loading placeholder ───────────────────────────────────────── */
+.tsk-placeholder {
+  animation: tsk-breathe 1.6s var(--task-ease) infinite alternate;
+  animation-play-state: var(--app-motion-activity-play-state);
+}
+@keyframes tsk-breathe {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── Details: open in place, height only (no fade) ────────────── */
+.tsk-more {
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--task-dur-open) var(--task-ease);
+}
+.tsk-row[data-open] .tsk-more {
+  grid-template-rows: 1fr;
+}
+.tsk-inner[data-drop] {
+  border-radius: 8px;
+  outline: 1px dashed color-mix(in srgb, var(--foreground) 28%, transparent);
+  outline-offset: -2px;
+}
+
+.tsk-notes:focus {
+  color: var(--foreground);
+}
+.tsk-notes::placeholder {
+  color: var(--task-faint);
+}
+
+/* ── Chips ─────────────────────────────────────────────────────── */
+.tsk-chip {
+  transition:
+    background-color var(--task-dur-fade) var(--task-ease),
+    color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-chip:hover,
+.tsk-chip[data-popup-open] {
+  background: var(--muted);
+  color: var(--foreground);
+}
+/* After :hover on purpose: a dashed chip keeps its faint text while hovered. */
+.tsk-chip[data-ghost] {
+  border-style: dashed;
+  color: var(--task-faint);
+}
+.tsk-chip:focus-visible,
+.tsk-chip-x:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.tsk-chip[aria-disabled="true"] {
+  cursor: default;
+}
+.tsk-chip[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+.tsk-chip[data-ghost][aria-disabled="true"]:hover {
+  color: var(--task-faint);
+}
+.tsk-chip[data-error] {
+  color: color-mix(in srgb, var(--destructive) 80%, var(--foreground));
+}
+
+/* Removable chips: the × fades in over the label's end, which fades out under it. */
+.tsk-chip-x {
+  opacity: 0;
+  transition:
+    opacity var(--task-dur-fade) var(--task-ease),
+    background-color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-chip-x:hover {
+  background: var(--accent);
+}
+.tsk-chip[data-removable]:hover .tsk-chip-x,
+.tsk-chip[data-removable]:focus-within .tsk-chip-x {
+  opacity: 1;
+}
+.tsk-chip[data-removable]:hover .tsk-chip-label,
+.tsk-chip[data-removable]:focus-within .tsk-chip-label {
+  mask-image: linear-gradient(to left, transparent 14px, #000 26px);
+}
+@media (pointer: coarse) {
+  .tsk-chip-x {
+    opacity: 1;
+  }
+  .tsk-chip[data-removable] .tsk-chip-label {
+    mask-image: linear-gradient(to left, transparent 14px, #000 26px);
+  }
+}
+
+/* A file still uploading fills from the left as it goes. */
+.tsk-chip[data-uploading]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+  transform-origin: left;
+  transform: scaleX(var(--tsk-progress, 0));
+  transition: transform var(--task-dur-row) var(--task-ease);
+  pointer-events: none;
+}
+
+/* ── Chats, Start, Delete ──────────────────────────────────────── */
+.tsk-chat:hover {
+  background: var(--muted);
+}
+.tsk-chat-open {
+  transition: color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-chat:hover .tsk-chat-open,
+.tsk-chat:focus-visible .tsk-chat-open {
+  color: var(--foreground);
+}
+.tsk-chat:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+.tsk-start {
+  transition: opacity var(--task-dur-fade) var(--task-ease);
+}
+.tsk-start:hover {
+  opacity: 0.9;
+}
+.tsk-start:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.tsk-del {
+  transition:
+    color var(--task-dur-fade) var(--task-ease),
+    background-color var(--task-dur-fade) var(--task-ease);
+}
+.tsk-del:hover:not(:disabled) {
+  color: var(--destructive);
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+}
+
+/* ── Completed toggle ─────────────────────────────────────────── */
+.tsk-group:hover {
+  color: var(--foreground);
+}
+.tsk-group > svg {
+  transition: transform var(--task-dur-check) var(--task-ease);
+}
+.tsk-group[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+
+/* ── Menus and popovers ───────────────────────────────────────── */
+.tsk-pop-item:hover,
+.tsk-pop-item:focus-visible,
+.tsk-pop-item[aria-selected="true"] {
+  background: var(--accent);
+  outline: none;
+}
+.tsk-pop-input::placeholder {
+  color: var(--task-faint);
+}
+.tsk-pop-input:focus {
+  border-color: color-mix(in srgb, var(--foreground) 46%, transparent);
+}

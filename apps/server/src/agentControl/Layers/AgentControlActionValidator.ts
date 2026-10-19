@@ -43,6 +43,7 @@ import {
 } from "../Services/AgentControlActionValidator.ts";
 import { assertSafeAgentControlDeviceUrl, isAgentControlDevicePlan } from "../deviceControl.ts";
 import { resolveThreadArtifacts } from "../artifactHandoff.ts";
+import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
 
 const fail = (
   reason: ConstructorParameters<typeof AgentControlPlanValidationError>[0]["reason"],
@@ -51,6 +52,9 @@ const fail = (
 
 const handsOverArtifacts = (plan: AgentControlActionPlan) =>
   plan.kind === "createThreads" && plan.entries.some((entry) => (entry.artifacts?.length ?? 0) > 0);
+
+const startsLocalTaskChats = (plan: AgentControlActionPlan) =>
+  plan.kind === "createThreads" && plan.entries.some((entry) => entry.localTaskId !== undefined);
 
 /** Privilege order of runtime modes: lower is less privileged. */
 export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
@@ -462,6 +466,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   readonly projectPlans?: AgentControlProjectPlansShape;
   readonly automations?: AgentControlAutomationShape;
   readonly deviceService?: DeviceServiceShape;
+  readonly localTasks?: Pick<LocalTaskServiceShape, "get">;
 }): AgentControlActionValidatorShape => {
   const validateAutomation = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(
@@ -538,6 +543,58 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           { discard: true },
         );
 
+  const readLocalTask = (taskId: string) =>
+    deps.localTasks === undefined
+      ? fail("task-unavailable", "Tasks are unavailable on this node.")
+      : deps.localTasks.get(taskId).pipe(
+          Effect.mapError(
+            (error) =>
+              new AgentControlPlanValidationError({
+                reason: "task-unavailable",
+                detail: error.reason === "not-found" ? "The task is unavailable." : error.message,
+              }),
+          ),
+        );
+
+  // A task's chat starts in the task's project (one without a project joins the chat's), and
+  // never from a completed task: checked at submission and again before execution.
+  const validateLocalTaskStarts = (plan: AgentControlActionPlan) =>
+    plan.kind !== "createThreads"
+      ? Effect.void
+      : Effect.forEach(
+          plan.entries,
+          (entry) =>
+            entry.localTaskId === undefined
+              ? Effect.void
+              : (entry.artifacts?.length ?? 0) > 0
+                ? fail(
+                    "invalid-plan",
+                    "A task's chat carries the task's files; it cannot also hand over artifacts.",
+                  )
+                : readLocalTask(entry.localTaskId).pipe(
+                    Effect.flatMap((task) =>
+                      task.state === "done"
+                        ? fail("task-stale", "Reopen the task before starting a chat.")
+                        : task.projectId !== null && task.projectId !== entry.projectId
+                          ? fail("project-scope", "The task belongs to another project.")
+                          : Effect.void,
+                    ),
+                  ),
+          { discard: true },
+        );
+
+  // The user approves deleting exactly the revision the card showed.
+  const validateLocalTaskDelete = (
+    plan: Extract<AgentControlActionPlan, { kind: "deleteLocalTask" }>,
+  ) =>
+    readLocalTask(plan.taskId).pipe(
+      Effect.flatMap((task) =>
+        task.revision !== plan.expectedRevision
+          ? fail("task-stale", "The task changed since the delete was requested; read it again.")
+          : Effect.void,
+      ),
+    );
+
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
       const { snapshot, providers } = yield* loadState([
@@ -608,6 +665,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
       } else if (input.plan.kind === "changeSettings") {
         // Closed schema: only non-secret boolean preferences are supported.
+      } else if (input.plan.kind === "deleteLocalTask") {
+        // Tasks are the node's own list, not one project's: no project scope applies.
+        yield* validateLocalTaskDelete(input.plan);
       } else if (input.plan.kind === "workspaceLifecycle") {
         if (!deps.workspaces || input.plan.projectId !== caller.projectId)
           return yield* fail("project-scope", "Workspace control unavailable in caller scope.");
@@ -630,6 +690,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        yield* validateLocalTaskStarts(input.plan);
         yield* validateHandoffArtifacts(input.plan, caller.id);
       }
 
@@ -671,6 +732,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail(
             "invalid-plan",
             "Artifact handover requires an originating provider thread; external tasks cannot hand over artifacts.",
+          );
+        }
+        if (startsLocalTaskChats(input.plan) || input.plan.kind === "deleteLocalTask") {
+          return yield* fail(
+            "privilege-escalation",
+            "External integrations cannot manage the node's Tasks.",
           );
         }
         if (isAgentControlDevicePlan(input.plan)) {
@@ -891,7 +958,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         if (!origin || origin.projectId !== originProjectId) {
           return yield* fail("caller-stale", "The originating thread is unavailable.");
         }
+        yield* validateLocalTaskStarts(proposal.plan);
         yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
+      } else if (startsLocalTaskChats(proposal.plan) || proposal.plan.kind === "deleteLocalTask") {
+        return yield* fail(
+          "privilege-escalation",
+          "Only an originating provider thread can manage the node's Tasks.",
+        );
       } else if (handsOverArtifacts(proposal.plan)) {
         return yield* fail(
           "privilege-escalation",
@@ -952,6 +1025,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             "privilege-escalation",
             "External integrations cannot change settings.",
           );
+        return;
+      }
+      if (proposal.plan.kind === "deleteLocalTask") {
+        yield* validateLocalTaskDelete(proposal.plan);
         return;
       }
       if (isAgentControlDevicePlan(proposal.plan)) {
@@ -1094,6 +1171,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const workspaces = yield* Effect.serviceOption(AgentControlWorkspaces);
   const automations = yield* Effect.serviceOption(AgentControlAutomationService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
+  const localTasks = yield* Effect.serviceOption(LocalTaskService);
   return makeAgentControlActionValidatorFromDeps({
     projections,
     getProviders: providerRegistry.getProviders,
@@ -1102,6 +1180,7 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
     ...(Option.isSome(workspaces) ? { workspaces: workspaces.value } : {}),
     ...(Option.isSome(deviceService) ? { deviceService: deviceService.value } : {}),
     ...(Option.isSome(automations) ? { automations: automations.value } : {}),
+    ...(Option.isSome(localTasks) ? { localTasks: localTasks.value } : {}),
     ...(Option.isSome(externalIntegrations)
       ? { revalidateExternal: externalIntegrations.value.revalidate }
       : {}),

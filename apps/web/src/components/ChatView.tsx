@@ -6,6 +6,7 @@ import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
 import { BackgroundBrowserPreview } from "../browser/BackgroundBrowserPreview";
 import type { ProviderOptionSelection } from "@ryco/contracts";
+import { taskDraftSend } from "./tasks/taskDraft";
 import {
   rejectRetiredProjectMemory,
   hasRetiredProjectMemory,
@@ -4264,12 +4265,19 @@ export default function ChatView(props: ChatViewProps) {
         setThreadError(threadIdForSend, "Worktree creation is unavailable in this environment.");
         return false;
       }
+      // A task draft's first message starts the chat as the task's.
+      const localTask =
+        isFirstMessage && draftThread?.localTaskId
+          ? taskDraftSend(environmentId, draftThread.localTaskId)
+          : null;
       // Filled by `prepareForDispatch` below when a source-backed worktree is created,
       // so the navigation at the end of this function targets the resulting thread.
       let sourceThreadRef: ScopedThreadRef | null = null;
       const prepareWorktreeSourceForDispatch = async () => {
         const createWorktree = api.git.createWorktreeForProject;
         if (!pendingWorktreeSource || !createWorktree || !activeProject) return null;
+        // The task is checked before its worktree and thread are made for it.
+        await localTask?.preflight();
         const created = await createWorktree({
           fetchOrigin: draftThread?.fetchOrigin ?? true,
           projectId: activeProject.id,
@@ -4372,6 +4380,7 @@ export default function ChatView(props: ChatViewProps) {
           projectCwd: activeProject?.cwd ?? "",
         },
         ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
+        ...(localTask ? { localTask } : {}),
         scroll: {
           scrollToEndBeforeOptimistic: async () => {
             captureFirstSendLayout();

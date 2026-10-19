@@ -121,6 +121,11 @@
       "import": "./src/keybindings.ts",
       "require": "./src/keybindings.ts"
     },
+    "./local-tasks": {
+      "types": "./src/localTasks.ts",
+      "import": "./src/localTasks.ts",
+      "require": "./src/localTasks.ts"
+    },
     "./model": {
       "types": "./src/model.ts",
       "import": "./src/model.ts",
@@ -170,6 +175,11 @@
       "types": "./src/workspaceLifecycle.ts",
       "import": "./src/workspaceLifecycle.ts",
       "require": "./src/workspaceLifecycle.ts"
+    },
+    "./work-items": {
+      "types": "./src/workItems.ts",
+      "import": "./src/workItems.ts",
+      "require": "./src/workItems.ts"
     },
     "./worktree": {
       "types": "./src/worktree.ts",

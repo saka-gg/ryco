@@ -442,6 +442,7 @@ describe("OrchestrationEngine", () => {
           stateDir: root,
           dbPath: path.join(root, "node.db"),
           attachmentsDir: path.join(root, "attachments"),
+          taskFilesDir: path.join(root, "task-files"),
           logsDir: path.join(root, "logs"),
         } as ServerConfigShape,
         providerProtection: { resolve: () => [] },

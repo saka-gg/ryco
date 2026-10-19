@@ -338,6 +338,9 @@ describe("forward compatibility (additive extension)", () => {
     expect(AGENT_CONTROL_ACTION_CAPABILITIES.createThreads).toBe(
       AGENT_CONTROL_CAPABILITIES.createThreads,
     );
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.deleteLocalTask).toBe(
+      AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+    );
     expect(Object.keys(AGENT_CONTROL_ACTION_CAPABILITIES).toSorted()).toEqual([
       "automationRun",
       "cancelAutomation",
@@ -345,6 +348,7 @@ describe("forward compatibility (additive extension)", () => {
       "createAutomation",
       "createProject",
       "createThreads",
+      "deleteLocalTask",
       "deviceAttach",
       "deviceBoot",
       "deviceDetach",

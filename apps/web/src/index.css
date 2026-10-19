@@ -595,6 +595,8 @@
   /* Large layout surfaces that move as a whole: split chat panes and the
      workspace panel slide on the same 360ms house curve. */
   --app-motion-duration-pane: 360ms;
+  /* A row or section opening in place (a task's details). */
+  --app-motion-duration-disclosure: 320ms;
   --app-motion-activity-play-state: running;
   --background: var(--color-white);
   --app-chrome-background: var(--background);
@@ -715,6 +717,7 @@
     --app-motion-duration-chip: 0s;
     --app-motion-duration-pop: 0s;
     --app-motion-duration-pane: 0s;
+    --app-motion-duration-disclosure: 0s;
     --app-motion-activity-play-state: paused;
   }
 }

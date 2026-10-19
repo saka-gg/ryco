@@ -1,6 +1,12 @@
 import { AGENT_CONTROL_WS_METHODS, type EnvironmentId, WS_METHODS } from "@ryco/contracts";
 import { Link, useLocation } from "@tanstack/react-router";
-import { CalendarClockIcon, FoldersIcon, GitPullRequestIcon, PlusIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  FoldersIcon,
+  GitPullRequestIcon,
+  ListTodoIcon,
+  PlusIcon,
+} from "lucide-react";
 import { type CSSProperties, memo, type ReactElement, type ReactNode, useEffect } from "react";
 
 import { usePresentationTier } from "../../hooks/usePresentationTier";
@@ -8,6 +14,7 @@ import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { cn } from "../../lib/utils";
 import { PROJECTS_ROUTE_PATH } from "../../projectsRoute";
 import { PULL_REQUESTS_ROUTE_PATH } from "../../pullRequestsRoute";
+import { TASKS_ROUTE_PATH } from "../../tasksRoute";
 import { type SidebarMode, useUiStateStore } from "../../uiStateStore";
 
 import {
@@ -16,6 +23,8 @@ import {
 } from "../automations/automationsDialogStore";
 import { useWaitingAutomationRuns } from "../automations/useWaitingAutomationRuns";
 import type { InboxSidebarEnvironment } from "../inboxSidebar/inboxSidebarModel";
+import { TasksSidebarEntry } from "../tasks/TasksSidebarEntry";
+import { tasksAvailable, useTasksEnvironment } from "../tasks/useTasksEnvironment";
 import { Kbd } from "../ui/kbd";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -26,7 +35,7 @@ import {
 import { SidebarOmnifield } from "./SidebarOmnifield";
 import { preloadDraftRoute } from "./threadNavigationIntent";
 
-const DESTINATION_CLASS_NAME =
+export const DESTINATION_CLASS_NAME =
   "sidebar-fold-item sidebar-fold-destination flex cursor-pointer items-center rounded-lg text-left text-xs outline-hidden ring-ring hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2";
 
 export interface SidebarPrimaryActionsProps {
@@ -47,8 +56,9 @@ export interface SidebarPrimaryActionsProps {
  * hands any text to the command palette as "Search everywhere"; its ⌘K chip
  * opens the palette, the one place for everything else. "+" starts a thread in
  * the project you last worked in. "Automations" opens the schedules dialog,
- * with a badge for runs waiting for approval on any connected device; "Pull
- * requests" and "Projects" open their pages.
+ * with a badge for runs waiting for approval on any connected device; "Tasks"
+ * (with a badge for tasks whose chat needs you), "Pull requests" and "Projects"
+ * open their pages.
  *
  * While a list is scrolled, all of it folds into one toolbar row
  * (sidebarFold.ts) and the list gets the space back.
@@ -61,14 +71,18 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
   const automationsCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
   const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
   const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList);
+  const tasks = useTasksEnvironment();
   const folded = useSidebarFoldStore((store) => store.folded);
   const setFoldEnabled = useSidebarFoldStore((store) => store.setEnabled);
   const setFoldGain = useSidebarFoldStore((store) => store.setFoldGain);
   const resetFold = useSidebarFoldStore((store) => store.reset);
 
   const showAutomations = automationsCapability.allowed && !phone;
+  // The frozen phone tier has no Tasks page (AGENTS.md).
+  const showTasks = tasksAvailable(tasks) && !phone;
   // Destinations stack (or, folded, line up) in this order; each takes the next slot.
-  const pullRequestsIndex = Number(showAutomations);
+  const tasksIndex = Number(showAutomations);
+  const pullRequestsIndex = tasksIndex + Number(showTasks);
   const projectsIndex = pullRequestsIndex + Number(pullRequestsCapability.allowed);
   const destinationCount = projectsIndex + Number(projectsCapability.allowed);
 
@@ -128,6 +142,13 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
         </TooltipPopup>
       </Tooltip>
       {showAutomations ? <AutomationsEntry folded={folded} index={0} /> : null}
+      {showTasks ? (
+        <TasksSidebarEntry
+          folded={folded}
+          index={tasksIndex}
+          current={pathname === TASKS_ROUTE_PATH}
+        />
+      ) : null}
       {pullRequestsCapability.allowed ? (
         <FoldedTooltip folded={folded} label="Pull requests">
           <Link
@@ -164,19 +185,22 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
   );
 });
 
-function destinationStyle(index: number): CSSProperties {
+export function destinationStyle(index: number): CSSProperties {
   return { "--sidebar-fold-index": index } as CSSProperties;
 }
 
 const DESTINATION_ICONS = {
+  Tasks: ListTodoIcon,
   "Pull requests": GitPullRequestIcon,
   Projects: FoldersIcon,
 } as const;
 
 /** A destination row; once folded it is an icon whose name moves to a tooltip. */
-function FoldedTooltip(props: {
+export function FoldedTooltip(props: {
   readonly folded: boolean;
   readonly label: keyof typeof DESTINATION_ICONS;
+  /** Shown after the label (and, folded, on the icon), like the Automations badge. */
+  readonly badge?: ReactNode;
   readonly children: ReactElement;
 }) {
   const Icon = DESTINATION_ICONS[props.label];
@@ -185,6 +209,7 @@ function FoldedTooltip(props: {
       <TooltipTrigger render={props.children}>
         <Icon className="size-3.5 shrink-0" />
         <span className="sidebar-fold-label min-w-0 flex-1">{props.label}</span>
+        {props.badge}
       </TooltipTrigger>
       <TooltipPopup side="bottom">{props.label}</TooltipPopup>
     </Tooltip>
@@ -219,7 +244,7 @@ function AutomationsEntry(props: { readonly folded: boolean; readonly index: num
   );
 }
 
-function WaitingBadge(props: { readonly children: ReactNode }) {
+export function WaitingBadge(props: { readonly children: ReactNode }) {
   return (
     <span className="sidebar-fold-badge inline-grid h-4 min-w-4 shrink-0 place-items-center rounded-full bg-foreground/8 px-[5px] text-[10px] font-semibold text-foreground tabular-nums">
       {props.children}

@@ -291,6 +291,8 @@ it.effect("injects the MCP connection into runtime options, never the environmen
           AGENT_CONTROL_CAPABILITIES.controlDevices,
           AGENT_CONTROL_CAPABILITIES.controlComputer,
           AGENT_CONTROL_CAPABILITIES.controlBrowser,
+          AGENT_CONTROL_CAPABILITIES.readLocalTasks,
+          AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
         ],
         injectionMode: "codex-http",
       });

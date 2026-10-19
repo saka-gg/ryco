@@ -803,6 +803,42 @@ it.effect("keeps each project mutation scoped to the requesting runtime's exact 
   }),
 );
 
+it.effect("starts a chat as a task's only with the task grant as well", () =>
+  Effect.gen(function* () {
+    const createTaskChat = (grantedCapabilities: typeof writeSession.grantedCapabilities) =>
+      call(
+        makeDeps({ getTurnAuthority: () => Effect.succeed(Option.some(activeAuthority)) }),
+        AGENT_CONTROL_MCP_TOOLS.createThreads,
+        {
+          requestId: "request-task-chat",
+          entries: [
+            {
+              projectId: "project-1",
+              title: "Task chat",
+              prompt: "Work on the task.",
+              modelSelection,
+              runtimeMode: "auto",
+              envMode: "local",
+              localTaskId: "task-1",
+            },
+          ],
+        },
+        { ...writeSession, grantedCapabilities },
+      );
+    const without = writeSession.grantedCapabilities.filter(
+      (capability) => capability !== AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+    );
+    const denied = yield* createTaskChat(without);
+    assert.isTrue(denied.isError);
+    assert.strictEqual(denied.content[0]?.text, "Capability denied.");
+    const granted = yield* createTaskChat([
+      ...without,
+      AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+    ]);
+    assert.notStrictEqual(granted.content[0]?.text, "Capability denied.");
+  }),
+);
+
 it.effect("creates an immutable proposal without mutating the target", () =>
   Effect.gen(function* () {
     const submitted: Array<

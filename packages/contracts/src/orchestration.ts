@@ -558,25 +558,25 @@ export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES = 50 * 1024 * 1024;
-const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
-const PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS = 70_000_000;
+export const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
+export const PROVIDER_SEND_TURN_MAX_FILE_DATA_URL_CHARS = 70_000_000;
 const CHAT_ATTACHMENT_ID_MAX_CHARS = 128;
 const FILE_ATTACHMENT_UPLOAD_TOKEN_MAX_CHARS = 256;
 // Correlation id is command id by design in this model.
 export const CorrelationId = CommandId;
 export type CorrelationId = typeof CorrelationId.Type;
 
-const ChatAttachmentId = TrimmedNonEmptyString.check(
+export const ChatAttachmentId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(CHAT_ATTACHMENT_ID_MAX_CHARS),
   Schema.isPattern(/^[a-z0-9_-]+$/i),
 );
 export type ChatAttachmentId = typeof ChatAttachmentId.Type;
 
-const ChatAttachmentName = TrimmedNonEmptyString.check(
+export const ChatAttachmentName = TrimmedNonEmptyString.check(
   Schema.isMaxLength(255),
   Schema.isPattern(/^[^/\\\p{Cc}]+$/u),
 );
-const ChatAttachmentMimeType = TrimmedNonEmptyString.check(
+export const ChatAttachmentMimeType = TrimmedNonEmptyString.check(
   Schema.isMaxLength(100),
   Schema.isPattern(/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i),
 );

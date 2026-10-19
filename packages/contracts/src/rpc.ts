@@ -8,6 +8,10 @@ import {
   LocalTaskListInput,
   LocalTaskListResult,
   LocalTaskDelegateInput,
+  LocalTaskFileUploadInput,
+  LocalTaskAddFileInput,
+  LocalTaskRemoveFileInput,
+  LocalTaskChange,
 } from "./localTasks.ts";
 import { NotesCommand, NotesError, NotesListInput, NotesSnapshot } from "./notes.ts";
 import { DailyRecapRequest, DailyRecapSnapshot, DailyRecapReadError } from "./dailyRecap.ts";
@@ -524,6 +528,10 @@ export const WS_METHODS = {
   serverUpdateLocalTask: "server.updateLocalTask",
   serverDeleteLocalTask: "server.deleteLocalTask",
   serverDelegateLocalTask: "server.delegateLocalTask",
+  serverCreateLocalTaskFileUpload: "server.createLocalTaskFileUpload",
+  serverAddLocalTaskFile: "server.addLocalTaskFile",
+  serverRemoveLocalTaskFile: "server.removeLocalTaskFile",
+  serverSubscribeLocalTaskChanges: "server.subscribeLocalTaskChanges",
   serverGetDailyRecap: "server.getDailyRecap",
 
   // Worktree notes
@@ -942,6 +950,38 @@ export const WsServerDelegateLocalTaskRpc = Rpc.make(WS_METHODS.serverDelegateLo
   success: LocalTask,
   error: Schema.Union([LocalTaskError, AuthRpcError, OrchestrationDispatchCommandError]),
 });
+
+export const WsServerCreateLocalTaskFileUploadRpc = Rpc.make(
+  WS_METHODS.serverCreateLocalTaskFileUpload,
+  {
+    payload: LocalTaskFileUploadInput,
+    success: FileAttachmentCreateUploadUrlResult,
+    error: Schema.Union([LocalTaskError, AuthRpcError]),
+  },
+);
+
+export const WsServerAddLocalTaskFileRpc = Rpc.make(WS_METHODS.serverAddLocalTaskFile, {
+  payload: LocalTaskAddFileInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+export const WsServerRemoveLocalTaskFileRpc = Rpc.make(WS_METHODS.serverRemoveLocalTaskFile, {
+  payload: LocalTaskRemoveFileInput,
+  success: LocalTask,
+  error: Schema.Union([LocalTaskError, AuthRpcError]),
+});
+
+/** Each task that changed on the node, from now on: a cue to read the tasks again. */
+export const WsServerSubscribeLocalTaskChangesRpc = Rpc.make(
+  WS_METHODS.serverSubscribeLocalTaskChanges,
+  {
+    payload: Schema.Struct({}),
+    success: LocalTaskChange,
+    error: Schema.Union([LocalTaskError, AuthRpcError]),
+    stream: true,
+  },
+);
 
 export const WsNotesListRpc = Rpc.make(WS_METHODS.notesList, {
   payload: NotesListInput,
@@ -2430,6 +2470,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerUpdateLocalTaskRpc
   | typeof WsServerDeleteLocalTaskRpc
   | typeof WsServerDelegateLocalTaskRpc
+  | typeof WsServerCreateLocalTaskFileUploadRpc
+  | typeof WsServerAddLocalTaskFileRpc
+  | typeof WsServerRemoveLocalTaskFileRpc
+  | typeof WsServerSubscribeLocalTaskChangesRpc
   | typeof WsNotesListRpc
   | typeof WsNotesCommandRpc
   | typeof WsServerGetDailyRecapRpc
@@ -2644,6 +2688,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerUpdateLocalTaskRpc,
   WsServerDeleteLocalTaskRpc,
   WsServerDelegateLocalTaskRpc,
+  WsServerCreateLocalTaskFileUploadRpc,
+  WsServerAddLocalTaskFileRpc,
+  WsServerRemoveLocalTaskFileRpc,
+  WsServerSubscribeLocalTaskChangesRpc,
   WsNotesListRpc,
   WsNotesCommandRpc,
   WsServerGetDailyRecapRpc,

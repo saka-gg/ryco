@@ -8,6 +8,7 @@ import {
   attachmentRelativePath,
   createAttachmentId,
   createFileAttachmentId,
+  decodeUploadAttachmentDataUrl,
   parseAttachmentIdFromRelativePath,
   parseThreadSegmentFromAttachmentId,
   readPersistedAttachment,
@@ -234,6 +235,30 @@ describe("attachmentStore", () => {
       }
     } finally {
       fs.rmSync(attachmentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("decodes inline attachments only when they match what the sender declared", () => {
+    const input = {
+      type: "file" as const,
+      name: "notes.txt",
+      mimeType: "TEXT/plain",
+      sizeBytes: 3,
+      dataUrl: "data:text/plain;base64,YWJj",
+    };
+    const decoded = decodeUploadAttachmentDataUrl(input);
+    expect(decoded.ok && decoded.bytes.toString()).toBe("abc");
+    expect(decoded.ok && decoded.mimeType).toBe("text/plain");
+    for (const [change, message] of [
+      [{ dataUrl: "not a data url" }, "must use a valid base64 data URL"],
+      [{ mimeType: "application/json" }, "declares 'application/json'"],
+      [{ type: "image" as const }, "must use an image MIME type"],
+      [{ sizeBytes: 4 }, "mismatched size metadata"],
+      [{ dataUrl: "data:text/plain;base64,YWJ" }, "mismatched size metadata"],
+    ] as const) {
+      const result = decodeUploadAttachmentDataUrl({ ...input, ...change });
+      expect(result.ok).toBe(false);
+      expect(!result.ok && result.message).toContain(message);
     }
   });
 });

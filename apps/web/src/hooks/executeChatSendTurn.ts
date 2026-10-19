@@ -250,6 +250,8 @@ export interface ExecuteChatSendTurnInput {
    * Returning a preparation redirects the dispatch at the thread it produced.
    */
   prepareForDispatch?: () => Promise<SendTurnDispatchPreparation | null>;
+  /** A task draft's first send, recorded under the task (see the send engine). */
+  localTask?: CommitSendTurnDispatchInput["localTask"];
   draft: SendTurnComposerDraftDeps;
   dispatch: SendTurnDispatchDeps;
   refs: SendTurnRollbackRefs;
@@ -805,6 +807,7 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         ? { renewChatProjectId: thread.renewChatProjectId }
         : {}),
       sourceControlContexts: freshSourceControlContexts,
+      ...(input.localTask ? { localTask: input.localTask } : {}),
       createdAt: messageCreatedAt,
       newCommandId,
       beginLocalDispatch,

@@ -172,6 +172,24 @@ function planPresentation(proposal: AgentControlProposal): {
     },
   ];
   switch (plan.kind) {
+    case "deleteLocalTask":
+      return {
+        actionLabel: "Delete task",
+        targetLabel: plan.title,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: "Before · destructive task removal",
+            lines: [
+              `Task: ${plan.title}`,
+              `Task ID: ${plan.taskId}`,
+              `Expected revision: ${plan.expectedRevision}`,
+              "Its notes, links and files are deleted; chats started from it are kept.",
+              "Execution stops if the task changed after this request was made.",
+            ],
+          },
+        ],
+      };
     case "createThreads": {
       const count = plan.entries.length;
       const projectIds = [...new Set(plan.entries.map((entry) => String(entry.projectId)))];
@@ -199,6 +217,11 @@ function planPresentation(proposal: AgentControlProposal): {
             ...(entry.artifacts && entry.artifacts.length > 0
               ? [
                   `Handed-over artifacts: ${entry.artifacts.length} of the originating chat's pages/files, copied and attached to the first message.`,
+                ]
+              : []),
+            ...(entry.localTaskId !== undefined
+              ? [
+                  `Task: started as the chat of task ${entry.localTaskId}, with the task's files on its first message.`,
                 ]
               : []),
             ...(entry.tokenMode === undefined ? [] : [`Token mode: ${entry.tokenMode}`]),
@@ -645,6 +668,7 @@ export function buildAgentControlProposalCardModel(
     riskLabels: proposal.riskTags.map((tag) => riskLabelFromTag(String(tag))),
     isDestructive:
       proposal.plan.kind === "removeProject" ||
+      proposal.plan.kind === "deleteLocalTask" ||
       (proposal.plan.kind === "workspaceLifecycle" && proposal.plan.action !== "restore"),
     warningLabel:
       proposal.plan.kind === "deviceOpenUrl"
