@@ -278,18 +278,37 @@ function watchChanges(
       refresh();
       return;
     }
-    for (const taskId of taskIds)
+    const known = selectLocalTasksEnvironment(useLocalTasksStore.getState(), environmentId).tasks;
+    for (const taskId of taskIds) {
+      // Deleted here while the read was out (its change may come after): it stays deleted.
+      const wasKnown = taskId in known;
       get({ taskId }).then(
         (task) => {
-          if (isCurrent()) useLocalTasksStore.getState().applyTask(environmentId, task);
+          if (!isCurrent()) return;
+          const store = useLocalTasksStore.getState();
+          if (wasKnown && !(taskId in selectLocalTasksEnvironment(store, environmentId).tasks))
+            return;
+          store.applyTask(environmentId, task);
         },
         // Deleted, or unreadable now: the list says what is left.
         () => {
           if (isCurrent()) refresh();
         },
       );
+    }
   };
   const unsubscribe = subscribe((change) => {
+    if (!isCurrent()) return;
+    // The stream's first word, once it listens (again, after a reconnect): read everything.
+    if (change.taskId === undefined) {
+      refresh();
+      return;
+    }
+    if (change.deleted) {
+      pending.delete(change.taskId);
+      useLocalTasksStore.getState().removeTask(environmentId, change.taskId);
+      return;
+    }
     pending.add(change.taskId);
     if (timer === null) timer = setTimeout(flush, LOCAL_TASKS_CHANGE_READ_DELAY_MS);
   });

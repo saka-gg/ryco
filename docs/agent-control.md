@@ -114,7 +114,8 @@ up to 8 files. Agents use it with the `ryco_*_local_task` tools. They are a diff
 the runs a chat delegates (`ryco_task_status`).
 
 - **Reading** needs the `local-tasks.read` grant: `ryco_list_local_tasks` (open, done or all tasks,
-  by project or text, newest change first, with a notes preview) and `ryco_read_local_task` (one
+  by project or text, newest change first, with a notes preview; `offset` pages past the first
+  answer's `nextOffset`) and `ryco_read_local_task` (one
   task whole, with its files and the chats started from it).
 - **Changing** needs `local-tasks.manage` and exact active-turn authority, and runs at once.
   `ryco_create_local_task` takes a `requestId` that names the task, so a retry answers with the
@@ -128,7 +129,8 @@ the runs a chat delegates (`ryco_task_status`).
   project, runtime-mode and worktree rules, and `returnToOrigin` works as there. The first message
   is the task's title, notes and links unless a `prompt` is given. The chat is recorded under the
   task before it is dispatched and gets copies of the task's files; a task without a project joins
-  the caller's. A completed task starts nothing. A `ryco_create_threads` entry can carry
+  the caller's, and one in another project can't be started from here. A completed task starts
+  nothing. Starting a task's chat through `ryco_create_threads` needs `local-tasks.manage` too. A `ryco_create_threads` entry can carry
   `localTaskId` itself, but not together with `artifacts`.
 - **Deleting** is never immediate: `ryco_propose_local_task_delete` asks the user, with the task's
   revision. The approved delete removes the task, its links and its files (its chats are kept), and

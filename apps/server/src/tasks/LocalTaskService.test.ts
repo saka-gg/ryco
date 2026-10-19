@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Fiber, Layer, Stream } from "effect";
+import { Effect, Layer, Queue, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   CommandId,
@@ -674,33 +674,84 @@ describe("local task service", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("searches by state, project and text, newest change first, a page at a time", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const tasks = yield* LocalTaskService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* tasks.create({ ...create("old"), title: "Ärger mit dem Login" });
+      yield* tasks.create({ ...create("new"), title: "Second", projectId });
+      const done = yield* tasks.create({ ...create("done"), title: "Finished" });
+      yield* tasks.update({ taskId: "done", expectedRevision: done.revision, state: "done" });
+      for (const [taskId, updatedAt] of [
+        ["old", "2026-10-01T00:00:00.000Z"],
+        ["new", "2026-10-03T00:00:00.000Z"],
+        ["done", "2026-10-02T00:00:00.000Z"],
+      ])
+        yield* sql`UPDATE local_tasks SET task_json = json_set(task_json, '$.updatedAt', ${updatedAt})
+          WHERE task_id = ${taskId}`;
+      const ids = (found: { readonly tasks: ReadonlyArray<{ readonly taskId: string }> }) =>
+        found.tasks.map((task) => task.taskId);
+      const page = { limit: 10, offset: 0 };
+
+      const open = yield* tasks.search({ state: "todo", ...page });
+      assert.deepEqual([ids(open), open.total], [["new", "old"], 2]);
+      assert.deepEqual(ids(yield* tasks.search({ state: "all", ...page })), ["new", "done", "old"]);
+      assert.deepEqual(ids(yield* tasks.search({ state: "done", ...page })), ["done"]);
+      assert.deepEqual(ids(yield* tasks.search({ state: "all", projectId, ...page })), ["new"]);
+      // Any case, beyond ASCII too; the notes count as well.
+      assert.deepEqual(ids(yield* tasks.search({ state: "all", query: "ärger", ...page })), [
+        "old",
+      ]);
+      assert.equal((yield* tasks.search({ state: "all", query: "OWNER FENCE", ...page })).total, 3);
+      const second = yield* tasks.search({ state: "all", limit: 1, offset: 1 });
+      assert.deepEqual([ids(second), second.total], [["done"], 3]);
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("publishes each task a change touched, deletions and starts included", () =>
     Effect.gen(function* () {
       yield* seed;
       const tasks = yield* LocalTaskService;
-      const seen = yield* tasks.changes.pipe(
-        Stream.map((change) => change.taskId),
-        Stream.take(6),
-        Stream.runCollect,
+      const received = yield* Queue.unbounded<string>();
+      yield* tasks.changes.pipe(
+        Stream.runForEach((change) =>
+          Queue.offer(
+            received,
+            change.taskId === undefined
+              ? "*"
+              : change.deleted
+                ? `deleted ${change.taskId}`
+                : change.taskId,
+          ),
+        ),
         Effect.forkScoped,
       );
-      // The subscription is live before the first change.
-      yield* Effect.yieldNow;
+      const next = Queue.take(received);
+      // First the cue to read everything, once the subscription listens.
+      assert.equal(yield* next, "*");
       const created = yield* tasks.create(create("one"));
+      assert.equal(yield* next, "one");
       const updated = yield* tasks.update({
         taskId: "one",
         expectedRevision: created.revision,
         title: "Renamed",
       });
+      assert.equal(yield* next, "one");
       yield* tasks.create(create("two"));
+      assert.equal(yield* next, "two");
       yield* tasks.reserveDelegation({ taskId: "two", command: command() });
+      assert.equal(yield* next, "two");
       yield* tasks.markDelegated(command().commandId);
+      assert.equal(yield* next, "two");
       yield* tasks.remove({ taskId: "one", expectedRevision: updated.revision });
-      // A failed write changes nothing, so it says nothing.
+      assert.equal(yield* next, "deleted one");
+      // A failed write changes nothing, so it says nothing: the next change is the write after it.
       yield* tasks
         .update({ taskId: "two", expectedRevision: 99, title: "Stale" })
         .pipe(Effect.flip);
-      assert.deepEqual([...(yield* Fiber.join(seen))], ["one", "one", "two", "two", "two", "one"]);
+      yield* tasks.create(create("three"));
+      assert.equal(yield* next, "three");
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
@@ -1071,10 +1122,12 @@ describe("local task service", () => {
         fs.utimesSync(path.join(taskFilesDir, name), old, old);
       }
       fs.writeFileSync(path.join(taskFilesDir, "task-gone-fresh-txt"), "abc");
-      assert.equal(yield* cleanupOrphanTaskFiles({ sql, taskFilesDir, nowMs: Date.now() }), 1);
+      // A copy or upload still being written is fresh; an old `.part` file is one a crash left.
+      fs.writeFileSync(path.join(taskFilesDir, "task-gone-writing-txt.part"), "abc");
+      assert.equal(yield* cleanupOrphanTaskFiles({ sql, taskFilesDir, nowMs: Date.now() }), 2);
       assert.deepEqual(fs.readdirSync(taskFilesDir).toSorted(), [
         "task-gone-fresh-txt",
-        "task-gone-upload-txt.part",
+        "task-gone-writing-txt.part",
         "task-task-kept-txt",
       ]);
     }).pipe(Effect.provide(layer));

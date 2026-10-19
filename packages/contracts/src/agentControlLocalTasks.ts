@@ -54,6 +54,8 @@ export const AgentControlListLocalTasksInput = Schema.Struct({
   limit: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_LOCAL_TASK_LIST_MAX })),
   ),
+  /** How many matching tasks to skip: the previous answer's `nextOffset`. */
+  offset: Schema.optional(NonNegativeInt),
 }).pipe(rejectExcessProperties);
 export type AgentControlListLocalTasksInput = typeof AgentControlListLocalTasksInput.Type;
 

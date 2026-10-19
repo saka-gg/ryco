@@ -223,15 +223,15 @@ describe("derivedAttachmentId", () => {
     ).toBe(`${id}.png`);
   });
 
-  it("refuses ids longer than an attachment id may be", () => {
-    // An 80-character thread segment, a uuid and a 12-character extension exceed 128.
-    expect(
-      derivedAttachmentId({
-        threadId: "t".repeat(80),
-        sourceId: "x",
-        extensionSegment: "a".repeat(12),
-      }),
-    ).toBeNull();
+  it("shortens the extension to keep the id within an attachment id's length", () => {
+    // An 80-character thread segment, a uuid and a 12-character extension would make 130.
+    const id = derivedAttachmentId({
+      threadId: "t".repeat(80),
+      sourceId: "x",
+      extensionSegment: "a".repeat(12),
+    });
+    expect(id).toHaveLength(128);
+    expect(id?.endsWith(`-${"a".repeat(10)}`)).toBe(true);
   });
 });
 

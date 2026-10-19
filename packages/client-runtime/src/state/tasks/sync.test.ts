@@ -404,4 +404,49 @@ describe("retainLocalTasks", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
+
+  it("reads all on the stream's first word, and keeps a deleted task deleted", async () => {
+    vi.useFakeTimers();
+    const list = vi.fn<ListFn>().mockResolvedValue(page([task("a"), task("b")]));
+    let answer: (value: LocalTask) => void = () => {};
+    const get = vi.fn(
+      () =>
+        new Promise<LocalTask>((resolve) => {
+          answer = resolve;
+        }),
+    );
+    let emit: (change: { readonly taskId?: string; readonly deleted?: boolean }) => void = () => {};
+    const api: LocalTasksApi = {
+      listLocalTasks: list,
+      getLocalTask: get as never,
+      subscribeLocalTaskChanges: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+    };
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    // Listening now (first, or again after a reconnect): what changed before is read.
+    emit({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+
+    // A deletion drops the task without reading anything.
+    emit({ taskId: "b", deleted: true });
+    expect(taskIds()).toEqual(["a"]);
+    expect(get).not.toHaveBeenCalled();
+
+    // A read still out when the task is deleted here doesn't bring it back.
+    emit({ taskId: "a" });
+    await vi.advanceTimersByTimeAsync(LOCAL_TASKS_CHANGE_READ_DELAY_MS);
+    expect(get).toHaveBeenCalledTimes(1);
+    useLocalTasksStore.getState().removeTask(ENV, "a");
+    answer(task("a", { revision: 2 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(taskIds()).toEqual([]);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  });
 });

@@ -1,4 +1,5 @@
 import { link, rm, writeFile } from "node:fs/promises";
+import * as path from "node:path";
 
 import {
   type ChatAttachment,
@@ -21,6 +22,7 @@ import {
   resolveAttachmentPath,
   toSafeFileAttachmentExtensionSegment,
   toSafeThreadAttachmentSegment,
+  composeAttachmentId,
   uuidFromSha256Hex,
 } from "../attachmentStore.ts";
 import { stageWorkspaceFile } from "../assistantAttachments.ts";
@@ -42,15 +44,21 @@ export const taskFileSegment = (taskId: string) => `task-${taskId}`;
 /**
  * How a chat receives the file: an image only when the provider can take it as one (an image
  * MIME type with a known image extension, within the image size limit); everything else
- * travels as a plain file.
+ * travels as a plain file. `rasterImage: false` says the bytes were read and are not a raster
+ * image (a text file named `.png`), so the name and MIME type don't make it one.
  */
 export function classifyTaskFile(input: {
   readonly mimeType: string;
   readonly name: string;
   readonly sizeBytes: number;
+  readonly rasterImage?: boolean | undefined;
 }): LocalTaskFile["type"] {
   const mimeType = input.mimeType.toLowerCase();
-  if (!mimeType.startsWith("image/") || input.sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+  if (
+    input.rasterImage === false ||
+    !mimeType.startsWith("image/") ||
+    input.sizeBytes > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+  ) {
     return "file";
   }
   return inferImageExtension({ mimeType, fileName: input.name }) === ".bin" ? "file" : "image";
@@ -65,11 +73,17 @@ export function toLocalTaskFile(input: {
   readonly width?: number | undefined;
   readonly height?: number | undefined;
   readonly addedAt: string;
+  readonly rasterImage?: boolean | undefined;
 }): LocalTaskFile {
   const mimeType = input.mimeType.toLowerCase();
   return {
     fileId: input.fileId,
-    type: classifyTaskFile({ mimeType, name: input.name, sizeBytes: input.sizeBytes }),
+    type: classifyTaskFile({
+      mimeType,
+      name: input.name,
+      sizeBytes: input.sizeBytes,
+      rasterImage: input.rasterImage,
+    }),
     name: input.name,
     mimeType,
     sizeBytes: input.sizeBytes,
@@ -81,6 +95,19 @@ export function toLocalTaskFile(input: {
 
 const invalid = (message: string) => new LocalTaskError({ reason: "invalid", message });
 const storageError = (message: string) => new LocalTaskError({ reason: "persistence", message });
+
+/** Why a workspace file couldn't be read, without the node's absolute paths. */
+function workspaceFileFailure(cause: unknown): string {
+  const code = cause instanceof Error && "code" in cause ? cause.code : undefined;
+  if (code === "ENOENT" || code === "ENOTDIR")
+    return "The file (or this thread's workspace) does not exist.";
+  if (code === "EACCES" || code === "EPERM") return "The file can't be read.";
+  if (code === "EISDIR") return "The path is a folder, not a file.";
+  // Node's own errors name the absolute path; `stageWorkspaceFile`'s are plain sentences.
+  return cause instanceof Error && cause.message && code === undefined
+    ? cause.message
+    : "The file could not be read from the workspace.";
+}
 
 const taskFilePath = (taskFilesDir: string, fileId: string) =>
   resolveAttachmentRelativePath({ attachmentsDir: taskFilesDir, relativePath: fileId });
@@ -133,6 +160,8 @@ export const storeTaskFileFromWorkspace = (input: {
     readonly name: string;
     readonly mimeType: string;
     readonly sizeBytes: number;
+    /** Whether the bytes are a raster image a provider takes inline (`toLocalTaskFile`). */
+    readonly rasterImage: boolean;
     readonly width?: number;
     readonly height?: number;
   },
@@ -140,6 +169,8 @@ export const storeTaskFileFromWorkspace = (input: {
 > =>
   Effect.gen(function* () {
     const segment = toSafeThreadAttachmentSegment(taskFileSegment(input.taskId));
+    // One file however the path is spelled (`a.txt`, `./a.txt`), so it names one task file.
+    const relativePath = path.relative(input.cwd, path.resolve(input.cwd, input.relativePath));
     if (!segment) return yield* invalid("Failed to create a safe id for the task file.");
     const staged = yield* Effect.tryPromise({
       try: (signal) =>
@@ -149,17 +180,16 @@ export const storeTaskFileFromWorkspace = (input: {
           name: input.name,
           stagingDir: input.taskFilesDir,
           maxBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES,
-          hashSeed: (name) => JSON.stringify([input.taskId, input.relativePath, name]),
+          hashSeed: (name) => JSON.stringify([input.taskId, relativePath, name]),
           signal,
         }),
-      catch: (cause) =>
-        invalid(
-          cause instanceof Error && cause.message
-            ? cause.message
-            : "The file could not be read from the workspace.",
-        ),
+      catch: (cause) => invalid(workspaceFileFailure(cause)),
     });
-    const fileId = `${segment}-${uuidFromSha256Hex(staged.contentHash)}-${toSafeFileAttachmentExtensionSegment(staged.name)}`;
+    const fileId = composeAttachmentId(
+      segment,
+      uuidFromSha256Hex(staged.contentHash),
+      toSafeFileAttachmentExtensionSegment(staged.name),
+    );
     const filePath = taskFilePath(input.taskFilesDir, fileId);
     yield* Effect.tryPromise({
       try: async () => {
@@ -183,6 +213,7 @@ export const storeTaskFileFromWorkspace = (input: {
       name: staged.name,
       mimeType: staged.mimeType,
       sizeBytes: staged.sizeBytes,
+      rasterImage: staged.inlineImage,
       ...(dimensions ? { width: dimensions.width, height: dimensions.height } : {}),
     };
   });

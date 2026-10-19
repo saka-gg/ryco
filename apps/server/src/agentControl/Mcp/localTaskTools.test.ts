@@ -98,6 +98,14 @@ const setup = (options: { readonly grants?: ReadonlyArray<AgentControlCapability
       callTool: (_session, name, args) =>
         Effect.sync((): AgentControlMcpToolResult => {
           baseCalls.push({ name, args });
+          // A request id the node has seen with another plan.
+          if ((args as { readonly requestId?: string }).requestId === "used")
+            return {
+              content: [
+                { type: "text", text: "Request ID was already used with a different plan." },
+              ],
+              isError: true,
+            };
           return { content: [{ type: "text", text: "{}" }], structuredContent: { receipt: "ok" } };
         }),
     };
@@ -437,6 +445,66 @@ describe("local task tools", () => {
         "Reopen it",
       );
       assert.lengthOf(harness.baseCalls, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("pages lists, and explains deleted requests, other projects and reused starts", () =>
+    Effect.gen(function* () {
+      const harness = yield* setup();
+      for (const requestId of ["a", "b", "c"])
+        harness.value(yield* harness.call(TOOLS.create, { requestId, title: `Task ${requestId}` }));
+      type Listed = {
+        readonly tasks: ReadonlyArray<{ readonly title: string }>;
+        readonly total: number;
+        readonly nextOffset?: number;
+      };
+      const first = harness.value<Listed>(yield* harness.call(TOOLS.list, { limit: 2 }));
+      assert.deepEqual([first.tasks.length, first.total, first.nextOffset], [2, 3, 2]);
+      const rest = harness.value<Listed>(
+        yield* harness.call(TOOLS.list, { limit: 2, offset: first.nextOffset }),
+      );
+      assert.deepEqual([rest.tasks.length, rest.nextOffset], [1, undefined]);
+
+      // The request's task was deleted since: a retry can't bring it back, and says so.
+      const gone = harness.value<TaskResult>(
+        yield* harness.call(TOOLS.create, { requestId: "gone", title: "Gone" }),
+      );
+      yield* harness.tasks.remove({ taskId: gone.task.taskId, expectedRevision: 0 });
+      assert.include(
+        harness.failure(yield* harness.call(TOOLS.create, { requestId: "gone", title: "Gone" })),
+        "was deleted",
+      );
+
+      // Chats are created in the caller's project only: another project's task says why.
+      const elsewhere = harness.value<TaskResult>(
+        yield* harness.call(TOOLS.create, {
+          requestId: "elsewhere",
+          title: "Elsewhere",
+          projectId: otherProjectId,
+        }),
+      );
+      const start = (requestId: string, taskId: string) =>
+        harness.call(TOOLS.startChat, {
+          requestId,
+          taskId,
+          modelSelection: MODEL,
+          runtimeMode: "approval-required",
+          envMode: "local",
+        });
+      assert.include(
+        harness.failure(yield* start("start-elsewhere", elsewhere.task.taskId)),
+        "another project",
+      );
+      assert.lengthOf(harness.baseCalls, 0);
+
+      // A start retried after the task changed: the first try may have started the chat.
+      const here = harness.value<TaskResult>(
+        yield* harness.call(TOOLS.create, { requestId: "here", title: "Here" }),
+      );
+      assert.include(
+        harness.failure(yield* start("used", here.task.taskId)),
+        "ryco_read_local_task",
+      );
     }).pipe(Effect.provide(layer)),
   );
 

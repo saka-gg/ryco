@@ -284,9 +284,14 @@ export type LocalTaskRemoveFileInput = typeof LocalTaskRemoveFileInput.Type;
 
 /**
  * A task changed on the node (created, edited, deleted, a file or a chat
- * start): clients that show tasks read them again.
+ * start): clients that show tasks read it again, or drop it when `deleted`.
+ * Every subscription starts with a change without a `taskId`, sent once it
+ * listens: read every task then, since nothing changed before it was heard.
  */
-export const LocalTaskChange = Schema.Struct({ taskId: LocalTaskId });
+export const LocalTaskChange = Schema.Struct({
+  taskId: Schema.optional(LocalTaskId),
+  deleted: Schema.optional(Schema.Boolean),
+});
 export type LocalTaskChange = typeof LocalTaskChange.Type;
 
 export class LocalTaskError extends Schema.TaggedError<LocalTaskError>()("LocalTaskError", {

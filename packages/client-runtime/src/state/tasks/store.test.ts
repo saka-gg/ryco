@@ -127,6 +127,21 @@ describe("applyList", () => {
     expect(environment().touchedAt).toEqual({});
   });
 
+  it("keeps a copy read after a list started when the list has its revision", () => {
+    store().applyList(ENV, [task("a", { delegations: [delegation("one", 1, "starting")] })], {
+      since: epoch(),
+      readAt: 1,
+    });
+    const since = epoch();
+    // A start failing doesn't move the revision: the copy read since is the newer one.
+    store().applyTask(ENV, task("a", { delegations: [delegation("one", 1, "failed")] }));
+    store().applyList(ENV, [task("a", { delegations: [delegation("one", 1, "starting")] })], {
+      since,
+      readAt: 2,
+    });
+    expect(environment().tasks.a?.delegations[0]?.status).toBe("failed");
+  });
+
   it("unites starts by command id, the node's newer copy winning, and drops confirmed optimistic starts", () => {
     store().applyTask(ENV, task("a", { delegations: [delegation("one", 1, "starting")] }));
     store().setOverlay(ENV, "a", (overlay) => ({

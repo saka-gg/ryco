@@ -12,6 +12,7 @@ import {
   AgentControlOperationId,
   AgentControlProposalId,
   AgentControlRequestId,
+  LocalTaskError,
   OrchestrationThreadShell,
   ProjectId,
   ProviderInstanceId,
@@ -1884,6 +1885,83 @@ it.effect("deletes exactly the approved task revision, once", () =>
   }),
 );
 
+it.effect("completes a delete a restart interrupted once the task is gone", () =>
+  Effect.gen(function* () {
+    const deletePlan = {
+      kind: "deleteLocalTask" as const,
+      taskId: "task-old",
+      expectedRevision: 4,
+      title: "Old idea",
+    };
+    const executing: AgentControlProposal = {
+      ...approvedProposal,
+      plan: deletePlan,
+      planDigest: computeAgentControlPlanDigest(deletePlan),
+      status: "executing",
+    };
+    const running: AgentControlOperation = {
+      operationId: AgentControlOperationId.make("operation-delete-interrupted"),
+      proposalId: executing.proposalId,
+      actionKind: "deleteLocalTask",
+      status: "running",
+      attempt: 1,
+      // Deleted, but the server stopped before the checkpoint said so.
+      state: {
+        completedSteps: [],
+        resources: { threadIds: [], ownedThreadIds: [], worktreeIds: [], ownedWorktrees: [] },
+        commandReceipts: [],
+      },
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const proposalRef = yield* Ref.make(executing);
+    const operationRef = yield* Ref.make(running);
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.modify(proposalRef, (current) => {
+            const next: AgentControlProposal = {
+              ...current,
+              status: input.result.outcome === "completed" ? "completed" : "failed",
+              result: input.result,
+            };
+            return [next, next];
+          }),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+      },
+      projections: {},
+      commandApplication: {},
+    }).pipe(
+      Effect.provideService(LocalTaskService, {
+        get: () =>
+          Effect.fail(new LocalTaskError({ reason: "not-found", message: "Task not found." })),
+      } as never),
+    );
+    yield* execution.recoverIncomplete;
+    assert.strictEqual((yield* Ref.get(proposalRef)).status, "completed");
+    const operation = yield* Ref.get(operationRef);
+    assert.strictEqual(operation.status, "completed");
+    assert.include(operation.state.completedSteps, "local-task-deleted");
+  }),
+);
+
 it.effect("starts an agent's task chat as the task's, with copies of the task's files", () =>
   Effect.gen(function* () {
     const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-control-task-start-"));
@@ -1941,12 +2019,17 @@ it.effect("starts an agent's task chat as the task's, with copies of the task's 
       },
     }).pipe(
       Effect.provideService(LocalTaskService, {
-        reserveDelegation: (input: {
-          readonly taskId: string;
-          readonly command: { readonly commandId: string };
-        }) =>
+        reserveDelegation: (
+          input: {
+            readonly taskId: string;
+            readonly command: { readonly commandId: string };
+          },
+          options: { readonly branch?: string | null },
+        ) =>
           Effect.sync(() => {
             calls.push(["reserve", input]);
+            // Agent Control makes a worktree itself: its branch comes along, not in a bootstrap.
+            assert.deepEqual(options, { branch: null });
             return {
               task: {} as never,
               command: input.command,

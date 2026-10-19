@@ -22,11 +22,12 @@ import {
   type ProjectId,
 } from "@ryco/contracts";
 import { aggregateLocalTaskStatus } from "@ryco/shared/localTasks";
-import { Context, Effect, Layer, Option, PubSub, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Option, Schema, Stream } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { ServerConfig } from "../config.ts";
 import { type DelegatedRun, readDelegatedRun } from "../persistence/delegatedRunStatus.ts";
+import { makeLocalTaskChangeFeed } from "./taskChangeFeed.ts";
 import { deleteTaskFiles } from "./taskFiles.ts";
 
 type TaskEffect<A> = Effect.Effect<A, LocalTaskError>;
@@ -48,6 +49,14 @@ export interface LocalTaskDelegationReservation {
 
 export interface LocalTaskServiceShape {
   readonly list: (input: LocalTaskListInput) => TaskEffect<LocalTaskListResult>;
+  /**
+   * The tasks matching a filter, most recently changed first: one page of them in whole, and how
+   * many match. Only that page's chats are read, however many tasks there are.
+   */
+  readonly search: (input: LocalTaskSearchInput) => TaskEffect<{
+    readonly tasks: ReadonlyArray<LocalTask>;
+    readonly total: number;
+  }>;
   readonly get: (taskId: string) => TaskEffect<LocalTask>;
   readonly create: (input: LocalTaskCreateInput) => TaskEffect<LocalTask>;
   readonly update: (input: LocalTaskUpdateInput) => TaskEffect<LocalTask>;
@@ -65,6 +74,10 @@ export interface LocalTaskServiceShape {
    */
   readonly reserveDelegation: (
     input: LocalTaskDelegateInput,
+    options?: {
+      /** The chat's branch when the node made its worktree itself, without a bootstrap. */
+      readonly branch?: string | null;
+    },
   ) => TaskEffect<LocalTaskDelegationReservation>;
   readonly markDelegated: (commandId: string) => TaskEffect<void>;
   /**
@@ -112,6 +125,16 @@ const startFailed = (message: string | null) =>
   error("conflict", message?.trim() ? message : FAILED_START_ERROR);
 /** Leaves a file alone while an upload or add that wrote it may still be on its way. */
 const ORPHAN_TASK_FILE_GRACE_MS = 60 * 60 * 1000;
+
+export interface LocalTaskSearchInput {
+  /** Open (`todo`), completed (`done`) or every task (`all`). */
+  readonly state: "todo" | "done" | "all";
+  readonly projectId?: string | undefined;
+  /** Text the title or notes contain, in any case. */
+  readonly query?: string | undefined;
+  readonly limit: number;
+  readonly offset: number;
+}
 
 interface TaskRow {
   task_id: string;
@@ -215,7 +238,8 @@ export const cleanupOrphanTaskFiles = (input: {
     const live = new Set(referenced.flatMap((row) => (row.file_id ? [row.file_id] : [])));
     let deleted = 0;
     for (const name of names) {
-      if (name.endsWith(".part") || live.has(name)) continue;
+      // A `.part` file is a copy still being written, or one a crash left: the grace below tells.
+      if (live.has(name)) continue;
       const filePath = path.join(input.taskFilesDir, name);
       const info = yield* Effect.tryPromise(() => lstat(filePath)).pipe(Effect.option);
       if (
@@ -428,8 +452,8 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
       return record.files.filter((file) => fileIds.has(file.fileId));
     };
 
-    const changes = yield* PubSub.unbounded<LocalTaskChange>();
-    const changed = (taskId: string) => PubSub.publish(changes, { taskId }).pipe(Effect.asVoid);
+    const feed = yield* makeLocalTaskChangeFeed();
+    const changed = (taskId: string, deleted = false) => feed.publish(taskId, deleted);
     /** The task a start belongs to, for its change: none once the start is gone. */
     const changedStart = (commandId: string) =>
       sql<{
@@ -451,6 +475,35 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
             ORDER BY task_id ASC LIMIT ${limit + 1}`;
           const tasks = yield* presentMany(rows.slice(0, limit));
           return { tasks, nextCursor: rows.length > limit ? tasks.at(-1)!.taskId : null };
+        }).pipe(Effect.mapError(mapError)),
+      search: (input) =>
+        Effect.gen(function* () {
+          const state = input.state === "all" ? null : input.state;
+          const projectId = input.projectId ?? null;
+          const rows =
+            yield* sql<TaskRow>`SELECT task_id, revision, task_json, create_digest, deleted_at
+            FROM local_tasks WHERE deleted_at IS NULL
+              AND (${state} IS NULL OR json_extract(task_json, '$.state') = ${state})
+              AND (${projectId} IS NULL OR json_extract(task_json, '$.projectId') = ${projectId})
+            ORDER BY json_extract(task_json, '$.updatedAt') DESC, task_id ASC`;
+          const needle = input.query?.toLowerCase();
+          const matching =
+            needle === undefined
+              ? rows
+              : (yield* Effect.forEach(rows, (row) =>
+                  recordFor(row).pipe(
+                    Effect.map((record) =>
+                      record.title.toLowerCase().includes(needle) ||
+                      record.notes.toLowerCase().includes(needle)
+                        ? row
+                        : null,
+                    ),
+                  ),
+                )).filter((row) => row !== null);
+          const tasks = yield* presentMany(
+            matching.slice(input.offset, input.offset + input.limit),
+          );
+          return { tasks, total: matching.length };
         }).pipe(Effect.mapError(mapError)),
       create: (input) =>
         sql
@@ -551,7 +604,7 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
               return record.files.map((file) => file.fileId);
             }),
           );
-          yield* changed(input.taskId);
+          yield* changed(input.taskId, true);
           // The chats keep their own copies; only the task's originals go.
           yield* deleteTaskFiles(taskFilesDir, fileIds);
           return { deleted: true as const };
@@ -567,12 +620,13 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
             }),
           )
           .pipe(Effect.mapError(mapError)),
-      reserveDelegation: (input) =>
+      reserveDelegation: (input, options) =>
         sql
           .withTransaction(
             Effect.gen(function* () {
               const decoded = yield* Schema.decodeUnknownEffect(LocalTaskDelegateInput)(input);
               const command = decoded.command;
+              const branch = command.bootstrap?.prepareWorktree?.branch ?? options?.branch ?? null;
               const stored = yield* commandDigest(command);
               let row = yield* rowFor(decoded.taskId);
               const record = yield* recordFor(row);
@@ -585,7 +639,7 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
                 if (replay.needsDispatch && replay.start.command_digest !== stored.digest)
                   yield* sql`UPDATE local_task_delegations
                     SET command_json = ${stored.json}, command_digest = ${stored.digest},
-                      branch = ${command.bootstrap?.prepareWorktree?.branch ?? null}
+                      branch = ${branch}
                     WHERE command_id = ${command.commandId}`;
                 return {
                   task: yield* present(row),
@@ -675,7 +729,7 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
                   message_id, branch, command_json, command_digest, file_ids_json, created_at)
                 SELECT ${command.commandId}, ${record.taskId}, COALESCE(MAX(sequence), 0) + 1,
                   ${command.threadId}, ${command.message.messageId},
-                  ${bootstrap?.prepareWorktree?.branch ?? null}, ${stored.json}, ${stored.digest},
+                  ${branch}, ${stored.json}, ${stored.digest},
                   ${JSON.stringify(record.files.map((file) => file.fileId))}, ${new Date().toISOString()}
                 FROM local_task_delegations WHERE task_id = ${record.taskId}`;
               return {
@@ -769,12 +823,31 @@ export const makeLocalTaskService = (options: { readonly taskFilesDir: string })
             }),
           );
           yield* changed(task.taskId);
-          yield* deleteTaskFiles(taskFilesDir, [input.fileId]);
+          // The same bytes added again since (a file's id comes from them) are the task's again.
+          const heldAgain = yield* get(task.taskId).pipe(
+            Effect.map((current) => current.files.some((file) => file.fileId === input.fileId)),
+            Effect.orElseSucceed(() => false),
+          );
+          if (!heldAgain) yield* deleteTaskFiles(taskFilesDir, [input.fileId]);
           return task;
         }).pipe(Effect.mapError(mapError)),
-      changes: Stream.fromPubSub(changes),
+      changes: feed.changes,
     };
-    return service;
+    // A write and its change go together: a caller interrupted after the commit (a client that
+    // disconnected) must not leave the other clients without word of it.
+    return {
+      ...service,
+      create: (input) => Effect.uninterruptible(service.create(input)),
+      update: (input) => Effect.uninterruptible(service.update(input)),
+      remove: (input) => Effect.uninterruptible(service.remove(input)),
+      reserveDelegation: (input, options) =>
+        Effect.uninterruptible(service.reserveDelegation(input, options)),
+      markDelegated: (commandId) => Effect.uninterruptible(service.markDelegated(commandId)),
+      markDelegationFailed: (commandId, message) =>
+        Effect.uninterruptible(service.markDelegationFailed(commandId, message)),
+      addFile: (input) => Effect.uninterruptible(service.addFile(input)),
+      removeFile: (input) => Effect.uninterruptible(service.removeFile(input)),
+    } satisfies LocalTaskServiceShape;
   });
 
 export const LocalTaskServiceLive = Layer.effect(

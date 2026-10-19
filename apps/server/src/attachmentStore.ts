@@ -92,7 +92,26 @@ export function createFileAttachmentId(threadId: string, name: string): string |
   if (!threadSegment) {
     return null;
   }
-  return `${threadSegment}-${randomUUID()}-${toSafeFileAttachmentExtensionSegment(name)}`;
+  return composeAttachmentId(
+    threadSegment,
+    randomUUID(),
+    toSafeFileAttachmentExtensionSegment(name),
+  );
+}
+
+/**
+ * `<segment>-<uuid>`, then `-<extension>` when there is one, the extension shortened so the id
+ * keeps within an attachment id's 128 characters: the longest segment (80) leaves it 10.
+ */
+export function composeAttachmentId(
+  segment: string,
+  uuid: string,
+  extension: string | null | undefined,
+): string {
+  const base = `${segment}-${uuid}`;
+  return extension
+    ? `${base}-${extension.slice(0, ATTACHMENT_ID_MAX_CHARS - base.length - 1)}`
+    : base;
 }
 
 /** The first 32 hex digits of a sha-256 digest, formatted like a UUID (no version bits). */
@@ -381,9 +400,7 @@ export function derivedAttachmentId(input: {
   const uuid = uuidFromSha256Hex(
     createHash("sha256").update(`${input.threadId}\0${input.sourceId}`, "utf8").digest("hex"),
   );
-  const extension = input.extensionSegment ? `-${input.extensionSegment.toLowerCase()}` : "";
-  const id = `${threadSegment}-${uuid}${extension}`;
-  return id.length <= ATTACHMENT_ID_MAX_CHARS ? id : null;
+  return composeAttachmentId(threadSegment, uuid, input.extensionSegment?.toLowerCase());
 }
 
 /**

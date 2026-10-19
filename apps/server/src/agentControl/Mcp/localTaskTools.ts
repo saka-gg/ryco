@@ -165,7 +165,7 @@ const fieldProperties = {
 const descriptors = {
   list: {
     name: TOOLS.list,
-    description: `List the node's Tasks, newest change first: id, revision, title, state (todo/done), status of their chats, priority, due day, project, links and a notes preview. ${NOT_TASK_RUNS}`,
+    description: `List the node's Tasks, newest change first: id, revision, title, state (todo/done), status of their chats, priority, due day, project, links and a notes preview. When more match than fit, the answer has nextOffset: pass it as offset for the next ones. ${NOT_TASK_RUNS}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -173,6 +173,7 @@ const descriptors = {
         projectId: { type: "string", maxLength: 256 },
         query: { type: "string", minLength: 1, maxLength: 200 },
         limit: { type: "integer", minimum: 1, maximum: AGENT_CONTROL_LOCAL_TASK_LIST_MAX },
+        offset: { type: "integer", minimum: 0 },
       },
       additionalProperties: false,
     },
@@ -247,7 +248,7 @@ const descriptors = {
   startChat: {
     name: TOOLS.startChat,
     description:
-      "Start a chat for a Task, like Start on the Tasks page: recorded under the task, with the task's files on its first message. The first message is the task's title, notes and links unless you give a prompt. It runs through ryco_create_threads (the same project, runtime-mode and worktree rules), in the task's project (a task without one joins this chat's). Returns that request's receipt; confirm with ryco_wait_for_control_request.",
+      "Start a chat for a Task, like Start on the Tasks page: recorded under the task, with the task's files on its first message. The first message is the task's title, notes and links unless you give a prompt. It runs through ryco_create_threads (the same project, runtime-mode and worktree rules), so only a task in this chat's project (or one without a project, which joins it) can be started from here. Returns that request's receipt; confirm with ryco_wait_for_control_request.",
     inputSchema: {
       type: "object",
       properties: {
@@ -343,6 +344,9 @@ const toTaskSummary = (task: LocalTask) => {
   };
 };
 
+/** What `ryco_create_threads` answers a request id reused with another plan. */
+const DUPLICATE_REQUEST_TEXT = "Request ID was already used with a different plan.";
+
 const result = (value: unknown): AgentControlMcpToolResult => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
   structuredContent: value,
@@ -357,24 +361,10 @@ const taskFailure = (error: LocalTaskError) =>
   new ToolFailure(
     error.reason === "conflict" && error.message.startsWith("Task changed")
       ? "The task changed since it was read. Read it again with ryco_read_local_task, then retry with its revision."
-      : error.reason === "not-found"
+      : error.reason === "not-found" && error.message === "Task not found."
         ? `${error.message} Use ryco_list_local_tasks for task ids.`
         : error.message,
   );
-
-/** Every task, read page by page (the node caps one page at 100). */
-const readAllTasks = (tasks: LocalTaskServiceShape) =>
-  Effect.gen(function* () {
-    const all: LocalTask[] = [];
-    let afterId: string | undefined;
-    for (let page = 0; page < 200; page += 1) {
-      const listed = yield* tasks.list({ limit: 100, ...(afterId ? { afterId } : {}) });
-      all.push(...listed.tasks);
-      if (listed.nextCursor === null) break;
-      afterId = listed.nextCursor;
-    }
-    return all;
-  });
 
 export interface LocalTaskToolDeps extends Pick<
   AgentControlMcpToolDeps,
@@ -460,26 +450,25 @@ export function withLocalTaskTools(
   const list = (args: unknown) =>
     Effect.gen(function* () {
       const input = yield* decode(AgentControlListLocalTasksInput, args);
-      const state = input.state ?? "todo";
-      const needle = input.query?.toLowerCase();
-      const matching = (yield* task(readAllTasks(tasks)))
-        .filter((entry) => state === "all" || entry.state === state)
-        .filter((entry) => input.projectId === undefined || entry.projectId === input.projectId)
-        .filter(
-          (entry) =>
-            needle === undefined ||
-            entry.title.toLowerCase().includes(needle) ||
-            entry.notes.toLowerCase().includes(needle),
-        )
-        .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
       const limit = Math.min(
         input.limit ?? AGENT_CONTROL_LOCAL_TASK_LIST_DEFAULT,
         AGENT_CONTROL_LOCAL_TASK_LIST_MAX,
       );
+      const offset = input.offset ?? 0;
+      const found = yield* task(
+        tasks.search({
+          state: input.state ?? "todo",
+          projectId: input.projectId,
+          query: input.query,
+          limit,
+          offset,
+        }),
+      );
+      const end = offset + limit;
       return {
-        tasks: matching.slice(0, limit).map(toTaskSummary),
-        total: matching.length,
-        truncated: matching.length > limit,
+        tasks: found.tasks.map(toTaskSummary),
+        total: found.total,
+        ...(end < found.total ? { nextOffset: end } : {}),
       };
     });
 
@@ -507,10 +496,24 @@ export function withLocalTaskTools(
           projectId: input.projectId ?? null,
         })
         .pipe(
-          Effect.mapError((error) =>
-            error.reason === "conflict"
-              ? new ToolFailure("Request ID was already used for a different task.")
-              : taskFailure(error),
+          Effect.catch((error) =>
+            error.reason !== "conflict"
+              ? Effect.fail(taskFailure(error))
+              : // The request's task exists with other fields, or was deleted since.
+                tasks.get(taskId).pipe(
+                  Effect.matchEffect({
+                    onFailure: () =>
+                      Effect.fail(
+                        new ToolFailure(
+                          "The task this request created was deleted. Use a new requestId to create it again.",
+                        ),
+                      ),
+                    onSuccess: () =>
+                      Effect.fail(
+                        new ToolFailure("Request ID was already used for a different task."),
+                      ),
+                  }),
+                ),
           ),
         );
       // Links are set by the first edit; a retry finds them set (or the task edited since).
@@ -596,18 +599,24 @@ export function withLocalTaskTools(
         return yield* Effect.fail(
           new ToolFailure("The task is done. Reopen it (state todo) before starting a chat."),
         );
-      const projectId =
-        current.projectId ??
-        Option.getOrNull(
-          Option.map(
-            yield* deps.projections
-              .getThreadShellById(session.threadId)
-              .pipe(Effect.mapError(() => new ToolFailure("This thread is unavailable."))),
-            (thread) => thread.projectId,
-          ),
-        );
+      const callerProjectId = Option.getOrNull(
+        Option.map(
+          yield* deps.projections
+            .getThreadShellById(session.threadId)
+            .pipe(Effect.mapError(() => new ToolFailure("This thread is unavailable."))),
+          (thread) => thread.projectId,
+        ),
+      );
+      const projectId = current.projectId ?? callerProjectId;
       if (projectId === null)
         return yield* Effect.fail(new ToolFailure("The task has no project to start a chat in."));
+      // Chats are created in the caller's project only (ryco_create_threads' rule).
+      if (projectId !== callerProjectId)
+        return yield* Effect.fail(
+          new ToolFailure(
+            "The task belongs to another project. Start its chat from a chat in that project, or from the Tasks page.",
+          ),
+        );
       const titles = new Map<ThreadId, string | null>();
       for (const link of current.links)
         if (link.kind === "thread") titles.set(link.threadId, yield* describeThread(link.threadId));
@@ -620,7 +629,7 @@ export function withLocalTaskTools(
           describeThread: (threadId) => titles.get(threadId) ?? null,
         });
       // The validated, routine and audited thread-creation path does the rest.
-      return yield* base.callTool(session, AGENT_CONTROL_MCP_TOOLS.createThreads, {
+      const created = yield* base.callTool(session, AGENT_CONTROL_MCP_TOOLS.createThreads, {
         requestId: input.requestId,
         entries: [
           {
@@ -639,6 +648,14 @@ export function withLocalTaskTools(
           },
         ],
       });
+      // The plan is built from the task as it is now: a retry after the task (or a linked chat's
+      // title) changed differs from the first try, which may well have started the chat.
+      const first = created.content[0];
+      return created.isError && first?.type === "text" && first.text === DUPLICATE_REQUEST_TEXT
+        ? errorResult(
+            "This requestId was already used, and the task changed since: its chat may have started then. Check the chats with ryco_read_local_task, and use a new requestId to start another.",
+          )
+        : created;
     });
 
   const proposeDelete = (

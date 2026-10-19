@@ -245,7 +245,12 @@ function applyListTo(
     const existing = current.tasks[task.taskId];
     // Listed, but removed here after the read started.
     if (task.taskId in tasks || (!existing && touchedSince(task.taskId))) continue;
-    const next = mergeTask(existing, task);
+    // Read here after the list started, at the same revision: a chat start's progress doesn't
+    // move the revision, so this copy is the newer one.
+    const next =
+      existing && touchedSince(task.taskId) && task.revision === existing.revision
+        ? withDelegationsOf(existing, task)
+        : mergeTask(existing, task);
     if (next !== existing) reused = false;
     tasks[task.taskId] = next;
     order.push(task.taskId);

@@ -57,10 +57,13 @@ Tasks belong to the selected node; a node that supports what follows advertises 
 `getLocalTask`, `createLocalTask`, `updateLocalTask`, `deleteLocalTask`,
 `delegateLocalTask`, `createLocalTaskFileUpload`, `addLocalTaskFile`, `removeLocalTaskFile`,
 and the stream `server.subscribeLocalTaskChanges`, which sends `{ taskId }` for each task a
-change touches from then on (created, edited, deleted, a file, a chat start), whoever made it:
-another client or an agent through Agent Control (see [Agent Control](./agent-control.md#tasks)).
-Read the task (or the list, when it is gone) on a change; the stream carries no task content and
-nothing that happened before it was opened, so read the list when it (re)connects. There is no
+change touches from then on (created, edited, a file, a chat start; `{ taskId, deleted: true }`
+for a deleted one), whoever made it: another client or an agent through Agent Control (see
+[Agent Control](./agent-control.md#tasks)). Read the task on a change, or drop it when deleted;
+the stream carries no task content. Changes a subscriber hasn't read yet merge per task, and one
+that falls far behind (a stalled connection) gets `{}` in their place. Each subscription also
+starts with `{}` once it listens (again after a reconnect): read the list on `{}`, which covers
+whatever changed before it was heard. There is no
 external task service; status changes of a task's chats arrive with the chats themselves.
 
 Create supplies `taskId`, `title`, `notes`, `priority`, `dueAt`, and nullable `projectId`.

@@ -19,6 +19,7 @@ import {
   resolveAttachmentPath,
   toSafeThreadAttachmentSegment,
   toSafeFileAttachmentExtensionSegment,
+  composeAttachmentId,
   uuidFromSha256Hex,
 } from "./attachmentStore.ts";
 
@@ -144,10 +145,13 @@ async function publishStagedAttachment(input: {
     readonly htmlRender?: ChatHtmlRenderMetadata;
   };
 }): Promise<PublishedAssistantAttachment> {
-  const suffix = input.extensionSegment === undefined ? "" : `-${input.extensionSegment}`;
   const attachment = Schema.decodeUnknownSync(ChatAttachment)({
     ...input.fields,
-    id: `${input.thread}-${uuidFromSha256Hex(input.contentHash)}${suffix}`,
+    id: composeAttachmentId(
+      input.thread,
+      uuidFromSha256Hex(input.contentHash),
+      input.extensionSegment,
+    ),
   });
   const destination = resolveAttachmentPath({ attachmentsDir: input.attachmentsDir, attachment });
   if (!destination) throw new Error("Invalid attachment destination.");

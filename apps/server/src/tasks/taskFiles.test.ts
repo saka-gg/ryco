@@ -16,6 +16,7 @@ import {
   classifyTaskFile,
   copyTaskFilesToThread,
   deleteTaskFiles,
+  storeTaskFileFromWorkspace,
   taskFileSegment,
   toLocalTaskFile,
   writeTaskFileFromDataUrl,
@@ -69,6 +70,45 @@ describe("task files", () => {
       addedAt: "2026-10-02T00:00:00.000Z",
     });
   });
+
+  it.effect("take a workspace file as an image only when its bytes are one", () =>
+    Effect.gen(function* () {
+      const { taskFilesDir } = makeDirs();
+      const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-task-workspace-"));
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      fs.writeFileSync(path.join(workspace, "real.png"), png);
+      // A Git LFS pointer, say: text under an image name.
+      fs.writeFileSync(path.join(workspace, "pointer.png"), "version https://git-lfs.github.com\n");
+      const store = (relativePath: string) =>
+        storeTaskFileFromWorkspace({ taskFilesDir, taskId: "t1", cwd: workspace, relativePath });
+      const real = yield* store("real.png");
+      const pointer = yield* store("pointer.png");
+      const addedAt = "2026-10-19T00:00:00.000Z";
+      expect(toLocalTaskFile({ ...real, addedAt }).type).toBe("image");
+      expect(toLocalTaskFile({ ...pointer, addedAt })).toMatchObject({
+        type: "file",
+        mimeType: "image/png",
+      });
+      // One file, however its path is spelled.
+      expect((yield* store("./real.png")).fileId).toBe(real.fileId);
+      // The longest task id and extension still make a valid id: the extension gives way.
+      fs.writeFileSync(path.join(workspace, "notes.longextension"), "notes");
+      const long = yield* storeTaskFileFromWorkspace({
+        taskFilesDir,
+        taskId: "t".repeat(128),
+        cwd: workspace,
+        relativePath: "notes.longextension",
+      });
+      expect(long.fileId.length).toBe(128);
+      expect(fs.existsSync(path.join(taskFilesDir, long.fileId))).toBe(true);
+      // A missing file says so, without the node's paths.
+      const missing = yield* Effect.flip(store("gone.txt"));
+      expect(missing.message).toBe("The file (or this thread's workspace) does not exist.");
+    }),
+  );
 
   it.effect("store an inline file under a fresh task id and delete it best effort", () =>
     Effect.gen(function* () {

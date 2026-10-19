@@ -1217,7 +1217,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 return yield* Effect.fail(new Error("Tasks are unavailable on this node."));
               const tasks = localTasks.value;
               const reservation = yield* tasks
-                .reserveDelegation({ taskId: localTaskId, command: turnStart })
+                .reserveDelegation(
+                  { taskId: localTaskId, command: turnStart },
+                  { branch: worktree?.branch ?? null },
+                )
                 .pipe(Effect.mapError((error) => new Error(error.message)));
               const copies = yield* copyTaskFilesToThread({
                 taskFilesDir: config.taskFilesDir,
@@ -1549,6 +1552,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             message:
               isProjectAction(executing) ||
               executing.plan.kind === "changeSettings" ||
+              executing.plan.kind === "deleteLocalTask" ||
               executing.plan.kind === "createAutomation" ||
               executing.plan.kind === "updateAutomation" ||
               executing.plan.kind === "cancelAutomation"
@@ -1664,6 +1668,39 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 attempt: operation.attempt,
                 state,
                 result,
+                updatedAt: new Date().toISOString(),
+              });
+              yield* proposals.settleExecution({
+                proposalId: proposal.proposalId,
+                result: completedResult(completed),
+                now: new Date().toISOString(),
+              });
+              continue;
+            }
+          }
+          // Deleted, and only the checkpoint was lost: the task being gone is the outcome.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "deleteLocalTask" &&
+            Option.isSome(localTasks)
+          ) {
+            const gone = yield* localTasks.value.get(proposal.plan.taskId).pipe(
+              Effect.as(false),
+              Effect.catch((error) => Effect.succeed(error.reason === "not-found")),
+            );
+            if (gone) {
+              const state = {
+                ...operation.state,
+                completedSteps: unique([...operation.state.completedSteps, "local-task-deleted"]),
+              };
+              const completed = yield* operations.transition({
+                operationId: operation.operationId,
+                expectedStatus: "running",
+                nextStatus: "completed",
+                actor: "executor",
+                attempt: operation.attempt,
+                state,
+                result: completedResult({ ...operation, state }),
                 updatedAt: new Date().toISOString(),
               });
               yield* proposals.settleExecution({

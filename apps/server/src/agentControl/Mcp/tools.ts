@@ -1282,6 +1282,24 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
   ) =>
     Effect.gen(function* () {
       const input = yield* decodeArgs(AgentControlMcpCreateThreadsInput, args);
+      // A chat started as a task's writes to the task (its starts, its project): that needs the
+      // task grant as well, however the chat is created.
+      if (input.entries.some((entry) => entry.localTaskId !== undefined)) {
+        yield* deps.policy
+          .authorize({
+            principal: {
+              kind: "provider-session",
+              threadId: session.threadId,
+              providerInstanceId: session.providerInstanceId,
+              runtimeSessionId: session.runtimeSessionId,
+              turnId: authority.turnId,
+            },
+            grantedCapabilities: session.grantedCapabilities,
+            requiredCapability: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
+            operation: `mcp:${AGENT_CONTROL_MCP_TOOLS.createThreads}:local-task`,
+          })
+          .pipe(Effect.mapError(() => new ToolFailure("Capability denied.")));
+      }
       return yield* submitMutation({
         session,
         authority,
