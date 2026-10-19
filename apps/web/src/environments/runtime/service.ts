@@ -48,6 +48,7 @@ export {
 } from "@ryco/client-runtime/connection";
 
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "~/composerDraftStore";
+import { useMessageQueueStore } from "~/messageQueueStore";
 import { ensureLocalApi } from "~/localApi";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
 import { createProjectSearchInvalidationQueue } from "~/rpc/projectSearchInvalidation";
@@ -78,13 +79,13 @@ import {
   writeSavedEnvironmentBearerToken,
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
+import { useStore, selectEnvironmentState } from "~/store";
+import { createEnvironmentEventBatcher } from "@ryco/client-runtime/state/threads";
 import {
-  useStore,
-  selectEnvironmentState,
-  selectSidebarThreadSummaryByRef,
-  selectThreadByRef,
-} from "~/store";
-import { createEnvironmentEventBatcher, fullThreadEntry } from "@ryco/client-runtime/state/threads";
+  hasUnsentThreadWork,
+  isThreadNonIdle,
+  selectThreadBodyUsage,
+} from "@ryco/client-runtime/state/threads/threadBodyResidency";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import type { WsProtocolCloseContext } from "@ryco/client-runtime/rpc";
 import {
@@ -201,7 +202,14 @@ function getEnvironmentSupervisor() {
     waitForPrimaryShellSnapshotApplied,
     subscribeBrowserResume: subscribeBrowserResumeReconnects,
     isThreadDetailSubscriptionNonIdle: (environmentId, threadId) =>
-      isNonIdleThreadDetailSubscription({ environmentId, threadId }),
+      isThreadNonIdle(useStore.getState(), scopeThreadRef(environmentId, threadId)),
+    listThreadBodies: () => selectThreadBodyUsage(useStore.getState()),
+    evictThreadBodies: (threadRefs) => useStore.getState().evictThreadBodies(threadRefs),
+    isThreadBodyProtected: (threadRef) =>
+      hasUnsentThreadWork(threadRef, {
+        queuesByThreadKey: useMessageQueueStore.getState().queuesByThreadKey,
+        draftsByThreadKey: useComposerDraftStore.getState().draftsByThreadKey,
+      }),
     syncThreadDetailSnapshot: (environmentId, snapshot) =>
       useStore
         .getState()
@@ -298,55 +306,6 @@ async function waitForPrimaryShellSnapshotApplied(timeoutMs: number): Promise<vo
       globalThis.setTimeout(resolve, timeoutMs);
     }),
   ]);
-}
-
-function isNonIdleThreadDetailSubscription(input: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-}): boolean {
-  const threadRef = scopeThreadRef(input.environmentId, input.threadId);
-  const state = useStore.getState();
-  // An archived stub knows of no pending work; once loaded, its full summary does.
-  const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, threadRef));
-
-  // Prefer shell/sidebar state first because it carries the coarse thread
-  // readiness flags used throughout the UI (pending approvals/input/plan).
-  if (sidebarThread) {
-    if (
-      sidebarThread.hasPendingApprovals ||
-      sidebarThread.hasPendingUserInput ||
-      sidebarThread.hasActionableProposedPlan
-    ) {
-      return true;
-    }
-
-    const orchestrationStatus = sidebarThread.session?.orchestrationStatus;
-    if (
-      orchestrationStatus &&
-      orchestrationStatus !== "idle" &&
-      orchestrationStatus !== "stopped"
-    ) {
-      return true;
-    }
-
-    if (sidebarThread.latestTurn?.state === "running") {
-      return true;
-    }
-  }
-
-  const thread = selectThreadByRef(state, threadRef);
-  if (!thread) {
-    return false;
-  }
-
-  const orchestrationStatus = thread.session?.orchestrationStatus;
-  return (
-    Boolean(
-      orchestrationStatus && orchestrationStatus !== "idle" && orchestrationStatus !== "stopped",
-    ) ||
-    thread.latestTurn?.state === "running" ||
-    thread.pendingSourceProposedPlan !== undefined
-  );
 }
 
 function disposeThreadDetailSubscriptionsForEnvironment(environmentId: EnvironmentId): void {

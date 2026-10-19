@@ -1,8 +1,10 @@
-import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { ResumableSubscriptionOptions } from "../rpc/wsRpcClient.ts";
 import type { SubscriptionFailureKind } from "../rpc/wsTransport.ts";
+import { scopedThreadKey } from "../scoped.ts";
+import type { ThreadBodyUsage } from "../state/threads/threadBodyResidency.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import {
   createEnvironmentConnectionSupervisor,
@@ -30,6 +32,9 @@ function makeSupervisor(
       environmentId: EnvironmentId,
       threadId: ThreadId,
     ) => boolean;
+    readonly listThreadBodies?: () => ReadonlyArray<ThreadBodyUsage>;
+    readonly evictThreadBodies?: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
+    readonly isThreadBodyProtected?: (threadRef: ScopedThreadRef) => boolean;
     readonly stateSink?: unknown;
     readonly scheduleShellFrame?: (callback: () => void) => void;
     readonly threadWindowActivityPayloads?: "preview";
@@ -44,6 +49,9 @@ function makeSupervisor(
     syncThreadWindowSnapshot: () => undefined,
     applyThreadDetailEvent: () => undefined,
     isThreadDetailSubscriptionNonIdle: overrides.isThreadDetailSubscriptionNonIdle ?? (() => true),
+    listThreadBodies: overrides.listThreadBodies,
+    evictThreadBodies: overrides.evictThreadBodies,
+    isThreadBodyProtected: overrides.isThreadBodyProtected,
     now: () => Date.now(),
     setTimeout: (callback: () => void, delayMs: number) => setTimeout(callback, delayMs),
     clearTimeout: (timeoutId: ReturnType<typeof setTimeout>) => clearTimeout(timeoutId),
@@ -1219,6 +1227,318 @@ describe("thread detail cache accounting", () => {
     releaseBusy();
 
     expect(threads.unsubscribed).toEqual([]);
+  });
+});
+
+describe("thread body residency", () => {
+  const minute = 60 * 1000;
+  const other = "env-other" as EnvironmentId;
+  const thread = (id: string) => id as ThreadId;
+  const refOf = (id: string, environmentId: EnvironmentId = remote): ScopedThreadRef => ({
+    environmentId,
+    threadId: thread(id),
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const emptySnapshot = {
+    kind: "snapshot",
+    snapshot: { snapshotSequence: 1, thread: {}, history: {} },
+  };
+
+  /** A supervisor over a fake store whose bodies appear as threads are opened. */
+  function setup(
+    options: {
+      readonly busy?: ReadonlySet<string>;
+      readonly protectedThreads?: ReadonlySet<string>;
+      readonly activeEnvironmentId?: EnvironmentId;
+    } = {},
+  ) {
+    const bodies = new Map<string, ThreadBodyUsage>();
+    const log: string[] = [];
+    const evictions: string[][] = [];
+    const listeners = new Map<string, (item: unknown) => void>();
+    const listThreadBodies = vi.fn(() => [...bodies.values()]);
+    const evictThreadBodies = vi.fn((threadRefs: ReadonlyArray<ScopedThreadRef>) => {
+      evictions.push(threadRefs.map((threadRef) => threadRef.threadId));
+      for (const threadRef of threadRefs) {
+        log.push(`evict:${threadRef.threadId}`);
+        bodies.delete(scopedThreadKey(threadRef));
+      }
+    });
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: (_environmentId, threadId) =>
+        options.busy?.has(threadId) ?? false,
+      isThreadBodyProtected: (threadRef) =>
+        options.protectedThreads?.has(threadRef.threadId) ?? false,
+      listThreadBodies,
+      evictThreadBodies,
+    });
+    for (const environmentId of [remote, other]) {
+      supervisor.register({
+        kind: "saved",
+        environmentId,
+        knownEnvironment: { source: "manual" },
+        dispose: () => Promise.resolve(),
+        client: {
+          orchestration: {
+            subscribeThread: () => () => undefined,
+            subscribeThreadWindow: (
+              input: { readonly threadId: string },
+              next: (item: unknown) => void,
+            ) => {
+              listeners.set(input.threadId, next);
+              return () => {
+                log.push(`unsubscribe:${input.threadId}`);
+              };
+            },
+          },
+        },
+      } as unknown as EnvironmentConnection);
+    }
+    /** The store receives the thread's body, as its window snapshot would deliver it. */
+    const load = (id: string, environmentId: EnvironmentId = remote, lastActivityAt = 0) => {
+      const threadRef = refOf(id, environmentId);
+      bodies.set(scopedThreadKey(threadRef), {
+        ref: threadRef,
+        bytes: 10,
+        environmentActive: environmentId === options.activeEnvironmentId,
+        lastActivityAt,
+      });
+    };
+    /** A view opens the thread, its window snapshot lands, and the view leaves again. */
+    const open = async (id: string, environmentId: EnvironmentId = remote) => {
+      const release = supervisor.retainThreadDetailSubscription(environmentId, thread(id), {
+        view: true,
+      });
+      listeners.get(id)?.(emptySnapshot);
+      load(id, environmentId);
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+    };
+    const bodyIds = () => [...bodies.values()].map(({ ref }) => ref.threadId);
+    return {
+      supervisor,
+      bodies,
+      bodyIds,
+      load,
+      open,
+      log,
+      evictions,
+      listeners,
+      listThreadBodies,
+      evictThreadBodies,
+    };
+  }
+
+  const numbered = (prefix: string, from: number, to: number) =>
+    Array.from({ length: to - from }, (_, index) => `${prefix}${from + index}`);
+
+  it("runs one pass for a chunk of disposals, and drops nothing within the budget", async () => {
+    const { supervisor, bodies, open, listThreadBodies, evictThreadBodies } = setup();
+    for (const id of ["a", "b", "c"]) await open(id);
+    listThreadBodies.mockClear();
+
+    for (const id of ["a", "b", "c"]) {
+      expect(supervisor.disposeThreadDetailSubscription(remote, thread(id))).toBe(true);
+    }
+    expect(listThreadBodies).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listThreadBodies).toHaveBeenCalledTimes(1);
+    expect(evictThreadBodies).not.toHaveBeenCalled();
+    expect(bodies.size).toBe(3);
+
+    // The next chunk gets its own pass.
+    const release = supervisor.retainThreadDetailSubscription(remote, thread("d"));
+    release();
+    supervisor.disposeThreadDetailSubscription(remote, thread("d"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listThreadBodies).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the 64 most recently opened bodies while 100 threads are opened in turn", async () => {
+    const { bodies, bodyIds, open, evictions } = setup();
+
+    for (let index = 0; index < 100; index += 1) {
+      await open(`thread-${index}`);
+      expect(bodies.size).toBeLessThanOrEqual(64);
+    }
+
+    expect(bodyIds().toSorted()).toEqual(numbered("thread-", 36, 100).toSorted());
+    // Each pass drops the single oldest body that is over the budget.
+    expect(evictions.flat()).toEqual(numbered("thread-", 0, 36));
+  });
+
+  it("never drops a body that is open, busy, or holds unsent work, however old", async () => {
+    const { supervisor, bodies, bodyIds, load, open, evictions } = setup({
+      busy: new Set(["thread-busy"]),
+      protectedThreads: new Set(["thread-unsent"]),
+    });
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-open"), { view: true });
+    for (const id of ["thread-open", "thread-busy", "thread-unsent"]) load(id);
+
+    for (let index = 0; index < 100; index += 1) {
+      await open(`thread-${index}`);
+      expect(bodies.size).toBeLessThanOrEqual(64);
+    }
+
+    expect(bodyIds().toSorted()).toEqual(
+      [...numbered("thread-", 39, 100), "thread-open", "thread-busy", "thread-unsent"].toSorted(),
+    );
+    expect(evictions.flat()).not.toContain("thread-open");
+    expect(evictions.flat()).not.toContain("thread-busy");
+    expect(evictions.flat()).not.toContain("thread-unsent");
+  });
+
+  it("keeps a retained thread's body even when only a background owner holds it", async () => {
+    const { supervisor, bodyIds, load, open } = setup();
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-background"));
+    load("thread-background");
+
+    for (let index = 0; index < 70; index += 1) await open(`thread-${index}`);
+
+    expect(bodyIds()).toContain("thread-background");
+    expect(bodyIds()).not.toContain("thread-0");
+  });
+
+  it("keeps the recent threads of the active environment over older ones elsewhere, until they age", async () => {
+    const { bodyIds, open, evictions } = setup({ activeEnvironmentId: remote });
+    for (let index = 0; index < 33; index += 1) await open(`active-${index}`, remote);
+    for (let index = 0; index < 33; index += 1) await open(`other-${index}`, other);
+
+    // The active environment's threads are the oldest, yet the others make way.
+    expect(bodyIds()).toHaveLength(64);
+    expect(bodyIds()).toEqual(expect.arrayContaining(numbered("active-", 0, 33)));
+    expect(evictions.flat()).toEqual(["other-0", "other-1"]);
+
+    // Once they are older than the recent-access window they rank by age alone.
+    await vi.advanceTimersByTimeAsync(6 * minute);
+    await open("other-33", other);
+    await vi.advanceTimersByTimeAsync(6 * minute);
+    expect(evictions.flat().slice(2)).toEqual(["active-0"]);
+  });
+
+  it("drops a body no subscription ever delivered first, when a snapshot lands past the budget", async () => {
+    const { load, open, evictions, bodyIds } = setup();
+    for (const id of numbered("cached-", 0, 64)) load(id);
+
+    await open("opened");
+
+    expect(evictions).toEqual([["cached-0"]]);
+    expect(bodyIds()).toHaveLength(64);
+    expect(bodyIds()).toContain("opened");
+  });
+
+  it("drops the least recently active of the bodies no subscription delivered, whatever their order", async () => {
+    const { load, open, evictions } = setup();
+    // The most recently active threads were cached first.
+    for (const [index, id] of numbered("cached-", 0, 64).entries()) {
+      load(id, remote, 1_000 - index);
+    }
+
+    await open("opened-1");
+    await open("opened-2");
+
+    expect(evictions).toEqual([["cached-63"], ["cached-62"]]);
+  });
+
+  it("drops a cached body again when the store restores it", async () => {
+    const { load, open, evictions } = setup();
+    for (const [index, id] of numbered("cached-", 0, 64).entries()) load(id, remote, 100 + index);
+
+    await open("opened-1");
+    load("cached-0", remote, 100);
+    await open("opened-2");
+
+    // The restored body is the least recently active again, and goes first.
+    expect(evictions).toEqual([["cached-0"], ["cached-0", "cached-1"]]);
+  });
+
+  it("holds every body opened in a burst in the active environment until the idle sweep drops the oldest", async () => {
+    const { bodies, open, evictions } = setup({ activeEnvironmentId: remote });
+
+    for (let index = 0; index < 100; index += 1) await open(`thread-${index}`);
+
+    // All were accessed within the recent-access window: none may go yet.
+    expect(bodies.size).toBe(100);
+    expect(evictions).toEqual([]);
+
+    // The idle sweep disposes the cached subscriptions, and its pass settles
+    // the store to the budget, oldest first.
+    await vi.advanceTimersByTimeAsync(6 * minute);
+
+    expect(bodies.size).toBe(64);
+    expect(evictions.flat()).toEqual(numbered("thread-", 0, 36));
+  });
+
+  it("disposes an idle cached subscription before dropping its body", async () => {
+    const protectedThreads = new Set(numbered("pinned-", 0, 64));
+    const { load, open, log, evictions, bodyIds } = setup({ protectedThreads });
+    for (const id of protectedThreads) load(id);
+
+    // 64 pinned bodies leave no room for a 65th: the one just opened is the
+    // only unprotected body, and its cached subscription goes first.
+    await open("idle");
+
+    expect(log).toEqual(["unsubscribe:idle", "evict:idle"]);
+    expect(evictions).toEqual([["idle"]]);
+    expect(bodyIds()).toHaveLength(64);
+  });
+
+  it("ranks a body by the supervisor's own byte estimate once it has one", async () => {
+    const { supervisor, listeners, load, evictions, bodyIds } = setup();
+    const hugeSnapshot = {
+      kind: "snapshot",
+      snapshot: { snapshotSequence: 1, thread: { padding: "x".repeat(11_000_000) }, history: {} },
+    };
+
+    for (let index = 0; index < 5; index += 1) {
+      const id = `thread-${index}`;
+      const release = supervisor.retainThreadDetailSubscription(remote, thread(id));
+      listeners.get(id)?.(hugeSnapshot);
+      load(id);
+      release();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+
+    // Five ~11 MB threads outgrow the 48 MiB budget although the store's own
+    // estimate of each is tiny: only the oldest goes.
+    expect(evictions).toEqual([["thread-0"]]);
+    expect(bodyIds()).toEqual(["thread-1", "thread-2", "thread-3", "thread-4"]);
+  });
+
+  it("runs no pass for the disposals of a reset", async () => {
+    const { supervisor, open, listThreadBodies, evictThreadBodies } = setup();
+    await open("thread-0");
+    listThreadBodies.mockClear();
+
+    await supervisor.resetForTests();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listThreadBodies).not.toHaveBeenCalled();
+    expect(evictThreadBodies).not.toHaveBeenCalled();
+
+    // A disposal after the reset schedules a pass as usual.
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-1"))();
+    supervisor.disposeThreadDetailSubscription(remote, thread("thread-1"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listThreadBodies).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops nothing when the store inputs are absent", async () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: () => false,
+    });
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-0"))();
+    expect(supervisor.disposeThreadDetailSubscription(remote, thread("thread-0"))).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

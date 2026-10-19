@@ -1493,6 +1493,77 @@ export function removeThreadByRef(state: AppState, threadRef: ScopedThreadRef): 
   );
 }
 
+/** The record without the given threads' entries; the record itself when it holds none of them. */
+function withoutThreadEntries<R extends Record<ThreadId, unknown> | undefined>(
+  record: R,
+  threadIds: ReadonlySet<ThreadId>,
+): R {
+  if (record === undefined) return record;
+  let next: Record<ThreadId, unknown> | undefined;
+  for (const threadId of threadIds) {
+    if (!Object.hasOwn(record, threadId)) continue;
+    next ??= { ...record };
+    delete next[threadId];
+  }
+  return (next ?? record) as R;
+}
+
+function evictThreadBodiesFromEnvironment(
+  state: EnvironmentState,
+  threadIds: ReadonlySet<ThreadId>,
+): EnvironmentState {
+  const next: EnvironmentState = {
+    ...state,
+    messageIdsByThreadId: withoutThreadEntries(state.messageIdsByThreadId, threadIds),
+    messageByThreadId: withoutThreadEntries(state.messageByThreadId, threadIds),
+    pendingMessagesByThreadId: withoutThreadEntries(state.pendingMessagesByThreadId, threadIds),
+    activityIdsByThreadId: withoutThreadEntries(state.activityIdsByThreadId, threadIds),
+    activityByThreadId: withoutThreadEntries(state.activityByThreadId, threadIds),
+    proposedPlanIdsByThreadId: withoutThreadEntries(state.proposedPlanIdsByThreadId, threadIds),
+    proposedPlanByThreadId: withoutThreadEntries(state.proposedPlanByThreadId, threadIds),
+    turnDiffIdsByThreadId: withoutThreadEntries(state.turnDiffIdsByThreadId, threadIds),
+    turnDiffSummaryByThreadId: withoutThreadEntries(state.turnDiffSummaryByThreadId, threadIds),
+    threadHistoryByThreadId: withoutThreadEntries(state.threadHistoryByThreadId, threadIds),
+    threadHistoryLoadByThreadId: withoutThreadEntries(state.threadHistoryLoadByThreadId, threadIds),
+    cachedMessageThreadIds: withoutThreadEntries(state.cachedMessageThreadIds, threadIds),
+  };
+  return (Object.keys(next) as Array<keyof EnvironmentState>).every(
+    (key) => next[key] === state[key],
+  )
+    ? state
+    : next;
+}
+
+/**
+ * Drops the loaded body of each given thread: its messages, activities,
+ * proposed plans, turn diffs and history pages, with their load state. The
+ * thread's shell, session, turn state and sidebar summary stay, as does every
+ * other thread's body (by identity), so the thread still lists and a later
+ * open loads its window again as for a thread never opened.
+ */
+export function evictThreadBodies(
+  state: AppState,
+  threadRefs: ReadonlyArray<ScopedThreadRef>,
+): AppState {
+  const threadIdsByEnvironmentId = new Map<EnvironmentId, Set<ThreadId>>();
+  for (const { environmentId, threadId } of threadRefs) {
+    const threadIds = threadIdsByEnvironmentId.get(environmentId) ?? new Set<ThreadId>();
+    threadIds.add(threadId);
+    threadIdsByEnvironmentId.set(environmentId, threadIds);
+  }
+  let nextState = state;
+  for (const [environmentId, threadIds] of threadIdsByEnvironmentId) {
+    const environmentState = state.environmentStateById[environmentId];
+    if (!environmentState) continue;
+    nextState = commitEnvironmentState(
+      nextState,
+      environmentId,
+      evictThreadBodiesFromEnvironment(environmentState, threadIds),
+    );
+  }
+  return nextState;
+}
+
 function upsertWorktreeState(
   state: EnvironmentState,
   worktree: SidebarWorktreeSummary,
@@ -4568,6 +4639,8 @@ interface AppStore extends AppState {
     onEntryError?: (environmentId: EnvironmentId, error: unknown) => void,
   ) => void;
   demoteEnvironmentStateToCachedSnapshot: (environmentId: EnvironmentId, demotedAt: number) => void;
+  /** Drops the loaded bodies of the given threads; see `evictThreadBodies`. */
+  evictThreadBodies: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
   syncServerShellSnapshot: (
     snapshot: OrchestrationStubbedShellSnapshot,
     environmentId: EnvironmentId,
@@ -4686,6 +4759,10 @@ export const useStore = create<AppStore>((set, get) => {
     demoteEnvironmentStateToCachedSnapshot: (environmentId, demotedAt) => {
       shellCoalescer.flush();
       set((state) => demoteEnvironmentStateToCachedSnapshot(state, environmentId, demotedAt));
+    },
+    evictThreadBodies: (threadRefs) => {
+      shellCoalescer.flush();
+      set((state) => evictThreadBodies(state, threadRefs));
     },
     applyLoadedThreadShells: (threads, environmentId) => {
       shellCoalescer.flush();
