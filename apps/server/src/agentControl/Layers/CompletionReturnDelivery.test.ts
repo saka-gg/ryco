@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, Layer, Option, Schema } from "effect";
+import { Clock, Effect, Fiber, Layer, Logger, Option, Schema } from "effect";
+import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   AgentControlProposal,
@@ -57,7 +58,10 @@ import {
   renderDelegationWake,
   type DelegationWakeCommand,
 } from "../completionReturnMessages.ts";
-import { makeCompletionReturnDelivery } from "./CompletionReturnDelivery.ts";
+import {
+  makeCompletionReturnDelivery,
+  runCompletionReturnScans,
+} from "./CompletionReturnDelivery.ts";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 
@@ -2059,3 +2063,182 @@ it.effect(
       assert.include(h.sent[1]!.message.text, "[1/1]");
     }).pipe(Effect.provide(layer)),
 );
+
+// ── scan scheduling ──────────────────────────────────────────────────────
+
+interface ScanLoopHandle {
+  /** Notifies the loop's subscribers, as a ledger write does. */
+  readonly signal: () => void;
+  /** When the earliest pending row is due, in virtual milliseconds; null when none is pending. */
+  readonly setDueAtMs: (dueAtMs: number | null) => void;
+}
+
+/** The scan loop on a virtual clock, over a ledger whose pending rows the test controls. */
+const startScanLoop = (
+  options: {
+    readonly dueAtMs?: number;
+    /** The first scans fail. */
+    readonly failedScans?: number;
+    /** What each scan does to the ledger, given its number (from 1). */
+    readonly onScan?: (scan: number, handle: ScanLoopHandle) => void;
+  } = {},
+) =>
+  Effect.gen(function* () {
+    const scanTimes: number[] = [];
+    const listeners = new Set<() => void>();
+    let dueAtMs: number | null = options.dueAtMs ?? null;
+    let failedScans = options.failedScans ?? 0;
+    const handle: ScanLoopHandle = {
+      signal: () => {
+        for (const listener of listeners) listener();
+      },
+      setDueAtMs: (value) => {
+        dueAtMs = value;
+      },
+    };
+    const scan = Effect.gen(function* () {
+      scanTimes.push(yield* Clock.currentTimeMillis);
+      options.onScan?.(scanTimes.length, handle);
+      if (failedScans > 0) {
+        failedScans -= 1;
+        return yield* Effect.fail(new Error("fixture scan failure"));
+      }
+    });
+    const fiber = yield* runCompletionReturnScans({
+      scan,
+      repository: {
+        earliestPendingCheckAt: () =>
+          Effect.sync(() => (dueAtMs === null ? null : new Date(dueAtMs).toISOString())),
+        subscribeChanges: (listener: () => void) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      },
+    }).pipe(Effect.forkChild);
+    const settle = Effect.gen(function* () {
+      for (let index = 0; index < 10; index += 1) yield* Effect.yieldNow;
+    });
+    yield* settle;
+    return {
+      ...handle,
+      scanTimes,
+      listeners,
+      advance: (millis: number) => TestClock.adjust(millis).pipe(Effect.andThen(settle)),
+      stop: Fiber.interrupt(fiber),
+    };
+  });
+
+it.effect("scans once a minute while nothing is pending", () =>
+  Effect.gen(function* () {
+    const loop = yield* startScanLoop();
+    assert.deepStrictEqual(loop.scanTimes, [0]);
+    yield* loop.advance(59_000);
+    assert.deepStrictEqual(loop.scanTimes, [0]);
+    yield* loop.advance(1_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 60_000]);
+    yield* loop.advance(120_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 60_000, 120_000, 180_000]);
+    assert.equal(loop.listeners.size, 1);
+    yield* loop.stop;
+    assert.equal(loop.listeners.size, 0);
+  }),
+);
+
+it.effect("scans again when the earliest pending row is due", () =>
+  Effect.gen(function* () {
+    const loop = yield* startScanLoop({
+      dueAtMs: 5_000,
+      // The scan at five seconds settles the row.
+      onScan: (scan, handle) => {
+        if (scan === 2) handle.setDueAtMs(null);
+      },
+    });
+    yield* loop.advance(4_900);
+    assert.deepStrictEqual(loop.scanTimes, [0]);
+    yield* loop.advance(100);
+    assert.deepStrictEqual(loop.scanTimes, [0, 5_000]);
+    yield* loop.advance(59_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 5_000]);
+    yield* loop.advance(1_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 5_000, 65_000]);
+    yield* loop.stop;
+  }),
+);
+
+it.effect("never rescans an overdue row faster than every two seconds", () =>
+  Effect.gen(function* () {
+    // As a row that every scan holds again looks: due before the scan that just ran.
+    const loop = yield* startScanLoop({ dueAtMs: -30_000 });
+    yield* loop.advance(6_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000, 6_000]);
+    yield* loop.stop;
+  }),
+);
+
+it.effect("looks at a row that is due in a long while once a minute", () =>
+  Effect.gen(function* () {
+    const loop = yield* startScanLoop({ dueAtMs: 600_000 });
+    yield* loop.advance(180_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 60_000, 120_000, 180_000]);
+    yield* loop.stop;
+  }),
+);
+
+it.effect("scans at once when the ledger changes, then returns to its pause", () =>
+  Effect.gen(function* () {
+    const loop = yield* startScanLoop();
+    yield* loop.advance(10_000);
+    assert.deepStrictEqual(loop.scanTimes, [0]);
+    loop.signal();
+    yield* loop.advance(0);
+    assert.deepStrictEqual(loop.scanTimes, [0, 10_000]);
+    // The pause restarts from the scan the change caused.
+    yield* loop.advance(59_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 10_000]);
+    yield* loop.advance(1_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 10_000, 70_000]);
+    yield* loop.stop;
+  }),
+);
+
+it.effect("does not scan again for the writes its own scan made", () =>
+  Effect.gen(function* () {
+    // Every scan holds a row, which writes the ledger.
+    const loop = yield* startScanLoop({
+      dueAtMs: 0,
+      onScan: (_scan, handle) => handle.signal(),
+    });
+    yield* loop.advance(7_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000, 6_000]);
+    yield* loop.stop;
+  }),
+);
+
+it.effect("logs a failed scan and retries after the short pause", () => {
+  const lines: Array<{ level: string; message: ReadonlyArray<unknown> }> = [];
+  const logs = Logger.layer([
+    Logger.make((options) => {
+      lines.push({
+        level: options.logLevel,
+        message: Array.isArray(options.message) ? options.message : [options.message],
+      });
+    }),
+  ]);
+  return Effect.gen(function* () {
+    const loop = yield* startScanLoop({ failedScans: 2 });
+    yield* loop.advance(4_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000]);
+    assert.deepStrictEqual(lines, [
+      { level: "Warn", message: ["Completion return recovery will retry."] },
+      { level: "Warn", message: ["Completion return recovery will retry."] },
+    ]);
+    // The third scan succeeded: back to the idle pause.
+    yield* loop.advance(59_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000]);
+    yield* loop.advance(1_000);
+    assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000, 64_000]);
+    yield* loop.stop;
+  }).pipe(Effect.provide(logs));
+});
