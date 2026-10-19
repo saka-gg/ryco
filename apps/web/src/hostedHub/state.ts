@@ -1,4 +1,5 @@
 import {
+  getHostedEnvironmentSessions,
   hostedAccountStore,
   hostedHubController,
   hostedHubStore,
@@ -36,6 +37,7 @@ export function ensureWebHostedRuntimeConfigured(): void {
 }
 
 export {
+  getHostedEnvironmentSessions,
   hostedAccountStore,
   hostedHubController,
   hostedHubStore,
