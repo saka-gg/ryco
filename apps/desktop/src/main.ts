@@ -113,6 +113,7 @@ import {
   createBackendFailurePolicy,
 } from "./backendStartup.ts";
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
+import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
 import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
 import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
 import {
@@ -465,6 +466,20 @@ let desktopWorkspaceClient: DesktopWorkspaceClient | null = null;
 let desktopWorkspaceRelayManager: DesktopWorkspaceRelayManager | null = null;
 let disposeDesktopWorkspaceSubscription: (() => void) | null = null;
 let desktopKeepAwake: DesktopKeepAwakeController | null = null;
+// Window and power lifecycle for the workspace client: it backgrounds a while
+// after the window leaves sight, never on blur, and keeps machine presence fresh.
+const desktopWorkspaceActivity = createDesktopWorkspaceActivity({
+  setBackgrounded: (backgrounded) => {
+    void desktopWorkspaceClient?.setBackgrounded(backgrounded).catch(() => undefined);
+  },
+  refreshCatalog: () => {
+    void desktopWorkspaceClient?.refreshCatalog().catch(() => undefined);
+  },
+  isWindowInSight: () =>
+    BrowserWindow.getAllWindows().some(
+      (window) => !window.isDestroyed() && window.isVisible() && !window.isMinimized(),
+    ),
+});
 // The Hub connector configuration the running backend was launched with.
 let backendHubLaunch: DesktopHubConnectorLaunch | null = null;
 // The Tailscale Serve configuration the running backend was launched with. A
@@ -4004,10 +4019,8 @@ function registerIpcHandlers(): void {
         return;
       }
       try {
-        desktopWorkspaceRelayManager?.send(
-          workspaceTransportId(rawTransportId),
-          Uint8Array.from(rawData),
-        );
+        // IPC already delivered a private copy; the relay keeps what it needs.
+        desktopWorkspaceRelayManager?.send(workspaceTransportId(rawTransportId), rawData);
       } catch {
         // The transport emits its own bounded close; never surface relay details over IPC.
       }
@@ -4668,12 +4681,7 @@ function createWindow(): BrowserWindow {
     event.preventDefault();
     window.setTitle(APP_DISPLAY_NAME);
   });
-  window.on("blur", () => {
-    void desktopWorkspaceClient?.setBackgrounded(true);
-  });
-  window.on("focus", () => {
-    void desktopWorkspaceClient?.setBackgrounded(false);
-  });
+  desktopWorkspaceActivity.attachWindow(window);
   window.webContents.on("dom-ready", () => {
     const currentUrl = window.webContents.getURL();
     markDesktopWindowStartupLoad("dom-ready", currentUrl);
@@ -5102,6 +5110,7 @@ async function bootstrap(): Promise<void> {
   registerIpcHandlers();
   if (computerUseRuntime) registerComputerUseStackIpc?.(computerUseRuntime);
   forwardSystemResumeToRenderers();
+  desktopWorkspaceActivity.attachPower(powerMonitor);
   startDesktopKeepAwake();
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   configureDeferredDesktopIntegration();

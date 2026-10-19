@@ -23,6 +23,18 @@ interface ListenerRegistration {
   readonly once: boolean;
 }
 
+/**
+ * The bytes to hand to IPC. Electron serializes them before the call returns,
+ * so a caller can reuse its buffer right away and bytes that span their whole
+ * buffer go as is. A view onto part of a larger buffer is copied out so that
+ * only its own bytes cross the process boundary.
+ */
+function spanningBytes(bytes: Uint8Array): Uint8Array {
+  return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+    ? bytes
+    : bytes.slice();
+}
+
 type DesktopWorkspaceTransportBridge = Pick<
   DesktopBridge,
   | "prepareDesktopWorkspaceTransport"
@@ -105,7 +117,7 @@ export class DesktopWorkspaceIpcSocket {
             ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
             : null;
     if (bytes === null) throw new Error("Desktop workspace transport payload is invalid.");
-    this.#bridge.sendDesktopWorkspaceTransport?.(this.#transportId, Uint8Array.from(bytes));
+    this.#bridge.sendDesktopWorkspaceTransport?.(this.#transportId, spanningBytes(bytes));
   }
 
   close(): void {
@@ -148,7 +160,8 @@ export class DesktopWorkspaceIpcSocket {
         return;
       case "message":
         if (this.#state !== OPEN) return;
-        this.#emit({ type: "message", data: Uint8Array.from(event.data) });
+        // IPC delivered these bytes to this socket alone; hand them on as is.
+        this.#emit({ type: "message", data: event.data });
         return;
       case "error":
         this.#emit({ type: "error" });
