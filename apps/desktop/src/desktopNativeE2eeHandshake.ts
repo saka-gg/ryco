@@ -28,7 +28,13 @@ import {
   E2EE_SUITE_ACCOUNT_GRANT_25519_CHACHAPOLY_SHA256,
 } from "@ryco/shared/relayE2eeWire";
 
-import { DesktopE2eePrekeyIssuer, type DesktopE2eePrekeyCertificate } from "./desktopE2eePrekey.ts";
+import {
+  desktopClientPublicKeys,
+  DesktopE2eePrekeyIssuer,
+  type DesktopClientPublicKeys,
+  type DesktopClientPublicKeySource,
+  type DesktopE2eePrekeyCertificate,
+} from "./desktopE2eePrekey.ts";
 import { DesktopE2eeTrustStore, type DesktopVerifiedE2eePin } from "./desktopE2eeTrust.ts";
 import type { DesktopHostedIdentityStatus } from "./desktopHostedIdentity.ts";
 import type { DesktopLocalIntroductionSecurity } from "./localTrustedIntroduction.ts";
@@ -44,7 +50,9 @@ const MAX_HANDSHAKES = 16;
 const HANDLE = /^[A-Za-z0-9_-]{43}$/;
 
 type DesktopE2eeHandshakeSecurity = DesktopLocalIntroductionSecurity &
-  Pick<DesktopNativeSecurityHelper, "withAgreementSecretKey">;
+  DesktopClientPublicKeySource &
+  Pick<DesktopNativeSecurityHelper, "withAgreementSecretKey"> &
+  Partial<Pick<DesktopNativeSecurityHelper, "holdForRelay">>;
 
 type DesktopAccountAuthorization = Extract<
   NativeE2eeTrustResolution,
@@ -204,6 +212,7 @@ export class DesktopNativeE2eeHandshakeService {
   readonly #security: DesktopE2eeHandshakeSecurity;
   readonly #trust: DesktopE2eeTrustStore;
   readonly #prekey: DesktopE2eePrekeyIssuer;
+  readonly #keys: DesktopClientPublicKeys;
   readonly #identityStatus: () => DesktopHostedIdentityStatus;
   readonly #accountAuthority: DesktopNativeE2eeAccountAuthority | undefined;
   readonly #now: () => number;
@@ -222,6 +231,7 @@ export class DesktopNativeE2eeHandshakeService {
   }) {
     this.#origin = input.origin;
     this.#security = input.security;
+    this.#keys = desktopClientPublicKeys(input.security);
     this.#trust = input.trust ?? new DesktopE2eeTrustStore(input.records);
     this.#now = input.now ?? Date.now;
     this.#prekey =
@@ -279,11 +289,8 @@ export class DesktopNativeE2eeHandshakeService {
     }
     const certificate = await this.#prekey.ensure(input.accountId);
     if (
-      !e2eeBytesEqual(certificate.identityPublicKey, await this.#security.getSigningPublicKey()) ||
-      !e2eeBytesEqual(
-        certificate.agreementPublicKey,
-        await this.#security.ensureAgreementPublicKey(),
-      ) ||
+      !e2eeBytesEqual(certificate.identityPublicKey, await this.#keys.signing()) ||
+      !e2eeBytesEqual(certificate.agreementPublicKey, await this.#keys.agreement()) ||
       (pin !== null &&
         pin.clientIdentityFingerprint !==
           formatE2eeKeyFingerprint(
@@ -331,6 +338,7 @@ export class DesktopNativeE2eeHandshakeService {
       });
       if (resolution.kind !== "authorized" || resolution.trustSource !== "account-enrolled") {
         if (resolution.kind === "blocked" && resolution.reason === "enrollment-revoked") {
+          this.#keys.invalidate();
           accountAuthority.revoked?.();
         }
         if (resolution.kind === "blocked" && resolution.reason === "node-update-required") {
@@ -527,7 +535,16 @@ export class DesktopNativeE2eeHandshakeService {
     held?.client.destroy();
   }
 
+  /**
+   * Keeps the native security helper up while a relay session may still sign
+   * or borrow a key. Release when the session ends.
+   */
+  holdForRelay(): () => void {
+    return this.#security.holdForRelay?.() ?? (() => undefined);
+  }
+
   dispose(): void {
+    this.#keys.invalidate();
     for (const held of this.#handshakes.values()) held.client.destroy();
     this.#handshakes.clear();
     for (const prepared of this.#prepared.values()) prepared.accountAuthorization?.dispose();

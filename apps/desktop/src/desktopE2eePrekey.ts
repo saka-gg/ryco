@@ -125,21 +125,113 @@ function certificateFromStored(
   }
 }
 
+/** Where the client's public keys are read from; see {@link DesktopClientPublicKeys}. */
+export type DesktopClientPublicKeySource = Pick<
+  DesktopLocalIntroductionSecurity,
+  "getSigningPublicKey" | "ensureAgreementPublicKey"
+> & {
+  /** Calls `listener` when a key reset makes a read public key stale; returns the unsubscribe. */
+  readonly onPublicKeysChanged?: (listener: () => void) => () => void;
+};
+
+/** One public key: read on first use, kept until cleared, handed out as a copy. */
+class PublicKeyCell {
+  readonly #read: () => Promise<Uint8Array>;
+  #pending: Promise<Uint8Array> | undefined;
+
+  constructor(read: () => Promise<Uint8Array>) {
+    this.#read = read;
+  }
+
+  async get(): Promise<Uint8Array> {
+    let pending = this.#pending;
+    if (pending === undefined) {
+      const read = this.#read();
+      pending = read;
+      this.#pending = read;
+      // A failed read is not kept: the next caller asks the helper again.
+      read.catch(() => {
+        if (this.#pending === read) this.#pending = undefined;
+      });
+    }
+    // A copy, so a caller that wipes its bytes cannot change what is kept.
+    return Uint8Array.from(await pending);
+  }
+
+  clear(): void {
+    this.#pending = undefined;
+  }
+}
+
+/**
+ * The client's signing and agreement public keys, read from the native security
+ * helper once and kept for the life of the process. Every handshake and prekey
+ * check needs them, and each read is a helper round trip (a process launch when
+ * the helper is idle). Only public keys are kept: secrets are still borrowed
+ * from the helper per handshake. A key reset reported by the source, or
+ * {@link invalidate}, makes the next read ask the helper again.
+ */
+export class DesktopClientPublicKeys {
+  readonly #signing: PublicKeyCell;
+  readonly #agreement: PublicKeyCell;
+
+  constructor(source: DesktopClientPublicKeySource) {
+    this.#signing = new PublicKeyCell(() => source.getSigningPublicKey());
+    this.#agreement = new PublicKeyCell(() => source.ensureAgreementPublicKey());
+    source.onPublicKeysChanged?.(() => this.invalidate());
+  }
+
+  /** The uncompressed P-256 signing public key. */
+  signing(): Promise<Uint8Array> {
+    return this.#signing.get();
+  }
+
+  /** The X25519 agreement public key. */
+  agreement(): Promise<Uint8Array> {
+    return this.#agreement.get();
+  }
+
+  /** Forget both keys, so the next read asks the source again. */
+  invalidate(): void {
+    this.#signing.clear();
+    this.#agreement.clear();
+  }
+}
+
+const clientPublicKeys = new WeakMap<DesktopClientPublicKeySource, DesktopClientPublicKeys>();
+
+/**
+ * The public key memo of one security source. The prekey issuer and the
+ * handshake service of a source share it, so a connect reads each key once.
+ */
+export function desktopClientPublicKeys(
+  source: DesktopClientPublicKeySource,
+): DesktopClientPublicKeys {
+  let keys = clientPublicKeys.get(source);
+  if (keys === undefined) {
+    keys = new DesktopClientPublicKeys(source);
+    clientPublicKeys.set(source, keys);
+  }
+  return keys;
+}
+
 export class DesktopE2eePrekeyIssuer {
   readonly #origin: string;
   readonly #security: DesktopLocalIntroductionSecurity;
+  readonly #keys: DesktopClientPublicKeys;
   readonly #records: DesktopProtectedRecordStore;
   readonly #now: () => number;
   #pending: Promise<unknown> = Promise.resolve();
 
   constructor(input: {
     readonly origin: string;
-    readonly security: DesktopLocalIntroductionSecurity;
+    readonly security: DesktopLocalIntroductionSecurity & DesktopClientPublicKeySource;
     readonly records: DesktopProtectedRecordStore;
     readonly now?: () => number;
   }) {
     this.#origin = input.origin;
     this.#security = input.security;
+    this.#keys = desktopClientPublicKeys(input.security);
     this.#records = input.records;
     this.#now = input.now ?? Date.now;
   }
@@ -159,8 +251,8 @@ export class DesktopE2eePrekeyIssuer {
   async #ensure(accountId: string): Promise<DesktopE2eePrekeyCertificate> {
     try {
       const [identityPublicKey, agreementPublicKey, storedValue] = await Promise.all([
-        this.#security.getSigningPublicKey(),
-        this.#security.ensureAgreementPublicKey(),
+        this.#keys.signing(),
+        this.#keys.agreement(),
         this.#records.read(PREKEY_RECORD),
       ]);
       const parsed = decodeStored(storedValue);

@@ -1,5 +1,11 @@
+import { once } from "node:events";
+import type { IncomingHttpHeaders } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import { EARLY_RELAY_SOCKET_TICKET_WAIT_MS } from "@ryco/client-runtime/relay/earlyRelaySocket";
 import { EnvironmentId } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { WebSocketServer } from "ws";
 
 import {
   bytesFromRawData,
@@ -18,6 +24,62 @@ function unavailableAuthority(): DesktopWorkspaceRelayAuthority {
     issueTicket: vi.fn(),
     authorizeUpgrade: vi.fn(),
   };
+}
+
+/** A stand-in for the `ws` socket the relay upgrade opens, driven through `addEventListener`. */
+class FakeUpgradeSocket {
+  binaryType = "blob";
+  readyState = 0;
+  bufferedAmount = 0;
+  readonly closes: Array<{ readonly code?: number; readonly reason?: string }> = [];
+  readonly send = vi.fn();
+  readonly #listeners = new Map<string, Array<(event: never) => void>>();
+
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+
+  constructor(url: string, headers: Readonly<Record<string, string>>) {
+    this.url = url;
+    this.headers = headers;
+  }
+
+  addEventListener = (type: string, listener: (event: never) => void) => {
+    this.#listeners.set(type, [...(this.#listeners.get(type) ?? []), listener]);
+  };
+
+  close = (code?: number, reason?: string) => {
+    this.closes.push({
+      ...(code === undefined ? {} : { code }),
+      ...(reason === undefined ? {} : { reason }),
+    });
+    this.readyState = 3;
+  };
+
+  emit(type: string, event: object = {}): void {
+    if (type === "open") this.readyState = 1;
+    if (type === "close") this.readyState = 3;
+    for (const listener of this.#listeners.get(type) ?? []) listener(event as never);
+  }
+}
+
+function upgradeSockets() {
+  const sockets: FakeUpgradeSocket[] = [];
+  const createUpgradeSocket = vi.fn(
+    (url: string, headers: Readonly<Record<string, string>>): never => {
+      const socket = new FakeUpgradeSocket(url, headers);
+      sockets.push(socket);
+      return socket as never;
+    },
+  );
+  return { sockets, createUpgradeSocket };
+}
+
+/** The handshake service as the relay manager uses it: cleanup owner and security helper hold. */
+function fakeHandshake() {
+  const release = vi.fn();
+  const holdForRelay = vi.fn(() => release);
+  const destroy = vi.fn();
+  return { handshake: { destroy, holdForRelay } as never, destroy, holdForRelay, release };
 }
 
 describe("Desktop workspace relay manager", () => {
@@ -103,10 +165,11 @@ describe("Desktop workspace relay manager", () => {
       kind: "update-required",
     });
     vi.mocked(authority.authorizeUpgrade).mockResolvedValue({});
-    vi.mocked(authority.handshake).mockResolvedValue({} as never);
+    vi.mocked(authority.handshake).mockResolvedValue(fakeHandshake().handshake);
     const manager = new DesktopWorkspaceRelayManager({
       authority,
       emit: (event) => events.push(event),
+      createUpgradeSocket: upgradeSockets().createUpgradeSocket,
     });
 
     await expect(
@@ -142,12 +205,13 @@ describe("Desktop workspace relay manager", () => {
       expiresAt: Date.now() + 60_000,
     });
     vi.mocked(authority.authorizeUpgrade).mockResolvedValue({});
-    vi.mocked(authority.handshake).mockResolvedValue({} as never);
+    vi.mocked(authority.handshake).mockResolvedValue(fakeHandshake().handshake);
     const socketFactory = vi.fn(() => ({ send: vi.fn(), close: vi.fn() }));
     const manager = new DesktopWorkspaceRelayManager({
       authority,
       emit: vi.fn(),
       socketFactory,
+      createUpgradeSocket: upgradeSockets().createUpgradeSocket,
     });
 
     await manager.activate(manager.prepareVerification(environmentId));
@@ -184,9 +248,7 @@ describe("Desktop workspace relay manager", () => {
       relayTicket: { ticket: "t".repeat(43), expiresAt: Date.now() + 60_000 },
     } as never);
     vi.mocked(authority.authorizeUpgrade).mockResolvedValue({});
-    vi.mocked(authority.handshake).mockResolvedValue({
-      destroy: vi.fn(),
-    } as never);
+    vi.mocked(authority.handshake).mockResolvedValue(fakeHandshake().handshake);
     let callbacks:
       | Parameters<
           NonNullable<
@@ -198,6 +260,7 @@ describe("Desktop workspace relay manager", () => {
     const manager = new DesktopWorkspaceRelayManager({
       authority,
       emit: vi.fn(),
+      createUpgradeSocket: upgradeSockets().createUpgradeSocket,
       socketFactory: (input) => {
         callbacks = input.callbacks;
         return { send: vi.fn(), close };
@@ -219,10 +282,12 @@ describe("Desktop workspace relay manager", () => {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function relayFixture(options: { readonly now?: () => number } = {}) {
@@ -242,12 +307,13 @@ function relayFixture(options: { readonly now?: () => number } = {}) {
     credentials: { tier: "native" },
     relayTicket: { ticket: "ticket", expiresAt: Date.now() + 60_000 },
   } as const;
-  const destroy = vi.fn();
+  const { handshake, destroy, holdForRelay, release } = fakeHandshake();
+  const { sockets, createUpgradeSocket } = upgradeSockets();
   const authority = { ...unavailableAuthority(), onAccountAuthorizationRevoked: vi.fn() };
   vi.mocked(authority.resolveTarget).mockResolvedValue(target);
   vi.mocked(authority.prepareE2ee).mockResolvedValue(preparation as never);
-  vi.mocked(authority.handshake).mockResolvedValue({ destroy } as never);
-  vi.mocked(authority.authorizeUpgrade).mockResolvedValue({});
+  vi.mocked(authority.handshake).mockResolvedValue(handshake);
+  vi.mocked(authority.authorizeUpgrade).mockResolvedValue({ Authorization: "DPoP token" });
   const close = vi.fn();
   const socketFactory = vi.fn(
     (
@@ -260,6 +326,7 @@ function relayFixture(options: { readonly now?: () => number } = {}) {
   const manager = new DesktopWorkspaceRelayManager({
     authority,
     socketFactory,
+    createUpgradeSocket,
     emit,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
@@ -268,6 +335,10 @@ function relayFixture(options: { readonly now?: () => number } = {}) {
     target,
     preparation,
     destroy,
+    holdForRelay,
+    release,
+    sockets,
+    createUpgradeSocket,
     authority,
     close,
     socketFactory,
@@ -314,8 +385,12 @@ describe("desktop relay attempt ownership", () => {
   it("destroys late native preparation after a sibling authority request fails", async () => {
     const f = relayFixture();
     const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.resolveTarget).mockResolvedValue({
+      ...f.target,
+      nativeTrust: "verified",
+    });
     vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
-    vi.mocked(f.authority.authorizeUpgrade).mockRejectedValue(new Error("unavailable"));
+    vi.mocked(f.authority.issueTicket).mockRejectedValue(new Error("unavailable"));
     await expect(f.manager.activate(f.manager.prepare(f.environmentId))).rejects.toThrow(
       "activation failed",
     );
@@ -437,6 +512,320 @@ describe("desktop relay attempt ownership", () => {
     await f.manager.activate(f.manager.prepare(f.environmentId));
     expect(f.socketFactory.mock.calls[4]![0].relayCompression).toBe(true);
     f.manager.dispose();
+  });
+});
+
+/** A target that asks the Hub for a ticket, so the ticket request is in flight beside the upgrade. */
+function useTicketRequest(f: ReturnType<typeof relayFixture>) {
+  vi.mocked(f.authority.resolveTarget).mockResolvedValue({ ...f.target, nativeTrust: "verified" });
+  vi.mocked(f.authority.prepareE2ee).mockResolvedValue({
+    kind: "native",
+    pairingOnly: false,
+    attemptHandle: "a".repeat(43),
+    suiteId: 1,
+    credentials: { tier: "native" },
+  } as never);
+  const ticket = deferred<{ readonly ticket: string; readonly expiresAt: number }>();
+  vi.mocked(f.authority.issueTicket).mockReturnValue(ticket.promise);
+  return ticket;
+}
+
+describe("desktop relay early upgrade", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts the upgrade before the ticket resolves and hands that socket to the relay socket", async () => {
+    const f = relayFixture();
+    const ticket = useTicketRequest(f);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(f.authority.issueTicket).toHaveBeenCalledOnce();
+    expect(f.createUpgradeSocket).toHaveBeenCalledExactlyOnceWith(f.target.relayUrl, {
+      Authorization: "DPoP token",
+    });
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    // The upgrade authorization is requested ahead of the requests that share
+    // the security helper with it.
+    const authorizeOrder = vi.mocked(f.authority.authorizeUpgrade).mock.invocationCallOrder[0]!;
+    expect(authorizeOrder).toBeLessThan(
+      vi.mocked(f.authority.prepareE2ee).mock.invocationCallOrder[0]!,
+    );
+    expect(authorizeOrder).toBeLessThan(
+      vi.mocked(f.authority.issueTicket).mock.invocationCallOrder[0]!,
+    );
+
+    f.sockets[0]!.emit("open");
+    ticket.resolve({ ticket: "ticket", expiresAt: Date.now() + 60_000 });
+    await activation;
+
+    expect(f.socketFactory).toHaveBeenCalledOnce();
+    expect(f.socketFactory.mock.calls[0]![0]).toMatchObject({
+      ticket: "ticket",
+      upgrade: { socket: f.sockets[0] },
+    });
+    expect(f.authority.authorizeUpgrade).toHaveBeenCalledOnce();
+    expect(f.createUpgradeSocket).toHaveBeenCalledOnce();
+    expect(f.sockets[0]!.closes).toEqual([]);
+    f.manager.dispose();
+  });
+
+  it("opens the upgrade beside the E2EE preparation for an account-trusted target without a ticket request", async () => {
+    const f = relayFixture();
+    const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(f.createUpgradeSocket).toHaveBeenCalledOnce();
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    preparation.resolve(f.preparation);
+    await activation;
+
+    expect(f.authority.issueTicket).not.toHaveBeenCalled();
+    expect(f.socketFactory.mock.calls[0]![0]).toMatchObject({
+      ticket: "ticket",
+      upgrade: { socket: f.sockets[0] },
+    });
+    f.manager.dispose();
+  });
+
+  it("discards the early socket when preparation fails", async () => {
+    const f = relayFixture();
+    const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    const failed = expect(activation).rejects.toThrow("activation failed");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.sockets).toHaveLength(1);
+
+    preparation.reject(new Error("unavailable"));
+    await failed;
+
+    expect(f.sockets[0]!.closes).toEqual([{ code: 1000, reason: "closed" }]);
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    expect(f.release).toHaveBeenCalledOnce();
+  });
+
+  it("adopts the early socket only after the prepared attempt passes every check", async () => {
+    const f = relayFixture();
+    const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    const failed = expect(activation).rejects.toThrow("activation failed");
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.emit("open");
+
+    preparation.resolve({ ...f.preparation, pairingOnly: true } as never);
+    await failed;
+
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    expect(f.sockets[0]!.closes).toEqual([{ code: 1000, reason: "closed" }]);
+    expect(f.release).toHaveBeenCalledOnce();
+  });
+
+  it.each(["close", "dispose"] as const)(
+    "discards the early socket when the transport is superseded by %s",
+    async (operation) => {
+      const f = relayFixture();
+      const preparation = deferred<typeof f.preparation>();
+      vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+      const id = f.manager.prepare(f.environmentId);
+      const activation = f.manager.activate(id);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.sockets).toHaveLength(1);
+
+      if (operation === "close") f.manager.close(id);
+      else f.manager.dispose();
+      expect(f.sockets[0]!.closes).toEqual([{ code: 1000, reason: "closed" }]);
+
+      preparation.resolve(f.preparation);
+      await activation;
+      expect(f.socketFactory).not.toHaveBeenCalled();
+      expect(f.release).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("opens a fresh socket with a new authorization when the early one waited too long for its ticket", async () => {
+    const f = relayFixture();
+    vi.mocked(f.authority.authorizeUpgrade)
+      .mockResolvedValueOnce({ Authorization: "DPoP first" })
+      .mockResolvedValueOnce({ Authorization: "DPoP second" });
+    const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.emit("open");
+
+    await vi.advanceTimersByTimeAsync(EARLY_RELAY_SOCKET_TICKET_WAIT_MS);
+    expect(f.sockets[0]!.closes).toEqual([{ code: 1000, reason: "closed" }]);
+
+    preparation.resolve(f.preparation);
+    await activation;
+
+    expect(f.authority.authorizeUpgrade).toHaveBeenCalledTimes(2);
+    expect(f.createUpgradeSocket).toHaveBeenCalledTimes(2);
+    expect(f.createUpgradeSocket).toHaveBeenLastCalledWith(f.target.relayUrl, {
+      Authorization: "DPoP second",
+    });
+    expect(f.socketFactory.mock.calls[0]![0].upgrade).toMatchObject({ socket: f.sockets[1] });
+    expect(f.sockets[1]!.closes).toEqual([]);
+    f.manager.dispose();
+  });
+
+  it.each(["close", "error"] as const)(
+    "opens a fresh socket when the early one fails with %s before the attempt is ready",
+    async (event) => {
+      const f = relayFixture();
+      vi.mocked(f.authority.authorizeUpgrade)
+        .mockResolvedValueOnce({ Authorization: "DPoP first" })
+        .mockResolvedValueOnce({ Authorization: "DPoP second" });
+      const preparation = deferred<typeof f.preparation>();
+      vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+      const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+      await vi.advanceTimersByTimeAsync(0);
+      f.sockets[0]!.emit("open");
+      f.sockets[0]!.emit(event);
+
+      preparation.resolve(f.preparation);
+      await activation;
+
+      expect(f.createUpgradeSocket).toHaveBeenLastCalledWith(f.target.relayUrl, {
+        Authorization: "DPoP second",
+      });
+      expect(f.socketFactory.mock.calls[0]![0].upgrade).toMatchObject({ socket: f.sockets[1] });
+      f.manager.dispose();
+    },
+  );
+
+  it("discards the replacement socket when the transport is superseded while it is authorized", async () => {
+    const f = relayFixture();
+    const replacementHeaders = deferred<Readonly<Record<string, string>>>();
+    vi.mocked(f.authority.authorizeUpgrade)
+      .mockResolvedValueOnce({ Authorization: "DPoP first" })
+      .mockReturnValueOnce(replacementHeaders.promise);
+    const preparation = deferred<typeof f.preparation>();
+    vi.mocked(f.authority.prepareE2ee).mockReturnValue(preparation.promise as never);
+    const activation = f.manager.activate(f.manager.prepare(f.environmentId));
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.emit("open");
+    f.sockets[0]!.emit("close");
+    preparation.resolve(f.preparation);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.authority.authorizeUpgrade).toHaveBeenCalledTimes(2);
+
+    f.manager.dispose();
+    replacementHeaders.resolve({ Authorization: "DPoP second" });
+    await activation;
+
+    expect(f.createUpgradeSocket).toHaveBeenCalledOnce();
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    expect(f.release).toHaveBeenCalledOnce();
+  });
+
+  it("fails the attempt at once when the upgrade cannot be authorized", async () => {
+    const f = relayFixture();
+    // The ticket request never answers: only the failed authorization ends the attempt.
+    useTicketRequest(f);
+    vi.mocked(f.authority.authorizeUpgrade).mockRejectedValue(new Error("unavailable"));
+    const id = f.manager.prepare(f.environmentId);
+
+    await expect(f.manager.activate(id)).rejects.toThrow("activation failed");
+
+    expect(f.authority.authorizeUpgrade).toHaveBeenCalledOnce();
+    expect(f.createUpgradeSocket).not.toHaveBeenCalled();
+    expect(f.socketFactory).not.toHaveBeenCalled();
+    expect(f.emit).toHaveBeenCalledExactlyOnceWith({
+      type: "close",
+      transportId: id,
+      code: 4401,
+      reason: "Relay unavailable",
+      retryable: true,
+    });
+    expect(f.destroy).toHaveBeenCalledExactlyOnceWith(f.preparation.attemptHandle);
+    expect(f.release).toHaveBeenCalledOnce();
+  });
+
+  it("holds the security helper from activation until the transport ends", async () => {
+    const f = relayFixture();
+    const first = f.manager.prepare(f.environmentId);
+    await f.manager.activate(first);
+    expect(f.holdForRelay).toHaveBeenCalledOnce();
+    expect(f.release).not.toHaveBeenCalled();
+
+    f.socketFactory.mock.calls[0]![0].events.close(1006, "lost");
+    expect(f.release).toHaveBeenCalledOnce();
+
+    const second = f.manager.prepare(f.environmentId);
+    await f.manager.activate(second);
+    expect(f.holdForRelay).toHaveBeenCalledTimes(2);
+    f.manager.close(second);
+    expect(f.release).toHaveBeenCalledTimes(2);
+    f.manager.dispose();
+    expect(f.release).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("desktop relay over a real socket", () => {
+  it("sends the auth frame on the socket opened before the ticket resolved", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await once(server, "listening");
+    const upgrades: IncomingHttpHeaders[] = [];
+    const frames: Buffer[] = [];
+    const connected = deferred<void>();
+    server.on("connection", (socket, request) => {
+      upgrades.push(request.headers);
+      connected.resolve();
+      socket.on("message", (data) => frames.push(data as Buffer));
+    });
+    const { port } = server.address() as AddressInfo;
+    const f = relayFixture();
+    const relayUrl = `ws://127.0.0.1:${port}/v1/relay/client`;
+    vi.mocked(f.authority.resolveTarget).mockResolvedValue({
+      ...f.target,
+      relayUrl,
+      nativeTrust: "verified",
+    });
+    vi.mocked(f.authority.prepareE2ee).mockResolvedValue({
+      kind: "native",
+      pairingOnly: false,
+      attemptHandle: "a".repeat(43),
+      suiteId: 1,
+      credentials: { tier: "native" },
+    } as never);
+    vi.mocked(f.authority.authorizeUpgrade).mockResolvedValue({ "x-upgrade-proof": "proof" });
+    const ticket = deferred<{ readonly ticket: string; readonly expiresAt: number }>();
+    vi.mocked(f.authority.issueTicket).mockReturnValue(ticket.promise);
+    const events: DesktopWorkspaceTransportEvent[] = [];
+    const manager = new DesktopWorkspaceRelayManager({
+      authority: f.authority,
+      emit: (event) => events.push(event),
+    });
+    try {
+      const id = manager.prepare(f.environmentId);
+      const activation = manager.activate(id);
+
+      // The Hub has accepted the upgrade while the ticket is still outstanding.
+      await connected.promise;
+      expect(upgrades[0]?.["x-upgrade-proof"]).toBe("proof");
+      expect(frames).toHaveLength(0);
+
+      ticket.resolve({ ticket: "t".repeat(43), expiresAt: Date.now() + 60_000 });
+      await activation;
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(f.authority.authorizeUpgrade).toHaveBeenCalledOnce();
+
+      for (const client of server.clients) client.terminate();
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ type: "close" }));
+      expect(f.release).toHaveBeenCalledOnce();
+    } finally {
+      manager.dispose();
+      server.close();
+    }
   });
 });
 
