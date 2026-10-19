@@ -1,8 +1,9 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   decodeNativeSnapshot,
@@ -97,11 +98,7 @@ async function withFakeMonitor(body: string, run: (binary: string) => Promise<vo
   }
 }
 
-it.skipIf(process.platform === "win32")(
-  "collects validated snapshots and chunked history and cleans up the subprocess",
-  async () => {
-    await withFakeMonitor(
-      `
+const respondingSidecar = `
     const snapshot = ${JSON.stringify(snapshot)};
     const write = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
     write({ version: 3, type: "hello", sidecarPid: process.pid, sidecarVersion: "test" });
@@ -115,23 +112,74 @@ it.skipIf(process.platform === "win32")(
         if (command.type === "readHistory") write({ version: 3, type: "historyChunk", requestId: command.requestId, snapshots: [snapshot], done: true });
       }
     });
-  `,
-      async (binary) => {
-        const monitor = makeNativeResourceMonitor({ resolveBinary: async () => binary });
-        try {
-          const [first, concurrent] = await Promise.all([monitor.sample(), monitor.sample()]);
-          expect(first).toBe(concurrent);
-          expect(first.processes[0]?.command).toBe("agent");
-          expect(await monitor.sample()).toBe(first);
-          expect(await monitor.sample({ fresh: true })).not.toBe(first);
-          expect(await monitor.history(60000)).toHaveLength(1);
-          expect(monitor.health().status).toBe("healthy");
-        } finally {
-          monitor.close();
-        }
+  `;
+
+it.skipIf(process.platform === "win32")(
+  "collects validated snapshots and chunked history and cleans up the subprocess",
+  async () => {
+    await withFakeMonitor(respondingSidecar, async (binary) => {
+      const monitor = makeNativeResourceMonitor({ resolveBinary: async () => binary });
+      try {
+        const [first, concurrent] = await Promise.all([monitor.sample(), monitor.sample()]);
+        expect(first).toBe(concurrent);
+        expect(first.processes[0]?.command).toBe("agent");
+        expect(await monitor.sample()).toBe(first);
+        expect(await monitor.sample({ fresh: true })).not.toBe(first);
+        expect(await monitor.history(60000)).toHaveLength(1);
+        expect(monitor.health().status).toBe("healthy");
+      } finally {
+        monitor.close();
+      }
+      expect(monitor.health().status).toBe("stopped");
+    });
+  },
+);
+
+const isProcessRunning = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+it.skipIf(process.platform === "win32")(
+  "stops the sidecar after ten idle minutes and starts it again on demand",
+  async () => {
+    await withFakeMonitor(respondingSidecar, async (binary) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const monitor = makeNativeResourceMonitor({ resolveBinary: async () => binary });
+      try {
+        await monitor.sample();
+        const firstPid = monitor.health().sidecarPid;
+        expect(monitor.health().status).toBe("healthy");
+        expect(firstPid).toBeDefined();
+
+        // A request restarts the idle countdown.
+        vi.advanceTimersByTime(9 * 60_000);
+        await monitor.sample({ fresh: true });
+        vi.advanceTimersByTime(9 * 60_000);
+        expect(monitor.health().status).toBe("healthy");
+
+        vi.advanceTimersByTime(60_000);
         expect(monitor.health().status).toBe("stopped");
-      },
-    );
+        expect(monitor.health().sidecarPid).toBeUndefined();
+        for (let attempt = 0; attempt < 100 && isProcessRunning(firstPid!); attempt += 1) {
+          await sleep(20);
+        }
+        expect(isProcessRunning(firstPid!)).toBe(false);
+
+        const restarted = await monitor.sample();
+        expect(restarted.processes[0]?.command).toBe("agent");
+        expect(monitor.health().status).toBe("healthy");
+        expect(monitor.health().sidecarPid).not.toBe(firstPid);
+        expect(monitor.health().restartCount).toBe(0);
+      } finally {
+        monitor.close();
+        vi.useRealTimers();
+      }
+    });
   },
 );
 
