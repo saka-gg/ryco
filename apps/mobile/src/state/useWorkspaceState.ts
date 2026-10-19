@@ -9,7 +9,10 @@ import type { SavedEnvironmentConnectionState } from "@ryco/client-runtime/conne
 
 import { useConnectionRegistry } from "../providers/ConnectionRegistryProvider";
 import { useWsConnectionStatus, wsUiStateForEnvironment } from "../rpc/wsConnectionState";
-import { hostedState } from "../features/home/homeEnvironmentModel";
+import {
+  hostedState,
+  selectShellCurrentByEnvironmentId,
+} from "../features/home/homeEnvironmentModel";
 import { useMobileHostedConnectionsStore } from "../hostedHub/state";
 import {
   hostedWorkspacePhase,
@@ -55,7 +58,10 @@ export function useWorkspaceState(): WorkspaceState {
     catalog.runtimeStore.getState,
   );
   const wsStatus = useWsConnectionStatus();
-  const environmentStateById = useStore((state) => state.environmentStateById);
+  // A flat per-environment flag compared shallowly: `environmentStateById`
+  // gets a new identity on every streamed shell or orchestration event, and
+  // subscribing to it re-rendered every consumer of the workspace state.
+  const shellCurrentByEnvironmentId = useStore(useShallow(selectShellCurrentByEnvironmentId));
   const hostedConnections = useMobileHostedConnectionsStore(
     useShallow((state) => state.selectedNodes),
   );
@@ -108,7 +114,7 @@ export function useWorkspaceState(): WorkspaceState {
   const allEnvironments = mergeWorkspaceEnvironments(environments, hostedEnvironments);
   const shellSummary = deriveWorkspaceShellSummary(
     allEnvironments,
-    (environmentId) => environmentStateById[environmentId]?.bootstrapComplete ?? false,
+    (environmentId) => shellCurrentByEnvironmentId[environmentId] ?? false,
   );
 
   return projectWorkspaceState({

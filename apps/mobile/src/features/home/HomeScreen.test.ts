@@ -17,6 +17,7 @@ vi.mock("react", async (importOriginal) => {
     useEffect: () => undefined,
     useLayoutEffect: (effect: () => void) => effect(),
     useMemo: <T>(factory: () => T) => factory(),
+    useRef: <T>(initial: T) => ({ current: initial }),
     useReducer: <T>(
       _reducer: unknown,
       initial: T,
@@ -27,7 +28,10 @@ vi.mock("react", async (importOriginal) => {
     useSyncExternalStore: <T>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
   };
 });
-vi.mock("@react-navigation/native", () => ({ useNavigation: () => navigationMock }));
+vi.mock("@react-navigation/native", () => ({
+  useIsFocused: () => true,
+  useNavigation: () => navigationMock,
+}));
 vi.mock("@react-navigation/elements", () => ({ useHeaderHeight: () => 96 }));
 vi.mock("zustand/react/shallow", () => ({ useShallow: (selector: unknown) => selector }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#ededed" }));

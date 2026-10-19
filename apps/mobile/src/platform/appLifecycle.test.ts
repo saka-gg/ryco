@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { AppLifecycleEvent } from "@ryco/client-runtime/platform";
 
 const native = vi.hoisted(() => ({
+  appState: "active",
   appListeners: new Set<(state: string) => void>(),
   networkListeners: new Set<(state: { isConnected?: boolean }) => void>(),
   getNetworkState: vi.fn<() => Promise<{ isConnected?: boolean }>>(),
@@ -10,7 +11,9 @@ const native = vi.hoisted(() => ({
 
 vi.mock("react-native", () => ({
   AppState: {
-    currentState: "active",
+    get currentState() {
+      return native.appState;
+    },
     addEventListener: (_event: string, listener: (state: string) => void) => {
       native.appListeners.add(listener);
       return { remove: () => native.appListeners.delete(listener) };
@@ -29,6 +32,7 @@ const network = (isConnected: boolean) => {
   for (const listener of native.networkListeners) listener({ isConnected });
 };
 const appState = (state: string) => {
+  native.appState = state;
   for (const listener of native.appListeners) listener(state);
 };
 const deferredNetwork = () => {
@@ -41,6 +45,7 @@ const deferredNetwork = () => {
 
 beforeEach(() => {
   vi.resetModules();
+  native.appState = "active";
   native.appListeners.clear();
   native.networkListeners.clear();
   native.getNetworkState.mockReset().mockResolvedValue({ isConnected: true });
@@ -173,5 +178,45 @@ describe("mobile lifecycle connectivity", () => {
     await Promise.resolve();
     expect(mobileAppLifecycle.isOnline()).toBe(true);
     expect(listener).toHaveBeenCalledWith("online");
+  });
+
+  it("keeps the foreground through an iOS inactive interruption", async () => {
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    appState("inactive");
+    expect(mobileAppLifecycle.isForeground()).toBe(true);
+    appState("active");
+    await Promise.resolve();
+    expect(events).toEqual([]);
+    expect(native.getNetworkState).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits background once and resumes once when passing through inactive", async () => {
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    appState("inactive");
+    appState("background");
+    expect(mobileAppLifecycle.isForeground()).toBe(false);
+    appState("inactive");
+    expect(events).toEqual(["background"]);
+    appState("active");
+    await Promise.resolve();
+    expect(mobileAppLifecycle.isForeground()).toBe(true);
+    expect(events).toEqual(["background", "foreground", "resume"]);
+    expect(native.getNetworkState).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes an app that started in the background on its first activation", async () => {
+    native.appState = "background";
+    const { mobileAppLifecycle } = await import("./appLifecycle");
+    const events: AppLifecycleEvent[] = [];
+    mobileAppLifecycle.subscribe((event) => events.push(event));
+    await Promise.resolve();
+    appState("active");
+    expect(events).toEqual(["foreground", "resume"]);
   });
 });

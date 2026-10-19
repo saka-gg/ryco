@@ -22,41 +22,14 @@ export interface RetainedMobileHostedConnectionScope {
   readonly refCount: number;
 }
 
-export const MOBILE_SCOPE_REPORT_INTERVAL_MS = 25_000;
 export const MOBILE_SCOPE_LEASE_TTL_MS = UNIFIED_WORKSPACE_SCOPE_LEASE_TTL_MS;
 
-export interface MobileHostedScopeLeaseReport {
-  readonly observedAt: number;
-  readonly ttlMs: typeof MOBILE_SCOPE_LEASE_TTL_MS;
-  readonly scopes: ReadonlyArray<RetainedMobileHostedConnectionScope>;
-}
-
+/** Aggregate-only view of the retained scopes: no environment, thread, cwd, or payload identifiers. */
 export interface MobileHostedScopeLeaseDiagnostics {
-  readonly observedAt: number | null;
+  readonly observedAt: number;
   readonly ttlMs: typeof MOBILE_SCOPE_LEASE_TTL_MS;
   readonly activeScopeCount: number;
   readonly retainedEnvironmentCount: number;
-}
-
-let scopeLeaseDiagnostics: MobileHostedScopeLeaseDiagnostics = {
-  observedAt: null,
-  ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
-  activeScopeCount: 0,
-  retainedEnvironmentCount: 0,
-};
-
-/** Aggregate-only staging seam: no environment, thread, cwd, or payload identifiers. */
-export function recordMobileHostedScopeLeaseReport(report: MobileHostedScopeLeaseReport): void {
-  scopeLeaseDiagnostics = {
-    observedAt: report.observedAt,
-    ttlMs: report.ttlMs,
-    activeScopeCount: report.scopes.length,
-    retainedEnvironmentCount: new Set(report.scopes.map((entry) => entry.environmentId)).size,
-  };
-}
-
-export function readMobileHostedScopeLeaseDiagnostics(): MobileHostedScopeLeaseDiagnostics {
-  return scopeLeaseDiagnostics;
 }
 
 export interface MobileHostedScopeLeaseStore {
@@ -66,12 +39,6 @@ export interface MobileHostedScopeLeaseStore {
   ) => ReadonlyArray<RetainedMobileHostedConnectionScope>;
   readonly isEnvironmentRetained: (environmentId: EnvironmentId) => boolean;
   readonly subscribe: (listener: () => void) => () => void;
-  readonly startReporter: (input: {
-    readonly report: (report: MobileHostedScopeLeaseReport) => void;
-    readonly now?: () => number;
-    readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
-    readonly clearTimeout?: (timer: unknown) => void;
-  }) => () => void;
   readonly reset: () => void;
 }
 
@@ -132,47 +99,6 @@ export function createMobileHostedScopeLeaseStore(): MobileHostedScopeLeaseStore
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    startReporter(input) {
-      const now = input.now ?? (() => Date.now());
-      const schedule =
-        input.setTimeout ??
-        ((callback: () => void, delayMs: number) => globalThis.setTimeout(callback, delayMs));
-      const cancel =
-        input.clearTimeout ??
-        ((timer: unknown) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>));
-      let stopped = false;
-      let timer: unknown = null;
-      let queued = false;
-      const emit = () => {
-        if (stopped) return;
-        queued = false;
-        input.report({
-          observedAt: now(),
-          ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
-          scopes: list(),
-        });
-      };
-      const request = () => {
-        if (queued || stopped) return;
-        queued = true;
-        if (typeof globalThis.queueMicrotask === "function") globalThis.queueMicrotask(emit);
-        else void Promise.resolve().then(emit);
-      };
-      const tick = () => {
-        if (stopped) return;
-        emit();
-        timer = schedule(tick, MOBILE_SCOPE_REPORT_INTERVAL_MS);
-      };
-      const unsubscribe = this.subscribe(request);
-      emit();
-      timer = schedule(tick, MOBILE_SCOPE_REPORT_INTERVAL_MS);
-      return () => {
-        if (stopped) return;
-        stopped = true;
-        unsubscribe();
-        if (timer !== null) cancel(timer);
-      };
-    },
     reset() {
       if (retained.size === 0) return;
       retained.clear();
@@ -182,6 +108,20 @@ export function createMobileHostedScopeLeaseStore(): MobileHostedScopeLeaseStore
 }
 
 export const mobileHostedConnectionScopes = createMobileHostedScopeLeaseStore();
+
+/** Computed on demand from the live refcounts; nothing observes or reports on a timer. */
+export function readMobileHostedScopeLeaseDiagnostics(
+  store: Pick<MobileHostedScopeLeaseStore, "list"> = mobileHostedConnectionScopes,
+  now: () => number = () => Date.now(),
+): MobileHostedScopeLeaseDiagnostics {
+  const scopes = store.list();
+  return {
+    observedAt: now(),
+    ttlMs: MOBILE_SCOPE_LEASE_TTL_MS,
+    activeScopeCount: scopes.length,
+    retainedEnvironmentCount: new Set(scopes.map((entry) => entry.environmentId)).size,
+  };
+}
 
 /** Capacity-assessment arithmetic, kept executable for the PR evidence. */
 export function measureHostedLeaseReconnectTraffic(input: {
