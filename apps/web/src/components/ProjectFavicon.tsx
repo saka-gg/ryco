@@ -107,21 +107,25 @@ export function ProjectFavicon(input: {
     [environmentId, projectId, revision],
   );
   // The artwork this row shows, latched: once displayed it stays until a newer
-  // answer replaces it, so an expired or evicted cache entry never blanks a
-  // mounted row.
+  // answer replaces it, so an evicted cache entry never blanks a mounted row.
   const [artwork, setArtwork] = useState<{ key: string; source: string | null } | null>(null);
-  // Cached artwork renders on the first pass, without a request.
-  const cached =
-    api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
+  // Artwork the node already answered renders on the first pass, without a
+  // request, and whether or not the node is connected now: the Hub keeps one
+  // node connected at a time, and every other node's rows keep their icons.
+  const known = projectId
+    ? artwork?.key === requestKey
+      ? artwork.source
+      : peekProjectIconSource(environmentId, projectId, revision)
+    : undefined;
   useEffect(() => {
     if (!api || !projectId || !visible) return;
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // A fresh cache hit answers without a request; an expired entry is read
-    // again while the latched artwork stays on screen (stale-while-revalidate).
+    // again while the known artwork stays on screen (stale-while-revalidate).
     // Answers are revalidated only when this effect runs again, never on a
     // free-running timer. A read the node could not finish is not an answer:
-    // it is retried a bounded number of times.
+    // the known artwork stays, and the read is retried a bounded number of times.
     const readArtwork = (failures: number) => {
       if (!current) return;
       readProjectIconSource(api, environmentId, projectId, revision).then(
@@ -131,9 +135,6 @@ export function ProjectFavicon(input: {
         },
         () => {
           if (!current) return;
-          setArtwork((previous) =>
-            previous?.key === requestKey ? previous : { key: requestKey, source: null },
-          );
           const delay = PROJECT_ICON_RETRY_DELAYS_MS[failures];
           if (delay !== undefined) timer = setTimeout(() => readArtwork(failures + 1), delay);
         },
@@ -145,27 +146,21 @@ export function ProjectFavicon(input: {
       if (timer !== undefined) clearTimeout(timer);
     };
   }, [api, environmentId, projectId, requestKey, revision, visible]);
-  const src =
-    // Until the node's config is known, whether it serves icons over RPC is
-    // unknown: show the placeholder rather than starting an HTTP fallback the
-    // RPC would duplicate a moment later.
-    iconSupport === null || deferred
-      ? null
-      : rpcSupported && projectId
-        ? // Node artwork shows only while the node is connected.
-          api
-          ? artwork?.key === requestKey
-            ? artwork.source
-            : (cached ?? null)
-          : null
-        : isHostedHubMode() || !visible
-          ? null
-          : resolveProjectFaviconHttpUrl({
-              environmentId,
-              cwd: input.cwd,
-              projectId,
-              customAvatarContentHash: revision,
-            });
+  // Until the node's config is known, whether it serves icons over RPC is
+  // unknown: show known artwork or the placeholder rather than starting an HTTP
+  // fallback the RPC would duplicate a moment later.
+  const src = deferred
+    ? null
+    : projectId && iconSupport !== false
+      ? (known ?? null)
+      : iconSupport === null || isHostedHubMode() || !visible
+        ? null
+        : resolveProjectFaviconHttpUrl({
+            environmentId,
+            cwd: input.cwd,
+            projectId,
+            customAvatarContentHash: revision,
+          });
   return (
     <ProjectFaviconImage
       key={src ?? "fallback"}

@@ -57,39 +57,41 @@ export function ProjectFavicon(props: {
     [environmentId, projectId, revision],
   );
   // The artwork this row shows, latched into state as soon as it is known, so
-  // the icon never depends on the cache entry still being fresh at render time:
-  // once the TTL passes or the LRU drops the entry, the row keeps its icon.
+  // the icon never depends on the cache entry still being there at render time:
+  // once the LRU drops the entry, the row keeps its icon.
   const [artwork, setArtwork] = useState<LatchedArtwork | null>(() => {
-    const source =
-      api && projectId ? peekProjectIconSource(environmentId, projectId, revision) : undefined;
+    const source = projectId
+      ? peekProjectIconSource(environmentId, projectId, revision)
+      : undefined;
     return source === undefined ? null : { key: requestKey, source };
   });
   useEffect(() => {
     if (!api || !projectId) return;
     // Answered from the cache while its entry is fresh, without a request;
     // otherwise read again, with the latched artwork on screen until the
-    // answer replaces it.
+    // answer replaces it. A read the node could not finish is not an answer:
+    // the artwork on screen stays.
     let current = true;
-    void readProjectIconSource(api, environmentId, projectId, revision)
-      .then((source) => {
+    void readProjectIconSource(api, environmentId, projectId, revision).then(
+      (source) => {
         if (current) setArtwork((latched) => latchArtwork(latched, requestKey, source));
-      })
-      .catch(() => {
-        if (current) setArtwork((latched) => latchArtwork(latched, requestKey, null));
-      });
+      },
+      () => undefined,
+    );
     return () => {
       current = false;
     };
   }, [api, environmentId, projectId, requestKey, revision]);
-  // A row whose inputs just changed shows cached artwork for the new key on its
-  // first pass, before the effect latches it.
-  const faviconUrl = api
-    ? artwork?.key === requestKey
+  // Artwork the node already answered shows whether or not it is connected now:
+  // the Hub keeps one node connected at a time, and every other node's rows
+  // keep their icons. A row whose inputs just changed shows cached artwork for
+  // the new key on its first pass, before the effect latches it.
+  const faviconUrl =
+    artwork?.key === requestKey
       ? artwork.source
       : projectId
         ? (peekProjectIconSource(environmentId, projectId, revision) ?? null)
-        : null
-    : null;
+        : null;
 
   return (
     <ProjectFaviconImage

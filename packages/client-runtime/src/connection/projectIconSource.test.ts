@@ -98,7 +98,7 @@ describe("project icon cache", () => {
     await readProjectIconSource(api, environmentA, project, "new-avatar");
     expect(read).toHaveBeenCalledTimes(3);
   });
-  it("peeks cached artwork for a first-pass render and expires it after the TTL", async () => {
+  it("peeks the last read artwork past the TTL, while a read after the TTL asks again", async () => {
     vi.useFakeTimers();
     const read = vi.fn(async () => icon);
     expect(peekProjectIconSource(environmentA, project, null)).toBeUndefined();
@@ -108,7 +108,10 @@ describe("project icon cache", () => {
     );
     expect(peekProjectIconSource(environmentA, project, "other-revision")).toBeUndefined();
     vi.advanceTimersByTime(PROJECT_ICON_TTL_MS + 1);
-    expect(peekProjectIconSource(environmentA, project, null)).toBeUndefined();
+    // A row whose node is not connected still shows what it last read.
+    expect(peekProjectIconSource(environmentA, project, null)).toBe(
+      "data:image/png;base64,aWNvbg==",
+    );
     await readProjectIconSource(makeApi(read), environmentA, project, null);
     expect(read).toHaveBeenCalledTimes(2);
   });

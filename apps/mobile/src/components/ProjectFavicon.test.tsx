@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 // The favicon under a minimal hook runtime (state slots, memo slots and
 // dependency-checked effects; no React renderer exists in this suite). What it
 // proves: a row that first showed artwork from the shared cache keeps it once
-// the cache entry expires or is dropped, a disconnected row shows the folder,
-// and a reconnect shows the kept artwork while it reads it again.
+// the cache entry expires or is dropped, a disconnected row keeps its artwork
+// (and a row mounted while disconnected shows the cached one), and a reconnect
+// shows the kept artwork while it reads it again.
 
 const hoisted = vi.hoisted(() => ({
   phase: "connected" as string,
@@ -141,14 +142,14 @@ describe("ProjectFavicon", () => {
     expect(readIcon).toHaveBeenCalledOnce();
   });
 
-  it("hides artwork while disconnected and shows it again while a reconnect rereads it", async () => {
+  it("keeps artwork while disconnected and while a reconnect rereads it", async () => {
     const first = makeApi("Zmlyc3Q=");
     hoisted.api = first.api;
     expect(render()).toBeNull();
     await vi.waitFor(() => expect(render()).toBe(FIRST_ICON));
 
     hoisted.phase = "connecting";
-    expect(render()).toBeNull();
+    expect(render()).toBe(FIRST_ICON);
 
     // The entry went stale while the node was away; the new connection rereads
     // it, and the kept artwork stays up until the answer replaces it.
@@ -159,5 +160,18 @@ describe("ProjectFavicon", () => {
     expect(render()).toBe(FIRST_ICON);
     expect(second.readIcon).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(render()).toBe(SECOND_ICON));
+  });
+
+  it("shows cached artwork on a row mounted while its node is not connected", async () => {
+    // The Hub connects one node at a time: this node's icon was read while it
+    // was connected, and a row mounts after the Hub moved to another node.
+    const { api, readIcon } = makeApi("Zmlyc3Q=");
+    await readProjectIconSource(api, ENVIRONMENT, PROJECT, null);
+    hoisted.api = undefined;
+    hoisted.phase = "disconnected";
+    vi.setSystemTime(Date.now() + PROJECT_ICON_TTL_MS + 1);
+
+    expect(render()).toBe(FIRST_ICON);
+    expect(readIcon).toHaveBeenCalledOnce();
   });
 });

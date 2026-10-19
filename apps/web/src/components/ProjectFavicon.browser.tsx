@@ -144,18 +144,53 @@ describe("hosted project icons", () => {
       .poll(() => view.container.querySelector("img")?.src)
       .toBe(`data:image/svg+xml;base64,${icon.dataBase64}`);
   });
-  it("clears artwork while disconnected and restores it after reconnect without a refetch", async () => {
+  it("keeps artwork while disconnected and after reconnect without a refetch", async () => {
     const read = vi.fn(async () => icon);
     connect(read);
+    const dataUrl = `data:image/svg+xml;base64,${icon.dataBase64}`;
     const view = await render(
       <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
     );
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
     recordWsConnectionClosed({}, { environmentId: env });
-    await expect.poll(() => view.container.querySelector("img")).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(view.container.querySelector("img")?.src).toBe(dataUrl);
     recordWsConnectionOpened({ environmentId: env });
-    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(view.container.querySelector("img")?.src).toBe(dataUrl);
     // Same node, same server build: the cached artwork is reused.
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it("keeps another node's artwork after the Hub switches to a different node", async () => {
+    const read = vi.fn(async () => icon);
+    connect(read);
+    const dataUrl = `data:image/svg+xml;base64,${icon.dataBase64}`;
+    const view = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
+    // The Hub connects one node at a time: opening a chat on another node
+    // disconnects this one and makes the other node primary, so this node's
+    // config (and with it its icon capability) is no longer known.
+    const otherEnv = EnvironmentId.make("hosted-other-node");
+    recordWsConnectionClosed({}, { environmentId: env });
+    writePrimaryEnvironmentDescriptor({ ...descriptor, environmentId: otherEnv });
+    appAtomRegistry.set(serverConfigAtom, {
+      environment: { ...descriptor, environmentId: otherEnv },
+    } as ServerConfig);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(view.container.querySelector("img")?.src).toBe(dataUrl);
+    // A row mounted afterwards shows it too, even once the entry is past its TTL.
+    const realNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(realNow + 5 * 60_000 + 1);
+    try {
+      const remounted = await render(
+        <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+      );
+      expect(remounted.container.querySelector("img")?.src).toBe(dataUrl);
+    } finally {
+      now.mockRestore();
+    }
     expect(read).toHaveBeenCalledTimes(1);
   });
   it("reuses artwork after a reconnect through a new client, and on remount", async () => {
@@ -166,7 +201,7 @@ describe("hosted project icons", () => {
     );
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
     recordWsConnectionClosed({}, { environmentId: env });
-    await expect.poll(() => view.container.querySelector("img")).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 50));
     // A reconnect builds a new client (and API object) for the same node.
     connect(read);
     await expect.poll(() => view.container.querySelector("img")?.naturalWidth).toBe(16);
@@ -244,7 +279,8 @@ describe("hosted project icons", () => {
     try {
       // A reconnect hands the row a new API: the expired entry is read again.
       recordWsConnectionClosed({}, { environmentId: env });
-      await expect.poll(() => view.container.querySelector("img")).toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(view.container.querySelector("img")?.src).toBe(dataUrl);
       connect(read);
       await expect.poll(() => read.mock.calls.length).toBe(2);
       // While the node answers, the latched artwork stays on screen.
@@ -254,6 +290,34 @@ describe("hosted project icons", () => {
       await expect
         .poll(() => view.container.querySelector("img")?.src)
         .toBe(`data:image/svg+xml;base64,${updated.dataBase64}`);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("keeps the last artwork when the node could not revalidate an expired entry", async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(icon)
+      .mockRejectedValueOnce(new Error("Project icon unavailable"));
+    connect(read);
+    const dataUrl = `data:image/svg+xml;base64,${icon.dataBase64}`;
+    const first = await render(
+      <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+    );
+    await expect.poll(() => first.container.querySelector("img")?.naturalWidth).toBe(16);
+    await first.unmount();
+    const realNow = Date.now();
+    const now = vi.spyOn(Date, "now").mockReturnValue(realNow + 5 * 60_000 + 1);
+    try {
+      // A new row starts from the expired entry and asks the node again.
+      const view = await render(
+        <TestFavicon environmentId={env} cwd="/project" projectId={projectId} />,
+      );
+      expect(view.container.querySelector("img")?.src).toBe(dataUrl);
+      await expect.poll(() => read.mock.calls.length).toBe(2);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(view.container.querySelector("img")?.src).toBe(dataUrl);
     } finally {
       now.mockRestore();
     }
