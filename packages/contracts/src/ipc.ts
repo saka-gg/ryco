@@ -590,6 +590,20 @@ export type DesktopWorkspaceStateSummary = Omit<DesktopWorkspaceStateProjection,
 export type DesktopWorkspaceStatePush = DesktopWorkspaceStateSummary &
   Partial<Pick<DesktopWorkspaceStateProjection, "snapshots">>;
 
+/**
+ * Display-only content of one thread (its recent messages) as it crosses the
+ * isolated Desktop preload. Main validates what it is handed and what it
+ * stores; the renderer validates what it reads back.
+ */
+export interface DesktopThreadContentProjection {
+  readonly messages: ReadonlyArray<unknown>;
+}
+
+/** Thread content by thread id, least recently visited first. */
+export type DesktopThreadContentProjectionMap = Readonly<
+  Record<string, DesktopThreadContentProjection>
+>;
+
 export type DesktopWorkspaceScopeProjection =
   | { readonly type: "interactive" }
   | { readonly type: "thread-detail"; readonly threadId: ThreadId }
@@ -889,6 +903,21 @@ export interface DesktopBridge {
     readonly environmentId: EnvironmentId;
     readonly payload: string;
   }) => Promise<DesktopWorkspaceStateSummary>;
+  /**
+   * The Desktop-local cache of recent conversation text. Main keeps it
+   * encrypted and bounded; the renderer hands it display content and reads it
+   * back to paint a cold start. Publishing is fire-and-forget.
+   */
+  publishDesktopThreadContent?: (
+    environmentId: EnvironmentId,
+    content: DesktopThreadContentProjectionMap,
+  ) => void;
+  getDesktopThreadContent?: (
+    environmentId: EnvironmentId,
+  ) => Promise<DesktopThreadContentProjectionMap>;
+  getDesktopThreadContentCacheEnabled?: () => Promise<boolean>;
+  /** Turning the cache off deletes what it holds. Resolves to the setting now in effect. */
+  setDesktopThreadContentCacheEnabled?: (enabled: boolean) => Promise<boolean>;
   onDesktopWorkspaceState?: (listener: (state: DesktopWorkspaceStatePush) => void) => () => void;
   onDesktopWorkspaceConnectionCommand?: (
     listener: (command: DesktopWorkspaceConnectionCommand) => void,

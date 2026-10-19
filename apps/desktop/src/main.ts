@@ -226,6 +226,7 @@ import type {
 } from "./desktopHostedIdentity.ts";
 import type * as DesktopHubStack from "./desktopHubStack.ts";
 import type { DesktopNativeE2eeHandshakeService } from "./desktopNativeE2eeHandshake.ts";
+import type { DesktopThreadContentCache } from "./desktopThreadContentCache.ts";
 import type {
   DesktopWorkspaceClient,
   DesktopWorkspaceClientSnapshot,
@@ -306,11 +307,8 @@ const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
 const SAVED_ENVIRONMENT_REGISTRY_PATH = Path.join(STATE_DIR, "saved-environments.json");
 const SHELL_ENVIRONMENT_CACHE_PATH = DESKTOP_PATHS.shellEnvironmentCachePath;
-const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(
-  STATE_DIR,
-  "desktop-workspace-client",
-  "metadata-v1.json",
-);
+const DESKTOP_WORKSPACE_CLIENT_DIR = Path.join(STATE_DIR, "desktop-workspace-client");
+const DESKTOP_WORKSPACE_CACHE_PATH = Path.join(DESKTOP_WORKSPACE_CLIENT_DIR, "metadata-v1.json");
 const DESKTOP_SCHEME = "ryco";
 const DESKTOP_BOOT_HOST = "app";
 const DESKTOP_BOOT_PATH = "/desktop-boot.html";
@@ -1138,12 +1136,41 @@ function emitDesktopWorkspaceState(snapshot: DesktopWorkspaceClientSnapshot): vo
   );
 }
 
+/**
+ * Recent conversation text for the signed-in account's machines, encrypted
+ * with the OS-protected key and bounded by the shared display-content policy.
+ * Its module is small and has no Hub dependencies, but is only needed once a
+ * Hub origin is configured.
+ */
+const loadDesktopThreadContentModule = lazyAsyncResource(
+  () => import("./desktopThreadContentCache.ts"),
+);
+const ensureDesktopThreadContentCache = lazyAsyncResource(
+  async (): Promise<DesktopThreadContentCache> => {
+    const origin = desktopSettings.hubOrigin;
+    if (origin === null) throw new Error("Desktop Hub is unavailable.");
+    const { createDesktopThreadContentCache } = await loadDesktopThreadContentModule();
+    return createDesktopThreadContentCache({
+      directory: DESKTOP_WORKSPACE_CLIENT_DIR,
+      hubOrigin: origin,
+      protection: getDesktopSecretStorage(),
+    });
+  },
+);
+
 async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   const origin = desktopSettings.hubOrigin;
   if (origin === null) throw new Error("Desktop Hub is unavailable.");
-  const { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient } =
-    await loadDesktopHubStack();
+  const [
+    { createDesktopWorkspaceMetadataCache, DesktopWorkspaceClient },
+    { withThreadContentPurges },
+    threadContent,
+  ] = await Promise.all([
+    loadDesktopHubStack(),
+    loadDesktopThreadContentModule(),
+    ensureDesktopThreadContentCache(),
+  ]);
   // Another caller may have finished while the stack loaded.
   if (desktopWorkspaceClient !== null) return desktopWorkspaceClient;
   // Constructing the workspace (including getState IPC) must not create keys.
@@ -1170,7 +1197,11 @@ async function ensureDesktopWorkspaceClient(): Promise<DesktopWorkspaceClient> {
     trust: {
       read: async (...args) => (await ensureDesktopNativeIdentityContext()).trust.read(...args),
     },
-    cache: createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
+    // Conversation text is forgotten wherever the metadata cache forgets.
+    cache: withThreadContentPurges(
+      createDesktopWorkspaceMetadataCache(DESKTOP_WORKSPACE_CACHE_PATH),
+      threadContent,
+    ),
     connection: {
       connect: async ({ environmentId, delayMs }) => {
         mainWindow?.webContents.send(DESKTOP_WORKSPACE_IPC.connectionCommand, {
@@ -1244,7 +1275,13 @@ const ensureDesktopNativeE2eeHandshakeService = lazyAsyncResource(
 );
 
 function invalidateDesktopNativeE2eeAccess(): void {
+  const revokedIdentity = desktopHostedIdentityStatus;
   desktopHostedIdentityStatus = { status: "unavailable" };
+  if (revokedIdentity.status === "ready") {
+    void ensureDesktopThreadContentCache()
+      .then((threadContent) => threadContent.purgeAccount(revokedIdentity.accountId))
+      .catch(() => undefined);
+  }
   desktopWorkspaceClient?.invalidateAccess();
   desktopNativeE2eeHandshakeService?.dispose();
   desktopWorkspaceRelayManager?.dispose();
@@ -3896,7 +3933,9 @@ function registerIpcHandlers(): void {
   ): Promise<A> => {
     const client = await ensureDesktopWorkspaceClient();
     const { createDesktopWorkspaceIpcHandlers } = await loadDesktopHubStack();
-    return operation(createDesktopWorkspaceIpcHandlers(client));
+    return operation(
+      createDesktopWorkspaceIpcHandlers(client, await ensureDesktopThreadContentCache()),
+    );
   };
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.getState,
@@ -3911,9 +3950,13 @@ function registerIpcHandlers(): void {
     DESKTOP_WORKSPACE_IPC.beginVerification,
     DESKTOP_WORKSPACE_IPC.cancelVerification,
     DESKTOP_WORKSPACE_IPC.verifyApproval,
+    DESKTOP_WORKSPACE_IPC.getThreadContent,
+    DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled,
+    DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled,
   ]) {
     ipcMain.removeHandler(channel);
   }
+  ipcMain.removeAllListeners(DESKTOP_WORKSPACE_IPC.publishThreadContent);
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.getState, () =>
     withDesktopWorkspace((handlers) => handlers.getState()),
   );
@@ -3949,6 +3992,24 @@ function registerIpcHandlers(): void {
   );
   ipcMain.handle(DESKTOP_WORKSPACE_IPC.verifyApproval, (_event, raw: unknown) =>
     withDesktopWorkspace((handlers) => handlers.verifyApproval(raw)),
+  );
+  // One-way: a refused or failed publication only means the cache keeps what it had.
+  ipcMain.on(
+    DESKTOP_WORKSPACE_IPC.publishThreadContent,
+    (_event, rawEnvironmentId: unknown, rawContent: unknown) => {
+      void withDesktopWorkspace((handlers) =>
+        handlers.publishThreadContent(rawEnvironmentId, rawContent),
+      ).catch(() => undefined);
+    },
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContent, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.getThreadContent(raw)),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled, () =>
+    withDesktopWorkspace((handlers) => handlers.getThreadContentCacheEnabled()),
+  );
+  ipcMain.handle(DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled, (_event, raw: unknown) =>
+    withDesktopWorkspace((handlers) => handlers.setThreadContentCacheEnabled(raw)),
   );
   for (const channel of [
     DESKTOP_WORKSPACE_IPC.prepareTransport,

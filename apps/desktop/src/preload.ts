@@ -289,6 +289,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.cancelVerification, handle),
   verifyDesktopWorkspaceApproval: (input) =>
     ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.verifyApproval, input),
+  publishDesktopThreadContent: (environmentId, content) =>
+    ipcRenderer.send(DESKTOP_WORKSPACE_IPC.publishThreadContent, environmentId, content),
+  getDesktopThreadContent: (environmentId) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContent, environmentId),
+  getDesktopThreadContentCacheEnabled: () =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.getThreadContentCacheEnabled),
+  setDesktopThreadContentCacheEnabled: (enabled) =>
+    ipcRenderer.invoke(DESKTOP_WORKSPACE_IPC.setThreadContentCacheEnabled, enabled),
   onDesktopWorkspaceState: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
       if (typeof state !== "object" || state === null) return;
