@@ -10,7 +10,11 @@ export function useThreadExportAction(thread: ScopedThreadRef | null): CommandPa
   const controllerRef = useRef<AbortController | null>(null);
   const [exporting, setExporting] = useState(false);
   useEffect(() => () => controllerRef.current?.abort(), []);
-  const capability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.getThreadWindow);
+  const environmentId = thread?.environmentId ?? null;
+  const capability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.getThreadWindow,
+    environmentId,
+  );
   return {
     kind: "action",
     // The palette owns this hook; closing it aborts the in-flight read.

@@ -168,7 +168,7 @@ export function prepareThreadTerminal(input: PrepareThreadTerminalInput): void {
   }
   // An early open never runs ahead of hosted authorization: until the hosted
   // lifecycle grants terminal access, the terminal opens on its own when it mounts.
-  if (!readHostedRpcCapability(WS_METHODS.terminalOpen).allowed) return;
+  if (!readHostedRpcCapability(WS_METHODS.terminalOpen, input.environmentId).allowed) return;
   const api = readEnvironmentApi(input.environmentId);
   if (!api) return;
   const dimensions = readLastTerminalDimensions(input.layout);

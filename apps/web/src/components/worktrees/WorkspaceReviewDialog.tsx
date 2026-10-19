@@ -3,6 +3,8 @@ import { WS_METHODS } from "@ryco/contracts";
 import { useState } from "react";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import {
   openWorkspaceReviewDialog,
   useWorkspaceReviewDialog,
@@ -20,8 +22,17 @@ function WorkspaceReviewDialogBody(props: {
 }) {
   const { target } = props;
   const access = useProjectEditAccess(target.environmentId);
-  const applyCapability = useHostedRpcCapability(WS_METHODS.lifecycleApplyWorkspace);
-  const previewCapability = useHostedRpcCapability(WS_METHODS.lifecyclePreviewWorkspace);
+  const applyCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleApplyWorkspace,
+    target.environmentId,
+  );
+  const previewCapability = useHostedRpcCapability(
+    WS_METHODS.lifecyclePreviewWorkspace,
+    target.environmentId,
+  );
+  const nodeLabel = useHostedHubStore((state) =>
+    hostedSwitchTargetLabel(state, target.environmentId),
+  );
   return (
     <DialogPopup className="max-w-md" data-testid="workspace-review-dialog">
       <DialogHeader>
@@ -39,7 +50,8 @@ function WorkspaceReviewDialogBody(props: {
           previewDenied={
             previewCapability.allowed
               ? null
-              : (previewCapability.reason ?? "Your role on this device can't change workspaces.")
+              : (hostedCapabilityCopy(previewCapability, nodeLabel) ??
+                "Your role on this device can't change workspaces.")
           }
           canApply={access.canEdit && applyCapability.allowed}
           onClose={props.onClose}

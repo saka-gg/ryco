@@ -39,8 +39,14 @@ const selectLocalTasksSupported = (config: ServerConfig | null): boolean | null 
 export function useTasksEnvironment(): TasksEnvironment {
   const environmentId = usePrimaryEnvironmentId();
   const supported = useEnvironmentServerConfigSelector(environmentId, selectLocalTasksSupported);
-  const capability = useHostedRpcCapability(WS_METHODS.serverListLocalTasks);
-  const role = useHostedHubStore((state) => state.effectiveRole);
+  const capability = useHostedRpcCapability(WS_METHODS.serverListLocalTasks, environmentId);
+  // The shared state mirrors the selected node only, so its role counts for this environment
+  // only while this is the selected one; the capability above answers for any other.
+  const role = useHostedHubStore((state) =>
+    environmentId !== null && state.selectedNode?.environmentId === environmentId
+      ? state.effectiveRole
+      : null,
+  );
   // The node this surface was allowed to use; a reconnect keeps it, a new node starts over.
   const [allowedFor, setAllowedFor] = useState<EnvironmentId | null>(null);
   if (capability.allowed && environmentId !== null && allowedFor !== environmentId) {
@@ -56,8 +62,10 @@ export function useTasksEnvironment(): TasksEnvironment {
     role,
     allowedBefore: environmentId !== null && allowedFor === environmentId,
   });
-  const denied = access.denied || refused;
-  const allowed = access.allowed && !refused;
+  // An environment other than the selected one has no role here; its own capability says it.
+  const roleRefused = capability.hosted && capability.kind === "role";
+  const denied = access.denied || roleRefused || refused;
+  const allowed = access.allowed && !roleRefused && !refused;
   return useMemo(
     () => ({ environmentId, supported, allowed, denied, reason: denied ? DENIED_REASON : null }),
     [allowed, denied, environmentId, supported],

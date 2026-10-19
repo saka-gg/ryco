@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId, type EnvironmentApi } from "@ryco/contracts";
+import { EnvironmentId, ThreadId, WS_METHODS, type EnvironmentApi } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as environmentApi from "./environmentApi";
@@ -198,6 +198,38 @@ describe("prepareThreadTerminal", () => {
         launchKey: terminalLaunchKey(launch),
       }),
     ).toBeNull();
+  });
+
+  it("asks for terminal access on the thread's own environment", () => {
+    const open = mockTerminalOpen();
+    const otherEnvironmentId = EnvironmentId.make("environment-other");
+    const capability = vi
+      .spyOn(hostedCapabilities, "readHostedRpcCapability")
+      .mockImplementation((_method, requestedEnvironmentId) =>
+        requestedEnvironmentId === otherEnvironmentId
+          ? { hosted: true, allowed: true, reason: null }
+          : { hosted: true, allowed: false, reason: "Not connected." },
+      );
+
+    prepareThreadTerminal({
+      environmentId: otherEnvironmentId,
+      threadId,
+      terminalId: "default",
+      launch,
+      layout: "drawer",
+    });
+    expect(capability).toHaveBeenLastCalledWith(WS_METHODS.terminalOpen, otherEnvironmentId);
+    expect(open).toHaveBeenCalledTimes(1);
+
+    prepareThreadTerminal({
+      environmentId,
+      threadId,
+      terminalId: "default",
+      launch,
+      layout: "drawer",
+    });
+    expect(capability).toHaveBeenLastCalledWith(WS_METHODS.terminalOpen, environmentId);
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it("drops a failed prepare so the terminal opens on its own", async () => {
