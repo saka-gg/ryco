@@ -236,6 +236,47 @@ async function waitForThread(
   return poll();
 }
 
+// Captured at import, before any test installs fake timers.
+const realSetTimeout = globalThis.setTimeout;
+
+/** Polls on real time, so it keeps working while a test drives fake timers by hand. */
+async function untilReal(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    if (performance.now() >= deadline) {
+      throw new Error("Timed out waiting for condition");
+    }
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 5));
+  }
+}
+
+interface RecordedActivityUpsert {
+  readonly id: string;
+  readonly kind: string;
+  readonly payload: Record<string, unknown>;
+}
+
+/** Records every activity upsert the engine is asked to persist. */
+function recordActivityUpserts() {
+  const upserts: RecordedActivityUpsert[] = [];
+  return {
+    upserts,
+    interceptDispatch: (
+      command: OrchestrationCommand,
+      dispatch: OrchestrationEngineShape["dispatch"],
+    ) => {
+      if (command.type === "thread.activity.append") {
+        upserts.push({
+          id: command.activity.id,
+          kind: command.activity.kind,
+          payload: (command.activity.payload ?? {}) as Record<string, unknown>,
+        });
+      }
+      return dispatch(command);
+    },
+  };
+}
+
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
     | OrchestrationEngineService
@@ -280,6 +321,8 @@ describe("ProviderRuntimeIngestion", () => {
       command: OrchestrationCommand,
       dispatch: OrchestrationEngineShape["dispatch"],
     ) => ReturnType<OrchestrationEngineShape["dispatch"]>;
+    /** Hides the engine's in-memory read model, as a narrow engine double would. */
+    omitReadModel?: boolean;
   }) {
     const workspaceRoot = makeTempDir("ryco-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
@@ -300,16 +343,23 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const interceptDispatch = options?.interceptDispatch;
-    const orchestrationLayer = interceptDispatch
-      ? Layer.effect(
-          OrchestrationEngineService,
-          Effect.map(Effect.service(OrchestrationEngineService), (engine) => ({
-            ...engine,
-            dispatch: (command: OrchestrationCommand) =>
-              interceptDispatch(command, engine.dispatch),
-          })),
-        ).pipe(Layer.provide(engineLayer))
-      : engineLayer;
+    const orchestrationLayer =
+      interceptDispatch || options?.omitReadModel
+        ? Layer.effect(
+            OrchestrationEngineService,
+            Effect.map(Effect.service(OrchestrationEngineService), (engine) => {
+              const { getReadModel: _inMemoryModel, ...withoutReadModel } = engine;
+              const visible = options?.omitReadModel ? withoutReadModel : engine;
+              return interceptDispatch
+                ? {
+                    ...visible,
+                    dispatch: (command: OrchestrationCommand) =>
+                      interceptDispatch(command, engine.dispatch),
+                  }
+                : visible;
+            }),
+          ).pipe(Layer.provide(engineLayer))
+        : engineLayer;
     const baseSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolverLive),
       Layer.provide(SqlitePersistenceMemory),
@@ -5803,6 +5853,485 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
   });
+
+  describe("thread lookup for provider events", () => {
+    function countShellReads() {
+      const counter = { reads: 0 };
+      return {
+        counter,
+        wrapSnapshotQuery: (query: ProjectionSnapshotQueryShape): ProjectionSnapshotQueryShape => ({
+          ...query,
+          getThreadShellById: (threadId) => {
+            counter.reads += 1;
+            return query.getThreadShellById(threadId);
+          },
+        }),
+      };
+    }
+
+    const emitWarning = (
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      name: string,
+      overrides: Record<string, unknown> = {},
+    ) =>
+      harness.emit({
+        type: "runtime.warning",
+        eventId: asEventId(`evt-${name}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: new Date().toISOString(),
+        threadId: asThreadId("thread-1"),
+        payload: { message: name },
+        ...overrides,
+      });
+
+    it("resolves each event's thread from the engine's in-memory model", async () => {
+      const shellReads = countShellReads();
+      const harness = await createHarness({ wrapSnapshotQuery: shellReads.wrapSnapshotQuery });
+
+      for (let index = 0; index < 5; index += 1) {
+        emitWarning(harness, `warning-${index}`);
+      }
+      await harness.drain();
+
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+      expect(
+        thread?.activities.filter((activity) => activity.kind === "runtime.warning"),
+      ).toHaveLength(5);
+      expect(shellReads.counter.reads).toBe(0);
+    });
+
+    it("falls back to the projection when the engine has no in-memory model", async () => {
+      const shellReads = countShellReads();
+      const harness = await createHarness({
+        wrapSnapshotQuery: shellReads.wrapSnapshotQuery,
+        omitReadModel: true,
+      });
+
+      for (let index = 0; index < 3; index += 1) {
+        emitWarning(harness, `warning-${index}`);
+      }
+      await harness.drain();
+
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+      expect(
+        thread?.activities.filter((activity) => activity.kind === "runtime.warning"),
+      ).toHaveLength(3);
+      expect(shellReads.counter.reads).toBeGreaterThanOrEqual(3);
+    });
+
+    it.each([
+      { name: "in-memory model", omitReadModel: false },
+      { name: "projection fallback", omitReadModel: true },
+    ])("rejects an event of a replaced runtime through the $name", async ({ omitReadModel }) => {
+      const recorder = recordActivityUpserts();
+      const harness = await createHarness({
+        callbackRuntime: true,
+        omitReadModel,
+        interceptDispatch: recorder.interceptDispatch,
+      });
+
+      emitWarning(harness, "stale", {
+        runtimeSessionId: RuntimeSessionId.make("replaced-runtime"),
+      });
+      emitWarning(harness, "current");
+      await harness.drain();
+
+      const ids = recorder.upserts.map((upsert) => upsert.id);
+      expect(ids).toContain("evt-current");
+      expect(ids).not.toContain("evt-stale");
+    });
+
+    it.each(["trashed", "deleted"] as const)(
+      "treats a %s thread as not found without reading the projection",
+      async (state) => {
+        const recorder = recordActivityUpserts();
+        const shellReads = countShellReads();
+        const harness = await createHarness({
+          wrapSnapshotQuery: shellReads.wrapSnapshotQuery,
+          interceptDispatch: recorder.interceptDispatch,
+        });
+        const threadId = asThreadId("thread-1");
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.trash",
+            commandId: CommandId.make("cmd-thread-trash"),
+            threadId,
+          }),
+        );
+        if (state === "deleted") {
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.delete",
+              commandId: CommandId.make("cmd-thread-delete"),
+              threadId,
+            }),
+          );
+        }
+
+        emitWarning(harness, "after-removal");
+        await harness.drain();
+
+        expect(recorder.upserts.map((upsert) => upsert.id)).not.toContain("evt-after-removal");
+        expect(shellReads.counter.reads).toBe(0);
+      },
+    );
+  });
+
+  describe("coalesced activity writes", () => {
+    type Harness = Awaited<ReturnType<typeof createHarness>>;
+    const provider = ProviderDriverKind.make("codex");
+    const threadId = asThreadId("thread-1");
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Holds time still, so a burst is "within the interval" however slowly it is processed. */
+    const freezeTime = () => vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+
+    /** Resolves once every event emitted before it has been handled. */
+    async function processedThrough(
+      harness: Harness,
+      recorder: ReturnType<typeof recordActivityUpserts>,
+      marker: string,
+    ) {
+      harness.emit({
+        type: "runtime.warning",
+        eventId: asEventId(`evt-${marker}`),
+        provider,
+        createdAt: new Date().toISOString(),
+        threadId,
+        payload: { message: marker },
+      });
+      await untilReal(() => recorder.upserts.some((upsert) => upsert.id === `evt-${marker}`));
+    }
+
+    describe("child messages", () => {
+      const childThreadId = "child-thread-coalesce";
+      const childItemId = "child-message-coalesce";
+      const childActivityId = `agent-message:thread-1:${childThreadId}:${childItemId}`;
+      const childTurnId = asTurnId("turn-child-coalesce");
+
+      const startChild = (harness: Harness) =>
+        harness.emit({
+          type: "item.started",
+          eventId: asEventId("evt-child-collab-started"),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: childTurnId,
+          itemId: asItemId("collab-coalesce"),
+          payload: {
+            itemType: "collab_agent_tool_call",
+            status: "inProgress",
+            data: {
+              item: {
+                type: "collabAgentToolCall",
+                id: "collab-coalesce",
+                tool: "spawnAgent",
+                prompt: "You are a researcher.",
+                receiverThreadIds: [childThreadId],
+                senderThreadId: "parent-thread",
+                status: "inProgress",
+                agentsStates: { [childThreadId]: { status: "running" } },
+              },
+            },
+          },
+        });
+
+      const emitChildDelta = (harness: Harness, delta: string, index: number) =>
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`evt-child-delta-${index}`),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: childTurnId,
+          itemId: asItemId(childItemId),
+          raw: {
+            source: "codex.app-server.notification",
+            method: "item/agentMessage/delta",
+            payload: { threadId: childThreadId },
+          },
+          payload: { streamKind: "assistant_text", delta },
+        });
+
+      const childWrites = (recorder: ReturnType<typeof recordActivityUpserts>) =>
+        recorder.upserts.filter((upsert) => upsert.id === childActivityId);
+
+      it("persists a streamed message at most once per interval and completes it with the whole text", async () => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        startChild(harness);
+        const words = Array.from({ length: 60 }, (_, index) => `w${index} `);
+        words.forEach((word, index) => emitChildDelta(harness, word, index));
+        await processedThrough(harness, recorder, "after-first-burst");
+
+        // Only the first delta was persisted at once.
+        expect(childWrites(recorder).map((write) => write.payload.text)).toEqual(["w0 "]);
+
+        await vi.advanceTimersByTimeAsync(300);
+        await untilReal(() => childWrites(recorder).length === 2);
+        expect(childWrites(recorder)[1]?.payload).toMatchObject({
+          text: words.join(""),
+          streaming: true,
+        });
+
+        const moreWords = Array.from({ length: 20 }, (_, index) => `x${index} `);
+        moreWords.forEach((word, index) => emitChildDelta(harness, word, 60 + index));
+        await processedThrough(harness, recorder, "after-second-burst");
+        expect(childWrites(recorder)).toHaveLength(2);
+
+        harness.emit({
+          type: "item.completed",
+          eventId: asEventId("evt-child-completed"),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: childTurnId,
+          itemId: asItemId(childItemId),
+          raw: {
+            source: "codex.app-server.notification",
+            method: "item/completed",
+            payload: { threadId: childThreadId },
+          },
+          payload: { itemType: "assistant_message", status: "completed" },
+        });
+        await untilReal(() => childWrites(recorder).length === 3);
+        expect(childWrites(recorder)[2]?.payload).toMatchObject({
+          text: [...words, ...moreWords].join(""),
+          streaming: false,
+        });
+
+        // The completed message is final: the timer left over from streaming adds nothing.
+        await vi.advanceTimersByTimeAsync(1_000);
+        await harness.drain();
+        expect(childWrites(recorder)).toHaveLength(3);
+        const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+        expect(
+          thread?.activities.find((activity) => activity.id === childActivityId)?.payload,
+        ).toMatchObject({ text: [...words, ...moreWords].join(""), streaming: false });
+      });
+
+      it("persists a delta that follows a quiet interval at once", async () => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        startChild(harness);
+        emitChildDelta(harness, "first ", 0);
+        await processedThrough(harness, recorder, "after-first");
+        await vi.advanceTimersByTimeAsync(300);
+        emitChildDelta(harness, "second", 1);
+        await untilReal(() => childWrites(recorder).length === 2);
+
+        expect(childWrites(recorder)[1]?.payload.text).toBe("first second");
+      });
+
+      it.each([
+        ["turn.completed", { state: "completed" }],
+        ["turn.aborted", { reason: "user interrupted" }],
+        ["session.exited", { reason: "stopped" }],
+        ["runtime.error", { message: "provider failed", class: "provider_error" }],
+      ] as const)("persists the pending text when %s arrives", async (boundary, payload) => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        startChild(harness);
+        ["alpha ", "beta ", "gamma"].forEach((word, index) => emitChildDelta(harness, word, index));
+        await processedThrough(harness, recorder, "before-boundary");
+        expect(childWrites(recorder).map((write) => write.payload.text)).toEqual(["alpha "]);
+
+        harness.emit({
+          type: boundary,
+          eventId: asEventId("evt-boundary"),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          ...(boundary === "session.exited" ? {} : { turnId: childTurnId }),
+          payload,
+        });
+        await untilReal(() => childWrites(recorder).length === 2);
+
+        expect(childWrites(recorder)[1]?.payload).toMatchObject({
+          text: "alpha beta gamma",
+          streaming: true,
+        });
+        // The interval timer finds nothing left to write.
+        await vi.advanceTimersByTimeAsync(1_000);
+        await harness.drain();
+        expect(childWrites(recorder)).toHaveLength(2);
+      });
+
+      it("persists pending text when the ingestion drains", async () => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        startChild(harness);
+        emitChildDelta(harness, "one ", 0);
+        emitChildDelta(harness, "two", 1);
+        await processedThrough(harness, recorder, "before-drain");
+        expect(childWrites(recorder)).toHaveLength(1);
+
+        await harness.drain();
+
+        expect(childWrites(recorder)).toHaveLength(2);
+        expect(childWrites(recorder)[1]?.payload.text).toBe("one two");
+      });
+    });
+
+    describe("task progress", () => {
+      const taskProgressId = "task-progress:thread-1:task-coalesce";
+      const taskUsageId = "task-usage:thread-1:task-coalesce";
+      const taskTurnId = asTurnId("turn-task-coalesce");
+
+      const emitTaskProgress = (harness: Harness, index: number, payload: object) =>
+        harness.emit({
+          type: "task.progress",
+          eventId: asEventId(`evt-task-tick-${index}`),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: taskTurnId,
+          payload: { taskId: "task-coalesce", description: "Agent one", ...payload },
+        });
+
+      const writesOf = (recorder: ReturnType<typeof recordActivityUpserts>, id: string) =>
+        recorder.upserts.filter((upsert) => upsert.id === id);
+
+      it("persists meaningful progress at once and paces usage-only ticks to one write per interval", async () => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        emitTaskProgress(harness, 0, {
+          summary: "Running tests",
+          typedUsage: { totalTokens: 1 },
+        });
+        for (let tick = 1; tick < 30; tick += 1) {
+          emitTaskProgress(harness, tick, { typedUsage: { totalTokens: tick + 1 } });
+        }
+        await processedThrough(harness, recorder, "after-usage-ticks");
+        expect(writesOf(recorder, taskProgressId)).toHaveLength(1);
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(1);
+
+        // A different summary is not held back, and its usage waits like any other.
+        emitTaskProgress(harness, 30, {
+          summary: "Reading files",
+          typedUsage: { totalTokens: 31 },
+        });
+        await processedThrough(harness, recorder, "after-summary-change");
+        expect(writesOf(recorder, taskProgressId).map((write) => write.payload.summary)).toEqual([
+          "Running tests",
+          "Reading files",
+        ]);
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(1);
+
+        // Same summary, only the usage figures moved: paced.
+        emitTaskProgress(harness, 31, { summary: "Reading files", usage: { total_tokens: 32 } });
+        await processedThrough(harness, recorder, "after-usage-change");
+        expect(writesOf(recorder, taskProgressId)).toHaveLength(2);
+
+        // One trailing write per activity carries the latest figures.
+        await vi.advanceTimersByTimeAsync(5_000);
+        await untilReal(
+          () =>
+            writesOf(recorder, taskUsageId).length === 2 &&
+            writesOf(recorder, taskProgressId).length === 3,
+        );
+        expect(writesOf(recorder, taskUsageId)[1]?.payload.typedUsage).toEqual({
+          totalTokens: 31,
+        });
+        expect(writesOf(recorder, taskProgressId)[2]?.payload.usage).toEqual({ total_tokens: 32 });
+
+        // After a quiet interval the next tick goes straight through.
+        await vi.advanceTimersByTimeAsync(5_000);
+        emitTaskProgress(harness, 32, { typedUsage: { totalTokens: 40 } });
+        await untilReal(() => writesOf(recorder, taskUsageId).length === 3);
+        expect(writesOf(recorder, taskUsageId)[2]?.payload.typedUsage).toEqual({
+          totalTokens: 40,
+        });
+
+        // Nothing is left to write once the trailing writes are done.
+        await vi.advanceTimersByTimeAsync(10_000);
+        await harness.drain();
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(3);
+        expect(writesOf(recorder, taskProgressId)).toHaveLength(3);
+      });
+
+      it("persists the latest usage before the task completion", async () => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        emitTaskProgress(harness, 0, { typedUsage: { totalTokens: 1 } });
+        emitTaskProgress(harness, 1, { typedUsage: { totalTokens: 2 } });
+        emitTaskProgress(harness, 2, { typedUsage: { totalTokens: 3 } });
+        await processedThrough(harness, recorder, "before-completion");
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(1);
+
+        harness.emit({
+          type: "task.completed",
+          eventId: asEventId("evt-task-coalesce-completed"),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          turnId: taskTurnId,
+          payload: { taskId: "task-coalesce", status: "completed" },
+        });
+        await untilReal(() =>
+          recorder.upserts.some((upsert) => upsert.id === "evt-task-coalesce-completed"),
+        );
+
+        const usageWrites = writesOf(recorder, taskUsageId);
+        expect(usageWrites).toHaveLength(2);
+        expect(usageWrites[1]?.payload.typedUsage).toEqual({ totalTokens: 3 });
+        const order = recorder.upserts.map((upsert) => upsert.id);
+        expect(order.lastIndexOf(taskUsageId)).toBeLessThan(
+          order.indexOf("evt-task-coalesce-completed"),
+        );
+
+        // A finished task has nothing pending.
+        await vi.advanceTimersByTimeAsync(10_000);
+        await harness.drain();
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(2);
+      });
+
+      it.each([
+        ["turn.completed", { state: "completed" }],
+        ["session.exited", { reason: "stopped" }],
+      ] as const)("persists the latest usage when %s arrives", async (boundary, payload) => {
+        const recorder = recordActivityUpserts();
+        const harness = await createHarness({ interceptDispatch: recorder.interceptDispatch });
+        freezeTime();
+
+        emitTaskProgress(harness, 0, { typedUsage: { totalTokens: 1 } });
+        emitTaskProgress(harness, 1, { typedUsage: { totalTokens: 2 } });
+        await processedThrough(harness, recorder, "before-boundary");
+        expect(writesOf(recorder, taskUsageId)).toHaveLength(1);
+
+        harness.emit({
+          type: boundary,
+          eventId: asEventId("evt-task-boundary"),
+          provider,
+          createdAt: new Date().toISOString(),
+          threadId,
+          ...(boundary === "session.exited" ? {} : { turnId: taskTurnId }),
+          payload,
+        });
+        await untilReal(() => writesOf(recorder, taskUsageId).length === 2);
+
+        expect(writesOf(recorder, taskUsageId)[1]?.payload.typedUsage).toEqual({
+          totalTokens: 2,
+        });
+      });
+    });
+  });
+
   describe("usage limits", () => {
     const codexInstance = ProviderInstanceId.make("codex");
     const limitTurn = asTurnId("turn-usage-limit");

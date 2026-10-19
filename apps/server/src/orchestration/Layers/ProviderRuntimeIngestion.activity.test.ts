@@ -10,7 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { makeAcpToolCallEvent } from "../../provider/acp/AcpCoreRuntimeEvents.ts";
 import { parseSessionUpdateEvent } from "../../provider/acp/AcpRuntimeModel.ts";
-import { runtimeEventToActivities } from "./ProviderRuntimeIngestion.ts";
+import { runtimeEventToActivities, taskProgressChangeKey } from "./ProviderRuntimeIngestion.ts";
 
 const base = {
   provider: ProviderDriverKind.make("codex"),
@@ -89,6 +89,60 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload.role).toBe("reviewer");
     expect(usagePayload.agentKind).toBe("agent");
     expect(usagePayload).not.toHaveProperty("status");
+  });
+});
+
+describe("taskProgressChangeKey", () => {
+  type TaskProgressEvent = Extract<ProviderRuntimeEvent, { type: "task.progress" }>;
+
+  const keysOf = (payload: Partial<TaskProgressEvent["payload"]>) => {
+    const event = {
+      ...base,
+      type: "task.progress",
+      eventId: EventId.make("evt-change-key"),
+      payload: { taskId: RuntimeTaskId.make("agent-1"), description: "Agent one", ...payload },
+    } satisfies ProviderRuntimeEvent;
+    return runtimeEventToActivities(event).map(taskProgressChangeKey);
+  };
+
+  it("does not move when only usage figures change", () => {
+    const [progressBefore] = keysOf({ summary: "Running tests", usage: { total_tokens: 1 } });
+    const [progressAfter] = keysOf({ summary: "Running tests", usage: { total_tokens: 2 } });
+    const [usageBefore] = keysOf({ typedUsage: { totalTokens: 1 } });
+    const [usageAfter] = keysOf({ typedUsage: { totalTokens: 2 } });
+
+    expect(progressAfter).toBe(progressBefore);
+    expect(usageAfter).toBe(usageBefore);
+    expect(usageBefore).not.toBe(progressBefore);
+  });
+
+  it("keeps the two activities of one tick apart", () => {
+    const [progress, usage] = keysOf({
+      summary: "Running tests",
+      typedUsage: { totalTokens: 1 },
+    });
+
+    expect(usage).not.toBe(progress);
+  });
+
+  it.each([
+    ["description", { description: "Agent two" }],
+    ["summary", { summary: "Reading files" }],
+    ["last tool", { lastToolName: "Edit" }],
+    ["status", { status: "failed" }],
+    ["error", { error: "Tool crashed" }],
+  ] as const)("moves when the %s changes", (_name, change) => {
+    const initial = {
+      summary: "Running tests",
+      lastToolName: "Read",
+      status: "running",
+      error: "Rate limited",
+    } as const;
+
+    const [before] = keysOf(initial);
+    const [after] = keysOf({ ...initial, ...change });
+
+    expect(after).not.toBe(before);
   });
 });
 
