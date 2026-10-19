@@ -102,7 +102,10 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { parseCodexSkillsListResponse } from "./CodexProvider.ts";
-import { makeCodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
+import {
+  makeCodexStoredThreadReader,
+  type CodexStoredThreadReader,
+} from "./CodexStoredThreadReader.ts";
 import {
   agentControlHostContext,
   installAgentControlNativeHttp,
@@ -151,7 +154,12 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
-  /** How long the shared stored-thread reader stays up unused. */
+  /**
+   * The instance's shared stored-thread reader, when its driver also reads the provider status
+   * through it. Without one the adapter starts its own.
+   */
+  readonly storedThreadReader?: CodexStoredThreadReader;
+  /** How long the adapter's own stored-thread reader stays up unused. */
   readonly storedThreadReaderIdleTimeout?: Duration.Input;
 }
 
@@ -1935,15 +1943,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
   // History reads of threads without a live runtime share one read-only app-server.
-  const storedThreadReader = yield* makeCodexStoredThreadReader({
-    binaryPath: codexConfig.binaryPath,
-    cwd: process.cwd(),
-    ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
-    ...(options?.environment ? { environment: options.environment } : {}),
-    ...(options?.storedThreadReaderIdleTimeout !== undefined
-      ? { idleTimeout: options.storedThreadReaderIdleTimeout }
-      : {}),
-  });
+  const storedThreadReader =
+    options?.storedThreadReader ??
+    (yield* makeCodexStoredThreadReader({
+      binaryPath: codexConfig.binaryPath,
+      cwd: process.cwd(),
+      ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+      ...(options?.environment ? { environment: options.environment } : {}),
+      ...(options?.storedThreadReaderIdleTimeout !== undefined
+        ? { idleTimeout: options.storedThreadReaderIdleTimeout }
+        : {}),
+    }));
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(

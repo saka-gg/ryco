@@ -869,4 +869,168 @@ describe("makeManagedServerProvider", () => {
       }),
     ),
   );
+
+  describe("probe freshness for a driver that re-reads usage on its own", () => {
+    const probedWithUsage: ServerProvider = {
+      ...refreshedSnapshot,
+      rateLimits: { primary: { usedPercent: 10 } },
+    };
+
+    const makeUsageProvider = (options: {
+      readonly probed: ServerProvider;
+      readonly withRefreshUsage: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const usageReads = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(options.probed),
+          ),
+          ...(options.withRefreshUsage
+            ? {
+                refreshUsage: (snapshot: ServerProvider) =>
+                  Ref.updateAndGet(usageReads, (count) => count + 1).pipe(
+                    Effect.map((count) => ({
+                      ...snapshot,
+                      rateLimits: { primary: { usedPercent: 10 + count } },
+                    })),
+                  ),
+              }
+            : {}),
+          refreshInterval: null,
+          snapshotFreshness: Duration.minutes(5),
+        });
+        return { provider, checkCalls, usageReads };
+      });
+
+    it.effect(
+      "re-reads only the usage on the regular window and probes again after 30 minutes",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const { provider, checkCalls, usageReads } = yield* makeUsageProvider({
+              probed: probedWithUsage,
+              withRefreshUsage: true,
+            });
+
+            yield* provider.refresh;
+            assert.strictEqual(yield* Ref.get(checkCalls), 1);
+            assert.strictEqual(yield* provider.isFresh!, true);
+
+            // Six minutes on: the probe is still current, only the usage limits are stale.
+            yield* TestClock.adjust(Duration.minutes(6));
+            assert.strictEqual(yield* provider.isFresh!, false);
+            assert.strictEqual(yield* provider.isProbeFresh!, true);
+            const afterSix = yield* provider.revalidate;
+            assert.deepStrictEqual(afterSix.rateLimits, { primary: { usedPercent: 11 } });
+            assert.strictEqual(yield* Ref.get(checkCalls), 1);
+            assert.strictEqual(yield* Ref.get(usageReads), 1);
+            assert.strictEqual(yield* provider.isFresh!, true);
+
+            // The usage keeps its own five minute window.
+            yield* TestClock.adjust(Duration.minutes(5));
+            assert.deepStrictEqual((yield* provider.revalidate).rateLimits, {
+              primary: { usedPercent: 12 },
+            });
+            assert.strictEqual(yield* Ref.get(checkCalls), 1);
+
+            // Thirty minutes after the probe a full probe runs again.
+            yield* TestClock.adjust(Duration.minutes(18));
+            assert.strictEqual(yield* provider.isProbeFresh!, true);
+            yield* TestClock.adjust(Duration.minutes(1));
+            assert.strictEqual(yield* provider.isProbeFresh!, false);
+            assert.deepStrictEqual(yield* provider.revalidate, probedWithUsage);
+            assert.strictEqual(yield* Ref.get(checkCalls), 2);
+          }),
+        ).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("probes immediately on an explicit refresh inside the 30 minute window", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { provider, checkCalls, usageReads } = yield* makeUsageProvider({
+            probed: probedWithUsage,
+            withRefreshUsage: true,
+          });
+
+          yield* provider.refresh;
+          yield* TestClock.adjust(Duration.minutes(1));
+          assert.strictEqual(yield* provider.isFresh!, true);
+          assert.deepStrictEqual(yield* provider.refresh, probedWithUsage);
+          assert.strictEqual(yield* Ref.get(checkCalls), 2);
+          assert.strictEqual(yield* Ref.get(usageReads), 0);
+
+          // The new probe starts a new window.
+          yield* TestClock.adjust(Duration.minutes(29));
+          assert.strictEqual(yield* provider.isProbeFresh!, true);
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("keeps a driver without usage re-reads on the regular window", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { provider, checkCalls } = yield* makeUsageProvider({
+            probed: probedWithUsage,
+            withRefreshUsage: false,
+          });
+
+          yield* provider.refresh;
+          yield* TestClock.adjust(Duration.minutes(6));
+          assert.strictEqual(yield* provider.isProbeFresh!, false);
+          yield* provider.revalidate;
+          assert.strictEqual(yield* Ref.get(checkCalls), 2);
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("keeps the regular window after a probe that did not come back ready", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { provider, checkCalls, usageReads } = yield* makeUsageProvider({
+            probed: { ...probedWithUsage, status: "error", message: "CLI not found" },
+            withRefreshUsage: true,
+          });
+
+          yield* provider.refresh;
+          yield* TestClock.adjust(Duration.minutes(6));
+          assert.strictEqual(yield* provider.isProbeFresh!, false);
+          yield* provider.revalidate;
+          assert.strictEqual(yield* Ref.get(checkCalls), 2);
+          assert.strictEqual(yield* Ref.get(usageReads), 0);
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    );
+
+    it.effect("re-reads the usage of a probe that found none without probing again", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { provider, checkCalls, usageReads } = yield* makeUsageProvider({
+            probed: refreshedSnapshot,
+            withRefreshUsage: true,
+          });
+
+          yield* provider.refresh;
+          assert.strictEqual(yield* provider.isFresh!, true);
+
+          // The usage read during the probe may have failed: the regular window ends it, and
+          // the next read can find usage while the probe stays current.
+          yield* TestClock.adjust(Duration.minutes(6));
+          assert.strictEqual(yield* provider.isFresh!, false);
+          assert.strictEqual(yield* provider.isProbeFresh!, true);
+          const afterSix = yield* provider.revalidate;
+          assert.deepStrictEqual(afterSix.rateLimits, { primary: { usedPercent: 11 } });
+          assert.strictEqual(yield* Ref.get(checkCalls), 1);
+          assert.strictEqual(yield* Ref.get(usageReads), 1);
+          assert.strictEqual(yield* provider.isFresh!, true);
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    );
+  });
 });

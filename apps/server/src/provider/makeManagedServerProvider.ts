@@ -5,6 +5,7 @@ import {
   Duration,
   Effect,
   Equal,
+  Exit,
   Fiber,
   PubSub,
   Ref,
@@ -22,11 +23,15 @@ interface ProviderSnapshotState {
   readonly snapshot: ServerProvider;
   readonly enrichmentGeneration: number;
   readonly lastRefreshAttemptAtMs: number | null;
-  /** Set when a fingerprint-matched persisted snapshot was adopted instead of probing. */
+  /**
+   * Set when a fingerprint-matched persisted snapshot was adopted instead of probing, and after
+   * a ready probe of a driver with `refreshUsage`: until when the snapshot stands in for a probe.
+   */
   readonly persistedFreshUntilMs: number | null;
   /**
-   * While an adopted snapshot's usage limits are re-read on their own (`refreshUsage`): until
-   * when the last read stays current. Cleared by a probe, which reads usage itself.
+   * While such a snapshot's usage limits are re-read on their own (`refreshUsage`): until when
+   * the last read stays current. Null for a probed snapshot that is not adopted: its probe read
+   * the usage itself.
    */
   readonly usageFreshUntilMs: number | null;
 }
@@ -39,6 +44,12 @@ const DEFAULT_SNAPSHOT_FRESHNESS = Duration.minutes(5);
  * re-reads only them, and without it a snapshot carrying them gets only that window.
  */
 const DEFAULT_PERSISTED_SNAPSHOT_FRESHNESS = Duration.hours(6);
+/**
+ * How long a successful probe stands in for the next one when the driver re-reads usage limits on
+ * its own (`refreshUsage`): the usage keeps the regular `snapshotFreshness` window, everything else
+ * is probed at most this often. An explicit refresh always probes.
+ */
+const DEFAULT_USAGE_REFRESHED_PROBE_FRESHNESS = Duration.minutes(30);
 
 export const isProviderSnapshotFresh = (input: {
   readonly lastRefreshAttemptAtMs: number | null;
@@ -80,6 +91,11 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   readonly refreshInterval?: Duration.Input | null;
   readonly snapshotFreshness?: Duration.Input;
   readonly persistedSnapshotFreshness?: Duration.Input;
+  /**
+   * With `refreshUsage`: how long a successful probe stays current while only the usage limits
+   * are re-read every `snapshotFreshness`. Defaults to 30 minutes.
+   */
+  readonly usageRefreshedProbeFreshness?: Duration.Input;
   readonly retainInventoryOnError?: boolean;
 }): Effect.fn.Return<ServerProviderShape, ServerSettingsError, Scope.Scope> {
   const refreshSemaphore = yield* Semaphore.make(1);
@@ -111,6 +127,11 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const persistedSnapshotFreshnessMs = Duration.toMillis(
     Duration.fromInputUnsafe(
       input.persistedSnapshotFreshness ?? DEFAULT_PERSISTED_SNAPSHOT_FRESHNESS,
+    ),
+  );
+  const usageRefreshedProbeFreshnessMs = Duration.toMillis(
+    Duration.fromInputUnsafe(
+      input.usageRefreshedProbeFreshness ?? DEFAULT_USAGE_REFRESHED_PROBE_FRESHNESS,
     ),
   );
   const scope = yield* Effect.scope;
@@ -178,15 +199,30 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     }
 
     const checkedSnapshot = yield* input.checkProvider.pipe(
-      Effect.onExit(() =>
+      Effect.onExit((exit) =>
         Clock.currentTimeMillis.pipe(
           Effect.flatMap((lastRefreshAttemptAtMs) =>
-            Ref.update(snapshotStateRef, (state) => ({
-              ...state,
-              lastRefreshAttemptAtMs,
-              persistedFreshUntilMs: null,
-              usageFreshUntilMs: null,
-            })),
+            Ref.update(snapshotStateRef, (state) => {
+              // A ready snapshot of a driver that re-reads usage on its own is adopted like a
+              // persisted one, so later revalidation re-reads only the usage until the longer
+              // window ends. That holds for a probe that found no usage too: re-reading it is
+              // cheap and the next read may find some. Any other outcome keeps the regular
+              // window and re-probes sooner.
+              const adoptsProbe =
+                input.refreshUsage !== undefined &&
+                Exit.isSuccess(exit) &&
+                exit.value.status === "ready";
+              return {
+                ...state,
+                lastRefreshAttemptAtMs,
+                persistedFreshUntilMs: adoptsProbe
+                  ? lastRefreshAttemptAtMs + usageRefreshedProbeFreshnessMs
+                  : null,
+                usageFreshUntilMs: adoptsProbe
+                  ? lastRefreshAttemptAtMs + snapshotFreshnessMs
+                  : null,
+              };
+            }),
           ),
         ),
       ),
