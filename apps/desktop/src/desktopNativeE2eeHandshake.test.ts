@@ -427,4 +427,113 @@ describe("Desktop native E2EE handshake service", () => {
     agreement.secretKey.fill(0);
     nodeAgreement.secretKey.fill(0);
   });
+
+  it("reads the client public keys from the helper once across connects, until a key reset or disposal", async () => {
+    const origin = "https://hub.example.test";
+    const accountId = `acct_${"A".repeat(22)}`;
+    const localNodeId = `node_${"B".repeat(22)}`;
+    const remoteNodeId = `node_${"C".repeat(22)}`;
+    const records = memoryStore();
+    const trust = new DesktopE2eeTrustStore(records);
+    const localNodeKeys = generateKeyPairSync("ed25519");
+    const clientKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const clientPublic = rawP256(clientKeys.publicKey);
+    const agreements = [generateE2eeAgreementKeyPair()];
+    const keyListeners = new Set<() => void>();
+    const localPin = await trust.promoteLocal({
+      hubOrigin: origin,
+      accountId,
+      nodeId: localNodeId,
+      environmentId: `env_${"D".repeat(22)}`,
+      nodeIdentityPublicKey: rawEd25519(localNodeKeys.publicKey),
+      nodeContinuityId: `nct_${"E".repeat(22)}`,
+      nodePolicyGeneration: 1,
+      clientIdentityPublicKey: clientPublic,
+      approvedAt: 1_800_000_000_000,
+      randomHandle: () => "F".repeat(22),
+    });
+    const getSigningPublicKey = vi.fn(async () => clientPublic);
+    const ensureAgreementPublicKey = vi.fn(async () => agreements.at(-1)!.publicKey);
+    const service = new DesktopNativeE2eeHandshakeService({
+      origin,
+      records,
+      trust,
+      identityStatus: () => ({
+        status: "ready",
+        accountId,
+        nodeId: localNodeId,
+        localNodeHandle: localPin.localNodeHandle,
+      }),
+      now: () => 1_800_000_100_000,
+      security: {
+        getSigningPublicKey,
+        getSigningKey: async () => ({
+          algorithm: "ES256",
+          publicJwk: uncompressedPointToJwk(clientPublic),
+          sign: async (message) =>
+            derSignatureToRaw(Uint8Array.from(sign("sha256", message, clientKeys.privateKey))),
+        }),
+        ensureAgreementPublicKey,
+        withAgreementSecretKey: async (use) => use(Uint8Array.from(agreements.at(-1)!.secretKey)),
+        onPublicKeysChanged: (listener) => {
+          keyListeners.add(listener);
+          return () => void keyListeners.delete(listener);
+        },
+      },
+    });
+    const prepare = () => service.prepare({ accountId, nodeId: remoteNodeId, allowPairing: true });
+
+    for (let connect = 0; connect < 3; connect += 1) {
+      await expect(prepare()).resolves.toMatchObject({ kind: "native" });
+    }
+    expect(getSigningPublicKey).toHaveBeenCalledOnce();
+    expect(ensureAgreementPublicKey).toHaveBeenCalledOnce();
+
+    // The helper's agreement key is reset: the next connect certifies the new key.
+    agreements.push(generateE2eeAgreementKeyPair());
+    for (const listener of keyListeners) listener();
+    await expect(prepare()).resolves.toMatchObject({
+      kind: "native",
+      credentials: { agreementPublicKey: agreements[1]!.publicKey },
+    });
+    expect(ensureAgreementPublicKey).toHaveBeenCalledTimes(2);
+    expect(getSigningPublicKey).toHaveBeenCalledTimes(2);
+    await prepare();
+    expect(ensureAgreementPublicKey).toHaveBeenCalledTimes(2);
+
+    // Disposal (sign-out) ends the memo as well.
+    service.dispose();
+    await prepare();
+    expect(ensureAgreementPublicKey).toHaveBeenCalledTimes(3);
+    for (const agreement of agreements) agreement.secretKey.fill(0);
+  });
+
+  it("holds the security helper for a relay session and is a no-op without one", () => {
+    const release = vi.fn();
+    const holdForRelay = vi.fn(() => release);
+    const clientPublic = rawP256(generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey);
+    const agreement = generateE2eeAgreementKeyPair();
+    const security = {
+      getSigningPublicKey: async () => clientPublic,
+      getSigningKey: async () => {
+        throw new Error("unused");
+      },
+      ensureAgreementPublicKey: async () => agreement.publicKey,
+      withAgreementSecretKey: async <A>(use: (secretKey: Uint8Array) => Promise<A> | A) =>
+        use(Uint8Array.from(agreement.secretKey)),
+    };
+    const serviceWith = (extra: object) =>
+      new DesktopNativeE2eeHandshakeService({
+        origin: "https://hub.example.test",
+        records: memoryStore(),
+        identityStatus: () => ({ status: "signed-out" }),
+        security: { ...security, ...extra },
+      });
+
+    serviceWith({ holdForRelay }).holdForRelay()();
+    expect(holdForRelay).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(() => serviceWith({}).holdForRelay()()).not.toThrow();
+    agreement.secretKey.fill(0);
+  });
 });
