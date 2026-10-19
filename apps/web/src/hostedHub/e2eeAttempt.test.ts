@@ -1,5 +1,6 @@
 import { hostedHubStore } from "@ryco/client-runtime/authorization";
 import type { RelayE2eeChannel, RelayE2eeHost } from "@ryco/client-runtime/relay";
+import { EnvironmentId } from "@ryco/contracts";
 import { T_ADV } from "@ryco/shared/relayE2eeConstants";
 import { decodeNodeE2eeCapabilityStatement } from "@ryco/shared/relayE2eeTranscripts";
 import { deriveE2eeWebSas } from "@ryco/shared/relayE2eeVerificationDisplay";
@@ -42,10 +43,15 @@ import {
   recordWebE2eePolicyGeneration,
 } from "./e2eeLatch";
 import {
+  beginWebE2eeChannelAttempt,
   clearWebE2eeLocalDiagnostics,
+  lockWebE2eeChannelMode,
+  publishWebE2eeVerificationCode,
   resetWebE2eeSession,
+  setDisplayedWebE2eeEnvironment,
   webE2eeLocalDiagnostics,
   webE2eeSessionState,
+  webE2eeSessionStateFor,
 } from "./e2eeSession";
 
 /** The §7.6 element 5 key, for the §13.5 derivation the node would also run. */
@@ -130,6 +136,8 @@ afterEach(() => {
   signOut();
   clearWebE2eeLatches();
   clearWebE2eeLocalDiagnostics();
+  setDisplayedWebE2eeEnvironment(null);
+  resetWebE2eeSession();
   restoreGlobal("isSecureContext", originalIsSecureContext);
   restoreGlobal("crypto", originalCrypto);
   Object.defineProperty(globalThis, "window", {
@@ -587,5 +595,180 @@ describe("§12.1.1 an unreadable selection fails closed, never to plaintext", ()
       readonly retryable?: boolean;
     };
     expect(failure.retryable).toBe(true);
+  });
+});
+
+describe("§12.1/§13 every channel is resolved for its own node", () => {
+  const NODE_B = "node_BBBBBBBBBBBBBBBBBBBBBB";
+  const ENVIRONMENT_A = EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa");
+  const ENVIRONMENT_B = EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb");
+  const TARGET_B = { nodeId: NODE_B, environmentId: ENVIRONMENT_B } as const;
+  const SELECTION_B = { ...SELECTION, nodeId: NODE_B } as const;
+
+  function selectNodeA(): void {
+    hostedHubStore.setState({
+      selectedNode: { id: NODE_ID, environmentId: ENVIRONMENT_A } as never,
+    });
+    setDisplayedWebE2eeEnvironment(ENVIRONMENT_A);
+  }
+
+  it("classifies a channel to node B against B's latch while node A is selected", () => {
+    // §5.2's statement check and §12.1's latch are the CHANNEL's node's. Read
+    // from the selection, a reconnect of B's channel while A is selected would
+    // carry A's classification into B's §4.4 rows.
+    selectNodeA();
+    latchWebE2eeSelection(SELECTION_B);
+    resolveWebRelayE2eeProvider(TARGET_B);
+    expect(readWebRelayE2eeAttemptForTests()?.selectionClass).toBe("latched");
+
+    clearWebE2eeLatches();
+    latchWebE2eeSelection(SELECTION);
+    resolveWebRelayE2eeProvider(TARGET_B);
+    expect(readWebRelayE2eeAttemptForTests()?.selectionClass).toBe("legacy-eligible");
+  });
+
+  it("takes row K13 or K14 on B's channel by B's latch alone", async () => {
+    // A withheld carrier locks plaintext (K13) on a legacy-eligible selection and
+    // closes (K14) on a latched one. With A selected and latched, B's channel
+    // must still take the row B's own latch decides.
+    selectNodeA();
+    latchWebE2eeSelection(SELECTION);
+    const unlatched = createRelayHarness({ e2ee: resolveWebRelayE2eeProvider(TARGET_B) });
+    expect(readWebRelayE2eeAttemptForTests()?.selectionClass).toBe("legacy-eligible");
+    clearWebE2eeLatches();
+    latchWebE2eeSelection(SELECTION_B);
+    const latched = createRelayHarness({ e2ee: resolveWebRelayE2eeProvider(TARGET_B) });
+    expect(readWebRelayE2eeAttemptForTests()?.selectionClass).toBe("latched");
+
+    authenticateRelay(unlatched.socket);
+    authenticateRelay(latched.socket);
+    unlatched.facade.send(new TextEncoder().encode('{"buffered":1}'));
+    latched.facade.send(new TextEncoder().encode('{"buffered":2}'));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, T_ADV + 250));
+
+    const flushed = outboundRelayPayloads(unlatched.socket);
+    expect(flushed).toHaveLength(1);
+    expect(classifyPostStripPayload(flushed[0]!).kind).toBe("legacy-json");
+    expect(relayCloseReasons(unlatched.socket)).toEqual([]);
+    expect(outboundRelayPayloads(latched.socket)).toEqual([]);
+    expect(relayCloseReasons(latched.socket)).toEqual(["channel_rejected"]);
+    // Neither channel wrote into the displayed environment's entry.
+    expect(webE2eeSessionState().status).toBe("unavailable");
+    unlatched.socket.drop();
+    await settleRelay();
+  });
+
+  it("builds a warm channel's attempt with no node selected at all", async () => {
+    // Returning to the directory clears the selection and keeps the channels;
+    // a selection-bound attempt closed every one of them on reconnect.
+    hostedHubStore.setState({ selectedNode: null });
+    const provider = resolveWebRelayE2eeProvider(TARGET_B);
+    expect(provider).toBeTypeOf("function");
+    expect(readWebRelayE2eeAttemptForTests()).toMatchObject({
+      hubOrigin: HUB_ORIGIN,
+      selectionClass: "legacy-eligible",
+      credentials: { tier: "web" },
+    });
+
+    const harness = createRelayHarness({ e2ee: provider });
+    authenticateRelay(harness.socket);
+    await settleRelay();
+    expect(relayCloseReasons(harness.socket)).toEqual([]);
+    expect(harness.handlers.onFailure).not.toHaveBeenCalled();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B)).toEqual({
+      status: "negotiating",
+      verificationCode: null,
+    });
+    // Nothing is displayed, so the session-wide surfaces show nothing.
+    expect(webE2eeSessionState().status).toBe("unavailable");
+
+    harness.socket.drop();
+    await settleRelay();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B).status).toBe("unavailable");
+  });
+
+  it("projects each channel into its own environment and ends it with that channel", async () => {
+    selectNodeA();
+    const channelA = createRelayHarness({
+      e2ee: resolveWebRelayE2eeProvider({ nodeId: NODE_ID, environmentId: ENVIRONMENT_A }),
+    });
+    authenticateRelay(channelA.socket);
+    const channelB = createRelayHarness({ e2ee: resolveWebRelayE2eeProvider(TARGET_B) });
+    authenticateRelay(channelB.socket);
+    await settleRelay();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_A).status).toBe("negotiating");
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B).status).toBe("negotiating");
+
+    // B's channel ending takes B's entry and leaves the displayed one alone.
+    channelB.socket.drop();
+    await settleRelay();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B).status).toBe("unavailable");
+    expect(webE2eeSessionState().status).toBe("negotiating");
+    channelA.socket.drop();
+    await settleRelay();
+  });
+
+  it("lets a reconnected channel keep its entry when the stale one finishes late", async () => {
+    // The successor can reach `channel.accept` before the previous engine is
+    // done tearing down; the loser's dispose must not erase the winner's entry.
+    const stale = createRelayHarness({ e2ee: resolveWebRelayE2eeProvider(TARGET_B) });
+    authenticateRelay(stale.socket);
+    const current = createRelayHarness({ e2ee: resolveWebRelayE2eeProvider(TARGET_B) });
+    authenticateRelay(current.socket);
+    await settleRelay();
+
+    stale.socket.drop();
+    await settleRelay();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B)).toEqual({
+      status: "negotiating",
+      verificationCode: null,
+    });
+    current.socket.drop();
+    await settleRelay();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B).status).toBe("unavailable");
+  });
+
+  it("labels the target's entry legacy when §14.5 refused E2EE, not the displayed one", () => {
+    selectNodeA();
+    const channelA = {};
+    beginWebE2eeChannelAttempt(ENVIRONMENT_A, channelA);
+    publishWebE2eeVerificationCode("AAAA-BBBB", ENVIRONMENT_A, channelA);
+    lockWebE2eeChannelMode("e2ee", ENVIRONMENT_A, channelA);
+    defineGlobal("isSecureContext", false);
+    resetWebRelayE2eeForTests();
+
+    expect(resolveWebRelayE2eeProvider(TARGET_B)).toBeUndefined();
+    expect(webE2eeSessionStateFor(ENVIRONMENT_B)).toEqual({
+      status: "legacy",
+      verificationCode: null,
+    });
+    expect(webE2eeSessionState()).toEqual({
+      status: "web-unsigned",
+      verificationCode: "AAAA-BBBB",
+    });
+  });
+
+  it.each([
+    ["with E2EE available", true],
+    ["when §14.5 refused E2EE", false],
+  ])("closes a channel whose node could not be resolved, %s", async (_label, secure) => {
+    // The node is not in the directory: there is no latch key to classify by and
+    // no environment to label the channel in, so it never opens as plaintext.
+    if (!secure) {
+      defineGlobal("isSecureContext", false);
+      resetWebRelayE2eeForTests();
+    }
+    const provider = resolveWebRelayE2eeProvider(null);
+    expect(provider).toBeTypeOf("function");
+    const harness = createRelayHarness({ e2ee: provider });
+    authenticateRelay(harness.socket);
+    await settleRelay();
+
+    expect(outboundRelayPayloads(harness.socket)).toEqual([]);
+    const failure = harness.handlers.onFailure.mock.calls.at(-1)?.[0] as {
+      readonly retryable?: boolean;
+    };
+    expect(failure.retryable).toBe(true);
+    expect(webE2eeSessionState().status).toBe("unavailable");
   });
 });

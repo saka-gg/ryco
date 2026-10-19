@@ -7,21 +7,44 @@ import { statisticsSnapshotCache } from "@ryco/client-runtime/usage";
 import {
   EnvironmentId,
   ProjectId,
+  ThreadId,
   type EnvironmentApi,
   type ExecutionEnvironmentDescriptor,
+  type ProjectSearchEntriesResult,
   type ServerConfig,
   type ServerLifecycleWelcomePayload,
   type StatisticsSnapshot,
+  type VcsListRefsResult,
 } from "@ryco/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import * as environmentApi from "../environmentApi";
 import {
   resetPrimaryEnvironmentDescriptorForTests,
   writePrimaryEnvironmentDescriptor,
 } from "../environments/primary";
 import { useMessageQueueStore } from "../messageQueueStore";
+import {
+  getBranchesSnapshot,
+  getBranchesTargetKey,
+  resetGitAtomsForTests,
+  watchBranches,
+} from "../rpc/gitAtoms";
+import {
+  EMPTY_PROJECT_SEARCH_ENTRIES_STATE,
+  getProjectSearchEntriesSnapshot,
+  requestProjectSearchEntries,
+  resetProjectAtomsForTests,
+} from "../rpc/projectAtoms";
+import {
+  checkpointDiffCacheKey,
+  checkpointDiffStateAtom,
+  resetCheckpointDiffStateForTests,
+  watchCheckpointDiff,
+  type CheckpointDiffInput,
+} from "../rpc/providerAtoms";
 import {
   appAtomRegistry,
   emitWelcome,
@@ -38,6 +61,13 @@ import { useSettingsDialogStore } from "../settingsDialogStore";
 import { useStore } from "../store";
 import { useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
+import { clearWebE2eeLatches, isWebE2eeSelectionLatched, latchWebE2eeSelection } from "./e2eeLatch";
+import {
+  beginWebE2eeChannelAttempt,
+  lockWebE2eeChannelMode,
+  resetWebE2eeSession,
+  webE2eeSessionStateFor,
+} from "./e2eeSession";
 import { clearWebHostedAccountScopedState, clearWebHostedNodeScopedState } from "./environment";
 
 /**
@@ -82,7 +112,94 @@ afterEach(() => {
   resetServerStateForTests();
   resetEnvironmentServerConfigsForTests();
   resetPrimaryEnvironmentDescriptorForTests();
+  resetProjectAtomsForTests();
+  resetGitAtomsForTests();
+  resetCheckpointDiffStateForTests();
+  resetWebE2eeSession();
+  clearWebE2eeLatches();
+  vi.restoreAllMocks();
 });
+
+const CWD = "/workspace";
+const threadId = ThreadId.make("thread-id");
+
+/**
+ * One environment's project search, branch and checkpoint-diff caches, each
+ * holding a fetched answer, through a fake environment API.
+ */
+async function cacheNodeContent(target: EnvironmentId): Promise<() => void> {
+  const api = {
+    projects: {
+      searchEntries: async () =>
+        ({
+          entries: [{ kind: "file", path: `${target}.ts` }],
+          truncated: true,
+        }) as unknown as ProjectSearchEntriesResult,
+    },
+    vcs: {
+      listRefs: async (): Promise<VcsListRefsResult> => ({
+        refs: [],
+        isRepo: true,
+        hasPrimaryRemote: true,
+        nextCursor: null,
+        totalCount: 0,
+      }),
+    },
+    orchestration: {
+      getTurnDiff: async (request: { fromTurnCount: number; toTurnCount: number }) => ({
+        diff: `patch-${target}`,
+        threadId,
+        fromTurnCount: request.fromTurnCount,
+        toTurnCount: request.toTurnCount,
+      }),
+    },
+  } as unknown as EnvironmentApi;
+  vi.spyOn(environmentApi, "ensureEnvironmentApi").mockReturnValue(api);
+  vi.spyOn(environmentApi, "readEnvironmentApi").mockReturnValue(api);
+
+  requestProjectSearchEntries({ environmentId: target, cwd: CWD, query: "a" });
+  const releaseBranches = watchBranches({ environmentId: target, cwd: CWD, query: "" });
+  // Released once fetched, so it stays cached as an unwatched diff.
+  const releaseDiff = watchCheckpointDiff(diffInput(target));
+  await vi.waitFor(() => {
+    expect(projectSearch(target).data).not.toBeNull();
+    expect(branches(target).pages).toHaveLength(1);
+    expect(diff(target).data?.diff).toBe(`patch-${target}`);
+  });
+  releaseDiff();
+  vi.restoreAllMocks();
+  return releaseBranches;
+}
+
+function projectSearch(target: EnvironmentId) {
+  return getProjectSearchEntriesSnapshot({ environmentId: target, cwd: CWD, query: "a" });
+}
+
+function branches(target: EnvironmentId) {
+  return getBranchesSnapshot(getBranchesTargetKey({ environmentId: target, cwd: CWD, query: "" }));
+}
+
+function diffInput(target: EnvironmentId): CheckpointDiffInput {
+  return {
+    environmentId: target,
+    threadId,
+    fromTurnCount: 1,
+    toTurnCount: 2,
+    ignoreWhitespace: false,
+    cacheScope: "turn:2",
+  };
+}
+
+function diff(target: EnvironmentId) {
+  return appAtomRegistry.get(checkpointDiffStateAtom(checkpointDiffCacheKey(diffInput(target))));
+}
+
+/** A channel to `target` that locked `e2ee`, as the §4.4 machine drives it. */
+function lockE2eeChannel(target: EnvironmentId): void {
+  const channel = {};
+  beginWebE2eeChannelAttempt(target, channel);
+  lockWebE2eeChannelMode("e2ee", target, channel);
+}
 
 function cacheProjectIcon(): Promise<string | null> {
   const api = {
@@ -134,6 +251,36 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(statisticsSnapshotCache.peek(otherEnvironmentId)?.generatedAt).toBe(
       `statistics-${otherEnvironmentId}`,
     );
+  });
+
+  it("clears only the left environment's E2EE entry and node caches", async () => {
+    const releaseA = await cacheNodeContent(environmentId);
+    const releaseB = await cacheNodeContent(otherEnvironmentId);
+    lockE2eeChannel(environmentId);
+    lockE2eeChannel(otherEnvironmentId);
+    const selection = {
+      hubOrigin: "https://hub.example.test",
+      accountId: "acct_0123456789",
+      nodeId: "node_AAAAAAAAAAAAAAAAAAAAAA",
+    };
+    latchWebE2eeSelection(selection);
+
+    clearWebHostedNodeScopedState(environmentId);
+
+    expect(webE2eeSessionStateFor(environmentId).status).toBe("unavailable");
+    expect(projectSearch(environmentId)).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+    expect(branches(environmentId).pages).toHaveLength(0);
+    expect(diff(environmentId).data).toBeNull();
+    // Another node's channel and caches did not end with this one.
+    expect(webE2eeSessionStateFor(otherEnvironmentId).status).toBe("web-unsigned");
+    expect(projectSearch(otherEnvironmentId).data).not.toBeNull();
+    expect(branches(otherEnvironmentId).pages).toHaveLength(1);
+    expect(diff(otherEnvironmentId).data?.diff).toBe(`patch-${otherEnvironmentId}`);
+    // docs/relay-e2ee-protocol.md §12.1's latch is application-session state and
+    // outlives every node teardown.
+    expect(isWebE2eeSelectionLatched(selection)).toBe(true);
+    releaseA();
+    releaseB();
   });
 
   it("forgets only the left environment's server config entry", () => {
@@ -257,6 +404,21 @@ describe("clearWebHostedNodeScopedState", () => {
     expect(peekProjectIconSource(environmentId, iconProjectId, null)).toBeUndefined();
     expect(projectIconCacheBytes(environmentId)).toBe(0);
     expect(statisticsSnapshotCache.peek(environmentId)).toBeUndefined();
+  });
+
+  it("clears every environment's node caches at the account-session boundary", async () => {
+    const releaseA = await cacheNodeContent(environmentId);
+    const releaseB = await cacheNodeContent(otherEnvironmentId);
+
+    clearWebHostedAccountScopedState();
+
+    for (const target of [environmentId, otherEnvironmentId]) {
+      expect(projectSearch(target)).toEqual(EMPTY_PROJECT_SEARCH_ENTRIES_STATE);
+      expect(branches(target).pages).toHaveLength(0);
+      expect(diff(target).data).toBeNull();
+    }
+    releaseA();
+    releaseB();
   });
 
   it("purges every environment's server config entry at the account-session boundary", () => {

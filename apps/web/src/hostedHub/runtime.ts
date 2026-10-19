@@ -1,4 +1,8 @@
-import { configureHostedRuntime, type HostedHubApi } from "@ryco/client-runtime/authorization";
+import {
+  configureHostedRuntime,
+  hostedHubStore,
+  type HostedHubApi,
+} from "@ryco/client-runtime/authorization";
 
 import { writePrimaryEnvironmentDescriptor } from "../environments/primary";
 import {
@@ -14,7 +18,9 @@ import {
   prepareWebRelayE2ee,
   resolveWebRelayE2eeProvider,
   watchWebHostedSessionForE2ee,
+  type WebRelayE2eeTarget,
 } from "./e2eeAttempt";
+import { setDisplayedWebE2eeEnvironment } from "./e2eeSession";
 import { clearWebHostedNodeScopedState } from "./environment";
 import { hasHostedRelayPendingRequests, resetHostedRelayAttemptFactory } from "./transport";
 import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket";
@@ -31,12 +37,33 @@ import { subscribeWebForeground } from "./foreground";
 
 let configured = false;
 
+/**
+ * The node and environment a relay channel's E2EE attempt is resolved for:
+ * the channel's own node, as the transport names it, and that node's
+ * environment from the directory. `null` when the node is not in the
+ * directory, which closes the channel retryably rather than resolving it
+ * against another node.
+ */
+function relayE2eeTarget(nodeId: string | undefined): WebRelayE2eeTarget | null {
+  if (nodeId === undefined) return null;
+  const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId);
+  return node === undefined ? null : { nodeId, environmentId: node.environmentId };
+}
+
+/** The session-wide E2EE surfaces show the selected node's channel and no other. */
+function displayWebE2eeForSelectedNode(): void {
+  const selectedEnvironment = () => hostedHubStore.getState().selectedNode?.environmentId ?? null;
+  setDisplayedWebE2eeEnvironment(selectedEnvironment());
+  hostedHubStore.subscribe(() => setDisplayedWebE2eeEnvironment(selectedEnvironment()));
+}
+
 export function configureWebHostedRuntime(api: HostedHubApi): void {
   if (configured) return;
   configured = true;
   // docs/relay-e2ee-protocol.md §12.1: the in-memory latch ends with the
   // application session, and a sign-out is where this tier's session ends.
   watchWebHostedSessionForE2ee();
+  displayWebE2eeForSelectedNode();
   configureHostedRuntime(
     {
       endpoint: webEndpoint,
@@ -87,10 +114,13 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
       // genuine §13.5 code. This line raises the bar against accidental
       // wrong-node routing and some non-Hub network interposition, and against
       // nothing else.
+      //
+      // Each channel's attempt is resolved for the node it is opened to, and
+      // publishes into that node's environment — never the selected one's.
       createRelaySocket: (input) =>
         new BrowserHostedRelaySocket({
           ...input,
-          e2ee: resolveWebRelayE2eeProvider(),
+          e2ee: resolveWebRelayE2eeProvider(relayE2eeTarget(input.nodeId)),
           createRelaySocket: createWebHubRelaySocket,
         }),
       // Hub session version 2: the Hub mints and consumes the node ticket for the account
@@ -103,7 +133,7 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
           callbacks: input.callbacks,
           relayCompression: input.relayCompression,
           serverAuthenticated: true,
-          e2ee: resolveWebRelayE2eeProvider(),
+          e2ee: resolveWebRelayE2eeProvider(relayE2eeTarget(input.nodeId)),
           createRelaySocket: () =>
             createWebHubServerAuthenticatedRelaySocket({
               nodeId: input.nodeId,
