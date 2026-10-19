@@ -1,5 +1,6 @@
 export * from "./runtime.ts";
 export * from "./readCache.ts";
+export * from "./threadContentCachePolicy.ts";
 export * from "./store.ts";
 export * from "./eventBatching.ts";
 export * from "./storeSelectors.ts";
