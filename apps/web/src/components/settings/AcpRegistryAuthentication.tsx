@@ -4,6 +4,7 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { ensureLocalApi } from "../../localApi";
 import { useSettingsTarget } from "../../settingsTarget";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import { Button } from "../ui/button";
 
 function AcpRegistryAuthenticationContent({
@@ -12,7 +13,10 @@ function AcpRegistryAuthenticationContent({
   readonly instanceId: ProviderInstanceId;
 }) {
   const target = useSettingsTarget();
-  const capability = useHostedRpcCapability(WS_METHODS.serverAuthenticateAcpRegistry);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.serverAuthenticateAcpRegistry,
+    target?.environmentId ?? null,
+  );
   const server = target
     ? readEnvironmentApi(target.environmentId)?.server
     : ensureLocalApi().server;
@@ -134,7 +138,7 @@ function AcpRegistryAuthenticationContent({
       ) : null}
       {!allowed ? (
         <p className="text-xs text-muted-foreground">
-          {capability.reason ??
+          {hostedCapabilityCopy(capability, target?.nodeLabel) ??
             "Node management access and a current connection are required to authenticate."}
         </p>
       ) : null}

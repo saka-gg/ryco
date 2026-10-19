@@ -19,6 +19,7 @@ import {
   type DesktopUpdateChannel,
   EDITORS,
   type EditorId,
+  type EnvironmentId,
   type ScopedThreadRef,
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -38,6 +39,8 @@ import {
 } from "../../editorPreferences";
 import { isElectron } from "../../env";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { useLongPress } from "../../hooks/useLongPress";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useTheme } from "../../hooks/useTheme";
@@ -1061,27 +1064,33 @@ export function GeneralSettingsPanel({
 
 export function ArchivedThreadsPanel() {
   const target = useSettingsTarget();
-  const mutationCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
-  const mutationAllowed =
-    mutationCapability.allowed && (!target || (target.connected && target.canMutate !== false));
+  const targetAllowsMutation = !target || (target.connected && target.canMutate !== false);
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const config = useServerConfig();
   const lifecycleEnvironmentId = target?.environmentId ?? config?.environment.environmentId ?? null;
+  const lifecycleCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    lifecycleEnvironmentId,
+  );
   const archivedGroups = useMemo(
     () => selectArchivedSettingsGroups(projects, threads, target?.environmentId),
     [projects, threads, target?.environmentId],
   );
 
   const handleArchivedThreadContextMenu = useCallback(
-    async (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
-      if (!mutationAllowed) {
+    async (
+      threadRef: ScopedThreadRef,
+      position: { x: number; y: number },
+      mutation: ArchivedThreadMutation,
+    ) => {
+      if (!mutation.allowed) {
         toastManager.add(
           stackedThreadToast({
             type: "warning",
             title: "Archived thread is read-only",
-            description: mutationCapability.reason ?? "This action is unavailable.",
+            description: mutation.reason ?? "This action is unavailable.",
           }),
         );
         return;
@@ -1115,7 +1124,7 @@ export function ArchivedThreadsPanel() {
         await confirmAndDeleteThread(threadRef);
       }
     },
-    [confirmAndDeleteThread, mutationAllowed, mutationCapability.reason, unarchiveThread],
+    [confirmAndDeleteThread, unarchiveThread],
   );
 
   return (
@@ -1153,24 +1162,80 @@ export function ArchivedThreadsPanel() {
               )
             }
           >
-            {group.threads.map((thread) => (
-              <ArchivedThreadRow
-                key={thread.id}
-                thread={thread}
-                mutationAllowed={mutationAllowed}
-                mutationReason={mutationCapability.reason ?? null}
-                onOpenMenu={handleArchivedThreadContextMenu}
-                onUnarchive={unarchiveThread}
-              />
-            ))}
+            <ArchivedThreadRows
+              environmentId={
+                group.kind === "project" ? group.project.environmentId : group.environmentId
+              }
+              threads={group.threads}
+              targetAllowsMutation={targetAllowsMutation}
+              onOpenMenu={handleArchivedThreadContextMenu}
+              onUnarchive={unarchiveThread}
+            />
           </SettingsSection>
         ))
       )}
       <LifecycleSuggestionSettings
         environmentId={lifecycleEnvironmentId}
-        disabled={!mutationAllowed}
+        disabled={!targetAllowsMutation || !lifecycleCapability.allowed}
       />
     </SettingsPageContainer>
+  );
+}
+
+interface ArchivedThread {
+  readonly id: ScopedThreadRef["threadId"];
+  readonly environmentId: ScopedThreadRef["environmentId"];
+  readonly title: string;
+  readonly archivedAt: string | null;
+  readonly createdAt: string;
+}
+
+/** Whether an archived thread can be changed, and why not. */
+interface ArchivedThreadMutation {
+  readonly allowed: boolean;
+  readonly reason: string | null;
+}
+
+/**
+ * The rows of one archive section. Its threads live on one node, which decides
+ * whether they can be changed: the node's own role and connection, not the
+ * selected node's.
+ */
+function ArchivedThreadRows(props: {
+  environmentId: EnvironmentId;
+  threads: ReadonlyArray<ArchivedThread>;
+  targetAllowsMutation: boolean;
+  onOpenMenu: (
+    threadRef: ScopedThreadRef,
+    position: { x: number; y: number },
+    mutation: ArchivedThreadMutation,
+  ) => Promise<void>;
+  onUnarchive: (threadRef: ScopedThreadRef) => Promise<void>;
+}) {
+  const capability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    props.environmentId,
+  );
+  const nodeLabel = useHostedHubStore((state) =>
+    hostedSwitchTargetLabel(state, props.environmentId),
+  );
+  const mutation: ArchivedThreadMutation = {
+    allowed: props.targetAllowsMutation && capability.allowed,
+    reason: hostedCapabilityCopy(capability, nodeLabel),
+  };
+  return (
+    <>
+      {props.threads.map((thread) => (
+        <ArchivedThreadRow
+          key={thread.id}
+          thread={thread}
+          mutationAllowed={mutation.allowed}
+          mutationReason={mutation.reason}
+          onOpenMenu={(threadRef, position) => props.onOpenMenu(threadRef, position, mutation)}
+          onUnarchive={props.onUnarchive}
+        />
+      ))}
+    </>
   );
 }
 
@@ -1180,13 +1245,7 @@ export function ArchivedThreadsPanel() {
  * bottom action sheet.
  */
 function ArchivedThreadRow(props: {
-  thread: {
-    readonly id: ScopedThreadRef["threadId"];
-    readonly environmentId: ScopedThreadRef["environmentId"];
-    readonly title: string;
-    readonly archivedAt: string | null;
-    readonly createdAt: string;
-  };
+  thread: ArchivedThread;
   mutationAllowed: boolean;
   mutationReason: string | null;
   onOpenMenu: (threadRef: ScopedThreadRef, position: { x: number; y: number }) => Promise<void>;

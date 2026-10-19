@@ -11,6 +11,7 @@ import { SettingsTargetProvider, type SettingsTarget } from "../../settingsTarge
 
 const harness = vi.hoisted(() => ({
   allowed: true,
+  kind: "stale" as "stale" | "establishing",
   servers: new Map<string, unknown>(),
   localApi: vi.fn(() => {
     throw new Error("Unexpected primary-node fallback");
@@ -28,8 +29,18 @@ vi.mock("../../localApi", () => ({
 vi.mock("../../hostedHub/capabilities", () => ({
   useHostedRpcCapability: () => ({
     allowed: harness.allowed,
+    kind: harness.allowed ? "ready" : harness.kind,
     reason: harness.allowed ? null : "Read-only access",
   }),
+}));
+vi.mock("../../hostedHub/switchTarget", () => ({
+  hostedCapabilityCopy: (
+    capability: { kind?: string; reason: string | null },
+    label: string | null | undefined,
+  ) =>
+    capability.kind === "establishing"
+      ? `Available when ${label || "this node"} is connected`
+      : capability.reason,
 }));
 
 // Keep RPC tests focused on the registry components; shared design controls have their own tests.
@@ -100,6 +111,7 @@ function deferred<T>() {
 }
 beforeEach(() => {
   harness.allowed = true;
+  harness.kind = "stale";
   harness.servers.clear();
   harness.localApi.mockClear();
 });
@@ -222,6 +234,22 @@ describe("ACP registry settings boundaries", () => {
       expect(selected.authenticateAcpRegistry).not.toHaveBeenCalled();
     },
   );
+
+  it("says when the target node will be available while its connection is being set up", async () => {
+    harness.allowed = false;
+    harness.kind = "establishing";
+    harness.servers.set("node-a", server());
+    const node = target("node-a");
+    const mounted = await render(
+      <>
+        {registry(node)}
+        {authentication(node)}
+      </>,
+    );
+    const copy = mounted.getByText("Available when node-a is connected", { exact: true });
+    await vi.waitFor(() => expect(copy.elements()).toHaveLength(2));
+    expect(mounted.getByText("Read-only access", { exact: true }).elements()).toHaveLength(0);
+  });
 
   it("negotiates authentication explicitly on the selected node", async () => {
     const selected = server();

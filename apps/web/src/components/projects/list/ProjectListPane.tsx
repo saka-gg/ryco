@@ -12,6 +12,8 @@ import { PAGE_BAR_CLASS, PAGE_DRAWER_LEADING_INSET_CLASS } from "../../../appChr
 import { useCommandPaletteStore } from "../../../commandPaletteStore";
 import { usePageLeadingInsetClass } from "../../../hooks/usePageLeadingInsetClass";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../../hostedHub/switchTarget";
 import { cn } from "../../../lib/utils";
 import { WS_METHODS } from "@ryco/contracts";
 import { InboxMotionContext, useInboxListMotion } from "../../inboxSidebar/useInboxListMotion";
@@ -48,7 +50,10 @@ export function ProjectListPane(props: { readonly variant: ProjectListVariant })
   const visibleRows = useMemo(() => filterProjectListRows(rows, filter), [filter, rows]);
   const selectedKey = selection?.snapshot.projectKey ?? null;
   const inputRef = useRef<HTMLInputElement>(null);
-  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
+  // The device is chosen inside the add-project flow, so the button follows the routed node.
+  // hosted-capability: routed node
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
+  const routedNodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
   const leadingInset = usePageLeadingInsetClass(
     props.variant !== "drawer" && layout.leadingRegion === "list",
     "pl-2.5",
@@ -255,7 +260,9 @@ export function ProjectListPane(props: { readonly variant: ProjectListVariant })
           >
             <FolderPlusIcon className="size-4" />
           </TooltipTrigger>
-          <TooltipPopup side="bottom">{addProjectCapability.reason ?? "Add project"}</TooltipPopup>
+          <TooltipPopup side="bottom">
+            {hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ?? "Add project"}
+          </TooltipPopup>
         </Tooltip>
       </header>
 

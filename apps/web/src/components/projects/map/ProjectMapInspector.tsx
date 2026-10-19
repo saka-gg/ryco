@@ -10,7 +10,6 @@ import {
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
-  AGENT_CONTROL_WS_METHODS,
   ProjectId,
   ThreadId,
   WS_METHODS,
@@ -45,6 +44,7 @@ import { openInPreferredEditor } from "../../../editorPreferences";
 import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
 import { useThreadActions } from "../../../hooks/useThreadActions";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../../hostedHub/switchTarget";
 import { cn } from "../../../lib/utils";
 import { buildPullRequestsPageLocation } from "../../../pullRequestsRoute";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
@@ -375,8 +375,8 @@ function PendingChanges(props: {
   readonly changes: readonly ScheduleProposal[];
 }) {
   const { detail } = props;
-  const decideCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCommand);
-  const canDecide = decideCapability.allowed && detail.automationDisabledReason === null;
+  const canDecide =
+    detail.capabilities.decideAutomation.allowed && detail.automationDisabledReason === null;
   if (props.changes.length === 0) return null;
   return (
     <div className="mt-3 flex flex-col gap-1.5">
@@ -421,7 +421,10 @@ function DevicePanel(props: {
   const { detail } = props;
   const { nav } = useProjectsPage();
   const access = useProjectEditAccess(detail.member.environmentId);
-  const createCapability = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject);
+  const createCapability = useHostedRpcCapability(
+    WS_METHODS.gitCreateWorktreeForProject,
+    detail.member.environmentId,
+  );
   const { copyPathToClipboard } = useThreadClipboardActions();
   const router = useRouter();
   const nowMs = useNowMs();
@@ -628,9 +631,15 @@ function WorkspacePanel(props: {
   const { detail } = props;
   const router = useRouter();
   const access = useProjectEditAccess(detail.member.environmentId);
-  const applyCapability = useHostedRpcCapability(WS_METHODS.lifecycleApplyWorkspace);
-  const previewCapability = useHostedRpcCapability(WS_METHODS.lifecyclePreviewWorkspace);
-  const createCapability = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject);
+  const applyCapability = detail.capabilities.applyWorkspace;
+  const previewCapability = useHostedRpcCapability(
+    WS_METHODS.lifecyclePreviewWorkspace,
+    detail.member.environmentId,
+  );
+  const createCapability = useHostedRpcCapability(
+    WS_METHODS.gitCreateWorktreeForProject,
+    detail.member.environmentId,
+  );
   const { copyPathToClipboard } = useThreadClipboardActions();
   const { handleNewThread } = useNewThreadHandler();
   const navigateToThread = (environmentId: EnvironmentId, threadId: string) =>
@@ -679,7 +688,8 @@ function WorkspacePanel(props: {
             previewDenied={
               previewCapability.allowed
                 ? null
-                : (previewCapability.reason ?? "Your role on this device can't change workspaces.")
+                : (hostedCapabilityCopy(previewCapability, detail.checkout.deviceLabel) ??
+                  "Your role on this device can't change workspaces.")
             }
             canApply={canMutate}
             onClose={() => props.onReview(undefined)}
@@ -814,7 +824,12 @@ function WorkspacePanel(props: {
         )}
       </Section>
       <Actions
-        disabledReason={access.reason ?? (applyCapability.allowed ? null : applyCapability.reason)}
+        disabledReason={
+          access.reason ??
+          (applyCapability.allowed
+            ? null
+            : hostedCapabilityCopy(applyCapability, detail.checkout.deviceLabel))
+        }
       >
         {live && node ? (
           <Button
@@ -878,7 +893,6 @@ function AutomationPanel(props: {
 }) {
   const { detail } = props;
   const router = useRouter();
-  const decideCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCommand);
   const nowMs = useNowMs();
   const automation = detail.checkout.automations.find((candidate) => candidate.id === props.id);
   const record = detail.automations.get(props.id);
@@ -894,7 +908,8 @@ function AutomationPanel(props: {
   const decide = (decision: "accept" | "reject") =>
     automation.pendingProposalId &&
     void detail.decide(automation.pendingProposalId as AgentControlProposalId, decision);
-  const canDecide = decideCapability.allowed && detail.automationDisabledReason === null;
+  const canDecide =
+    detail.capabilities.decideAutomation.allowed && detail.automationDisabledReason === null;
   const projectId = ProjectId.make(detail.member.id);
   const automationId = record.automationId;
   const changes = detail.pendingChanges.filter((change) => change.automationId === props.id);

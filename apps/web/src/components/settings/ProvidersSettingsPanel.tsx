@@ -16,6 +16,7 @@ import { Equal } from "effect";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
 import {
   useSettings,
   useUpdateSettings,
@@ -157,9 +158,12 @@ export function ProvidersSettingsPanel() {
   // The read-only mutation capability again, not a connectivity probe: the
   // text-generation model and its traits are settings writes, so they are
   // gated by the settings-update method rather than by sensing the transport.
-  const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
+  const settingsCapability = useHostedRpcCapability(
+    WS_METHODS.serverUpdateSettings,
+    settingsTarget?.environmentId ?? null,
+  );
   const settingsBlocked = !settingsCapability.allowed;
-  const settingsBlockedReason = settingsCapability.reason;
+  const settingsBlockedReason = hostedCapabilityCopy(settingsCapability, settingsTarget?.nodeLabel);
   const serverProviders = useServerProviders();
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);

@@ -6,10 +6,8 @@ import {
 } from "@ryco/client-runtime/state/lifecycle";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
-  AGENT_CONTROL_WS_METHODS,
   ProjectId,
   ThreadId,
-  WS_METHODS,
   WorktreeId,
   type AgentControlAutomation,
   type AgentControlProposalId,
@@ -30,7 +28,7 @@ import {
 import { useState, type ReactNode } from "react";
 
 import { useThreadActions } from "../../../hooks/useThreadActions";
-import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { hostedCapabilityCopy } from "../../../hostedHub/switchTarget";
 import { formatCount } from "../../../lib/formatCount";
 import { cn, isMacPlatform } from "../../../lib/utils";
 import {
@@ -139,6 +137,12 @@ function resolveItems(items: readonly MapItemRef[], details: readonly MapCheckou
 const firstReason = (reasons: ReadonlyArray<string | null | undefined>) =>
   reasons.find((reason): reason is string => Boolean(reason)) ?? null;
 
+/** Why the checkout's device refuses workspace changes, when it does. */
+const applyRefusal = (detail: MapCheckoutDetail) =>
+  detail.capabilities.applyWorkspace.allowed
+    ? null
+    : hostedCapabilityCopy(detail.capabilities.applyWorkspace, detail.checkout.deviceLabel);
+
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : "An error occurred.";
 
@@ -211,8 +215,6 @@ export function ProjectMapSelectionPanel(props: {
   readonly onSelect: (selection: MapSelection | null) => void;
 }) {
   const threadActions = useThreadActions();
-  const applyCapability = useHostedRpcCapability(WS_METHODS.lifecycleApplyWorkspace);
-  const decideCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCommand);
   const [running, setRunning] = useState(false);
   const { workspaces, automations, threads } = resolveItems(props.items, props.details);
   const total = workspaces.length + automations.length + threads.length;
@@ -236,7 +238,12 @@ export function ProjectMapSelectionPanel(props: {
     const targets = offered.flatMap((entry): WorkspaceBatchTarget[] => {
       const registeredId =
         entry.workspace.registeredId ?? (entry.workspace.main ? null : entry.workspace.id);
-      if (!registeredId || !entry.detail.access.canEdit || !applyCapability.allowed) return [];
+      if (
+        !registeredId ||
+        !entry.detail.access.canEdit ||
+        !entry.detail.capabilities.applyWorkspace.allowed
+      )
+        return [];
       return [
         {
           environmentId: entry.detail.member.environmentId,
@@ -289,7 +296,8 @@ export function ProjectMapSelectionPanel(props: {
 
   /* Automations: every change is a proposal, one at a time per schedule. */
   const canDecide = (entry: AutomationEntry) =>
-    decideCapability.allowed && entry.detail.automationDisabledReason === null;
+    entry.detail.capabilities.decideAutomation.allowed &&
+    entry.detail.automationDisabledReason === null;
   const canChange = (entry: AutomationEntry) =>
     canDecide(entry) && entry.changes.length === 0 && !entry.record.cancelled;
   const due = automations.filter((entry) => entry.automation.pendingProposalId && canDecide(entry));
@@ -363,7 +371,7 @@ export function ProjectMapSelectionPanel(props: {
             <Actions
               disabledReason={firstReason([
                 ...workspaces.map((entry) => entry.detail.access.reason),
-                applyCapability.allowed ? null : applyCapability.reason,
+                ...workspaces.map((entry) => applyRefusal(entry.detail)),
               ])}
             >
               {workspaceGroups.map(({ spec, offered, targets }) => {

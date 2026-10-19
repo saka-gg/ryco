@@ -6,6 +6,7 @@ import {
   type ScheduleProposal,
 } from "@ryco/client-runtime/state/agentControl";
 import {
+  AGENT_CONTROL_WS_METHODS,
   ProjectId,
   WS_METHODS,
   type AgentControlAutomation,
@@ -21,7 +22,7 @@ import { useShallow } from "zustand/react/shallow";
 import { isElectron } from "../../../env";
 import { useEvent } from "../../../hooks/useEvent";
 import { retainDesktopWorkspaceInteractiveScope } from "../../../platform/desktopWorkspace";
-import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { useHostedRpcCapability, type HostedRpcCapability } from "../../../hostedHub/capabilities";
 import type {
   SidebarProjectGroupMember,
   SidebarProjectSnapshot,
@@ -93,6 +94,14 @@ export interface MapCheckoutDetail {
   readonly remeasureDisk: () => void;
   /** Whether this client can change the checkout now (a multiple selection spans devices). */
   readonly access: ProjectEditAccess;
+  /**
+   * What the checkout's device allows this client to run, for the panels that act
+   * on several devices at once and so cannot ask for a single environment.
+   */
+  readonly capabilities: {
+    readonly applyWorkspace: HostedRpcCapability;
+    readonly decideAutomation: HostedRpcCapability;
+  };
   readonly automationError: string | null;
   readonly automationBusy: boolean;
   readonly automationDisabledReason: string | null;
@@ -153,7 +162,18 @@ function CheckoutSource(props: {
   });
   const treeProject = tree.projects[0] ?? null;
 
-  const listCapability = useHostedRpcCapability(WS_METHODS.lifecycleListWorkspaces);
+  const listCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleListWorkspaces,
+    member.environmentId,
+  );
+  const applyCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleApplyWorkspace,
+    member.environmentId,
+  );
+  const decideCapability = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.automationCommand,
+    member.environmentId,
+  );
   const signature = useMemo(() => workspaceInspectionSignature(worktrees), [worktrees]);
   const { inspection, reinspect } = useProjectWorkspaceInspection({
     environmentId: member.environmentId,
@@ -243,6 +263,7 @@ function CheckoutSource(props: {
       diskUsage,
       remeasureDisk,
       access,
+      capabilities: { applyWorkspace: applyCapability, decideAutomation: decideCapability },
       automationError: centre.error,
       automationBusy: centre.busy,
       automationDisabledReason: centre.disabledReason,
@@ -255,6 +276,7 @@ function CheckoutSource(props: {
     };
   }, [
     access,
+    applyCapability,
     centre.busy,
     centre.disabledReason,
     centre.error,
@@ -262,6 +284,7 @@ function CheckoutSource(props: {
     command,
     dayMs,
     decide,
+    decideCapability,
     diskUsage,
     inspection,
     key,
