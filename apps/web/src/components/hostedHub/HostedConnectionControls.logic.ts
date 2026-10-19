@@ -26,10 +26,18 @@
 // is assertable from a node test and the `.tsx` owns only the name-to-component
 // mapping.
 
-import type {
-  HostedConnectionGuarantee,
-  HostedConnectionStatusIndicator,
+import {
+  deriveHostedConnectionStatusIndicator,
+  describeHostedConnectionPhase,
+  HOSTED_CONNECTION_STATUS_INDICATORS,
+  hostedBrowserRevalidated,
+  type HostedConnectionGuarantee,
+  type HostedConnectionStatusIndicator,
+  type HostedConnectionStatusText,
+  type HostedHubState,
+  type WebHostedE2eeChannelStatus,
 } from "../../hostedHub/connectionStatus";
+import type { HostedHubNode } from "../../hostedHub/types";
 
 /**
  * The glyphs the hosted surfaces draw, as names.
@@ -114,4 +122,136 @@ export function hostedConnectionStatusPresentation(
   return indicator.connected
     ? { glyph: "connected", iconClassName: "text-emerald-500" }
     : { glyph: "disconnected", iconClassName: "text-amber-500" };
+}
+
+/**
+ * What an intentional connect is called on every surface: one quiet word,
+ * never the transport's own steps (`requesting ticket`, `authenticating`, …).
+ */
+export const HOSTED_CONNECTING_STATUS_TEXT = "Connecting…";
+
+/** The hosted state the connection chip is derived from. */
+export type HostedConnectionChipSource = Pick<
+  HostedHubState,
+  | "accountStatus"
+  | "directoryStatus"
+  | "browserStatus"
+  | "selectionStatus"
+  | "transportStatus"
+  | "sessionStatus"
+  | "errorMessage"
+  | "effectiveRole"
+  | "selectedNode"
+  | "nodes"
+>;
+
+export interface HostedConnectionChipInput extends HostedConnectionChipSource {
+  /** The node id in the address, `null` outside a node route. */
+  readonly routedNodeId: string | null;
+  readonly e2eeStatus: WebHostedE2eeChannelStatus;
+}
+
+export interface HostedConnectionChip {
+  /** The node the chip names: the selected one, or the one the route is opening. */
+  readonly node: HostedHubNode;
+  readonly role: HostedHubState["effectiveRole"];
+  readonly statusText: HostedConnectionStatusText | typeof HOSTED_CONNECTING_STATUS_TEXT;
+  readonly indicator: HostedConnectionStatusIndicator;
+  /** The chip names the node the route is opening, not the selected one. */
+  readonly switching: boolean;
+}
+
+/**
+ * The node an in-app switch is heading to: the routed node when it is not the
+ * selected one yet, the directory lists it as one this browser can open, and
+ * nothing is wrong. Anything else (a stale browser, an error waiting to be
+ * shown) keeps describing the selection, so the chip never calls a problem a
+ * switch.
+ */
+function hostedSwitchTargetNode(input: HostedConnectionChipInput): HostedHubNode | null {
+  if (input.routedNodeId === null || input.routedNodeId === input.selectedNode?.id) return null;
+  if (
+    input.accountStatus !== "authenticated" ||
+    input.directoryStatus !== "ready" ||
+    input.errorMessage !== null ||
+    !hostedBrowserRevalidated(input.browserStatus)
+  ) {
+    return null;
+  }
+  const node = input.nodes.find((candidate) => candidate.id === input.routedNodeId);
+  if (!node || node.revokedAt !== null || node.capabilities?.nativeClientRequired === true) {
+    return null;
+  }
+  return node;
+}
+
+/**
+ * The single chip every connection surface renders: which node it names, the
+ * bounded status words, and the indicator beside them.
+ *
+ * An intentional connect — a fresh selection, a reconnect, or a switch to the
+ * node the route is opening — reads `Connecting…` and nothing else, so the
+ * transport's steps never reach the screen. During a switch the chip names the
+ * TARGET node, not the one still selected. Failures, an offline node, a stale
+ * browser and every channel label come out of the shared derivation unchanged.
+ * `null` while there is no node to name.
+ */
+export function deriveHostedConnectionChip(
+  input: HostedConnectionChipInput,
+): HostedConnectionChip | null {
+  const target = hostedSwitchTargetNode(input);
+  if (target) {
+    return target.presence.online
+      ? {
+          node: target,
+          role: target.effectiveRole,
+          statusText: HOSTED_CONNECTING_STATUS_TEXT,
+          indicator: HOSTED_CONNECTION_STATUS_INDICATORS.connecting,
+          switching: true,
+        }
+      : {
+          node: target,
+          role: target.effectiveRole,
+          statusText: "Offline",
+          indicator: HOSTED_CONNECTION_STATUS_INDICATORS.Offline,
+          switching: true,
+        };
+  }
+  const node = input.selectedNode;
+  if (!node) return null;
+
+  const statusInput = {
+    browserStatus: input.browserStatus,
+    sessionStatus: input.sessionStatus,
+    selectionStatus: input.selectionStatus,
+    transportStatus: input.transportStatus,
+    e2eeStatus: input.e2eeStatus,
+  };
+  const phase = describeHostedConnectionPhase({
+    ...statusInput,
+    accountAuthenticated: input.accountStatus === "authenticated",
+    directoryReady: input.directoryStatus === "ready",
+    quiet: input.errorMessage === null,
+  });
+  if (phase === "Connecting") {
+    return {
+      node,
+      role: input.effectiveRole,
+      statusText: HOSTED_CONNECTING_STATUS_TEXT,
+      indicator: HOSTED_CONNECTION_STATUS_INDICATORS.connecting,
+      switching: false,
+    };
+  }
+  return {
+    node,
+    role: input.effectiveRole,
+    statusText: phase,
+    indicator: deriveHostedConnectionStatusIndicator(statusInput),
+    switching: false,
+  };
+}
+
+/** The live-region sentence for a chip, without doubling the ellipsis' full stop. */
+export function hostedConnectionAnnouncement(label: string, statusText: string): string {
+  return `Node ${label}: ${statusText}${statusText.endsWith("…") ? "" : "."}`;
 }

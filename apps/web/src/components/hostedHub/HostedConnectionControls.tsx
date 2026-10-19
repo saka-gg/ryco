@@ -13,7 +13,8 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { Button } from "../ui/button";
@@ -26,21 +27,21 @@ import {
   MobileSheetTitle,
 } from "../mobile/MobileSheet";
 import { MobileStatusChip } from "../mobile/MobileStatusChip";
-import {
-  deriveHostedConnectionStatusIndicator,
-  deriveHostedConnectionStatusText,
-  type HostedConnectionStatusIndicator,
-} from "../../hostedHub/connectionStatus";
+import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
 import {
   leaveHostedNodeRouteToDirectory,
   selectHostedNodeRoute,
+  useRoutedHostedNode,
 } from "../../hostedHub/nodeRouteOrchestrator";
 import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { useWebE2eeChannelStatus } from "../../hostedHub/useWebE2eeSession";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
+  deriveHostedConnectionChip,
+  hostedConnectionAnnouncement,
   hostedConnectionStatusPresentation,
+  type HostedConnectionChip,
   type HostedConnectionGlyph,
 } from "./HostedConnectionControls.logic";
 import { HostedE2eeVerification } from "./HostedE2eeVerification";
@@ -132,6 +133,36 @@ export function useHostedConnectionActions() {
   return { switchNode, returnToAllNodes };
 }
 
+/**
+ * The one place the hosted state becomes what the connection surfaces show:
+ * the node they name and its bounded status, including the channel state
+ * (docs/relay-e2ee-protocol.md §12.2 asks for it on every user-facing surface).
+ * Returns null while there is no node to name, which also covers every
+ * non-hosted mode.
+ */
+function useHostedConnectionChip(): HostedConnectionChip | null {
+  const source = useHostedHubStore(
+    useShallow((state) => ({
+      accountStatus: state.accountStatus,
+      directoryStatus: state.directoryStatus,
+      browserStatus: state.browserStatus,
+      selectionStatus: state.selectionStatus,
+      transportStatus: state.transportStatus,
+      sessionStatus: state.sessionStatus,
+      errorMessage: state.errorMessage,
+      effectiveRole: state.effectiveRole,
+      selectedNode: state.selectedNode,
+      nodes: state.nodes,
+    })),
+  );
+  const routedNodeId = useRoutedHostedNode().nodeId;
+  const e2eeStatus = useWebE2eeChannelStatus();
+  return useMemo(
+    () => deriveHostedConnectionChip({ ...source, routedNodeId, e2eeStatus }),
+    [e2eeStatus, routedNodeId, source],
+  );
+}
+
 function DeliveryUnknownAcknowledgement() {
   const session = useHostedHubStore((state) => state.sessionStatus);
   const recoveredAfterUnknown = useHostedHubStore((state) => state.sessionRecoveredAfterUnknown);
@@ -168,21 +199,14 @@ function DeliveryUnknownAcknowledgement() {
  */
 export function HostedNodeMenu() {
   const readCache = useHostedReadCache();
-  const node = useHostedHubStore((state) => state.selectedNode);
+  const chip = useHostedConnectionChip();
   const nodes = useHostedHubStore((state) => state.nodes);
-  const transport = useHostedHubStore((state) => state.transportStatus);
-  const session = useHostedHubStore((state) => state.sessionStatus);
-  const selection = useHostedHubStore((state) => state.selectionStatus);
   const directory = useHostedHubStore((state) => state.directoryStatus);
-  const role = useHostedHubStore((state) => state.effectiveRole);
   const error = useHostedHubStore((state) => state.errorMessage);
   const browserStatus = useHostedHubStore((state) => state.browserStatus);
-  // docs/relay-e2ee-protocol.md §12.2: every user-facing surface, and this is
-  // one of the three.
-  const e2eeStatus = useWebE2eeChannelStatus();
   const { switchNode, returnToAllNodes } = useHostedConnectionActions();
   const disclosureRef = useRef<HTMLDetailsElement>(null);
-  if (!node) {
+  if (!chip) {
     if (!readCache.accountId || !canShowHostedReadPreview()) return null;
     return (
       <details className="relative text-xs">
@@ -202,15 +226,7 @@ export function HostedNodeMenu() {
     );
   }
 
-  const statusInput = {
-    browserStatus,
-    sessionStatus: session,
-    selectionStatus: selection,
-    transportStatus: transport,
-    e2eeStatus,
-  };
-  const statusText = deriveHostedConnectionStatusText(statusInput);
-  const indicator = deriveHostedConnectionStatusIndicator(statusInput);
+  const { node, role, statusText, indicator } = chip;
 
   return (
     <div className="relative max-w-full">
@@ -235,7 +251,7 @@ export function HostedNodeMenu() {
             {role ?? "Role unavailable"} · {statusText}
           </p>
           <p className="sr-only" aria-live="polite">
-            Node {node.label}: {statusText}.
+            {hostedConnectionAnnouncement(node.label, statusText)}
           </p>
           {error ? (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
@@ -333,28 +349,15 @@ export function HostedConnectionSheet({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
-  const node = useHostedHubStore((state) => state.selectedNode);
+  const chip = useHostedConnectionChip();
   const nodes = useHostedHubStore((state) => state.nodes);
-  const transport = useHostedHubStore((state) => state.transportStatus);
-  const session = useHostedHubStore((state) => state.sessionStatus);
-  const selection = useHostedHubStore((state) => state.selectionStatus);
   const directory = useHostedHubStore((state) => state.directoryStatus);
-  const role = useHostedHubStore((state) => state.effectiveRole);
   const error = useHostedHubStore((state) => state.errorMessage);
   const browserStatus = useHostedHubStore((state) => state.browserStatus);
-  const e2eeStatus = useWebE2eeChannelStatus();
   const { switchNode, returnToAllNodes } = useHostedConnectionActions();
-  if (!node) return null;
+  if (!chip) return null;
 
-  const statusInput = {
-    browserStatus,
-    sessionStatus: session,
-    selectionStatus: selection,
-    transportStatus: transport,
-    e2eeStatus,
-  };
-  const statusText = deriveHostedConnectionStatusText(statusInput);
-  const indicator = deriveHostedConnectionStatusIndicator(statusInput);
+  const { node, role, statusText, indicator } = chip;
   const switchingDisabled = directory !== "ready" || browserStatus !== "current";
 
   return (
@@ -372,7 +375,7 @@ export function HostedConnectionSheet({
           {role ?? "Role unavailable"} · {statusText}
         </MobileSheetDescription>
         <p className="sr-only" aria-live="polite">
-          Node {node.label}: {statusText}.
+          {hostedConnectionAnnouncement(node.label, statusText)}
         </p>
       </MobileSheetHeader>
       <MobileSheetPanel>
@@ -471,24 +474,12 @@ export function HostedConnectionSheet({
  * children of it, so shrinking the visible control cannot take them with it.
  */
 export function HostedConnectionPill() {
-  const node = useHostedHubStore((state) => state.selectedNode);
-  const transport = useHostedHubStore((state) => state.transportStatus);
+  const chip = useHostedConnectionChip();
   const session = useHostedHubStore((state) => state.sessionStatus);
-  const selection = useHostedHubStore((state) => state.selectionStatus);
-  const browserStatus = useHostedHubStore((state) => state.browserStatus);
-  const e2eeStatus = useWebE2eeChannelStatus();
   const [open, setOpen] = useState(false);
-  if (!node) return null;
+  if (!chip) return null;
 
-  const statusInput = {
-    browserStatus,
-    sessionStatus: session,
-    selectionStatus: selection,
-    transportStatus: transport,
-    e2eeStatus,
-  };
-  const statusText = deriveHostedConnectionStatusText(statusInput);
-  const indicator = deriveHostedConnectionStatusIndicator(statusInput);
+  const { node, statusText, indicator } = chip;
 
   return (
     <>
@@ -505,7 +496,7 @@ export function HostedConnectionPill() {
             data-testid="hosted-connection-status-announcer"
             className="sr-only"
           >
-            Node {node.label}: {statusText}.
+            {hostedConnectionAnnouncement(node.label, statusText)}
           </span>
           {session === "delivery-unknown" ? (
             <span role="alert" className="sr-only">

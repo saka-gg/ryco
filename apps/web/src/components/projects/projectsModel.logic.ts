@@ -265,3 +265,38 @@ export function classifyEnvironmentPresence(input: {
   if (lost || input.hydratedFromCache) return input.hydratedFromCache ? "cached" : "offline";
   return input.bootstrapComplete ? "online" : "connecting";
 }
+
+/**
+ * Whether an environment is the device this client itself runs on. A hosted
+ * browser runs no environment of its own: the node it has selected is a remote
+ * device like any other, so none of them is "this device".
+ */
+export function isThisDevice(input: {
+  readonly hosted: boolean;
+  readonly environmentId: string;
+  readonly primaryEnvironmentId: string | null;
+}): boolean {
+  return !input.hosted && input.environmentId === input.primaryEnvironmentId;
+}
+
+/**
+ * How reachable a Hub node is from this browser. Hub presence says the node can
+ * be reached and opening it connects, so a reachable node is "online" whether
+ * or not it is the selected one; only a connection that is on its way reads
+ * "connecting". A node that is not reachable shows its cached copy when the
+ * store has one, and is "offline" otherwise.
+ */
+export function classifyHostedNodePresence(input: {
+  /** The Hub's presence for the node. */
+  readonly online: boolean;
+  /** The machine entry says a live connection to the node is up. */
+  readonly connected: boolean;
+  /** A connection to the node is being established. */
+  readonly establishing: boolean;
+  /** The store holds a shell for the node, live or restored from a cache. */
+  readonly hasShell: boolean;
+}): EnvironmentPresenceStatus {
+  if (input.establishing) return "connecting";
+  if (input.online || input.connected) return "online";
+  return input.hasShell ? "cached" : "offline";
+}
