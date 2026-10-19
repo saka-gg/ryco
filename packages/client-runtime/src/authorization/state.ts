@@ -2658,7 +2658,9 @@ class HostedHubController {
         !failure.retryable && state.browserStatus === "synchronizing"
           ? "current"
           : state.browserStatus,
-      errorMessage: failureMessage(failure),
+      // A spent transfer budget is a routine rotation: the reconnect that
+      // follows is the whole story, so it shows no error.
+      errorMessage: failure.kind === "budget" ? null : failureMessage(failure),
     });
   }
 
@@ -2941,6 +2943,8 @@ function failureMessage(failure: HostedRelayFailure): string {
       return "Hub is draining connections. Ryco will retry shortly.";
     case "slow-consumer":
       return "The relay closed a slow connection. Ryco will reconnect.";
+    case "budget":
+      return "The relay channel reached its transfer budget. Ryco is reconnecting.";
     case "authentication":
       return "The relay authentication attempt expired or was rejected.";
     case "rate-limited":
