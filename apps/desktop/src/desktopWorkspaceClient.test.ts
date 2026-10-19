@@ -1,12 +1,19 @@
+import * as FS from "node:fs";
+import * as OS from "node:os";
+import * as Path from "node:path";
+
 import { EnvironmentId, ProjectId, ThreadId, type RelayEffectiveRole } from "@ryco/contracts";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import {
   WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION,
+  isWorkspaceMetadataSnapshot,
+  workspaceMetadataPayloadBytes,
   type WorkspaceMetadataCache,
   type WorkspaceMetadataCacheRecord,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { createDesktopWorkspaceMetadataCache } from "./desktopWorkspaceCache.ts";
 import {
   createDesktopWorkspaceIpcHandlers,
   projectDesktopWorkspaceState,
@@ -15,8 +22,18 @@ import {
 import {
   DesktopWorkspaceClient,
   type DesktopWorkspaceAccountE2ee,
+  type DesktopWorkspaceClientSnapshot,
   type DesktopWorkspaceIdentityStatus,
 } from "./desktopWorkspaceClient.ts";
+
+vi.mock("@ryco/client-runtime/state/workspace", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@ryco/client-runtime/state/workspace")>();
+  return {
+    ...actual,
+    isWorkspaceMetadataSnapshot: vi.fn(actual.isWorkspaceMetadataSnapshot),
+    workspaceMetadataPayloadBytes: vi.fn(actual.workspaceMetadataPayloadBytes),
+  };
+});
 
 function node(
   index: number,
@@ -24,6 +41,7 @@ function node(
     readonly online?: boolean;
     readonly role?: RelayEffectiveRole;
     readonly environmentId?: string;
+    readonly lastHeartbeatAt?: number;
   } = {},
 ): HostedHubNode {
   const role = input.role ?? "owner";
@@ -41,7 +59,7 @@ function node(
     revocationReasonCode: null,
     grant: { id: `grant-${index}`, role },
     effectiveRole: role,
-    presence: { online: input.online ?? true, lastHeartbeatAt: 1 },
+    presence: { online: input.online ?? true, lastHeartbeatAt: input.lastHeartbeatAt ?? 1 },
   } as HostedHubNode;
 }
 
@@ -68,11 +86,15 @@ function memoryCache(): WorkspaceMetadataCache {
   };
 }
 
-function snapshot(environmentId: EnvironmentId, title = "Thread"): WorkspaceMetadataSnapshot {
+function snapshot(
+  environmentId: EnvironmentId,
+  title = "Thread",
+  capturedAt = 10,
+): WorkspaceMetadataSnapshot {
   return {
     schemaVersion: WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION,
     environmentId,
-    capturedAt: 10,
+    capturedAt,
     projects: [
       {
         environmentId,
@@ -201,7 +223,7 @@ describe("DesktopWorkspaceClient", () => {
     const renamed = await handlers.renameDevice({ environmentId: id, label: "  Studio Mac  " });
     expect(renameNode).toHaveBeenCalledExactlyOnceWith(node(1).id, "Studio Mac");
     expect(renamed.machines.find((entry) => entry.environmentId === id)?.label).toBe("Studio Mac");
-    expect(client.snapshot().workspace.snapshots).toEqual(before.workspace.snapshots);
+    expect(client.snapshot().snapshots).toEqual(before.snapshots);
     expect(
       renamed.machines.find((entry) => entry.environmentId === node(2).environmentId)?.label,
     ).toBe("Node 2");
@@ -330,7 +352,7 @@ describe("DesktopWorkspaceClient", () => {
       catalog: [],
       queuedEnvironmentIds: [],
     });
-    expect(invalidated.workspace.machines).toEqual([]);
+    expect(invalidated.snapshots).toEqual([]);
     expect(releaseCalls).toContain(nodes[0]!.environmentId);
   });
 
@@ -343,7 +365,7 @@ describe("DesktopWorkspaceClient", () => {
 
     const restarted = fixture({ nodes, cache });
     const state = await restarted.client.resume();
-    expect(state.workspace.threads).toHaveLength(1);
+    expect(state.snapshots.flatMap((entry) => entry.threads)).toHaveLength(1);
     expect(restarted.connectCalls).toEqual([]);
 
     await restarted.client.retainScope({
@@ -365,7 +387,11 @@ describe("DesktopWorkspaceClient", () => {
     await client.acceptWorkspaceSnapshot(snapshot(nodes[0]!.environmentId, "Local"));
     const state = await client.acceptWorkspaceSnapshot(snapshot(nodes[1]!.environmentId, "Remote"));
 
-    expect(state.workspace.threads.map((thread) => [thread.environmentId, thread.title])).toEqual([
+    expect(
+      state.snapshots
+        .flatMap((entry) => entry.threads)
+        .map((thread) => [thread.environmentId, thread.title]),
+    ).toEqual([
       [nodes[0]!.environmentId, "Local"],
       [nodes[1]!.environmentId, "Remote"],
     ]);
@@ -566,5 +592,156 @@ describe("desktop workspace demand serialization", () => {
     });
     await f.client.releaseScope(leaseId);
     await expect(f.client.renewScope(leaseId)).rejects.toThrow("lease expired");
+  });
+});
+
+describe("desktop workspace publication", () => {
+  async function subscribed(input: Parameters<typeof fixture>[0] = {}) {
+    const f = fixture(input);
+    await f.client.resume();
+    const published: DesktopWorkspaceClientSnapshot[] = [];
+    f.client.subscribe((state) => void published.push(state));
+    return { ...f, published };
+  }
+
+  it("publishes nothing for a renewal, focus change, or directory read that alters nothing", async () => {
+    const f = await subscribed();
+    const { leaseId } = await f.client.retainScope({
+      environmentId: node(2).environmentId,
+      scope: { type: "interactive" },
+    });
+    const afterRetain = f.published.length;
+    expect(afterRetain).toBeGreaterThan(0);
+
+    await f.client.renewScope(leaseId);
+    await f.client.renewScope(leaseId);
+    await f.client.setBackgrounded(true);
+    await f.client.setBackgrounded(false);
+
+    // Every directory read stamps a later observation time on each machine, and
+    // a node's heartbeat moves between reads. Neither changes what a subscriber
+    // can observe.
+    const timestamps = () =>
+      f.client
+        .snapshot()
+        .catalog.map((entry) => [entry.presence.observedAt, entry.presence.lastSeenAt]);
+    for (const lastHeartbeatAt of [2, 3]) {
+      const before = timestamps();
+      f.setDirectory([node(1, { lastHeartbeatAt }), node(2, { lastHeartbeatAt })]);
+      await f.client.refreshCatalog();
+      expect(timestamps()).not.toEqual(before);
+    }
+
+    expect(f.published).toHaveLength(afterRetain);
+  });
+
+  it("publishes a connection change and marks the snapshots it repeats", async () => {
+    const f = await subscribed();
+    const environmentId = node(1).environmentId;
+    await f.client.acceptWorkspaceSnapshot(snapshot(environmentId));
+    const [accepted] = f.published.slice(-1);
+    expect(accepted?.snapshots).toHaveLength(1);
+    expect(accepted?.snapshotsUnchanged).toBeUndefined();
+
+    f.client.reportConnection(environmentId, true);
+    const [reported] = f.published.slice(-1);
+    expect(reported).not.toBe(accepted);
+    expect(reported?.snapshotsUnchanged).toBe(true);
+    expect(reported?.snapshots).toHaveLength(1);
+    expect(reported?.catalog.find((entry) => entry.environmentId === environmentId)).toMatchObject({
+      connectionState: "connected",
+    });
+  });
+
+  it("publishes a changed snapshot once and an identical one not at all", async () => {
+    const f = await subscribed();
+    const environmentId = node(1).environmentId;
+    await f.client.acceptWorkspaceSnapshot(snapshot(environmentId, "First", 10));
+    const afterFirst = f.published.length;
+
+    await f.client.acceptWorkspaceSnapshot(snapshot(environmentId, "First", 10));
+    expect(f.published).toHaveLength(afterFirst);
+
+    await f.client.acceptWorkspaceSnapshot(snapshot(environmentId, "Second", 11));
+    expect(f.published).toHaveLength(afterFirst + 1);
+    const [latest] = f.published.slice(-1);
+    expect(latest?.snapshotsUnchanged).toBeUndefined();
+    expect(latest?.snapshots[0]?.threads[0]?.title).toBe("Second");
+  });
+
+  it("publishes the state that follows a purge or a loss of access", async () => {
+    const f = await subscribed();
+    const environmentId = node(1).environmentId;
+    await f.client.acceptWorkspaceSnapshot(snapshot(environmentId));
+    const before = f.published.length;
+
+    await f.client.purgeCache(environmentId);
+    expect(f.published).toHaveLength(before + 1);
+    expect(f.published.at(-1)?.snapshots).toEqual([]);
+
+    f.client.invalidateAccess();
+    expect(f.published).toHaveLength(before + 2);
+    expect(f.published.at(-1)).toMatchObject({ status: "unavailable", snapshotsUnchanged: true });
+  });
+
+  it("carries only the snapshots of machines whose metadata can be read", async () => {
+    const nodes = [node(1), node(2)];
+    const cache = memoryCache();
+    const warm = fixture({ nodes, cache });
+    await warm.client.resume();
+    await warm.client.acceptWorkspaceSnapshot(snapshot(nodes[0]!.environmentId));
+    await warm.client.acceptWorkspaceSnapshot(snapshot(nodes[1]!.environmentId));
+    expect(warm.client.snapshot().snapshots).toHaveLength(2);
+
+    // The second machine is no longer verified, so its cached metadata stays hidden.
+    const restarted = fixture({ nodes, cache, trustedNodeIds: new Set([nodes[0]!.id]) });
+    const state = await restarted.client.resume();
+    expect(state.snapshots.map((entry) => entry.environmentId)).toEqual([nodes[0]!.environmentId]);
+    await expect(
+      restarted.client.acceptWorkspaceSnapshot(snapshot(nodes[1]!.environmentId)),
+    ).rejects.toThrow("not eligible");
+  });
+});
+
+describe("desktop workspace snapshot intake", () => {
+  it("validates and measures a published snapshot once on its way to the cache file", async () => {
+    const directory = FS.mkdtempSync(Path.join(OS.tmpdir(), "ryco-desktop-workspace-intake-"));
+    const cache = createDesktopWorkspaceMetadataCache(
+      Path.join(directory, "desktop-workspace-client", "metadata-v1.json"),
+    );
+    const validate = vi.mocked(isWorkspaceMetadataSnapshot);
+    const measure = vi.mocked(workspaceMetadataPayloadBytes);
+    try {
+      const f = fixture({ cache });
+      await f.client.resume();
+      const handlers = createDesktopWorkspaceIpcHandlers(f.client);
+      const environmentId = node(1).environmentId;
+
+      for (const [title, capturedAt] of [
+        ["First", 10],
+        ["Second", 11],
+        ["Third", 12],
+      ] as const) {
+        validate.mockClear();
+        measure.mockClear();
+        await handlers.publishSnapshot(snapshot(environmentId, title, capturedAt));
+        expect(validate).toHaveBeenCalledTimes(1);
+        expect(measure).toHaveBeenCalledTimes(1);
+      }
+
+      await cache.flush();
+      const stored = await cache.load({
+        hubOrigin: "https://hub.example",
+        accountId: "account-a",
+        environmentId,
+      });
+      expect(stored?.snapshot.threads[0]?.title).toBe("Third");
+      expect(stored?.payloadBytes).toBe(
+        workspaceMetadataPayloadBytes(snapshot(environmentId, "Third", 12)),
+      );
+    } finally {
+      await cache.dispose();
+      FS.rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
