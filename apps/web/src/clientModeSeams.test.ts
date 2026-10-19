@@ -111,6 +111,7 @@ describe("client-mode seams", () => {
     expect(() => registry.ensureRecord({} as Parameters<typeof registry.ensureRecord>[0])).toThrow(
       /hosted-hub builds/u,
     );
+    expect(standard.hostedEnvironmentSessionsMode()).toBe("single");
   });
 
   it("reports the signed-out hosted workspace and never grants a lease", async () => {
@@ -123,6 +124,8 @@ describe("client-mode seams", () => {
     expect(standard.readHostedNodeMutationLease(environmentId)).toBeNull();
     await expect(standard.waitForHostedNodeMutationLease(environmentId)).resolves.toBeNull();
     expect(standard.nodeIdForHostedEnvironment(environmentId)).toBeNull();
+    expect(standard.isHostedEnvironmentDemanded(environmentId)).toBe(false);
+    expect(standard.requestHostedWorkspaceReconcile({ reason: "resume" })).toBeUndefined();
     expect(() => standard.startHostedWorkspaceCoordinator()).toThrow(/hosted-hub builds/u);
   });
 
@@ -133,6 +136,16 @@ describe("client-mode seams", () => {
       null,
     );
     expect(() => standard.getHostedRelayAttemptFactory()).toThrow(/hosted-hub builds/u);
+    expect(() =>
+      standard.createHostedEnvironmentAttemptFactory(
+        {} as Parameters<typeof standard.createHostedEnvironmentAttemptFactory>[0],
+      ),
+    ).toThrow(/hosted-hub builds/u);
+    expect(() =>
+      standard.webHostedEnvironmentAttemptPorts(
+        {} as Parameters<typeof standard.webHostedEnvironmentAttemptPorts>[0],
+      ),
+    ).toThrow(/hosted-hub builds/u);
   });
 
   it("keeps the hosted boot gate loud in standard builds", async () => {

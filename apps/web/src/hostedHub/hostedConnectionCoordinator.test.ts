@@ -5,17 +5,26 @@ import {
 } from "@ryco/client-runtime/state/workspace";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import type { HostedBrowserStatus, HostedHubNode } from "@ryco/client-runtime/authorization";
+import {
+  isHostedEnvironmentSessionLive,
+  resetHostedEnvironmentSessionsForTests,
+  type HostedBrowserStatus,
+  type HostedHubNode,
+  type HostedHubState,
+} from "@ryco/client-runtime/authorization";
 
 import {
   MAX_HOSTED_WEB_CONNECTIONS,
   createHostedConnectionCoordinator,
   hostedDemandUnblocked,
   readHostedDemandReadiness,
+  readHostedNodeMutationLease,
+  readHostedWorkspaceState,
   startHostedWorkspaceCoordinator,
 } from "./hostedConnectionCoordinator";
 import { createHostedWebScopeStore, hostedWebConnectionScopes } from "./hostedConnectionScopes";
-import { hostedHubController, hostedHubStore } from "./state";
+import { HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS } from "./runtime";
+import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
 
 const environment = (index: number) => EnvironmentId.make(`env_${String(index).padStart(22, "0")}`);
 const thread = (index: number) => ThreadId.make(`thread_${String(index)}`);
@@ -23,16 +32,17 @@ const thread = (index: number) => ThreadId.make(`thread_${String(index)}`);
 function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
   let now = 1;
   const connected = new Set<EnvironmentId>();
-  const connects: Array<{ environmentId: EnvironmentId; delayMs: number }> = [];
+  const connects: Array<{ environmentId: EnvironmentId }> = [];
   const releases: EnvironmentId[] = [];
   const scopes = createHostedWebScopeStore();
   const coordinator = createHostedConnectionCoordinator({
     scopes,
     ...(foregroundEnvironmentId ? { foregroundEnvironmentId } : {}),
     now: () => now,
-    connect: async (environmentId, delayMs) => {
-      connects.push({ environmentId, delayMs });
+    connect: async (environmentId) => {
+      connects.push({ environmentId });
       connected.add(environmentId);
+      return "connected";
     },
     release: async (environmentId) => {
       releases.push(environmentId);
@@ -534,5 +544,341 @@ describe("hosted Web demand follows directory state", () => {
 
     expect(releaseWatch).toHaveBeenCalledOnce();
     releaseScope();
+  });
+});
+
+describe("hosted Web single-session machine catalog", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    hostedWebConnectionScopes.reset();
+    hostedHubController.resetForTests();
+  });
+
+  const ownerNode = (environmentId: EnvironmentId): HostedHubNode => ({
+    ...hubNode(environmentId, true),
+    grant: { id: "grant_bbbbbbbbbbbbbbbbbbbbbb", role: "owner" },
+    effectiveRole: "owner",
+  });
+
+  /** The selected node with a cached shell, so its lease only waits on the session. */
+  function startSelected(node: HostedHubNode, session: Partial<HostedHubState>) {
+    const environmentId = node.environmentId;
+    const snapshot = {
+      schemaVersion: 1 as const,
+      environmentId,
+      capturedAt: 1,
+      projects: [],
+      worktrees: [],
+      threads: [],
+    };
+    const record = {
+      namespace: { hubOrigin: "https://hub.example.test", accountId: "account-a", environmentId },
+      snapshot,
+      payloadBytes: workspaceMetadataPayloadBytes(snapshot),
+      updatedAt: 1,
+    };
+    signedInDirectory([node]);
+    hostedHubStore.setState({ selectedNode: node, selectionStatus: "online", ...session });
+    vi.spyOn(hostedHubController, "returnToDirectory").mockResolvedValue();
+    return startHostedWorkspaceCoordinator({
+      cache: { ...emptyCache, list: async () => [record] },
+      hubOrigin: "https://hub.example.test",
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+  }
+
+  it.each(["ready", "replaying", "delivery-unknown"] as const)(
+    "shows an online, established selected session that is %s as connected and leases it",
+    async (sessionStatus) => {
+      const env = environment(11);
+      const stop = startSelected(ownerNode(env), {
+        transportStatus: "online",
+        sessionEstablished: true,
+        sessionStatus,
+        effectiveRole: "owner",
+      });
+
+      await vi.waitFor(() =>
+        expect(readHostedWorkspaceState().machines).toMatchObject([
+          {
+            environmentId: env,
+            connectionState: "connected",
+            deliveryUnknown: sessionStatus === "delivery-unknown",
+            canMutate: true,
+          },
+        ]),
+      );
+      await vi.waitFor(() => expect(readHostedNodeMutationLease(env)).not.toBeNull());
+      stop();
+    },
+  );
+
+  it("shows a selected session that is still being established as disconnected", async () => {
+    const env = environment(12);
+    const stop = startSelected(ownerNode(env), {
+      transportStatus: "connecting",
+      sessionEstablished: false,
+      sessionStatus: "synchronizing",
+      // The directory's role stands while one session is being established.
+      effectiveRole: "viewer",
+    });
+
+    await vi.waitFor(() =>
+      expect(readHostedWorkspaceState().machines).toMatchObject([
+        {
+          environmentId: env,
+          connectionState: "disconnected",
+          deliveryUnknown: false,
+          effectiveRole: "owner",
+        },
+      ]),
+    );
+    expect(readHostedNodeMutationLease(env)).toBeNull();
+    stop();
+  });
+});
+
+describe("hosted Web retained environment sessions", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    hostedWebConnectionScopes.reset();
+    hostedHubController.resetForTests();
+    resetHostedEnvironmentSessionsForTests();
+  });
+
+  it("keeps retained sessions off until more than one connection is allowed", () => {
+    expect(HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS).toBe(MAX_HOSTED_WEB_CONNECTIONS > 1);
+  });
+
+  function retainedHarness(input: { readonly foreground: () => EnvironmentId | null }) {
+    const scopes = createHostedWebScopeStore();
+    const startedAt = Date.now();
+    const connects: Array<{ readonly environmentId: EnvironmentId; readonly at: number }> = [];
+    const live = new Set<EnvironmentId>();
+    let mostLive = 0;
+    const coordinator = createHostedConnectionCoordinator({
+      scopes,
+      mode: "retained",
+      maxConnections: 3,
+      foregroundEnvironmentId: input.foreground,
+      now: () => Date.now(),
+      connect: async (environmentId) => {
+        connects.push({ environmentId, at: Date.now() - startedAt });
+        live.add(environmentId);
+        mostLive = Math.max(mostLive, live.size);
+        return "connected";
+      },
+      release: async (environmentId) => {
+        live.delete(environmentId);
+      },
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+    return { coordinator, scopes, connects, live, mostLive: () => mostLive };
+  }
+
+  it("connects a routed environment at once while staggered wakes are still pending", async () => {
+    vi.useFakeTimers();
+    let routed: EnvironmentId | null = null;
+    const test = retainedHarness({ foreground: () => routed });
+    for (let index = 1; index <= 3; index += 1) {
+      test.scopes.retain(environment(index), { type: "thread-detail", threadId: thread(index) });
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    // The first wake starts at once, the others 750 ms apart.
+    expect(test.connects).toEqual([{ environmentId: environment(1), at: 0 }]);
+    expect(test.coordinator.executorSnapshot().pendingWakes).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(10);
+    routed = environment(4);
+    test.scopes.retain(environment(4), { type: "thread-detail", threadId: thread(4) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.connects.at(-1)).toEqual({ environmentId: environment(4), at: 10 });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(test.mostLive()).toBeLessThanOrEqual(3);
+    expect(test.coordinator.snapshot().activeConnectionCount).toBe(3);
+    expect(test.coordinator.snapshot().queuedEnvironmentIds).toHaveLength(1);
+    test.coordinator.dispose();
+  });
+
+  it("never holds more than three connections for five demanded nodes", async () => {
+    vi.useFakeTimers();
+    const test = retainedHarness({ foreground: () => null });
+    for (let index = 1; index <= 5; index += 1) {
+      test.scopes.retain(environment(index), { type: "thread-detail", threadId: thread(index) });
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(test.mostLive()).toBe(3);
+    expect(test.live.size).toBe(3);
+    expect(test.coordinator.snapshot().queuedEnvironmentIds).toHaveLength(2);
+    test.coordinator.dispose();
+  });
+
+  function retainedNode(index: number, online = true): HostedHubNode {
+    return {
+      ...hubNode(environment(index), online),
+      id: `node_${String(index).padStart(22, "0")}`,
+      label: `Node ${index}`,
+    };
+  }
+
+  /**
+   * The workspace coordinator in retained mode over the real session registry;
+   * the lifecycle owner's acquire and release are recorded and write the
+   * registry as the controller would.
+   */
+  function startRetained(
+    nodes: ReadonlyArray<HostedHubNode>,
+    options?: {
+      /** Nodes whose records are live before the coordinator starts. */
+      readonly warm?: ReadonlyArray<HostedHubNode>;
+    },
+  ) {
+    signedInDirectory(nodes);
+    resetHostedEnvironmentSessionsForTests();
+    const sessions = getHostedEnvironmentSessions();
+    for (const node of options?.warm ?? []) {
+      sessions.markConnectRequested(node.environmentId, sessions.ensureRecord(node).generation);
+    }
+    let mostLive = 0;
+    sessions.subscribe(() => {
+      const live = sessions.list().filter((record) => isHostedEnvironmentSessionLive(record));
+      mostLive = Math.max(mostLive, live.length);
+    });
+    const acquired: EnvironmentId[] = [];
+    const released: EnvironmentId[] = [];
+    vi.spyOn(hostedHubController, "acquireEnvironment").mockImplementation(async (nodeId) => {
+      const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId)!;
+      const record = sessions.ensureRecord(node);
+      sessions.markConnectRequested(node.environmentId, record.generation);
+      acquired.push(node.environmentId);
+      return "connecting";
+    });
+    vi.spyOn(hostedHubController, "releaseEnvironment").mockImplementation(
+      async (environmentId) => {
+        released.push(environmentId);
+        sessions.release(environmentId);
+      },
+    );
+    const watchPresence = vi
+      .spyOn(hostedHubController, "watchDirectoryPresence")
+      .mockReturnValue(() => undefined);
+    const ticks: Array<() => void> = [];
+    const stop = startHostedWorkspaceCoordinator({
+      cache: emptyCache,
+      hubOrigin: "https://hub.example.test",
+      mode: "retained",
+      maxConnections: 3,
+      setInterval: (callback) => ticks.push(callback),
+      clearInterval: () => undefined,
+    });
+    return {
+      sessions,
+      acquired,
+      released,
+      watchPresence,
+      mostLive: () => mostLive,
+      tick: () => ticks.forEach((callback) => callback()),
+      stop,
+    };
+  }
+
+  it("counts the live records an earlier coordinator left against the cap", async () => {
+    const nodes = [1, 2, 3, 4].map((index) => retainedNode(index));
+    const test = startRetained(nodes, { warm: nodes.slice(0, 3) });
+    const routed = environment(4);
+    const releaseView = hostedWebConnectionScopes.retain(routed, {
+      type: "thread-detail",
+      threadId: thread(4),
+    });
+
+    // The warm records hold every slot, so one of them makes room first.
+    await vi.waitFor(() => expect(test.acquired).toEqual([routed]));
+    expect(test.released).toHaveLength(1);
+    expect(test.mostLive()).toBeLessThanOrEqual(3);
+    expect(
+      test.sessions.list().filter((record) => isHostedEnvironmentSessionLive(record)),
+    ).toHaveLength(3);
+    releaseView();
+    test.stop();
+  });
+
+  it("releases background demand a rate limit hit instead of retrying it", async () => {
+    const nodes = [retainedNode(1), retainedNode(2)];
+    const test = startRetained(nodes);
+    const background = environment(1);
+    const view = environment(2);
+    const releaseDraft = hostedWebConnectionScopes.retain(background, { type: "interactive" });
+    const releaseView = hostedWebConnectionScopes.retain(view, {
+      type: "thread-detail",
+      threadId: thread(2),
+    });
+    await vi.waitFor(() => expect(test.acquired.toSorted()).toEqual([background, view]));
+
+    for (const environmentId of [background, view]) {
+      const record = test.sessions.read(environmentId)!;
+      test.sessions.failure(environmentId, record.generation, {
+        kind: "rate-limited",
+        retryable: true,
+      });
+    }
+
+    // The background demand stands down; the mounted view keeps its backoff.
+    await vi.waitFor(() => expect(test.released).toEqual([background]));
+    test.tick();
+    test.tick();
+    test.tick();
+    await settleCoordinator();
+    expect(test.acquired.filter((environmentId) => environmentId === background)).toHaveLength(1);
+    expect(test.sessions.read(view)).toBeDefined();
+
+    // New demand is a new edge.
+    releaseDraft();
+    const releaseAgain = hostedWebConnectionScopes.retain(background, { type: "interactive" });
+    await vi.waitFor(() =>
+      expect(test.acquired.filter((environmentId) => environmentId === background)).toHaveLength(2),
+    );
+    releaseAgain();
+    releaseView();
+    test.stop();
+  });
+
+  it("releases a non-selected record whose node went offline until the node is back", async () => {
+    const nodes = [retainedNode(1), retainedNode(2)];
+    const test = startRetained(nodes);
+    const selected = environment(1);
+    const other = environment(2);
+    hostedHubStore.setState({ selectedNode: nodes[0]! });
+    const releaseSelected = hostedWebConnectionScopes.retain(selected, {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
+    const releaseOther = hostedWebConnectionScopes.retain(other, {
+      type: "thread-detail",
+      threadId: thread(2),
+    });
+    await vi.waitFor(() => expect(test.acquired.toSorted()).toEqual([selected, other]));
+
+    hostedHubStore.setState({ nodes: [retainedNode(1, false), retainedNode(2, false)] });
+
+    // Only the selected record keeps its transport's backoff.
+    await vi.waitFor(() => expect(test.released).toEqual([other]));
+    expect(test.watchPresence).toHaveBeenCalled();
+    test.tick();
+    await settleCoordinator();
+    expect(test.acquired.filter((environmentId) => environmentId === other)).toHaveLength(1);
+
+    hostedHubStore.setState({ nodes });
+    await vi.waitFor(() =>
+      expect(test.acquired.filter((environmentId) => environmentId === other)).toHaveLength(2),
+    );
+    expect(test.released).toEqual([other]);
+    releaseSelected();
+    releaseOther();
+    test.stop();
   });
 });

@@ -1,6 +1,7 @@
 import type {
   HostedAccountRefused,
   HostedAccountState,
+  HostedEnvironmentSessionsMode,
   HostedHubState,
   HostedRecoveryCodeDisplayState,
 } from "@ryco/client-runtime/authorization";
@@ -180,6 +181,9 @@ const standardHostedEnvironmentSessions: {
 
 export const getHostedEnvironmentSessions: () => HostedEnvironmentSessions = () =>
   standardHostedEnvironmentSessions;
+
+/** A standard build keeps no hosted environment sessions at all. */
+export const hostedEnvironmentSessionsMode: () => HostedEnvironmentSessionsMode = () => "single";
 
 /** Standard builds have no hosted runtime to configure. */
 export const ensureWebHostedRuntimeConfigured: () => void = ignore;

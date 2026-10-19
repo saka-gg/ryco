@@ -4,6 +4,7 @@ import {
   refreshActiveKeyedQueriesForEnvironment,
 } from "@ryco/client-runtime/rpc";
 import type { HostedHubState } from "@ryco/client-runtime/authorization";
+import type { HostedEnvironmentSessionRecord } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
 
 import { defaultQueryClient } from "./queryClient";
 
@@ -47,6 +48,53 @@ export function isHostedEnvironmentQueryRefreshReady(
     state.sessionStatus === "ready" &&
     state.sessionEstablished &&
     state.browserStatus === "current"
+  );
+}
+
+/** What a retained environment session's query refresh is fenced by. */
+export interface HostedRecordQueryRefreshState {
+  /** The environment's session record, if it has one. */
+  readonly record:
+    | Pick<
+        HostedEnvironmentSessionRecord,
+        "environmentId" | "generation" | "transportStatus" | "sessionStatus" | "sessionEstablished"
+      >
+    | null
+    | undefined;
+  readonly shared: Pick<HostedHubState, "directoryStatus" | "browserStatus">;
+}
+
+/**
+ * The account and directory were checked in this browser lifecycle. The same
+ * rule as the session registry's `hostedBrowserRevalidated`, restated here
+ * because standard builds load this module and must not bundle the registry;
+ * a test keeps the two in step.
+ */
+function browserRevalidated(status: HostedHubState["browserStatus"]): boolean {
+  return status === "current" || status === "synchronizing";
+}
+
+/**
+ * Retained environment sessions: the environment's own record of this
+ * generation has accepted its snapshot on a live relay. The selection and the
+ * shared generation play no part, so an environment that is not selected
+ * refreshes its fenced queries as soon as its own session is current again.
+ */
+export function isHostedRecordQueryRefreshReady(
+  state: HostedRecordQueryRefreshState,
+  environmentId: EnvironmentId,
+  generation: number,
+): boolean {
+  const { record, shared } = state;
+  return (
+    record != null &&
+    record.environmentId === environmentId &&
+    record.generation === generation &&
+    record.transportStatus === "online" &&
+    record.sessionStatus === "ready" &&
+    record.sessionEstablished &&
+    shared.directoryStatus === "ready" &&
+    browserRevalidated(shared.browserStatus)
   );
 }
 

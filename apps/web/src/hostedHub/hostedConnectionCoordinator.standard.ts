@@ -55,6 +55,11 @@ export const hasActiveHostedWorkspaceCoordinator: Hosted["hasActiveHostedWorkspa
 export const setHostedWorkspaceBackgrounded: Hosted["setHostedWorkspaceBackgrounded"] = () =>
   Promise.resolve();
 
+export const isHostedEnvironmentDemanded: Hosted["isHostedEnvironmentDemanded"] = () => false;
+
+export const requestHostedWorkspaceReconcile: Hosted["requestHostedWorkspaceReconcile"] = () =>
+  undefined;
+
 export const retryHostedHomeDiscovery: Hosted["retryHostedHomeDiscovery"] = () => undefined;
 
 export const startHostedWorkspaceCoordinator: Hosted["startHostedWorkspaceCoordinator"] = () =>

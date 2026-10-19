@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { createFakeHistoryWindow } from "../../test/fakeHistoryWindow";
 import { useStore, selectSidebarThreadsAcrossEnvironments } from "../store";
 import { workspaceMetadataToCachedShellSnapshot } from "../workspaceMetadataProjection";
-import { hostedHubController, hostedHubStore } from "./state";
+import { resetHostedEnvironmentSessionsForTests } from "@ryco/client-runtime/authorization";
+import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
 import { hostedWebConnectionScopes } from "./hostedConnectionScopes";
 import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "./nodeRoutes";
 import {
@@ -514,6 +515,45 @@ describe("hosted home discovery", () => {
     await settle();
     expect(readHostedWorkspaceState().workspace.threads).toHaveLength(1);
     expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+  });
+
+  it("discovers through acquire with retained sessions and never moves the selection", async () => {
+    resetHostedEnvironmentSessionsForTests();
+    const sessions = getHostedEnvironmentSessions();
+    const acquire = vi
+      .spyOn(hostedHubController, "acquireEnvironment")
+      .mockImplementation(async (nodeId) => {
+        const target = nodes.find((entry) => entry.id === nodeId)!;
+        const record = sessions.ensureRecord(target);
+        sessions.markConnectRequested(target.environmentId, record.generation);
+        return "connecting";
+      });
+    const release = vi
+      .spyOn(hostedHubController, "releaseEnvironment")
+      .mockImplementation(async (environmentId) => sessions.release(environmentId));
+    stop = startHostedWorkspaceCoordinator({
+      hubOrigin: "https://hub.example.test",
+      mode: "retained",
+      maxConnections: 1,
+      cache: {
+        list,
+        load: async () => null,
+        replace: async () => undefined,
+        purgeAccount: async () => undefined,
+        purgeEnvironment: async () => undefined,
+      },
+    });
+    await settle();
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id]]);
+    expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBe(nodes[0]!.environmentId);
+
+    await complete(nodes[0]!.environmentId);
+    // The discovered device leaves its one slot to the next.
+    expect(release).toHaveBeenCalledWith(nodes[0]!.environmentId);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
+    expect(select).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState().selectedNode).toBeNull();
+    resetHostedEnvironmentSessionsForTests();
   });
 
   it("does not discover on account pages or after sign-out", async () => {
