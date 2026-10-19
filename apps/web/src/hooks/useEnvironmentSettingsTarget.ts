@@ -56,7 +56,10 @@ export function useEnvironmentSettingsTarget(
   const primaryEnvironment = usePrimaryEnvironmentDescriptor();
   const primaryServerConfig = useAtomValue(serverConfigAtom);
   const desktopWorkspace = useDesktopWorkspaceState();
-  const nodeWriteCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
+  const nodeWriteCapability = useHostedRpcCapability(
+    WS_METHODS.serverUpdateSettings,
+    environmentId,
+  );
   const savedEnvironment = useSavedEnvironmentRegistryStore((state) =>
     environmentId ? (state.byId[environmentId] ?? null) : null,
   );
@@ -110,11 +113,9 @@ export function useEnvironmentSettingsTarget(
     nodeLabel,
     serverConfig,
     primary: isPrimary,
-    canManage:
-      connected &&
-      (hosted
-        ? role === "owner" && roleFresh && nodeWriteCapability.allowed
-        : canManageUnauthorized),
+    // Updating settings is owner-only, so the capability already answers for this
+    // node's own role and freshness; the shared role belongs to the selected node.
+    canManage: connected && (hosted ? nodeWriteCapability.allowed : canManageUnauthorized),
     canMutate:
       isPrimary ||
       (desktopWorkspaceMachine

@@ -415,10 +415,22 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
     () => records.filter((worktree) => !isWorkspaceDeleted(worktree)),
     [records],
   );
-  const listCapability = useHostedRpcCapability(WS_METHODS.lifecycleListWorkspaces);
-  const suggestionsCapability = useHostedRpcCapability(WS_METHODS.lifecycleSuggestions);
-  const applyCapability = useHostedRpcCapability(WS_METHODS.lifecycleApplyWorkspace);
-  const createCapability = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject);
+  const listCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleListWorkspaces,
+    member.environmentId,
+  );
+  const suggestionsCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleSuggestions,
+    member.environmentId,
+  );
+  const applyCapability = useHostedRpcCapability(
+    WS_METHODS.lifecycleApplyWorkspace,
+    member.environmentId,
+  );
+  const createCapability = useHostedRpcCapability(
+    WS_METHODS.gitCreateWorktreeForProject,
+    member.environmentId,
+  );
   const signature = useMemo(() => workspaceInspectionSignature(worktrees), [worktrees]);
   const { inspection, reinspect } = useProjectWorkspaceInspection({
     environmentId: member.environmentId,

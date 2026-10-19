@@ -102,7 +102,7 @@ export function useCheckoutDiskUsage(member: {
     useShallow((state) => selectSidebarWorktreesForProjectRef(state, ref)),
   );
   const signature = useMemo(() => workspaceInspectionSignature(worktrees), [worktrees]);
-  const capability = useHostedRpcCapability(WS_METHODS.lifecycleDiskUsage);
+  const capability = useHostedRpcCapability(WS_METHODS.lifecycleDiskUsage, member.environmentId);
   return useProjectDiskUsage({
     environmentId: member.environmentId,
     projectId: member.id,

@@ -125,7 +125,10 @@ export function ListHeader(props: {
  */
 function NewPullRequestButton() {
   const { repository, model, nav } = usePullRequestsPage();
-  const allowed = useHostedRpcCapability(WS_METHODS.sourceControlCreateChangeRequest).allowed;
+  const allowed = useHostedRpcCapability(
+    WS_METHODS.sourceControlCreateChangeRequest,
+    repository?.environmentId ?? null,
+  ).allowed;
   const [open, setOpen] = useState(false);
   const target = useMemo<CreatePullRequestTarget | null>(
     () =>

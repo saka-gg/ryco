@@ -13,7 +13,10 @@ export function SessionImportSettings() {
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const tier = usePresentationTier();
-  const capability = useHostedRpcCapability(WS_METHODS.sessionImportRun);
+  const capability = useHostedRpcCapability(
+    WS_METHODS.sessionImportRun,
+    target?.environmentId ?? null,
+  );
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
   const current = useRef({ allowed: false, environmentId: target?.environmentId });
   const allowed =

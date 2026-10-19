@@ -87,7 +87,10 @@ export function CliProxyHubSettings() {
   const tier = usePresentationTier();
   const navigate = useNavigate();
   const closeSettings = useSettingsDialogStore((state) => state.closeSettings);
-  const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
+  const settingsCapability = useHostedRpcCapability(
+    WS_METHODS.serverUpdateSettings,
+    target?.environmentId ?? null,
+  );
   const hubs = config?.settings.cliProxyHubs ?? {};
   const entries = (Object.entries(hubs) as Array<[CliProxyHubId, CliProxyHubConfig]>).toSorted(
     ([, left], [, right]) => hubDisplayName(left).localeCompare(hubDisplayName(right)),

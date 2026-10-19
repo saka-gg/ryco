@@ -42,8 +42,8 @@ export function ProjectPreferenceSettings({
   const config = useServerConfig();
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
-  const capability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
+  const capability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings, environmentId ?? null);
   const disabled =
     !capability.allowed ||
     scope === "client" ||
