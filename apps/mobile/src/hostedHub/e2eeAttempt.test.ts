@@ -3,7 +3,7 @@ import { createPrivateKey, createPublicKey, sign as signBytes, type KeyObject } 
 import { hostedHubStore, type HostedRelayFailure } from "@ryco/client-runtime/authorization";
 import type { RelayE2eeHost } from "@ryco/client-runtime/relay";
 import type { RelayE2eeInitiatorAttempt } from "@ryco/client-runtime/relay/e2ee";
-import { RELAY_INITIAL_LIMITS } from "@ryco/contracts";
+import { RELAY_INITIAL_LIMITS, type EnvironmentId } from "@ryco/contracts";
 import { decodeE2eeClientHello } from "@ryco/shared/relayE2eeHandshake";
 import { e2eeKeyFingerprint, formatE2eeKeyFingerprint } from "@ryco/shared/relayE2eeKeys";
 import {
@@ -73,6 +73,10 @@ const PREKEY_SIGNATURE = (() => {
 })();
 /** A §7.1-valid Ed25519 node identity key. §16.1-style material, TEST ONLY. */
 const NODE_PUBLIC_KEY = bytes("03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8");
+/** A second valid identity, so two pinned nodes carry distinguishable pins. TEST ONLY. */
+const OTHER_NODE_PUBLIC_KEY = bytes(
+  "5866666666666666666666666666666666666666666666666666666666666666",
+);
 
 /**
  * The custody seams, all of which reach a keychain or the enclave. Each one can
@@ -97,6 +101,9 @@ const relayProvider = vi.hoisted(() => ({
   attempt: null as RelayE2eeInitiatorAttempt | null,
 }));
 const hubApi = vi.hoisted(() => ({ ticketsIssued: 0 }));
+const hostedRuntime = vi.hoisted(() => ({
+  environmentSessions: "single" as "single" | "retained",
+}));
 
 vi.mock("expo-secure-store", () => ({
   WHEN_UNLOCKED_THIS_DEVICE_ONLY: 0xd,
@@ -188,6 +195,7 @@ vi.mock("../platform/e2eeRelayProvider", async (importOriginal) => {
 // grant's resolver and key custody are never reached on that path.
 vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@ryco/client-runtime/authorization")>()),
+  hostedEnvironmentSessionsMode: () => hostedRuntime.environmentSessions,
   getHostedHubApi: () => ({
     issueRelayTicket: async () => {
       hubApi.ticketsIssued += 1;
@@ -216,10 +224,12 @@ import {
 } from "./e2eeSession";
 import {
   disposeMobileRelayE2eeAttempt,
+  disposeMobileRelayE2eeAttemptFor,
   inspectMobileRelayE2eeAttemptForTests,
   prepareMobileRelayE2eeAttempt,
   resetMobileRelayE2eeAttemptForTests,
   resolveMobileRelayE2eeProvider,
+  type MobileE2eeAttemptTarget,
 } from "./e2eeAttempt";
 import {
   issueMobileRelayAttempt,
@@ -232,6 +242,7 @@ function selectNode(
   nodeId = "node_1",
   accountId = ACCOUNT,
   generation = hostedHubStore.getState().generation,
+  environmentId = "env_1",
 ): void {
   hostedHubStore.setState({
     accountStatus: "authenticated",
@@ -244,7 +255,7 @@ function selectNode(
     },
     selectedNode: {
       id: nodeId,
-      environmentId: "env_1",
+      environmentId,
       label: "Studio",
       platformOs: "darwin",
       platformArch: "arm64",
@@ -268,6 +279,12 @@ function signOut(): void {
     account: null,
     selectedNode: null,
   } as never);
+}
+
+/** Signed in, on the home screen: no node is selected. */
+function signInWithoutSelection(accountId = ACCOUNT): void {
+  selectNode("node_unused", accountId);
+  hostedHubStore.setState({ selectedNode: null } as never);
 }
 
 /** The minimum of `RelayE2eeHost` the fail-closed channel touches. */
@@ -314,6 +331,7 @@ beforeEach(() => {
   custody.onPrekeyStart = null;
   relayProvider.attempt = null;
   hubApi.ticketsIssued = 0;
+  hostedRuntime.environmentSessions = "single";
   setMobileNativeE2eeEnrollmentCoordinator(null);
   resetMobileRelayE2eeAttemptForTests();
   resetMobileE2eeSessionForTests();
@@ -333,10 +351,11 @@ function authenticatedStatement(policyGeneration = 8) {
   } as const;
 }
 
-async function prepareVerifiedSelection(
+/** §13.2 step 5: the owner compared and verified `nodeId`'s identity. */
+async function verifyNode(
   nodeId: string,
-  generation = 1,
   accountId = ACCOUNT,
+  nodeIdentityPublicKey = NODE_PUBLIC_KEY,
 ): Promise<void> {
   await mobileE2eeTrustStore.hydrate();
   const index = await mobileE2eeTrustStore.beginPairing({
@@ -347,10 +366,10 @@ async function prepareVerifiedSelection(
   await mobileE2eeTrustStore.promote(
     mintE2eeOwnerVerificationDecision({
       index,
-      nodeIdentityPublicKey: NODE_PUBLIC_KEY,
+      nodeIdentityPublicKey,
       clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
       comparedSafetyNumber: deriveE2eeSafetyNumber({
-        nodeIdentityPublicKey: NODE_PUBLIC_KEY,
+        nodeIdentityPublicKey,
         clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
         hubOrigin: HUB,
         accountId,
@@ -360,6 +379,14 @@ async function prepareVerifiedSelection(
       decidedAt: 1_000,
     }),
   );
+}
+
+async function prepareVerifiedSelection(
+  nodeId: string,
+  generation = 1,
+  accountId = ACCOUNT,
+): Promise<void> {
+  await verifyNode(nodeId, accountId);
   selectNode(nodeId, accountId, generation);
   await prepareMobileRelayE2eeAttempt();
   resolveMobileRelayE2eeProvider();
@@ -1321,5 +1348,274 @@ describe("authenticated statement persistence owns the mobile handshake", () => 
 
     await expect(commit).rejects.toThrow();
     expect(getMobileE2eeSessionState().selection?.nodeId).not.toBe("node_generation_b");
+  });
+});
+
+describe("per-channel attempts: each environment resolves for its own target", () => {
+  const PIN = formatE2eeKeyFingerprint(e2eeKeyFingerprint("node-identity", NODE_PUBLIC_KEY));
+  const OTHER_PIN = formatE2eeKeyFingerprint(
+    e2eeKeyFingerprint("node-identity", OTHER_NODE_PUBLIC_KEY),
+  );
+  const ENV_A = "env_a" as EnvironmentId;
+  const ENV_B = "env_b" as EnvironmentId;
+
+  /** A channel target as an environment-bound relay binding hands it over. */
+  function target(
+    nodeId: string,
+    environmentId: EnvironmentId,
+    generation = 1,
+  ): { readonly target: MobileE2eeAttemptTarget; readonly supersede: () => void } {
+    let current = true;
+    return {
+      target: {
+        nodeId,
+        nodeLabel: `Label ${nodeId}`,
+        environmentId,
+        generation,
+        isCurrent: () => current,
+      },
+      supersede: () => {
+        current = false;
+      },
+    };
+  }
+
+  function instantiate(provider: ReturnType<typeof resolveMobileRelayE2eeProvider>): unknown[] {
+    const context = host();
+    expect(provider).not.toBeUndefined();
+    provider!(context.host);
+    return context.closes;
+  }
+
+  it("classifies a target against its own node while another is selected, into its own entry", async () => {
+    await verifyNode("node_own_b");
+    selectNode("node_own_a", ACCOUNT, 5, ENV_A);
+    const b = target("node_own_b", ENV_B, 9);
+
+    await prepareMobileRelayE2eeAttempt(b.target);
+
+    // §12.1's latch and §13.1's pin are the TARGET's, not the selection's.
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_B)).toMatchObject({
+      selectionClass: "latched",
+      verifiedPinFingerprint: PIN,
+    });
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)).toBeNull();
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+    expect(getMobileE2eeSessionState(ENV_B)).toMatchObject({
+      channel: "negotiating",
+      pinVerified: true,
+      selection: { nodeId: "node_own_b", nodeLabel: "Label node_own_b", environmentId: ENV_B },
+    });
+    expect(getMobileE2eeSessionState(ENV_A).selection).toBeNull();
+
+    // The selected node resolves against its own record beside it.
+    await prepareMobileRelayE2eeAttempt();
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)).toMatchObject({
+      verifiedPinFingerprint: null,
+    });
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)?.selectionClass).not.toBe("latched");
+    expect(getMobileE2eeSessionState(ENV_B).selection?.nodeId).toBe("node_own_b");
+  });
+
+  it("gives a warm record reconnecting with nothing selected a complete attempt for its node", async () => {
+    await verifyNode("node_warm_b");
+    signInWithoutSelection();
+    const b = target("node_warm_b", ENV_B, 3);
+
+    await prepareMobileRelayE2eeAttempt(b.target);
+
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_B)).toMatchObject({
+      selectionClass: "latched",
+      verifiedPinFingerprint: PIN,
+      pairingOnly: false,
+    });
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+    expect(getMobileE2eeSessionState(ENV_B)).toMatchObject({
+      channel: "negotiating",
+      pinVerified: true,
+      selection: { nodeId: "node_warm_b" },
+    });
+    // Without a target there is still nothing to secure.
+    expect(instantiate(resolveMobileRelayE2eeProvider())).toHaveLength(1);
+  });
+
+  it("keeps one environment's classification when another node is pinned", async () => {
+    await verifyNode("node_pinned_b");
+    signInWithoutSelection();
+    const a = target("node_pinned_a", ENV_A, 1);
+    const b = target("node_pinned_b", ENV_B, 2);
+    await Promise.all([
+      prepareMobileRelayE2eeAttempt(a.target),
+      prepareMobileRelayE2eeAttempt(b.target),
+    ]);
+    const before = inspectMobileRelayE2eeAttemptForTests(ENV_B);
+    expect(before).toMatchObject({ selectionClass: "latched", verifiedPinFingerprint: PIN });
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)?.verifiedPinFingerprint).toBeNull();
+
+    // A's own §13.2 promotion bumps the shared trust revision, so both
+    // environments re-resolve — each against its own record.
+    await verifyNode("node_pinned_a", ACCOUNT, OTHER_NODE_PUBLIC_KEY);
+    await Promise.all([
+      prepareMobileRelayE2eeAttempt(a.target),
+      prepareMobileRelayE2eeAttempt(b.target),
+    ]);
+
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)).toMatchObject({
+      selectionClass: "latched",
+      verifiedPinFingerprint: OTHER_PIN,
+    });
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_B)).toEqual(before);
+  });
+
+  it("runs preparations for two environments side by side and joins repeats for one", async () => {
+    await mobileE2eeTrustStore.hydrate();
+    signInWithoutSelection();
+    let release!: () => void;
+    custody.prekeyPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const a = target("node_parallel_a", ENV_A, 1);
+    const b = target("node_parallel_b", ENV_B, 2);
+
+    const preparingA = prepareMobileRelayE2eeAttempt(a.target);
+    const preparingB = prepareMobileRelayE2eeAttempt(b.target);
+    const repeatedA = prepareMobileRelayE2eeAttempt(a.target);
+    // Both environments are inside their credential reads at the same time.
+    await vi.waitFor(() => expect(custody.prekeyCalls).toBe(2));
+    release();
+    await Promise.all([preparingA, preparingB, repeatedA]);
+
+    expect(custody.prekeyCalls).toBe(2);
+    expect(instantiate(resolveMobileRelayE2eeProvider(a.target))).toHaveLength(0);
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+    expect(getMobileE2eeSessionState(ENV_A).selection?.nodeId).toBe("node_parallel_a");
+    expect(getMobileE2eeSessionState(ENV_B).selection?.nodeId).toBe("node_parallel_b");
+  });
+
+  it("refuses a superseded target at onStatement and K1, and fails its channels closed", async () => {
+    await verifyNode("node_stale_b");
+    signInWithoutSelection();
+    const b = target("node_stale_b", ENV_B, 4);
+    await prepareMobileRelayE2eeAttempt(b.target);
+    resolveMobileRelayE2eeProvider(b.target);
+    const attempt = relayProvider.attempt!;
+    const record = vi.spyOn(mobileE2eeTrustStore, "recordAuthenticatedStatement");
+
+    b.supersede();
+
+    await expect(attempt.onStatement!(authenticatedStatement() as never)).rejects.toThrow(
+      "superseded",
+    );
+    expect(record).not.toHaveBeenCalled();
+    await expect(attempt.withNativeAgreementSecretKey!(() => undefined)).rejects.toThrow(
+      "superseded",
+    );
+    const prekeyCalls = custody.prekeyCalls;
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(1);
+    // A superseded target has nothing to re-prime.
+    await prepareMobileRelayE2eeAttempt(b.target);
+    expect(custody.prekeyCalls).toBe(prekeyCalls);
+  });
+
+  it("is not superseded when the selection moves", async () => {
+    await verifyNode("node_moved_b");
+    selectNode("node_moved_a", ACCOUNT, 1, ENV_A);
+    const b = target("node_moved_b", ENV_B, 4);
+    await prepareMobileRelayE2eeAttempt(b.target);
+    resolveMobileRelayE2eeProvider(b.target);
+    const attempt = relayProvider.attempt!;
+
+    selectNode("node_moved_c", ACCOUNT, 2, "env_c");
+    signInWithoutSelection();
+
+    const use = vi.fn(() => "borrowed");
+    await expect(attempt.withNativeAgreementSecretKey!(use)).resolves.toBe("borrowed");
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+  });
+
+  it("never hands an attempt resolved for the selection to a target of the same generation", async () => {
+    await mobileE2eeTrustStore.hydrate();
+    selectNode("node_lifecycle_a", ACCOUNT, 6, ENV_A);
+    await prepareMobileRelayE2eeAttempt();
+    expect(custody.prekeyCalls).toBe(1);
+
+    // Same node, environment and number — but a record generation, not the
+    // selection's: the two counters are unrelated.
+    const a = target("node_lifecycle_a", ENV_A, 6);
+    expect(instantiate(resolveMobileRelayE2eeProvider(a.target))).toHaveLength(1);
+    await prepareMobileRelayE2eeAttempt(a.target);
+    expect(custody.prekeyCalls).toBe(2);
+  });
+
+  it("disposes one environment's attempt and leaves the other usable", async () => {
+    await mobileE2eeTrustStore.hydrate();
+    signInWithoutSelection();
+    const a = target("node_dispose_a", ENV_A, 1);
+    const b = target("node_dispose_b", ENV_B, 2);
+    await Promise.all([
+      prepareMobileRelayE2eeAttempt(a.target),
+      prepareMobileRelayE2eeAttempt(b.target),
+    ]);
+    resolveMobileRelayE2eeProvider(a.target);
+    const attemptA = relayProvider.attempt!;
+
+    disposeMobileRelayE2eeAttemptFor(a.target.environmentId);
+
+    expect(inspectMobileRelayE2eeAttemptForTests(ENV_A)).toBeNull();
+    await expect(attemptA.withNativeAgreementSecretKey!(() => undefined)).rejects.toThrow(
+      "superseded",
+    );
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+    expect(instantiate(resolveMobileRelayE2eeProvider(a.target))).toHaveLength(1);
+  });
+
+  it.each(["single", "retained"] as const)(
+    "releases warm targets on an empty selection only with single sessions (%s)",
+    async (environmentSessions) => {
+      hostedRuntime.environmentSessions = environmentSessions;
+      await verifyNode(`node_home_${environmentSessions}`);
+      signInWithoutSelection();
+      const b = target(`node_home_${environmentSessions}`, ENV_B, 2);
+      await prepareMobileRelayE2eeAttempt(b.target);
+
+      // Going home: the selection-following form finds nothing selected.
+      await prepareMobileRelayE2eeAttempt();
+
+      if (environmentSessions === "single") {
+        expect(inspectMobileRelayE2eeAttemptForTests(ENV_B)).toBeNull();
+        expect(getMobileE2eeSessionState(ENV_B).selection).toBeNull();
+      } else {
+        expect(inspectMobileRelayE2eeAttemptForTests(ENV_B)).not.toBeNull();
+        expect(getMobileE2eeSessionState(ENV_B).selection?.nodeId).toBe(
+          `node_home_${environmentSessions}`,
+        );
+        expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+      }
+    },
+  );
+
+  it("keeps the custody-unavailable legacy answer to the target it was resolved for", async () => {
+    await mobileE2eeTrustStore.hydrate();
+    signInWithoutSelection();
+    vi.spyOn(mobileE2eeTrustStore, "classify").mockResolvedValue({
+      class: "legacy-eligible",
+      branch: "a",
+    });
+    const a = target("node_custody_a", ENV_A, 1);
+    const b = target("node_custody_b", ENV_B, 2);
+    custody.prekeyFails = true;
+    await prepareMobileRelayE2eeAttempt(a.target);
+    expect(resolveMobileRelayE2eeProvider(a.target)).toBeUndefined();
+    expect(getMobileE2eeSessionState(ENV_A).channel).toBe("legacy");
+
+    // §6.3's one legacy answer is A's own: B, with no slot yet, fails closed.
+    custody.prekeyFails = false;
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(1);
+    await prepareMobileRelayE2eeAttempt(b.target);
+    expect(instantiate(resolveMobileRelayE2eeProvider(b.target))).toHaveLength(0);
+    expect(getMobileE2eeSessionState(ENV_B).channel).toBe("negotiating");
+    // A's retry, re-primed by its legacy answer, settles on its own.
+    await prepareMobileRelayE2eeAttempt(a.target);
+    expect(getMobileE2eeSessionState(ENV_A).selection?.nodeId).toBe("node_custody_a");
   });
 });

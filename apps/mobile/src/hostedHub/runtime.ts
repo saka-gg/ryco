@@ -1,9 +1,14 @@
 import {
   configureHostedRuntime,
+  getHostedEnvironmentSessions,
   getHostedHubApi,
+  hostedEnvironmentSessionsMode,
   hostedHubController,
   hostedHubStore,
+  type HostedEnvironmentSessionRecord,
+  type HostedEnvironmentSessions,
 } from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   createNativeE2eeEnrollmentCoordinator,
   type NativeE2eeEnrollmentCoordinator,
@@ -28,7 +33,12 @@ import {
   hydrateMobileHostedSessionToken,
   mobileSessionCredentials,
 } from "../platform/sessionCredentials";
-import { disposeMobileRelayE2eeAttempt, prepareMobileRelayE2eeAttempt } from "./e2eeAttempt";
+import {
+  disposeMobileRelayE2eeAttempt,
+  disposeMobileRelayE2eeAttemptFor,
+  prepareMobileRelayE2eeAttempt,
+  type MobileE2eeAttemptTarget,
+} from "./e2eeAttempt";
 import {
   getMobileE2eeSessionState,
   resetMobileE2eeSession,
@@ -317,9 +327,21 @@ export async function configureMobileHostedRuntime(
  * account or the node, so the store's own revision is subscribed to as well. The
  * attempt slot is keyed on it too, so a decision that lands between this
  * notification and the re-preparation completing still cannot be used.
+ *
+ * WITH RETAINED ENVIRONMENT SESSIONS the selection is only a cursor, so the
+ * environment records are watched instead: see
+ * {@link watchEnvironmentSessionsForE2ee}.
  */
 function watchSelectionForE2ee(): void {
   if (selectionWatch !== undefined) return;
+  selectionWatch =
+    hostedEnvironmentSessionsMode() === "retained"
+      ? watchEnvironmentSessionsForE2ee()
+      : watchSelectedNodeForE2ee();
+}
+
+/** One environment session at a time: the attempt follows the selected node. */
+function watchSelectedNodeForE2ee(): () => void {
   interface SelectionSnapshot {
     readonly accountStatus: ReturnType<typeof hostedHubStore.getState>["accountStatus"];
     readonly accountId: string | null;
@@ -353,44 +375,178 @@ function watchSelectionForE2ee(): void {
     };
     if (last !== undefined && sameSnapshot(next, last)) return;
     last = next;
-    if (state.accountStatus === "authenticated" && state.account !== null) {
-      if (
-        enrollment?.status === "idle" ||
-        (enrollment?.status === "ready" &&
-          enrollment.ready !== null &&
-          enrollment.ready.namespace.accountId !== state.account.id)
-      ) {
-        void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
-      }
-      // `unavailable` and `revoked` recover inside the coordinator, on the
-      // lifecycle wired at construction.
-    } else if (enrollment && enrollment.status !== "idle") {
-      void enrollmentCoordinator?.invalidate("signed-out");
-    }
+    syncNativeEnrollment();
     if (state.accountStatus !== "authenticated" || state.selectedNode === null) {
-      disposeMobileRelayE2eeAttempt();
       // The projection describes a channel for a selection that no longer
       // exists. Leaving it standing kept a sign-out — and a node deselect —
       // looking like a live, possibly verified, connection on every §13 surface.
-      resetMobileE2eeSession();
+      releaseEveryE2eeAttempt();
       return;
     }
     if (enrollmentCoordinator?.getState().status !== "ready") {
-      disposeMobileRelayE2eeAttempt();
-      resetMobileE2eeSession();
+      releaseEveryE2eeAttempt();
       return;
     }
     void prepareMobileRelayE2eeAttempt();
   };
+  const unsubscribe = subscribeE2eeInputs(evaluate);
+  evaluate();
+  return unsubscribe;
+}
+
+/**
+ * Retained environment sessions: every environment keeps its own attempt and
+ * projection, whatever is selected.
+ *
+ * Each record that is not suspended and has a connection requested is primed
+ * for its own node and record generation, so a warm environment that reconnects
+ * while another node is selected — or while none is — finds a complete attempt
+ * of its own. A record that disappears or takes a new generation loses exactly
+ * its own attempt and projection; clearing the selection resets nothing. Only
+ * sign-out and an enrollment that is not ready revoke everything, as they do
+ * with a single session.
+ */
+function watchEnvironmentSessionsForE2ee(): () => void {
+  const sessions = getHostedEnvironmentSessions();
+  interface AccountSnapshot {
+    readonly accountStatus: ReturnType<typeof hostedHubStore.getState>["accountStatus"];
+    readonly accountId: string | null;
+    readonly trustRevision: number;
+    readonly enrollmentGeneration: number;
+    readonly enrollmentStatus: string;
+  }
+  interface RecordSnapshot {
+    readonly nodeId: string;
+    readonly generation: number;
+    /** Not suspended, and a connection was requested for this generation. */
+    readonly warm: boolean;
+  }
+  const sameAccount = (left: AccountSnapshot, right: AccountSnapshot): boolean =>
+    left.accountStatus === right.accountStatus &&
+    left.accountId === right.accountId &&
+    left.trustRevision === right.trustRevision &&
+    left.enrollmentGeneration === right.enrollmentGeneration &&
+    left.enrollmentStatus === right.enrollmentStatus;
+  const sameRecord = (left: RecordSnapshot, right: RecordSnapshot): boolean =>
+    left.nodeId === right.nodeId &&
+    left.generation === right.generation &&
+    left.warm === right.warm;
+
+  let lastAccount: AccountSnapshot | undefined;
+  let lastRecords = new Map<EnvironmentId, RecordSnapshot>();
+  const evaluate = () => {
+    const state = hostedHubStore.getState();
+    const enrollment = enrollmentCoordinator?.getState();
+    const account: AccountSnapshot = {
+      accountStatus: state.accountStatus,
+      accountId: state.account?.id ?? null,
+      trustRevision: mobileE2eeTrustStore.revision(),
+      enrollmentGeneration: enrollment?.generation ?? 0,
+      enrollmentStatus: enrollment?.status ?? "idle",
+    };
+    const accountChanged = lastAccount === undefined || !sameAccount(account, lastAccount);
+    if (accountChanged) {
+      lastAccount = account;
+      syncNativeEnrollment();
+    }
+    if (
+      state.accountStatus !== "authenticated" ||
+      enrollmentCoordinator?.getState().status !== "ready"
+    ) {
+      if (accountChanged) releaseEveryE2eeAttempt();
+      lastRecords = new Map();
+      return;
+    }
+
+    const records = new Map<EnvironmentId, HostedEnvironmentSessionRecord>();
+    for (const record of sessions.list()) records.set(record.environmentId, record);
+    for (const [environmentId, previous] of lastRecords) {
+      const record = records.get(environmentId);
+      if (record !== undefined && record.generation === previous.generation) continue;
+      // The attempt and the claim belonged to the generation that just ended.
+      disposeMobileRelayE2eeAttemptFor(environmentId);
+      resetMobileE2eeSession(environmentId);
+    }
+    const next = new Map<EnvironmentId, RecordSnapshot>();
+    for (const record of records.values()) {
+      const snapshot: RecordSnapshot = {
+        nodeId: record.nodeId,
+        generation: record.generation,
+        warm: !record.suspended && record.connectRequested,
+      };
+      next.set(record.environmentId, snapshot);
+      const previous = lastRecords.get(record.environmentId);
+      if (!snapshot.warm) continue;
+      if (accountChanged || previous === undefined || !sameRecord(previous, snapshot)) {
+        void prepareMobileRelayE2eeAttempt(attemptTargetFor(sessions, record));
+      }
+    }
+    lastRecords = next;
+  };
+  const unsubscribeInputs = subscribeE2eeInputs(evaluate);
+  const unsubscribeSessions = sessions.subscribe(evaluate);
+  evaluate();
+  return () => {
+    unsubscribeInputs();
+    unsubscribeSessions();
+  };
+}
+
+/** The channel target of one environment record's current generation. */
+function attemptTargetFor(
+  sessions: HostedEnvironmentSessions,
+  record: HostedEnvironmentSessionRecord,
+): MobileE2eeAttemptTarget {
+  return {
+    nodeId: record.nodeId,
+    nodeLabel: record.label,
+    environmentId: record.environmentId,
+    generation: record.generation,
+    isCurrent: () => sessions.isCurrentGeneration(record.environmentId, record.generation),
+  };
+}
+
+/**
+ * Start native enrollment for the signed-in account, or cancel it once nobody
+ * is signed in. `unavailable` and `revoked` recover inside the coordinator, on
+ * the lifecycle wired at construction.
+ */
+function syncNativeEnrollment(): void {
+  const state = hostedHubStore.getState();
+  const enrollment = enrollmentCoordinator?.getState();
+  if (state.accountStatus === "authenticated" && state.account !== null) {
+    if (
+      enrollment?.status === "idle" ||
+      (enrollment?.status === "ready" &&
+        enrollment.ready !== null &&
+        enrollment.ready.namespace.accountId !== state.account.id)
+    ) {
+      void enrollmentCoordinator?.ensure(state.account.id).catch(() => undefined);
+    }
+  } else if (enrollment && enrollment.status !== "idle") {
+    void enrollmentCoordinator?.invalidate("signed-out");
+  }
+}
+
+/** Revoke every environment's warm attempt and clear every projection. */
+function releaseEveryE2eeAttempt(): void {
+  disposeMobileRelayE2eeAttempt();
+  resetMobileE2eeSession();
+}
+
+/**
+ * Re-evaluate on every input an attempt is resolved from: the account and its
+ * selection, the trust document, and the enrollment.
+ */
+function subscribeE2eeInputs(evaluate: () => void): () => void {
   const unsubscribeStore = hostedHubStore.subscribe(evaluate);
   const unsubscribeTrust = mobileE2eeTrustStore.subscribe(evaluate);
   const unsubscribeEnrollment = enrollmentCoordinator?.subscribe(evaluate) ?? (() => undefined);
-  selectionWatch = () => {
+  return () => {
     unsubscribeStore();
     unsubscribeTrust();
     unsubscribeEnrollment();
   };
-  evaluate();
 }
 
 /**

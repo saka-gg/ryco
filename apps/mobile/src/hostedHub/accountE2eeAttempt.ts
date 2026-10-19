@@ -14,12 +14,17 @@ import { mobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import {
   beginMobileE2eeChannel,
   beginMobileE2eeChannelAttempt,
+  endMobileE2eeChannel,
   lockMobileE2eeChannelMode,
   mobileE2eeLocalRecordContext,
   observeMobileAccountE2eeStatement,
   recordMobileE2eeInitiatorDiagnostic,
 } from "./e2eeSession";
-import { prepareMobileRelayE2eeAttempt, resolveMobileRelayE2eeProvider } from "./e2eeAttempt";
+import {
+  prepareMobileRelayE2eeAttempt,
+  resolveMobileRelayE2eeProvider,
+  type MobileE2eeAttemptTarget,
+} from "./e2eeAttempt";
 import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
 import { getMobileHostedConfig } from "./runtimeConfig";
 import { makeMobileRelayE2eeProvider } from "../platform/e2eeRelayProvider";
@@ -47,30 +52,46 @@ export type MobileRelaySocketContext =
   | {
       readonly kind: "local";
       readonly selection: MobileRelaySelectionSnapshot;
+      /** The channel's target, or `undefined` for the selected node. */
+      readonly target: MobileE2eeAttemptTarget | undefined;
       readonly provider: RelayE2eeProvider;
       readonly dispose: () => void;
     }
   | {
       readonly kind: "account";
       readonly selection: MobileRelaySelectionSnapshot;
+      /** The channel's target, or `undefined` for the selected node. */
+      readonly target: MobileE2eeAttemptTarget | undefined;
       readonly enrollment: NativeE2eeReadyEnrollment;
       readonly enrollmentGeneration: number;
       provider?: RelayE2eeProvider;
       dispose: () => void;
     };
 
-function currentSelection(): MobileRelaySelectionSnapshot | null {
+/**
+ * The signed-in account's view of the channel's target — the node and the
+ * environment it names, whatever is selected — or of the selected node when
+ * there is no target. `null` once the target's record generation was replaced.
+ */
+function currentSelection(target?: MobileE2eeAttemptTarget): MobileRelaySelectionSnapshot | null {
   const config = getMobileHostedConfig();
   const state = hostedHubStore.getState();
-  const node = state.selectedNode;
-  if (
-    config === null ||
-    state.accountStatus !== "authenticated" ||
-    state.account === null ||
-    node === null
-  ) {
+  if (config === null || state.accountStatus !== "authenticated" || state.account === null) {
     return null;
   }
+  if (target !== undefined) {
+    if (!target.isCurrent()) return null;
+    return {
+      hubOrigin: config.hubOrigin,
+      accountId: state.account.id,
+      nodeId: target.nodeId,
+      nodeLabel: target.nodeLabel,
+      environmentId: target.environmentId,
+      generation: target.generation,
+    };
+  }
+  const node = state.selectedNode;
+  if (node === null) return null;
   return {
     hubOrigin: config.hubOrigin,
     accountId: state.account.id,
@@ -81,8 +102,12 @@ function currentSelection(): MobileRelaySelectionSnapshot | null {
   };
 }
 
-function isCurrent(selection: MobileRelaySelectionSnapshot): boolean {
-  const current = currentSelection();
+/** Whether `selection` is still what its target (or the selection) resolves to. */
+function isCurrent(
+  selection: MobileRelaySelectionSnapshot,
+  target: MobileE2eeAttemptTarget | undefined,
+): boolean {
+  const current = currentSelection(target);
   return (
     current !== null &&
     current.hubOrigin === selection.hubOrigin &&
@@ -109,10 +134,25 @@ function trustedRecord(selection: MobileRelaySelectionSnapshot) {
  */
 export const MOBILE_ENROLLMENT_GATE_WAIT_MS = 10_000;
 
-/** Prepare public state only. Ticket and grant are deliberately not issued here. */
-export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySocketContext> {
-  const selection = currentSelection();
-  if (selection === null) throw new Error("No authorized hosted node is selected.");
+/**
+ * Prepare public state only. Ticket and grant are deliberately not issued here.
+ *
+ * With a `target` the context is prepared for the target's node and
+ * environment and stays valid exactly as long as the target's record generation
+ * does, whether or not that node is selected; without one, for the selected
+ * node.
+ */
+export async function prepareMobileRelaySocketContext(
+  target?: MobileE2eeAttemptTarget,
+): Promise<MobileRelaySocketContext> {
+  const selection = currentSelection(target);
+  if (selection === null) {
+    throw new Error(
+      target === undefined
+        ? "No authorized hosted node is selected."
+        : "Hosted node selection changed.",
+    );
+  }
   const coordinator = getMobileNativeE2eeEnrollmentCoordinator();
   const enrollmentState =
     coordinator === null
@@ -124,7 +164,7 @@ export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySock
             clearTimeout: (timer) => globalThis.clearTimeout(timer),
           },
         });
-  if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
+  if (!isCurrent(selection, target)) throw new Error("Hosted node selection changed.");
   if (enrollmentState?.status !== "ready" || enrollmentState.ready === null) {
     throw new Error("Native E2EE enrollment is not ready.");
   }
@@ -142,16 +182,17 @@ export async function prepareMobileRelaySocketContext(): Promise<MobileRelaySock
   // Desktop approves from; the attempt it resolves to is pairing-only and
   // releases nothing. A 0x02 account-grant channel never creates that record.
   if (record !== null && (isE2eeVerifiedPinRecord(record) || isE2eePairingRecord(record))) {
-    await prepareMobileRelayE2eeAttempt();
-    if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
-    const provider = resolveMobileRelayE2eeProvider();
+    await prepareMobileRelayE2eeAttempt(target);
+    if (!isCurrent(selection, target)) throw new Error("Hosted node selection changed.");
+    const provider = resolveMobileRelayE2eeProvider(target);
     if (provider === undefined) throw new Error("Native E2EE key custody is unavailable.");
-    return { kind: "local", selection, provider, dispose: () => undefined };
+    return { kind: "local", selection, target, provider, dispose: () => undefined };
   }
 
   return {
     kind: "account",
     selection,
+    target,
     enrollment: enrollmentState.ready,
     enrollmentGeneration: enrollmentState.generation,
     dispose: () => undefined,
@@ -166,6 +207,7 @@ function accountProvider(
   >,
 ): RelayE2eeProvider {
   const selection = context.selection;
+  const target = context.target;
   const ready = context.enrollment;
   const attempt: RelayE2eeInitiatorAttempt = {
     hubOrigin: selection.hubOrigin,
@@ -185,7 +227,7 @@ function accountProvider(
     },
     withNativeAgreementSecretKey: (use) =>
       mobileNativeE2eePlatform.withAgreementSecret((secretKey) => {
-        if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
+        if (!isCurrent(selection, target)) throw new Error("Hosted node selection changed.");
         const enrollment = getMobileNativeE2eeEnrollmentCoordinator()?.getState();
         if (
           enrollment?.status !== "ready" ||
@@ -198,7 +240,7 @@ function accountProvider(
     accountId: selection.accountId,
     acceptedPolicyGeneration: resolution.grant.claims.nodePolicyGeneration,
     onStatement: (verification) => {
-      if (!isCurrent(selection)) throw new Error("Hosted node selection changed.");
+      if (!isCurrent(selection, target)) throw new Error("Hosted node selection changed.");
       observeMobileAccountE2eeStatement(verification, selection.environmentId);
     },
     onDiagnostic: (diagnostic) =>
@@ -206,12 +248,14 @@ function accountProvider(
   };
   const provider = makeMobileRelayE2eeProvider({ attempt });
   return (host) => {
-    beginMobileE2eeChannelAttempt(selection.environmentId);
+    // Named, so a channel the environment has since replaced claims nothing.
+    const channel = {};
+    beginMobileE2eeChannelAttempt(selection.environmentId, channel);
     const machine = provider(host);
     const sync = (): void => {
       const mode = machine.mode();
       if (mode === "e2ee" || mode === "legacy") {
-        lockMobileE2eeChannelMode(mode, selection.environmentId);
+        lockMobileE2eeChannelMode(mode, selection.environmentId, channel);
       }
     };
     return {
@@ -225,6 +269,10 @@ function accountProvider(
         const submitted = machine.submit(message);
         sync();
         return submitted;
+      },
+      dispose: (options) => {
+        endMobileE2eeChannel(selection.environmentId, channel);
+        machine.dispose(options);
       },
     };
   };
@@ -240,7 +288,11 @@ export async function issueMobileRelayAttempt(input: {
   readonly preparedSocketContext: MobileRelaySocketContext;
 }> {
   const context = input.preparedSocketContext as MobileRelaySocketContext;
-  if (!context || context.selection.nodeId !== input.nodeId || !isCurrent(context.selection)) {
+  if (
+    !context ||
+    context.selection.nodeId !== input.nodeId ||
+    !isCurrent(context.selection, context.target)
+  ) {
     throw new Error("Hosted node selection changed.");
   }
   if (context.kind === "local") {
@@ -265,7 +317,7 @@ export async function issueMobileRelayAttempt(input: {
   if (
     resolution.kind !== "authorized" ||
     resolution.trustSource !== "account-enrolled" ||
-    !isCurrent(context.selection)
+    !isCurrent(context.selection, context.target)
   ) {
     if (resolution.kind === "authorized" && resolution.trustSource === "account-enrolled") {
       resolution.dispose();
@@ -303,7 +355,7 @@ export async function issueMobileRelayAttempt(input: {
     accountId: context.selection.accountId,
     nodeId: context.selection.nodeId,
   });
-  if (!isCurrent(context.selection)) {
+  if (!isCurrent(context.selection, context.target)) {
     context.dispose();
     throw new Error("Hosted node selection changed.");
   }

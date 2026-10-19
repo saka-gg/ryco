@@ -1,4 +1,4 @@
-import { hostedHubStore } from "@ryco/client-runtime/authorization";
+import { hostedEnvironmentSessionsMode, hostedHubStore } from "@ryco/client-runtime/authorization";
 import {
   relayE2eeUnresolvedAttemptFailure,
   type RelayE2eeChannel,
@@ -30,6 +30,7 @@ import {
   beginMobileE2eeChannelAttempt,
   beginMobileE2eeFailClosedSelection,
   deriveMobileE2eeIdentityDisplay,
+  endMobileE2eeChannel,
   lockMobileE2eeChannelMode,
   markMobileE2eeKeyCustodyUnavailable,
   mobileE2eeLocalRecordContext,
@@ -63,6 +64,15 @@ import { getMobileHostedConfig } from "./runtimeConfig";
 // a freshly verified one still reporting none. The revision is bumped by the store
 // on every commit, so a committed decision invalidates this slot by construction.
 //
+// ONE SLOT PER ENVIRONMENT, NOT ONE FOR THE SELECTION. Several environments can
+// hold live channels at once, and a channel may reconnect while another node is
+// selected or while none is. Each environment therefore owns its own slot, keyed
+// by the node, the environment and the lifecycle generation its channel belongs
+// to. A caller that knows the channel's target passes it, and the attempt is then
+// resolved for that target's node and fenced by that target's generation, never
+// by whatever happens to be selected. Without a target the current selection is
+// the target, which is all a single-session client ever passes.
+//
 // THREE OUTCOMES, AND ONLY ONE OF THEM IS LEGACY:
 //
 //   1. A resolved attempt for this selection → the §4.4 machine, which decides
@@ -94,6 +104,20 @@ const LOCAL_SUITE_PREFERENCE: readonly number[] = [E2EE_SUITE_25519_CHACHAPOLY_S
  */
 const PREPARATION_MAX_PASSES = 4;
 
+/**
+ * The channel one attempt is resolved for, taken from the environment-bound
+ * relay binding that will open it rather than from the selection.
+ */
+export interface MobileE2eeAttemptTarget {
+  readonly nodeId: string;
+  readonly nodeLabel: string;
+  readonly environmentId: EnvironmentId;
+  /** The environment record's generation the channel belongs to. */
+  readonly generation: number;
+  /** Whether that record generation is still the environment's current one. */
+  readonly isCurrent: () => boolean;
+}
+
 interface SelectionScope {
   readonly hubOrigin: string;
   readonly accountId: string;
@@ -103,11 +127,30 @@ interface SelectionScope {
 
 interface CurrentSelection extends SelectionScope {
   readonly nodeLabel: string;
+  /**
+   * Which lifecycle `generation` counts: the shared selection's, or the
+   * environment record's a target carries. The two counters are unrelated, so an
+   * attempt resolved under one is never handed to a channel of the other.
+   */
+  readonly lifecycle: "selection" | "environment";
   readonly generation: number;
+}
+
+/**
+ * Where one preparation or provider resolution reads the selection it acts for.
+ *
+ * `current` answers `null` when there is nothing to act for any more: signed
+ * out, no node selected, or a target whose record generation was replaced.
+ */
+interface AttemptSource {
+  readonly current: () => CurrentSelection | null;
+  /** Only the selection itself owns the global "nothing selected" outcome. */
+  readonly followsSelection: boolean;
 }
 
 interface AttemptSlot {
   readonly selection: SelectionScope;
+  readonly lifecycle: CurrentSelection["lifecycle"];
   readonly generation: number;
   readonly trustRevision: number;
 }
@@ -115,24 +158,38 @@ interface AttemptSlot {
 interface PreparedAttempt {
   readonly slot: AttemptSlot;
   readonly attempt: RelayE2eeInitiatorAttempt;
-  /** Revoked when the warm selection/trust snapshot stops being current. */
+  /** Revoked when its environment's slot is replaced or disposed. */
   readonly lifetime: { active: boolean };
 }
 
-let prepared: PreparedAttempt | null = null;
-let preparing: Promise<void> | undefined;
+/** Every slot below is kept per environment: the selection's, or the target's. */
+type EnvironmentKey = EnvironmentId | null;
+
+const prepared = new Map<EnvironmentKey, PreparedAttempt>();
+
+interface Preparation {
+  /** The newest current request for this environment; every pass reads it. */
+  source: AttemptSource;
+  done: Promise<void>;
+}
+
+/**
+ * The preparation running for each environment. Environments never wait for or
+ * cancel each other; two requests for the same environment share one.
+ */
+const preparing = new Map<EnvironmentKey, Preparation>();
 /**
  * The slot whose §6.3 key custody this device does not have, which is the ONLY
  * state that answers `undefined` — an unchanged legacy channel.
  *
  * It is keyed by slot rather than kept as a flag so that a custody failure for
  * one node cannot silently make a different node legacy too, and it is cleared on
- * every fresh preparation, so the answer is retried rather than latched for the
- * session.
+ * every fresh preparation of its environment, so the answer is retried rather
+ * than latched for the session.
  */
-let custodyUnavailableFor: AttemptSlot | null = null;
+const custodyUnavailableFor = new Map<EnvironmentKey, AttemptSlot>();
 /** A resolved strict failure whose owner-visible trust context survives retries. */
-let strictUnavailableFor: AttemptSlot | null = null;
+const strictUnavailableFor = new Map<EnvironmentKey, AttemptSlot>();
 /**
  * Underlying authenticated trust mutations, keyed independently of cache
  * revision and lifecycle generation. A deadline closes only the channel that
@@ -160,6 +217,7 @@ function attemptSlot(selection: CurrentSelection): AttemptSlot {
       nodeId: selection.nodeId,
       environmentId: selection.environmentId,
     },
+    lifecycle: selection.lifecycle,
     generation: selection.generation,
     trustRevision: mobileE2eeTrustStore.revision(),
   };
@@ -168,9 +226,16 @@ function attemptSlot(selection: CurrentSelection): AttemptSlot {
 function sameAttemptSlot(left: AttemptSlot, right: AttemptSlot): boolean {
   return (
     sameSelection(left.selection, right.selection) &&
+    left.lifecycle === right.lifecycle &&
     left.generation === right.generation &&
     left.trustRevision === right.trustRevision
   );
+}
+
+/** Whether `slot` still describes what `source` would resolve right now. */
+function slotIsLive(source: AttemptSource, slot: AttemptSlot): boolean {
+  const live = source.current();
+  return live !== null && sameAttemptSlot(attemptSlot(live), slot);
 }
 
 function pendingTrustCommit(selection: SelectionScope): Promise<void> | undefined {
@@ -209,29 +274,68 @@ function clearPendingTrustCommit(selection: SelectionScope, operation: Promise<v
   }
 }
 
-/** The hosted selection a channel would be opened for, or `null`. */
-function currentSelection(): CurrentSelection | null {
+/** The signed-in Hub account, or `null`. */
+function currentAccount(): { readonly hubOrigin: string; readonly accountId: string } | null {
   const config = getMobileHostedConfig();
   if (config === null) return null;
   const state = hostedHubStore.getState();
+  if (state.accountStatus !== "authenticated" || state.account === null) return null;
+  return { hubOrigin: config.hubOrigin, accountId: state.account.id };
+}
+
+/** The hosted selection a channel would be opened for, or `null`. */
+function currentSelection(): CurrentSelection | null {
+  const account = currentAccount();
+  if (account === null) return null;
+  const state = hostedHubStore.getState();
   const node = state.selectedNode;
-  if (state.accountStatus !== "authenticated" || state.account === null || node === null) {
-    return null;
-  }
+  if (node === null) return null;
   return {
-    hubOrigin: config.hubOrigin,
-    accountId: state.account.id,
+    ...account,
     nodeId: node.id,
     nodeLabel: node.label,
     environmentId: node.environmentId,
+    lifecycle: "selection",
     generation: state.generation,
   };
 }
 
-function ownsSelection(selection: CurrentSelection): boolean {
-  const live = currentSelection();
+/**
+ * The signed-in account's view of `target`, or `null` once the target's record
+ * generation was replaced. The node and the environment are the target's own,
+ * whatever is selected — including nothing.
+ */
+function selectionForTarget(target: MobileE2eeAttemptTarget): CurrentSelection | null {
+  const account = currentAccount();
+  if (account === null || !target.isCurrent()) return null;
+  return {
+    ...account,
+    nodeId: target.nodeId,
+    nodeLabel: target.nodeLabel,
+    environmentId: target.environmentId,
+    lifecycle: "environment",
+    generation: target.generation,
+  };
+}
+
+const selectedSource: AttemptSource = { current: currentSelection, followsSelection: true };
+
+function attemptSource(target: MobileE2eeAttemptTarget | undefined): AttemptSource {
+  if (target === undefined) return selectedSource;
+  return { current: () => selectionForTarget(target), followsSelection: false };
+}
+
+/**
+ * Whether a channel resolved for `selection` may still act for it: the same
+ * account, node and environment, under the same lifecycle generation.
+ */
+function owns(source: AttemptSource, selection: CurrentSelection): boolean {
+  const live = source.current();
   return (
-    live !== null && live.generation === selection.generation && sameSelection(live, selection)
+    live !== null &&
+    live.lifecycle === selection.lifecycle &&
+    live.generation === selection.generation &&
+    sameSelection(live, selection)
   );
 }
 
@@ -282,51 +386,88 @@ function previouslyVerifiedDisplay(
 }
 
 /**
- * Resolve everything one channel attempt needs, for the CURRENT selection.
+ * Resolve everything one channel attempt needs, for `target` — or, without one,
+ * for the CURRENT selection.
  *
- * Idempotent per slot and serialized: two callers racing at launch resolve once.
- * A failure leaves the slot empty rather than half-filled, so the next channel
- * either gets a complete attempt, gets no provider at all (§6.3), or fails closed.
+ * Idempotent per slot and serialized per environment: two callers racing at
+ * launch resolve once, and preparations for different environments never wait
+ * for or supersede each other. A failure leaves the slot empty rather than
+ * half-filled, so the next channel either gets a complete attempt, gets no
+ * provider at all (§6.3), or fails closed.
  */
-export function prepareMobileRelayE2eeAttempt(): Promise<void> {
-  // The clear is a `.finally` on the DERIVED promise rather than a `finally`
-  // block inside the body. A preparation that returns before its first `await`
-  // — no selection, or a slot that is already current — otherwise runs its
-  // whole body synchronously, clears the slot, and is then assigned INTO it, so
-  // `??=` would short-circuit every later call against a settled promise and the
-  // attempt would never be re-resolved again.
-  preparing ??= runPreparation().finally(() => {
-    preparing = undefined;
-  });
-  return preparing;
+export function prepareMobileRelayE2eeAttempt(target?: MobileE2eeAttemptTarget): Promise<void> {
+  const source = attemptSource(target);
+  const selection = source.current();
+  if (selection === null) {
+    // Nothing to act for: a superseded target simply has nothing to prepare,
+    // and only the selection itself may clear what "nothing selected" clears.
+    if (source.followsSelection) releaseForNoSelection();
+    return Promise.resolve();
+  }
+  const key = selection.environmentId;
+  const running = preparing.get(key);
+  if (running !== undefined) {
+    running.source = source;
+    return running.done;
+  }
+  // Registered BEFORE it runs. A preparation that settled without suspending
+  // and was only then assigned into the map would leave a settled entry behind,
+  // every later call would join it, and the attempt would never be re-resolved
+  // again.
+  const preparation: Preparation = { source, done: Promise.resolve() };
+  preparing.set(key, preparation);
+  preparation.done = runPreparation(key, preparation);
+  return preparation.done;
+}
+
+/**
+ * The global outcome of "no hosted node is selected": every warm attempt is
+ * revoked and every projection cleared.
+ *
+ * Only a client with one environment session at a time takes it. With retained
+ * environment sessions an empty selection is just the home screen, and the
+ * environments still connected keep their own attempts and projections.
+ */
+function releaseForNoSelection(): void {
+  if (hostedEnvironmentSessionsMode() !== "single") return;
+  disposeMobileRelayE2eeAttempt();
+  custodyUnavailableFor.clear();
+  strictUnavailableFor.clear();
+  resetMobileE2eeSession();
 }
 
 /**
  * Passes, not one shot.
  *
- * `preparing` de-duplicates by "a preparation is running", so a selection change
- * that arrives while one is in flight joins it rather than scheduling its own.
- * Each pass therefore re-reads the live selection after its awaits and starts
- * over when it moved, instead of settling an attempt for the node the owner just
- * left — which is deterministic, not a race: switching nodes inside one
- * preparation window always produced it.
+ * Requests for the same environment de-duplicate by "a preparation is running",
+ * so a change that arrives while one is in flight joins it rather than
+ * scheduling its own. Each pass therefore re-reads the newest request after its
+ * awaits and starts over when it moved, instead of settling an attempt for the
+ * node the owner just left — which is deterministic, not a race: switching
+ * nodes inside one preparation window always produced it.
  */
-async function runPreparation(): Promise<void> {
-  for (let pass = 0; pass < PREPARATION_MAX_PASSES; pass += 1) {
-    if (await runPreparationPass()) return;
+async function runPreparation(key: EnvironmentKey, preparation: Preparation): Promise<void> {
+  try {
+    for (let pass = 0; pass < PREPARATION_MAX_PASSES; pass += 1) {
+      const source = preparation.source;
+      // A request that joined while this pass ran gets a pass of its own.
+      if ((await runPreparationPass(key, source)) && preparation.source === source) return;
+    }
+  } finally {
+    if (preparing.get(key) === preparation) preparing.delete(key);
   }
 }
 
-/** One pass. `true` when the slot now describes the live selection. */
-async function runPreparationPass(): Promise<boolean> {
-  const selection = currentSelection();
+/** One pass. `true` when the environment's slot now describes the live request. */
+async function runPreparationPass(key: EnvironmentKey, source: AttemptSource): Promise<boolean> {
+  const selection = source.current();
   if (selection === null) {
-    disposeMobileRelayE2eeAttempt();
-    custodyUnavailableFor = null;
-    strictUnavailableFor = null;
-    resetMobileE2eeSession();
+    if (source.followsSelection) releaseForNoSelection();
     return true;
   }
+  // The selection moved to another environment, whose own preparation resolves
+  // it; this one has nothing left to settle.
+  if (selection.environmentId !== key) return true;
   // A previous channel authenticated a durable trust advance for this same
   // selection. Until the underlying OS-backed write settles, no attempt may
   // classify the old generation or borrow the old pin. Keep the complete cached
@@ -334,11 +475,14 @@ async function runPreparationPass(): Promise<boolean> {
   // preparation complete and let provider resolution close new channels.
   if (pendingTrustCommit(selection) !== undefined) return true;
   const slot = attemptSlot(selection);
-  if (prepared !== null && sameAttemptSlot(prepared.slot, slot)) return true;
+  const held = prepared.get(key);
+  if (held !== undefined && sameAttemptSlot(held.slot, slot)) return true;
+  const custodyClaim = custodyUnavailableFor.get(key);
+  const strictClaim = strictUnavailableFor.get(key);
   const retainsCurrentFailureClaim =
-    (custodyUnavailableFor !== null && sameAttemptSlot(custodyUnavailableFor, slot)) ||
-    (strictUnavailableFor !== null && sameAttemptSlot(strictUnavailableFor, slot));
-  disposeMobileRelayE2eeAttempt();
+    (custodyClaim !== undefined && sameAttemptSlot(custodyClaim, slot)) ||
+    (strictClaim !== undefined && sameAttemptSlot(strictClaim, slot));
+  disposePreparedAttempt(key);
   // The old projection belongs to the disposed slot just as surely as its
   // lifetime token does. Clear it before any awaited guard or credential operation so
   // a failure for the new selection cannot leave the previous channel's
@@ -350,8 +494,8 @@ async function runPreparationPass(): Promise<boolean> {
   // `resolveMobileRelayE2eeProvider` erase the legacy label or unexpected-node
   // ceremony merely by scheduling the retry it promises to perform.
   if (!retainsCurrentFailureClaim) resetMobileE2eeSession(selection.environmentId);
-  custodyUnavailableFor = null;
-  strictUnavailableFor = null;
+  custodyUnavailableFor.delete(key);
+  strictUnavailableFor.delete(key);
 
   // §4.4: the client-anchored guards are resolved HERE, before any channel
   // exists and BEFORE any custody call, and `classify` runs §13.1's marker
@@ -363,11 +507,10 @@ async function runPreparationPass(): Promise<boolean> {
   try {
     guards = await resolveGuards(selection);
   } catch {
-    const live = currentSelection();
     // A moved selection needs another pass. A current selection whose guards
     // are unobtainable is already a complete fail-closed result; retry it on
     // the next channel, not four times inside this preparation.
-    return live !== null && sameAttemptSlot(attemptSlot(live), slot);
+    return slotIsLive(source, slot);
   }
 
   // §7.4 / §6.4 and §6.3's key custody. A failure here is outcome 2 — but only
@@ -379,15 +522,14 @@ async function runPreparationPass(): Promise<boolean> {
   try {
     credentials = await resolveCredentials(selection);
   } catch {
-    const live = currentSelection();
-    if (live === null || !sameAttemptSlot(attemptSlot(live), slot)) return false;
+    if (!slotIsLive(source, slot)) return false;
     // §6.3: no software fallback and no degraded mode. The device has no E2EE
     // for this selection; the channel runs legacy and every surface says legacy
     // only for the exact legacy-eligible/permitted conjunction. A local failure
     // cannot talk an unexpected, latched, or policy-forbidden selection out of
     // its fail-closed result.
     if (guards.classification.class !== "legacy-eligible" || !guards.legacyPermitted) {
-      strictUnavailableFor = slot;
+      strictUnavailableFor.set(key, slot);
       beginMobileE2eeFailClosedSelection({
         selection: {
           hubOrigin: selection.hubOrigin,
@@ -407,7 +549,7 @@ async function runPreparationPass(): Promise<boolean> {
       // storage four times for the same persistent failure.
       return true;
     }
-    custodyUnavailableFor = slot;
+    custodyUnavailableFor.set(key, slot);
     markMobileE2eeKeyCustodyUnavailable(selection.environmentId);
     return true;
   }
@@ -417,10 +559,7 @@ async function runPreparationPass(): Promise<boolean> {
   // issuance or renewal may transiently derive the agreement public key. An
   // attempt describes the state it was resolved from, so one that no longer
   // matches is dropped rather than assigned.
-  const live = currentSelection();
-  if (live === null || !sameAttemptSlot(attemptSlot(live), slot)) {
-    return false;
-  }
+  if (!slotIsLive(source, slot)) return false;
 
   const record = guards.record;
   const verified = guards.verified;
@@ -485,7 +624,7 @@ async function runPreparationPass(): Promise<boolean> {
         // external trust mutation re-prepares the slot and revokes it here.
         if (
           !lifetime.active ||
-          !ownsSelection(selection) ||
+          !owns(source, selection) ||
           mobileE2eeTrustStore.revision() !== acceptedTrustRevision
         ) {
           throw new Error("Mobile E2EE selection was superseded.");
@@ -512,7 +651,7 @@ async function runPreparationPass(): Promise<boolean> {
         }),
     accountId: selection.accountId,
     onStatement: async (verification) => {
-      if (!ownsSelection(selection)) throw new Error("Mobile E2EE selection was superseded.");
+      if (!owns(source, selection)) throw new Error("Mobile E2EE selection was superseded.");
       const trustRevisionBeforeStatement = mobileE2eeTrustStore.revision();
       if (trustRevisionBeforeStatement !== acceptedTrustRevision) {
         throw new Error("Mobile E2EE selection was superseded.");
@@ -545,7 +684,7 @@ async function runPreparationPass(): Promise<boolean> {
       // The authenticated old selection may still tighten its own durable
       // record after a deadline or navigation. It cannot resume or project into
       // a lifecycle generation that did not own this callback.
-      if (!lifetime.active || !ownsSelection(selection)) {
+      if (!lifetime.active || !owns(source, selection)) {
         throw new Error("Mobile E2EE selection was superseded.");
       }
       acceptedTrustRevision = mobileE2eeTrustStore.revision();
@@ -555,11 +694,11 @@ async function runPreparationPass(): Promise<boolean> {
     onDiagnostic: (diagnostic) =>
       recordMobileE2eeInitiatorDiagnostic(diagnostic, selection.environmentId),
   };
-  prepared = {
+  prepared.set(key, {
     slot,
     attempt,
     lifetime,
-  };
+  });
   return true;
 }
 
@@ -654,11 +793,27 @@ function formatStatementFingerprint(identityPublicKey: Uint8Array): string {
   return formatE2eeKeyFingerprint(e2eeKeyFingerprint("node-identity", identityPublicKey));
 }
 
-/** Revoke and drop the public-only warm attempt. Idempotent. */
+function disposePreparedAttempt(key: EnvironmentKey): void {
+  const held = prepared.get(key);
+  if (held === undefined) return;
+  held.lifetime.active = false;
+  prepared.delete(key);
+}
+
+/**
+ * Revoke and drop every environment's public-only warm attempt: sign-out,
+ * enrollment revocation, nothing selected. Idempotent.
+ */
 export function disposeMobileRelayE2eeAttempt(): void {
-  if (prepared === null) return;
-  prepared.lifetime.active = false;
-  prepared = null;
+  for (const key of prepared.keys()) disposePreparedAttempt(key);
+}
+
+/**
+ * Revoke and drop one environment's warm attempt, leaving every other
+ * environment's attempt usable. Idempotent.
+ */
+export function disposeMobileRelayE2eeAttemptFor(environmentId: EnvironmentId): void {
+  disposePreparedAttempt(environmentId);
 }
 
 /**
@@ -688,35 +843,43 @@ function unresolvedAttemptChannel(host: RelayE2eeHost): RelayE2eeChannel {
 
 /**
  * The `RelayE2eeProvider` the hosted socket is built with, resolved
- * synchronously at `createRelaySocket`.
+ * synchronously at `createRelaySocket` — for `target`, or without one for the
+ * current selection.
  *
  * `undefined` means outcome 2 above and nothing else: this device could not
  * prepare the public certificate/identity state for a selection §12.1.1 still
  * permits legacy for, so the engine runs the unchanged legacy channel. A late
  * agreement-scalar failure is already past validated evidence and closes inside
- * the initiator. Every other unresolved state — including no selection — closes.
+ * the initiator. Every other unresolved state — including no selection and a
+ * superseded target — closes.
  */
-export function resolveMobileRelayE2eeProvider(): RelayE2eeProvider | undefined {
-  const selection = currentSelection();
+export function resolveMobileRelayE2eeProvider(
+  target?: MobileE2eeAttemptTarget,
+): RelayE2eeProvider | undefined {
+  const selection = attemptSource(target).current();
   // Nothing to secure and nothing to classify. The store can move between the
   // transport's reconnect gate and this synchronous construction — a sign-out or
-  // a Hub-profile change during backoff — so this is unresolved evidence like
-  // any other, never a plaintext channel nobody decided on.
+  // a Hub-profile change during backoff, or a record generation the target no
+  // longer owns — so this is unresolved evidence like any other, never a
+  // plaintext channel nobody decided on.
   if (selection === null) return unresolvedAttemptChannel;
   if (pendingTrustCommit(selection) !== undefined) return unresolvedAttemptChannel;
+  const key = selection.environmentId;
   const slot = attemptSlot(selection);
-  // §6.3's one legacy answer, and the only `undefined` this function returns.
-  // The preparation is re-primed either way, so the answer is retried on the
-  // next channel rather than latched for the session.
-  if (custodyUnavailableFor !== null && sameAttemptSlot(custodyUnavailableFor, slot)) {
-    void prepareMobileRelayE2eeAttempt();
+  // §6.3's one legacy answer, and the only `undefined` this function returns —
+  // and only for THIS environment's own custody slot. The preparation is
+  // re-primed either way, so the answer is retried on the next channel rather
+  // than latched for the session.
+  const custodyClaim = custodyUnavailableFor.get(key);
+  if (custodyClaim !== undefined && sameAttemptSlot(custodyClaim, slot)) {
+    void prepareMobileRelayE2eeAttempt(target);
     return undefined;
   }
-  const held = prepared;
-  if (held === null || !sameAttemptSlot(held.slot, slot)) {
+  const held = prepared.get(key);
+  if (held === undefined || !sameAttemptSlot(held.slot, slot)) {
     // Not ready, or resolved against a selection or a trust document that has
     // since moved. Re-prime for the next attempt and fail this one closed.
-    void prepareMobileRelayE2eeAttempt();
+    void prepareMobileRelayE2eeAttempt(target);
     return unresolvedAttemptChannel;
   }
   const provider = makeMobileRelayE2eeProvider({ attempt: held.attempt });
@@ -724,8 +887,11 @@ export function resolveMobileRelayE2eeProvider(): RelayE2eeProvider | undefined 
   return (host) => {
     // §13's projection is PER CHANNEL, not per preparation: a claim earned by one
     // channel may not describe the next one. Publishing `negotiating` here is
-    // what keeps a verified label from surviving the socket that earned it.
-    beginMobileE2eeChannelAttempt(environmentId);
+    // what keeps a verified label from surviving the socket that earned it, and
+    // naming the channel is what keeps a replaced one from claiming anything in
+    // the entry afterwards.
+    const channel = {};
+    beginMobileE2eeChannelAttempt(environmentId, channel);
     const machine = provider(host);
     // §4.4's mode lock has no callback — it is a state the machine holds — so
     // the pill is synced after every operation that can cause one. Publishing is
@@ -733,7 +899,9 @@ export function resolveMobileRelayE2eeProvider(): RelayE2eeProvider | undefined 
     // store holding `negotiating`, which claims nothing.
     const sync = () => {
       const mode = machine.mode();
-      if (mode === "e2ee" || mode === "legacy") lockMobileE2eeChannelMode(mode, environmentId);
+      if (mode === "e2ee" || mode === "legacy") {
+        lockMobileE2eeChannelMode(mode, environmentId, channel);
+      }
     };
     return {
       ...machine,
@@ -748,6 +916,7 @@ export function resolveMobileRelayE2eeProvider(): RelayE2eeProvider | undefined 
         return submitted;
       },
       dispose: (options) => {
+        endMobileE2eeChannel(environmentId, channel);
         machine.dispose(options);
       },
     };
@@ -764,15 +933,19 @@ export function resolveMobileRelayE2eeProvider(): RelayE2eeProvider | undefined 
  * transcript and no signature is exposed, and the pin is reported as presence
  * plus its §7.1 display form, never as key material.
  */
-export function inspectMobileRelayE2eeAttemptForTests(): {
+export function inspectMobileRelayE2eeAttemptForTests(
+  /** Defaults to the selected node's environment. */
+  environmentId?: EnvironmentId,
+): {
   readonly selectionClass: RelayE2eeSelectionClass;
   readonly legacyPermitted: boolean;
   readonly pairingOnly: boolean;
   readonly verifiedPinFingerprint: string | null;
   readonly acceptedPolicyGeneration: number | undefined;
 } | null {
-  const held = prepared;
-  if (held === null) return null;
+  const key = environmentId ?? currentSelection()?.environmentId;
+  const held = key === undefined ? undefined : prepared.get(key);
+  if (held === undefined) return null;
   const pin = held.attempt.verifiedPin;
   return {
     selectionClass: held.attempt.selectionClass,
@@ -787,8 +960,8 @@ export function inspectMobileRelayE2eeAttemptForTests(): {
 /** Test seam: exercise the production disposal path, then clear other module state. */
 export function resetMobileRelayE2eeAttemptForTests(): void {
   disposeMobileRelayE2eeAttempt();
-  preparing = undefined;
-  custodyUnavailableFor = null;
-  strictUnavailableFor = null;
+  preparing.clear();
+  custodyUnavailableFor.clear();
+  strictUnavailableFor.clear();
   pendingTrustCommits.clear();
 }

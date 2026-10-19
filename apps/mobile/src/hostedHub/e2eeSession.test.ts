@@ -11,6 +11,7 @@ import {
   beginMobileE2eeChannelAttempt,
   beginMobileE2eeFailClosedSelection,
   clearMobileE2eeTrustEvent,
+  endMobileE2eeChannel,
   getMobileE2eeSessionState,
   lockMobileE2eeChannelMode,
   markMobileE2eeKeyCustodyUnavailable,
@@ -67,15 +68,17 @@ function begin(
     readonly classification?: E2eeTrustClassification;
     readonly pinVerified?: boolean;
     readonly trustSource?: "locally-verified" | "account-enrolled";
+    readonly nodeId?: string;
+    readonly environmentId?: string;
   } = {},
 ): void {
   beginMobileE2eeChannel({
     selection: {
       hubOrigin: HUB,
       accountId: ACCOUNT,
-      nodeId: "node_1",
+      nodeId: overrides.nodeId ?? "node_1",
       nodeLabel: "Studio",
-      environmentId: "env_1",
+      environmentId: overrides.environmentId ?? "env_1",
       localNodeHandle: null,
       localRecordState: null,
       clientIdentityPublicKey: CLIENT_PUBLIC_KEY,
@@ -286,6 +289,76 @@ describe("the channel's claim", () => {
     markMobileE2eeKeyCustodyUnavailable();
     expect(getMobileE2eeSessionState().channel).toBe("legacy");
     expect(getMobileE2eeSessionState().selection).toBeNull();
+  });
+});
+
+describe("§13: each environment's entry belongs to its own channels", () => {
+  it("resets one environment's entry and leaves every other environment's", () => {
+    begin({ nodeId: "node_a", environmentId: "env_a", pinVerified: true });
+    lockMobileE2eeChannelMode("e2ee", "env_a");
+    begin({ nodeId: "node_b", environmentId: "env_b" });
+    raiseMobileE2eeUnexpectedNode("none", "env_b");
+    const untouched = getMobileE2eeSessionState("env_b");
+    let notifiedB = 0;
+    const unsubscribe = subscribeMobileE2eeSession("env_b", () => {
+      notifiedB += 1;
+    });
+
+    resetMobileE2eeSession("env_a");
+
+    expect(getMobileE2eeSessionState("env_a")).toMatchObject({
+      channel: "unavailable",
+      selection: null,
+      event: null,
+    });
+    expect(getMobileE2eeSessionState("env_b")).toBe(untouched);
+    expect(untouched).toMatchObject({
+      channel: "negotiating",
+      selection: { nodeId: "node_b" },
+      event: { kind: "unexpected-node" },
+    });
+    expect(notifiedB).toBe(0);
+    unsubscribe();
+  });
+
+  it("keeps a reconnected environment's new entry when its replaced channel ends late", () => {
+    begin({ nodeId: "node_a", environmentId: "env_a", pinVerified: true });
+    const replaced = {};
+    beginMobileE2eeChannelAttempt("env_a", replaced);
+    lockMobileE2eeChannelMode("e2ee", "env_a", replaced);
+    expect(getMobileE2eeSessionState("env_a").channel).toBe("verified");
+
+    // The environment reconnects: a fresh preparation, then a new channel.
+    begin({ nodeId: "node_a", environmentId: "env_a", pinVerified: false });
+    const current = {};
+    beginMobileE2eeChannelAttempt("env_a", current);
+    const reconnected = getMobileE2eeSessionState("env_a");
+
+    // The replaced channel's last operation lands, and only then is it disposed.
+    lockMobileE2eeChannelMode("e2ee", "env_a", replaced);
+    endMobileE2eeChannel("env_a", replaced);
+
+    // §2.2: the verified claim the old channel earned never lands on the new one.
+    expect(getMobileE2eeSessionState("env_a")).toBe(reconnected);
+    expect(reconnected).toMatchObject({ channel: "negotiating", pinVerified: false });
+
+    lockMobileE2eeChannelMode("e2ee", "env_a", current);
+    expect(getMobileE2eeSessionState("env_a").channel).toBe("unverified");
+  });
+
+  it("claims nothing for a channel after it ended, or in another environment", () => {
+    begin({ nodeId: "node_a", environmentId: "env_a" });
+    begin({ nodeId: "node_b", environmentId: "env_b" });
+    const channelA = {};
+    beginMobileE2eeChannelAttempt("env_a", channelA);
+    beginMobileE2eeChannelAttempt("env_b", {});
+
+    lockMobileE2eeChannelMode("legacy", "env_b", channelA);
+    expect(getMobileE2eeSessionState("env_b").channel).toBe("negotiating");
+
+    endMobileE2eeChannel("env_a", channelA);
+    lockMobileE2eeChannelMode("legacy", "env_a", channelA);
+    expect(getMobileE2eeSessionState("env_a").channel).toBe("negotiating");
   });
 });
 
