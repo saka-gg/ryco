@@ -16,10 +16,7 @@ import {
   configureMobileHostedConnectionCoordinator,
   resetMobileHostedConnectionCoordinatorForTests,
 } from "../connection/hostedConnectionCoordinator";
-import {
-  mobileHostedConnectionScopes,
-  recordMobileHostedScopeLeaseReport,
-} from "../connection/hostedConnectionScopes";
+import { mobileHostedConnectionScopes } from "../connection/hostedConnectionScopes";
 import {
   hostedHubController,
   hostedHubStore,
@@ -100,7 +97,6 @@ export function createMobileConnectionRegistry(overrides?: {
 
 let initialized = false;
 let stopEnvironmentDriver: (() => void) | null = null;
-let stopHostedScopeReporter: (() => void) | null = null;
 let stopHostedAccountWatch: (() => void) | null = null;
 
 /**
@@ -169,13 +165,6 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       restoreActiveEnvironment: (environmentId) =>
         useStore.getState().setActiveEnvironmentId(environmentId),
     });
-    // A local lease report uses the same 25s/45s cadence as the reference
-    // design. Connection ownership consumes the live refcounts immediately;
-    // the periodic report is the bounded observability/TTL contract and never
-    // carries payload content or high-cardinality logs.
-    stopHostedScopeReporter = mobileHostedConnectionScopes.startReporter({
-      report: recordMobileHostedScopeLeaseReport,
-    });
     let previousHostedState = hostedHubStore.getState();
     let artworkAccountId = previousHostedState.account?.id ?? null;
     stopHostedAccountWatch = hostedHubStore.subscribe(() => {
@@ -237,8 +226,6 @@ export function resetMobileRuntimeInitForTests(): void {
   appCatalog = null;
   appRemoteApi = null;
   appDriver = null;
-  stopHostedScopeReporter?.();
-  stopHostedScopeReporter = null;
   stopHostedAccountWatch?.();
   stopHostedAccountWatch = null;
   mobileHostedConnectionScopes.reset();

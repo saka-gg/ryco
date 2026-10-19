@@ -1162,4 +1162,23 @@ describe("subscribeAppStateResume", () => {
 
     unsubscribe();
   });
+
+  it("ignores inactive interruptions but resumes after background passes through inactive", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeAppStateResume(listener);
+
+    // Notification Center or the app-switcher peek: inactive and straight back.
+    appStateHolder.handler!("inactive");
+    appStateHolder.handler!("active");
+    expect(listener).not.toHaveBeenCalled();
+
+    // A real background trip returns through inactive before active.
+    appStateHolder.handler!("background");
+    appStateHolder.handler!("inactive");
+    expect(listener).not.toHaveBeenCalled();
+    appStateHolder.handler!("active");
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+  });
 });

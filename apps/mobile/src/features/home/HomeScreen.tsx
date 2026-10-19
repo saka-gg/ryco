@@ -1,8 +1,16 @@
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { AppState, Pressable, View } from "react-native";
 
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
@@ -47,8 +55,21 @@ export function HomeScreen() {
   const [scrollMemory] = useState(createHomeScrollMemory);
   const [stabilizeInboxSections] = useState(createInboxSectionStabilizer);
   const iconColor = useThemeColor("--color-icon");
+  const isFocused = useIsFocused();
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const clockStaleRef = useRef(false);
+  // The clock only runs while Home is the focused screen: a covered Home would
+  // otherwise rebuild its whole model every tick for content nobody sees. It is
+  // read again on the way back, since it stood still in between.
   useEffect(() => {
+    if (!isFocused) {
+      clockStaleRef.current = true;
+      return;
+    }
+    if (clockStaleRef.current) {
+      clockStaleRef.current = false;
+      setNowMs(Date.now());
+    }
     const timer = setInterval(() => setNowMs(Date.now()), 30_000);
     const subscription = AppState.addEventListener("change", (state) => {
       if (state === "active") setNowMs(Date.now());
@@ -57,7 +78,7 @@ export function HomeScreen() {
       clearInterval(timer);
       subscription.remove();
     };
-  }, []);
+  }, [isFocused]);
   // The same clock keeps cached Hub nodes' "last seen" text current.
   const environments = useHomeEnvironments({ nowMs });
   // Keyed by the ids alone: a list rebuilt for a clock tick or a status change
