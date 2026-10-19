@@ -14,6 +14,7 @@ const context = createPrimaryEnvironmentContext({
 });
 
 export const readPrimaryEnvironmentDescriptor = context.readPrimaryEnvironmentDescriptor;
+export const subscribePrimaryEnvironmentDescriptor = context.store.subscribe;
 export const writePrimaryEnvironmentDescriptor = context.writePrimaryEnvironmentDescriptor;
 export const getPrimaryKnownEnvironment = context.getPrimaryKnownEnvironment;
 export const resolveInitialPrimaryEnvironmentDescriptor =

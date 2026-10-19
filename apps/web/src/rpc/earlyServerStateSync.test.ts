@@ -2,19 +2,30 @@ import { createEnvironmentConnection } from "@ryco/client-runtime/connection";
 import type { KnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import {
   emitWelcome,
+  getServerConfig,
+  getServerConfigUpdatedNotification,
+  resetEnvironmentServerConfigsForTests,
   resetServerStateForTests,
   startServerStateSync,
+  writeEnvironmentServerConfig,
   type WsRpcClient,
 } from "@ryco/client-runtime/rpc";
 import {
   EnvironmentId,
   ThreadId,
+  type ExecutionEnvironmentDescriptor,
+  type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
   type ServerLifecycleWelcomePayload,
 } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  resetPrimaryEnvironmentDescriptorForTests,
+  writePrimaryEnvironmentDescriptor,
+} from "../environments/primary";
+import { retainActiveServerConfigProjection } from "./activeServerConfig";
 import {
   EARLY_SERVER_STATE_SYNC_HOLD_MS,
   releaseEarlyPrimaryServerStateSync,
@@ -35,7 +46,10 @@ const server = {
   }),
 };
 
-/** The primary connection as the web shell builds it: no config handler of its own. */
+/**
+ * The primary connection as the web shell builds it: its config handler keeps
+ * the connection's one config stream open from the start.
+ */
 function createPrimaryConnection() {
   return createEnvironmentConnection({
     kind: "primary",
@@ -50,6 +64,7 @@ function createPrimaryConnection() {
       dispose: async () => undefined,
       reconnect: async () => undefined,
     } as unknown as WsRpcClient,
+    onConfigUpdated: () => undefined,
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: () => undefined,
     applyShellEvent: () => undefined,
@@ -59,6 +74,17 @@ function createPrimaryConnection() {
 }
 
 let connection = createPrimaryConnection();
+
+const PRIMARY_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
+
+function configWithProviders(...instanceIds: ReadonlyArray<string>): ServerConfig {
+  return {
+    environment: { environmentId: PRIMARY_ENVIRONMENT_ID, label: "Local", capabilities: {} },
+    issues: [],
+    providers: instanceIds.map((instanceId) => ({ instanceId })),
+    settings: {},
+  } as unknown as ServerConfig;
+}
 
 function welcome(threadId: string): ServerLifecycleWelcomePayload {
   return {
@@ -84,6 +110,7 @@ beforeEach(() => {
   lifecycleListeners.clear();
   configListeners.clear();
   resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
   connection = createPrimaryConnection();
 });
 
@@ -91,25 +118,26 @@ afterEach(() => {
   releaseEarlyPrimaryServerStateSync();
   vi.useRealTimers();
   resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
+  resetPrimaryEnvironmentDescriptorForTests();
 });
 
 describe("startEarlyPrimaryServerStateSync", () => {
-  it("opens the welcome and config streams once and hands them to the shell's hold", () => {
+  it("opens the welcome stream once and hands it to the shell's hold", () => {
     startEarlyPrimaryServerStateSync(connection);
     expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(server.subscribeConfig).toHaveBeenCalledOnce();
 
     // The shell's ServerStateBootstrap: same connection, no second stream.
     const stopShell = startServerStateSync(connection);
     releaseEarlyPrimaryServerStateSync();
     expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(server.subscribeConfig).toHaveBeenCalledOnce();
     expect(lifecycleListeners.size).toBe(1);
-    expect(configListeners.size).toBe(1);
 
     stopShell();
     expect(lifecycleListeners.size).toBe(0);
-    expect(configListeners.size).toBe(0);
+    // The config stream belongs to the connection, not to the sync holds.
+    expect(server.subscribeConfig).toHaveBeenCalledOnce();
+    expect(configListeners.size).toBe(1);
   });
 
   it("runs the first-welcome warm-up once", () => {
@@ -123,7 +151,7 @@ describe("startEarlyPrimaryServerStateSync", () => {
     expect(warm.mock.calls[0]?.[0].bootstrapThreadId).toBe("thread-1");
   });
 
-  it("closes its streams when the shell never takes them over", () => {
+  it("closes its stream when the shell never takes it over", () => {
     vi.useFakeTimers();
     startEarlyPrimaryServerStateSync(connection);
 
@@ -131,52 +159,60 @@ describe("startEarlyPrimaryServerStateSync", () => {
     expect(lifecycleListeners.size).toBe(1);
     vi.advanceTimersByTime(1);
     expect(lifecycleListeners.size).toBe(0);
-    expect(configListeners.size).toBe(0);
   });
 
-  it("opens the config stream only once the provider catalogs have attached", async () => {
-    let attachCatalogs!: () => void;
-    const catalogsAttached = new Promise<void>((resolve) => {
-      attachCatalogs = resolve;
-    });
-    startEarlyPrimaryServerStateSync(connection, { after: catalogsAttached });
-    await Promise.resolve();
-    expect(server.subscribeConfig).not.toHaveBeenCalled();
-    expect(server.subscribeLifecycle).not.toHaveBeenCalled();
-
-    attachCatalogs();
-    await catalogsAttached;
-    await Promise.resolve();
-    expect(server.subscribeConfig).toHaveBeenCalledOnce();
-    expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
-  });
-
-  it("opens the streams when the catalog attach rejects", async () => {
-    const failed = Promise.reject(new Error("indexeddb unavailable"));
-    startEarlyPrimaryServerStateSync(connection, { after: failed });
-    await failed.catch(() => undefined);
-    await Promise.resolve();
-    expect(server.subscribeConfig).toHaveBeenCalledOnce();
-  });
-
-  it("opens nothing when the shell takes over before the catalogs attach", async () => {
-    let attachCatalogs!: () => void;
-    const catalogsAttached = new Promise<void>((resolve) => {
-      attachCatalogs = resolve;
-    });
+  it("drops the first-welcome warm-up once the shell has taken the sync over", () => {
     const warm = vi.fn();
-    startEarlyPrimaryServerStateSync(connection, { after: catalogsAttached, onFirstWelcome: warm });
+    startEarlyPrimaryServerStateSync(connection, { onFirstWelcome: warm });
 
     const stopShell = startServerStateSync(connection);
     releaseEarlyPrimaryServerStateSync();
-    attachCatalogs();
-    await catalogsAttached;
-    await Promise.resolve();
     emitWelcome(welcome("thread-1"));
 
-    expect(server.subscribeConfig).toHaveBeenCalledOnce();
+    expect(server.subscribeLifecycle).toHaveBeenCalledOnce();
     expect(warm).not.toHaveBeenCalled();
     stopShell();
-    expect(configListeners.size).toBe(0);
+    expect(lifecycleListeners.size).toBe(0);
+  });
+
+  it("shows the primary's config as it arrives and hands the projection to the shell", () => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: PRIMARY_ENVIRONMENT_ID,
+    } as unknown as ExecutionEnvironmentDescriptor);
+    startEarlyPrimaryServerStateSync(connection);
+
+    // The connection's config arrives while the shell is still loading.
+    const first = configWithProviders("codex");
+    writeEnvironmentServerConfig(PRIMARY_ENVIRONMENT_ID, first);
+    expect(getServerConfig()).toBe(first);
+    const announced = getServerConfigUpdatedNotification()?.id;
+
+    // The shell takes its own hold before the boot path lets go: nothing is
+    // shown or announced again, and the projection keeps following.
+    const stopShell = retainActiveServerConfigProjection();
+    releaseEarlyPrimaryServerStateSync();
+    expect(getServerConfig()).toBe(first);
+    expect(getServerConfigUpdatedNotification()?.id).toBe(announced);
+    const second = configWithProviders("codex", "claude");
+    writeEnvironmentServerConfig(PRIMARY_ENVIRONMENT_ID, second);
+    expect(getServerConfig()).toBe(second);
+
+    stopShell();
+    writeEnvironmentServerConfig(PRIMARY_ENVIRONMENT_ID, configWithProviders("gemini"));
+    expect(getServerConfig()).toBe(second);
+  });
+
+  it("stops showing config once the boot path's hold ends with no shell", () => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: PRIMARY_ENVIRONMENT_ID,
+    } as unknown as ExecutionEnvironmentDescriptor);
+    startEarlyPrimaryServerStateSync(connection);
+    const first = configWithProviders("codex");
+    writeEnvironmentServerConfig(PRIMARY_ENVIRONMENT_ID, first);
+
+    releaseEarlyPrimaryServerStateSync();
+    writeEnvironmentServerConfig(PRIMARY_ENVIRONMENT_ID, configWithProviders("claude"));
+
+    expect(getServerConfig()).toBe(first);
   });
 });

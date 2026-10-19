@@ -11,7 +11,6 @@ import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts/se
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@ryco/shared/keybindings";
 import * as Atom from "effect/reactivity/Atom";
 
-import type { EnvironmentConnectionConfig } from "../connection/connection.ts";
 import type { WsRpcClient } from "./wsRpcClient.ts";
 import { appAtomRegistry, resetAppAtomRegistryForTests } from "./atomRegistry.ts";
 import { projectServerConfigEvent } from "./serverConfigProjection.ts";
@@ -83,10 +82,24 @@ export function getServerConfigUpdatedNotification(): ServerConfigUpdatedNotific
   return appAtomRegistry.get(serverConfigUpdatedAtom);
 }
 
-export function setServerConfigSnapshot(config: ServerConfig): void {
+/** The update source a stream event reports as; a provider delta is a provider status change. */
+export function toServerConfigUpdateSource(
+  type: ServerConfigStreamEvent["type"],
+): ServerConfigUpdateSource {
+  return type === "providerStatusesDelta" ? "providerStatuses" : type;
+}
+
+/** Shows `config` as the global server config and announces it as the result of `source`. */
+export function publishServerConfig(config: ServerConfig, source: ServerConfigUpdateSource): void {
   resolveServerConfig(config);
-  emitProvidersUpdated({ providers: config.providers });
-  emitServerConfigUpdated(toServerConfigUpdatedPayload(config), "snapshot");
+  if (source === "snapshot" || source === "providerStatuses") {
+    emitProvidersUpdated({ providers: config.providers });
+  }
+  emitServerConfigUpdated(toServerConfigUpdatedPayload(config), source);
+}
+
+export function setServerConfigSnapshot(config: ServerConfig): void {
+  publishServerConfig(config, "snapshot");
 }
 
 export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
@@ -94,14 +107,15 @@ export function applyServerConfigEvent(event: ServerConfigStreamEvent): void {
   if (!nextConfig) {
     return;
   }
-  resolveServerConfig(nextConfig);
-  const source = event.type === "providerStatusesDelta" ? "providerStatuses" : event.type;
-  if (source === "snapshot" || source === "providerStatuses") {
-    emitProvidersUpdated({ providers: nextConfig.providers });
-  }
-  emitServerConfigUpdated(toServerConfigUpdatedPayload(nextConfig), source);
+  publishServerConfig(nextConfig, toServerConfigUpdateSource(event.type));
 }
 
+/**
+ * Local writes to the shown config (this and `applySettingsUpdated`) stand until
+ * the node's own update to the same part arrives (a settings event for settings,
+ * a provider status event for providers) or a snapshot replaces the config; the
+ * active-environment projection keeps them through updates to anything else.
+ */
 export function applyProvidersUpdated(payload: ServerProviderUpdatedPayload): void {
   const latestServerConfig = getServerConfig();
   emitProvidersUpdated(payload);
@@ -159,55 +173,41 @@ interface ServerStateSyncHold {
   readonly stop: () => void;
 }
 
-/**
- * What the primary server-state sync reads: the connection's lifecycle stream
- * and its config observer, which is the connection's one config stream.
- */
+/** What the primary server-state sync reads: the connection's lifecycle stream. */
 export interface ServerStateConnection {
   readonly client: { readonly server: ServerStateClient };
-  readonly config: Pick<EnvironmentConnectionConfig, "subscribe">;
 }
 
-/** One lifecycle subscription and one config hold per connection, shared by every holder. */
+/** One lifecycle subscription per connection, shared by every holder. */
 let serverStateSyncHolds = new WeakMap<ServerStateConnection, ServerStateSyncHold>();
 
 /**
- * Keeps the primary server state live. The config subscription's first item is
- * always a full snapshot, so no separate `getConfig` read runs beside it: that
- * fetched the same ~100 KB config a second time on every connect and queued
- * the shell snapshot behind both on slow links.
+ * Keeps the primary connection's `welcome` live. Welcome comes from the primary
+ * lifecycle stream only; it is not per-environment state.
  *
- * Config comes from the connection's own observer instead of a second
- * `subscribeConfig` on the same client, so each connection carries exactly one
- * config stream, and an event the connection does not accept (an increment
- * without a current snapshot, a stale hosted generation) never reaches the
- * global state either.
+ * It writes no config. Config flows from each connection's own config observer
+ * (`onConfigUpdated`, one config stream per connection, which already drops
+ * events the connection does not accept: an increment without a current
+ * snapshot, a stale hosted generation) into the per-environment store in
+ * `environmentServerConfigs.ts`, and the global config atoms are derived from
+ * the active environment's entry. The config subscription's first item is
+ * always a full snapshot, so no separate `getConfig` read runs beside it.
  *
  * Reference-counted per connection: a second holder (the boot path that starts
  * the sync with the early primary connection, then the shell's own) shares
- * the first one's subscriptions instead of opening duplicate streams, and the
- * last returned stop ends them.
+ * the first one's subscription instead of opening a duplicate stream, and the
+ * last returned stop ends it.
  */
 export function startServerStateSync(connection: ServerStateConnection): () => void {
   let hold = serverStateSyncHolds.get(connection);
   if (!hold) {
-    const cleanups = [
-      connection.client.server.subscribeLifecycle((event) => {
+    hold = {
+      count: 0,
+      stop: connection.client.server.subscribeLifecycle((event) => {
         if (event.type === "welcome") {
           emitWelcome(event.payload);
         }
       }),
-      connection.config.subscribe(({ event }) => {
-        applyServerConfigEvent(event);
-      }),
-    ];
-    hold = {
-      count: 0,
-      stop: () => {
-        for (const cleanup of cleanups) {
-          cleanup();
-        }
-      },
     };
     serverStateSyncHolds.set(connection, hold);
   }
@@ -230,12 +230,22 @@ export function resetServerStateForTests() {
   nextServerConfigUpdatedNotificationId = 1;
 }
 
-export function clearServerState(): void {
-  appAtomRegistry.set(welcomeAtom, null);
+/** Resets the config-derived atoms; the welcome payload is left as it is. */
+export function clearServerConfigState(): void {
   appAtomRegistry.set(serverConfigAtom, null);
   appAtomRegistry.set(serverConfigUpdatedAtom, null);
   appAtomRegistry.set(providersUpdatedAtom, null);
   nextServerConfigUpdatedNotificationId = 1;
+}
+
+/** Resets the primary connection's welcome payload; the config atoms are left as they are. */
+export function clearWelcomeState(): void {
+  appAtomRegistry.set(welcomeAtom, null);
+}
+
+export function clearServerState(): void {
+  clearWelcomeState();
+  clearServerConfigState();
 }
 
 let nextServerConfigUpdatedNotificationId = 1;

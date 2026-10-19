@@ -226,8 +226,7 @@ export function createEnvironmentConnection(
   const shouldObserveLifecycle = input.kind === "saved" || input.onWelcome !== undefined;
   // Saved connections and those with a config handler hold their one config
   // stream for their whole life. A primary without one opens it for its first
-  // observer (the primary server-state sync), which may wait for the provider
-  // catalogs it can name before it subscribes.
+  // observer.
   const holdsConfigForLife = input.kind === "saved" || input.onConfigUpdated !== undefined;
   const lifecycleGeneration = input.lifecycleGeneration;
   const isCurrentGeneration = () =>

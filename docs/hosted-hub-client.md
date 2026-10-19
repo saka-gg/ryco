@@ -176,6 +176,17 @@ environment to close, teardown is ordered:
    caches, timers, and the previous environment projection;
 4. start any queued replacement as a new environment generation.
 
+The server config the UI shows comes from a per-environment store. Each connection writes its own
+node's config there from the moment it connects (its config stream is a session-sync subscription,
+fenced by the hosted generation like the rest of its state), and the global config the UI reads is
+derived from the active environment's entry while the shell is mounted. An entry lasts until its
+environment is left: leaving an environment forgets only its own entry, and the shown config resets
+with it when that environment's config was the one shown, whether or not the shell is mounted.
+After a switch the shown config is the new environment's entry, once its connection has written
+one; until then no config is shown. Sign-out purges all entries. `welcome` is not per-environment
+state: it comes from the primary connection's lifecycle stream only, and leaving the primary node
+drops it.
+
 Hosted Web keeps the shared absolute ceiling of three but uses a qualified platform ceiling of one.
 Cached directory, Inbox, Projects, and search hydration acquire no relay connection. A mounted
 thread detail, VCS status, or provider status scope acquires its owner automatically. Excess demand

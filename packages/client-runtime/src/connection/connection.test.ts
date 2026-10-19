@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { ShellSubscriptionOptions, WsRpcClient } from "../rpc/index.ts";
-import { startServerStateSync } from "../rpc/serverState.ts";
 import {
   recordWsConnectionAttempt,
   recordWsConnectionClosed,
@@ -479,13 +478,14 @@ describe("live config", () => {
   });
 
   it("opens one config stream per connection, shared by every observer", () => {
-    // A saved connection holds its stream for life; the server-state sync
-    // rides on it instead of opening another.
+    // A saved connection holds its stream for life; observers ride on it
+    // instead of opening another.
     const saved = configHarness();
     const savedConnection = liveConnection(saved, { kind: "saved" });
-    const stopSaved = startServerStateSync(savedConnection);
     expect(saved.subscribeConfig).toHaveBeenCalledOnce();
-    stopSaved();
+    const stopSavedObserver = savedConnection.config.subscribe(() => undefined);
+    expect(saved.subscribeConfig).toHaveBeenCalledOnce();
+    stopSavedObserver();
     expect(saved.openStreams()).toBe(1);
 
     // A primary connection without a config handler opens its stream for the
@@ -493,14 +493,12 @@ describe("live config", () => {
     const primary = configHarness();
     const primaryConnection = liveConnection(primary);
     expect(primary.subscribeConfig).not.toHaveBeenCalled();
-    const stopEarly = startServerStateSync(primaryConnection);
-    const stopShell = startServerStateSync(primaryConnection);
-    const unsubscribeReader = primaryConnection.config.subscribe(() => undefined);
+    const stopFirstObserver = primaryConnection.config.subscribe(() => undefined);
+    const stopSecondObserver = primaryConnection.config.subscribe(() => undefined);
     expect(primary.subscribeConfig).toHaveBeenCalledOnce();
-    stopEarly();
-    unsubscribeReader();
+    stopFirstObserver();
     expect(primary.openStreams()).toBe(1);
-    stopShell();
+    stopSecondObserver();
     expect(primary.openStreams()).toBe(0);
     expect(primaryConnection.config.read()).toBeNull();
   });

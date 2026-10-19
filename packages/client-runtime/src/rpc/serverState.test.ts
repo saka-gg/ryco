@@ -17,12 +17,20 @@ import { createEnvironmentConnection } from "../connection/connection.ts";
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { WsRpcClient } from "./wsRpcClient.ts";
 import {
+  readEnvironmentServerConfig,
+  resetEnvironmentServerConfigsForTests,
+  writeEnvironmentServerConfig,
+} from "./environmentServerConfigs.ts";
+import {
+  applyServerConfigEvent,
+  clearWelcomeState,
   getServerConfig,
   getLegacyServerKeybindings,
   onProvidersUpdated,
   onServerConfigUpdated,
   onWelcome,
   resetServerStateForTests,
+  setServerConfigSnapshot,
   startServerStateSync,
 } from "./serverState.ts";
 
@@ -100,7 +108,7 @@ const serverApi = {
   ),
 };
 
-/** A primary connection over `serverApi`, as the web shell builds it (no config handler). */
+/** A primary connection over `serverApi`, as the web shell builds it: config goes to the per-environment store. */
 function createPrimaryConnection() {
   return createEnvironmentConnection({
     kind: "primary",
@@ -115,6 +123,8 @@ function createPrimaryConnection() {
       dispose: async () => undefined,
       reconnect: async () => undefined,
     } as unknown as WsRpcClient,
+    onConfigUpdated: (config) =>
+      writeEnvironmentServerConfig(baseEnvironment.environmentId, config),
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: () => undefined,
     applyShellEvent: () => undefined,
@@ -137,31 +147,18 @@ function emitServerConfigEvent(event: ServerConfigStreamEvent) {
   }
 }
 
-async function waitFor(assertion: () => void, timeoutMs = 1_000): Promise<void> {
-  const startedAt = Date.now();
-  for (;;) {
-    try {
-      assertion();
-      return;
-    } catch (error) {
-      if (Date.now() - startedAt >= timeoutMs) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   lifecycleListeners.clear();
   configListeners.clear();
   resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
   connection = createPrimaryConnection();
 });
 
 afterEach(() => {
   resetServerStateForTests();
+  resetEnvironmentServerConfigsForTests();
 });
 
 describe("serverState", () => {
@@ -170,21 +167,28 @@ describe("serverState", () => {
     expect(getLegacyServerKeybindings()).toEqual(DEFAULT_RESOLVED_KEYBINDINGS);
   });
 
-  it("takes the config snapshot from the subscription alone and replays it to late subscribers", async () => {
-    const configListener = vi.fn();
+  it("keeps the welcome stream only and writes no config of its own", () => {
     const stop = startServerStateSync(connection);
-    const unsubscribe = onServerConfigUpdated(configListener);
+
+    expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
+    // The connection's own config stream carries the config (one stream, one
+    // writer: the per-environment store); the sync adds no stream or write.
+    expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
+    expect(serverApi.getConfig).not.toHaveBeenCalled();
 
     emitServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(baseServerConfig);
-    });
+    expect(readEnvironmentServerConfig(baseEnvironment.environmentId)).toEqual(baseServerConfig);
+    expect(getServerConfig()).toBeNull();
 
-    expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
-    expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
-    // The subscription's first item is the snapshot; a parallel read would
-    // fetch the same config twice on every connect.
-    expect(serverApi.getConfig).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("takes a config snapshot and replays it to late subscribers", () => {
+    const configListener = vi.fn();
+    const unsubscribe = onServerConfigUpdated(configListener);
+
+    setServerConfigSnapshot(baseServerConfig);
+    expect(getServerConfig()).toEqual(baseServerConfig);
     expect(configListener).toHaveBeenCalledWith(
       {
         issues: [],
@@ -207,31 +211,28 @@ describe("serverState", () => {
 
     unsubscribeLate();
     unsubscribe();
-    stop();
   });
 
-  it("shares one lifecycle and config subscription between holders of the same connection", () => {
+  it("shares one lifecycle subscription between holders of the same connection", () => {
     const stopEarly = startServerStateSync(connection);
     const stopShell = startServerStateSync(connection);
 
     expect(serverApi.subscribeLifecycle).toHaveBeenCalledOnce();
-    expect(serverApi.subscribeConfig).toHaveBeenCalledOnce();
     expect(lifecycleListeners.size).toBe(1);
-    expect(configListeners.size).toBe(1);
 
-    // The first holder letting go (twice, even) leaves the other's streams open.
+    // The first holder letting go (twice, even) leaves the other's stream open.
     stopEarly();
     stopEarly();
     expect(lifecycleListeners.size).toBe(1);
-    expect(configListeners.size).toBe(1);
 
     stopShell();
     expect(lifecycleListeners.size).toBe(0);
-    expect(configListeners.size).toBe(0);
+    // The connection's config stream is not the sync's to close.
+    expect(configListeners.size).toBe(1);
 
-    // A later holder opens fresh streams.
+    // A later holder opens a fresh stream.
     const stopAgain = startServerStateSync(connection);
-    expect(serverApi.subscribeConfig).toHaveBeenCalledTimes(2);
+    expect(serverApi.subscribeLifecycle).toHaveBeenCalledTimes(2);
     stopAgain();
   });
 
@@ -277,17 +278,34 @@ describe("serverState", () => {
     stop();
   });
 
-  it("merges provider, settings, and keybinding updates into the cached config", async () => {
+  it("resets the welcome alone, leaving the shown config as it is", () => {
+    const stop = startServerStateSync(connection);
+    setServerConfigSnapshot(baseServerConfig);
+    emitLifecycleEvent({
+      version: 1,
+      sequence: 1,
+      type: "welcome",
+      payload: { environment: baseEnvironment, cwd: "/workspace", projectName: "ryco" },
+    });
+
+    clearWelcomeState();
+
+    const welcomeListener = vi.fn();
+    const unsubscribe = onWelcome(welcomeListener);
+    expect(welcomeListener).not.toHaveBeenCalled();
+    expect(getServerConfig()).toBe(baseServerConfig);
+    unsubscribe();
+    stop();
+  });
+
+  it("merges provider, settings, and keybinding updates into the cached config", () => {
     const configListener = vi.fn();
     const providersListener = vi.fn();
-    const stop = startServerStateSync(connection);
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
 
-    emitServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual(baseServerConfig);
-    });
+    applyServerConfigEvent({ version: 1, type: "snapshot", config: baseServerConfig });
+    expect(getServerConfig()).toEqual(baseServerConfig);
 
     const nextProviders: ReadonlyArray<ServerProvider> = [
       {
@@ -312,7 +330,7 @@ describe("serverState", () => {
       },
     ] as const;
 
-    emitServerConfigEvent({
+    applyServerConfigEvent({
       version: 1,
       type: "keybindingsUpdated",
       payload: {
@@ -320,14 +338,14 @@ describe("serverState", () => {
         issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
       },
     });
-    emitServerConfigEvent({
+    applyServerConfigEvent({
       version: 1,
       type: "providerStatuses",
       payload: {
         providers: nextProviders,
       },
     });
-    emitServerConfigEvent({
+    applyServerConfigEvent({
       version: 1,
       type: "settingsUpdated",
       payload: {
@@ -338,17 +356,15 @@ describe("serverState", () => {
       },
     });
 
-    await waitFor(() => {
-      expect(getServerConfig()).toEqual({
-        ...baseServerConfig,
-        keybindings: nextKeybindings,
-        issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
-        providers: nextProviders,
-        settings: {
-          ...DEFAULT_SERVER_SETTINGS,
-          enableLegacyTokenStreaming: true,
-        },
-      });
+    expect(getServerConfig()).toEqual({
+      ...baseServerConfig,
+      keybindings: nextKeybindings,
+      issues: [{ kind: "keybindings.malformed-config", message: "bad json" }],
+      providers: nextProviders,
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        enableLegacyTokenStreaming: true,
+      },
     });
 
     expect(providersListener).toHaveBeenLastCalledWith({ providers: nextProviders });
@@ -384,12 +400,10 @@ describe("serverState", () => {
 
     unsubscribeProviders();
     unsubscribeConfig();
-    stop();
   });
-  it("applies a provider delta onto the list the stream sent and reports it as a provider update", async () => {
+  it("applies a provider delta onto the list the stream sent and reports it as a provider update", () => {
     const configListener = vi.fn();
     const providersListener = vi.fn();
-    const stop = startServerStateSync(connection);
     const unsubscribeConfig = onServerConfigUpdated(configListener);
     const unsubscribeProviders = onProvidersUpdated(providersListener);
     const model = { slug: "gpt-5", name: "GPT-5", isCustom: false, capabilities: null };
@@ -399,15 +413,15 @@ describe("serverState", () => {
       instanceId: ProviderInstanceId.make("codex-work"),
     };
 
-    emitServerConfigEvent({
+    applyServerConfigEvent({
       version: 1,
       type: "snapshot",
       config: { ...baseServerConfig, providers: [codex, work] },
     });
-    await waitFor(() => expect(getServerConfig()?.providers).toHaveLength(2));
+    expect(getServerConfig()?.providers).toHaveLength(2);
 
     const { models: _models, skills: _skills, slashCommands: _slashCommands, ...status } = work;
-    emitServerConfigEvent({
+    applyServerConfigEvent({
       version: 1,
       type: "providerStatusesDelta",
       payload: {
@@ -416,13 +430,11 @@ describe("serverState", () => {
       },
     });
 
-    await waitFor(() => {
-      const providers = getServerConfig()?.providers ?? [];
-      expect(providers.map((provider) => provider.instanceId)).toEqual(["codex-work", "codex"]);
-      // The untouched instance keeps its object; the changed one keeps its catalogs.
-      expect(providers[1]).toBe(getServerConfig()?.providers[1]);
-      expect(providers[0]).toEqual({ ...work, status: "error" });
-    });
+    const providers = getServerConfig()?.providers ?? [];
+    expect(providers.map((provider) => provider.instanceId)).toEqual(["codex-work", "codex"]);
+    // The untouched instance keeps its object; the changed one keeps its catalogs.
+    expect(providers[1]).toBe(getServerConfig()?.providers[1]);
+    expect(providers[0]).toEqual({ ...work, status: "error" });
     expect(providersListener).toHaveBeenLastCalledWith({
       providers: getServerConfig()?.providers,
     });
@@ -430,6 +442,5 @@ describe("serverState", () => {
 
     unsubscribeProviders();
     unsubscribeConfig();
-    stop();
   });
 });

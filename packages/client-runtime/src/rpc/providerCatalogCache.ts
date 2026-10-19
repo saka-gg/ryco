@@ -20,6 +20,14 @@ export interface ProviderCatalogStore {
 export const PROVIDER_CATALOG_CACHE_MAX_ENTRIES = 32;
 
 /**
+ * How long a config subscription waits for a declared load before it starts
+ * without those catalogs. The server then sends them all again, which costs
+ * bytes; a storage read that never settles must not cost the session its
+ * config. A load that lands later still fills the cache for later snapshots.
+ */
+export const PROVIDER_CATALOG_LOAD_MAX_WAIT_MS = 250;
+
+/**
  * Provider catalogs a client was sent, by content digest, shared by every
  * connection of the page. A config subscription names the digests it holds
  * (`knownProviderCatalogs`) and the server leaves those catalogs out of its
@@ -31,6 +39,16 @@ export interface ProviderCatalogCache {
   readonly put: (digest: string, catalog: ProviderCatalog) => void;
   /** Loads persisted catalogs (entries already in memory win) and saves later changes. */
   readonly attachStore: (store: ProviderCatalogStore) => Promise<void>;
+  /**
+   * Declares that catalogs are still on their way into the cache (`loading` is
+   * the attach of a persisted store): a config subscription that starts
+   * meanwhile waits for it, since claiming nothing makes the server send every
+   * catalog again. A rejection counts as settled, and so does the wait
+   * outlasting {@link PROVIDER_CATALOG_LOAD_MAX_WAIT_MS}.
+   */
+  readonly expectLoad: (loading: PromiseLike<unknown>) => void;
+  /** Settles once every declared load has (or its wait ran out); `null` when none is pending. */
+  readonly loaded: () => Promise<void> | null;
   readonly clear: () => void;
 }
 
@@ -38,6 +56,7 @@ export function createProviderCatalogCache(
   maxEntries: number = PROVIDER_CATALOG_CACHE_MAX_ENTRIES,
 ): ProviderCatalogCache {
   const entries = new Map<string, ProviderCatalog>();
+  const pendingLoads = new Set<Promise<void>>();
   let store: ProviderCatalogStore | null = null;
   let saveScheduled = false;
   const scheduleSave = () => {
@@ -75,6 +94,20 @@ export function createProviderCatalogCache(
       }
       for (const [digest, catalog] of current) insert(digest, catalog);
     },
+    expectLoad: (loading) => {
+      const settled = new Promise<void>((resolve) => {
+        const timer = globalThis.setTimeout(() => resolve(), PROVIDER_CATALOG_LOAD_MAX_WAIT_MS);
+        const finish = () => {
+          globalThis.clearTimeout(timer);
+          resolve();
+        };
+        Promise.resolve(loading).then(finish, finish);
+      });
+      pendingLoads.add(settled);
+      void settled.then(() => pendingLoads.delete(settled));
+    },
+    loaded: () =>
+      pendingLoads.size === 0 ? null : Promise.all(pendingLoads).then(() => undefined),
     clear: () => {
       entries.clear();
       scheduleSave();
