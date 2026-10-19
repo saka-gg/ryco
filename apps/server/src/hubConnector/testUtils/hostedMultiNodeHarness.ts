@@ -116,6 +116,14 @@ export interface HostedMultiNodeHarnessOptions {
   readonly e2ee?: "nx";
   /** Byte budget of one shell message; defaults to the node's production budget. */
   readonly shellPageMaxBytes?: number;
+  /**
+   * How a node reads its shell for each subscription; the seeded shell as it is by default. A
+   * test can put a shell memo, with a build it counts, in front of the seeded shell.
+   */
+  readonly readShell?: (
+    nodeIndex: number,
+    seeded: HostedNodeShellSnapshot,
+  ) => Effect.Effect<HostedNodeShellSnapshot>;
 }
 
 export interface HubTraffic {
@@ -458,6 +466,9 @@ function shellThread(projectId: string, nodeIndex: number, index: number) {
   };
 }
 
+/** The shell a node serves: one project and its threads. */
+export type HostedNodeShellSnapshot = ReturnType<typeof nodeShellSnapshot>;
+
 function nodeShellSnapshot(nodeIndex: number, threadCount: number) {
   const projectId = `project-node-${nodeIndex}`;
   return {
@@ -608,6 +619,7 @@ interface FakeNodeOptions {
   readonly sendToHub: (node: FakeNode, bytes: Uint8Array) => void;
   /** Called once per channel with the number of messages its shell travelled in. */
   readonly onShellServed: (channelId: string, pages: number) => void;
+  readonly readShell: HostedMultiNodeHarnessOptions["readShell"];
   readonly now: () => number;
 }
 
@@ -623,6 +635,8 @@ function createFakeNode(options: FakeNodeOptions): FakeNode {
   const errors: string[] = [];
   const scopes: Scope.Closeable[] = [];
   const shell = nodeShellSnapshot(index, options.threadsPerNode);
+  const readShell = (): Effect.Effect<HostedNodeShellSnapshot> =>
+    options.readShell?.(index, shell) ?? Effect.succeed(shell);
   const threadWindow = nodeThreadWindowSnapshot(index);
   const ceiling = nodeE2eeChannelPlaintextCeiling(RELAY_INITIAL_LIMITS);
   const rateLimiter = makeNodeE2eeHandshakeRateLimiter();
@@ -690,18 +704,24 @@ function createFakeNode(options: FakeNodeOptions): FakeNode {
             WsRpcGroup.of({
               [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: {
                 readonly snapshotDelivery?: "paged";
-              }) => {
-                if (input.snapshotDelivery !== "paged") {
-                  options.onShellServed(channelId, 1);
-                  return Stream.concat(
-                    Stream.succeed({ kind: "snapshot" as const, snapshot: shell }),
-                    Stream.never,
-                  );
-                }
-                const messages = pageShellSnapshot(shell as never, options.shellPageMaxBytes);
-                options.onShellServed(channelId, messages.length);
-                return Stream.concat(Stream.fromArrays(...messages), Stream.never);
-              },
+              }) =>
+                Stream.unwrap(
+                  Effect.map(readShell(), (snapshot): Stream.Stream<unknown> => {
+                    if (input.snapshotDelivery !== "paged") {
+                      options.onShellServed(channelId, 1);
+                      return Stream.concat(
+                        Stream.succeed({ kind: "snapshot" as const, snapshot }),
+                        Stream.never,
+                      );
+                    }
+                    const messages = pageShellSnapshot(
+                      snapshot as never,
+                      options.shellPageMaxBytes,
+                    );
+                    options.onShellServed(channelId, messages.length);
+                    return Stream.concat(Stream.fromArrays(...messages), Stream.never);
+                  }),
+                ),
               [ORCHESTRATION_WS_METHODS.subscribeThreadWindow]: () =>
                 Stream.concat(Stream.succeed(threadWindow), Stream.never),
             } as never),
@@ -1370,6 +1390,7 @@ export async function createHostedMultiNodeHarness(
         threadsPerNode,
         shellPageMaxBytes,
         now: () => Date.now(),
+        readShell: options.readShell,
         sendToHub: (node, bytes) => hub.receiveFromNode(node, bytes),
         onShellServed: (channelId, pages) => {
           const trace = hub.traces.find((candidate) => candidate.channelId === channelId);

@@ -51,7 +51,7 @@ import {
   WorktreeId,
 } from "@ryco/contracts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
-import { Deferred, Effect, Layer, Option, Schema, Struct } from "effect";
+import { Clock, Deferred, Effect, Layer, Option, Schema, type Scope, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -442,6 +442,50 @@ function computeSnapshotSequence(
   return Number.isFinite(minSequence) ? minSequence : 0;
 }
 
+/** A shell as built: stubbed builds list archived threads apart. */
+type BuiltShellSnapshot = OrchestrationShellSnapshot & {
+  readonly archivedThreadStubs?: ReadonlyArray<OrchestrationArchivedThreadStub>;
+};
+
+/**
+ * The projection's progress as a version: every projector's cursor and time, which advance in
+ * the transaction that projects an event. `null` until every projector the shell reads has
+ * recorded its progress, since such a projection has no sequence to compare.
+ */
+function projectionStateVersion(
+  stateRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionStateDbRowSchema>>,
+): string | null {
+  const recorded = new Set<string>(stateRows.map((row) => row.projector));
+  if (!REQUIRED_SNAPSHOT_PROJECTORS.every((projector) => recorded.has(projector))) {
+    return null;
+  }
+  return stateRows
+    .map((row) => `${row.projector}:${row.lastAppliedSequence}:${row.updatedAt}`)
+    .toSorted()
+    .join(",");
+}
+
+/** The usable priority batches a shell's rankings come from, as a version. */
+function priorityBatchVersion(
+  rows: ReadonlyArray<{ readonly batchId: string; readonly usableUntil: string }>,
+): string {
+  return [...new Set(rows.map((row) => `${row.batchId}@${row.usableUntil}`))].toSorted().join(",");
+}
+
+/**
+ * The projects' repository identities as a version. They are recorded outside the event log
+ * (the event announcing a changed identity follows the write), and every write stamps its
+ * project with the time of the check it records.
+ */
+function repositoryIdentityVersion(
+  rows: ReadonlyArray<{ readonly projectId: string; readonly checkedAt: string }>,
+): string {
+  return rows
+    .map((row) => `${row.projectId}@${row.checkedAt}`)
+    .toSorted()
+    .join(",");
+}
+
 function escapeSqlLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
@@ -674,6 +718,22 @@ function checkpointHistoryPageInfo(input: {
 export function coalesceConcurrentRuns<A, E>(
   run: () => Effect.Effect<A, E>,
 ): () => Effect.Effect<A, E> {
+  return makeRunCoalescer(run).next;
+}
+
+interface RunCoalescer<A, E> {
+  /** A run that starts after this call (see {@link coalesceConcurrentRuns}). */
+  readonly next: () => Effect.Effect<A, E>;
+  /** The run in flight, if any; it may have started before the caller's call. */
+  readonly inFlight: () => Deferred.Deferred<A, E> | undefined;
+  /**
+   * The run in flight, else a new one. Only for a caller that already waited out a run in
+   * flight at its call: runs never overlap, so every run in flight since started after it.
+   */
+  readonly inFlightOrNew: () => Effect.Effect<A, E>;
+}
+
+function makeRunCoalescer<A, E>(run: () => Effect.Effect<A, E>): RunCoalescer<A, E> {
   let running: Deferred.Deferred<A, E> | undefined;
   let queued: Deferred.Deferred<A, E> | undefined;
   const execute = (target: Deferred.Deferred<A, E>): Effect.Effect<void> =>
@@ -687,18 +747,139 @@ export function coalesceConcurrentRuns<A, E>(
         );
       }),
     );
-  return () =>
-    Effect.suspend(() => {
-      if (queued !== undefined) return Deferred.await(queued);
-      const target = Deferred.makeUnsafe<A, E>();
-      if (running !== undefined) {
+  const start = (): Effect.Effect<A, E> => {
+    const target = Deferred.makeUnsafe<A, E>();
+    running = target;
+    return execute(target).pipe(Effect.forkDetach, Effect.andThen(Deferred.await(target)));
+  };
+  return {
+    next: () =>
+      Effect.suspend(() => {
+        if (queued !== undefined) return Deferred.await(queued);
+        if (running === undefined) return start();
+        const target = Deferred.makeUnsafe<A, E>();
         queued = target;
         return Deferred.await(target);
-      }
-      running = target;
-      return execute(target).pipe(Effect.forkDetach, Effect.andThen(Deferred.await(target)));
-    });
+      }),
+    inFlight: () => running,
+    inFlightOrNew: () =>
+      Effect.suspend(() => (running === undefined ? start() : Deferred.await(running))),
+  };
 }
+
+/** The oldest shell the memo serves again, whatever its version says. */
+export const SHELL_MEMO_MAX_AGE_MS = 2_000;
+/** A memoized shell nobody asked for in this long is dropped. */
+export const SHELL_MEMO_IDLE_EVICTION_MS = 30_000;
+
+/**
+ * A built shell and the version of every input it was built from. Two builds at the same version
+ * produce the same snapshot; `null` means the build cannot name its version.
+ */
+export interface VersionedShell<A> {
+  readonly snapshot: A;
+  readonly version: string | null;
+}
+
+interface ShellMemo<A> {
+  readonly snapshot: A;
+  readonly version: string;
+  readonly builtAt: number;
+  lastUsedAt: number;
+}
+
+export interface CurrentShellMemo<A, E> {
+  /** The current shell: the memoized one while it is exactly current, else a new build. */
+  readonly read: () => Effect.Effect<A, E>;
+  /** Whether a built shell is held, from its build until its idle eviction. */
+  readonly holding: () => boolean;
+}
+
+/**
+ * Serves the shell the last build produced again, without building, only while it is exactly
+ * the current shell: the current version still equals the version it was built at, and it is at
+ * most {@link SHELL_MEMO_MAX_AGE_MS} old. A fresh build would then produce the same snapshot at
+ * the same sequence, so the events a subscriber replays after it are the ones a fresh build's
+ * subscriber replays, and readiness still follows a current shell. Anything else builds through
+ * {@link coalesceConcurrentRuns} and replaces the memo; a build without a version is never
+ * served again.
+ *
+ * A read that finds a build already under way (a channel open warming the shell, say) waits it
+ * out and checks again, instead of queueing behind it for a second build: that build is served
+ * when it turns out to be the current shell, by the same version check after the wait.
+ *
+ * The memo is dropped {@link SHELL_MEMO_IDLE_EVICTION_MS} after its last use, by one timer at a
+ * time. Every caller shares the served snapshot, so nobody may mutate it.
+ */
+export const makeCurrentShellMemo = <A, E, VersionError>(options: {
+  readonly build: () => Effect.Effect<VersionedShell<A>, E>;
+  /** The current version, cheap to read; a failed read counts as a change. */
+  readonly readVersion: Effect.Effect<string | null, VersionError>;
+}): Effect.Effect<CurrentShellMemo<A, E>, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope;
+    let memo: ShellMemo<A> | undefined;
+    let evicting = false;
+    const evictWhenIdle: Effect.Effect<void> = Effect.gen(function* () {
+      while (true) {
+        const current = memo;
+        if (current === undefined) return;
+        const idleMs = (yield* Clock.currentTimeMillis) - current.lastUsedAt;
+        if (idleMs >= SHELL_MEMO_IDLE_EVICTION_MS) {
+          memo = undefined;
+          return;
+        }
+        yield* Effect.sleep(SHELL_MEMO_IDLE_EVICTION_MS - idleMs);
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          evicting = false;
+        }),
+      ),
+    );
+    const builds = makeRunCoalescer(() =>
+      Effect.gen(function* () {
+        const builtAt = yield* Clock.currentTimeMillis;
+        const built = yield* options.build();
+        memo =
+          built.version === null
+            ? undefined
+            : { snapshot: built.snapshot, version: built.version, builtAt, lastUsedAt: builtAt };
+        if (memo !== undefined && !evicting) {
+          evicting = true;
+          yield* Effect.forkIn(evictWhenIdle, scope);
+        }
+        return built.snapshot;
+      }),
+    );
+    const currentVersion = options.readVersion.pipe(Effect.orElseSucceed(() => null));
+    /** The memo, marked used, while it is exactly the current shell. */
+    const currentMemo: Effect.Effect<ShellMemo<A> | undefined> = Effect.gen(function* () {
+      const current = memo;
+      if (current === undefined) return undefined;
+      const now = yield* Clock.currentTimeMillis;
+      if (now - current.builtAt > SHELL_MEMO_MAX_AGE_MS) return undefined;
+      if ((yield* currentVersion) !== current.version) return undefined;
+      current.lastUsedAt = now;
+      return current;
+    });
+    return {
+      read: () =>
+        Effect.gen(function* () {
+          const served = yield* currentMemo;
+          if (served !== undefined) return served.snapshot;
+          const inFlight = builds.inFlight();
+          if (inFlight === undefined) return yield* builds.next();
+          // Its outcome only matters through the memo it leaves; a failure is the next
+          // build's to report.
+          yield* Effect.exit(Deferred.await(inFlight));
+          const built = yield* currentMemo;
+          return built !== undefined ? built.snapshot : yield* builds.inFlightOrNew();
+        }),
+      holding: () => memo !== undefined,
+    };
+  });
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): ProjectionRepositoryError =>
@@ -748,6 +929,26 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
       ORDER BY ranking.thread_id ASC
     `;
   };
+  /** The batches `listThreadPriorityRows` reads rankings from right now (one slot, indexed). */
+  const listActivePriorityBatchRows = () => {
+    const now = new Date().toISOString();
+    return sql<{ readonly batchId: string; readonly usableUntil: string }>`
+      SELECT batch.batch_id AS "batchId", batch.usable_until AS "usableUntil"
+      FROM thread_priority_batches AS batch
+      WHERE batch.usable_until > ${now}
+        AND EXISTS (
+          SELECT 1 FROM thread_priority_rankings AS ranking
+          WHERE ranking.batch_id = batch.batch_id
+        )
+    `;
+  };
+  /** When each project's repository identity was last recorded (one row per project). */
+  const listRepositoryIdentityCheckRows = () =>
+    sql<{ readonly projectId: string; readonly checkedAt: string }>`
+      SELECT project_id AS "projectId", repository_identity_checked_at AS "checkedAt"
+      FROM projection_projects
+      WHERE repository_identity_checked_at IS NOT NULL
+    `;
   const decodeThreadPriorityRow = (
     row: Effect.Success<ReturnType<typeof listThreadPriorityRows>>[number],
   ) =>
@@ -3145,10 +3346,55 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         }),
       );
 
+  // Background liveness lives in memory, outside the event log, so the shell's version names it.
+  const backgroundLivenessVersion = () =>
+    threadBackgroundLiveness
+      .listLiveThreadIds()
+      .toSorted()
+      .map(
+        (threadId) =>
+          `${threadId}=${threadBackgroundLiveness.getThreadBackgroundLiveness(threadId)}`,
+      )
+      .join(",");
+  /**
+   * The version of every input a shell is built from: the projection's progress (every event's
+   * rows), the usable priority batch, the recorded repository identities and background liveness
+   * (see {@link makeCurrentShellMemo}).
+   */
+  const shellVersion = (
+    stateRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionStateDbRowSchema>>,
+    priorityRows: ReadonlyArray<{ readonly batchId: string; readonly usableUntil: string }>,
+    identityRows: ReadonlyArray<{ readonly projectId: string; readonly checkedAt: string }>,
+  ): string | null => {
+    const state = projectionStateVersion(stateRows);
+    return state === null
+      ? null
+      : JSON.stringify([
+          state,
+          priorityBatchVersion(priorityRows),
+          repositoryIdentityVersion(identityRows),
+          backgroundLivenessVersion(),
+        ]);
+  };
+  // Three small reads: the projection's cursors, the usable batch (its time is read per call)
+  // and the projects' identity checks.
+  const readShellVersion = Effect.suspend(() =>
+    Effect.all([
+      listProjectionStateRows(undefined),
+      listActivePriorityBatchRows(),
+      listRepositoryIdentityCheckRows(),
+    ]),
+  ).pipe(
+    Effect.map(([stateRows, batchRows, identityRows]) =>
+      shellVersion(stateRows, batchRows, identityRows),
+    ),
+  );
+
   // Pure SQL: repository identities are persisted (see project/repositoryIdentitySync.ts), so a
   // snapshot never waits on git. Rows are decoded once, with the wire normalizations applied per
-  // field, and the assembled snapshot is not decoded again.
-  const buildShell = (scope: ShellScope | undefined) =>
+  // field, and the assembled snapshot is not decoded again. The version is read in the same
+  // transaction (and liveness in the same synchronous step) as the rows it describes.
+  const buildVersionedShell = (scope: ShellScope | undefined) =>
     sql
       .withTransaction(
         Effect.all([
@@ -3225,6 +3471,13 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 ),
               )
             : Effect.succeed({ updatedAt: null }),
+          listRepositoryIdentityCheckRows().pipe(
+            Effect.mapError(
+              toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getShellSnapshot:listRepositoryIdentityChecks",
+              ),
+            ),
+          ),
         ]),
       )
       .pipe(
@@ -3239,9 +3492,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             priorityRows,
             updatedAtRow,
             archivedUpdatedAtRow,
-          ]): OrchestrationShellSnapshot & {
-            readonly archivedThreadStubs?: ReadonlyArray<OrchestrationArchivedThreadStub>;
-          } => {
+            identityRows,
+          ]): VersionedShell<BuiltShellSnapshot> => {
             const stubArchived = scope?.archivedThreads === "stub";
             let updatedAt: string | null = updatedAtRow.updatedAt;
             if (archivedUpdatedAtRow.updatedAt !== null) {
@@ -3299,7 +3551,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 .map((row) => [row.threadId, decodeThreadPriorityRow(row)]),
             );
 
-            return {
+            const snapshot: BuiltShellSnapshot = {
               snapshotSequence: computeSnapshotSequence(stateRows),
               projects: projectRows.map((row) =>
                 mapProjectShellRow(
@@ -3351,6 +3603,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
               }),
               updatedAt: updatedAt ?? new Date(0).toISOString(),
             };
+            return { snapshot, version: shellVersion(stateRows, priorityRows, identityRows) };
           },
         ),
         Effect.mapError((error) => {
@@ -3359,7 +3612,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           }
           return toPersistenceSqlError("ProjectionSnapshotQuery.getShellSnapshot:query")(error);
         }),
-        Effect.tap((snapshot) =>
+        Effect.tap(({ snapshot }) =>
           Effect.logDebug(
             scope?.projectIds === undefined && scope?.threadIds === undefined
               ? "startup shell snapshot query complete"
@@ -3372,42 +3625,57 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             },
           ),
         ),
+        Effect.withSpan("ProjectionSnapshotQuery.buildShell", {
+          attributes: {
+            "shell.form":
+              scope?.projectIds !== undefined || scope?.threadIds !== undefined
+                ? "scoped"
+                : scope?.archivedThreads === "stub"
+                  ? "stubbed"
+                  : "full",
+          },
+        }),
       );
 
-  const buildShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] = () =>
-    buildShell(undefined);
-
-  const buildStubbedShellSnapshot: NonNullable<
-    ProjectionSnapshotQueryShape["getStubbedShellSnapshot"]
-  > = () =>
-    buildShell({ archivedThreads: "stub" }).pipe(
-      Effect.map((snapshot) => ({
-        ...snapshot,
-        archivedThreadStubs: snapshot.archivedThreadStubs ?? [],
+  const buildVersionedShellSnapshot = () => buildVersionedShell(undefined);
+  const buildVersionedStubbedShellSnapshot = () =>
+    buildVersionedShell({ archivedThreads: "stub" }).pipe(
+      Effect.map(({ snapshot, version }) => ({
+        snapshot: { ...snapshot, archivedThreadStubs: snapshot.archivedThreadStubs ?? [] },
+        version,
       })),
     );
 
   const getScopedShellSnapshot: NonNullable<
     ProjectionSnapshotQueryShape["getScopedShellSnapshot"]
-  > = (scope) => buildShell(scope);
+  > = (scope) => buildVersionedShell(scope).pipe(Effect.map(({ snapshot }) => snapshot));
 
   // A caller inside a transaction holds the single connection: a shared build would wait for
   // that connection (a deadlock) or run on the caller's transaction, so it builds its own.
-  const sharedOutsideTransactions = <A, E>(build: () => Effect.Effect<A, E>) => {
-    // Subscribers refreshing on the same thread-priority batch, reconnecting clients and server
-    // callers often ask at once; they share builds instead of each building the whole shell.
-    // Each shell form shares its own builds.
-    const coalesced = coalesceConcurrentRuns(build);
-    return () =>
-      Effect.serviceOption(sql.transactionService).pipe(
-        Effect.flatMap((transaction) => (Option.isSome(transaction) ? build() : coalesced())),
-      );
-  };
+  // Everyone else gets the memoized shell while it is current, else a shared build: subscribers
+  // refreshing on the same thread-priority batch, reconnecting clients, a channel open warming
+  // the shell and server callers often ask at once or in quick succession. Each shell form has
+  // its own memo and shares its own builds; scoped shells have neither.
+  const sharedOutsideTransactions = <A, E>(
+    build: () => Effect.Effect<VersionedShell<A>, E>,
+  ): Effect.Effect<() => Effect.Effect<A, E>, never, Scope.Scope> =>
+    makeCurrentShellMemo({ build, readVersion: readShellVersion }).pipe(
+      Effect.map(
+        (memo) => () =>
+          Effect.serviceOption(sql.transactionService).pipe(
+            Effect.flatMap((transaction) =>
+              Option.isSome(transaction)
+                ? build().pipe(Effect.map(({ snapshot }) => snapshot))
+                : memo.read(),
+            ),
+          ),
+      ),
+    );
   const getShellSnapshot: ProjectionSnapshotQueryShape["getShellSnapshot"] =
-    sharedOutsideTransactions(buildShellSnapshot);
+    yield* sharedOutsideTransactions(buildVersionedShellSnapshot);
   const getStubbedShellSnapshot: NonNullable<
     ProjectionSnapshotQueryShape["getStubbedShellSnapshot"]
-  > = sharedOutsideTransactions(buildStubbedShellSnapshot);
+  > = yield* sharedOutsideTransactions(buildVersionedStubbedShellSnapshot);
 
   const listProjectShells: NonNullable<ProjectionSnapshotQueryShape["listProjectShells"]> = () =>
     listActiveProjectShellRows(undefined).pipe(
