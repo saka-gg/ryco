@@ -1,4 +1,3 @@
-import { pendingRequestActivityInOrchestrationOrder } from "@ryco/shared/threadActivity";
 import type {
   OrchestrationEvent,
   OrchestrationReadModel,
@@ -16,7 +15,14 @@ import {
   OrchestrationWorktreeShell as OrchestrationWorktreeShellSchema,
 } from "@ryco/contracts";
 import { Effect, Schema } from "effect";
-import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
+import {
+  capThreadActivitiesPreservingMilestones,
+  compareThreadActivities,
+  pendingRequestActivityInOrchestrationOrder,
+  resolveRevertRetention,
+  retainThreadMessagesAfterForkRevert,
+  retainTurnItemsAfterRevert,
+} from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 
 import {
@@ -26,7 +32,6 @@ import {
   isCommandModelActivityKind,
 } from "./commandReadModelShape.ts";
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
-import { isForkBaseItemId } from "./forkInheritance.ts";
 import {
   projectCreatedWorktreePullRequests,
   projectWorktreeSourceControlState,
@@ -136,105 +141,6 @@ function capThreadMessagesPreservingUserAnchors(
   });
 }
 
-/**
- * Decides whether an item bound to a turn survives a revert. The legacy rule
- * keeps only turns with a retained checkpoint; the authoritative rule (events
- * that carry `latestTurn`) also keeps items of turns that are not dropped and
- * predate the kept boundary, which the hydrated command model has no
- * checkpoints for.
- */
-type RevertTurnItemFilter = (item: {
-  readonly turnId: string;
-  readonly createdAt: string;
-}) => boolean;
-
-function retainThreadMessagesAfterRevert(
-  messages: ReadonlyArray<OrchestrationMessage>,
-  keepTurnItem: RevertTurnItemFilter,
-  turnCount: number,
-  /** Authoritative boundary: fallback candidates must not postdate it. Null keeps none. */
-  boundaryAt?: string | null,
-): ReadonlyArray<OrchestrationMessage> {
-  const retainedMessageIds = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "system") {
-      retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (
-      message.turnId !== null &&
-      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })
-    ) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-  const isFallbackCandidate = (message: OrchestrationMessage) =>
-    (message.turnId === null ||
-      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })) &&
-    (boundaryAt === undefined || (boundaryAt !== null && message.createdAt <= boundaryAt));
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !retainedMessageIds.has(message.id) &&
-          isFallbackCandidate(message),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !retainedMessageIds.has(message.id) &&
-          isFallbackCandidate(message),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
-}
-
-function retainTurnItemsAfterRevert<
-  T extends { readonly id: string; readonly turnId: string | null; readonly createdAt: string },
->(
-  threadId: ThreadId,
-  items: ReadonlyArray<T>,
-  keepTurnItem: RevertTurnItemFilter,
-): ReadonlyArray<T> {
-  return items.filter(
-    (item) =>
-      item.turnId === null ||
-      isForkBaseItemId(threadId, item.id) ||
-      keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
-  );
-}
-
 /** The latest-turn entry a revert to `checkpoint` leaves behind. */
 export function latestTurnFromCheckpoint(
   checkpoint: OrchestrationCheckpointSummary,
@@ -247,23 +153,6 @@ export function latestTurnFromCheckpoint(
     completedAt: checkpoint.completedAt,
     assistantMessageId: checkpoint.assistantMessageId,
   };
-}
-
-function compareThreadActivities(
-  left: OrchestrationThread["activities"][number],
-  right: OrchestrationThread["activities"][number],
-): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
 export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
@@ -1108,48 +997,31 @@ export function projectEvent(
             .filter((entry) => entry.checkpointTurnCount <= payload.turnCount)
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
-          const retainedTurnIds = new Set<string>(
-            checkpoints.map((checkpoint) => checkpoint.turnId),
-          );
 
           // Events carrying `latestTurn` are authoritative (read from SQL by the
           // reactor). Legacy events and replays keep the count-based rule.
-          const authoritative = payload.latestTurn !== undefined;
+          const { keepTurnItem, boundaryAt } = resolveRevertRetention({
+            retainedTurnIds: checkpoints.map((checkpoint) => checkpoint.turnId),
+            latestTurn: payload.latestTurn,
+            droppedTurnIds: payload.droppedTurnIds,
+          });
           let latestTurn: OrchestrationLatestTurn | null;
-          let keepTurnItem: RevertTurnItemFilter;
-          let boundaryAt: string | null | undefined;
-          if (authoritative) {
-            latestTurn = payload.latestTurn ?? null;
-            if (latestTurn !== null) retainedTurnIds.add(latestTurn.turnId);
-            const dropped = new Set<string>(payload.droppedTurnIds ?? []);
-            const boundary = latestTurn?.completedAt ?? null;
-            boundaryAt = boundary;
-            keepTurnItem = (item) =>
-              retainedTurnIds.has(item.turnId) ||
-              (!dropped.has(item.turnId) && boundary !== null && item.createdAt <= boundary);
+          if (payload.latestTurn !== undefined) {
+            latestTurn = payload.latestTurn;
           } else {
             const latestCheckpoint = checkpoints.at(-1) ?? null;
             latestTurn =
               latestCheckpoint === null ? null : latestTurnFromCheckpoint(latestCheckpoint);
-            keepTurnItem = (item) => retainedTurnIds.has(item.turnId);
-            boundaryAt = undefined;
           }
 
           // A fork's inherited history predates all its checkpoints and always survives.
-          // It is kept apart so it cannot fill the count-based fallback for own messages.
-          const ownMessages = retainThreadMessagesAfterRevert(
-            thread.messages.filter((message) => !isForkBaseItemId(thread.id, message.id)),
+          const messages = retainThreadMessagesAfterForkRevert(
+            thread.id,
+            thread.messages,
             keepTurnItem,
             payload.turnCount,
             boundaryAt,
-          );
-          const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
-          const messages = thread.messages
-            .filter(
-              (message) =>
-                isForkBaseItemId(thread.id, message.id) || keptOwnMessageIds.has(message.id),
-            )
-            .slice(-MAX_THREAD_MESSAGES);
+          ).slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainTurnItemsAfterRevert(
             thread.id,
             thread.proposedPlans,

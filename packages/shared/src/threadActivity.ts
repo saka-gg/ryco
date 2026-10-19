@@ -6,6 +6,7 @@ import {
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
+import { isForkBaseItemId } from "./threadFork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 
@@ -225,4 +226,285 @@ export function pendingRequestActivityInOrchestrationOrder(
     activity.kind === "provider.user-input.respond.failed"
     ? { ...activity, sequence }
     : activity;
+}
+
+interface ThreadActivityOrderKey {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly sequence?: number | undefined;
+}
+
+/**
+ * Orders by the durable orchestration sequence alone: activities with a sequence sort after
+ * those without, and equal or both-missing sequences compare as 0 so the caller's tiebreakers
+ * apply.
+ */
+export function compareThreadActivitySequence(
+  left: Pick<ThreadActivityOrderKey, "sequence">,
+  right: Pick<ThreadActivityOrderKey, "sequence">,
+): number {
+  if (left.sequence !== undefined && right.sequence !== undefined) {
+    return left.sequence - right.sequence;
+  }
+  if (left.sequence !== undefined) return 1;
+  if (right.sequence !== undefined) return -1;
+  return 0;
+}
+
+/** The display order of a thread's activities: sequence, then creation time, then id. */
+export function compareThreadActivities(
+  left: ThreadActivityOrderKey,
+  right: ThreadActivityOrderKey,
+): number {
+  return (
+    compareThreadActivitySequence(left, right) ||
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+// ── Changed files in tool payloads ────────────────────────────────────
+
+/** Keys that name a file in a tool payload record, in lookup order. */
+export const CHANGED_FILE_PATH_KEYS = [
+  "path",
+  "filePath",
+  "relativePath",
+  "filename",
+  "newPath",
+  "oldPath",
+] as const;
+
+/** Keys whose values may nest further file records, in scan order. */
+export const CHANGED_FILE_NESTED_KEYS = [
+  "item",
+  "result",
+  "input",
+  "data",
+  "changes",
+  "files",
+  "edits",
+  "patch",
+  "patches",
+  "operations",
+] as const;
+
+/** How deep a payload is scanned for file records. */
+export const CHANGED_FILE_SCAN_MAX_DEPTH = 4;
+
+/** How many files a payload scan collects before it stops. */
+export const CHANGED_FILE_SCAN_MAX_FILES = 12;
+
+function asPayloadRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function pushChangedFile(target: string[], seen: Set<string>, value: unknown): void {
+  if (typeof value !== "string") return;
+  const normalized = value.trim();
+  if (normalized.length === 0 || seen.has(normalized)) return;
+  seen.add(normalized);
+  target.push(normalized);
+}
+
+/**
+ * Collects the distinct file paths a tool payload names into `target`, scanning nested
+ * records and arrays up to `CHANGED_FILE_SCAN_MAX_DEPTH` and stopping at
+ * `CHANGED_FILE_SCAN_MAX_FILES`. The server's activity projection and every client's work log
+ * read file changes through this one scan.
+ */
+export function collectChangedFiles(
+  value: unknown,
+  target: string[],
+  seen: Set<string>,
+  depth: number,
+): void {
+  if (depth > CHANGED_FILE_SCAN_MAX_DEPTH || target.length >= CHANGED_FILE_SCAN_MAX_FILES) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectChangedFiles(entry, target, seen, depth + 1);
+      if (target.length >= CHANGED_FILE_SCAN_MAX_FILES) return;
+    }
+    return;
+  }
+
+  const record = asPayloadRecord(value);
+  if (!record) return;
+
+  for (const key of CHANGED_FILE_PATH_KEYS) {
+    pushChangedFile(target, seen, record[key]);
+  }
+  for (const nestedKey of CHANGED_FILE_NESTED_KEYS) {
+    if (!(nestedKey in record)) continue;
+    collectChangedFiles(record[nestedKey], target, seen, depth + 1);
+    if (target.length >= CHANGED_FILE_SCAN_MAX_FILES) return;
+  }
+}
+
+// ── Checkpoint revert retention ───────────────────────────────────────
+
+/**
+ * Decides whether an item bound to a turn survives a revert. The legacy rule keeps only turns
+ * with a retained checkpoint; the authoritative rule (events that carry `latestTurn`) also keeps
+ * items of turns that are not dropped and predate the kept boundary, which a hydrated command
+ * model has no checkpoints for.
+ */
+export type RevertTurnItemFilter = (item: {
+  readonly turnId: string;
+  readonly createdAt: string;
+}) => boolean;
+
+export interface RevertRetentionInput {
+  /** Turns whose checkpoints the revert keeps. */
+  readonly retainedTurnIds: Iterable<string>;
+  /**
+   * The authoritative latest turn the revert leaves, null for none. Undefined for events that
+   * predate it, which keep the count-based rule.
+   */
+  readonly latestTurn?:
+    | { readonly turnId: string; readonly completedAt: string | null }
+    | null
+    | undefined;
+  /** Authoritative turns the revert drops; only read together with `latestTurn`. */
+  readonly droppedTurnIds?: ReadonlyArray<string> | undefined;
+}
+
+export interface RevertRetention {
+  readonly keepTurnItem: RevertTurnItemFilter;
+  /**
+   * Authoritative boundary: count-based fallback candidates must not postdate it, and null
+   * keeps none. Undefined when the legacy rule applies.
+   */
+  readonly boundaryAt: string | null | undefined;
+}
+
+/** The one revert-retention rule the server's projection and every client's store apply. */
+export function resolveRevertRetention(input: RevertRetentionInput): RevertRetention {
+  const retainedTurnIds = new Set<string>(input.retainedTurnIds);
+  const { latestTurn } = input;
+  if (latestTurn === undefined) {
+    return {
+      keepTurnItem: (item) => retainedTurnIds.has(item.turnId),
+      boundaryAt: undefined,
+    };
+  }
+
+  if (latestTurn !== null) retainedTurnIds.add(latestTurn.turnId);
+  const dropped = new Set<string>(input.droppedTurnIds ?? []);
+  const boundary = latestTurn?.completedAt ?? null;
+  return {
+    keepTurnItem: (item) =>
+      retainedTurnIds.has(item.turnId) ||
+      (!dropped.has(item.turnId) && boundary !== null && item.createdAt <= boundary),
+    boundaryAt: boundary,
+  };
+}
+
+interface RevertableMessage {
+  readonly id: string;
+  readonly role: "user" | "assistant" | "system";
+  readonly turnId?: string | null | undefined;
+  readonly createdAt: string;
+}
+
+function compareByCreatedAtThenId(
+  left: { readonly id: string; readonly createdAt: string },
+  right: { readonly id: string; readonly createdAt: string },
+): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+/**
+ * The messages that survive a revert to `turnCount` checkpoints: system messages, messages of
+ * kept turns, and, for each role still short of `turnCount`, the oldest turn-less or kept
+ * messages that do not postdate `boundaryAt`.
+ */
+export function retainThreadMessagesAfterRevert<M extends RevertableMessage>(
+  messages: ReadonlyArray<M>,
+  keepTurnItem: RevertTurnItemFilter,
+  turnCount: number,
+  /** Authoritative boundary: fallback candidates must not postdate it. Null keeps none. */
+  boundaryAt?: string | null,
+): M[] {
+  const retainedMessageIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "system") {
+      retainedMessageIds.add(message.id);
+      continue;
+    }
+    if (
+      message.turnId !== undefined &&
+      message.turnId !== null &&
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })
+    ) {
+      retainedMessageIds.add(message.id);
+    }
+  }
+  const isFallbackCandidate = (message: M) =>
+    (message.turnId === undefined ||
+      message.turnId === null ||
+      keepTurnItem({ turnId: message.turnId, createdAt: message.createdAt })) &&
+    (boundaryAt === undefined || (boundaryAt !== null && message.createdAt <= boundaryAt));
+
+  for (const role of ["user", "assistant"] as const) {
+    const retainedCount = messages.filter(
+      (message) => message.role === role && retainedMessageIds.has(message.id),
+    ).length;
+    const missingCount = Math.max(0, turnCount - retainedCount);
+    if (missingCount === 0) continue;
+    const fallbackMessages = messages
+      .filter(
+        (message) =>
+          message.role === role &&
+          !retainedMessageIds.has(message.id) &&
+          isFallbackCandidate(message),
+      )
+      .toSorted(compareByCreatedAtThenId)
+      .slice(0, missingCount);
+    for (const message of fallbackMessages) {
+      retainedMessageIds.add(message.id);
+    }
+  }
+
+  return messages.filter((message) => retainedMessageIds.has(message.id));
+}
+
+/**
+ * `retainThreadMessagesAfterRevert` for a thread that may be a fork. A fork's inherited history
+ * predates every checkpoint the fork owns, so it always stays; it is kept apart from the
+ * count-based fallback, which only ever fills in the fork's own messages.
+ */
+export function retainThreadMessagesAfterForkRevert<M extends RevertableMessage>(
+  threadId: string,
+  messages: ReadonlyArray<M>,
+  keepTurnItem: RevertTurnItemFilter,
+  turnCount: number,
+  boundaryAt?: string | null,
+): M[] {
+  const ownMessages = retainThreadMessagesAfterRevert(
+    messages.filter((message) => !isForkBaseItemId(threadId, message.id)),
+    keepTurnItem,
+    turnCount,
+    boundaryAt,
+  );
+  const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
+  return messages.filter(
+    (message) => isForkBaseItemId(threadId, message.id) || keptOwnMessageIds.has(message.id),
+  );
+}
+
+/** Proposed plans and activities that survive a revert: turn-less, fork base, or kept turns. */
+export function retainTurnItemsAfterRevert<
+  T extends { readonly id: string; readonly turnId: string | null; readonly createdAt: string },
+>(threadId: string, items: ReadonlyArray<T>, keepTurnItem: RevertTurnItemFilter): T[] {
+  return items.filter(
+    (item) =>
+      item.turnId === null ||
+      isForkBaseItemId(threadId, item.id) ||
+      keepTurnItem({ turnId: item.turnId, createdAt: item.createdAt }),
+  );
 }
