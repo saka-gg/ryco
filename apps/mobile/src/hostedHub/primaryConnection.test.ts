@@ -1,3 +1,9 @@
+import type {
+  EndpointService,
+  HttpClientService,
+  PasskeyCeremonyService,
+  SessionCredentialsService,
+} from "@ryco/client-runtime/platform";
 import type { EnvironmentConnectionInput } from "@ryco/client-runtime/connection";
 import {
   recordWsConnectionAttempt,
@@ -7,20 +13,12 @@ import {
 } from "@ryco/client-runtime/rpc";
 import {
   EnvironmentId,
-  type ExecutionEnvironmentDescriptor,
+  ORCHESTRATION_WS_METHODS,
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@ryco/contracts";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const hostedLifecycle = vi.hoisted(() => ({
-  generation: 7,
-  listeners: new Set<() => void>(),
-  markReady: vi.fn(),
-  markReplaying: vi.fn(),
-  reportFailure: vi.fn(),
-  failure: vi.fn(),
-}));
 const enrollment = vi.hoisted(() => ({
   applyRevocation: vi.fn(() => true),
   invalidate: vi.fn(async () => undefined),
@@ -28,96 +26,50 @@ const enrollment = vi.hoisted(() => ({
 vi.mock("./e2eeEnrollment", () => ({
   getMobileNativeE2eeEnrollmentCoordinator: () => enrollment,
 }));
-const connectionFactory = vi.hoisted(() => ({
-  input: null as Record<string, unknown> | null,
+
+const e2ee = vi.hoisted(() => ({
+  prepare: vi.fn(async (_target: unknown): Promise<unknown> => ({ kind: "account" })),
+  issue: vi.fn(async (_input: unknown) => ({
+    ticket: "ticket",
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    preparedSocketContext: { kind: "account" },
+  })),
+  dispose: vi.fn((_context: unknown) => undefined),
 }));
+vi.mock("./accountE2eeAttempt", () => ({
+  prepareMobileRelaySocketContext: e2ee.prepare,
+  issueMobileRelayAttempt: e2ee.issue,
+  disposeMobileRelaySocketContext: e2ee.dispose,
+  providerForMobileRelaySocketContext: () => () => undefined,
+}));
+vi.mock("./relaySocket", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./relaySocket")>()),
+  openMobileEarlyRelaySocket: () => undefined,
+}));
+
 const relay = vi.hoisted(() => ({
-  binding: null as import("@ryco/client-runtime/relay").HostedRelayAttemptBinding | null,
-  recover: vi.fn(),
+  created: null as import("@ryco/client-runtime/relay").HostedEnvironmentAttemptFactory | null,
 }));
 vi.mock("@ryco/client-runtime/relay", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@ryco/client-runtime/relay")>();
   return {
     ...actual,
-    recoverHostedRelayConnection: relay.recover,
-    HostedRelayAttemptFactory: class extends actual.HostedRelayAttemptFactory {
-      constructor(binding: import("@ryco/client-runtime/relay").HostedRelayAttemptBinding) {
-        super(binding);
-        relay.binding = binding;
-      }
+    createHostedEnvironmentAttemptFactory: (
+      options: Parameters<typeof actual.createHostedEnvironmentAttemptFactory>[0],
+    ) => {
+      relay.created = actual.createHostedEnvironmentAttemptFactory(options);
+      return relay.created;
     },
   };
 });
 
-const coordinator = vi.hoisted(() => ({
-  current: true,
-  listeners: new Set<() => void>(),
-  generation: 3,
-  markReady: vi.fn(),
-  markReplaying: vi.fn(),
-  reportFailure: vi.fn(),
+const demand = vi.hoisted(() => ({ value: true }));
+vi.mock("../connection/hostedConnectionCoordinator", () => ({
+  readMobileHostedConnectionCoordinator: () => ({ isDemanded: () => demand.value }),
 }));
 
-vi.mock("@ryco/client-runtime/authorization", async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  hostedHubStore: {
-    subscribe: (listener: () => void) => {
-      hostedLifecycle.listeners.add(listener);
-      return () => hostedLifecycle.listeners.delete(listener);
-    },
-    getState: () => ({
-      generation: hostedLifecycle.generation,
-      accountStatus: "authenticated",
-      directoryStatus: "ready",
-      browserStatus: "current",
-      selectedNode: {
-        id: "node-hosted-1",
-        environmentId: "env-hosted-1",
-        label: "Studio",
-        effectiveRole: "owner",
-      },
-    }),
-  },
-  hostedHubController: { failure: hostedLifecycle.failure },
-  markHostedSessionReady: hostedLifecycle.markReady,
-  markHostedSessionReplaying: hostedLifecycle.markReplaying,
-  reportHostedShellSnapshotFailure: hostedLifecycle.reportFailure,
-}));
-vi.mock("../connection/hostedConnectionCoordinator", () => ({
-  mobileHostedConnectionsStore: {
-    subscribe: (listener: () => void) => {
-      coordinator.listeners.add(listener);
-      return () => coordinator.listeners.delete(listener);
-    },
-  },
-  getMobileHostedConnectionCoordinator: () => ({
-    ensureRecord: () => ({
-      generation: coordinator.generation,
-      transportStatus: "idle",
-      sessionStatus: "synchronizing",
-      effectiveRole: "owner",
-    }),
-    shouldActivate: () => true,
-    isCurrentGeneration: () => coordinator.current,
-    registerPendingRequestReader: vi.fn(),
-    read: () => ({
-      generation: coordinator.generation,
-      transportStatus: "online",
-      sessionStatus: "ready",
-      effectiveRole: "owner",
-    }),
-    markAttemptPrepared: vi.fn(),
-    transportStatus: vi.fn(),
-    sessionStatus: vi.fn(),
-    role: vi.fn(),
-    failure: vi.fn(),
-    markDeliveryUnknown: vi.fn(),
-    acknowledgeDeliveryUnknown: vi.fn(),
-    connectionClosed: vi.fn(),
-    markSessionReady: coordinator.markReady,
-    markSessionReplaying: coordinator.markReplaying,
-    reportShellSnapshotFailure: coordinator.reportFailure,
-  }),
+const connectionFactory = vi.hoisted(() => ({
+  input: null as Record<string, unknown> | null,
 }));
 vi.mock("@ryco/client-runtime/connection", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -165,107 +117,254 @@ vi.mock("expo-constants", () => ({
   },
 }));
 
-import { createHostedPrimaryConnection } from "./primaryConnection";
 import {
-  resetPrimaryEnvironmentForTests,
-  writePrimaryEnvironmentDescriptor,
-} from "./primaryEnvironment";
+  configureHostedRuntime,
+  getHostedEnvironmentSessions,
+  hostedHubStore,
+  resetHostedEnvironmentSessionsForTests,
+  type HostedHubApi,
+  type HostedHubNode,
+  type HostedNodeLifecycle,
+} from "@ryco/client-runtime/authorization";
+
+import { createHostedEnvironmentConnection } from "./primaryConnection";
 import { resetMobileHostedRuntimeConfigForTests } from "./runtimeConfig";
 import {
   readEnvironmentServerConfig,
   resetEnvironmentServerConfigsForTests,
 } from "../state/environmentServerConfigs";
 
-const descriptor = {
-  environmentId: "env-hosted-1",
-  label: "Studio",
-  platform: { os: "darwin", arch: "arm64" },
-  serverVersion: "1.0.0",
-  capabilities: { repositoryIdentity: false },
-} as unknown as ExecutionEnvironmentDescriptor;
+function hubNode(suffix: string, label: string): HostedHubNode {
+  return {
+    id: `node-${suffix}`,
+    environmentId: EnvironmentId.make(`env-${suffix}`),
+    label,
+    platformOs: "darwin",
+    platformArch: "arm64",
+    clientVersion: "1",
+    createdAt: 0,
+    updatedAt: 0,
+    lastAuthenticatedAt: null,
+    revokedAt: null,
+    revocationReasonCode: null,
+    grant: { id: `grant-${suffix}`, role: "owner" },
+    effectiveRole: "owner",
+    presence: { online: true, lastHeartbeatAt: null },
+  };
+}
 
-const deps = () => ({
-  pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
-  resetShellProjection: vi.fn(),
-  applyShellEvent: vi.fn(),
-  applyThreadPriorities: vi.fn(),
-  syncShellSnapshot: vi.fn(),
-});
+const studio = hubNode("hosted-1", "Studio");
+const laptop = hubNode("hosted-2", "Laptop");
+const dispatchCommand = { tag: ORCHESTRATION_WS_METHODS.dispatchCommand, stream: false } as const;
+
+const unusedService = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("platform service is not used by the relay connection tests");
+    },
+  },
+);
+
+const lifecycle: HostedNodeLifecycle = {
+  activate: async () => undefined,
+  suspend: async () => undefined,
+  deactivate: async () => undefined,
+  clearNodeScopedState: () => undefined,
+  writePrimaryEnvironmentDescriptor: () => undefined,
+  connectPrimaryEnvironment: () => undefined,
+  disconnectPrimaryEnvironment: async () => undefined,
+  setActiveEnvironmentId: () => undefined,
+  connectEnvironment: () => undefined,
+  releaseEnvironment: async () => undefined,
+  suspendEnvironment: async () => undefined,
+  requestEnvironmentReconcile: () => undefined,
+};
+
+function deps() {
+  return {
+    pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
+    resetShellProjection: vi.fn(),
+    applyShellEvent: vi.fn(),
+    applyThreadPriorities: vi.fn(),
+    syncShellSnapshot: vi.fn(),
+  };
+}
+
+/** A connection was requested for the node's environment, as the controller leaves it. */
+function requestConnection(node: HostedHubNode): number {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(node);
+  sessions.markConnectRequested(node.environmentId, generation);
+  return generation;
+}
+
+function connect(node: HostedHubNode, input = deps()) {
+  const generation = requestConnection(node);
+  const connection = createHostedEnvironmentConnection({ ...input, node, generation });
+  return { connection, generation, binding: relay.created!.binding, input };
+}
 
 beforeEach(() => {
-  hostedLifecycle.generation = 7;
-  hostedLifecycle.listeners.clear();
-  coordinator.listeners.clear();
-  hostedLifecycle.markReady.mockReset();
-  hostedLifecycle.markReplaying.mockReset();
-  hostedLifecycle.reportFailure.mockReset();
-  hostedLifecycle.failure.mockReset();
+  resetHostedEnvironmentSessionsForTests();
+  configureHostedRuntime(
+    {
+      endpoint: unusedService as EndpointService,
+      httpClient: unusedService as HttpClientService,
+      passkeyCeremony: unusedService as PasskeyCeremonyService,
+      sessionCredentials: unusedService as SessionCredentialsService,
+      nodeLifecycle: lifecycle,
+      environmentSessions: "retained",
+      timers: {
+        now: () => Date.now(),
+        setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+        clearTimeout: (timer) => globalThis.clearTimeout(timer),
+        queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+      },
+      isForeground: () => true,
+      subscribeForeground: () => () => undefined,
+      hasPendingRelayRequests: () => false,
+      resetRelayAttemptFactory: () => undefined,
+      relayUrl: () => "wss://hub.example.test/v1/relay/client",
+      createRelaySocket: () => {
+        throw new Error("no relay socket is opened by the relay connection tests");
+      },
+    },
+    { credentialMode: "bearer", clearSessionMaterial: () => undefined } as unknown as HostedHubApi,
+  );
+  // Another node is selected: every connection here is a warm, non-selected one.
+  hostedHubStore.setState({
+    accountStatus: "authenticated",
+    account: { id: "acct-1" } as never,
+    directoryStatus: "ready",
+    browserStatus: "current",
+    nodes: [studio, laptop],
+    selectedNode: laptop,
+  });
+  demand.value = true;
   enrollment.applyRevocation.mockClear();
   enrollment.invalidate.mockClear();
-  coordinator.current = true;
-  coordinator.generation = 3;
+  e2ee.prepare.mockClear();
+  e2ee.issue.mockClear();
+  e2ee.dispose.mockClear();
+  connectionFactory.input = null;
+  relay.created = null;
   resetWsConnectionStateForTests();
   resetEnvironmentServerConfigsForTests();
-  coordinator.markReady.mockReset();
-  coordinator.markReplaying.mockReset();
-  coordinator.reportFailure.mockReset();
-  connectionFactory.input = null;
-  relay.binding = null;
-  relay.recover.mockClear();
-  resetPrimaryEnvironmentForTests();
   resetMobileHostedRuntimeConfigForTests();
 });
 
-describe("hosted primary connection", () => {
-  it("wakes subscriptions for account and per-node admission changes and cleans both up", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    createHostedPrimaryConnection(deps());
-    const changed = vi.fn();
-    const unsubscribe = relay.binding!.subscribeAdmissionChanges!(changed);
-    for (const listener of hostedLifecycle.listeners) listener();
-    for (const listener of coordinator.listeners) listener();
-    expect(changed).toHaveBeenCalledTimes(2);
-    unsubscribe();
-    expect(hostedLifecycle.listeners.size).toBe(0);
-    expect(coordinator.listeners.size).toBe(0);
+afterEach(() => {
+  resetHostedEnvironmentSessionsForTests();
+});
+
+describe("hosted environment connection", () => {
+  it("builds a primary-kind hub-hosted connection that targets the relay, never a node address", async () => {
+    const { connection } = connect(studio);
+
+    // The supervisor keeps hosted node connections as primary ones.
+    expect(connection.kind).toBe("primary");
+    expect(connection.knownEnvironment).toMatchObject({
+      environmentId: studio.environmentId,
+      label: "Studio",
+      source: "hub-hosted",
+      target: {
+        wsBaseUrl: "wss://hub.example.test/v1/relay/client",
+        httpBaseUrl: "https://hub.example.test",
+      },
+    });
+    await connection.dispose();
   });
 
-  it("returns recovered channels to the shared lifecycle only for the active record", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    createHostedPrimaryConnection(deps());
-    relay.binding?.connectionRecovered?.(coordinator.generation);
-    expect(relay.recover).toHaveBeenCalledExactlyOnceWith(hostedLifecycle.generation);
+  it("admits requests from its own record while another node is selected", () => {
+    const { binding, generation } = connect(studio);
+    const sessions = getHostedEnvironmentSessions();
 
-    coordinator.current = false;
-    relay.binding?.connectionRecovered?.(coordinator.generation);
-    expect(relay.recover).toHaveBeenCalledTimes(1);
+    expect(binding.authorizeRequest(dispatchCommand)).toBe("awaiting-session");
+    sessions.transportStatus(studio.environmentId, generation, "online");
+    sessions.markSessionReady(studio.environmentId, generation);
+    expect(binding.authorizeRequest(dispatchCommand)).toBe("allowed");
+
+    // A replaced generation never admits anything again.
+    sessions.renew(studio.environmentId);
+    expect(binding.authorizeRequest(dispatchCommand)).toBe("forbidden");
+  });
+
+  it("reconnects a dropped warm connection without being selected while it is demanded", () => {
+    const { binding, generation } = connect(studio);
+
+    expect(hostedHubStore.getState().selectedNode).toBe(laptop);
+    expect(binding.shouldReconnect(generation)).toBe(true);
+
+    // Nothing holds it: it stops instead, and the coordinator releases it.
+    demand.value = false;
+    expect(binding.shouldReconnect(generation)).toBe(false);
+  });
+
+  it("prepares its E2EE attempt for its own node and record generation", async () => {
+    const { binding, generation } = connect(studio);
+
+    await binding.prepareSocketContext!();
+
+    const [target] = e2ee.prepare.mock.calls[0] as [
+      {
+        nodeId: string;
+        nodeLabel: string;
+        environmentId: string;
+        generation: number;
+        isCurrent: () => boolean;
+      },
+    ];
+    expect(target).toMatchObject({
+      nodeId: studio.id,
+      nodeLabel: "Studio",
+      environmentId: studio.environmentId,
+      generation,
+    });
+    expect(target.isCurrent()).toBe(true);
+    getHostedEnvironmentSessions().renew(studio.environmentId);
+    expect(target.isCurrent()).toBe(false);
+  });
+
+  it("refuses an attempt whose record was replaced during E2EE preparation", async () => {
+    connect(studio);
+    const prepared = { kind: "account" };
+    e2ee.prepare.mockImplementationOnce(async () => {
+      getHostedEnvironmentSessions().renew(studio.environmentId);
+      return prepared;
+    });
+
+    await expect(relay.created!.factory.nextUrl()).rejects.toThrow(
+      "Hosted node selection changed.",
+    );
+
+    expect(e2ee.issue).not.toHaveBeenCalled();
+    expect(e2ee.dispose).toHaveBeenCalledWith(prepared);
   });
 
   it.each(["revoked", "node_revoked", "grant_revoked"] as const)(
     "keeps the device enrollment when a %s close ends one node's channel",
     (closeReason) => {
-      writePrimaryEnvironmentDescriptor(descriptor);
-      createHostedPrimaryConnection(deps());
+      const { binding, generation } = connect(studio);
+      const failure = { kind: "revoked", retryable: false, closeReason } as const;
 
-      relay.binding?.failure(coordinator.generation, {
-        kind: "revoked",
-        retryable: false,
-        closeReason,
-      });
+      binding.failure(generation, failure);
 
       expect(enrollment.applyRevocation).not.toHaveBeenCalled();
       expect(enrollment.invalidate).not.toHaveBeenCalled();
-      // The node itself still reports the revocation.
-      expect(hostedLifecycle.failure).toHaveBeenCalledOnce();
+      // The node's own record still reports the revocation.
+      expect(getHostedEnvironmentSessions().read(studio.environmentId)).toMatchObject({
+        failure,
+        transportStatus: "terminal-failure",
+      });
     },
   );
 
   it("hands only the Hub's enrollment frame to the enrollment coordinator", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    createHostedPrimaryConnection(deps());
+    const { binding, generation } = connect(studio);
     const enrollmentRevoked = { enrollmentId: `enr_${"e".repeat(22)}`, enrollmentRevision: 2 };
 
-    relay.binding?.failure(coordinator.generation, {
+    binding.failure(generation, {
       kind: "revoked",
       retryable: false,
       closeReason: "revoked",
@@ -276,111 +375,69 @@ describe("hosted primary connection", () => {
     expect(enrollment.invalidate).not.toHaveBeenCalled();
   });
 
-  it("returns null when no hosted node is selected", () => {
-    // The normal state, including at supervisor start() on a direct-only build.
-    expect(createHostedPrimaryConnection(deps())).toBeNull();
-  });
-
-  it("returns null again after the descriptor is cleared", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    writePrimaryEnvironmentDescriptor(null);
-    expect(createHostedPrimaryConnection(deps())).toBeNull();
-  });
-
-  it("builds a primary-kind connection once a node is selected", async () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-
-    const connection = createHostedPrimaryConnection(deps());
-
-    expect(connection).not.toBeNull();
-    // `disconnectPrimary` finds the connection by `entry.kind === "primary"`.
-    expect(connection?.kind).toBe("primary");
-    expect(connection?.knownEnvironment.environmentId).toBe("env-hosted-1");
-    expect(connection?.knownEnvironment.source).toBe("hub-hosted");
-    await connection?.dispose().catch(() => undefined);
-  });
-
-  it("points the connection target at the relay, never at a node address", async () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-
-    const connection = createHostedPrimaryConnection(deps());
-
-    // The hosted plane never learns a node-owned address; the only reachable
-    // endpoint is the Hub's relay.
-    expect(connection?.knownEnvironment.target.wsBaseUrl).toBe(
-      "wss://hub.example.test/v1/relay/client",
-    );
-    expect(connection?.knownEnvironment.target.httpBaseUrl).toBe("https://hub.example.test");
-    await connection?.dispose().catch(() => undefined);
-  });
-
-  it("marks the hosted session ready when the supervisor accepts the first snapshot", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
+  it("marks its own record ready when the supervisor accepts the first snapshot", () => {
     const input = deps();
     input.syncShellSnapshot.mockImplementation((_snapshot, _environmentId, callbacks) => {
       callbacks?.onReady();
     });
-
-    createHostedPrimaryConnection(input);
+    connect(studio, input);
     const syncShellSnapshot = connectionFactory.input?.syncShellSnapshot as (
       snapshot: unknown,
       environmentId: string,
     ) => void;
-    syncShellSnapshot({ snapshotSequence: 1 }, "env-hosted-1");
+
+    syncShellSnapshot({ snapshotSequence: 1 }, studio.environmentId);
 
     expect(input.syncShellSnapshot).toHaveBeenCalledTimes(1);
-    expect(hostedLifecycle.markReady).toHaveBeenCalledWith("env-hosted-1", 7);
+    expect(getHostedEnvironmentSessions().read(studio.environmentId)).toMatchObject({
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    // The selected node's session is untouched.
+    expect(getHostedEnvironmentSessions().read(laptop.environmentId)).toBeUndefined();
   });
 
-  it("marks current snapshots ready and reports replay or snapshot failure", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    const input = deps();
-    input.syncShellSnapshot.mockImplementation((_snapshot, _environmentId, callbacks) => {
-      callbacks?.onCurrent();
-    });
-
-    createHostedPrimaryConnection(input);
+  it("reports replay and snapshot failure for its own record generation", () => {
+    connect(studio);
     const connectionInput = connectionFactory.input as {
-      syncShellSnapshot: (snapshot: unknown, environmentId: string) => void;
       onResubscribe: (environmentId: string) => void;
       onShellError: (environmentId: string) => void;
     };
-    connectionInput.syncShellSnapshot({ snapshotSequence: 1 }, "env-hosted-1");
-    connectionInput.onResubscribe("env-hosted-1");
-    connectionInput.onShellError("env-hosted-1");
 
-    expect(hostedLifecycle.markReady).toHaveBeenCalledWith("env-hosted-1", 7);
-    expect(hostedLifecycle.markReplaying).toHaveBeenCalledWith("env-hosted-1", 7);
-    expect(hostedLifecycle.reportFailure).toHaveBeenCalledWith("env-hosted-1", 7);
+    connectionInput.onResubscribe(studio.environmentId);
+    expect(getHostedEnvironmentSessions().read(studio.environmentId)?.sessionStatus).toBe(
+      "replaying",
+    );
+    connectionInput.onShellError(studio.environmentId);
+    expect(getHostedEnvironmentSessions().read(studio.environmentId)).toMatchObject({
+      transportStatus: "terminal-failure",
+      syncFailed: true,
+    });
   });
 
-  it("keeps retained shell data across selection generations and drops it after eviction", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    const input = deps();
-
-    createHostedPrimaryConnection(input);
-    hostedLifecycle.generation = 8;
+  it("keeps shell data across selection changes and drops it once the record is replaced", () => {
+    const { input } = connect(studio);
     const connectionInput = connectionFactory.input as {
       applyShellEvent: (event: unknown, environmentId: string) => void;
       syncShellSnapshot: (snapshot: unknown, environmentId: string) => void;
     };
-    connectionInput.applyShellEvent({ sequence: 1 }, "env-hosted-1");
-    expect(input.applyShellEvent).toHaveBeenCalledOnce();
 
-    coordinator.current = false;
-    connectionInput.applyShellEvent({ sequence: 2 }, "env-hosted-1");
-    connectionInput.syncShellSnapshot({ snapshotSequence: 1 }, "env-hosted-1");
+    hostedHubStore.setState({ selectedNode: studio, generation: 8 });
+    connectionInput.applyShellEvent({ sequence: 1 }, studio.environmentId);
+    hostedHubStore.setState({ selectedNode: null, generation: 9 });
+    connectionInput.applyShellEvent({ sequence: 2 }, studio.environmentId);
+    expect(input.applyShellEvent).toHaveBeenCalledTimes(2);
 
-    expect(input.applyShellEvent).toHaveBeenCalledOnce();
+    getHostedEnvironmentSessions().renew(studio.environmentId);
+    connectionInput.applyShellEvent({ sequence: 3 }, studio.environmentId);
+    connectionInput.syncShellSnapshot({ snapshotSequence: 1 }, studio.environmentId);
+
+    expect(input.applyShellEvent).toHaveBeenCalledTimes(2);
     expect(input.syncShellSnapshot).not.toHaveBeenCalled();
-    expect(hostedLifecycle.markReady).not.toHaveBeenCalled();
   });
 
-  it("asks for thread-priority deltas and drops them from a superseded generation", () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    const input = deps();
-
-    createHostedPrimaryConnection(input);
+  it("asks for thread-priority deltas and drops them from a replaced generation", () => {
+    const { input } = connect(studio);
     // The shared connection requests `threadPriorities: "delta"` exactly when
     // this handler is supplied; without it every ranking batch is a full
     // shell snapshot over the relay.
@@ -389,18 +446,17 @@ describe("hosted primary connection", () => {
     };
     expect(connectionInput.applyThreadPriorities).toBeTypeOf("function");
     const item = { kind: "thread-priorities", priorities: [] };
-    connectionInput.applyThreadPriorities!(item, "env-hosted-1");
-    expect(input.applyThreadPriorities).toHaveBeenCalledExactlyOnceWith(item, "env-hosted-1");
+    connectionInput.applyThreadPriorities!(item, studio.environmentId);
+    expect(input.applyThreadPriorities).toHaveBeenCalledExactlyOnceWith(item, studio.environmentId);
 
-    coordinator.current = false;
-    connectionInput.applyThreadPriorities!(item, "env-hosted-1");
+    getHostedEnvironmentSessions().release(studio.environmentId);
+    connectionInput.applyThreadPriorities!(item, studio.environmentId);
     expect(input.applyThreadPriorities).toHaveBeenCalledOnce();
   });
 
-  it("never reads or publishes config from a superseded generation", async () => {
-    writePrimaryEnvironmentDescriptor(descriptor);
-    createHostedPrimaryConnection(deps());
-    // The real connection over the input the hosted primary built.
+  it("never reads or publishes config from a replaced generation", async () => {
+    connect(studio);
+    // The real connection over the input the hosted connection built.
     const { createEnvironmentConnection: createRealConnection } = await vi.importActual<
       typeof import("@ryco/client-runtime/connection")
     >("@ryco/client-runtime/connection");
@@ -421,7 +477,7 @@ describe("hosted primary connection", () => {
         reconnect: async () => undefined,
       } as unknown as WsRpcClient,
     });
-    const environmentId = EnvironmentId.make("env-hosted-1");
+    const environmentId = studio.environmentId;
     recordWsConnectionAttempt("wss://hub.example.test/v1/relay/client", {
       environmentId,
       recordGlobal: false,
@@ -431,7 +487,7 @@ describe("hosted primary connection", () => {
     connection.config.subscribe(observed);
     const config = (label: string) =>
       ({
-        environment: { ...descriptor, label },
+        environment: { environmentId, label },
         providers: [],
         issues: [],
         keybindings: [],
@@ -443,9 +499,8 @@ describe("hosted primary connection", () => {
     expect(readEnvironmentServerConfig(environmentId)?.settings).toEqual({ label: "current" });
     expect(observed).toHaveBeenCalledOnce();
 
-    // The coordinator replaced this environment's record: a new generation.
-    coordinator.current = false;
-    coordinator.generation = 4;
+    // The environment's session started over: a new record generation.
+    getHostedEnvironmentSessions().renew(environmentId);
     expect(connection.config.read()).toBeNull();
     emit({ version: 1, type: "snapshot", config: config("stale") } as ServerConfigStreamEvent);
     emit({
@@ -463,8 +518,14 @@ describe("hosted primary connection", () => {
 
 describe("primary environment descriptor store", () => {
   it("notifies subscribers on change and stops after unsubscribe", async () => {
-    const { subscribePrimaryEnvironmentDescriptor, readPrimaryEnvironmentDescriptor } =
-      await import("./primaryEnvironment");
+    const {
+      resetPrimaryEnvironmentForTests,
+      subscribePrimaryEnvironmentDescriptor,
+      readPrimaryEnvironmentDescriptor,
+      writePrimaryEnvironmentDescriptor,
+    } = await import("./primaryEnvironment");
+    resetPrimaryEnvironmentForTests();
+    const descriptor = { environmentId: studio.environmentId, label: "Studio" } as never;
     const listener = vi.fn();
     const unsubscribe = subscribePrimaryEnvironmentDescriptor(listener);
 
@@ -478,7 +539,13 @@ describe("primary environment descriptor store", () => {
   });
 
   it("does not notify when the descriptor is unchanged", async () => {
-    const { subscribePrimaryEnvironmentDescriptor } = await import("./primaryEnvironment");
+    const {
+      resetPrimaryEnvironmentForTests,
+      subscribePrimaryEnvironmentDescriptor,
+      writePrimaryEnvironmentDescriptor,
+    } = await import("./primaryEnvironment");
+    resetPrimaryEnvironmentForTests();
+    const descriptor = { environmentId: studio.environmentId, label: "Studio" } as never;
     const listener = vi.fn();
     subscribePrimaryEnvironmentDescriptor(listener);
 

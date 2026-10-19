@@ -17,14 +17,8 @@ import {
   resetMobileHostedConnectionCoordinatorForTests,
 } from "../connection/hostedConnectionCoordinator";
 import { mobileHostedConnectionScopes } from "../connection/hostedConnectionScopes";
-import {
-  hostedHubController,
-  hostedHubStore,
-  type HostedAccountStatus,
-} from "@ryco/client-runtime/authorization";
+import { hostedHubStore, type HostedAccountStatus } from "@ryco/client-runtime/authorization";
 import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
-import { demoteMobileHostedEnvironmentState } from "../hostedHub/nodeStateCleanup";
-import { useStore } from "../state/threadsRuntime";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
 
 type Catalog = ReturnType<typeof createMobileSavedEnvironmentCatalog>;
@@ -46,6 +40,20 @@ let appDriver: MobileEnvironmentDriver | null = null;
 /** The account session ended; `unavailable` (the Hub could not be reached) is not an ending. */
 function isHostedAccountTeardown(status: HostedAccountStatus): boolean {
   return status === "signed-out" || status === "signing-out" || status === "session-expired";
+}
+
+/**
+ * Hosted sessions may still belong to the account: it is signed in, or its
+ * sign-out has not reached the controller's release of every session yet.
+ *
+ * While the Hub answers a sign-out, the account's relay channels stay open and
+ * keep admitting what their sessions admit: the account is still signed in
+ * until then, and a sign-out that another sign-in replaced never ends it. The
+ * controller releases every session in the same update that ends the account,
+ * whether the Hub's answer succeeded or failed, so no channel outlives it.
+ */
+function holdsHostedSessions(status: HostedAccountStatus): boolean {
+  return status === "authenticated" || status === "signing-out";
 }
 
 function getAppCatalog(): Catalog {
@@ -143,6 +151,8 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         console.warn("[snapshot-cache] cold-start hydration failed", error);
       },
     );
+    // Mobile's hosted connections run on the shared session registry and demand
+    // executor; the hosted controller connects and releases every environment.
     const hostedCoordinator = configureMobileHostedConnectionCoordinator({
       scopes: mobileHostedConnectionScopes,
       now: () => Date.now(),
@@ -150,30 +160,21 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
       clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
       nodeForId: (nodeId) =>
         hostedHubStore.getState().nodes.find((node) => node.id === nodeId) ?? null,
-      selectedEnvironmentId: () => hostedHubStore.getState().selectedNode?.environmentId ?? null,
-      selectNode: (nodeId) => hostedHubController.selectNode(nodeId),
-      connectSelectedEnvironment: () => {
-        registry.driver.supervisor.connectPrimary();
-      },
-      markSelectedDeliveryUnknown: () =>
-        hostedHubController.markDeliveryUnknown(hostedHubStore.getState().generation),
-      acknowledgeSelectedDeliveryUnknown: () => hostedHubController.acknowledgeDeliveryUnknown(),
-      listConnections: () => registry.driver.supervisor.list(),
-      readConnection: (environmentId) => registry.driver.supervisor.read(environmentId),
-      removeConnection: (environmentId) => registry.driver.supervisor.remove(environmentId),
-      demoteEnvironment: demoteMobileHostedEnvironmentState,
-      restoreActiveEnvironment: (environmentId) =>
-        useStore.getState().setActiveEnvironmentId(environmentId),
+      isDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
     });
     let previousHostedState = hostedHubStore.getState();
     let artworkAccountId = previousHostedState.account?.id ?? null;
     stopHostedAccountWatch = hostedHubStore.subscribe(() => {
       const currentHostedState = hostedHubStore.getState();
       if (
-        previousHostedState.accountStatus === "authenticated" &&
-        currentHostedState.accountStatus !== "authenticated"
+        holdsHostedSessions(previousHostedState.accountStatus) &&
+        !holdsHostedSessions(currentHostedState.accountStatus)
       ) {
-        void hostedCoordinator.releaseAll();
+        // The controller's own sign-out and expiry release every session in
+        // the update that ends the account, without handing one account's node
+        // state to the next. Whatever outlived the account any other way is
+        // released after that.
+        void Promise.resolve().then(() => hostedCoordinator.releaseAll());
       }
       // Project artwork is keyed by node and outlives a connection, not an
       // account: it is dropped when the account session ends (sign-out,
@@ -190,13 +191,6 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         clearAllProjectIconCaches();
       }
       if (currentAccountId !== null) artworkAccountId = currentAccountId;
-      if (
-        previousHostedState.sessionStatus === "delivery-unknown" &&
-        currentHostedState.sessionStatus === "ready" &&
-        currentHostedState.selectedNode !== null
-      ) {
-        hostedCoordinator.acknowledgeDeliveryUnknown(currentHostedState.selectedNode.environmentId);
-      }
       previousHostedState = currentHostedState;
     });
     mobileRuntimeStartupBarrier.runAfterDirectReady(
