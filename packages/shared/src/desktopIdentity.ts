@@ -5,7 +5,6 @@
 export const SYNARA_DESKTOP_SCHEME = "synara";
 export const SYNARA_DESKTOP_ORIGIN = `${SYNARA_DESKTOP_SCHEME}://app`;
 export const SYNARA_DESKTOP_ENTRY_URL = `${SYNARA_DESKTOP_ORIGIN}/index.html`;
-export const SYNARA_DESKTOP_UPDATE_CHANNEL = "synara";
 export const SYNARA_PRODUCTION_BUNDLE_ID = "com.emanueledipietro.synara";
 export const SYNARA_DEVELOPMENT_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.dev`;
 export const SYNARA_CANARY_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.canary`;
@@ -19,11 +18,8 @@ export const SYNARA_CUA_DESKTOP_SCHEME = "synara-cua";
 export const SYNARA_CUA_DESKTOP_ORIGIN = `${SYNARA_CUA_DESKTOP_SCHEME}://app`;
 export const SYNARA_CUA_DESKTOP_ENTRY_URL = `${SYNARA_CUA_DESKTOP_ORIGIN}/index.html`;
 export const SYNARA_SOURCE_DESKTOP_BUILD_MARKER = "synara-source-desktop-build-v2";
-export const SYNARA_DESKTOP_SMOKE_USER_DATA_ENV = "SYNARA_DESKTOP_SMOKE_USER_DATA";
 
 export type SynaraDesktopFlavor = "production" | "development" | "canary" | "cua";
-export const SYNARA_PACKAGED_DESKTOP_FLAVORS = ["production", "canary", "cua"] as const;
-export type SynaraPackagedDesktopFlavor = (typeof SYNARA_PACKAGED_DESKTOP_FLAVORS)[number];
 
 export interface SynaraDesktopIdentity {
   readonly flavor: SynaraDesktopFlavor;
