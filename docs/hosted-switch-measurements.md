@@ -289,6 +289,238 @@ caches the static shell only.
 
 ## After wave 1
 
+Revision: the wave-0 tip plus the second set of changes. On the switch path: hosted capability is
+resolved per environment, and the hosted lifecycle controller gains a retained mode that the web
+app does not enable yet (it keeps one hosted connection, so every cross-node switch below is still a
+cold open); relay end-to-end encryption runs per channel; the node builds its shell when a relay
+channel opens and serves that build again only while it is exactly current; and the node serves
+the thread windows a view waits on before the windows that retained subscriptions reload. Outside
+it: fewer serial steps in the desktop's native relay connect, bounded thread-body retention in the
+client store, and a single inline script in the hosted index.
+
+Setup, as under "Baseline (base commit)" except:
+
+- The wave-0 tip is measured again in the same session, interleaved: blocks in the order wave-0
+  tip, wave-1 tip, three times. Each revision runs against the Hub revision it was developed with,
+  with its own bundle, Hub data and node homes.
+- A third node with 30 projects and 2,000 threads (60% archived, 777 listed) serves the
+  2,000-thread rows. Every node home is a copy of the same generated fixture in both revisions.
+- Every node records every span (no minimum span duration), in both revisions alike, so a shell
+  build of 2 ms appears in the node trace.
+- Per block and delay: one `hosted-switch` run with 8 cross-node switches and 3 same-node controls,
+  the second of each CPU-profiled and left out of the medians, and five cold loads at D = 0 and 40.
+  Medians pool the three blocks: 21 cross-node switches, 6 same-node controls and 15 cold loads per
+  delay and revision. No switch or load timed out or failed.
+- The wave-0 tip's hosted index has two inline scripts and the Hub serves exactly one, so that
+  bundle is served with the two merged, which is what the wave-1 change does in the source.
+- 1-minute load average 5.4–8.6 during the blocks.
+
+### Against the targets
+
+Cold cross-node writable (ms, n = 21). Target: at most 12·D + 600.
+
+| D   | Base commit | After wave 0        | After wave 1        | Delta | Target | Result |
+| --- | ----------- | ------------------- | ------------------- | ----- | ------ | ------ |
+| 0   | 1,504       | 324 (286–369)       | 316 (283–358)       | -8    | 600    | met    |
+| 20  | 1,642       | 537 (502–719)       | 519 (502–562)       | -18   | 840    | met    |
+| 40  | 1,766       | 774 (741–851)       | 777 (741–819)       | +3    | 1,080  | met    |
+| 80  | 2,112       | 1,254 (1,227–1,302) | 1,252 (1,231–1,280) | -2    | 1,560  | met    |
+
+"After wave 0" is the wave-0 tip measured in this session; the earlier session measured 340, 539,
+794 and 1,274 ms. Block medians of one revision and delay differ by up to 59 ms, so none of these
+deltas is a change: wave 1 leaves the cold switch between the two small nodes where wave 0 put it,
+which already met the target. On these nodes its switch-path changes take a 2–3 ms shell build off
+the critical path. Wave 1 shows on the 2,000-thread node and after relay drops (see "Node"); the
+retained mode it adds is not enabled in the web app yet.
+
+Other switch metrics, ms after the click, median (n = 21):
+
+| D   | Click long task, after wave 0 → 1 | First frame, after wave 0 → 1 | Content, after wave 0 → 1 |
+| --- | --------------------------------- | ----------------------------- | ------------------------- |
+| 0   | 171 → 173                         | 173 → 175                     | 302 → 296                 |
+| 20  | 174 → 172                         | 176 → 174                     | 522 → 514                 |
+| 40  | 169 → 170                         | 171 → 172                     | 758 → 759                 |
+| 80  | 167 → 170                         | 169 → 173                     | 1,242 → 1,241             |
+
+- After wave 1 the click long task takes 147–203 ms and stays within its target (at most 250 ms)
+  at every delay. In the profiled switches (12 per revision, all delays) the task takes 198–212 ms
+  while profiled (198–222 after wave 0), with 2.1–3.7 ms of inbox row code (target at most 30 ms),
+  14–17 ms of all inbox sidebar code, 53–60 ms of React DOM and 40–48 ms of Base UI, the same as
+  after wave 0.
+- Same-node controls, both revisions: a window that is already in memory shows in 40–64 ms at
+  every delay, and one that is not costs one browser-node round trip: 73–130, 179–194 and
+  342–345 ms at D = 20, 40 and 80. The same-node target (at most 200 ms) is met by a window in
+  memory and missed at D = 80 by one that is not, as after wave 0.
+
+### Phase attribution
+
+Cross-node switches after wave 1, ms after the click, median of 21. The node rows come from the
+target node's trace; the channel open, shell build and first-response spans are new in wave 1.
+After wave 0, the client marks and the node's shell subscription are within 10 ms of these values
+at every delay.
+
+| Phase                                 | D = 0   | D = 20  | D = 40  | D = 80  |
+| ------------------------------------- | ------- | ------- | ------- | ------- |
+| `requesting-ticket`                   | 135     | 136     | 137     | 136     |
+| `authenticating`                      | 146     | 143     | 143     | 144     |
+| Hub: stream authenticated             | 149     | 165     | 187     | 226     |
+| Node: channel open starts             | 150     | 185     | 227     | 308     |
+| Click long task ends                  | 173     | 172     | 170     | 170     |
+| Node: channel accepted                | 184     | 218     | 263     | 339     |
+| Node: shell build, start to end       | 187–190 | 220–221 | 264–267 | 340–341 |
+| `opening-channel`                     | 192     | 188     | 227     | 307     |
+| `online`                              | 215     | 351     | 517     | 833     |
+| Node: shell subscription arrives      | 226     | 402     | 607     | 1,006   |
+| Node: first shell message sent        | 228     | 404     | 610     | 1,007   |
+| Node: first thread window message     | 235     | 408     | 613     | 1,011   |
+| `shell-accepted` and `mutation-ready` | 236     | 449     | 694     | 1,172   |
+| Writable (composer editable)          | 316     | 519     | 777     | 1,252   |
+
+- Every cross-node switch after wave 1 shows exactly one shell build on the target node (84 of 84
+  over the four delays). It starts 1–3 ms after the channel is accepted, takes 2–3 ms, and is done
+  37 ms (D = 0) to 665 ms (D = 80) before the shell subscription arrives. The subscription is
+  served that build without a second one: its first message leaves 2.1–2.5 ms after the request.
+- The node's channel open (from the open the Hub forwards to the accepted channel) takes 32–34 ms at
+  every delay (29–59 ms). The node's key custody reads are part of it and unchanged: the change that
+  memoizes them was not taken.
+- At D = 0 the 316 ms to writable are 135 ms of click rendering before the relay connect starts,
+  11 ms until the stream authenticates, 69 ms from `authenticating` to `online` (channel open and
+  handshake), 22 ms from `online` to the accepted shell and 80 ms of rendering after mutation
+  readiness.
+- From D = 0 to 80, writable grows by 936 ms, 11.7·D: `authenticating` to `online` by 7.8·D (two
+  browser-node round trips), `online` to the node's shell subscription by 2.0·D and the subscription
+  to `shell-accepted` by 2.0·D. The node answers each leg within 2–5 ms.
+
+### 2,000-thread node
+
+Cross-node switches between the 120-thread node and the 2,000-thread node, in interleaved blocks
+(wave-0 tip, wave-1 tip, twice; no CPU profiles), 8 switches to each node per revision and delay.
+ms after the click, median:
+
+| Target node   | D   | Click long task, after wave 0 → 1 | `online` to `shell-accepted`, after wave 0 → 1 | Writable, after wave 0 → 1 |
+| ------------- | --- | --------------------------------- | ---------------------------------------------- | -------------------------- |
+| 2,000 threads | 0   | 567 → 561                         | 124 (112–137) → 98 (95–104)                    | 1,272 → 1,283              |
+| 2,000 threads | 40  | 579 → 573                         | 421 (416–440) → 389 (383–394)                  | 1,834 → 1,794              |
+| 120 threads   | 0   | 885 → 900                         | 31 → 29                                        | 1,138 → 1,129              |
+| 120 threads   | 40  | 893 → 905                         | 187 → 185                                      | 1,533 → 1,544              |
+
+- On the 2,000-thread node the build at channel open takes 26–29 ms (median) and is done 76 ms
+  (D = 0) to 331 ms (D = 40) before the shell subscription arrives. The first shell message still
+  leaves 18–20 ms after the request, the time to encode and encrypt the large shell. `online` to
+  `shell-accepted` is 26–32 ms shorter than after wave 0, the build that no longer runs after the
+  request.
+- Writable does not follow, because the click long task (561–905 ms with 2,000 threads in the
+  inbox, longer when leaving the large node than when entering it) and 530–560 ms of rendering
+  after mutation readiness on the large node dominate it. Wave 1 changes neither. The cold target
+  is defined on the two small nodes; on this one the click long task and that rendering alone
+  exceed it.
+
+### Cold load
+
+First content (ms, n = 15): 558 (546–637) after wave 0 and 567 (548–593) after wave 1 at D = 0;
+3,251 (3,233–3,409) and 3,256 (3,226–3,266) at D = 40. Wave 1 has no cold-load change; the targets
+for a later change (700 ms at D = 0 and 3,000 ms at D = 40) stand as after wave 0.
+
+### Node
+
+| Row                                                         | After wave 0                | After wave 1                    | Target       | Result     |
+| ----------------------------------------------------------- | --------------------------- | ------------------------------- | ------------ | ---------- |
+| Key custody reads in a web channel open (advertisement p50) | read on every open          | unchanged                       | under 2 ms   | not landed |
+| Shell builds for a second open within 2 s, no new event     | one (no memo)               | 0 (3 of 3)                      | none         | met        |
+| Shell builds per cold cross-node switch, 120 or 80 threads  | one, after the subscription | one, at channel open (84 of 84) |              |            |
+| Routed thread after a relay drop, 10 retained threads       | not writable again (3 of 3) | writable again (9 of 9)         | served first | met        |
+
+- Key custody: the change that memoizes the node's key custody reads was not taken, so a web channel
+  open still reads them; the whole channel open is 32–34 ms (see "Phase attribution").
+- Shell memo: three browsers open the 2,000-thread node 0, 0.7 and 4 s apart, in three rounds. The
+  first channel's build at channel open serves its own subscription; the second channel, 0.7 s
+  later, builds nothing; the third, 4 s later and so past the memo's 2 s, builds again. Every round
+  shows exactly two builds for three subscriptions, each 46–65 ms with three cold loads under way.
+  Before wave 1 there is no memo (only concurrent requests share a build) and no build span, so the
+  wave-0 cells of the two shell rows describe the code, not a trace.
+- Relay drops: the browser holds 10 threads of the 120-thread node, opened one after another, and
+  the routed thread; restarting the delay proxy then drops every relay connection at once,
+  including the nodes'. Three runs per revision, each with up to three drops 12–14 s apart.
+  - After wave 0 the page did not recover in any run: from the read-only banner (348–375 ms after
+    the drop) its main thread stayed busy for the whole 45 s observed, no new client stream reached
+    the Hub and the session never became writable again.
+  - After wave 1 every drop cost one client stream, one channel open and one shell subscription on
+    the node, and the page stayed responsive (0.10–0.23 s of main-thread tasks during a recovery).
+    It was writable again 1.05–1.30 s after the first drop of each run. Later drops took 1.9–12.2 s:
+    the nodes came back later each time (after 1.7–4.5 s) and the client's next retry then waited
+    longer still.
+  - The replacement channel asked for 22 thread windows. In every drop, 2–4 of them were served out
+    of arrival order, 1.9–13 ms after they arrived and ahead of 3–17 windows that had arrived
+    before them: the windows a view waits on, which the node starts at once. The others took turns,
+    and the last first message left 58–96 ms after the first request. The trace does not name
+    threads, so the windows a view waits on are recognized by that order, not by their ids.
+
+### Desktop
+
+Not measured on a native client. The local fixture cannot sign in a native client, and a run
+against the production Hub needs the owner's interactive sign-in and enrolls the desktop as a device
+on a real account, so both rows are manual production checks. The evidence here is the desktop unit
+tests: 94 pass in the relay, handshake, prekey, security helper and background signal suites.
+
+- Cold remote connect, before and after the connect trims. Target: 50–130 ms faster, and at most one
+  public-key read from the security helper per process. Not measured. The tests show the relay
+  socket upgrade starting before the ticket resolves and the auth frame going out on that socket
+  (also over a real socket); an account-trusted target needing no ticket request and upgrading
+  beside the E2EE preparation; the client public keys read from the helper once per process, until
+  a key reset; and the helper kept up while a relay transport holds it.
+- Relay upgrades on Cmd-Tab or window blur. Target: 0, with warm connections kept. Not measured
+  live. Since wave 0 the tests show that focus loss alone never backgrounds the workspace, through
+  30 minutes of blur and focus events; minimize, hide and lock background it only after a 3-minute
+  grace period, and suspend at once.
+
+### Memory
+
+One browser opens 100 listed threads of the 2,000-thread node in a row (in-app navigation, each
+until its messages show), then stays idle for 7 minutes. The JS heap is measured after a garbage
+collection. Thread bodies are counted in a heap snapshot: 88 of the 100 threads have more than one
+turn, and only a loaded body holds the id of such a thread's first assistant message (the shell
+names the latest ones). Two runs per revision. As generated, every fixture session is `ready`, the
+state a node leaves after a completed turn, and the retention counts a `ready` session as busy, so
+the wave-1 tip also ran with every session set to `stopped`.
+
+| Metric                                                          | After wave 0              | After wave 1              | Delta        | Target                     | Result                                     |
+| --------------------------------------------------------------- | ------------------------- | ------------------------- | ------------ | -------------------------- | ------------------------------------------ |
+| Web JS heap after 1 / 32 / 64 / 100 threads (MiB, median)       | 34.1 / 62.5 / 81.2 / 98.9 | 34.0 / 62.9 / 81.7 / 99.1 | about 0      |                            |                                            |
+| Web JS heap after 7 minutes idle (MiB)                          | 98.7–98.9                 | 98.3–100.1                | about 0      |                            |                                            |
+| Thread bodies held (of 88 countable), after opening 100 threads | 88                        | 88                        | 0            |                            |                                            |
+| The same after 7 minutes idle, sessions `ready`                 | 88                        | 88                        | 0            | at most 64, plus protected | met only because every thread is protected |
+| The same after 7 minutes idle, sessions `stopped`               |                           | 88                        |              | at most 64, plus protected | missed                                     |
+| Node RSS of the 120-thread node, idle                           | 270 MiB                   | 267 MiB                   | -3 MiB       |                            |                                            |
+| The same with 3 open channels (median / max)                    | 304 / 305 MiB             | 294 / 304 MiB             | -10 / -1 MiB |                            |                                            |
+
+- No body was evicted in any run. A heap snapshot after the idle period (wave-1 tip, sessions
+  `stopped`) shows the store's message index holding 174 threads with 1,466 message ids: the 100
+  opened and 74 the probe never opened. A memo keyed by per-thread store records holds the composed
+  content of the same 174 threads. With sessions stopped, the busy-thread rules keep only the 22 of
+  the 100 threads with an actionable proposed plan, so they do not explain the miss; its cause is
+  not established by this measurement.
+- Node RSS: one 30 s idle sample and one 60 s sample with three browser contexts holding a channel
+  each, per revision. Single samples, so the differences are not conclusive.
+
+### Relay round trips
+
+The in-process multi-node harness (the real browser and node relay stacks with the NX handshake,
+over a Hub that only forwards frames, 10 ms of virtual delay per hop) counts the same at both tips:
+
+| Count                                                                                 | After wave 0 | After wave 1 |
+| ------------------------------------------------------------------------------------- | ------------ | ------------ |
+| Relay round trips from the open to the accepted shell (`COLD_OPEN_RELAY_ROUND_TRIPS`) | 3            | 3            |
+| The same with a shell of five messages                                                | 7            | 7            |
+| Hub frames and bytes, first cold open                                                 | 28, 11,733 B | 28, 11,733 B |
+| Hub frames and bytes, opening a second node                                           | 47, 15,285 B | 47, 15,285 B |
+| Replacement channels per relay drop                                                   | 1            | 1            |
+| Shell builds when a node is reopened within 2 s, no new event                         | not covered  | 0            |
+
+A relay drop costs one open, one channel and 3 round trips, with no new account socket and no ticket
+request, at both tips. On the fixture, every relay drop after wave 1 cost one client stream, one
+channel open and one shell subscription on the node; after wave 0 the page did not reconnect at all
+(see "Node").
+
 ## After wave 2
 
 ## After wave 3 (final)
