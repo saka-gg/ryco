@@ -21,9 +21,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyInboxServerConfig,
+  buildInboxSidebarModel,
   buildInboxSidebarSections,
   buildPrimaryInboxSidebarEnvironment,
   buildSavedInboxSidebarEnvironment,
+  createInboxSidebarModelSharing,
   describeInboxFocus,
   sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
@@ -1406,5 +1408,202 @@ describe("sameInboxProviderCatalogs", () => {
     );
     expect(sameInboxProviderCatalogs([provider()], [provider(), provider()])).toBe(false);
     expect(sameInboxProviderCatalogs(null, [provider()])).toBe(false);
+  });
+});
+
+describe("queued environments", () => {
+  const idleRow = (environments: ReadonlyArray<InboxSidebarEnvironment>) =>
+    build({ threads: [thread("idle")], environments }).flatMap((section) => section.rows)[0];
+
+  it("says Waiting for an environment queued for a free connection slot", () => {
+    expect(
+      idleRow([environment(ENV_A, { connectionState: "reconnecting", queued: true })]),
+    ).toMatchObject({ state: "reconnecting", statusLabel: "Waiting" });
+  });
+
+  it("keeps Reconnecting for an environment that is not queued", () => {
+    expect(idleRow([environment(ENV_A, { connectionState: "reconnecting" })])).toMatchObject({
+      state: "reconnecting",
+      statusLabel: "Reconnecting",
+    });
+  });
+
+  it("keeps the queued flag when a live config replaces capabilities", () => {
+    const queued = environment(ENV_A, { connectionState: "reconnecting", queued: true });
+    expect(
+      applyInboxServerConfig(queued, {
+        environment: {
+          environmentId: ENV_A,
+          label: "Node name",
+          platform: { os: "darwin" as const, arch: "arm64" as const },
+          serverVersion: "1.0.0",
+          capabilities: {
+            repositoryIdentity: true,
+            threadSettlement: true,
+            threadPriorityRanking: false,
+          },
+        },
+        providers: [],
+      }),
+    ).toMatchObject({ queued: true });
+  });
+});
+
+describe("createInboxSidebarModelSharing", () => {
+  const NOW_MS = Date.parse("2026-08-24T00:00:00Z");
+  const pullRequestWorktree: SidebarWorktreeSummary = {
+    id: WorktreeId.make("shared-worktree"),
+    environmentId: ENV_A,
+    projectId: PROJECT_A,
+    title: "Feature",
+    branch: "feature/shared",
+    worktreePath: "/repo/shared",
+    origin: "pr",
+    prNumber: 7,
+    issueNumber: null,
+    prTitle: "Pull request",
+    issueTitle: null,
+    prState: "open",
+    prIsDraft: false,
+    issueState: null,
+    workItemProvider: null,
+    workItemKey: null,
+    workItemTitle: null,
+    workItemState: null,
+    workItemStateName: null,
+    workItemUrl: null,
+    createdAt: "2026-08-23T00:00:00.000Z",
+    updatedAt: "2026-08-23T00:00:00.000Z",
+    archivedAt: null,
+    manualPosition: 0,
+  };
+  const working = {
+    latestTurn: {
+      turnId: TurnId.make("turn-shared"),
+      state: "running" as const,
+      requestedAt: "2026-08-23T10:00:00.000Z",
+      startedAt: "2026-08-23T10:00:00.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  };
+  const buildModel = (threads: ReadonlyArray<SidebarThreadSummary>) =>
+    buildInboxSidebarModel({
+      projects: [project(ENV_A)],
+      worktrees: [pullRequestWorktree],
+      threads,
+      environments: [environment(ENV_A)],
+      filters: ALL_FILTERS,
+      nowMs: NOW_MS,
+    });
+  const rowByTitle = (model: ReturnType<typeof buildModel>, title: string) =>
+    model.sections.flatMap((section) => section.rows).find((row) => row.title === title)!;
+  const sectionByKey = (model: ReturnType<typeof buildModel>, key: string) =>
+    model.sections.find((section) => section.key === key)!;
+  const threads = (restingTitle = "resting") => [
+    thread("busy", { ...working, worktreeId: pullRequestWorktree.id }),
+    thread("resting", { title: restingTitle }),
+  ];
+
+  it("returns the previous model, sections and rows for identical inputs", () => {
+    const sharing = createInboxSidebarModelSharing();
+    const first = sharing.share(buildModel(threads()));
+    const second = sharing.share(buildModel(threads()));
+
+    // The builder returns fresh objects every time, including pull requests.
+    const fresh = buildModel(threads());
+    expect(rowByTitle(fresh, "busy")).not.toBe(rowByTitle(first, "busy"));
+    expect(rowByTitle(first, "busy").pullRequest).toEqual({
+      number: 7,
+      state: "open",
+      isDraft: false,
+    });
+
+    expect(second).toBe(first);
+    expect(second.sections).toBe(first.sections);
+    for (const section of first.sections) {
+      expect(sectionByKey(second, section.key)).toBe(section);
+      expect(sectionByKey(second, section.key).rows).toBe(section.rows);
+    }
+    expect(rowByTitle(second, "busy")).toBe(rowByTitle(first, "busy"));
+    expect(rowByTitle(second, "resting")).toBe(rowByTitle(first, "resting"));
+  });
+
+  it("replaces only the row of the thread whose summary changed", () => {
+    const sharing = createInboxSidebarModelSharing();
+    const first = sharing.share(buildModel(threads()));
+    const second = sharing.share(buildModel(threads("renamed")));
+
+    expect(second).not.toBe(first);
+    expect(rowByTitle(second, "busy")).toBe(rowByTitle(first, "busy"));
+    expect(sectionByKey(second, "active")).toBe(sectionByKey(first, "active"));
+    expect(rowByTitle(second, "renamed")).not.toBe(rowByTitle(first, "resting"));
+    expect(sectionByKey(second, "recent")).not.toBe(sectionByKey(first, "recent"));
+    expect(sectionByKey(second, "recent").rows.map((row) => row.title)).toEqual(["renamed"]);
+  });
+
+  it("follows a changed order and a changed settlement deadline", () => {
+    const sharing = createInboxSidebarModelSharing();
+    const older = thread("older", {
+      updatedAt: "2026-08-23T09:00:00.000Z",
+      createdAt: "2026-08-23T09:00:00.000Z",
+    });
+    const newer = thread("newer", {
+      updatedAt: "2026-08-23T11:00:00.000Z",
+      createdAt: "2026-08-23T11:00:00.000Z",
+    });
+    const first = sharing.share(buildModel([older, newer]));
+    expect(sectionByKey(first, "recent").rows.map((row) => row.title)).toEqual(["newer", "older"]);
+
+    const reordered = sharing.share(
+      buildModel([
+        older,
+        { ...newer, createdAt: "2026-08-23T08:00:00.000Z", updatedAt: "2026-08-23T08:00:00.000Z" },
+      ]),
+    );
+    expect(sectionByKey(reordered, "recent").rows.map((row) => row.title)).toEqual([
+      "older",
+      "newer",
+    ]);
+    expect(sectionByKey(reordered, "recent")).not.toBe(sectionByKey(first, "recent"));
+
+    const deadline = sharing.share({ ...reordered, nextSettlementEvaluationAtMs: 42 });
+    expect(deadline).not.toBe(reordered);
+    expect(deadline.nextSettlementEvaluationAtMs).toBe(42);
+    expect(deadline.sections).toBe(reordered.sections);
+  });
+
+  it("replaces a host row when a folded child changes", () => {
+    const delegated = {
+      parentThreadId: ThreadId.make("host"),
+      rootThreadId: ThreadId.make("host"),
+      relationship: "delegated" as const,
+    };
+    const family = (childTitle: string) => [
+      thread("host"),
+      thread("child", { title: childTitle, lineage: delegated }),
+    ];
+    const sharing = createInboxSidebarModelSharing();
+    const first = sharing.share(buildModel(family("child")));
+    const same = sharing.share(buildModel(family("child")));
+    expect(rowByTitle(same, "host")).toBe(rowByTitle(first, "host"));
+    expect(rowByTitle(same, "host").delegatedChildren[0]).toBe(
+      rowByTitle(first, "host").delegatedChildren[0],
+    );
+
+    const changed = sharing.share(buildModel(family("renamed child")));
+    expect(rowByTitle(changed, "host")).not.toBe(rowByTitle(first, "host"));
+    expect(rowByTitle(changed, "host").delegatedChildren.map((row) => row.title)).toEqual([
+      "renamed child",
+    ]);
+  });
+
+  it("forgets rows that left the model", () => {
+    const sharing = createInboxSidebarModelSharing();
+    const first = sharing.share(buildModel(threads()));
+    sharing.share(buildModel([thread("resting")]));
+    const back = sharing.share(buildModel(threads()));
+    expect(rowByTitle(back, "busy")).not.toBe(rowByTitle(first, "busy"));
+    expect(rowByTitle(back, "busy")).toEqual(rowByTitle(first, "busy"));
   });
 });

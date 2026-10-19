@@ -29,6 +29,7 @@ import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxRowPreviewPayload } from "./InboxRowPreview";
 import {
   buildInboxSidebarModel,
+  createInboxSidebarModelSharing,
   type InboxSidebarEnvironment,
   type InboxSidebarRow,
   type InboxSidebarSectionKey,
@@ -121,26 +122,32 @@ export function InboxSidebar(props: InboxSidebarProps) {
     },
     [],
   );
+  // Keeps rows that did not change identical across model runs, so memoized
+  // rows skip rendering when only a few threads moved.
+  const [modelSharing] = useState(() => createInboxSidebarModelSharing());
   const model = useMemo(
     () =>
-      buildInboxSidebarModel({
-        projects: props.projects,
-        worktrees: props.worktrees,
-        threads: props.threads,
-        environments: props.environments,
-        filters: { query, environmentId, status },
-        deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
-        localQueuedThreadKeys: props.localQueuedThreadKeys,
-        activeThreadKey: props.activeThreadKey,
-        aiFocusEnabled: props.aiFocusEnabled,
-        autoSettleAfterDays: props.autoSettleAfterDays,
-        pinnedThreadKeys: props.pinnedThreadKeys,
-        primaryEnvironmentId: props.primaryEnvironmentId ?? null,
-        nestDelegated,
-        nowMs: Math.max(settlementNowMs, Date.now()),
-      }),
+      modelSharing.share(
+        buildInboxSidebarModel({
+          projects: props.projects,
+          worktrees: props.worktrees,
+          threads: props.threads,
+          environments: props.environments,
+          filters: { query, environmentId, status },
+          deliveryUnknownThreadKeys: props.deliveryUnknownThreadKeys,
+          localQueuedThreadKeys: props.localQueuedThreadKeys,
+          activeThreadKey: props.activeThreadKey,
+          aiFocusEnabled: props.aiFocusEnabled,
+          autoSettleAfterDays: props.autoSettleAfterDays,
+          pinnedThreadKeys: props.pinnedThreadKeys,
+          primaryEnvironmentId: props.primaryEnvironmentId ?? null,
+          nestDelegated,
+          nowMs: Math.max(settlementNowMs, Date.now()),
+        }),
+      ),
     [
       environmentId,
+      modelSharing,
       nestDelegated,
       props.primaryEnvironmentId,
       props.activeThreadKey,
@@ -229,13 +236,19 @@ export function InboxSidebar(props: InboxSidebarProps) {
   });
   const [previewHandle] = useState(() => TooltipCreateHandle<InboxRowPreviewPayload>());
   const [hintHandle] = useState(() => TooltipCreateHandle<ReactNode>());
+  const { onOpenThread } = props;
+  // One callback for every row: a per-row closure would defeat the row's memo.
+  const openRow = useCallback(
+    (row: InboxSidebarRow) => onOpenThread(scopeThreadRef(row.environmentId, row.threadId)),
+    [onOpenThread],
+  );
   const renderRow = (row: InboxSidebarRow) => (
     <InboxThreadRow
       threadActions={props.threadActions}
       active={props.activeThreadKey === row.key}
       motionEnabled={motionEnabled}
       previewHandle={previewHandle}
-      onOpen={() => props.onOpenThread(scopeThreadRef(row.environmentId, row.threadId))}
+      onOpenRow={openRow}
       onSetSettlement={setThreadSettlement}
       row={row}
     />

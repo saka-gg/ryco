@@ -74,6 +74,8 @@ export interface InboxSidebarEnvironment {
   readonly label: string;
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly connectionState: "connected" | "connecting" | "reconnecting" | "offline" | "idle";
+  /** Waiting for a free connection slot: shown as "Waiting", not as a reconnect. */
+  readonly queued?: boolean | undefined;
   readonly stale: boolean;
   readonly staleDetail?: string;
   readonly role: "viewer" | "operator" | "owner" | "client" | null;
@@ -440,7 +442,7 @@ function statusLabel(
     case "error":
       return "Error";
     case "reconnecting":
-      return "Reconnecting";
+      return environment?.queued ? "Waiting" : "Reconnecting";
     case "offline":
       return environment?.staleDetail ?? "Offline";
     case "idle":
@@ -866,6 +868,123 @@ export function buildInboxSidebarSections(
   input: BuildInboxSidebarInput,
 ): ReadonlyArray<InboxSidebarSection> {
   return buildInboxSidebarModel(input).sections;
+}
+
+/** Row data is shallow JSON; anything nested deeper than this is treated as changed. */
+const MAX_SHARED_VALUE_DEPTH = 6;
+
+function isPlainRecord(value: object): value is Readonly<Record<string, unknown>> {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** Equal data, whatever the identity: fresh copies of unchanged pull requests match. */
+function sameInboxValue(left: unknown, right: unknown, depth = 0): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (depth >= MAX_SHARED_VALUE_DEPTH) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => sameInboxValue(item, right[index], depth + 1))
+    );
+  }
+  if (!isPlainRecord(left) || !isPlainRecord(right)) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) => Object.hasOwn(right, key) && sameInboxValue(left[key], right[key], depth + 1),
+    )
+  );
+}
+
+function sameElements<T>(left: ReadonlyArray<T>, right: ReadonlyArray<T>): boolean {
+  return (
+    left === right || (left.length === right.length && left.every((item, i) => item === right[i]))
+  );
+}
+
+/** Folded children are compared by identity: they are shared before their host. */
+function sameInboxRow(previous: InboxSidebarRow, next: InboxSidebarRow): boolean {
+  const keys = Object.keys(next) as Array<keyof InboxSidebarRow>;
+  return (
+    keys.length === Object.keys(previous).length &&
+    keys.every((key) =>
+      key === "delegatedChildren"
+        ? sameElements(previous.delegatedChildren, next.delegatedChildren)
+        : Object.hasOwn(previous, key) && sameInboxValue(previous[key], next[key]),
+    )
+  );
+}
+
+export interface InboxSidebarModelSharing {
+  /**
+   * The model with every row, section and list that did not change since the
+   * previous call replaced by its previous object.
+   */
+  readonly share: (model: InboxSidebarModel) => InboxSidebarModel;
+}
+
+/**
+ * The builder returns fresh rows on every run, so a memoized row would still
+ * re-render for each of them. One instance per mounted inbox keeps unchanged
+ * rows identical across runs; rows that left the model are forgotten.
+ */
+export function createInboxSidebarModelSharing(): InboxSidebarModelSharing {
+  let rowsByKey = new Map<string, InboxSidebarRow>();
+  let sectionsByKey = new Map<InboxSidebarSectionKey, InboxSidebarSection>();
+  let previousModel: InboxSidebarModel | null = null;
+
+  return {
+    share(model) {
+      const nextRowsByKey = new Map<string, InboxSidebarRow>();
+      const shareRow = (row: InboxSidebarRow): InboxSidebarRow => {
+        const candidate =
+          row.delegatedChildren.length === 0
+            ? row
+            : { ...row, delegatedChildren: row.delegatedChildren.map(shareRow) };
+        const previous = rowsByKey.get(row.key);
+        const shared =
+          previous !== undefined && sameInboxRow(previous, candidate) ? previous : candidate;
+        nextRowsByKey.set(row.key, shared);
+        return shared;
+      };
+
+      const nextSectionsByKey = new Map<InboxSidebarSectionKey, InboxSidebarSection>();
+      const sections = model.sections.map((section) => {
+        const rows = section.rows.map(shareRow);
+        const previous = sectionsByKey.get(section.key);
+        const shared =
+          previous !== undefined &&
+          previous.title === section.title &&
+          sameElements(previous.rows, rows)
+            ? previous
+            : { ...section, rows };
+        nextSectionsByKey.set(section.key, shared);
+        return shared;
+      });
+      const sharedSections =
+        previousModel !== null && sameElements(previousModel.sections, sections)
+          ? previousModel.sections
+          : sections;
+
+      const shared =
+        previousModel !== null &&
+        previousModel.sections === sharedSections &&
+        previousModel.nextSettlementEvaluationAtMs === model.nextSettlementEvaluationAtMs
+          ? previousModel
+          : { ...model, sections: sharedSections };
+      rowsByKey = nextRowsByKey;
+      sectionsByKey = nextSectionsByKey;
+      previousModel = shared;
+      return shared;
+    },
+  };
 }
 
 /**
