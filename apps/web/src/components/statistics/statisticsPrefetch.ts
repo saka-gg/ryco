@@ -17,11 +17,13 @@ export type StatisticsPrefetchSearch = Pick<StatisticsSearch, "view" | "range" |
 export function prefetchStatisticsPage(search: StatisticsPrefetchSearch): void {
   switch (search.view) {
     case "usage":
-      if (!readHostedRpcCapability(WS_METHODS.serverGetUsageSummary).allowed) return;
+      // hosted-capability: routed node
+      if (!readHostedRpcCapability(WS_METHODS.serverGetUsageSummary, null).allowed) return;
       prefetchUsageSummary(search.range, search.environmentIds);
       return;
     case "activity":
-      if (!readHostedRpcCapability(WS_METHODS.serverGetStatistics).allowed) return;
+      // hosted-capability: routed node
+      if (!readHostedRpcCapability(WS_METHODS.serverGetStatistics, null).allowed) return;
       prefetchStatistics();
       return;
     case "limits":

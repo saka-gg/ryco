@@ -7,6 +7,8 @@ import {
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 
 export interface AgentControlDecisions {
   readonly submittingIds: ReadonlyArray<string>;
@@ -22,7 +24,11 @@ export interface AgentControlDecisions {
  * the queue subscription delivers the authoritative state alongside it.
  */
 export function useAgentControlDecisions(environmentId: EnvironmentId): AgentControlDecisions {
-  const decisionCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.acceptProposal);
+  const decisionCapability = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.acceptProposal,
+    environmentId,
+  );
+  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
   const [submittingIds, setSubmittingIds] = useState<ReadonlyArray<string>>([]);
   const [decisionErrorsById, setDecisionErrorsById] = useState<Readonly<Record<string, string>>>(
     {},
@@ -65,7 +71,9 @@ export function useAgentControlDecisions(environmentId: EnvironmentId): AgentCon
   return {
     submittingIds,
     decisionErrorsById,
-    disabledReason: decisionCapability.allowed ? null : (decisionCapability.reason ?? null),
+    disabledReason: decisionCapability.allowed
+      ? null
+      : hostedCapabilityCopy(decisionCapability, nodeLabel),
     decide,
   };
 }

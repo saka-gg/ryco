@@ -382,7 +382,10 @@ function TasksPageContent(props: {
   const projectOrder = useUiStateStore((state) => state.projectOrder);
   const providers = useEnvironmentServerConfigSelector(environmentId, selectProviders);
   const uploads = useTaskFileUploadsStore((state) => state.byTask);
-  const sourceWorktrees = useHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject).allowed;
+  const sourceWorktrees = useHostedRpcCapability(
+    WS_METHODS.gitCreateWorktreeForProject,
+    environmentId,
+  ).allowed;
   const draftKeys = useTaskDraftKeys(environmentId);
 
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);

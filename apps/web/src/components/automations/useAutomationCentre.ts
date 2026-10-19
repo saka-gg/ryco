@@ -22,6 +22,8 @@ import {
   subscribeEnvironmentConnections,
 } from "../../environments/runtime";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { readAgentControlEnabled } from "../agent-control/agentControlSyncGate";
 import { retainAgentControlProposalSync } from "./data/useAutomationProposalSync";
 
@@ -66,7 +68,11 @@ export function useAutomationCentre(
   environmentId: EnvironmentId,
   projectId: ProjectId,
 ): AutomationCentreState {
-  const capability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCommand);
+  const capability = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.automationCommand,
+    environmentId,
+  );
+  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
   const [snapshot, setSnapshot] = useState<AutomationCentreSnapshot | null>(null);
   // The environment's live config (its subscription keeps it current), not a
   // full `getConfig` read per bind just for the provider list.
@@ -236,7 +242,7 @@ export function useAutomationCentre(
     busy: agentControlOff ? false : busy,
     disabledReason: capability.allowed
       ? null
-      : (capability.reason ?? "Automation changes are unavailable."),
+      : (hostedCapabilityCopy(capability, nodeLabel) ?? "Automation changes are unavailable."),
     command,
     decide,
     refresh: () => void refresh.current(),

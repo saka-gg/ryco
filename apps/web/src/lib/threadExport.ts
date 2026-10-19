@@ -1,13 +1,11 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
-import { hostedSessionAdmits } from "@ryco/client-runtime/authorization";
 import { loadThreadForExport, THREAD_EXPORT_RETRY } from "@ryco/client-runtime/connection";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { serializeThreadMarkdown, threadExportFilename } from "@ryco/shared/threadExport";
 import { readEnvironmentApi } from "../environmentApi";
 import { readEnvironmentConnection } from "../environments/runtime";
-import { isElectron, isHostedHubMode } from "../env";
-import { resolveHostedRpcCapability } from "../hostedHub/capabilities";
-import { useHostedHubStore } from "../hostedHub/state";
+import { isElectron } from "../env";
+import { readHostedRpcCapability } from "../hostedHub/capabilities";
 import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
 import { downloadPlanAsTextFile } from "../proposedPlan";
 
@@ -20,20 +18,12 @@ export async function exportThreadMarkdown(
   const initial = { ...getWsConnectionStatusForEnvironment(ref.environmentId) };
   const isCurrent = () => {
     const status = getWsConnectionStatusForEnvironment(ref.environmentId);
-    const hosted = useHostedHubStore.getState();
     return (
       readEnvironmentConnection(ref.environmentId) === connection &&
       status.phase === "connected" &&
       status.connectedAt === initial.connectedAt &&
       status.disconnectedAt === initial.disconnectedAt &&
-      resolveHostedRpcCapability({
-        hosted: isHostedHubMode(),
-        role: hosted.effectiveRole,
-        fresh: hosted.directoryStatus === "ready" && hosted.transportStatus === "online",
-        browserCurrent: hosted.browserStatus === "current",
-        sessionReady: hostedSessionAdmits(hosted, ORCHESTRATION_WS_METHODS.getThreadWindow),
-        method: ORCHESTRATION_WS_METHODS.getThreadWindow,
-      }).allowed
+      readHostedRpcCapability(ORCHESTRATION_WS_METHODS.getThreadWindow, ref.environmentId).allowed
     );
   };
   if (!api || !isCurrent()) throw new Error(THREAD_EXPORT_RETRY);

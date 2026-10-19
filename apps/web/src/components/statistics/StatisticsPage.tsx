@@ -2,6 +2,8 @@ import { WS_METHODS } from "@ryco/contracts";
 import { ActivityIcon, BarChart3Icon, GaugeIcon, ShieldAlertIcon } from "lucide-react";
 
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
+import { useHostedHubStore } from "~/hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "~/hostedHub/switchTarget";
 import { cn } from "~/lib/utils";
 import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
@@ -31,7 +33,9 @@ export function StatisticsPage({
       : search.view === "limits"
         ? WS_METHODS.serverReadCliProxyHubs
         : WS_METHODS.serverGetStatistics;
-  const capability = useHostedRpcCapability(method);
+  // hosted-capability: routed node
+  const capability = useHostedRpcCapability(method, null);
+  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -96,7 +100,9 @@ export function StatisticsPage({
               <StatePanel
                 icon={ShieldAlertIcon}
                 title="Statistics aren’t available for this session"
-                description={capability.reason ?? "Owner access is required."}
+                description={
+                  hostedCapabilityCopy(capability, nodeLabel) ?? "Owner access is required."
+                }
               />
             ) : search.view === "usage" ? (
               <UsageView search={search} onSearchChange={onSearchChange} />
