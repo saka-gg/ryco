@@ -33,7 +33,18 @@ export function createHostedStore<T extends object>(initial: T): HostedStore<T> 
     getState: () => state,
     getInitialState: () => initial,
     setState: (patch, replace = false) => {
-      state = replace ? (patch as T) : { ...state, ...patch };
+      if (replace) {
+        state = patch as T;
+      } else {
+        // A patch that changes nothing publishes nothing: the state keeps its
+        // identity and no subscriber is woken to re-read an identical snapshot.
+        const current = state as Record<string, unknown>;
+        const changes = Object.entries(patch as Record<string, unknown>);
+        if (changes.every(([key, value]) => Object.is(current[key], value))) {
+          return;
+        }
+        state = { ...state, ...patch };
+      }
       publish();
     },
     subscribe: (listener) => {

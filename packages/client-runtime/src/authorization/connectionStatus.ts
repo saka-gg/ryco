@@ -1,3 +1,4 @@
+import { isHostedConnectionEstablishing, type HostedConnectionPhase } from "./capabilities.ts";
 import type {
   HostedBrowserStatus,
   HostedRelayTransportStatus,
@@ -269,6 +270,26 @@ export function deriveHostedConnectionStatusText(
                             : selectionStatus === "offline"
                               ? "Offline"
                               : HOSTED_TRANSPORT_STATUS_TEXTS[transportStatus];
+}
+
+export type HostedConnectionPhaseInput = HostedConnectionStatusInput & HostedConnectionPhase;
+
+/**
+ * The status text for a connection, with every intentional connect collapsed
+ * to the one quiet word `Connecting`.
+ *
+ * Failures, an offline node, a stale browser, an unconfirmed delivery, a
+ * device-security gate and every channel label come out of
+ * {@link deriveHostedConnectionStatusText} unchanged.
+ */
+export function describeHostedConnectionPhase(
+  input: HostedConnectionPhaseInput,
+): HostedConnectionStatusText | "Connecting" {
+  const deviceGated =
+    input.nativeDeviceSecurityStatus !== undefined && input.nativeDeviceSecurityStatus !== "ready";
+  return !deviceGated && isHostedConnectionEstablishing(input)
+    ? "Connecting"
+    : deriveHostedConnectionStatusText(input);
 }
 
 /**

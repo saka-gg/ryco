@@ -21,6 +21,11 @@ vi.mock("../../hostedHub/state", () => ({
     acknowledgeDeliveryUnknown: vi.fn(),
     markEnvironmentDeliveryUnknown: vi.fn(),
   },
+  getHostedEnvironmentSessions: () => ({
+    read: () => undefined,
+    getSnapshot: () => ({ records: new Map() }),
+    subscribe: () => () => undefined,
+  }),
 }));
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
   useHostedWorkspaceState: () => ({ machines: [] }),

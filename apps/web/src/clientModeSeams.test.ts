@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   CLIENT_MODE_SEAM_MODULES,
@@ -88,6 +88,29 @@ describe("client-mode seams", () => {
       expect.objectContaining({ status: "refused", reason: "signed-out" }),
     );
     expect(standard.hostedHubController.leaseRecoveryCodeDisplay()()).toBeUndefined();
+  });
+
+  it("gives standard builds an inert environment session registry with every registry member", async () => {
+    const [hosted, standard] = await Promise.all([
+      import("./hostedHub/state"),
+      import("./hostedHub/state.standard"),
+    ]);
+    const registry = standard.getHostedEnvironmentSessions();
+    expect(Object.keys(registry).toSorted()).toEqual(
+      Object.keys(hosted.getHostedEnvironmentSessions()).toSorted(),
+    );
+    const snapshot = registry.getSnapshot();
+    expect(snapshot.records.size).toBe(0);
+    expect(snapshot.deliveryUnknown.size).toBe(0);
+    expect(registry.getSnapshot()).toBe(snapshot);
+    expect(registry.list()).toEqual([]);
+    expect(registry.read("env-1" as Parameters<typeof registry.read>[0])).toBeUndefined();
+    const listener = vi.fn();
+    expect(registry.subscribe(listener)()).toBeUndefined();
+    expect(listener).not.toHaveBeenCalled();
+    expect(() => registry.ensureRecord({} as Parameters<typeof registry.ensureRecord>[0])).toThrow(
+      /hosted-hub builds/u,
+    );
   });
 
   it("reports the signed-out hosted workspace and never grants a lease", async () => {

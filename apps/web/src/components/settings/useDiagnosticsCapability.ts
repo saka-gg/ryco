@@ -1,7 +1,10 @@
 import {
   hostedSessionAdmits,
   resolveHostedRpcCapability,
+  selectHostedSharedCapabilityState,
 } from "@ryco/client-runtime/authorization/capabilities";
+import { useShallow } from "zustand/react/shallow";
+
 import { isHostedHubMode } from "../../env";
 import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
@@ -12,7 +15,9 @@ import { canRequestDirectDiagnostics } from "./diagnosticsCapability";
 /** Apply the shared policy to the selected node, including its current shell. */
 export function useDiagnosticsCapability(method: string) {
   const target = useSettingsTarget();
-  const state = useHostedHubStore((value) => value);
+  // Only the fields the capability reads: a directory refresh or a node list
+  // update elsewhere in the hosted state does not re-render the settings page.
+  const state = useHostedHubStore(useShallow((value) => selectHostedSharedCapabilityState(value)));
   const workspace = useHostedWorkspaceState();
   const runtime = useSavedEnvironmentRuntimeStore((value) =>
     target ? value.byId[target.environmentId] : undefined,
