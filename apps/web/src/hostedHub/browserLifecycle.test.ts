@@ -1,15 +1,24 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { bindHostedBrowserLifecycle } from "./browserLifecycle";
+import {
+  bindHostedBrowserLifecycle,
+  HOSTED_HIDDEN_GRACE_MS,
+  type HostedBrowserLifecyclePorts,
+} from "./browserLifecycle";
 
-function harness() {
+function harness(
+  options: {
+    readonly visible?: boolean;
+    readonly ports?: Partial<HostedBrowserLifecyclePorts>;
+  } = {},
+) {
   const document = new EventTarget();
   const window = new EventTarget();
-  let visible = true;
+  let visible = options.visible ?? true;
   let online = true;
   const suspend = vi.fn();
   const recover = vi.fn(async (): Promise<void> => undefined);
-  const setBackgrounded = vi.fn(async () => undefined);
+  const setBackgrounded = vi.fn(async (_backgrounded: boolean) => undefined);
   const probe = vi.fn();
   const network = new EventTarget();
   const stop = bindHostedBrowserLifecycle({
@@ -25,6 +34,7 @@ function harness() {
       network.addEventListener("change", listener);
       return () => network.removeEventListener("change", listener);
     },
+    ...options.ports,
   });
   return {
     document,
@@ -150,5 +160,136 @@ describe("hosted browser lifecycle", () => {
     h.window.dispatchEvent(new Event("pageshow"));
     expect(h.suspend).not.toHaveBeenCalled();
     expect(h.recover).not.toHaveBeenCalled();
+  });
+});
+
+describe("hosted browser hidden grace", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks for background planning once after the grace period without suspending", () => {
+    const h = harness();
+    try {
+      h.setVisible(false);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS - 1);
+      expect(h.setBackgrounded).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(h.setBackgrounded).toHaveBeenCalledExactlyOnceWith(true);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS * 2);
+      expect(h.setBackgrounded).toHaveBeenCalledOnce();
+      expect(h.suspend).not.toHaveBeenCalled();
+      expect(h.recover).not.toHaveBeenCalled();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("does nothing when the tab is visible again before the grace period ends, then restarts the full period", async () => {
+    const h = harness();
+    try {
+      h.setVisible(false);
+      vi.advanceTimersByTime(60_000);
+      h.setVisible(true);
+      await Promise.resolve();
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS);
+      expect(h.setBackgrounded).not.toHaveBeenCalledWith(true);
+
+      h.setVisible(false);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS - 1);
+      expect(h.setBackgrounded).not.toHaveBeenCalledWith(true);
+      vi.advanceTimersByTime(1);
+      expect(h.setBackgrounded.mock.calls.filter(([value]) => value === true)).toHaveLength(1);
+      expect(h.suspend).not.toHaveBeenCalled();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("returns to foreground planning through one recovery after the grace fired", async () => {
+    const h = harness();
+    try {
+      h.setVisible(false);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS);
+      expect(h.setBackgrounded).toHaveBeenCalledExactlyOnceWith(true);
+      h.setVisible(true);
+      await Promise.resolve();
+      expect(h.recover).toHaveBeenCalledOnce();
+      expect(h.setBackgrounded.mock.calls).toEqual([[true], [false]]);
+      expect(h.suspend).not.toHaveBeenCalled();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("keeps the suspension path on freeze and cancels the pending grace", () => {
+    const h = harness();
+    try {
+      h.setVisible(false);
+      vi.advanceTimersByTime(30_000);
+      h.document.dispatchEvent(new Event("freeze"));
+      expect(h.suspend).toHaveBeenCalledExactlyOnceWith("hidden");
+      expect(h.setBackgrounded).toHaveBeenCalledExactlyOnceWith(true);
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS * 2);
+      expect(h.setBackgrounded).toHaveBeenCalledOnce();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("does not arm the grace for a tab that is already suspended", () => {
+    const h = harness();
+    try {
+      h.window.dispatchEvent(new Event("pagehide"));
+      expect(h.setBackgrounded).toHaveBeenCalledOnce();
+      h.setVisible(false);
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS * 2);
+      expect(h.setBackgrounded).toHaveBeenCalledOnce();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("arms the grace for a tab that is bound while hidden", () => {
+    const h = harness({ visible: false });
+    try {
+      vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS);
+      expect(h.setBackgrounded).toHaveBeenCalledExactlyOnceWith(true);
+      expect(h.suspend).not.toHaveBeenCalled();
+    } finally {
+      h.stop();
+    }
+  });
+
+  it("clears the pending grace on disposal", () => {
+    const h = harness();
+    h.setVisible(false);
+    expect(vi.getTimerCount()).toBe(1);
+    h.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(HOSTED_HIDDEN_GRACE_MS * 2);
+    expect(h.setBackgrounded).not.toHaveBeenCalled();
+  });
+
+  it("uses the injected timers and grace period", () => {
+    const timers = {
+      setTimeout: vi.fn((_callback: () => void, _ms: number) => "timer"),
+      clearTimeout: vi.fn(),
+    };
+    const h = harness({ ports: { ...timers, hiddenGraceMs: 5_000 } });
+    try {
+      h.setVisible(false);
+      expect(timers.setTimeout).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 5_000);
+      h.setVisible(true);
+      expect(timers.clearTimeout).toHaveBeenCalledExactlyOnceWith("timer");
+    } finally {
+      h.stop();
+    }
   });
 });

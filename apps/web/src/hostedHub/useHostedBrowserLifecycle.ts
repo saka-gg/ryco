@@ -27,6 +27,8 @@ function bindBrowserLifecycle(): () => void {
     setBackgrounded: setHostedWorkspaceBackgrounded,
     probe: resumeWebHubSession,
     subscribeNetworkChange: subscribeBrowserNetworkChange,
+    setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+    clearTimeout: (timer) => window.clearTimeout(timer as number),
   });
 }
 
@@ -37,7 +39,8 @@ function bindBrowserLifecycle(): () => void {
  * reach the Hub. Bound for as long as the account status is one of those and
  * rebound on every change between them, exactly as the hook form was keyed on
  * the status. What a recovery runs is the controller's decision, not this
- * binding's.
+ * binding's. A tab hidden for the grace period also asks the workspace
+ * coordinator to plan as backgrounded, which changes connection demand only.
  *
  * Started once by the hosted workspace owners (see `hostedWorkspaceOwners`),
  * which the boot gate retains before the hosted root has loaded and the root
