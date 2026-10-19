@@ -64,17 +64,19 @@ export function projectIconRequestKey(
 }
 
 /**
- * The cached artwork for a row, without a request: a data URL, `null` for a
- * project known to have none, or `undefined` when nothing current is cached.
- * Lets a remounted row render its icon on the first pass.
+ * The artwork last read for a row, however old, without a request: a data URL,
+ * `null` for a project known to have none, or `undefined` when nothing was read.
+ * Lets a remounted row render its icon on the first pass, and a row whose node
+ * is not connected (the Hub keeps one node connected at a time) keep showing
+ * it. Freshness is the read's concern: a connected row revalidates an expired
+ * entry through `readProjectIconSource`.
  */
 export function peekProjectIconSource(
   environmentId: EnvironmentId,
   projectId: ProjectId,
   revision: string | null,
 ): string | null | undefined {
-  const cached = readCache(environmentId)?.resolved.get(entryKey(projectId, revision));
-  return cached && cached.expiresAt > Date.now() ? cached.source : undefined;
+  return readCache(environmentId)?.resolved.get(entryKey(projectId, revision))?.source;
 }
 
 export function readProjectIconSource(
