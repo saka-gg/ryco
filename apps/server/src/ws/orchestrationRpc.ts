@@ -1,6 +1,7 @@
-import { Effect, Option, Schema, Stream } from "effect";
+import { Deferred, Effect, Exit, Option, Schema, Semaphore, Stream } from "effect";
 import { readAttachmentChunk } from "../attachmentRead.ts";
 import { clamp } from "effect/Number";
+import { BACKGROUND_WORK_CHECKPOINT } from "@ryco/shared/backgroundWork";
 import {
   AuthRpcError,
   FileAttachmentCreateUploadUrlError,
@@ -19,7 +20,9 @@ import {
   type OrchestrationGetThreadHistoryPageInput,
   type OrchestrationGetThreadShellsInput,
   type OrchestrationGetThreadWindowInput,
+  type OrchestrationThreadHistoryRecoveryMode,
   type OrchestrationThreadShell,
+  type OrchestrationThreadWindowSnapshot,
   type ThreadId,
 } from "@ryco/contracts";
 
@@ -31,6 +34,7 @@ import {
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
 import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
+import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
 import {
   makeThreadHistoryRecoveryRegistry,
   type ThreadStreamItemLike,
@@ -57,6 +61,166 @@ import {
   ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES,
 } from "./context/constants.ts";
 import { observeArrays } from "./streamBatching.ts";
+
+/**
+ * Encoded size a thread window may reach. The relay carries 4 MiB per message;
+ * a larger window fails with `response-too-large` and costs the client a
+ * halved re-subscribe, so the window is trimmed on the server instead.
+ */
+export const THREAD_WINDOW_MAX_ENCODED_BYTES = 3.5 * 1024 * 1024;
+
+/** Passive thread window loads that may run at once on one connection. */
+const PASSIVE_THREAD_WINDOW_LOAD_CONCURRENCY = 2;
+
+const encodedJsonBytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/**
+ * Keeps a window within `maxBytes` of encoded JSON by dropping its oldest
+ * messages and activities, oldest first across both, and marks each trimmed
+ * collection as having older history so pagination reaches what was dropped.
+ * The newest message and the newest activity always stay, so one oversized
+ * item still opens. The derived background-work checkpoint rides along
+ * untouched: it already accounts for evidence outside the window.
+ */
+export function fitThreadWindowToByteBudget(
+  snapshot: OrchestrationThreadWindowSnapshot,
+  maxBytes: number = THREAD_WINDOW_MAX_ENCODED_BYTES,
+): OrchestrationThreadWindowSnapshot {
+  let bytes = encodedJsonBytes(snapshot);
+  if (bytes <= maxBytes) return snapshot;
+
+  const { id: threadId, messages } = snapshot.thread;
+  const checkpoint = snapshot.thread.activities.at(-1);
+  const derivedCheckpoint =
+    checkpoint?.kind === BACKGROUND_WORK_CHECKPOINT ? checkpoint : undefined;
+  const activities =
+    derivedCheckpoint === undefined
+      ? snapshot.thread.activities
+      : snapshot.thread.activities.slice(0, -1);
+
+  const withOldestDropped = (droppedMessages: number, droppedActivities: number) => {
+    const keptMessages = messages.slice(droppedMessages);
+    const keptActivities = activities.slice(droppedActivities);
+    const oldestMessage = droppedMessages === 0 ? undefined : keptMessages[0];
+    const oldestActivity = droppedActivities === 0 ? undefined : keptActivities[0];
+    return {
+      ...snapshot,
+      thread: {
+        ...snapshot.thread,
+        messages: keptMessages,
+        activities:
+          derivedCheckpoint === undefined ? keptActivities : [...keptActivities, derivedCheckpoint],
+      },
+      history: {
+        ...snapshot.history,
+        messages:
+          oldestMessage === undefined
+            ? snapshot.history.messages
+            : {
+                ...snapshot.history.messages,
+                oldestCursor: encodeThreadHistoryCursor({
+                  threadId,
+                  collection: "messages",
+                  order: { createdAt: oldestMessage.createdAt, id: oldestMessage.id },
+                }),
+                hasMoreBefore: true,
+              },
+        activities:
+          oldestActivity === undefined
+            ? snapshot.history.activities
+            : {
+                ...snapshot.history.activities,
+                oldestCursor: encodeThreadHistoryCursor({
+                  threadId,
+                  collection: "activities",
+                  order: {
+                    sequence: oldestActivity.sequence ?? null,
+                    createdAt: oldestActivity.createdAt,
+                    id: oldestActivity.id,
+                  },
+                }),
+                hasMoreBefore: true,
+              },
+      },
+    } satisfies OrchestrationThreadWindowSnapshot;
+  };
+
+  let fitted = snapshot;
+  let droppedMessages = 0;
+  let droppedActivities = 0;
+  while (bytes > maxBytes) {
+    const droppedBefore = droppedMessages + droppedActivities;
+    // Dropping an item saves about its own encoded size. The result is
+    // re-measured below, so anything this ignores (separators, the repointed
+    // cursors) only costs another short pass.
+    let excess = bytes - maxBytes;
+    while (excess > 0) {
+      const message = droppedMessages < messages.length - 1 ? messages[droppedMessages] : undefined;
+      const activity =
+        droppedActivities < activities.length - 1 ? activities[droppedActivities] : undefined;
+      if (
+        message !== undefined &&
+        (activity === undefined || message.createdAt < activity.createdAt)
+      ) {
+        excess -= encodedJsonBytes(message) + 1;
+        droppedMessages += 1;
+      } else if (activity !== undefined) {
+        excess -= encodedJsonBytes(activity) + 1;
+        droppedActivities += 1;
+      } else {
+        break;
+      }
+    }
+    if (droppedMessages + droppedActivities === droppedBefore) break;
+    fitted = withOldestDropped(droppedMessages, droppedActivities);
+    bytes = encodedJsonBytes(fitted);
+  }
+  return fitted;
+}
+
+/**
+ * Orders one connection's thread window loads. A window a view is waiting on
+ * (`active`, which is also what an older client gets) starts at once. The
+ * windows retained subscriptions reload after a reconnect (`passive`) take
+ * turns, a couple at a time in arrival order, and hold back while an active
+ * load runs. Served in arrival order instead, the routed thread's window queues
+ * behind every retained thread's.
+ */
+const makeThreadWindowLoadScheduler = () => {
+  const passiveSlots = Semaphore.makeUnsafe(PASSIVE_THREAD_WINDOW_LOAD_CONCURRENCY);
+  let activeLoads = 0;
+  let activeLoadsSettled: Deferred.Deferred<void> | undefined;
+
+  const awaitNoActiveLoad: Effect.Effect<void> = Effect.suspend(() =>
+    activeLoadsSettled === undefined
+      ? Effect.void
+      : Deferred.await(activeLoadsSettled).pipe(Effect.andThen(awaitNoActiveLoad)),
+  );
+  const enterActiveLoad = Effect.sync(() => {
+    if (activeLoads === 0) activeLoadsSettled = Deferred.makeUnsafe<void>();
+    activeLoads += 1;
+  });
+  const leaveActiveLoad = Effect.sync(() => {
+    activeLoads -= 1;
+    if (activeLoads === 0 && activeLoadsSettled !== undefined) {
+      Deferred.doneUnsafe(activeLoadsSettled, Exit.void);
+      activeLoadsSettled = undefined;
+    }
+  });
+
+  return <A, E, R>(
+    mode: OrchestrationThreadHistoryRecoveryMode | undefined,
+    load: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> =>
+    mode === "passive"
+      ? passiveSlots.withPermits(1)(awaitNoActiveLoad.pipe(Effect.andThen(load)))
+      : Effect.acquireUseRelease(
+          enterActiveLoad,
+          () => load,
+          () => leaveActiveLoad,
+        );
+};
 
 export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   const {
@@ -86,6 +250,10 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
   // subscription a prewarm opened can turn its history recovery on (and off
   // again once the view detaches).
   const historyRecoveryRegistry = makeThreadHistoryRecoveryRegistry();
+
+  // Shared by this connection's thread window subscriptions: the routed
+  // thread's window must not wait behind the retained threads' reloads.
+  const scheduleThreadWindowLoad = makeThreadWindowLoadScheduler();
 
   // Lifetime follows the authorized thread subscription. Reading history never
   // resumes Codex or grants mutation authority to this connection. A passive
@@ -210,6 +378,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         }),
       },
     }).pipe(
+      Effect.map((window) => fitThreadWindowToByteBudget(window)),
       Effect.mapError((cause) =>
         Schema.is(OrchestrationThreadHistoryError)(cause)
           ? cause
@@ -701,23 +870,26 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
         ORCHESTRATION_WS_METHODS.subscribeThreadWindow,
         Effect.succeed(
           makeReplayableThreadStream(
-            Effect.gen(function* () {
-              const perfEnabled = isServerPerfProfileEnabled();
-              const startedAtMs = performance.now();
-              const snapshot = yield* loadThreadWindow(input);
-              const snapshotDurationMs = Math.max(0, performance.now() - startedAtMs);
-              yield* recordThreadSnapshotDurationMs(snapshotDurationMs);
-              if (perfEnabled) {
-                yield* Effect.sync(() =>
-                  recordServerPerfPayload(
-                    "server.ws.orchestration.subscribeThreadWindow.snapshot",
-                    snapshot,
-                    { durationMs: snapshotDurationMs },
-                  ),
-                );
-              }
-              return snapshot;
-            }),
+            scheduleThreadWindowLoad(
+              input.historyRecovery,
+              Effect.gen(function* () {
+                const perfEnabled = isServerPerfProfileEnabled();
+                const startedAtMs = performance.now();
+                const snapshot = yield* loadThreadWindow(input);
+                const snapshotDurationMs = Math.max(0, performance.now() - startedAtMs);
+                yield* recordThreadSnapshotDurationMs(snapshotDurationMs);
+                if (perfEnabled) {
+                  yield* Effect.sync(() =>
+                    recordServerPerfPayload(
+                      "server.ws.orchestration.subscribeThreadWindow.snapshot",
+                      snapshot,
+                      { durationMs: snapshotDurationMs },
+                    ),
+                  );
+                }
+                return snapshot;
+              }),
+            ),
             input.threadId,
             { resumeFromSequence: input.resumeFromSequence },
           ).pipe(
