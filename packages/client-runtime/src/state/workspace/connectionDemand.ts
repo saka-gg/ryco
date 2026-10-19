@@ -19,6 +19,12 @@ export interface WorkspaceConnectionScopeLease {
   readonly scope: WorkspaceConnectionScope;
   readonly retainedAt: number;
   readonly expiresAt: number;
+  /**
+   * Background or intent demand (drafts, discovery, queued sends, press
+   * intent) that a foreground environment may displace when no slot is free.
+   * Mounted views never set it. Absent means `false`.
+   */
+  readonly preemptible?: boolean;
 }
 
 export interface WorkspaceDemandConnection {
@@ -111,6 +117,7 @@ export function retainWorkspaceConnectionScope(
     readonly scope: WorkspaceConnectionScope;
     readonly now: number;
     readonly ttlMs?: number;
+    readonly preemptible?: boolean;
   },
 ): WorkspaceConnectionDemandState {
   if (input.leaseId.length === 0) throw new TypeError("leaseId must not be empty");
@@ -130,6 +137,7 @@ export function retainWorkspaceConnectionScope(
           scope: input.scope,
           retainedAt: input.now,
           expiresAt: input.now + ttlMs,
+          ...(input.preemptible === true ? { preemptible: true } : {}),
         },
       ],
     },
@@ -175,43 +183,55 @@ export function pruneExpiredWorkspaceConnectionScopes(
   return leases.length === state.leases.length ? state : { ...state, leases };
 }
 
-export function workspaceConnectionScopeRefCounts(
+/**
+ * Whether an environment's connection is wanted right now: it is the
+ * foreground environment or holds an unexpired lease. A live environment that
+ * is not demanded is released after a relay drop instead of reconnecting.
+ */
+export function isWorkspaceEnvironmentDemanded(
   state: WorkspaceConnectionDemandState,
-  now: number,
-): ReadonlyArray<{
-  readonly environmentId: EnvironmentId;
-  readonly scope: WorkspaceConnectionScope;
-  readonly refCount: number;
-}> {
-  const active = pruneExpiredWorkspaceConnectionScopes(state, now).leases;
-  const counts = new Map<
-    string,
-    { environmentId: EnvironmentId; scope: WorkspaceConnectionScope; refCount: number }
-  >();
-  for (const lease of active) {
-    const key = JSON.stringify([lease.environmentId, lease.scope]);
-    const current = counts.get(key);
-    counts.set(key, {
-      environmentId: lease.environmentId,
-      scope: lease.scope,
-      refCount: (current?.refCount ?? 0) + 1,
-    });
-  }
-  return Array.from(counts.values());
+  environmentId: EnvironmentId,
+  input: { readonly now: number; readonly foregroundEnvironmentId?: EnvironmentId | null },
+): boolean {
+  if (input.foregroundEnvironmentId === environmentId) return true;
+  return state.leases.some(
+    (lease) => lease.environmentId === environmentId && lease.expiresAt > input.now,
+  );
 }
 
+/**
+ * Decides which environments to release, connect and queue. The planner alone
+ * decides eviction: retained environments are never released, except that a
+ * retained foreground environment without a free slot may displace one whose
+ * leases are all preemptible (it is queued and keeps its leases); when none
+ * qualifies the foreground is queued. The foreground connects first with no
+ * delay, the other retained environments follow by retain recency, each
+ * `wakeStaggerMs` after the previous one.
+ */
 export function planWorkspaceConnectionDemand(
   source: WorkspaceConnectionDemandState,
-  input: { readonly now: number; readonly wakeStaggerMs?: number },
+  input: {
+    readonly now: number;
+    readonly wakeStaggerMs?: number;
+    readonly foregroundEnvironmentId?: EnvironmentId | null;
+  },
 ): WorkspaceConnectionDemandPlan {
   const state = pruneExpiredWorkspaceConnectionScopes(source, input.now);
   const retainedAtByEnvironment = new Map<EnvironmentId, number>();
+  const preemptibleByEnvironment = new Map<EnvironmentId, boolean>();
   for (const lease of state.leases) {
     retainedAtByEnvironment.set(
       lease.environmentId,
       Math.max(retainedAtByEnvironment.get(lease.environmentId) ?? 0, lease.retainedAt),
     );
+    preemptibleByEnvironment.set(
+      lease.environmentId,
+      (preemptibleByEnvironment.get(lease.environmentId) ?? true) && lease.preemptible === true,
+    );
   }
+  const byRetainRecency = (left: EnvironmentId, right: EnvironmentId) =>
+    (retainedAtByEnvironment.get(right) ?? 0) - (retainedAtByEnvironment.get(left) ?? 0) ||
+    String(left).localeCompare(String(right));
   const retained = Array.from(retainedAtByEnvironment.keys());
   const retainedSet = new Set(retained);
   const connected = state.connections.filter((entry) => entry.connected);
@@ -223,13 +243,15 @@ export function planWorkspaceConnectionDemand(
         left.lastAccessedAt - right.lastAccessedAt ||
         String(left.environmentId).localeCompare(String(right.environmentId)),
     );
-  const missingRetained = retained
+  const foreground = input.foregroundEnvironmentId ?? null;
+  const missingByRecency = retained
     .filter((environmentId) => !connectedSet.has(environmentId))
-    .toSorted((left, right) => {
-      const recency =
-        (retainedAtByEnvironment.get(right) ?? 0) - (retainedAtByEnvironment.get(left) ?? 0);
-      return recency || String(left).localeCompare(String(right));
-    });
+    .toSorted(byRetainRecency);
+  const missingRetained =
+    foreground !== null && missingByRecency.includes(foreground)
+      ? [foreground, ...missingByRecency.filter((environmentId) => environmentId !== foreground)]
+      : missingByRecency;
+  const foregroundMissing = foreground !== null && missingRetained[0] === foreground;
 
   const release: EnvironmentId[] = [];
   if (state.backgrounded) {
@@ -255,17 +277,42 @@ export function planWorkspaceConnectionDemand(
     projectedConnected -= 1;
   }
 
+  const preempted: EnvironmentId[] = [];
+  const slotsNeeded = projectedConnected - state.platformMaxConnections + 1;
+  if (foregroundMissing && slotsNeeded > 0) {
+    const candidates = connected
+      .map((entry) => entry.environmentId)
+      .filter(
+        (environmentId) =>
+          environmentId !== foreground &&
+          retainedSet.has(environmentId) &&
+          preemptibleByEnvironment.get(environmentId) === true,
+      )
+      .toSorted(
+        (left, right) =>
+          (retainedAtByEnvironment.get(left) ?? 0) - (retainedAtByEnvironment.get(right) ?? 0) ||
+          String(left).localeCompare(String(right)),
+      );
+    if (candidates.length >= slotsNeeded) {
+      preempted.push(...candidates.slice(0, slotsNeeded));
+      release.push(...preempted);
+      projectedConnected -= preempted.length;
+    }
+  }
+
   const available = Math.max(0, state.platformMaxConnections - projectedConnected);
   const connectNow = missingRetained.slice(0, available);
   const wakeStaggerMs = Math.max(0, input.wakeStaggerMs ?? 0);
   return {
     state,
-    retain: retained.filter((environmentId) => connectedSet.has(environmentId)),
+    retain: retained.filter(
+      (environmentId) => connectedSet.has(environmentId) && !preempted.includes(environmentId),
+    ),
     release,
     connect: connectNow.map((environmentId, index) => ({
       environmentId,
       delayMs: index * wakeStaggerMs,
     })),
-    queued: missingRetained.slice(connectNow.length),
+    queued: [...missingRetained.slice(connectNow.length), ...preempted],
   };
 }
