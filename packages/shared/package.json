@@ -382,10 +382,6 @@
       "types": "./src/computerInvocation.ts",
       "import": "./src/computerInvocation.ts"
     },
-    "./computerKeyNames": {
-      "types": "./src/computerKeyNames.ts",
-      "import": "./src/computerKeyNames.ts"
-    },
     "./cuaActionDiagnostics": {
       "types": "./src/cuaActionDiagnostics.ts",
       "import": "./src/cuaActionDiagnostics.ts"

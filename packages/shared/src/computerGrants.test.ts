@@ -58,7 +58,7 @@ describe("computer permission copy", () => {
       "com.emanueledipietro.synara.dev",
     );
     expect(advice).toContain("add the current build again");
-    expect(advice).not.toContain("Synara has cleared");
+    expect(advice).not.toContain("Ryco has cleared");
     expect(advice).toContain("tccutil reset Accessibility com.emanueledipietro.synara.dev");
     // `ScreenCapture`, not "Screen Recording": the label is not the service name,
     // and a user who types the label gets an error instead of a reset.
@@ -67,7 +67,7 @@ describe("computer permission copy", () => {
 
   it("names the responsible app rather than assuming the released one", () => {
     // A `.dev` flavor resetting the production identifier would revoke a
-    // separately installed Synara's grants and fix nothing here.
+    // separately installed Ryco's grants and fix nothing here.
     const advice = computerStaleGrantAdvice(
       ["accessibility"],
       "adhoc",
@@ -79,7 +79,7 @@ describe("computer permission copy", () => {
 
   it("withholds the tccutil sentence when no responsible bundle id is known", () => {
     // Better to say nothing than to hand the user a command that resets some
-    // other Synara. The System Settings advice still stands on its own.
+    // other Ryco. The System Settings advice still stands on its own.
     for (const bundleId of [undefined, "", "   "]) {
       const advice = computerStaleGrantAdvice(["accessibility"], "adhoc", bundleId);
       expect(advice).toContain("add the current build again");
@@ -95,6 +95,18 @@ describe("computer permission copy", () => {
     expect(message).toContain("Accessibility");
     expect(message).toContain("System Settings");
     expect(message).not.toContain("tccutil");
+  });
+
+  it("names the product as Ryco in the setup message", () => {
+    expect(computerPermissionSetupMessage(["accessibility", "screenRecording"], "signed")).toBe(
+      "Ryco needs Accessibility and Screen Recording to control this Mac. Turn Ryco on in System Settings › Privacy & Security › Accessibility and Screen Recording, then try again.",
+    );
+    expect(computerPermissionSetupMessage([], "signed")).toBe(
+      "Ryco needs a macOS privacy permission to control this Mac. Grant it in System Settings › Privacy & Security, then try again.",
+    );
+    expect(computerStaleGrantAdvice(["accessibility"], "adhoc")).toContain(
+      "locally built copy of Ryco",
+    );
   });
 
   it("puts the stale-grant explanation into the ad-hoc setup message", () => {

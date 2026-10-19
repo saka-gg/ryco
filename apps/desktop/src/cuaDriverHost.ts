@@ -57,7 +57,7 @@ interface TaskRequest {
 export const CUA_CURSOR_IDLE_HIDE_MS = 60_000;
 /** A raw ENOENT names a path, not a remedy; source builds stage the driver themselves. */
 const CUA_DRIVER_MISSING_MESSAGE =
-  "Cua Driver is not bundled. Run the provisioning script (`node apps/desktop/scripts/provision-cua-driver.mjs`, needs the pinned Rust toolchain) in this checkout, then relaunch Synara.";
+  "Cua Driver is not bundled. Run the provisioning script (`node apps/desktop/scripts/provision-cua-driver.mjs`, needs the pinned Rust toolchain) in this checkout, then relaunch Ryco.";
 
 interface ControlledTarget {
   pid: number;
@@ -324,6 +324,19 @@ export function sweepOrphanedCuaDrivers(): void {
   }
   for (const entry of sweepOwnedCuaRuntimeDirectories({ directory: tmpdir(), liveSocketDirs }))
     log(`removed stale owned driver directory ${entry}`);
+}
+
+let orphanedDriversSwept = false;
+
+/**
+ * Reaps drivers and runtime directories leaked by hosts that died without
+ * retiring them. Run when this process first needs a driver, never again: the
+ * hosts that could have leaked are the ones that died before this process began.
+ */
+function sweepOrphanedCuaDriversOnce(): void {
+  if (orphanedDriversSwept) return;
+  orphanedDriversSwept = true;
+  sweepOrphanedCuaDrivers();
 }
 
 const DRIVER_SESSION_DEATH_CODES = new Set([
@@ -1859,6 +1872,7 @@ export class CuaDriverHost {
         // Same wording as the probe: a raw ENOENT names a path, not a remedy.
         throw new Error(CUA_DRIVER_MISSING_MESSAGE);
       }
+      sweepOrphanedCuaDriversOnce();
       const endpoint =
         process.platform === "win32"
           ? `\\\\.\\pipe\\synara-cua-driver-${randomUUID().slice(0, 8)}`

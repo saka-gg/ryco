@@ -90,6 +90,8 @@ async function fixture(
       dispose: () => Promise<void>;
     };
     listWindows?: Array<Record<string, unknown>>;
+    // A separately loaded copy of the module, for tests of process-wide state.
+    hostClass?: typeof CuaDriverHost;
   } = {},
 ) {
   // Model the driver's platform explicitly, independently of the CI runner.
@@ -213,7 +215,7 @@ process.stdin.resume(); process.stdin.on('end',retire);
 `,
   );
   await chmod(binary, 0o755);
-  const host = new CuaDriverHost({
+  const host = new (options.hostClass ?? CuaDriverHost)({
     binaryPath: binary,
     bundleId: "fixture",
     capability: authority,
@@ -3645,5 +3647,48 @@ describe("activation shield host method", () => {
     socket.destroy();
     expect(reply.ok).toBe(false);
     expect(String(reply.error)).toContain("authority");
+  });
+});
+
+describe("orphaned driver sweep", () => {
+  afterEach(() => {
+    vi.doUnmock("./cuaRuntimeOwnership.ts");
+    vi.resetModules();
+  });
+
+  it("runs once per process, just before the first driver is spawned", async () => {
+    const sweptAt: number[] = [];
+    const ownership = await vi.importActual<typeof import("./cuaRuntimeOwnership.ts")>(
+      "./cuaRuntimeOwnership.ts",
+    );
+    // A fresh copy of the host module: the sweep is process-wide state that the
+    // statically imported copy has already used up.
+    vi.resetModules();
+    vi.doMock("./cuaRuntimeOwnership.ts", () => ({
+      ...ownership,
+      sweepOwnedCuaRuntimeDirectories: () => {
+        sweptAt.push(Date.now());
+        return [];
+      },
+    }));
+    const { CuaDriverHost: FreshCuaDriverHost } = await import("./cuaDriverHost.ts");
+    const touch = (endpoint: string) =>
+      cuaRequest<CuaReply>(endpoint, {
+        method: "call",
+        name: "press_key",
+        args: { key: "enter", _synara_foreground_observation_ms: 0 },
+      });
+
+    const first = await fixture(capability, { hostClass: FreshCuaDriverHost });
+    expect(sweptAt).toHaveLength(0);
+    await expect(touch(first.endpoint)).resolves.toMatchObject({ ok: true });
+    expect(sweptAt).toHaveLength(1);
+    const started = (await first.events()).find((row) => row.event === "start");
+    expect(started).toBeDefined();
+    expect(sweptAt[0]!).toBeLessThanOrEqual(started!.time);
+
+    const second = await fixture(capability, { hostClass: FreshCuaDriverHost });
+    await expect(touch(second.endpoint)).resolves.toMatchObject({ ok: true });
+    expect(sweptAt).toHaveLength(1);
   });
 });
