@@ -705,10 +705,16 @@ const SWITCH_PROBE_SCRIPT = `(() => {
   };
 })()`;
 
+/** Expands every collapsed inbox section; returns how many it expanded. */
 const EXPAND_SECTIONS_SCRIPT = `(() => {
+  let expanded = 0;
   for (const button of document.querySelectorAll('button[aria-expanded="false"]')) {
-    if (button.querySelector('h2[id^="inbox-section-"]')) button.click();
+    if (button.querySelector('h2[id^="inbox-section-"]')) {
+      button.click();
+      expanded += 1;
+    }
   }
+  return expanded;
 })()`;
 
 const READ_ROW_KEYS_SCRIPT = `Array.from(document.querySelectorAll("[data-inbox-row-key]"), (element) => element.getAttribute("data-inbox-row-key"))`;
@@ -1028,6 +1034,12 @@ async function measureSwitch(input: SwitchInput): Promise<SwitchRun> {
   const { session, kind, options } = input;
   const { page, cdp } = session;
 
+  // A node switch can collapse an inbox section again (some builds remount the
+  // inbox per node), which would hide the open node's rows from the same-node
+  // control. Expand it and let the rows settle before choosing one.
+  if (((await page.evaluate(EXPAND_SECTIONS_SCRIPT)) as number) > 0) {
+    await sleep(SWITCH_SETTLE_MS);
+  }
   const pathname = (await page.evaluate("location.pathname")) as string;
   const rowKey = chooseRowKey({
     rowKeys: await readRowKeys(page),
@@ -1416,13 +1428,15 @@ async function firstThreadPath(hub: URL, cookie: HostedCookie): Promise<string> 
 async function waitForColdLoadMarks(
   page: Page,
 ): Promise<{ firstContent?: number; writable?: number }> {
+  // A function predicate, not a string: a string is evaluated with eval in the
+  // page, which a content security policy without 'unsafe-eval' refuses.
   await page
     .waitForFunction(
-      "window.__rycoColdLoad && window.__rycoColdLoad.writable !== undefined",
+      () =>
+        (globalThis as unknown as { readonly __rycoColdLoad?: { readonly writable?: number } })
+          .__rycoColdLoad?.writable !== undefined,
       undefined,
-      {
-        timeout: COLD_LOAD_TIMEOUT_MS,
-      },
+      { timeout: COLD_LOAD_TIMEOUT_MS },
     )
     .catch(() => undefined);
   return (await page.evaluate("window.__rycoColdLoad")) as {
