@@ -11,8 +11,15 @@ import {
   rankWorkspaceEntries,
 } from "@ryco/shared/workspaceEntrySearch";
 
+import { isHostedHubMode } from "~/env";
 import { ensureEnvironmentApi, readEnvironmentApi } from "~/environmentApi";
-import { appAtomRegistry } from "@ryco/client-runtime/rpc";
+import { hostedHubStore } from "~/hostedHub/state";
+import {
+  appAtomRegistry,
+  createRetainedKeyTracker,
+  KEY_SEP,
+  type RetainedKeyTracker,
+} from "@ryco/client-runtime/rpc";
 
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_LIMIT = 80;
 export const DEFAULT_PROJECT_SEARCH_ENTRIES_STALE_TIME_MS = 15_000;
@@ -120,8 +127,12 @@ const projectSearchEntriesStateAtom = Atom.family((scopeKey: string) => {
   );
 });
 
+function scopeKeyPrefix(environmentId: EnvironmentId): string {
+  return `${environmentId}::`;
+}
+
 function getScopeKey(environmentId: EnvironmentId, cwd: string, limit: number): string {
-  return `${environmentId}::${cwd}::${limit}`;
+  return `${scopeKeyPrefix(environmentId)}${cwd}::${limit}`;
 }
 
 export function resolveProjectSearchEntriesScopeKey(
@@ -189,6 +200,9 @@ function ensureScopeRuntime(
 }
 
 function setState(scopeKey: string, next: ProjectSearchEntriesState): void {
+  // `Atom.family` runs its factory once per key, so a key forgotten by a reset
+  // is only re-recorded here; otherwise the next reset would miss its atom.
+  knownScopeKeys.add(scopeKey);
   const atom = projectSearchEntriesStateAtom(scopeKey);
   const current = appAtomRegistry.get(atom);
   if (
@@ -519,6 +533,12 @@ export function getProjectSearchEntriesSnapshot(
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_FILESYSTEM_BROWSE_STALE_TIME_MS = 30_000;
+/**
+ * Browse results kept once nothing observes them. A browse listing is
+ * node-owned content that never expires on its own, so only the most recently
+ * released ones stay warm for back-navigation.
+ */
+export const FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT = 16;
 
 export interface FilesystemBrowseInput {
   readonly environmentId: EnvironmentId | null;
@@ -546,7 +566,6 @@ const INITIAL_FILESYSTEM_BROWSE_STATE: FilesystemBrowseState = Object.freeze({
 
 export const EMPTY_FILESYSTEM_BROWSE_STATE = INITIAL_FILESYSTEM_BROWSE_STATE;
 
-const BROWSE_KEY_SEP = "\u0000";
 const knownBrowseKeys = new Set<string>();
 
 const filesystemBrowseStateAtom = Atom.family((compositeKey: string) => {
@@ -560,6 +579,10 @@ const filesystemBrowseStateAtom = Atom.family((compositeKey: string) => {
 const EMPTY_FILESYSTEM_BROWSE_ATOM = Atom.make<FilesystemBrowseState>(
   INITIAL_FILESYSTEM_BROWSE_STATE,
 ).pipe(Atom.keepAlive, Atom.withLabel("filesystem-browse:null"));
+
+function browseKeyPrefix(environmentId: EnvironmentId): string {
+  return `${environmentId}${KEY_SEP}`;
+}
 
 interface ResolvedFilesystemBrowseInput {
   readonly environmentId: EnvironmentId;
@@ -586,6 +609,28 @@ interface BrowseController {
 
 const browseControllers = new Map<string, BrowseController>();
 
+/**
+ * Forget one browse entry completely: the controller is dropped, a response
+ * still in flight is fenced by the token bump, and the state atom falls back to
+ * its initial state so a later read cannot observe evicted node content.
+ */
+function dropBrowseKey(compositeKey: string): void {
+  const controller = browseControllers.get(compositeKey);
+  if (controller) {
+    controller.fetchToken += 1;
+    browseControllers.delete(compositeKey);
+  }
+  if (knownBrowseKeys.delete(compositeKey)) {
+    appAtomRegistry.set(filesystemBrowseStateAtom(compositeKey), INITIAL_FILESYSTEM_BROWSE_STATE);
+  }
+}
+
+const browseRetention: RetainedKeyTracker = createRetainedKeyTracker({
+  limit: FILESYSTEM_BROWSE_RETAINED_KEY_LIMIT,
+  onEvict: dropBrowseKey,
+  environmentPrefix: browseKeyPrefix,
+});
+
 function resolveFilesystemBrowseInput(
   input: FilesystemBrowseInput,
 ): ResolvedFilesystemBrowseInput | null {
@@ -595,7 +640,7 @@ function resolveFilesystemBrowseInput(
     return null;
   }
   const cwd = input.cwd ?? null;
-  const compositeKey = `${input.environmentId}${BROWSE_KEY_SEP}${cwd ?? ""}${BROWSE_KEY_SEP}${input.partialPath}`;
+  const compositeKey = `${browseKeyPrefix(input.environmentId)}${cwd ?? ""}${KEY_SEP}${input.partialPath}`;
   return {
     environmentId: input.environmentId,
     partialPath: input.partialPath,
@@ -614,11 +659,36 @@ export function getFilesystemBrowseStateAtom(scopeKey: string | null) {
 }
 
 function setFilesystemBrowseState(compositeKey: string, next: FilesystemBrowseState): void {
+  // Re-recorded on every write: the atom family only runs its factory once per
+  // key, so a key dropped from the index would otherwise escape the next reset.
+  knownBrowseKeys.add(compositeKey);
   appAtomRegistry.set(filesystemBrowseStateAtom(compositeKey), next);
 }
 
 function getFilesystemBrowseState(compositeKey: string): FilesystemBrowseState {
   return appAtomRegistry.get(filesystemBrowseStateAtom(compositeKey));
+}
+
+const ENVIRONMENT_UNAVAILABLE_MESSAGE = "The environment is temporarily unavailable. Reconnecting…";
+const HOSTED_ENVIRONMENT_SYNCING_MESSAGE = "Syncing with this node…";
+
+/**
+ * A node the signed-in account may use whose connection is not up yet, as after
+ * a switch to it: the missing environment API is expected to resolve by itself,
+ * unlike a revoked, offline or native-client-only node, which keeps the
+ * unavailable copy.
+ */
+function isHostedEnvironmentSyncing(environmentId: EnvironmentId): boolean {
+  if (!isHostedHubMode()) return false;
+  const node = hostedHubStore
+    .getState()
+    .nodes.find((candidate) => candidate.environmentId === environmentId);
+  return (
+    node !== undefined &&
+    node.revokedAt === null &&
+    node.presence.online &&
+    node.capabilities?.nativeClientRequired !== true
+  );
 }
 
 async function runBrowseController(controller: BrowseController): Promise<void> {
@@ -645,7 +715,11 @@ async function runBrowseController(controller: BrowseController): Promise<void> 
       data: current.data,
       isLoading: false,
       isFetching: false,
-      error: new Error("The environment is temporarily unavailable. Reconnecting…"),
+      error: new Error(
+        isHostedEnvironmentSyncing(controller.environmentId)
+          ? HOSTED_ENVIRONMENT_SYNCING_MESSAGE
+          : ENVIRONMENT_UNAVAILABLE_MESSAGE,
+      ),
       isPending: false,
     });
     return;
@@ -731,6 +805,8 @@ export function requestFilesystemBrowse(
   }
 
   const controller = ensureBrowseController(resolved);
+  // An entry nobody observes is evictable from the moment it exists.
+  if (controller.subscriberCount === 0) browseRetention.release(resolved.compositeKey);
   if (!options?.force) {
     if (controller.hasData && Date.now() - controller.lastFetchedAt < resolved.staleTime) {
       setFilesystemBrowseState(resolved.compositeKey, {
@@ -771,19 +847,27 @@ export function watchFilesystemBrowse(
     controller.fetching = false;
   }
   controller.subscriberCount += 1;
+  browseRetention.retain(resolved.compositeKey);
   triggerFilesystemBrowseFetch(resolved);
 
   return () => {
-    const current = browseControllers.get(resolved.compositeKey);
-    if (current && current.subscriberCount > 0) {
-      const targetBeforeRemoval = Array.from(current.subscriberTargets.values()).at(-1);
-      current.subscriberTargets.delete(subscriber);
-      const targetAfterRemoval = Array.from(current.subscriberTargets.values()).at(-1);
-      if (targetBeforeRemoval !== targetAfterRemoval && current.fetching) {
-        current.fetchToken += 1;
-        current.fetching = false;
+    // A reset or eviction drops the controller. A release that outlived it must
+    // not count against a newer controller created for the same key.
+    if (browseControllers.get(resolved.compositeKey) !== controller) {
+      return;
+    }
+    if (controller.subscriberCount > 0) {
+      const targetBeforeRemoval = Array.from(controller.subscriberTargets.values()).at(-1);
+      controller.subscriberTargets.delete(subscriber);
+      const targetAfterRemoval = Array.from(controller.subscriberTargets.values()).at(-1);
+      if (targetBeforeRemoval !== targetAfterRemoval && controller.fetching) {
+        controller.fetchToken += 1;
+        controller.fetching = false;
       }
-      current.subscriberCount -= 1;
+      controller.subscriberCount -= 1;
+      if (controller.subscriberCount === 0) {
+        browseRetention.release(resolved.compositeKey);
+      }
     }
   };
 }
@@ -792,23 +876,51 @@ export function prefetchFilesystemBrowse(input: FilesystemBrowseInput): void {
   requestFilesystemBrowse(input);
 }
 
-export function clearProjectAtomState(): void {
+/**
+ * Resets the search scopes and browse entries of one environment, or of every
+ * environment when `environmentId` is null. In-flight responses are fenced so
+ * a late answer cannot repopulate what was just cleared.
+ */
+function resetProjectAtomState(environmentId: EnvironmentId | null): void {
+  // An empty prefix matches every key.
+  const scopePrefix = environmentId === null ? "" : scopeKeyPrefix(environmentId);
+  const browsePrefix = environmentId === null ? "" : browseKeyPrefix(environmentId);
+
+  // Scope keys carry no separate environment identity, so the atoms match on the
+  // key prefix; runtimes know their environment and match it exactly.
   for (const key of knownScopeKeys) {
+    if (!key.startsWith(scopePrefix)) continue;
     appAtomRegistry.set(projectSearchEntriesStateAtom(key), INITIAL_PROJECT_SEARCH_ENTRIES_STATE);
+    knownScopeKeys.delete(key);
   }
-  knownScopeKeys.clear();
-  for (const runtime of scopeRuntimes.values()) {
+  for (const [key, runtime] of scopeRuntimes) {
+    if (environmentId !== null && runtime.environmentId !== environmentId) continue;
     clearRefreshingRefetch(runtime);
+    runtime.token += 1;
+    runtime.inFlightQuery = null;
+    scopeRuntimes.delete(key);
   }
-  scopeRuntimes.clear();
-  for (const controller of browseControllers.values()) {
-    controller.fetchToken += 1;
+  for (const key of new Set([...browseControllers.keys(), ...knownBrowseKeys])) {
+    if (key.startsWith(browsePrefix)) dropBrowseKey(key);
   }
-  browseControllers.clear();
-  for (const key of knownBrowseKeys) {
-    appAtomRegistry.set(filesystemBrowseStateAtom(key), INITIAL_FILESYSTEM_BROWSE_STATE);
+  if (environmentId === null) {
+    browseRetention.clear();
+  } else {
+    browseRetention.forgetEnvironment(environmentId);
   }
-  knownBrowseKeys.clear();
+}
+
+/**
+ * Full reset of every environment's project search and filesystem browse state:
+ * tests and account teardown.
+ */
+export function clearProjectAtomState(): void {
+  resetProjectAtomState(null);
+}
+
+/** Resets the project search and filesystem browse state of one environment only. */
+export function clearProjectAtomStateForEnvironment(environmentId: EnvironmentId): void {
+  resetProjectAtomState(environmentId);
 }
 
 export const resetProjectAtomsForTests = clearProjectAtomState;

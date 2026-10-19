@@ -185,6 +185,64 @@ export async function refreshActiveKeyedQueriesForEnvironment(
   );
 }
 
+export interface RetainedKeyTracker {
+  /** The key gained an observer again, so it is no longer evictable. */
+  readonly retain: (compositeKey: string) => void;
+  /** The key lost its last observer: evictable, most recently released last. */
+  readonly release: (compositeKey: string) => void;
+  /** Stops tracking one environment's keys without evicting them. */
+  readonly forgetEnvironment: (environmentId: EnvironmentId) => void;
+  readonly clear: () => void;
+}
+
+export interface RetainedKeyTrackerOptions {
+  /** How many released keys stay cached before the least recently released goes. */
+  readonly limit: number;
+  /** Drops everything the cache holds for the key; called once per eviction. */
+  readonly onEvict: (compositeKey: string) => void;
+  /** Leading part shared by every composite key of the environment. */
+  readonly environmentPrefix: (environmentId: EnvironmentId) => string;
+}
+
+/**
+ * Bounds a keyed cache that has no release hook of its own. Observed keys are
+ * never evicted; once a key loses its last observer it joins the released set,
+ * and the oldest released keys are evicted while that set exceeds the limit.
+ */
+export function createRetainedKeyTracker(options: RetainedKeyTrackerOptions): RetainedKeyTracker {
+  // Insertion-ordered by release time: the first entry is the least recently
+  // released key, so eviction walks from the front.
+  const released = new Set<string>();
+
+  function evict(): void {
+    for (const compositeKey of released) {
+      if (released.size <= options.limit) return;
+      released.delete(compositeKey);
+      options.onEvict(compositeKey);
+    }
+  }
+
+  return {
+    retain: (compositeKey) => {
+      released.delete(compositeKey);
+    },
+    release: (compositeKey) => {
+      released.delete(compositeKey);
+      released.add(compositeKey);
+      evict();
+    },
+    forgetEnvironment: (environmentId) => {
+      const prefix = options.environmentPrefix(environmentId);
+      for (const compositeKey of released) {
+        if (compositeKey.startsWith(prefix)) released.delete(compositeKey);
+      }
+    },
+    clear: () => {
+      released.clear();
+    },
+  };
+}
+
 export function createKeyedQueryRegistry<TState>(
   config: KeyedQueryRegistryConfig<TState>,
 ): KeyedQueryRegistry<TState> {
