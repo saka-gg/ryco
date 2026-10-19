@@ -32,6 +32,7 @@ import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
 import { isCompletionUnseen } from "../Sidebar.logic";
+import { ThreadTerminalIndicator, useThreadTerminalStatus } from "../ThreadTerminalStatus";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import {
   SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
@@ -259,6 +260,12 @@ export function InboxThreadRow(props: {
   const glyph = settling ? "completed" : resolveInboxGlyph(row, unseen);
   const glyphLabel = inboxGlyphLabel(row, unseen);
   const line = resolveInboxStateLine(row);
+  const terminalStatus = useThreadTerminalStatus(threadRef);
+  const terminalIndicator = terminalStatus ? (
+    <InboxHint className="flex shrink-0" label={terminalStatus.label}>
+      <ThreadTerminalIndicator status={terminalStatus} />
+    </InboxHint>
+  ) : null;
   const timestamp = row.settled
     ? (row.effectiveSettlementTimestamp ?? row.updatedAt)
     : row.updatedAt;
@@ -432,6 +439,7 @@ export function InboxThreadRow(props: {
           {row.showProject ? (
             <span className="max-w-20 truncate text-muted-foreground/60">{row.projectLabel}</span>
           ) : null}
+          {terminalIndicator}
           <InboxHint className="flex items-center gap-1" label={inboxTimeHint(row, timestamp)}>
             {row.snoozedUntil ? (
               <>
@@ -490,6 +498,7 @@ export function InboxThreadRow(props: {
               shortName={changeRequestShortName}
               variant="inline"
             />
+            {terminalIndicator}
             <InboxHint
               className="shrink-0 tabular-nums text-muted-foreground/70"
               label={inboxTimeHint(row, timestamp)}

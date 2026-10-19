@@ -84,6 +84,7 @@ function Toolbar(props: { readonly terminalOpen: boolean }) {
       terminalToggleShortcutLabel={null}
       onToggleTerminal={() => undefined}
       terminalCount={1}
+      runningTerminalCount={0}
     />
   );
 }

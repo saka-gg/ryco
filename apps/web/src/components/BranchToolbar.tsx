@@ -4,6 +4,7 @@ import { GitBranchIcon, GitPullRequestIcon, LockIcon, TerminalSquareIcon } from 
 import { memo, useCallback, useMemo } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import { cn } from "../lib/utils";
 import { useStore } from "../store";
 import { createProjectSelectorByRef, createThreadSelectorByRef } from "../storeSelectors";
 import { loadThreadTerminalDrawer } from "../workspacePanelPreload";
@@ -17,6 +18,8 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { RollingText } from "./chat/RollingText";
+import { TERMINAL_RUNNING_TONE, TerminalRunningDot } from "./ThreadTerminalStatus";
+import { formatTerminalRunningLine } from "./ThreadTerminalStatus.logic";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { LazyNewWorktreeDialog } from "./worktrees/lazyWorktreeDialogs";
@@ -64,6 +67,8 @@ interface BranchToolbarProps {
   terminalToggleShortcutLabel: string | null;
   onToggleTerminal: () => void;
   terminalCount: number;
+  /** Terminals running a process; they keep running behind a closed drawer. */
+  runningTerminalCount: number;
   /**
    * A first send is setting up this draft's new worktree: where it runs is
    * decided, so the choices give way to what was chosen. `branch` is the new
@@ -95,6 +100,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   terminalToggleShortcutLabel,
   onToggleTerminal,
   terminalCount,
+  runningTerminalCount,
   worktreeLaunch,
 }: BranchToolbarProps) {
   const threadRef = useMemo(
@@ -198,7 +204,15 @@ export const BranchToolbar = memo(function BranchToolbar({
                 aria-label="Toggle terminal drawer"
                 aria-pressed={terminalOpen}
               >
-                <TerminalSquareIcon className="size-3 shrink-0" />
+                <span
+                  className={cn(
+                    "relative inline-flex shrink-0",
+                    runningTerminalCount > 0 && TERMINAL_RUNNING_TONE,
+                  )}
+                >
+                  <TerminalSquareIcon className="size-3" />
+                  {runningTerminalCount > 0 && <TerminalRunningDot className="ring-background" />}
+                </span>
                 <span>{terminalOpen ? "Close Terminal" : "Open Terminal"}</span>
                 {terminalCount >= 2 && (
                   <span
@@ -206,6 +220,14 @@ export const BranchToolbar = memo(function BranchToolbar({
                     aria-label={`${terminalCount} open terminals`}
                   >
                     · {terminalCount}
+                  </span>
+                )}
+                {runningTerminalCount > 0 && (
+                  <span
+                    className={cn("tabular-nums", TERMINAL_RUNNING_TONE)}
+                    aria-label={formatTerminalRunningLine(runningTerminalCount)}
+                  >
+                    · {terminalCount >= 2 ? `${runningTerminalCount} running` : "running"}
                   </span>
                 )}
               </Button>

@@ -1,5 +1,5 @@
 import { endPaneDrag, startPaneDrag } from "../../chatPanesStore";
-import { ArchiveIcon, CloudIcon, PinIcon, TerminalIcon, XIcon } from "lucide-react";
+import { ArchiveIcon, CloudIcon, PinIcon, XIcon } from "lucide-react";
 import React, { memo, useCallback, useMemo } from "react";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -11,18 +11,14 @@ import {
 import { type GitStatusTarget, useGitStatus, type GitStatusState } from "../../lib/gitStatusState";
 import { cn, isMacPlatform } from "../../lib/utils";
 import { type AppState, selectProjectByRef, useStore } from "../../store";
-import { selectThreadTerminalState, useTerminalStateStore } from "../../terminalStateStore";
 import { useThreadSelectionStore } from "../../threadSelectionStore";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { type DraftId } from "../../composerDraftStore";
 import type { SidebarThreadSummary } from "../../types";
-import {
-  prStatusIndicator,
-  resolveThreadPr,
-  terminalStatusFromRunningIds,
-} from "../ThreadStatusIndicators";
+import { prStatusIndicator, resolveThreadPr } from "../ThreadStatusIndicators";
+import { ThreadTerminalIndicator, useThreadTerminalStatus } from "../ThreadTerminalStatus";
 import {
   canArchiveSidebarThread,
   isTrailingDoubleClick,
@@ -201,10 +197,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
   const isPinned = useUiStateStore((state) => state.pinnedThreadKeys[threadKey] === true);
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const hasSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.size > 0);
-  const runningTerminalIds = useTerminalStateStore(
-    (state) =>
-      selectThreadTerminalState(state.terminalStateByThreadKey, threadRef).runningTerminalIds,
-  );
+  const terminalStatus = useThreadTerminalStatus(threadRef);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isRemoteThread =
     primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
@@ -229,7 +222,6 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
   const pr = gitStatus ? resolveThreadPr(thread.branch, gitStatus.data) : null;
   const prStatus = prStatusIndicator(pr, gitStatus?.data?.sourceControlProvider);
   const PrStatusIcon = prStatus?.Icon;
-  const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const isConfirmingArchive = confirmingArchiveThreadKey === threadKey && !isThreadRunning;
   const canArchiveThread = !draftId && canArchiveSidebarThread(thread);
   const canCloseThread = (isTreeChild || draftId !== null) && !isThreadRunning;
@@ -576,16 +568,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {terminalStatus && (
-            <span
-              role="img"
-              aria-label={terminalStatus.label}
-              title={terminalStatus.label}
-              className={`inline-flex items-center justify-center ${terminalStatus.colorClass}`}
-            >
-              <TerminalIcon className="size-3" />
-            </span>
-          )}
+          {terminalStatus && <ThreadTerminalIndicator status={terminalStatus} withTitle />}
           <div
             className={`flex min-w-12 justify-end ${
               isRemoteThread
