@@ -166,7 +166,7 @@ export default function SimulatorPanel(props: {
 }) {
   const { environmentId, threadId } = props;
   useDeviceRuntime(environmentId);
-  const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app);
+  const testingCapability = useHostedRpcCapability(DEVICE_WS_METHODS.app, environmentId);
   const hostedWorkspace = useHostedWorkspaceState();
   const testingMutationReady =
     testingCapability.allowed &&

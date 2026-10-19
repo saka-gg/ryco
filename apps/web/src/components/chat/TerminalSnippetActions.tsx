@@ -1,12 +1,14 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
-import { resolveHostedRpcCapability } from "@ryco/client-runtime/authorization/capabilities";
 import { useCallback, useLayoutEffect, useRef, type ReactNode } from "react";
 import { isHostedHubMode } from "../../env";
 import { readEnvironmentConnection } from "../../environments/runtime";
-import { useHostedHubStore } from "../../hostedHub/state";
-import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import {
+  readHostedRpcCapability,
+  readHostedSessionGeneration,
+  useHostedRpcCapability,
+} from "../../hostedHub/capabilities";
 import { readHostedNodeMutationLease } from "../../hostedHub/hostedConnectionCoordinator";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { randomUUID } from "../../lib/utils";
@@ -26,7 +28,7 @@ export function TerminalSnippetActions({
   children: ReactNode;
 }) {
   const isPhone = usePresentationTier() === "phone";
-  const capability = useHostedRpcCapability(WS_METHODS.terminalWrite);
+  const capability = useHostedRpcCapability(WS_METHODS.terminalWrite, threadRef.environmentId);
   const focused = usePaneFocusRef();
   const alive = useRef(false);
   const generation = useRef(0);
@@ -49,7 +51,7 @@ export function TerminalSnippetActions({
       const connection = readEnvironmentConnection(threadRef.environmentId);
       const actionGeneration = generation.current;
       const evidence = connection?.shellSnapshotReadiness.read();
-      const hostedGeneration = useHostedHubStore.getState().generation;
+      const hostedGeneration = readHostedSessionGeneration(threadRef.environmentId);
       const lease = isHostedHubMode() ? readHostedNodeMutationLease(threadRef.environmentId) : null;
       if (isHostedHubMode() && !lease)
         throw new Error("This node must be current and authorized before terminal insertion.");
@@ -67,7 +69,6 @@ export function TerminalSnippetActions({
       const worktreePath = thread.worktreePath ?? null;
       let targetTerminalId: string | null = null;
       const isCurrent = () => {
-        const hosted = useHostedHubStore.getState();
         const currentLease = isHostedHubMode()
           ? readHostedNodeMutationLease(threadRef.environmentId)
           : null;
@@ -78,14 +79,10 @@ export function TerminalSnippetActions({
             currentLease.snapshotGeneration !== lease.snapshotGeneration)
         )
           return false;
-        const allowed = resolveHostedRpcCapability({
-          hosted: isHostedHubMode(),
-          role: hosted.effectiveRole,
-          fresh: hosted.directoryStatus === "ready" && hosted.transportStatus === "online",
-          browserCurrent: hosted.browserStatus === "current",
-          sessionReady: hosted.sessionStatus === "ready",
-          method: WS_METHODS.terminalWrite,
-        }).allowed;
+        const allowed = readHostedRpcCapability(
+          WS_METHODS.terminalWrite,
+          threadRef.environmentId,
+        ).allowed;
         const currentThread = createThreadSelectorByRef(threadRef)(useStore.getState());
         const currentProject = currentThread
           ? createProjectSelectorByRef(
@@ -102,7 +99,7 @@ export function TerminalSnippetActions({
           focused.current &&
           !isPhone &&
           allowed &&
-          hosted.generation === hostedGeneration &&
+          readHostedSessionGeneration(threadRef.environmentId) === hostedGeneration &&
           readEnvironmentConnection(threadRef.environmentId) === connection &&
           connection.shellSnapshotReadiness.read() === evidence &&
           currentThread?.projectId === thread.projectId &&

@@ -91,7 +91,7 @@ export function threadForkSupported(
 /** Whether "Fork from here" is offered for threads on `environmentId`. */
 export function useCanForkThread(environmentId: EnvironmentId | null | undefined): boolean {
   const config = useEnvironmentServerConfig(environmentId);
-  const capability = useHostedRpcCapability(WS_METHODS.threadsFork);
+  const capability = useHostedRpcCapability(WS_METHODS.threadsFork, environmentId ?? null);
   const tier = usePresentationTier();
   return threadForkSupported(config, capability.allowed, tier);
 }

@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
   WS_METHODS,
+  type EnvironmentId,
   type OrchestrationReadModel,
   type ThreadForkResult,
 } from "@ryco/contracts";
@@ -78,12 +79,12 @@ vi.mock("../hostedHub/capabilities", async (importOriginal) => {
   const { useSyncExternalStore } = await import("react");
   return {
     ...actual,
-    useHostedRpcCapability: (method: string) => {
+    useHostedRpcCapability: (method: string, environmentId: EnvironmentId | null = null) => {
       const override = useSyncExternalStore(
         hostedForkCapability.subscribe,
         hostedForkCapability.read,
       );
-      const capability = actual.useHostedRpcCapability(method);
+      const capability = actual.useHostedRpcCapability(method, environmentId);
       return override && method === "threads.fork" ? override : capability;
     },
   };

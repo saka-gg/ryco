@@ -49,6 +49,8 @@ import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
 import { adoptHostedEnvironmentRoute } from "../../hostedHub/adoptHostedEnvironmentRoute";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { useChatsAvailability } from "../../hooks/useChatsAvailability";
 import { useEvent } from "../../hooks/useEvent";
 import { useGitStatus } from "../../lib/gitStatusState";
@@ -169,7 +171,8 @@ function ForkThreadDialogBody(props: {
   const gitStatus = useGitStatus({ environmentId, cwd: forkSourceGitCwd({ project, isChat }) });
   const isGitRepo = project ? resolveThreadForkSourceGit({ isChat, status: gitStatus }) : null;
   const chatsAvailable = useChatsAvailability(environmentId).available;
-  const capability = useHostedRpcCapability(WS_METHODS.threadsFork);
+  const capability = useHostedRpcCapability(WS_METHODS.threadsFork, environmentId);
+  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
 
   const destinations = useMemo(
     () =>
@@ -271,7 +274,7 @@ function ForkThreadDialogBody(props: {
   const blocked = sourceMissing
     ? THREAD_FORK_COPY.errors["source-unavailable"]
     : capability.hosted && !capability.allowed
-      ? (capability.reason ?? THREAD_FORK_COPY.refusedForbidden)
+      ? (hostedCapabilityCopy(capability, nodeLabel) ?? THREAD_FORK_COPY.refusedForbidden)
       : null;
 
   const edit = useEvent((patch: Partial<ThreadForkSelection>) => {

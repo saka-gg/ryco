@@ -68,9 +68,18 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
 ) {
   const pathname = useLocation({ select: (location) => location.pathname });
   const phone = usePresentationTier() === "phone";
-  const automationsCapability = useHostedRpcCapability(AGENT_CONTROL_WS_METHODS.automationCentre);
-  const pullRequestsCapability = useHostedRpcCapability(WS_METHODS.sourceControlListChangeRequests);
-  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList);
+  // hosted-capability: routed node
+  const automationsCapability = useHostedRpcCapability(
+    AGENT_CONTROL_WS_METHODS.automationCentre,
+    null,
+  );
+  // hosted-capability: routed node
+  const pullRequestsCapability = useHostedRpcCapability(
+    WS_METHODS.sourceControlListChangeRequests,
+    null,
+  );
+  // hosted-capability: routed node
+  const projectsCapability = useHostedRpcCapability(WS_METHODS.projectsList, null);
   const tasks = useTasksEnvironment();
   const folded = useSidebarFoldStore((store) => store.folded);
   const setFoldEnabled = useSidebarFoldStore((store) => store.setEnabled);

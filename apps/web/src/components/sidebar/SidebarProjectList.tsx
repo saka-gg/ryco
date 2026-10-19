@@ -34,6 +34,8 @@ import {
   type SidebarThreadSortOrder,
 } from "@ryco/contracts";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
 import { hasNoShortcutModifiers } from "../../keybindings";
 import { projectTreeItemId, useUiStateStore } from "../../uiStateStore";
 import type { useUpdateSettings } from "~/hooks/useSettings";
@@ -393,7 +395,11 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
     | null
   >(null);
   const [folderNameDraft, setFolderNameDraft] = useState("");
-  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
+  // hosted-capability: routed node
+  const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
+  const routedNodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state));
+  const addProjectUnavailableReason =
+    hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ?? "Add project is unavailable";
   const openCreateFolderDialog = useCallback(
     (input: { initialProjectKeys?: readonly string[]; initialName?: string } = {}) => {
       const initialName = input.initialName ?? "";
@@ -532,9 +538,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
                       className="inline-flex"
                       tabIndex={addProjectCapability.allowed ? undefined : 0}
                       aria-label={
-                        addProjectCapability.allowed
-                          ? undefined
-                          : (addProjectCapability.reason ?? "Add project is unavailable")
+                        addProjectCapability.allowed ? undefined : addProjectUnavailableReason
                       }
                     >
                       <button
@@ -551,9 +555,7 @@ export const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   }
                 />
                 <TooltipPopup side="right">
-                  {addProjectCapability.allowed
-                    ? "Add project"
-                    : (addProjectCapability.reason ?? "Add project is unavailable")}
+                  {addProjectCapability.allowed ? "Add project" : addProjectUnavailableReason}
                 </TooltipPopup>
               </Tooltip>
             </div>

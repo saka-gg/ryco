@@ -34,7 +34,8 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
 }) {
   const { isMobile, setOpenMobile, toggleSidebar } = useSidebar();
   const pathname = useLocation({ select: (location) => location.pathname });
-  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
+  // hosted-capability: routed node
+  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
   const handleSettingsClick = useCallback(() => {
     if (isMobile) {

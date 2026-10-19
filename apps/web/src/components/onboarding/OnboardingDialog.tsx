@@ -57,9 +57,12 @@ export function OnboardingDialog({
   const [error, setError] = useState<string | null>(null);
   const refreshingRef = useRef(false);
   const generation = useRef(0);
-  const refreshCapability = useHostedRpcCapability(WS_METHODS.serverRefreshProviders);
-  const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings);
-  const projectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd);
+  // hosted-capability: routed node
+  const refreshCapability = useHostedRpcCapability(WS_METHODS.serverRefreshProviders, null);
+  // hosted-capability: routed node
+  const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings, null);
+  // hosted-capability: routed node
+  const projectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
   const stepIndex = ONBOARDING_STEPS.indexOf(step);
 
   useEffect(() => {
