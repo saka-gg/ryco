@@ -463,6 +463,79 @@ describe("retainThreadDetailSubscription", () => {
     await resetEnvironmentServiceForTests();
   });
 
+  it("fences a retained environment connection by its record generation", async () => {
+    vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
+    vi.stubGlobal("window", {
+      location: { href: "https://hub.example.test/", origin: "https://hub.example.test" },
+    });
+    const { hostedHubApi } = await import("~/hostedHub/api");
+    const { configureWebHostedRuntime } = await import("~/hostedHub/runtime");
+    configureWebHostedRuntime(hostedHubApi, { environmentSessions: "retained" });
+    const { getHostedEnvironmentSessions, useHostedHubStore } = await import("~/hostedHub/state");
+    const { useStore } = await import("~/store");
+    const environmentId = EnvironmentId.make("env-1");
+    const node = {
+      id: "node_aaaaaaaaaaaaaaaaaaaaaa",
+      environmentId,
+      label: "Hosted node",
+      platformOs: "linux",
+      platformArch: "x64",
+      clientVersion: "1",
+      createdAt: 1,
+      updatedAt: 1,
+      lastAuthenticatedAt: 1,
+      revokedAt: null,
+      revocationReasonCode: null,
+      grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
+      effectiveRole: "operator",
+      presence: { online: true, lastHeartbeatAt: 1 },
+    } as const;
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [node],
+    });
+    const syncServerShellSnapshot = vi.spyOn(useStore.getState(), "syncServerShellSnapshot");
+    const {
+      connectHostedEnvironment,
+      resetEnvironmentServiceForTests,
+      startEnvironmentConnectionService,
+    } = await import("./service");
+
+    // The generic primary path never builds a hosted connection.
+    const stop = startEnvironmentConnectionService();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+
+    const sessions = getHostedEnvironmentSessions();
+    const generation = sessions.ensureRecord(node).generation;
+    await connectHostedEnvironment(node, generation);
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toMatchObject({
+      kind: "primary",
+      knownEnvironment: { environmentId, source: "hub-hosted" },
+    });
+    expect(connectionInput.lifecycleGeneration.readCurrent()).toBe(generation);
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId: ThreadId.make("thread-current") }),
+      environmentId,
+    );
+    expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
+
+    sessions.renew(environmentId);
+    expect(connectionInput.lifecycleGeneration.readCurrent()).not.toBe(generation);
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId: ThreadId.make("thread-stale") }),
+      environmentId,
+    );
+    expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
+
+    stop();
+    await resetEnvironmentServiceForTests();
+    sessions.clear();
+  });
+
   it("accepts a restarted node's lower shell sequence after the stream resubscribes", async () => {
     const { useStore } = await import("~/store");
     const syncServerShellSnapshot = vi.spyOn(useStore.getState(), "syncServerShellSnapshot");

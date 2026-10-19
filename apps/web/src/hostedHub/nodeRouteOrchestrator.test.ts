@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
-import { configureHostedRuntime } from "@ryco/client-runtime/authorization";
+import {
+  configureHostedRuntime,
+  resetHostedEnvironmentSessionsForTests,
+} from "@ryco/client-runtime/authorization";
 import * as threadStore from "../store";
 
 import type { HostedHubNode, HostedHubSessionResponse } from "./types";
@@ -41,10 +44,12 @@ import {
 } from "./nodeRoutes";
 import {
   getHostedNodeRouteNotice,
+  leaveHostedNodeRouteToDirectory,
   resetHostedNodeRouteOrchestratorForTests,
   selectHostedNodeRoute,
   startHostedNodeRouteOrchestrator,
 } from "./nodeRouteOrchestrator";
+import { hostedWebConnectionScopes } from "./hostedConnectionScopes";
 
 const sessionResponse: HostedHubSessionResponse = {
   account: {
@@ -124,14 +129,25 @@ const unusedPlatformService = new Proxy(
 // The teardown effects also record their order so a Back-driven deactivation
 // can assert the documented reset → disconnect → clear → descriptor sequence.
 const teardownOrder: string[] = [];
-beforeEach(() => {
-  teardownOrder.length = 0;
+const retainedPorts = {
+  connectEnvironment: vi.fn((_node: HostedHubNode, _generation: number) => undefined),
+  releaseEnvironment: vi.fn(
+    async (_environmentId: EnvironmentId, _generation: number) => undefined,
+  ),
+  suspendEnvironment: vi.fn(
+    async (_environmentId: EnvironmentId, _generation: number) => undefined,
+  ),
+  requestEnvironmentReconcile: vi.fn(),
+};
+
+function configureRouteRuntime(environmentSessions: "single" | "retained" = "single"): void {
   configureHostedRuntime(
     {
       endpoint: unusedPlatformService as never,
       httpClient: unusedPlatformService as never,
       passkeyCeremony: unusedPlatformService as never,
       sessionCredentials: unusedPlatformService as never,
+      environmentSessions,
       nodeLifecycle: {
         activate: async () => undefined,
         suspend: async () => undefined,
@@ -150,6 +166,7 @@ beforeEach(() => {
           teardownOrder.push("disconnect");
         },
         setActiveEnvironmentId: () => undefined,
+        ...(environmentSessions === "retained" ? retainedPorts : {}),
       },
       timers: {
         now: () => Date.now(),
@@ -184,6 +201,11 @@ beforeEach(() => {
     },
     hostedHubApi,
   );
+}
+
+beforeEach(() => {
+  teardownOrder.length = 0;
+  configureRouteRuntime();
 });
 
 afterEach(() => {
@@ -199,6 +221,8 @@ afterEach(() => {
   suspendHostedNode.mockClear();
   hasHostedRelayPendingRequests.mockClear();
   resetHostedRelayAttemptFactory.mockClear();
+  for (const port of Object.values(retainedPorts)) port.mockClear();
+  resetHostedEnvironmentSessionsForTests();
 });
 
 describe("hosted node route restore pipeline", () => {
@@ -896,5 +920,61 @@ describe("hosted node route restore pipeline", () => {
         keys.every((key) => key === "__TSR_index" || key === "__TSR_key" || key === "key"),
       ).toBe(true);
     }
+  });
+});
+
+describe("hosted node routes with retained environment sessions", () => {
+  it("moves only the cursor on a route swap and holds the routed environment's demand", async () => {
+    configureRouteRuntime("retained");
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
+    const { history, flush } = setup(`/node/${first.id}`);
+    await hostedHubController.bootstrap();
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(first.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: first.environmentId,
+        scope: { type: "interactive" },
+      }),
+    ]);
+    const returnToDirectory = vi.spyOn(hostedHubController, "returnToDirectory");
+
+    selectHostedNodeRoute(second.id);
+    flush();
+    await settle();
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(second.id);
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: second.environmentId,
+        scope: { type: "interactive" },
+      }),
+    ]);
+
+    // A thread on the routed node holds that thread's view instead.
+    history.push(`/${second.environmentId}/t_2`);
+    flush();
+    await settle();
+    expect(hostedWebConnectionScopes.list()).toEqual([
+      expect.objectContaining({
+        environmentId: second.environmentId,
+        scope: { type: "thread-detail", threadId: "t_2" },
+      }),
+    ]);
+    // Selecting connected nothing: the workspace coordinator does, through acquire.
+    expect(retainedPorts.connectEnvironment).not.toHaveBeenCalled();
+    expect(activateHostedNode).not.toHaveBeenCalled();
+    expect(returnToDirectory).not.toHaveBeenCalled();
+
+    expect(leaveHostedNodeRouteToDirectory()).toBe(true);
+    flush();
+    await settle();
+    expect(returnToDirectory).toHaveBeenCalledOnce();
+    expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(retainedPorts.releaseEnvironment).not.toHaveBeenCalled();
   });
 });

@@ -1,13 +1,20 @@
 import {
+  configureHostedEnvironmentSessions,
   configureHostedRuntime,
   hostedHubStore,
+  type HostedEnvironmentSessionsMode,
   type HostedHubApi,
+  type HostedNodeLifecycle,
+  type HostedRuntimeTimers,
 } from "@ryco/client-runtime/authorization";
 
 import { writePrimaryEnvironmentDescriptor } from "../environments/primary";
 import {
+  connectHostedEnvironment,
   connectPrimaryEnvironment,
   disconnectPrimaryEnvironment,
+  removeHostedEnvironment,
+  suspendHostedEnvironment,
 } from "../environments/runtime/service";
 import { useStore } from "../store";
 import { webEndpoint } from "../platform/endpoint";
@@ -16,24 +23,34 @@ import { webPasskeyCeremony } from "../platform/passkeyCeremony";
 import { webSessionCredentials } from "../platform/sessionCredentials";
 import {
   prepareWebRelayE2ee,
-  resolveWebRelayE2eeProvider,
   watchWebHostedSessionForE2ee,
   type WebRelayE2eeTarget,
 } from "./e2eeAttempt";
 import { setDisplayedWebE2eeEnvironment } from "./e2eeSession";
 import { clearWebHostedNodeScopedState } from "./environment";
-import { hasHostedRelayPendingRequests, resetHostedRelayAttemptFactory } from "./transport";
-import { BrowserHostedRelaySocket, hostedRelayWebSocketUrl } from "./relaySocket";
+import { requestHostedWorkspaceReconcile } from "./hostedConnectionCoordinator";
+import {
+  createWebHostedRelaySocket,
+  createWebHostedServerAuthenticatedRelaySocket,
+  hasHostedRelayPendingRequests,
+  resetHostedRelayAttemptFactory,
+} from "./transport";
+import { hostedRelayWebSocketUrl } from "./relaySocket";
 
 import {
-  createWebHubRelaySocket,
-  createWebHubServerAuthenticatedRelaySocket,
   isWebHubServerAuthenticatedRelayAvailable,
   isWebHubSessionOnline,
   probeWebHubSession,
   watchWebHostedHubSession,
 } from "./hubSession";
 import { subscribeWebForeground } from "./foreground";
+
+/**
+ * Whether hosted Web keeps one session, and one connection, per environment.
+ * Turns on together with MAX_HOSTED_WEB_CONNECTIONS > 1, in the change that
+ * records the warm-set qualification.
+ */
+export const HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS = false;
 
 let configured = false;
 
@@ -57,36 +74,70 @@ function displayWebE2eeForSelectedNode(): void {
   hostedHubStore.subscribe(() => setDisplayedWebE2eeEnvironment(selectedEnvironment()));
 }
 
-export function configureWebHostedRuntime(api: HostedHubApi): void {
+const webHostedTimers: HostedRuntimeTimers = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (timer) => globalThis.clearTimeout(timer),
+  queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+};
+
+/**
+ * `environmentSessions` is a test seam; production follows
+ * {@link HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS}.
+ */
+export function configureWebHostedRuntime(
+  api: HostedHubApi,
+  options?: { readonly environmentSessions?: HostedEnvironmentSessionsMode },
+): void {
   if (configured) return;
   configured = true;
+  const environmentSessions =
+    options?.environmentSessions ??
+    (HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS ? "retained" : "single");
   // docs/relay-e2ee-protocol.md §12.1: the in-memory latch ends with the
   // application session, and a sign-out is where this tier's session ends.
   watchWebHostedSessionForE2ee();
   displayWebE2eeForSelectedNode();
+  const nodeLifecycle: HostedNodeLifecycle = {
+    activate: async () => undefined,
+    suspend: async () => undefined,
+    deactivate: async () => undefined,
+    clearNodeScopedState: clearWebHostedNodeScopedState,
+    writePrimaryEnvironmentDescriptor,
+    connectPrimaryEnvironment,
+    disconnectPrimaryEnvironment,
+    setActiveEnvironmentId: (environmentId) =>
+      useStore.getState().setActiveEnvironmentId(environmentId),
+  };
+  if (environmentSessions === "retained") {
+    configureHostedEnvironmentSessions({
+      now: webHostedTimers.now,
+      setTimeout: webHostedTimers.setTimeout,
+      clearTimeout: (timer) => webHostedTimers.clearTimeout(timer as ReturnType<typeof setTimeout>),
+    });
+  }
   configureHostedRuntime(
     {
       endpoint: webEndpoint,
       httpClient: webHttpClient,
       passkeyCeremony: webPasskeyCeremony,
       sessionCredentials: webSessionCredentials,
-      nodeLifecycle: {
-        activate: async () => undefined,
-        suspend: async () => undefined,
-        deactivate: async () => undefined,
-        clearNodeScopedState: clearWebHostedNodeScopedState,
-        writePrimaryEnvironmentDescriptor,
-        connectPrimaryEnvironment,
-        disconnectPrimaryEnvironment,
-        setActiveEnvironmentId: (environmentId) =>
-          useStore.getState().setActiveEnvironmentId(environmentId),
-      },
-      timers: {
-        now: () => Date.now(),
-        setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-        clearTimeout: (timer) => globalThis.clearTimeout(timer),
-        queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
-      },
+      // With retained sessions every environment's connection belongs to the
+      // lifecycle owner's ports below, each for one record generation, and the
+      // workspace coordinator alone decides when to acquire and release.
+      nodeLifecycle:
+        environmentSessions === "retained"
+          ? {
+              ...nodeLifecycle,
+              disconnectPrimaryEnvironment: async () => undefined,
+              connectEnvironment: connectHostedEnvironment,
+              releaseEnvironment: removeHostedEnvironment,
+              suspendEnvironment: suspendHostedEnvironment,
+              requestEnvironmentReconcile: requestHostedWorkspaceReconcile,
+            }
+          : nodeLifecycle,
+      environmentSessions,
+      timers: webHostedTimers,
       isForeground: () => globalThis.document?.visibilityState !== "hidden",
       subscribeForeground: subscribeWebForeground,
       hasPendingRelayRequests: hasHostedRelayPendingRequests,
@@ -118,28 +169,13 @@ export function configureWebHostedRuntime(api: HostedHubApi): void {
       // Each channel's attempt is resolved for the node it is opened to, and
       // publishes into that node's environment — never the selected one's.
       createRelaySocket: (input) =>
-        new BrowserHostedRelaySocket({
-          ...input,
-          e2ee: resolveWebRelayE2eeProvider(relayE2eeTarget(input.nodeId)),
-          createRelaySocket: createWebHubRelaySocket,
-        }),
+        createWebHostedRelaySocket(input, relayE2eeTarget(input.nodeId)),
       // Hub session version 2: the Hub mints and consumes the node ticket for the account
       // session itself, so the channel skips the HTTP ticket round trip and this tier never
       // holds a ticket. The channel is otherwise the one above, E2EE machine included.
       serverAuthenticatedRelayAvailable: isWebHubServerAuthenticatedRelayAvailable,
       createServerAuthenticatedRelaySocket: (input) =>
-        new BrowserHostedRelaySocket({
-          url: input.url,
-          callbacks: input.callbacks,
-          relayCompression: input.relayCompression,
-          serverAuthenticated: true,
-          e2ee: resolveWebRelayE2eeProvider(relayE2eeTarget(input.nodeId)),
-          createRelaySocket: () =>
-            createWebHubServerAuthenticatedRelaySocket({
-              nodeId: input.nodeId,
-              protocolMinor: input.protocolMinor,
-            }),
-        }),
+        createWebHostedServerAuthenticatedRelaySocket(input, relayE2eeTarget(input.nodeId)),
     },
     api,
   );

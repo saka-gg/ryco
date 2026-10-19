@@ -1,22 +1,30 @@
-import type { HostedHubNode, HostedHubState } from "@ryco/client-runtime/authorization";
 import {
   createNodeMutationLeaseAuthority,
+  hostedBrowserRevalidated,
+  isHostedEnvironmentConnectBlocked,
+  isHostedEnvironmentSessionLive,
+  type HostedEnvironmentReconcileRequest,
+  type HostedEnvironmentSessionRecord,
+  type HostedEnvironmentSessionsMode,
+  type HostedHubNode,
+  type HostedHubState,
   type NodeMutationLease,
+  type NodeMutationLeaseAuthority,
 } from "@ryco/client-runtime/authorization";
 import {
   buildUnifiedWorkspaceIndex,
+  cachedHubNodeCatalogInput,
+  createConnectionDemandExecutor,
   createWorkspaceConnectionDemandState,
-  planWorkspaceConnectionDemand,
+  hostedNodeCatalogInput,
   reconcileWorkspaceMachineCatalog,
-  releaseWorkspaceConnectionScope,
-  renewWorkspaceConnectionScope,
-  retainWorkspaceConnectionScope,
-  setWorkspaceConnectionBackgrounded,
-  setWorkspaceEnvironmentConnected,
   workspaceMetadataPayloadBytes,
+  type ConnectionDemandConnectResult,
+  type ConnectionDemandExecutorSnapshot,
   type UnifiedWorkspaceIndex,
   type WorkspaceConnectionDemandState,
   type WorkspaceMachineCatalogEntry,
+  type WorkspaceMachineCatalogInput,
   type WorkspaceMetadataCache,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
@@ -29,7 +37,12 @@ import {
   readWorkspaceMetadataSnapshot,
   workspaceMetadataToCachedShellSnapshot,
 } from "../workspaceMetadataProjection";
-import { hostedHubController, hostedHubStore } from "./state";
+import {
+  getHostedEnvironmentSessions,
+  hostedEnvironmentSessionsMode,
+  hostedHubController,
+  hostedHubStore,
+} from "./state";
 import { clearWebHostedAccountScopedState } from "./environment";
 import { startBrowserHostedThreadReadCache } from "./threadReadCache";
 import {
@@ -49,6 +62,7 @@ import {
   HOSTED_WEB_SCOPE_REPORT_INTERVAL_MS,
   hostedWebConnectionScopes,
   type HostedWebScopeStore,
+  type RetainedHostedWebScope,
 } from "./hostedConnectionScopes";
 
 /**
@@ -56,6 +70,8 @@ import {
  * docs/relay-capacity-assessment-3b.md is not assumed safe for concurrent
  * full-PNG browser streams; raising this constant requires measurements in the
  * same change.
+ * Retained environment sessions are enabled only when this is > 1 (see
+ * `HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS`).
  */
 export const MAX_HOSTED_WEB_CONNECTIONS = 1;
 export const HOSTED_WEB_WAKE_STAGGER_MS = 750;
@@ -67,13 +83,38 @@ export const HOME_DISCOVERY_CACHE_WAIT_MS = 1_500;
 
 export interface HostedConnectionCoordinatorDeps {
   readonly scopes: HostedWebScopeStore;
-  /** A navigation intent takes precedence over scopes from the outgoing shell. */
+  /**
+   * The routed environment. With one session a navigation intent takes
+   * precedence over scopes from the outgoing shell; with retained sessions the
+   * routed environment connects first and may displace background demand.
+   */
   readonly foregroundEnvironmentId?: () => EnvironmentId | null;
   readonly now: () => number;
-  readonly connect: (environmentId: EnvironmentId, delayMs: number) => Promise<void>;
+  /**
+   * Starts, or joins, the connection to one environment. `"refused"` holds the
+   * environment back until it is unparked or demanded anew; a rejection is a
+   * transient failure a later reconcile retries.
+   */
+  readonly connect: (
+    environmentId: EnvironmentId,
+    signal: AbortSignal,
+  ) => Promise<ConnectionDemandConnectResult>;
+  /** Local teardown of one environment's connection. */
   readonly release: (environmentId: EnvironmentId) => Promise<void>;
+  /** Timers for staggered wakes; the global ones by default. */
+  readonly setTimeout?: (callback: () => void, delayMs: number) => unknown;
+  readonly clearTimeout?: (timer: unknown) => void;
   readonly setInterval: (callback: () => void, delayMs: number) => unknown;
   readonly clearInterval: (timer: unknown) => void;
+  /** Defaults to {@link MAX_HOSTED_WEB_CONNECTIONS}. */
+  readonly maxConnections?: number;
+  /** Defaults to `single`. */
+  readonly mode?: HostedEnvironmentSessionsMode;
+  /**
+   * Retained sessions only: a scope whose demand stands down for now, so it
+   * holds no lease. The routed environment's scopes never do.
+   */
+  readonly withholds?: (entry: RetainedHostedWebScope) => boolean;
 }
 
 export interface HostedConnectionCoordinatorSnapshot {
@@ -84,131 +125,186 @@ export interface HostedConnectionCoordinatorSnapshot {
 
 export interface HostedConnectionCoordinator {
   readonly snapshot: () => HostedConnectionCoordinatorSnapshot;
+  /** The shared executor's own view, connects, releases and wakes included. */
+  readonly executorSnapshot: () => ConnectionDemandExecutorSnapshot;
   readonly subscribe: (listener: () => void) => () => void;
   readonly reportConnected: (environmentId: EnvironmentId, connected: boolean) => void;
+  /** A live environment's relay dropped: one nothing demands is released instead of reconnecting. */
+  readonly reportInterrupted: (environmentId: EnvironmentId) => void;
+  readonly isDemanded: (environmentId: EnvironmentId) => boolean;
+  readonly unpark: (environmentId: EnvironmentId) => void;
+  /** The lifecycle owner asks for a re-plan (a resume, a retry, a directory change). */
+  readonly handleReconcileRequest: (request: HostedEnvironmentReconcileRequest) => void;
+  /** Resolves once the resulting connects and releases have settled. */
   readonly setBackgrounded: (backgrounded: boolean) => Promise<void>;
+  /** Resolves once the resulting connects and releases have settled. */
   readonly reconcile: () => Promise<void>;
   readonly dispose: () => void;
 }
 
+/**
+ * Decides when hosted Web connects and releases environments, on the shared
+ * demand executor. It holds no authority: connects and releases go through the
+ * ports, which call the hosted lifecycle owner, and the executor keeps the
+ * connected set within the cap — strictly, through every swap.
+ *
+ * Mounted scopes become leases, synced before every plan (so a hidden tab's
+ * throttled renewal timer never lets a live scope's lease expire). Interactive
+ * scopes — drafts, home discovery, a routed node without a thread — are
+ * background demand a routed environment may displace, though never while
+ * their own environment is routed; views never are. With one session only the
+ * routed environment's scopes count; with retained sessions every scope does,
+ * and the routed environment is the executor's foreground.
+ */
 export function createHostedConnectionCoordinator(
   deps: HostedConnectionCoordinatorDeps,
 ): HostedConnectionCoordinator {
-  let demand = createWorkspaceConnectionDemandState(MAX_HOSTED_WEB_CONNECTIONS);
-  let queued: ReadonlyArray<EnvironmentId> = [];
-  let operation: Promise<void> = Promise.resolve();
-  let disposed = false;
-  let leaseSequence = 0;
+  const mode = deps.mode ?? "single";
   const leaseIdByScopeKey = new Map<string, string>();
   const listeners = new Set<() => void>();
+  const changeWaiters = new Set<() => void>();
+  let disposed = false;
+  let published: {
+    readonly source: ConnectionDemandExecutorSnapshot;
+    readonly snapshot: HostedConnectionCoordinatorSnapshot;
+  } | null = null;
 
-  const publish = () => {
-    for (const listener of Array.from(listeners)) listener();
-  };
-
-  const reconcileScopes = () => {
+  const syncLeases = () => {
     const foregroundEnvironmentId = deps.foregroundEnvironmentId?.() ?? null;
-    const active = new Map(
-      deps.scopes
-        .list()
-        .filter(
-          (entry) =>
-            foregroundEnvironmentId === null || entry.environmentId === foregroundEnvironmentId,
-        )
-        .map((entry) => [entry.key, entry] as const),
-    );
+    if (mode === "retained") executor.setForeground(foregroundEnvironmentId);
+    const active = new Map<string, RetainedHostedWebScope>();
+    for (const entry of deps.scopes.list()) {
+      const counts =
+        mode === "single"
+          ? foregroundEnvironmentId === null || entry.environmentId === foregroundEnvironmentId
+          : entry.environmentId === foregroundEnvironmentId || deps.withholds?.(entry) !== true;
+      if (counts) active.set(entry.key, entry);
+    }
     for (const [key, leaseId] of Array.from(leaseIdByScopeKey)) {
       if (active.has(key)) continue;
       leaseIdByScopeKey.delete(key);
-      demand = releaseWorkspaceConnectionScope(demand, leaseId);
+      executor.releaseLease(leaseId);
     }
     for (const [key, entry] of active) {
       const existing = leaseIdByScopeKey.get(key);
-      if (existing) {
-        demand = renewWorkspaceConnectionScope(
-          demand,
-          existing,
-          deps.now(),
-          HOSTED_WEB_SCOPE_LEASE_TTL_MS,
-        );
-        continue;
-      }
-      const leaseId = `hosted-web-${++leaseSequence}`;
-      leaseIdByScopeKey.set(key, leaseId);
-      demand = retainWorkspaceConnectionScope(demand, {
-        leaseId,
-        environmentId: entry.environmentId,
-        scope: entry.scope,
-        now: deps.now(),
-        ttlMs: HOSTED_WEB_SCOPE_LEASE_TTL_MS,
-      });
+      if (existing !== undefined && executor.renew(existing)) continue;
+      leaseIdByScopeKey.set(
+        key,
+        executor.retain({
+          environmentId: entry.environmentId,
+          scope: entry.scope,
+          preemptible: entry.scope.type === "interactive",
+        }),
+      );
     }
   };
 
-  const apply = async () => {
-    if (disposed) return;
-    reconcileScopes();
-    const plan = planWorkspaceConnectionDemand(demand, {
-      now: deps.now(),
-      wakeStaggerMs: HOSTED_WEB_WAKE_STAGGER_MS,
+  const isIdle = () => {
+    const current = executor.snapshot();
+    return (
+      current.connectingEnvironmentIds.length === 0 && current.releasingEnvironmentIds.length === 0
+    );
+  };
+
+  const nextChange = () =>
+    new Promise<void>((resolve) => {
+      changeWaiters.add(resolve);
     });
-    demand = plan.state;
-    queued = plan.queued;
-    publish();
-    for (const environmentId of plan.release) {
-      await deps.release(environmentId).catch(() => undefined);
-      demand = setWorkspaceEnvironmentConnected(demand, environmentId, false, deps.now());
+
+  /**
+   * Resolves once no connect or release is in flight. A connect or release
+   * that settles may schedule the plan it freed a slot for, which runs a few
+   * microtasks later, so each look waits for that first.
+   */
+  const settled = async () => {
+    for (;;) {
+      for (let hop = 0; hop < 4; hop += 1) await Promise.resolve();
+      if (disposed || isIdle()) return;
+      await nextChange();
     }
-    for (const command of plan.connect) {
-      try {
-        await deps.connect(command.environmentId, command.delayMs);
-        demand = setWorkspaceEnvironmentConnected(demand, command.environmentId, true, deps.now());
-      } catch {
-        demand = setWorkspaceEnvironmentConnected(demand, command.environmentId, false, deps.now());
-      }
-    }
-    const settled = planWorkspaceConnectionDemand(demand, {
-      now: deps.now(),
-      wakeStaggerMs: HOSTED_WEB_WAKE_STAGGER_MS,
-    });
-    queued = settled.queued;
-    publish();
   };
 
-  const enqueue = () => {
-    const next = operation.catch(() => undefined).then(apply);
-    operation = next.catch(() => undefined);
-    return next;
-  };
+  const executor = createConnectionDemandExecutor({
+    maxConnections: deps.maxConnections ?? MAX_HOSTED_WEB_CONNECTIONS,
+    wakeStaggerMs: HOSTED_WEB_WAKE_STAGGER_MS,
+    leaseTtlMs: HOSTED_WEB_SCOPE_LEASE_TTL_MS,
+    ports: {
+      now: deps.now,
+      setTimeout:
+        deps.setTimeout ??
+        ((callback: () => void, delayMs: number) => globalThis.setTimeout(callback, delayMs)),
+      clearTimeout:
+        deps.clearTimeout ??
+        ((timer: unknown) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>)),
+      connect: (environmentId, signal) => deps.connect(environmentId, signal),
+      release: (environmentId) => deps.release(environmentId),
+      beforePlan: syncLeases,
+      onChange: () => {
+        for (const listener of Array.from(listeners)) listener();
+        const waiters = Array.from(changeWaiters);
+        changeWaiters.clear();
+        for (const resolve of waiters) resolve();
+      },
+    },
+  });
 
-  const unsubscribeScopes = deps.scopes.subscribe(() => void enqueue());
-  const renewalTimer = deps.setInterval(() => void enqueue(), HOSTED_WEB_SCOPE_REPORT_INTERVAL_MS);
+  const unsubscribeScopes = deps.scopes.subscribe(() => executor.reconcile());
+  const renewalTimer = deps.setInterval(
+    () => executor.reconcile(),
+    HOSTED_WEB_SCOPE_REPORT_INTERVAL_MS,
+  );
 
   return {
-    snapshot: () => ({
-      demand,
-      queuedEnvironmentIds: queued,
-      activeConnectionCount: demand.connections.filter((entry) => entry.connected).length,
-    }),
+    snapshot() {
+      const source = executor.snapshot();
+      if (published?.source !== source) {
+        published = {
+          source,
+          snapshot: {
+            demand: source.demand,
+            queuedEnvironmentIds: source.queuedEnvironmentIds,
+            activeConnectionCount: source.activeConnectionCount,
+          },
+        };
+      }
+      return published.snapshot;
+    },
+    executorSnapshot: () => executor.snapshot(),
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    reportConnected(environmentId, connected) {
-      demand = setWorkspaceEnvironmentConnected(demand, environmentId, connected, deps.now());
-      publish();
+    reportConnected: (environmentId, connected) =>
+      executor.reportConnected(environmentId, connected),
+    reportInterrupted: (environmentId) => executor.reportInterrupted(environmentId),
+    isDemanded: (environmentId) => executor.isDemanded(environmentId),
+    unpark: (environmentId) => executor.unpark(environmentId),
+    handleReconcileRequest(request) {
+      // A retry or a directory change lifts what held the environment back.
+      if (request.environmentId !== undefined && request.reason !== "resume") {
+        executor.unpark(request.environmentId);
+        return;
+      }
+      executor.reconcile();
     },
     setBackgrounded(backgrounded) {
-      demand = setWorkspaceConnectionBackgrounded(demand, backgrounded);
-      return enqueue();
+      executor.setBackgrounded(backgrounded);
+      return settled();
     },
-    reconcile: enqueue,
+    reconcile() {
+      executor.reconcile();
+      return settled();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
       unsubscribeScopes();
       deps.clearInterval(renewalTimer);
+      executor.dispose();
       listeners.clear();
+      const waiters = Array.from(changeWaiters);
+      changeWaiters.clear();
+      for (const resolve of waiters) resolve();
     },
   };
 }
@@ -249,12 +345,52 @@ let hostedWorkspaceSnapshot: HostedWorkspaceSnapshot = {
 const hostedWorkspaceListeners = new Set<() => void>();
 let activeCoordinator: HostedConnectionCoordinator | null = null;
 let retryHomeDiscovery: (() => void) | null = null;
+/** The selected node's mutation readiness, with one session. */
 const hostedMutationLeaseAuthority = createNodeMutationLeaseAuthority();
+/** Each environment session's own mutation readiness, with retained sessions. */
+const recordMutationLeaseAuthorities = new Map<EnvironmentId, NodeMutationLeaseAuthority>();
+const mutationLeaseListeners = new Set<() => void>();
+
+function notifyMutationLeaseListeners(): void {
+  for (const listener of Array.from(mutationLeaseListeners)) listener();
+}
+
+hostedMutationLeaseAuthority.subscribe(notifyMutationLeaseListeners);
+
+const NO_MUTATION_READINESS = {
+  environmentId: null,
+  snapshotGeneration: 0,
+  effectiveRole: null,
+  directoryReady: false,
+  relayReady: false,
+  shellReady: false,
+} as const;
+
+function recordMutationLeaseAuthority(environmentId: EnvironmentId): NodeMutationLeaseAuthority {
+  const existing = recordMutationLeaseAuthorities.get(environmentId);
+  if (existing) return existing;
+  const authority = createNodeMutationLeaseAuthority();
+  authority.subscribe(notifyMutationLeaseListeners);
+  recordMutationLeaseAuthorities.set(environmentId, authority);
+  return authority;
+}
+
+/** Invalidate every environment session's lease, except for the environments kept. */
+function clearRecordMutationLeases(keep?: ReadonlySet<EnvironmentId>): void {
+  for (const [environmentId, authority] of Array.from(recordMutationLeaseAuthorities)) {
+    if (keep?.has(environmentId)) continue;
+    recordMutationLeaseAuthorities.delete(environmentId);
+    authority.update(NO_MUTATION_READINESS);
+  }
+}
 
 export function readHostedNodeMutationLease(
   environmentId: EnvironmentId,
 ): NodeMutationLease | null {
-  return hostedMutationLeaseAuthority.lease(environmentId);
+  return (
+    recordMutationLeaseAuthorities.get(environmentId)?.lease(environmentId) ??
+    hostedMutationLeaseAuthority.lease(environmentId)
+  );
 }
 
 export function waitForHostedNodeMutationLease(
@@ -269,13 +405,14 @@ export function waitForHostedNodeMutationLease(
       if (settled) return;
       settled = true;
       globalThis.clearTimeout(timer);
-      unsubscribe();
+      mutationLeaseListeners.delete(onChange);
       resolve(lease);
     };
-    const unsubscribe = hostedMutationLeaseAuthority.subscribe(() => {
+    const onChange = () => {
       const lease = readHostedNodeMutationLease(environmentId);
       if (lease) finish(lease);
-    });
+    };
+    mutationLeaseListeners.add(onChange);
     const timer = globalThis.setTimeout(() => finish(null), timeoutMs);
   });
 }
@@ -394,39 +531,68 @@ export function hostedDemandAwaitsPresence(
   return false;
 }
 
-function machineCatalog(
+const HOSTED_WEB_CATALOG_CLIENT = {
+  clientTier: "hosted-web",
+  nativeTrust: "not-required",
+  requiresNativeVerification: false,
+} as const;
+
+/**
+ * Each directory node as a machine with retained sessions: its connection
+ * state, role and delivery come from the node's own environment session.
+ */
+function retainedMachineCatalog(
   nodes: ReadonlyArray<HostedHubNode>,
-  selectedEnvironmentId: EnvironmentId | null,
-  connected: boolean,
-  deliveryUnknown: boolean,
+  recordFor: (environmentId: EnvironmentId) => HostedEnvironmentSessionRecord | undefined,
   now: number,
 ): ReadonlyArray<WorkspaceMachineCatalogEntry> {
   return reconcileWorkspaceMachineCatalog(
-    nodes.map((node) => ({
-      environmentId: node.environmentId,
-      nodeId: node.id,
-      label: node.label,
-      platform: { os: node.platformOs, arch: node.platformArch },
-      serverVersion: node.clientVersion,
-      capabilities: {
-        repositoryIdentity: node.capabilities?.repositoryIdentity ?? true,
-        threadSettlement: node.capabilities?.threadSettlement ?? false,
-        nativeClientRequired: node.capabilities?.nativeClientRequired ?? false,
-      },
-      clientTier: "hosted-web" as const,
-      nativeTrust: "not-required" as const,
-      requiresNativeVerification: false,
-      effectiveRole: node.effectiveRole,
-      online: node.presence.online,
-      lastSeenAt: node.presence.lastHeartbeatAt,
-      observedAt: now,
-      connectionState:
-        node.environmentId === selectedEnvironmentId && connected
-          ? ("connected" as const)
-          : ("disconnected" as const),
-      deliveryUnknown: node.environmentId === selectedEnvironmentId && deliveryUnknown,
-      revokedAt: node.revokedAt,
-    })),
+    nodes.map((node) => {
+      const record = recordFor(node.environmentId);
+      return hostedNodeCatalogInput(node, {
+        ...HOSTED_WEB_CATALOG_CLIENT,
+        session: record
+          ? {
+              transportStatus: record.transportStatus,
+              sessionStatus: record.sessionStatus,
+              effectiveRole: record.effectiveRole,
+            }
+          : null,
+        deliveryUnknown: record?.sessionStatus === "delivery-unknown",
+        observedAt: now,
+      });
+    }),
+  );
+}
+
+/**
+ * Each directory node as a machine with one session: the selected node is
+ * connected while its relay is online and its session established — replaying
+ * or with unknown delivery included — and every other node is disconnected.
+ * Roles and last-seen times come from the directory.
+ */
+function singleSessionMachineCatalog(
+  nodes: ReadonlyArray<HostedHubNode>,
+  state: HostedHubState,
+  now: number,
+): ReadonlyArray<WorkspaceMachineCatalogEntry> {
+  const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
+  const connected = state.transportStatus === "online" && state.sessionEstablished;
+  return reconcileWorkspaceMachineCatalog(
+    nodes.map((node): WorkspaceMachineCatalogInput => {
+      const selected = node.environmentId === selectedEnvironmentId;
+      return {
+        ...hostedNodeCatalogInput(node, {
+          ...HOSTED_WEB_CATALOG_CLIENT,
+          session: null,
+          deliveryUnknown: false,
+          observedAt: now,
+        }),
+        lastSeenAt: node.presence.lastHeartbeatAt,
+        connectionState: selected && connected ? "connected" : "disconnected",
+        deliveryUnknown: selected && state.sessionStatus === "delivery-unknown",
+      };
+    }),
   );
 }
 
@@ -441,6 +607,10 @@ export function startHostedWorkspaceCoordinator(input?: {
   /** The root can show a route-error directory at `/` instead of the workspace. */
   readonly canDiscoverHome?: () => boolean;
   readonly startReadCache?: typeof startBrowserHostedThreadReadCache;
+  /** Defaults to the hosted runtime's configured environment session mode. */
+  readonly mode?: HostedEnvironmentSessionsMode;
+  /** Defaults to {@link MAX_HOSTED_WEB_CONNECTIONS}. */
+  readonly maxConnections?: number;
 }): () => void {
   const cache = input?.cache ?? getBrowserWorkspaceMetadataCache();
   const now = input?.now ?? Date.now;
@@ -480,91 +650,318 @@ export function startHostedWorkspaceCoordinator(input?: {
    */
   const pendingCacheShells = new Map<string, number>();
   let cacheWaitTimer: unknown = null;
+  const mode = input?.mode ?? hostedEnvironmentSessionsMode();
+  const retained = mode === "retained";
+  const sessions = getHostedEnvironmentSessions();
+  /**
+   * Retained sessions: scopes of background demand that yielded to a rate
+   * limit. They hold no lease until they are released or their environment is
+   * routed, so a rate-limited relay is not retried by every tick.
+   */
+  const rateLimitedScopeKeys = new Set<string>();
+  /**
+   * One session: the selected node whose relay just failed terminally while it
+   * held its slot. The re-plan its freed slot starts must not retry it at once
+   * — after an E2EE FATAL-PRE that is never allowed — so that connect fails as
+   * transient, and a planned reconcile (the renewal tick, a demand or route
+   * change, a presence edge) retries it.
+   */
+  let unretriedTerminalFailure: EnvironmentId | null = null;
+
+  // With one session the routed node is connected only while it is online;
+  // with retained sessions an offline routed node still gets its bounded
+  // attempt from the lifecycle owner.
+  const routedEnvironmentId = (): EnvironmentId | null => {
+    const route = getRoutedHostedNode();
+    if (route.malformed || route.nodeId === null) return null;
+    return (
+      hostedHubStore
+        .getState()
+        .nodes.find(
+          (node) =>
+            node.id === route.nodeId &&
+            (retained
+              ? node.revokedAt === null && !hostedNodeRequiresNativeClient(node)
+              : isHostedWebConnectableNode(node)),
+        )?.environmentId ?? null
+    );
+  };
+
+  /** The routed and the selected environment keep their transport's own backoff. */
+  const keepsBackoff = (environmentId: EnvironmentId) =>
+    environmentId === routedEnvironmentId() ||
+    environmentId === hostedHubStore.getState().selectedNode?.environmentId;
+
+  /** The current directory reports the environment's node offline. */
+  const awaitsPresence = (environmentId: EnvironmentId) =>
+    hostedDemandAwaitsPresence(hostedHubStore.getState(), [environmentId]);
+
+  const connectSelected = async (
+    environmentId: EnvironmentId,
+  ): Promise<ConnectionDemandConnectResult> => {
+    const state = hostedHubStore.getState();
+    if (
+      disposed ||
+      state.accountStatus !== "authenticated" ||
+      state.directoryStatus !== "ready" ||
+      (state.browserStatus !== "current" && state.browserStatus !== "synchronizing") ||
+      !hostedWebConnectionScopes.list().some((scope) => scope.environmentId === environmentId)
+    ) {
+      throw new Error("Hosted Web directory is not current.");
+    }
+    const node = state.nodes.find(
+      (candidate) =>
+        candidate.environmentId === environmentId && isHostedWebConnectableNode(candidate),
+    );
+    if (!node) throw new Error("Hosted Web environment is not eligible.");
+    if (state.selectedNode?.id !== node.id) {
+      await hostedHubController.selectNode(node.id);
+    } else if (state.transportStatus === "terminal-failure") {
+      if (unretriedTerminalFailure === environmentId) {
+        unretriedTerminalFailure = null;
+        throw new Error("A terminally failed relay waits for a planned reconcile.");
+      }
+      await hostedHubController.retrySelectedNode();
+    }
+    // An already selected node's activation is its connection.
+    if (disposed || hostedHubStore.getState().selectedNode?.id !== node.id) {
+      throw new Error("Hosted Web connection demand was superseded.");
+    }
+    return "connected";
+  };
+
+  const releaseSelected = async (environmentId: EnvironmentId) => {
+    if (hostedHubStore.getState().selectedNode?.environmentId === environmentId) {
+      await hostedHubController.returnToDirectory();
+    }
+  };
+
+  // Retained sessions: the lifecycle owner's acquire is the only way any
+  // connection is created, and it never moves the selection.
+  const connectRetained = async (
+    environmentId: EnvironmentId,
+  ): Promise<ConnectionDemandConnectResult> => {
+    const nodeId = disposed ? null : nodeIdForHostedEnvironment(environmentId);
+    if (nodeId === null) throw new Error("Hosted Web environment is not eligible.");
+    const acquisition = await hostedHubController.acquireEnvironment(nodeId);
+    return acquisition === "refused" ? "refused" : "connected";
+  };
+
+  const releaseRetained = (environmentId: EnvironmentId) =>
+    hostedHubController.releaseEnvironment(environmentId);
 
   const coordinator = createHostedConnectionCoordinator({
     scopes: hostedWebConnectionScopes,
-    foregroundEnvironmentId: () => {
-      const route = getRoutedHostedNode();
-      if (route.malformed || route.nodeId === null) return null;
-      return (
-        hostedHubStore
-          .getState()
-          .nodes.find((node) => node.id === route.nodeId && isHostedWebConnectableNode(node))
-          ?.environmentId ?? null
-      );
-    },
+    foregroundEnvironmentId: routedEnvironmentId,
     now,
+    setTimeout: schedule,
+    clearTimeout: cancel,
     setInterval: repeat,
     clearInterval: cancelRepeat,
-    connect: async (environmentId, delayMs) => {
-      if (delayMs > 0) await new Promise<void>((resolve) => schedule(resolve, delayMs));
-      const state = hostedHubStore.getState();
-      if (
-        disposed ||
-        state.accountStatus !== "authenticated" ||
-        state.directoryStatus !== "ready" ||
-        (state.browserStatus !== "current" && state.browserStatus !== "synchronizing") ||
-        !hostedWebConnectionScopes.list().some((scope) => scope.environmentId === environmentId)
-      ) {
-        throw new Error("Hosted Web directory is not current.");
-      }
-      const node = state.nodes.find(
-        (candidate) =>
-          candidate.environmentId === environmentId && isHostedWebConnectableNode(candidate),
-      );
-      if (!node) throw new Error("Hosted Web environment is not eligible.");
-      if (state.selectedNode?.id === node.id && state.transportStatus === "terminal-failure") {
-        await hostedHubController.retrySelectedNode();
-      } else {
-        await hostedHubController.selectNode(node.id);
-      }
-      if (disposed || hostedHubStore.getState().selectedNode?.id !== node.id) {
-        throw new Error("Hosted Web connection demand was superseded.");
-      }
-    },
-    release: async (environmentId) => {
-      if (hostedHubStore.getState().selectedNode?.environmentId === environmentId) {
-        await hostedHubController.returnToDirectory();
-      }
-    },
+    maxConnections: input?.maxConnections ?? MAX_HOSTED_WEB_CONNECTIONS,
+    mode,
+    connect: retained ? connectRetained : connectSelected,
+    release: retained ? releaseRetained : releaseSelected,
+    // Demand that yields holds no lease while its reason lasts: background
+    // demand that was rate limited, and demand for a node the directory
+    // reports offline, which waits for presence instead.
+    withholds: (entry) =>
+      !keepsBackoff(entry.environmentId) &&
+      (rateLimitedScopeKeys.has(entry.key) || awaitsPresence(entry.environmentId)),
   });
   activeCoordinator = coordinator;
+
+  /** Environments holding a slot: connected, or connecting. */
+  const liveEnvironmentIds = () => {
+    const current = coordinator.executorSnapshot();
+    const live = new Set(current.connectingEnvironmentIds);
+    for (const entry of current.demand.connections) {
+      if (entry.connected) live.add(entry.environmentId);
+    }
+    return live;
+  };
+
+  // A live environment whose demand yields is released. `reportInterrupted`
+  // releases only an environment that, with its leases synced, nothing demands.
+  const yieldOfflineEnvironments = () => {
+    if (!retained || disposed) return;
+    for (const environmentId of liveEnvironmentIds()) {
+      if (!keepsBackoff(environmentId) && awaitsPresence(environmentId)) {
+        coordinator.reportInterrupted(environmentId);
+      }
+    }
+  };
+
+  const yieldRateLimited = (environmentId: EnvironmentId) => {
+    if (keepsBackoff(environmentId)) return;
+    const scopes = hostedWebConnectionScopes
+      .list()
+      .filter((entry) => entry.environmentId === environmentId);
+    // A mounted view keeps the environment on its transport's backoff.
+    if (scopes.some((entry) => entry.scope.type !== "interactive")) return;
+    for (const entry of scopes) rateLimitedScopeKeys.add(entry.key);
+    coordinator.reportInterrupted(environmentId);
+  };
+
+  // Retained sessions: the connected set is derived from the records, so a
+  // suspended, failed or released record frees its slot and is acquired again
+  // once it is demanded.
+  let observedRecords: ReadonlyMap<EnvironmentId, HostedEnvironmentSessionRecord> | null = null;
+  let observingRecords = false;
+  let observeRecordsAgain = false;
+  const observeRecordsOnce = () => {
+    if (disposed) return;
+    const { records } = sessions.getSnapshot();
+    const previous = observedRecords;
+    if (records === previous) return;
+    observedRecords = records;
+    const executor = coordinator.executorSnapshot();
+    const tracked = new Set<EnvironmentId>(executor.connectingEnvironmentIds);
+    for (const entry of executor.demand.connections) tracked.add(entry.environmentId);
+    // Records that outlived an earlier coordinator still hold their channels.
+    // The first pass counts every live one before anything is planned, so new
+    // demand waits for a free slot instead of opening channels past the cap.
+    if (previous === null) {
+      for (const [environmentId, record] of records) {
+        if (isHostedEnvironmentSessionLive(record)) tracked.add(environmentId);
+      }
+    }
+    for (const environmentId of tracked) {
+      coordinator.reportConnected(
+        environmentId,
+        isHostedEnvironmentSessionLive(records.get(environmentId)),
+      );
+    }
+    for (const [environmentId, record] of records) {
+      const before = previous?.get(environmentId);
+      if (
+        record.relayGap &&
+        (before?.relayGap !== true || before.generation !== record.generation)
+      ) {
+        coordinator.reportInterrupted(environmentId);
+      }
+      // A renewed record, or one whose terminal failure the directory lifted,
+      // may connect again.
+      if (
+        before !== undefined &&
+        ((before.generation !== record.generation && !record.suspended) ||
+          (isHostedEnvironmentConnectBlocked(before) && !isHostedEnvironmentConnectBlocked(record)))
+      ) {
+        coordinator.unpark(environmentId);
+      }
+      if (record.failure?.kind === "rate-limited" && before?.failure !== record.failure) {
+        yieldRateLimited(environmentId);
+      }
+    }
+    yieldOfflineEnvironments();
+  };
+  const observeRecords = () => {
+    if (!retained || disposed) return;
+    // A release started here publishes the registry again from inside its
+    // notification; that change is observed once this pass is done.
+    if (observingRecords) {
+      observeRecordsAgain = true;
+      return;
+    }
+    observingRecords = true;
+    try {
+      do {
+        observeRecordsAgain = false;
+        observeRecordsOnce();
+      } while (observeRecordsAgain);
+    } finally {
+      observingRecords = false;
+    }
+  };
+
+  const machineCatalog = (state: HostedHubState) =>
+    retained
+      ? retainedMachineCatalog(state.nodes, (environmentId) => sessions.read(environmentId), now())
+      : singleSessionMachineCatalog(state.nodes, state, now());
+
+  const updateMutationLeases = (
+    state: HostedHubState,
+    machines: ReadonlyArray<WorkspaceMachineCatalogEntry>,
+  ) => {
+    const shellReady = (environmentId: EnvironmentId) =>
+      snapshots.has(environmentId) &&
+      machines.some(
+        (machine) =>
+          machine.environmentId === environmentId &&
+          machine.connectionState === "connected" &&
+          machine.canMutate,
+      );
+    if (!retained) {
+      clearRecordMutationLeases();
+      const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
+      const selectedSnapshot =
+        selectedEnvironmentId === null ? undefined : snapshots.get(selectedEnvironmentId);
+      hostedMutationLeaseAuthority.update({
+        environmentId: selectedEnvironmentId,
+        snapshotGeneration: selectedSnapshot?.capturedAt ?? 0,
+        effectiveRole: state.effectiveRole,
+        directoryReady: state.directoryStatus === "ready" && state.browserStatus === "current",
+        relayReady:
+          state.transportStatus === "online" &&
+          state.sessionEstablished &&
+          selectedEnvironmentId !== null,
+        shellReady: selectedEnvironmentId !== null && shellReady(selectedEnvironmentId),
+      });
+      return;
+    }
+    // Each environment session earns its lease with its own relay attempt and
+    // accepted snapshot, and the lease names the record generation that did.
+    if (hostedMutationLeaseAuthority.read().environmentId !== null) {
+      hostedMutationLeaseAuthority.update(NO_MUTATION_READINESS);
+    }
+    const directoryReady =
+      state.directoryStatus === "ready" && hostedBrowserRevalidated(state.browserStatus);
+    const kept = new Set<EnvironmentId>();
+    for (const record of sessions.list()) {
+      kept.add(record.environmentId);
+      recordMutationLeaseAuthority(record.environmentId).update({
+        environmentId: record.environmentId,
+        snapshotGeneration: record.generation,
+        effectiveRole: record.effectiveRole,
+        directoryReady,
+        relayReady: record.transportStatus === "online" && record.sessionEstablished,
+        shellReady: shellReady(record.environmentId),
+      });
+    }
+    clearRecordMutationLeases(kept);
+  };
+
+  /**
+   * The environment's last connection attempt ended in a terminal failure, or,
+   * with retained sessions, its background demand yielded to a rate limit.
+   */
+  const relayFailed = (state: HostedHubState, environmentId: EnvironmentId) =>
+    retained
+      ? sessions.read(environmentId)?.transportStatus === "terminal-failure" ||
+        hostedWebConnectionScopes
+          .list()
+          .some(
+            (entry) => entry.environmentId === environmentId && rateLimitedScopeKeys.has(entry.key),
+          )
+      : state.selectedNode?.environmentId === environmentId &&
+        state.transportStatus === "terminal-failure";
 
   const publish = (machines: ReadonlyArray<WorkspaceMachineCatalogEntry>) => {
     const state = hostedHubStore.getState();
     const cached = readHostedReadCache();
     if (state.accountStatus !== "authenticated" && canShowHostedReadPreview()) {
-      hostedMutationLeaseAuthority.update({
-        environmentId: null,
-        snapshotGeneration: 0,
-        effectiveRole: null,
-        directoryReady: false,
-        relayReady: false,
-        shellReady: false,
-      });
+      hostedMutationLeaseAuthority.update(NO_MUTATION_READINESS);
+      clearRecordMutationLeases();
       const cachedMachines = reconcileWorkspaceMachineCatalog(
-        cached.nodes.map((node) => ({
-          environmentId: node.environmentId,
-          nodeId: node.nodeId,
-          label: node.label,
-          platform: { os: "unknown" as const, arch: "other" as const },
-          serverVersion: null,
-          capabilities: {
-            repositoryIdentity: true,
-            threadSettlement: false,
-            nativeClientRequired: false,
-          },
-          clientTier: "hosted-web" as const,
-          nativeTrust: "not-required" as const,
-          requiresNativeVerification: false,
-          effectiveRole: "viewer" as const,
-          online: false,
-          lastSeenAt: null,
-          observedAt: now(),
-          connectionState: "disconnected" as const,
-          deliveryUnknown: false,
-          revokedAt: null,
-        })),
+        cached.nodes.map((node) =>
+          cachedHubNodeCatalogInput({
+            environmentId: node.environmentId,
+            nodeId: node.nodeId,
+            label: node.label,
+            observedAt: now(),
+            clientTier: "hosted-web",
+          }),
+        ),
       ).map((machine) => ({ ...machine, canConnect: false, canMutate: false }));
       publishHostedWorkspace({
         status: "stale",
@@ -587,27 +984,7 @@ export function startHostedWorkspaceCoordinator(input?: {
           : state.directoryStatus === "stale"
             ? "stale"
             : "loading";
-    const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
-    const selectedSnapshot =
-      selectedEnvironmentId === null ? undefined : snapshots.get(selectedEnvironmentId);
-    hostedMutationLeaseAuthority.update({
-      environmentId: selectedEnvironmentId,
-      snapshotGeneration: selectedSnapshot?.capturedAt ?? 0,
-      effectiveRole: state.effectiveRole,
-      directoryReady: state.directoryStatus === "ready" && state.browserStatus === "current",
-      relayReady:
-        state.transportStatus === "online" &&
-        state.sessionEstablished &&
-        selectedEnvironmentId !== null,
-      shellReady:
-        selectedSnapshot !== undefined &&
-        machines.some(
-          (machine) =>
-            machine.environmentId === selectedEnvironmentId &&
-            machine.connectionState === "connected" &&
-            machine.canMutate,
-        ),
-    });
+    updateMutationLeases(state, machines);
     publishHostedWorkspace({
       status,
       accountId: state.account?.id ?? null,
@@ -667,9 +1044,7 @@ export function startHostedWorkspaceCoordinator(input?: {
       releaseDiscovery();
     } else {
       if (discoveryEnvironmentId !== null) {
-        const failed =
-          state.selectedNode?.environmentId === discoveryEnvironmentId &&
-          state.transportStatus === "terminal-failure";
+        const failed = relayFailed(state, discoveryEnvironmentId);
         if (failed) failedDiscoveryEnvironments.add(discoveryEnvironmentId);
         if (
           failed ||
@@ -804,24 +1179,29 @@ export function startHostedWorkspaceCoordinator(input?: {
     }
 
     if (disposed || generation !== syncGeneration || authorityResetPending) return;
-    const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
-    const activeAttempt =
-      selectedEnvironmentId !== null &&
-      state.transportStatus !== "idle" &&
-      state.transportStatus !== "terminal-failure";
-    const connected = state.transportStatus === "online" && state.sessionEstablished;
-    if (lastSelectedEnvironmentId && lastSelectedEnvironmentId !== selectedEnvironmentId) {
-      coordinator.reportConnected(lastSelectedEnvironmentId, false);
+    if (!retained) {
+      // One session: the selected node is the only connection, as the shared
+      // state reports it. Retained sessions report each record instead.
+      const selectedEnvironmentId = state.selectedNode?.environmentId ?? null;
+      const activeAttempt =
+        selectedEnvironmentId !== null &&
+        state.transportStatus !== "idle" &&
+        state.transportStatus !== "terminal-failure";
+      if (lastSelectedEnvironmentId && lastSelectedEnvironmentId !== selectedEnvironmentId) {
+        coordinator.reportConnected(lastSelectedEnvironmentId, false);
+      }
+      if (selectedEnvironmentId) {
+        if (
+          state.transportStatus === "terminal-failure" &&
+          liveEnvironmentIds().has(selectedEnvironmentId)
+        ) {
+          unretriedTerminalFailure = selectedEnvironmentId;
+        }
+        coordinator.reportConnected(selectedEnvironmentId, activeAttempt);
+      }
+      lastSelectedEnvironmentId = selectedEnvironmentId;
     }
-    if (selectedEnvironmentId) coordinator.reportConnected(selectedEnvironmentId, activeAttempt);
-    lastSelectedEnvironmentId = selectedEnvironmentId;
-    const machines = machineCatalog(
-      state.nodes,
-      selectedEnvironmentId,
-      connected,
-      state.sessionStatus === "delivery-unknown",
-      now(),
-    );
+    const machines = machineCatalog(state);
     const machineByEnvironment = new Map(
       machines.map((machine) => [machine.environmentId, machine] as const),
     );
@@ -895,19 +1275,50 @@ export function startHostedWorkspaceCoordinator(input?: {
       releasePresenceWatch();
       releasePresenceWatch = null;
     }
-    if (unblocked) void coordinator.reconcile();
+    if (unblocked) {
+      unretriedTerminalFailure = null;
+      void coordinator.reconcile();
+    }
+    yieldOfflineEnvironments();
+  };
+
+  // Rate-limit yields end with the scopes that yielded, and for the routed
+  // environment, which keeps its transport's backoff.
+  const forgetRateLimitYields = () => {
+    if (rateLimitedScopeKeys.size === 0) return;
+    const routed = routedEnvironmentId();
+    const present = new Map(
+      hostedWebConnectionScopes.list().map((entry) => [entry.key, entry] as const),
+    );
+    for (const key of Array.from(rateLimitedScopeKeys)) {
+      const entry = present.get(key);
+      if (entry === undefined || entry.environmentId === routed) rateLimitedScopeKeys.delete(key);
+    }
   };
 
   const unsubscribeHub = hostedHubStore.subscribe(() => {
     observeDemand();
     void synchronize();
   });
-  const unsubscribeDemandScopes = hostedWebConnectionScopes.subscribe(observeDemand);
+  const unsubscribeDemandScopes = hostedWebConnectionScopes.subscribe(() => {
+    unretriedTerminalFailure = null;
+    forgetRateLimitYields();
+    observeDemand();
+  });
   const unsubscribeReadCache = subscribeHostedReadCache(() => void synchronize());
   const unsubscribeRoute = subscribeRoutedHostedNode(() => {
+    unretriedTerminalFailure = null;
+    forgetRateLimitYields();
     scheduleHomeDiscovery();
     void coordinator.reconcile();
+    yieldOfflineEnvironments();
   });
+  const unsubscribeSessions = retained
+    ? sessions.subscribe(() => {
+        observeRecords();
+        void synchronize();
+      })
+    : () => undefined;
   const unsubscribeScopes = hostedWebConnectionScopes.subscribe(scheduleHomeDiscovery);
   const unsubscribeStore = useStore.subscribe(scheduleLiveSnapshotPublish);
   const unsubscribeCoordinator = coordinator.subscribe(() => {
@@ -946,6 +1357,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     publish(hostedWorkspaceSnapshot.machines);
     scheduleHomeDiscovery();
   }, onCacheShellReadsChanged);
+  observeRecords();
   void coordinator.reconcile();
   observeDemand();
   void synchronize();
@@ -956,6 +1368,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     if (cacheWaitTimer !== null) cancel(cacheWaitTimer);
     cacheWaitTimer = null;
     unsubscribeHub();
+    unsubscribeSessions();
     unsubscribeDemandScopes();
     releasePresenceWatch?.();
     releasePresenceWatch = null;
@@ -971,14 +1384,8 @@ export function startHostedWorkspaceCoordinator(input?: {
     coordinator.dispose();
     if (activeCoordinator === coordinator) {
       activeCoordinator = null;
-      hostedMutationLeaseAuthority.update({
-        environmentId: null,
-        snapshotGeneration: 0,
-        effectiveRole: null,
-        directoryReady: false,
-        relayReady: false,
-        shellReady: false,
-      });
+      hostedMutationLeaseAuthority.update(NO_MUTATION_READINESS);
+      clearRecordMutationLeases();
       publishHostedWorkspace({
         status: "signed-out",
         accountId: null,
@@ -997,6 +1404,21 @@ export function setHostedWorkspaceBackgrounded(backgrounded: boolean): Promise<v
 
 export function hasActiveHostedWorkspaceCoordinator(): boolean {
   return activeCoordinator !== null;
+}
+
+/**
+ * Whether the running workspace coordinator still wants the environment
+ * connected: it is routed, or holds a lease. A relay binding asks this before
+ * reconnecting a dropped channel. Without a coordinator nothing decides demand,
+ * and the transport keeps its own backoff.
+ */
+export function isHostedEnvironmentDemanded(environmentId: EnvironmentId): boolean {
+  return activeCoordinator?.isDemanded(environmentId) ?? true;
+}
+
+/** The hosted lifecycle owner asks the running workspace coordinator to re-plan. */
+export function requestHostedWorkspaceReconcile(request: HostedEnvironmentReconcileRequest): void {
+  activeCoordinator?.handleReconcileRequest(request);
 }
 
 export function nodeIdForHostedEnvironment(environmentId: EnvironmentId): string | null {

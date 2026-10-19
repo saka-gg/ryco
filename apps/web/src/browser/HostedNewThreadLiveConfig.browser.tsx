@@ -75,6 +75,8 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => {
     nodeIdForHostedEnvironment: vi.fn(),
     hasActiveHostedWorkspaceCoordinator: () => false,
     setHostedWorkspaceBackgrounded: async () => undefined,
+    isHostedEnvironmentDemanded: () => false,
+    requestHostedWorkspaceReconcile: () => undefined,
     retryHostedHomeDiscovery: () => undefined,
     startHostedWorkspaceCoordinator: unavailable,
     createHostedConnectionCoordinator: unavailable,

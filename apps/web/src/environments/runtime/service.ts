@@ -113,7 +113,11 @@ import {
   measureStartupPhase,
 } from "~/perf/startupInstrumentation";
 import { isHostedHubMode } from "~/env";
+import type { HostedHubNode } from "@ryco/client-runtime/authorization";
+import { isHostedEnvironmentDemanded } from "~/hostedHub/hostedConnectionCoordinator";
 import {
+  getHostedEnvironmentSessions,
+  hostedEnvironmentSessionsMode,
   hostedHubController,
   markHostedSessionReady,
   markHostedSessionReplaying,
@@ -126,6 +130,11 @@ import {
   hostedDispatchLineage,
 } from "~/hostedHub/transport";
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
+import {
+  createHostedEnvironmentConnection,
+  hostedEnvironmentConnectionGeneration,
+  type HostedConnectionFence,
+} from "./hostedEnvironmentConnection";
 import { webFrameScheduler, webSocket } from "../../platform";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 
@@ -186,8 +195,12 @@ function getEnvironmentSupervisor() {
       needsProviderInvalidation = false;
       projectSearchInvalidations.reset();
     },
+    // Retained hosted sessions open their connections only through the
+    // lifecycle owner's connect port (`connectHostedEnvironment`).
     createPrimaryConnection: () =>
-      getPrimaryKnownEnvironment()?.environmentId ? createPrimaryEnvironmentConnection() : null,
+      getPrimaryKnownEnvironment()?.environmentId && !hostsRetainedEnvironmentSessions()
+        ? createPrimaryEnvironmentConnection()
+        : null,
     listSavedEnvironmentRecords,
     hasSavedEnvironmentRegistryHydrated,
     waitForSavedEnvironmentRegistryHydration,
@@ -764,8 +777,36 @@ export function flushEnvironmentThreadDetailEvents(): void {
   threadDetailEventBatcher.flush();
 }
 
+/** Whether hosted Web keeps one session, and one connection, per environment. */
+function hostsRetainedEnvironmentSessions(): boolean {
+  return isHostedHubMode() && hostedEnvironmentSessionsMode() === "retained";
+}
+
+/**
+ * A single-session hosted connection's fence: the shared lifecycle generation,
+ * which the owner advances on every switch, suspension and teardown, and the
+ * selected session's readiness.
+ */
+function sharedGenerationFence(generation: number): HostedConnectionFence {
+  return {
+    accepts: () => useHostedHubStore.getState().generation === generation,
+    markReady: (environmentId) => markHostedSessionReady(environmentId, generation),
+    markReplaying: (environmentId) => markHostedSessionReplaying(environmentId, generation),
+    reportShellError: (environmentId) =>
+      reportHostedShellSnapshotFailure(environmentId, generation),
+    isQueryRefreshReady: (environmentId) =>
+      isHostedEnvironmentQueryRefreshReady(useHostedHubStore.getState(), environmentId, generation),
+  };
+}
+
+/**
+ * A connection's stream handlers. `fence` is the hosted lifecycle owner's for
+ * the connection — the shared generation in single-session mode, the
+ * environment's record generation with retained sessions — and `null` for a
+ * direct connection, which nothing fences.
+ */
 function createEnvironmentConnectionHandlers(
-  hostedGeneration: number | null = null,
+  fence: HostedConnectionFence | null = null,
   initialRefreshEnvironmentId?: EnvironmentId,
   options: {
     /**
@@ -776,8 +817,7 @@ function createEnvironmentConnectionHandlers(
     readonly resumeShell?: boolean;
   } = {},
 ) {
-  const acceptsEvent = () =>
-    hostedGeneration === null || useHostedHubStore.getState().generation === hostedGeneration;
+  const acceptsEvent = () => fence === null || fence.accepts();
   let queryRefreshGeneration = initialRefreshEnvironmentId
     ? environmentQueryRefresh.begin(initialRefreshEnvironmentId)
     : null;
@@ -788,19 +828,12 @@ function createEnvironmentConnectionHandlers(
   const completeQueryRefresh = (environmentId: EnvironmentId) => {
     const refreshGeneration = queryRefreshGeneration;
     if (refreshGeneration === null) return;
-    const isAuthoritativelyReady = () => {
-      if (hostedGeneration === null) return true;
-      return isHostedEnvironmentQueryRefreshReady(
-        useHostedHubStore.getState(),
-        environmentId,
-        hostedGeneration,
-      );
-    };
+    const isAuthoritativelyReady = () => fence === null || fence.isQueryRefreshReady(environmentId);
     void environmentQueryRefresh
       .ready(environmentId, refreshGeneration, isAuthoritativelyReady)
       .catch(() => undefined);
   };
-  const resumeShell = options.resumeShell === true && hostedGeneration === null;
+  const resumeShell = options.resumeShell === true && fence === null;
   return {
     ...(resumeShell
       ? {
@@ -814,14 +847,10 @@ function createEnvironmentConnectionHandlers(
     onResubscribe: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
       beginQueryRefresh(environmentId);
-      if (hostedGeneration !== null) {
-        markHostedSessionReplaying(environmentId, hostedGeneration);
-      }
+      fence?.markReplaying(environmentId);
     },
     onShellError: (environmentId: EnvironmentId) => {
-      if (hostedGeneration !== null && acceptsEvent()) {
-        reportHostedShellSnapshotFailure(environmentId, hostedGeneration);
-      }
+      if (fence !== null && fence.accepts()) fence.reportShellError(environmentId);
     },
     resetShellProjection: (environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
@@ -845,11 +874,11 @@ function createEnvironmentConnectionHandlers(
       if (!acceptsEvent()) return;
       getEnvironmentSupervisor().syncShellSnapshot(snapshot, environmentId, {
         onCurrent: () => {
-          if (hostedGeneration !== null) markHostedSessionReady(environmentId, hostedGeneration);
+          fence?.markReady(environmentId);
           completeQueryRefresh(environmentId);
         },
         onReady: () => {
-          if (hostedGeneration !== null) markHostedSessionReady(environmentId, hostedGeneration);
+          fence?.markReady(environmentId);
           completeQueryRefresh(environmentId);
         },
       });
@@ -1235,6 +1264,9 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
   if (existing) {
     return existing;
   }
+  if (hostsRetainedEnvironmentSessions()) {
+    throw new Error("No hosted connection is registered for the active environment.");
+  }
 
   const hostedGeneration = isHostedHubMode() ? useHostedHubStore.getState().generation : null;
   return registerConnection(
@@ -1256,7 +1288,7 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
       // per-environment config store, ahead of any shell that shows it.
       onConfigUpdated: (config, type) => writeEnvironmentServerConfig(environmentId, config, type),
       ...createEnvironmentConnectionHandlers(
-        hostedGeneration,
+        hostedGeneration === null ? null : sharedGenerationFence(hostedGeneration),
         hostedGeneration !== null ? environmentId : undefined,
         { resumeShell: hostedGeneration === null },
       ),
@@ -1276,6 +1308,81 @@ export async function disconnectPrimaryEnvironment(): Promise<void> {
 
 export function connectPrimaryEnvironment(): EnvironmentConnection | null {
   return maybeCreatePrimaryEnvironmentConnection();
+}
+
+// Retained hosted sessions: the lifecycle owner's ports for one environment's
+// connection. Each names the record generation it acts for, so a late release
+// or suspension of an old generation never tears down a newer connection.
+
+/**
+ * Open the environment's connection for this record generation. An existing
+ * connection of an older generation is removed first; one of this generation
+ * or a newer one makes this a no-op, as does a generation the record has
+ * already moved past.
+ */
+export async function connectHostedEnvironment(
+  node: HostedHubNode,
+  generation: number,
+): Promise<void> {
+  const environmentId = node.environmentId;
+  const sessions = getHostedEnvironmentSessions();
+  if (!sessions.isCurrentGeneration(environmentId, generation)) return;
+  const existing = getEnvironmentSupervisor().read(environmentId);
+  if (existing) {
+    const existingGeneration = hostedEnvironmentConnectionGeneration(existing);
+    if (existingGeneration !== null && existingGeneration >= generation) return;
+    await removeConnection(environmentId).catch(() => false);
+    if (
+      !sessions.isCurrentGeneration(environmentId, generation) ||
+      getEnvironmentSupervisor().read(environmentId)
+    ) {
+      return;
+    }
+  }
+  registerConnection(
+    createHostedEnvironmentConnection({
+      node,
+      generation,
+      sessions,
+      handlersFor: (fence) => createEnvironmentConnectionHandlers(fence, environmentId),
+      isDemanded: () => isHostedEnvironmentDemanded(environmentId),
+    }),
+  );
+}
+
+/**
+ * Local teardown of the environment's connection when its generation is at
+ * most `generation`. Never waits for the remote end to acknowledge a close.
+ */
+async function removeHostedConnectionUpTo(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  const existing = getEnvironmentSupervisor().read(environmentId);
+  if (!existing) return;
+  const existingGeneration = hostedEnvironmentConnectionGeneration(existing);
+  if (existingGeneration !== null && existingGeneration > generation) return;
+  await removeConnection(environmentId).catch(() => false);
+}
+
+/** Remove the environment's connection of this generation or older. */
+export function removeHostedEnvironment(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  return removeHostedConnectionUpTo(environmentId, generation);
+}
+
+/**
+ * Dispose the transport of the environment's connection of this generation or
+ * older. What it displays stays in the store; the lifecycle owner decides when
+ * node-scoped state goes.
+ */
+export function suspendHostedEnvironment(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  return removeHostedConnectionUpTo(environmentId, generation);
 }
 
 /** Connect one exact native-verified Hub node through Desktop main's opaque relay transport. */

@@ -325,6 +325,82 @@ describe("hosted browser lifecycle integration", () => {
     expect(issueRelayTicket).toHaveBeenCalledTimes(2);
   });
 
+  it("accepts only a fresh snapshot for each retained environment after a suspension", async () => {
+    const { hostedHubApi } = await import("./api");
+    const { configureWebHostedRuntime } = await import("./runtime");
+    configureWebHostedRuntime(hostedHubApi, { environmentSessions: "retained" });
+    const { listEnvironmentConnections } = await import("../environments/runtime/service");
+    const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
+      await import("./state");
+    const otherNode: HostedHubNode = {
+      ...selectedNode,
+      id: "node_bbbbbbbbbbbbbbbbbbbbbb",
+      environmentId: EnvironmentId.make("env_bbbbbbbbbbbbbbbbbbbbbb"),
+      label: "Other node",
+    };
+    const nodes = [selectedNode, otherNode];
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue(nodes);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account: sessionResponse.account,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes,
+    });
+    const sessions = getHostedEnvironmentSessions();
+    const dispatch = { tag: ORCHESTRATION_WS_METHODS.dispatchCommand, stream: false };
+    // What the platform's demand executor does for each demanded environment.
+    const acquireAll = async () => {
+      for (const node of nodes) {
+        expect(await hostedHubController.acquireEnvironment(node.id)).toBe("connecting");
+        const generation = sessions.read(node.environmentId)!.generation;
+        sessions.transportStatus(node.environmentId, generation, "online");
+      }
+    };
+    const established = (node: HostedHubNode) =>
+      sessions.read(node.environmentId)?.sessionEstablished === true;
+
+    await acquireAll();
+    expect(listEnvironmentConnections()).toHaveLength(2);
+    capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
+    capturedClients[1]!.emitShellSnapshot(shellSnapshot(1));
+    expect(nodes.map(established)).toEqual([true, true]);
+    for (const transport of capturedTransports) {
+      expect(transport.options.authorizeRequest?.(dispatch)).toBe("allowed");
+    }
+
+    hostedHubController.suspendBrowser("offline");
+    for (const transport of capturedTransports) {
+      expect(transport.options.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    }
+    await vi.waitFor(() => {
+      expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce();
+      expect(capturedClients[1]!.dispose).toHaveBeenCalledOnce();
+    });
+    expect(listEnvironmentConnections()).toHaveLength(0);
+
+    await hostedHubController.resumeBrowser();
+    await acquireAll();
+    expect(capturedClients).toHaveLength(4);
+    expect(nodes.map(established)).toEqual([false, false]);
+
+    // The suspended clients' snapshots belong to replaced generations.
+    capturedClients[0]!.emitShellSnapshot(shellSnapshot(2));
+    capturedClients[1]!.emitShellSnapshot(shellSnapshot(2));
+    expect(nodes.map(established)).toEqual([false, false]);
+    expect(capturedTransports[2]!.options.authorizeRequest?.(dispatch)).not.toBe("allowed");
+
+    // Each environment earns its authority with its own fresh snapshot only.
+    capturedClients[2]!.emitShellSnapshot(shellSnapshot(2));
+    expect(nodes.map(established)).toEqual([true, false]);
+    expect(capturedTransports[2]!.options.authorizeRequest?.(dispatch)).toBe("allowed");
+    expect(capturedTransports[3]!.options.authorizeRequest?.(dispatch)).not.toBe("allowed");
+    capturedClients[3]!.emitShellSnapshot(shellSnapshot(2));
+    expect(nodes.map(established)).toEqual([true, true]);
+    expect(capturedTransports[3]!.options.authorizeRequest?.(dispatch)).toBe("allowed");
+  });
+
   it("replays a command whose client a suspend disposed, on the resumed session only", async () => {
     const { hostedHubApi } = await import("./api");
     const { activateHostedNode } = await import("./environment");

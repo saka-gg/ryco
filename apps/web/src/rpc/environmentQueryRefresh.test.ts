@@ -1,10 +1,18 @@
 import { EnvironmentId } from "@ryco/contracts";
+import {
+  createHostedEnvironmentSessions,
+  hostedBrowserRevalidated,
+  type HostedBrowserStatus,
+  type HostedHubNode,
+} from "@ryco/client-runtime/authorization";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createEnvironmentQueryRefreshCoordinator,
   isHostedEnvironmentQueryRefreshReady,
+  isHostedRecordQueryRefreshReady,
   type HostedEnvironmentQueryRefreshState,
+  type HostedRecordQueryRefreshState,
 } from "./environmentQueryRefresh";
 
 const environmentId = EnvironmentId.make("environment-query-refresh-test");
@@ -131,4 +139,137 @@ describe("environment query refresh coordination", () => {
     await expect(coordinator.ready(environmentId, currentGeneration)).resolves.toBe(true);
     expect(refresh).toHaveBeenCalledTimes(1);
   });
+});
+
+function hostedNode(id: string): HostedHubNode {
+  return {
+    id: `node_${id.padEnd(22, "a")}`,
+    environmentId: EnvironmentId.make(`env_${id.padEnd(22, "a")}`),
+    label: `Node ${id}`,
+    platformOs: "linux",
+    platformArch: "x64",
+    clientVersion: "1",
+    createdAt: 1,
+    updatedAt: 1,
+    lastAuthenticatedAt: 1,
+    revokedAt: null,
+    revocationReasonCode: null,
+    grant: { id: `grant_${id.padEnd(22, "a")}`, role: "operator" },
+    effectiveRole: "operator",
+    presence: { online: true, lastHeartbeatAt: 1 },
+  };
+}
+
+describe("retained environment session query refresh", () => {
+  const record = {
+    environmentId,
+    generation: 7,
+    transportStatus: "online",
+    sessionStatus: "ready",
+    sessionEstablished: true,
+  } as const;
+  const shared = { directoryStatus: "ready", browserStatus: "current" } as const;
+
+  it("requires the record's own generation, live relay, accepted snapshot and a revalidated browser", () => {
+    const ready: HostedRecordQueryRefreshState = { record, shared };
+    expect(isHostedRecordQueryRefreshReady(ready, environmentId, 7)).toBe(true);
+    // The selection plays no part: a browser still synchronizing the selected
+    // node has revalidated everything every other record needs.
+    expect(
+      isHostedRecordQueryRefreshReady(
+        { record, shared: { ...shared, browserStatus: "synchronizing" } },
+        environmentId,
+        7,
+      ),
+    ).toBe(true);
+    const refused: ReadonlyArray<HostedRecordQueryRefreshState> = [
+      { record: undefined, shared },
+      { record: null, shared },
+      { record: { ...record, generation: 8 }, shared },
+      { record: { ...record, environmentId: EnvironmentId.make("other-environment") }, shared },
+      { record: { ...record, transportStatus: "reconnecting" }, shared },
+      { record: { ...record, sessionStatus: "replaying" }, shared },
+      { record: { ...record, sessionStatus: "delivery-unknown" }, shared },
+      { record: { ...record, sessionEstablished: false }, shared },
+      { record, shared: { ...shared, directoryStatus: "stale" } },
+      { record, shared: { ...shared, browserStatus: "checking-access" } },
+      { record, shared: { ...shared, browserStatus: "suspended" } },
+    ];
+    for (const state of refused) {
+      expect(isHostedRecordQueryRefreshReady(state, environmentId, 7)).toBe(false);
+    }
+  });
+
+  it("revalidates the browser by the same rule as the session registry", () => {
+    const statuses = Object.keys({
+      current: true,
+      suspended: true,
+      offline: true,
+      "checking-access": true,
+      synchronizing: true,
+      stale: true,
+    } satisfies Record<HostedBrowserStatus, true>) as ReadonlyArray<HostedBrowserStatus>;
+    for (const browserStatus of statuses) {
+      expect(
+        isHostedRecordQueryRefreshReady(
+          { record, shared: { ...shared, browserStatus } },
+          environmentId,
+          7,
+        ),
+        browserStatus,
+      ).toBe(hostedBrowserRevalidated(browserStatus));
+    }
+  });
+
+  it.each([
+    ["a record that is not selected", "synchronizing"],
+    ["the selected record", "current"],
+  ] as const)(
+    "refreshes the fenced queries of %s once its snapshot after a relay gap is accepted",
+    async (_label, browserStatus) => {
+      const sessions = createHostedEnvironmentSessions({
+        now: () => 1,
+        setTimeout: () => 0,
+        clearTimeout: () => undefined,
+      });
+      const node = hostedNode("gap");
+      const { generation } = sessions.ensureRecord(node);
+      sessions.markConnectRequested(node.environmentId, generation);
+      sessions.transportStatus(node.environmentId, generation, "online");
+      sessions.markSessionReady(node.environmentId, generation);
+      const harness = makeHarness();
+      const readiness = () =>
+        isHostedRecordQueryRefreshReady(
+          {
+            record: sessions.read(node.environmentId),
+            shared: { directoryStatus: "ready", browserStatus },
+          },
+          node.environmentId,
+          generation,
+        );
+
+      // The channel drops and its replacement resubscribes: queries are fenced.
+      sessions.connectionClosed(node.environmentId, generation);
+      const refresh = harness.coordinator.begin(node.environmentId);
+      expect(harness.fence).toHaveBeenCalledWith(node.environmentId);
+      // A snapshot that lands in the gap came from the lost channel.
+      sessions.markSessionReady(node.environmentId, generation);
+      await expect(harness.coordinator.ready(node.environmentId, refresh, readiness)).resolves.toBe(
+        false,
+      );
+
+      sessions.connectionRecovered(node.environmentId, generation);
+      sessions.transportStatus(node.environmentId, generation, "online");
+      await expect(harness.coordinator.ready(node.environmentId, refresh, readiness)).resolves.toBe(
+        false,
+      );
+      expect(harness.refresh).not.toHaveBeenCalled();
+
+      sessions.markSessionReady(node.environmentId, generation);
+      await expect(harness.coordinator.ready(node.environmentId, refresh, readiness)).resolves.toBe(
+        true,
+      );
+      expect(harness.refresh).toHaveBeenCalledTimes(1);
+    },
+  );
 });

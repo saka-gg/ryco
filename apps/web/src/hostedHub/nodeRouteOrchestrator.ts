@@ -14,11 +14,15 @@ import {
 import { HUB_ROUTE_TOP_SEGMENTS } from "./hubRoutes";
 import {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,
+  hostedEnvironmentSessionsMode,
   hostedHubController,
   useHostedHubStore,
 } from "./state";
 import { hasActiveHostedWorkspaceCoordinator } from "./hostedConnectionCoordinator";
-import { retainHostedWorkspaceThreadScope } from "./hostedConnectionScopes";
+import {
+  hostedWebConnectionScopes,
+  retainHostedWorkspaceThreadScope,
+} from "./hostedConnectionScopes";
 import { selectThreadExistsByRef, useStore } from "../store";
 import { canShowHostedReadPreview, readHostedReadCache } from "./readCache";
 
@@ -137,26 +141,47 @@ let reconcilePending = false;
 let routeScopeKey: string | null = null;
 let releaseRouteScope: (() => void) | null = null;
 
-function replaceRouteScope(scopedThread: ReturnType<typeof parseHostedScopedThreadPath>): void {
-  const nextKey = scopedThread
-    ? JSON.stringify([scopedThread.environmentId, scopedThread.threadId])
+/**
+ * The connection demand a route holds: its thread's detail, and with retained
+ * environment sessions the routed environment itself on a route without a
+ * thread, since there selecting a node only moves the cursor and connects
+ * nothing.
+ */
+interface RouteScope {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId | null;
+}
+
+function retainsEnvironmentSessions(): boolean {
+  return hostedEnvironmentSessionsMode() === "retained";
+}
+
+function routeScopeFor(
+  environmentId: EnvironmentId | null,
+  scopedThread: ReturnType<typeof parseHostedScopedThreadPath>,
+): RouteScope | null {
+  if (scopedThread) return scopedThread;
+  return environmentId !== null && retainsEnvironmentSessions()
+    ? { environmentId, threadId: null }
     : null;
+}
+
+function routeScopeKeyFor(scope: RouteScope | null): string | null {
+  return scope ? JSON.stringify([scope.environmentId, scope.threadId]) : null;
+}
+
+function replaceRouteScope(scope: RouteScope | null): void {
+  const nextKey = routeScopeKeyFor(scope);
   if (nextKey === routeScopeKey) return;
   releaseRouteScope?.();
   releaseRouteScope = null;
   routeScopeKey = nextKey;
-  if (scopedThread) {
-    releaseRouteScope = retainHostedWorkspaceThreadScope(
-      scopedThread.environmentId,
-      scopedThread.threadId,
-    );
+  if (scope) {
+    releaseRouteScope =
+      scope.threadId === null
+        ? hostedWebConnectionScopes.retain(scope.environmentId, { type: "interactive" })
+        : retainHostedWorkspaceThreadScope(scope.environmentId, scope.threadId);
   }
-}
-
-function routeScopeKeyFor(
-  scopedThread: ReturnType<typeof parseHostedScopedThreadPath>,
-): string | null {
-  return scopedThread ? JSON.stringify([scopedThread.environmentId, scopedThread.threadId]) : null;
 }
 
 /**
@@ -237,7 +262,13 @@ function reconcile(): void {
     replaceRouteScope(null);
     restoreRequestedNodeId = null;
     restoreOriginNodeId = null;
-    if (state.selectedNode && !hasActiveHostedWorkspaceCoordinator()) {
+    // With one session the workspace coordinator releases the selection along
+    // with its demand. With retained sessions releases never move the cursor,
+    // so the directory route clears it here, and that releases nothing.
+    if (
+      state.selectedNode &&
+      (retainsEnvironmentSessions() || !hasActiveHostedWorkspaceCoordinator())
+    ) {
       const terminalSelection =
         state.selectionStatus === "revoked" ||
         state.selectionStatus === "authorization-removed" ||
@@ -256,8 +287,9 @@ function reconcile(): void {
   }
 
   const scopedThread = parseHostedScopedThreadPath(routed.logicalPathname);
-  if (routeScopeKeyFor(scopedThread) !== routeScopeKey) replaceRouteScope(null);
   const directoryNode = state.nodes.find((candidate) => candidate.id === nodeId) ?? null;
+  const routeScope = routeScopeFor(directoryNode?.environmentId ?? null, scopedThread);
+  if (routeScopeKeyFor(routeScope) !== routeScopeKey) replaceRouteScope(null);
   const hasCachedView =
     scopedThread !== null &&
     selectThreadExistsByRef(useStore.getState(), scopedThread) &&
@@ -279,7 +311,7 @@ function reconcile(): void {
     return;
   }
   if (state.selectedNode?.id === nodeId) {
-    replaceRouteScope(scopedThread);
+    replaceRouteScope(routeScope);
     restoreRequestedNodeId = null;
     interactiveNodeId = null;
     if (state.sessionEstablished) {
@@ -347,14 +379,23 @@ function reconcile(): void {
     return;
   }
   const interactive = interactiveNodeId === nodeId;
-  replaceRouteScope(scopedThread);
+  replaceRouteScope(routeScopeFor(node.environmentId, scopedThread));
   // Scoped thread demand is acquired above. The environment-keyed
   // coordinator owns normal activation and eviction. Its catalog eligibility
   // intentionally excludes offline nodes, so a URL-originated offline restore
   // enters the same singular controller lifecycle here instead of being
-  // stranded on the pre-selection surface.
+  // stranded on the pre-selection surface. With retained sessions selecting
+  // only moves the cursor: the route scope is the demand the coordinator
+  // connects, so the swap never waits for, or releases, another environment.
   const urlOfflineRestore = scopedThread !== null && !node.presence.online && !interactive;
-  if (scopedThread && hasActiveHostedWorkspaceCoordinator() && !urlOfflineRestore) return;
+  if (
+    scopedThread &&
+    !retainsEnvironmentSessions() &&
+    hasActiveHostedWorkspaceCoordinator() &&
+    !urlOfflineRestore
+  ) {
+    return;
+  }
   if (restoreRequestedNodeId === nodeId) return;
   restoreRequestedNodeId = nodeId;
   restoreOriginNodeId = interactive ? null : nodeId;
