@@ -13,7 +13,9 @@ import GitActionsControl, {
 import { CrownOverview } from "../overview/crown/CrownOverview";
 import type { CrownOverviewProps } from "../overview/crown/crownTypes";
 import { useWorktreeNotes, type WorktreeNotesTarget } from "../overview/notes/useWorktreeNotes";
+import type { GitActionRunnerInput } from "../useGitActionRunner";
 import { type ChatProjectTarget, usePromoteChatBinding } from "./ChatProjectActions";
+import { useCrownShipBinding } from "./useCrownShipBinding";
 import type { PostPushWorkflowDiscoveryWatch } from "../postPushWorkflowDiscovery.logic";
 import { type ChatOverviewModelInput, useChatOverviewModel } from "./useChatOverviewModel";
 
@@ -48,6 +50,8 @@ export type ChatOverviewPanelProps = Omit<
   preview?: ReactNode;
   /** The git controls' background work ({@link GitThreadSync}), mounted while the overview is. */
   sourceControlSync?: ReactNode;
+  /** The checkout the crown's Ship button acts on; without it the button opens the branch card. */
+  shipTarget?: Omit<GitActionRunnerInput, "detectedChangeRequest"> | undefined;
 } & (
     | {
         /** The frozen web phone tier's full-screen classic panel. */
@@ -78,8 +82,6 @@ export interface OverviewPanelControlsInput {
 
 export interface OverviewPanelControls {
   sourceControlActions: (detectedChangeRequest: ChangeRequest | null) => ReactNode;
-  /** The same controls as explicit Commit / Push / PR / Pull buttons (the crown's branch preview). */
-  sourceControlQuickActions: (detectedChangeRequest: ChangeRequest | null) => ReactNode;
   branchControl: ReactNode;
   /** Keeps the thread in step with its checkout whether or not the controls are shown. */
   sourceControlSync: ReactNode;
@@ -121,11 +123,6 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
   const sourceControlActions = useCallback(
     (detectedChangeRequest: ChangeRequest | null) =>
       renderSourceControl("block", detectedChangeRequest),
-    [renderSourceControl],
-  );
-  const sourceControlQuickActions = useCallback(
-    (detectedChangeRequest: ChangeRequest | null) =>
-      renderSourceControl("actions", detectedChangeRequest),
     [renderSourceControl],
   );
 
@@ -176,7 +173,7 @@ export function useOverviewPanelControls(input: OverviewPanelControlsInput): Ove
     ],
   );
 
-  return { sourceControlActions, sourceControlQuickActions, branchControl, sourceControlSync };
+  return { sourceControlActions, branchControl, sourceControlSync };
 }
 
 type ChatOverviewPanelElementProps = ChatOverviewPanelProps & {
@@ -189,7 +186,7 @@ type ChatOverviewPanelElementProps = ChatOverviewPanelProps & {
  * Crown rail on desktop, or the classic panel inside the phone sheet.
  */
 export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
-  const { layoutProps, readiness } = useChatOverviewModel(props);
+  const { layoutProps, readiness, detectedChangeRequest } = useChatOverviewModel(props);
   const userGitActionActive = useGitActionActivity(props.environmentId, props.gitCwd);
   // The open crown reports this checkout's git actions in place of toasts.
   const gitNotice = useGitActionNotice(
@@ -213,6 +210,11 @@ export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
       <CrownWithNotes
         notesTarget={props.notesTarget}
         chatProject={props.chatProject}
+        shipTarget={
+          props.shipTarget && props.isGitRepo
+            ? { ...props.shipTarget, detectedChangeRequest }
+            : null
+        }
         {...layoutProps}
         preview={props.preview}
         threadTitle={props.threadTitle}
@@ -236,7 +238,7 @@ export function ChatOverviewPanel(props: ChatOverviewPanelElementProps) {
 /** What ChatView hands the on-demand overview panel. */
 export type ChatOverviewPanelWithControlsProps = DistributiveOmit<
   ChatOverviewPanelElementProps,
-  "sourceControlActions" | "sourceControlQuickActions" | "branchControl" | "sourceControlSync"
+  "sourceControlActions" | "branchControl" | "sourceControlSync" | "shipTarget"
 > & {
   /** The thread's git controls, built here so ChatView stays free of them. */
   controls: OverviewPanelControlsInput;
@@ -253,15 +255,21 @@ export function ChatOverviewPanelWithControls({
   controls,
   ...props
 }: ChatOverviewPanelWithControlsProps) {
-  const { sourceControlActions, sourceControlQuickActions, branchControl, sourceControlSync } =
+  const { sourceControlActions, branchControl, sourceControlSync } =
     useOverviewPanelControls(controls);
+  const { gitCwd, activeThreadRef, routeKind, draftId, onPostPush } = controls;
   return props.presentation === "crown" ? (
     <ChatOverviewPanel
       {...props}
       sourceControlActions={sourceControlActions}
-      sourceControlQuickActions={sourceControlQuickActions}
       branchControl={branchControl}
       sourceControlSync={sourceControlSync}
+      shipTarget={{
+        gitCwd,
+        activeThreadRef,
+        ...(routeKind === "draft" && draftId ? { draftId } : {}),
+        onPostPush,
+      }}
     />
   ) : (
     <ChatOverviewPanel
@@ -273,19 +281,34 @@ export function ChatOverviewPanelWithControls({
   );
 }
 
-/** The crown bound to the thread's notes and chat; the phone sheet never reads them. */
+/** The crown bound to the thread's notes, chat and Ship button; the phone sheet never reads them. */
 function CrownWithNotes({
   notesTarget,
   chatProject,
+  shipTarget,
   ...props
-}: Omit<CrownOverviewProps, "notes" | "chat"> & {
+}: Omit<CrownOverviewProps, "notes" | "chat" | "ship"> & {
   readonly open: boolean;
   readonly notesTarget: WorktreeNotesTarget | null;
   readonly chatProject: ChatProjectTarget | null;
+  readonly shipTarget: GitActionRunnerInput | null;
 }) {
   const notes = useWorktreeNotes(notesTarget);
   const chat = usePromoteChatBinding(chatProject);
-  return <CrownOverview {...props} notes={notes} chat={chat} />;
+  const { ship, dialog } = useCrownShipBinding({
+    gitCwd: shipTarget?.gitCwd ?? null,
+    activeThreadRef: shipTarget?.activeThreadRef ?? null,
+    draftId: shipTarget?.draftId,
+    detectedChangeRequest: shipTarget?.detectedChangeRequest ?? null,
+    onPostPush: shipTarget?.onPostPush,
+    enabled: shipTarget !== null,
+  });
+  return (
+    <>
+      <CrownOverview {...props} notes={notes} chat={chat} ship={ship} />
+      {dialog}
+    </>
+  );
 }
 
 export default ChatOverviewPanel;

@@ -23,6 +23,7 @@ import {
 import { CrownPreviewDock } from "./CrownPreviewDock";
 import { CrownRailNav } from "./CrownRailNav";
 import {
+  crownRailKeyForSection,
   crownSectionForRailKey,
   visibleCrownRailItems,
   type CrownRailKey,
@@ -68,7 +69,7 @@ function isFocusDropped(): boolean {
  * `open` drives the enter / exit transition while the parent delays unmount.
  */
 export function CrownOverview(props: CrownOverviewProps & { readonly open?: boolean }) {
-  const { open = true, isGitRepo, chat } = props;
+  const { open = true, isGitRepo, chat, ship } = props;
   const notes = props.notes?.available ? props.notes : undefined;
   const reducedMotion = useReducedMotionEffective();
   const paneFocused = usePaneFocus();
@@ -80,6 +81,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const summary = buildCrownRailSummary(props, {
     isGitRepo,
     notesFilled: notes?.filled === true,
+    ship,
   });
   const headline = resolveCrownHeadline(summary, props);
   const items = visibleCrownRailItems({
@@ -123,10 +125,12 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   const cardSection: CrownSection = selectedSection ?? headlineSection;
   const flyout = useCrownFlyout({ enabled: mode !== "card" });
 
-  // A composer focused in the Notes preview holds the flyout: leaving it or
-  // hovering another icon would drop the draft. Focus leaving lets it close.
+  // A field focused in the Notes or Ship preview (the notes composer, the
+  // commit message) holds the flyout: leaving it or hovering another icon
+  // would drop the draft. Focus leaving lets it close.
   const [flyoutEditingRaw, setFlyoutEditing] = useState(false);
-  const flyoutEditing = flyoutEditingRaw && flyout.openKey === "notes";
+  const flyoutEditing =
+    flyoutEditingRaw && (flyout.openKey === "notes" || flyout.openKey === "ship");
   const pointerInFlyoutRef = useRef(false);
   const onRailPointerOver = (key: CrownRailKey, el: HTMLElement) => {
     if (flyoutEditing && key !== flyout.openKey) return;
@@ -320,6 +324,11 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   };
 
   const onRailClick = (key: CrownRailKey, button: HTMLElement, event: MouseEvent) => {
+    // The rail's Ship button ships in one click; with nothing to ship it opens the branch card.
+    if (key === "ship" && ship && (ship.steps.length > 0 || ship.phase !== "idle")) {
+      ship.ship();
+      return;
+    }
     openCard(crownSectionForRailKey(key), button, event.detail === 0);
   };
 
@@ -382,7 +391,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
               items={items}
               summary={summary}
               pings={alerts.pings}
-              activeKey={cardSection}
+              activeKey={crownRailKeyForSection(cardSection)}
               onItemClick={onSpineClick}
             />
           }
@@ -410,6 +419,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
         reducedMotion={reducedMotion}
         notes={notes}
         chat={chat}
+        ship={ship}
         onPointerEnter={onFlyoutPointerEnter}
         onPointerLeave={onFlyoutPointerLeave}
         onEditingChange={onFlyoutEditingChange}

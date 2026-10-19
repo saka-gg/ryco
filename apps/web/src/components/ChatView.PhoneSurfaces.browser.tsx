@@ -600,11 +600,15 @@ describe("ChatView PhoneSurfaces (full app)", () => {
       });
       const crownRoot = rail.closest<HTMLElement>('[data-slot="crown-overview"]')!;
 
-      // An icon click expands the island into the card on that section.
-      rail.querySelector<HTMLElement>('[data-nav-key="branch"]')!.click();
+      // An icon click expands the island into the card on that section; the
+      // branch section opens from the spine (the rail's Ship icon ships instead).
+      rail.querySelector<HTMLElement>('[data-nav-key="changes"]')!.click();
       await vi.waitFor(() => {
         expect(crownRoot.dataset.mode).toBe("card");
       });
+      crownRoot
+        .querySelector<HTMLElement>('[data-slot="crown-spine"] [data-nav-key="ship"]')!
+        .click();
       const branchSection = await waitForElement(
         () =>
           crownRoot.querySelector<HTMLElement>(

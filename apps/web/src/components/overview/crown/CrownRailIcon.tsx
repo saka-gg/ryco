@@ -1,6 +1,8 @@
+import { CircleCheckIcon } from "lucide-react";
+
 import { CheckRing } from "./CheckRing";
 import { CrownBadge } from "./CrownBadge";
-import type { CrownRailSummary } from "./crownModel.logic";
+import { buildShipRingSegments, type CrownRailSummary } from "./crownModel.logic";
 import type { CrownRailItem } from "./crownSections";
 import { PlanArc } from "./PlanArc";
 
@@ -19,7 +21,10 @@ export function crownRailIconState(
         "data-state": summary.pr.conflict ? "conflict" : (summary.pr.state ?? "none"),
       };
     case "ship":
-      return { "data-ready": summary.ship.ready ? "true" : undefined };
+      return {
+        "data-ready": summary.ship.ready ? "true" : undefined,
+        "data-phase": summary.ship.phase === "idle" ? undefined : summary.ship.phase,
+      };
     default:
       return {};
   }
@@ -39,14 +44,10 @@ function IconAccessory(props: {
           <CrownBadge value={summary.agents.count} />
         </>
       );
-    case "branch":
-      return <CrownBadge value={summary.branch.badge} />;
     case "changes":
       return <CrownBadge value={summary.changes.count} />;
     case "notes":
       return <CrownBadge value={summary.notes.filled ? "•" : ""} variant="note" />;
-    case "ship":
-      return <CrownBadge value={summary.ship.count} variant="info" />;
     default:
       return null;
   }
@@ -78,6 +79,31 @@ export function CrownRailIcon(props: {
       );
     case "planArc":
       return <PlanArc pct={summary.plan.pct} />;
+    case "ship": {
+      const { phase, steps, runSteps, activeIndex } = summary.ship;
+      // Running (or waiting out the grace): one arc per step around a small rocket.
+      if (phase !== "idle") {
+        return (
+          <>
+            <CheckRing
+              segments={buildShipRingSegments(runSteps, activeIndex)}
+              viewBox={32}
+              radius={12.5}
+              className="crown-rail-ring"
+            />
+            <Icon aria-hidden="true" className="crown-ship-glyph" />
+          </>
+        );
+      }
+      if (steps === 0) return <CircleCheckIcon aria-hidden="true" className="crown-rail-glyph" />;
+      return (
+        <>
+          <i aria-hidden="true" className="crown-ship-ring" />
+          <Icon aria-hidden="true" className="crown-rail-glyph" />
+          <CrownBadge value={steps} variant="info" />
+        </>
+      );
+    }
     case "icon":
       return (
         <>

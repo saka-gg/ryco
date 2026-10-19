@@ -1,12 +1,11 @@
 import {
   BotIcon,
   CircleCheckIcon,
-  CloudUploadIcon,
   FileDiffIcon,
   FolderGit2Icon,
-  GitBranchIcon,
   GitPullRequestIcon,
   NotebookPenIcon,
+  RocketIcon,
   SparklesIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -28,8 +27,12 @@ export type CrownSection =
   | "notes"
   | "project";
 
-/** A rail button. `ship` (push) opens the branch section. */
-export type CrownRailKey = CrownSection | "ship";
+/**
+ * A rail button. `ship` stands for the branch section: on the rail it is the
+ * one-click Ship button (commit, push, pull request); on the card's spine it
+ * selects the branch detail like any other section.
+ */
+export type CrownRailKey = Exclude<CrownSection, "branch"> | "ship";
 
 /** Alert and ping colours; each maps to a CSS variable in {@link CROWN_TONE_VAR}. */
 export type CrownTone =
@@ -42,13 +45,15 @@ export type CrownTone =
   | "note"
   | "neutral";
 
-/** How a rail button draws its glyph. */
-export type CrownGlyphKind = "icon" | "checkRing" | "planArc";
+/** How a rail button draws its glyph; `ship` swaps between rocket, step ring and done. */
+export type CrownGlyphKind = "icon" | "checkRing" | "planArc" | "ship";
 
 export interface CrownRailItem {
   readonly key: CrownRailKey;
   readonly section: CrownSection;
   readonly label: string;
+  /** The section's title when it differs from the button's label. */
+  readonly sectionLabel?: string;
   readonly icon: LucideIcon;
   readonly glyph: CrownGlyphKind;
   /** Rail group; a separator renders where the group changes. */
@@ -64,16 +69,6 @@ export interface CrownRailItem {
 }
 
 export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
-  {
-    key: "branch",
-    section: "branch",
-    label: "Branch",
-    icon: GitBranchIcon,
-    glyph: "icon",
-    group: "status",
-    requiresGit: true,
-    requiresNotes: false,
-  },
   {
     key: "changes",
     section: "changes",
@@ -149,21 +144,19 @@ export const CROWN_RAIL_ITEMS: ReadonlyArray<CrownRailItem> = [
   {
     key: "ship",
     section: "branch",
-    label: "Push",
-    icon: CloudUploadIcon,
-    glyph: "icon",
+    label: "Ship",
+    sectionLabel: "Branch",
+    icon: RocketIcon,
+    glyph: "ship",
     group: "tools",
     requiresGit: true,
     requiresNotes: false,
   },
 ];
 
-/** Each section's title: the label of the rail item that owns it. */
+/** Each section's title, from the rail item that owns it. */
 export const CROWN_SECTION_LABEL = Object.fromEntries(
-  CROWN_RAIL_ITEMS.filter((item) => item.key === item.section).map((item) => [
-    item.section,
-    item.label,
-  ]),
+  CROWN_RAIL_ITEMS.map((item) => [item.section, item.sectionLabel ?? item.label]),
 ) as Readonly<Record<CrownSection, string>>;
 
 /** CSS colour for each tone. `--crown-*` tokens are declared on the island root. */
@@ -180,6 +173,11 @@ export const CROWN_TONE_VAR: Readonly<Record<CrownTone, string>> = {
 
 export function crownSectionForRailKey(key: CrownRailKey): CrownSection {
   return key === "ship" ? "branch" : key;
+}
+
+/** The rail button standing for a section: Ship for the branch. */
+export function crownRailKeyForSection(section: CrownSection): CrownRailKey {
+  return section === "branch" ? "ship" : section;
 }
 
 /** Rail items that apply to this thread, in rail order. */

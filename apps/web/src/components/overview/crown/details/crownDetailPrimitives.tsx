@@ -22,7 +22,7 @@ export type CrownDetailViewProps = Omit<CrownSectionDetailProps, "section">;
 
 /** The rail item that owns a section (its icon and git requirement). */
 export function crownRailItemForSection(section: CrownSection): CrownRailItem | undefined {
-  return CROWN_RAIL_ITEMS.find((item) => item.key === section);
+  return CROWN_RAIL_ITEMS.find((item) => item.section === section);
 }
 
 /** The flyout's heading row (`.dh`); the card titles the section itself, so it renders nothing there. */

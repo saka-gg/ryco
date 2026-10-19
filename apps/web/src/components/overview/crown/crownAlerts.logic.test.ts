@@ -509,7 +509,7 @@ describe("diffCrownSnapshots branch", () => {
     assert.deepInclude(event, {
       kind: "branch",
       section: "branch",
-      railKey: "branch",
+      railKey: "ship",
       tone: "neutral",
       icon: "commit",
       title: "2 new commits",

@@ -1,5 +1,3 @@
-import type { ReactNode } from "react";
-
 import type { OverviewChanges } from "../../overviewTypes";
 import { AheadBehind } from "../../overviewSections";
 import {
@@ -10,8 +8,8 @@ import {
   type CrownDetailViewProps,
 } from "./crownDetailPrimitives";
 
-/** The heading's `↑2 ↓1` / "in sync" meta (the lab's `.abx`). */
-function SyncMeta({ changes }: { changes: OverviewChanges }) {
+/** The heading's `↑2 ↓1` / "in sync" meta (the lab's `.abx`), shared with the Ship preview. */
+export function SyncMeta({ changes }: { changes: OverviewChanges }) {
   const parts = [
     changes.aheadCount > 0 ? `↑${changes.aheadCount}` : null,
     changes.behindCount > 0 ? `↓${changes.behindCount}` : null,
@@ -48,20 +46,11 @@ function BranchSyncRows({ changes }: { changes: OverviewChanges }) {
 }
 
 /**
- * The hover flyout's branch summary with explicit Commit / Push / PR / Pull
- * buttons (`sourceControlQuickActions`). The branch picker and the split
- * button's menu stay in the card: a combobox or menu opened inside a hover
- * preview would close under the pointer. The buttons' dialogs portal out but
- * stay inside the flyout in React, so the preview holds open while one is up.
- * Without the buttons (no checkout yet) a footnote points at the card.
+ * The branch summary for a hover preview without a Ship button (no checkout
+ * to act on yet). The branch picker and the git controls stay in the card: a
+ * combobox or menu opened inside a hover preview would close under the pointer.
  */
-function BranchPreview({
-  changes,
-  quickActions,
-}: {
-  changes: OverviewChanges | undefined;
-  quickActions: ReactNode;
-}) {
+function BranchPreview({ changes }: { changes: OverviewChanges | undefined }) {
   return (
     <>
       <CrownDetailHeading
@@ -77,11 +66,7 @@ function BranchPreview({
             </CrownKeyValueRow>
           ) : null}
           <BranchSyncRows changes={changes} />
-          {quickActions ? (
-            <div className="mt-2.5 w-full min-w-0">{quickActions}</div>
-          ) : (
-            <CrownDetailFootnote>Click to commit or push</CrownDetailFootnote>
-          )}
+          <CrownDetailFootnote>Click to open the branch</CrownDetailFootnote>
         </>
       ) : (
         <CrownDetailEmpty>No branch details yet</CrownDetailEmpty>
@@ -93,7 +78,7 @@ function BranchPreview({
 export function BranchDetail({ layout, variant }: CrownDetailViewProps) {
   const { changes, branchControl, sourceControlActions } = layout;
   if (variant === "flyout") {
-    return <BranchPreview changes={changes} quickActions={layout.sourceControlQuickActions} />;
+    return <BranchPreview changes={changes} />;
   }
   const hasContent = Boolean(branchControl || sourceControlActions || changes);
   return (

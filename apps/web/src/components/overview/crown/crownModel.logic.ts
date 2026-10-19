@@ -14,7 +14,7 @@ import {
   CROWN_RING_MIN_SEGMENT_PCT,
 } from "./crownLayout";
 import type { CrownRailItem, CrownSection, CrownTone } from "./crownSections";
-import type { CrownProject } from "./crownTypes";
+import type { CrownProject, CrownShipBinding, CrownShipPhase } from "./crownTypes";
 
 /**
  * Pure view model for the Crown rail: per-icon badges, the check ring and the
@@ -22,7 +22,8 @@ import type { CrownProject } from "./crownTypes";
  * `segRing()` (output/overview-concepts/rail-island.html).
  */
 
-export type CheckRingState = "pass" | "fail" | "running" | "queued";
+/** `current` marks the Ship step running now; check runs never use it. */
+export type CheckRingState = "pass" | "fail" | "running" | "queued" | "current";
 
 export interface CheckRingSegment {
   /** Run id, or `group:<state>` once the ring collapses. Stable across updates so arcs animate. */
@@ -40,7 +41,6 @@ export type CrownPrState = "open" | "draft" | "merged" | "closed";
 export interface CrownRailSummary {
   /** Outside a git repository the source-control icons are hidden and never headline. */
   readonly isGitRepo: boolean;
-  readonly branch: { readonly badge: string; readonly ahead: number };
   readonly changes: { readonly count: number };
   readonly checks: {
     readonly segments: ReadonlyArray<CheckRingSegment>;
@@ -65,8 +65,22 @@ export interface CrownRailSummary {
   readonly pr: { readonly state: CrownPrState | null; readonly conflict: boolean };
   /** The thread's worktree or project notes have text. */
   readonly notes: { readonly filled: boolean };
-  /** Commits a push would publish; `ready` lights the Push icon. */
-  readonly ship: { readonly count: number; readonly ready: boolean };
+  /**
+   * The Ship button: `count` is the commits a push would publish (the face's
+   * "to push" headline); `steps` and `label` what a click runs; `ready` lights
+   * the icon while a click would ship.
+   */
+  readonly ship: {
+    readonly count: number;
+    readonly steps: number;
+    readonly label: string | null;
+    readonly disabledReason: string | null;
+    readonly phase: CrownShipPhase;
+    readonly ready: boolean;
+    /** The run in progress: its step count and the running step's index (-1 while arming). */
+    readonly runSteps: number;
+    readonly activeIndex: number;
+  };
 }
 
 export interface CrownHeadline {
@@ -195,6 +209,47 @@ export function crownShipCount(changes: OverviewLayoutProps["changes"]): number 
   return 0;
 }
 
+type CrownShipSummaryInput = Pick<
+  CrownShipBinding,
+  "steps" | "label" | "disabledReason" | "phase" | "runSteps" | "activeStep"
+>;
+
+function crownShipSummary(
+  count: number,
+  ship: CrownShipSummaryInput | undefined,
+): CrownRailSummary["ship"] {
+  const steps = ship?.steps.length ?? 0;
+  const phase = ship?.phase ?? "idle";
+  const runSteps = ship?.runSteps ?? [];
+  return {
+    count,
+    steps,
+    label: ship ? ship.label : null,
+    disabledReason: ship?.disabledReason ?? null,
+    phase,
+    ready: steps > 0 && phase === "idle",
+    runSteps: runSteps.length,
+    activeIndex: ship?.activeStep ? runSteps.indexOf(ship.activeStep) : -1,
+  };
+}
+
+/** The Ship button's ring while it runs: done steps pass, the running one is current. */
+export function buildShipRingSegments(
+  total: number,
+  activeIndex: number,
+  gap = CROWN_RAIL_RING_GAP_PCT,
+): CheckRingSegment[] {
+  if (total <= 0) return [];
+  const slot = 100 / total;
+  const appliedGap = total > 1 ? gap : 0;
+  return Array.from({ length: total }, (_, index) => ({
+    key: `ship:${index}`,
+    state: index < activeIndex ? "pass" : index === activeIndex ? "current" : "queued",
+    len: Math.max(slot - appliedGap, CROWN_RING_MIN_SEGMENT_PCT),
+    offset: -(index * slot + appliedGap / 2),
+  }));
+}
+
 /**
  * The prototype's `segRing()`: one arc per run in `pathLength=100` units, each
  * `100/n - gap` long (at least 0.6) and offset to start `gap/2` into its slot.
@@ -235,7 +290,13 @@ const COLLAPSED_RING_ORDER: ReadonlyArray<CheckRingState> = ["fail", "running", 
 function collapseRingStates(
   runs: ReadonlyArray<Pick<OverviewPullRequestCheckRun, "tone">>,
 ): Array<{ key: string; state: CheckRingState; weight: number }> {
-  const counts: Record<CheckRingState, number> = { fail: 0, running: 0, queued: 0, pass: 0 };
+  const counts: Record<CheckRingState, number> = {
+    fail: 0,
+    running: 0,
+    queued: 0,
+    pass: 0,
+    current: 0,
+  };
   for (const run of runs) counts[checkRingStateForTone(run.tone)] += 1;
   return COLLAPSED_RING_ORDER.filter((state) => counts[state] > 0).map((state) => ({
     key: `group:${state}`,
@@ -246,7 +307,11 @@ function collapseRingStates(
 
 export function buildCrownRailSummary(
   layout: OverviewLayoutProps,
-  input: { readonly isGitRepo: boolean; readonly notesFilled?: boolean },
+  input: {
+    readonly isGitRepo: boolean;
+    readonly notesFilled?: boolean;
+    readonly ship?: CrownShipSummaryInput | undefined;
+  },
 ): CrownRailSummary {
   const summary = getOverviewSummary(layout);
   const checks = input.isGitRepo ? countCrownChecks(layout.pullRequest) : NO_CHECKS;
@@ -257,10 +322,6 @@ export function buildCrownRailSummary(
   const prState = input.isGitRepo ? crownPrState(layout.pullRequest) : null;
   return {
     isGitRepo: input.isGitRepo,
-    branch: {
-      badge: summary.aheadCount > 0 ? `↑${summary.aheadCount}` : "",
-      ahead: summary.aheadCount,
-    },
     changes: { count: summary.fileCount },
     checks: {
       segments: input.isGitRepo ? buildCheckRingSegments(layout.pullRequest?.latestRuns ?? []) : [],
@@ -282,7 +343,7 @@ export function buildCrownRailSummary(
       conflict: prState !== null && layout.pullRequest?.hasMergeConflicts === true,
     },
     notes: { filled: input.notesFilled === true },
-    ship: { count: shipCount, ready: shipCount > 0 },
+    ship: crownShipSummary(shipCount, input.isGitRepo ? input.ship : undefined),
   };
 }
 
@@ -296,10 +357,6 @@ export function crownRailItemDescription(
   summary: CrownRailSummary,
 ): string | null {
   switch (item.key) {
-    case "branch":
-      return summary.branch.ahead > 0
-        ? `${formatCount(summary.branch.ahead, "commit")} ahead`
-        : null;
     case "changes":
       return summary.changes.count > 0
         ? `${formatCount(summary.changes.count, "file")} changed`
@@ -330,10 +387,13 @@ export function crownRailItemDescription(
     }
     case "notes":
       return summary.notes.filled ? "Has notes" : null;
-    case "ship":
-      return summary.ship.count > 0
-        ? `${formatCount(summary.ship.count, "commit")} to push`
-        : "Nothing to push";
+    case "ship": {
+      const { phase, steps, label, disabledReason } = summary.ship;
+      if (phase === "arming") return "Starting, click again to cancel";
+      if (phase === "running") return "Shipping";
+      if (steps > 0 && label) return label;
+      return disabledReason ?? "Nothing to ship";
+    }
     case "project":
       return null;
   }

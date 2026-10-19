@@ -252,7 +252,7 @@ describe("Turn into project… (full app)", () => {
       );
       expect(
         document.querySelector(
-          '[data-slot="crown-overview"] [data-slot="crown-rail"] [data-nav-key="branch"]',
+          '[data-slot="crown-overview"] [data-slot="crown-rail"] [data-nav-key="ship"]',
         ),
       ).not.toBeNull();
       expect(

@@ -195,6 +195,7 @@ export function buildMenuItems(
 /** Why every git action is unavailable while one runs, or before status loads. */
 export const GIT_ACTION_BUSY_HINT = "Git action in progress.";
 export const GIT_STATUS_UNAVAILABLE_HINT = "Git status is unavailable.";
+export const GIT_DIVERGED_HINT = "Branch has diverged from upstream. Rebase/merge first.";
 
 export function resolveQuickAction(
   gitStatus: VcsStatusResult | null,
@@ -291,7 +292,7 @@ export function resolveQuickAction(
       label: "Sync ref",
       disabled: true,
       kind: "show_hint",
-      hint: "Branch has diverged from upstream. Rebase/merge first.",
+      hint: GIT_DIVERGED_HINT,
     };
   }
 
@@ -341,34 +342,119 @@ export function resolveQuickAction(
   };
 }
 
-/** The explicit action buttons of the `actions` appearance, in display order. */
-export type GitActionTileId = "commit" | "push" | "pr" | "pull";
+/** One step the crown's Ship button runs, in order. */
+export type GitShipStep = "pull" | "commit" | "push" | "pr";
 
 /**
- * Which action button carries the quick action, so the `actions` appearance
- * can mark the recommended next step. A commit-including action points at
- * Commit while there is something to commit (its button opens the commit
- * dialog); `commit_push` on a clean default ref is a plain push.
+ * What one click of the crown's Ship button does: every step still needed to
+ * get the branch out, run back to back. It is the quick action plus a pull in
+ * front when the branch is behind its upstream; pulls are fast-forward only,
+ * so the pull has to land before anything is committed, and a diverged branch
+ * cannot ship at all.
  */
-export function resolveRecommendedGitActionTile(
-  quickAction: GitQuickAction,
-  hasWorkingTreeChanges: boolean,
-): GitActionTileId | null {
-  switch (quickAction.kind) {
-    case "open_pr":
-      return "pr";
-    case "open_publish":
-      return "push";
-    case "run_pull":
-      return "pull";
-    case "show_hint":
-      return null;
-    case "run_action":
-      if (quickAction.action === "create_pr") return "pr";
-      if (quickAction.action === "push") return "push";
-      if (quickAction.action === "commit" || hasWorkingTreeChanges) return "commit";
-      return quickAction.action === "commit_push" ? "push" : null;
+export interface GitShipPlan {
+  readonly steps: ReadonlyArray<GitShipStep>;
+  /** The stacked action after the optional pull; null when at most a pull runs. */
+  readonly action: GitStackedAction | null;
+  /** The steps as one phrase ("Pull, commit, push & create PR"). */
+  readonly label: string;
+  /** Why nothing can ship; null while there are steps or a pull request to open. */
+  readonly disabledReason: string | null;
+  /** Nothing is left to ship but a pull request is open: the button opens it. */
+  readonly opensPullRequest: boolean;
+}
+
+/** The steps a stacked action takes on this checkout. */
+function stackedActionSteps(action: GitStackedAction, gitStatus: VcsStatusResult): GitShipStep[] {
+  const steps: GitShipStep[] = [];
+  const commits =
+    action === "commit" ||
+    ((action === "commit_push" || action === "commit_push_pr") && gitStatus.hasWorkingTreeChanges);
+  if (commits) steps.push("commit");
+  const pushes =
+    action === "push" ||
+    action === "commit_push" ||
+    action === "commit_push_pr" ||
+    (action === "create_pr" && (!gitStatus.hasUpstream || gitStatus.aheadCount > 0));
+  if (pushes) steps.push("push");
+  if (action === "create_pr" || action === "commit_push_pr") steps.push("pr");
+  return steps;
+}
+
+export function gitShipStepVerb(step: GitShipStep, terminology: ChangeRequestTerminology): string {
+  return step === "pr" ? `create ${terminology.shortLabel}` : step;
+}
+
+function shipLabel(
+  steps: ReadonlyArray<GitShipStep>,
+  terminology: ChangeRequestTerminology,
+): string {
+  const verbs = steps.map((step) => gitShipStepVerb(step, terminology));
+  const phrase =
+    verbs.length > 1 ? `${verbs.slice(0, -1).join(", ")} & ${verbs.at(-1)}` : (verbs[0] ?? "");
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
+}
+
+const NOTHING_TO_SHIP = "Nothing to ship";
+
+export function resolveShipPlan(
+  gitStatus: VcsStatusResult | null,
+  isBusy: boolean,
+  isDefaultRef = false,
+  hasPrimaryRemote = true,
+): GitShipPlan {
+  const blocked = (reason: string): GitShipPlan => ({
+    steps: [],
+    action: null,
+    label: NOTHING_TO_SHIP,
+    disabledReason: reason,
+    opensPullRequest: false,
+  });
+  if (isBusy) return blocked(GIT_ACTION_BUSY_HINT);
+  if (!gitStatus) return blocked(GIT_STATUS_UNAVAILABLE_HINT);
+
+  const behind = gitStatus.hasUpstream ? gitStatus.behindCount : 0;
+  if (behind > 0 && gitStatus.aheadCount > 0) return blocked(GIT_DIVERGED_HINT);
+
+  const terminology = resolveChangeRequestTerminology(gitStatus);
+  const pull: GitShipStep[] = behind > 0 ? ["pull"] : [];
+  // What the quick action does once the pull has caught the branch up.
+  const next = resolveQuickAction(
+    { ...gitStatus, behindCount: 0 },
+    false,
+    isDefaultRef,
+    hasPrimaryRemote,
+  );
+  if (next.kind === "run_action" && next.action) {
+    const steps = [...pull, ...stackedActionSteps(next.action, gitStatus)];
+    return {
+      steps,
+      action: next.action,
+      label: shipLabel(steps, terminology),
+      disabledReason: null,
+      opensPullRequest: false,
+    };
   }
+  if (pull.length > 0) {
+    return {
+      steps: pull,
+      action: null,
+      label: shipLabel(pull, terminology),
+      disabledReason: null,
+      opensPullRequest: false,
+    };
+  }
+  if (next.kind === "open_pr") {
+    return {
+      steps: [],
+      action: null,
+      label: next.label,
+      disabledReason: null,
+      opensPullRequest: true,
+    };
+  }
+  if (next.kind === "open_publish") return blocked("Publish the repository first.");
+  return blocked(next.hint ?? NOTHING_TO_SHIP);
 }
 
 /**

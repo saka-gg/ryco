@@ -90,6 +90,38 @@
   color: var(--info-foreground);
 }
 
+/* Ship: a ring breathes while a click would ship; while it runs, the ring shows one arc per step. */
+.crown-ship-ring {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.crown-rail-btn[data-nav-key="ship"][data-ready="true"] > .crown-ship-ring {
+  animation: crown-ship-breathe 1.8s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+.crown-rail-btn[data-phase] {
+  color: var(--info-foreground);
+}
+
+.crown-ship-glyph {
+  width: 12px;
+  height: 12px;
+}
+
+@keyframes crown-ship-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--info) 70%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--info) 0%, transparent);
+  }
+}
+
 /* Rings: the CI ring (per-run arcs) and the plan arc share the track. */
 .crown-ring {
   overflow: visible;
@@ -135,6 +167,13 @@
 .crown-ring-seg[data-s="running"] {
   stroke: var(--warning);
   animation: crown-segpulse 1.1s ease-in-out infinite;
+  animation-play-state: var(--app-motion-activity-play-state, running);
+}
+
+/* The Ship step running now. */
+.crown-ring-seg[data-s="current"] {
+  stroke: var(--info);
+  animation: crown-segpulse 1.4s ease-in-out infinite;
   animation-play-state: var(--app-motion-activity-play-state, running);
 }
 

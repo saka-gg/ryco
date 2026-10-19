@@ -12,7 +12,8 @@ import { stackedThreadToast, toastManager, type ThreadToastData } from "./compon
  */
 
 export type GitActionNoticeKind = "pull" | "commit" | "push" | "pr";
-export type GitActionNoticeStatus = "running" | "success" | "error";
+/** `cancelled`: stopped before anything ran (the Ship button's grace period). */
+export type GitActionNoticeStatus = "running" | "success" | "error" | "cancelled";
 
 export interface GitActionNoticeAction {
   readonly label: string;
@@ -102,6 +103,10 @@ export interface GitActionReporter {
     readonly action?: GitActionNoticeAction | undefined;
   }) => void;
   readonly failed: (failure: { readonly title: string; readonly description?: string }) => void;
+  /** Ends the run before it did anything. */
+  readonly cancelled: (result: { readonly title: string; readonly description?: string }) => void;
+  /** Drops this run's toast without a result, when a follow-up run reports in its place. */
+  readonly dismiss: () => void;
 }
 
 /** Results stay up this long once seen (toasts only; the crown keeps its own dwell). */
@@ -178,5 +183,16 @@ export function createGitActionReporter(input: {
           ...(toastData !== undefined ? { data: toastData } : {}),
         }),
       ),
+    cancelled: ({ title, description }) =>
+      report({ status: "cancelled", title, description }, () => ({
+        type: "info",
+        title,
+        ...(description !== undefined ? { description } : {}),
+        ...(toastData !== undefined ? { data: toastData } : {}),
+      })),
+    dismiss: () => {
+      if (toastId !== null) toastManager.close(toastId);
+      toastId = null;
+    },
   };
 }

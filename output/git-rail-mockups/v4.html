@@ -1,0 +1,1545 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root {
+--isl-bg: #0d0d0e;
+--isl-border: rgba(255, 255, 255, 0.08);
+--isl-fg: #f4f4f5;
+--isl-muted: #a1a1aa;
+--isl-faint: #6b6b73;
+--ok: #22c55e;
+--ok-fg: #4ade80;
+--bad: #ef4444;
+--bad-fg: #f87171;
+--warn: #f59e0b;
+--warn-fg: #fbbf24;
+--inf: #3b82f6;
+--inf-fg: #60a5fa;
+--merged: #c084fc;
+--plan: #a78bfa;
+--agent: #38bdf8;
+--note: #eccb6b;
+--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+--ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+--sans: var(--font-sans, "Inter", system-ui, sans-serif);
+--mono: var(--font-mono, "SF Mono", ui-monospace, Menlo, monospace);
+}
+* {
+box-sizing: border-box;
+}
+body {
+margin: 0;
+font-family: var(--sans);
+}
+button {
+font-family: inherit;
+}
+
+.wrap {
+display: flex;
+flex-direction: column;
+gap: 10px;
+}
+.bar {
+display: flex;
+flex-wrap: wrap;
+align-items: center;
+gap: 6px;
+}
+.bar .tag {
+font: 600 11px/1 var(--sans);
+letter-spacing: 0.06em;
+text-transform: uppercase;
+color: var(--muted-foreground);
+margin-right: 6px;
+}
+.seg {
+font: 500 12px/1 var(--sans);
+padding: 7px 11px;
+border-radius: 999px;
+border: 1px solid var(--border);
+background: transparent;
+color: var(--foreground);
+cursor: pointer;
+transition: background 0.15s, color 0.15s;
+}
+.seg:hover {
+background: var(--accent);
+}
+.seg[aria-pressed="true"] {
+background: var(--foreground);
+color: var(--background);
+border-color: transparent;
+}
+.hint {
+font-size: 11.5px;
+color: var(--muted-foreground);
+}
+
+.stage {
+position: relative;
+height: 560px;
+border-radius: var(--radius, 12px);
+background: var(--card);
+border: 1px solid var(--border);
+overflow: hidden;
+}
+.chat {
+position: absolute;
+left: 20px;
+top: 20px;
+bottom: 20px;
+right: 92px;
+display: flex;
+flex-direction: column;
+gap: 14px;
+font-size: 13px;
+line-height: 1.55;
+color: var(--foreground);
+}
+.chat .u {
+align-self: flex-end;
+max-width: 78%;
+padding: 8px 12px;
+border-radius: 16px;
+background: var(--secondary);
+color: var(--secondary-foreground);
+}
+.chat .a {
+color: var(--muted-foreground);
+max-width: 92%;
+}
+.chat .a b {
+color: var(--foreground);
+font-weight: 600;
+}
+.chat .tool {
+display: inline-flex;
+gap: 6px;
+align-items: center;
+font: 500 11.5px var(--mono);
+color: var(--muted-foreground);
+padding: 4px 8px;
+border-radius: 8px;
+background: var(--muted);
+align-self: flex-start;
+}
+.composer {
+margin-top: auto;
+height: 84px;
+border-radius: 18px;
+background: var(--muted);
+padding: 12px 14px;
+font-size: 13px;
+color: var(--muted-foreground);
+}
+
+.crown {
+position: absolute;
+top: 14px;
+right: 14px;
+width: 48px;
+color: var(--isl-fg);
+font-size: 12px;
+line-height: 1.45;
+}
+.ic {
+width: 16px;
+height: 16px;
+flex: none;
+}
+.ic.sm {
+width: 14px;
+height: 14px;
+}
+.ic.xs {
+width: 12px;
+height: 12px;
+}
+.mono {
+font-family: var(--mono);
+}
+.trunc {
+min-width: 0;
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+}
+.spin {
+animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+to {
+transform: rotate(360deg);
+}
+}
+
+.island {
+position: absolute;
+top: 0;
+right: 0;
+z-index: 6;
+width: 48px;
+height: 48px;
+border-radius: 24px;
+background: var(--isl-bg);
+border: 1px solid var(--isl-border);
+overflow: hidden;
+box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+transition:
+width 0.55s var(--ease-spring),
+box-shadow 0.4s ease;
+}
+.island[data-mode="alert"] {
+width: 272px;
+box-shadow:
+0 0 0 1px color-mix(in srgb, var(--tone) 50%, transparent),
+0 12px 34px -8px color-mix(in srgb, var(--tone) 45%, transparent);
+}
+.face {
+position: absolute;
+top: 0;
+right: 0;
+width: 46px;
+height: 46px;
+display: grid;
+place-items: center;
+}
+.logo {
+width: 22px;
+height: 22px;
+border-radius: 7px;
+display: grid;
+place-items: center;
+background: linear-gradient(140deg, #3f3f46, #18181b);
+box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+font: 700 11px/1 var(--sans);
+color: #fff;
+}
+.al {
+position: absolute;
+left: 16px;
+right: 50px;
+top: 0;
+bottom: 0;
+display: flex;
+align-items: center;
+gap: 10px;
+opacity: 0;
+transition: opacity 0.18s;
+}
+.island[data-mode="alert"] .al {
+opacity: 1;
+transition-delay: 0.14s;
+}
+.al-ic {
+color: var(--tone);
+display: grid;
+}
+.al b {
+display: block;
+font-size: 12.5px;
+font-weight: 600;
+}
+.al small {
+display: block;
+font-size: 11px;
+color: var(--isl-muted);
+}
+
+.rail {
+position: relative;
+margin-top: 56px;
+width: 48px;
+border-radius: 24px;
+background: var(--isl-bg);
+border: 1px solid var(--isl-border);
+box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+}
+.rail-list {
+position: relative;
+display: flex;
+flex-direction: column;
+align-items: center;
+gap: 5px;
+padding: 5px;
+}
+.hl {
+position: absolute;
+top: 0;
+left: 0;
+width: 36px;
+height: 36px;
+border-radius: 50%;
+background: rgba(255, 255, 255, 0.11);
+pointer-events: none;
+opacity: 0;
+transition:
+transform 0.42s var(--ease-spring),
+opacity 0.2s,
+width 0.2s,
+height 0.2s;
+}
+.sep {
+flex: none;
+width: 20px;
+height: 1px;
+margin: 2px 0;
+background: rgba(255, 255, 255, 0.09);
+}
+.rb {
+position: relative;
+z-index: 1;
+display: grid;
+flex: none;
+width: 36px;
+height: 36px;
+place-items: center;
+border: 0;
+padding: 0;
+border-radius: 50%;
+background: transparent;
+color: var(--isl-muted);
+cursor: pointer;
+transition: color 0.2s;
+}
+.rb > * {
+grid-area: 1 / 1;
+}
+.rb:hover,
+.rb[data-active="true"] {
+color: var(--isl-fg);
+}
+.rb:focus-visible {
+outline: 2px solid var(--inf-fg);
+outline-offset: 1px;
+}
+.rb[data-pr="open"] {
+color: var(--ok-fg);
+}
+.rb[data-pr="merged"] {
+color: var(--merged);
+}
+.rb[data-pr="draft"] {
+color: var(--isl-muted);
+}
+
+.bd {
+justify-self: end;
+align-self: end;
+min-width: 15px;
+height: 15px;
+margin: 0 -3px -2px 0;
+padding: 0 3px;
+border-radius: 8px;
+background: #222226;
+box-shadow: 0 0 0 2px var(--isl-bg);
+color: var(--isl-fg);
+font: 600 9px/15px var(--mono);
+text-align: center;
+white-space: nowrap;
+animation: pop 0.35s var(--ease-spring);
+}
+.bd.info {
+background: var(--inf);
+color: #fff;
+}
+.bd.warn {
+background: var(--warn);
+color: #1a1203;
+}
+.bd.ok {
+background: var(--ok);
+color: #04140a;
+}
+@keyframes pop {
+from {
+transform: scale(0.3);
+opacity: 0;
+}
+}
+
+.ring {
+width: 30px;
+height: 30px;
+overflow: visible;
+transform: rotate(-90deg);
+}
+.ring .tr {
+fill: none;
+stroke: rgba(255, 255, 255, 0.1);
+stroke-width: 2.5;
+}
+.ring .sg {
+fill: none;
+stroke-width: 2.5;
+stroke-linecap: round;
+transition: stroke 0.3s, stroke-dasharray 0.6s var(--ease-out), stroke-dashoffset 0.6s var(--ease-out);
+}
+.sg[data-s="pass"],
+.sg[data-s="done"] {
+stroke: var(--ok);
+}
+.sg[data-s="fail"] {
+stroke: var(--bad);
+}
+.sg[data-s="running"] {
+stroke: var(--warn);
+animation: pulse 1.1s ease-in-out infinite;
+}
+.sg[data-s="current"] {
+stroke: var(--inf);
+animation: pulse 1.4s ease-in-out infinite;
+}
+.sg[data-s="blocked"] {
+stroke: var(--warn);
+}
+.sg[data-s="q"] {
+stroke: rgba(255, 255, 255, 0.17);
+}
+.sg[data-s="plan"] {
+stroke: var(--plan);
+}
+@keyframes pulse {
+50% {
+opacity: 0.45;
+}
+}
+.dot {
+width: 7px;
+height: 7px;
+border-radius: 50%;
+background: color-mix(in srgb, var(--isl-muted) 60%, transparent);
+}
+.dot[data-ci="pass"] {
+background: var(--ok);
+}
+.dot[data-ci="fail"] {
+background: var(--bad);
+}
+.dot[data-ci="running"] {
+background: var(--warn);
+animation: pulse 1.1s infinite;
+}
+
+.fly {
+position: absolute;
+right: calc(100% + 10px);
+z-index: 5;
+width: 300px;
+padding: 14px;
+border-radius: 22px;
+background: var(--isl-bg);
+border: 1px solid var(--isl-border);
+box-shadow:
+0 24px 60px -14px rgba(0, 0, 0, 0.6),
+0 0 0 0.5px rgba(0, 0, 0, 0.4);
+transform-origin: right 40px;
+overflow: auto;
+scrollbar-width: none;
+transition: top 0.32s var(--ease-out);
+}
+.fly[hidden] {
+display: none;
+}
+.fly.enter {
+animation: fly-in 0.34s var(--ease-out);
+}
+@keyframes fly-in {
+from {
+opacity: 0;
+transform: translateX(10px) scale(0.95);
+}
+}
+.fly.pinned::after {
+content: "";
+position: absolute;
+top: 12px;
+right: 12px;
+width: 5px;
+height: 5px;
+border-radius: 50%;
+background: var(--isl-faint);
+}
+.dh {
+display: flex;
+align-items: center;
+gap: 7px;
+margin-bottom: 10px;
+font-size: 12.5px;
+font-weight: 600;
+padding-right: 10px;
+}
+.dh > .ic {
+color: var(--isl-muted);
+}
+.meta {
+margin-left: auto;
+flex: none;
+display: inline-flex;
+align-items: center;
+gap: 6px;
+font: 500 11px var(--mono);
+color: var(--isl-muted);
+}
+.up {
+color: var(--inf-fg);
+}
+.down {
+color: var(--warn-fg);
+}
+.add {
+color: var(--ok-fg);
+font-style: normal;
+}
+.del {
+color: var(--bad-fg);
+font-style: normal;
+}
+.faint {
+color: var(--isl-faint);
+}
+.muted {
+color: var(--isl-muted);
+}
+.grp {
+margin: 10px 4px 4px;
+display: flex;
+justify-content: space-between;
+font-size: 10px;
+font-weight: 600;
+letter-spacing: 0.07em;
+text-transform: uppercase;
+color: var(--isl-faint);
+}
+.row {
+display: flex;
+align-items: center;
+gap: 8px;
+padding: 3px 4px;
+min-width: 0;
+}
+.row .st {
+flex: none;
+width: 14px;
+font: 600 10px var(--mono);
+text-align: center;
+}
+.st.M {
+color: var(--warn-fg);
+}
+.st.A {
+color: var(--ok-fg);
+}
+.st.D {
+color: var(--bad-fg);
+}
+.row .nm {
+flex: 1;
+}
+.row .num {
+flex: none;
+font: 500 10.5px var(--mono);
+}
+.commit-row .hash {
+flex: none;
+font: 500 10.5px var(--mono);
+color: var(--isl-faint);
+}
+.empty {
+padding: 6px 4px;
+color: var(--isl-muted);
+}
+.note {
+display: flex;
+gap: 8px;
+align-items: flex-start;
+margin-top: 8px;
+padding: 8px 10px;
+border-radius: 12px;
+font-size: 11.5px;
+background: color-mix(in srgb, var(--warn) 12%, transparent);
+color: #fcd9a0;
+}
+.note .ic {
+color: var(--warn-fg);
+margin-top: 1px;
+}
+
+.btn {
+height: 28px;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+gap: 6px;
+padding: 0 11px;
+border-radius: 999px;
+border: 1px solid rgba(255, 255, 255, 0.1);
+background: rgba(255, 255, 255, 0.07);
+color: var(--isl-fg);
+font: 500 12px/1 var(--sans);
+white-space: nowrap;
+cursor: pointer;
+transition: background 0.15s, transform 0.15s, opacity 0.15s;
+}
+.btn:hover:not([disabled]) {
+background: rgba(255, 255, 255, 0.13);
+}
+.btn:active:not([disabled]) {
+transform: scale(0.97);
+}
+.btn.primary {
+background: #f4f4f5;
+color: #0d0d0e;
+border-color: transparent;
+}
+.btn.primary:hover:not([disabled]) {
+background: #fff;
+}
+.btn[disabled] {
+opacity: 0.38;
+cursor: not-allowed;
+}
+.btn:focus-visible {
+outline: 2px solid var(--inf-fg);
+outline-offset: 2px;
+}
+.actions {
+display: flex;
+gap: 6px;
+margin-top: 10px;
+}
+.actions > * {
+flex: 1;
+}
+.field {
+width: 100%;
+height: 30px;
+padding: 0 11px;
+border-radius: 10px;
+border: 1px solid rgba(255, 255, 255, 0.1);
+background: rgba(255, 255, 255, 0.04);
+color: var(--isl-fg);
+font: 12px var(--sans);
+outline: none;
+transition: border-color 0.15s, background 0.15s;
+}
+.field::placeholder {
+color: var(--isl-faint);
+}
+.field:focus {
+border-color: color-mix(in srgb, var(--inf) 70%, transparent);
+background: rgba(255, 255, 255, 0.06);
+}
+.pill {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+height: 18px;
+padding: 0 7px;
+border-radius: 999px;
+font: 600 10.5px/1 var(--sans);
+background: rgba(255, 255, 255, 0.08);
+color: var(--isl-muted);
+}
+.pill.open {
+background: color-mix(in srgb, var(--ok) 18%, transparent);
+color: var(--ok-fg);
+}
+.pill.merged {
+background: color-mix(in srgb, var(--merged) 18%, transparent);
+color: var(--merged);
+}
+.pill.draft {
+background: rgba(255, 255, 255, 0.08);
+color: var(--isl-muted);
+}
+.mini-ring {
+width: 14px;
+height: 14px;
+}
+.bar-split {
+display: flex;
+height: 3px;
+gap: 2px;
+margin: 2px 4px 6px;
+border-radius: 2px;
+overflow: hidden;
+}
+.bar-split i {
+display: block;
+border-radius: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+*,
+*::before,
+*::after {
+animation-duration: 0.001ms !important;
+transition-duration: 0.001ms !important;
+}
+}
+
+.chips {
+display: flex;
+align-items: stretch;
+gap: 4px;
+list-style: none;
+margin: 8px 0 0;
+padding: 0;
+}
+.chips .arrow {
+align-self: center;
+color: var(--isl-faint);
+font-size: 12px;
+}
+.chip {
+flex: 1;
+min-width: 0;
+display: grid;
+grid-template-columns: auto 1fr;
+column-gap: 5px;
+align-items: center;
+padding: 6px 7px;
+border-radius: 10px;
+background: rgba(255, 255, 255, 0.04);
+box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+color: var(--isl-muted);
+transition: background 0.3s, color 0.3s, box-shadow 0.3s;
+}
+.chip span {
+font-size: 11.5px;
+font-weight: 600;
+color: var(--isl-fg);
+white-space: nowrap;
+}
+.chip small {
+grid-column: 2;
+font: 500 10px var(--mono);
+color: var(--isl-faint);
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+}
+.chip .ic {
+grid-row: span 2;
+}
+.chip[data-state="now"] {
+background: color-mix(in srgb, var(--inf) 14%, transparent);
+box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--inf) 45%, transparent);
+color: var(--inf-fg);
+}
+.chip[data-state="done"] {
+color: var(--ok-fg);
+}
+.chip[data-state="done"] span {
+color: var(--isl-muted);
+}
+.chips.vert {
+flex-direction: column;
+}
+</style></head><body><div id="root"></div><script>// Shared mock engine: a simulated checkout, the crown island + rail, hover/pin flyouts.
+const ICONS = {
+branch:
+'<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+fileDiff:
+'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
+sparkles:
+'<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>',
+bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+pr: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
+merge: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>',
+notes:
+'<path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/>',
+cloudUp:
+'<path d="M12 13v8"/><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="m8 17 4-4 4 4"/>',
+cloudDown:
+'<path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/>',
+commit:
+'<circle cx="12" cy="12" r="3"/><line x1="3" x2="9" y1="12" y2="12"/><line x1="15" x2="21" y1="12" y2="12"/>',
+check: '<path d="M20 6 9 17l-5-5"/>',
+checkCircle: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+refresh:
+'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+alert:
+'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+ext: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3"/>',
+arrowLeft: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+chevron: '<path d="m9 18 6-6-6-6"/>',
+chevronDown: '<path d="m6 9 6 6 6-6"/>',
+rocket:
+'<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>',
+users:
+'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+};
+const I = (name, cls = "") =>
+`<svg class="ic ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+const esc = (v) =>
+String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const BRANCH = "feature/crown-git";
+const FILES = [
+{ p: "CrownRailNav.tsx", dir: "crown/", a: 28, d: 6, s: "M" },
+{ p: "gitHub.logic.ts", dir: "crown/", a: 41, d: 0, s: "A" },
+{ p: "rail.css", dir: "crown/styles/", a: 9, d: 3, s: "M" },
+];
+const INCOMING = [
+{ h: "a41c09e", m: "Clamp flyouts on short panes", by: "mara", t: "12m" },
+{ h: "7be2f13", m: "Bump effect to 3.21", by: "devon", t: "40m" },
+{ h: "c03d8aa", m: "Rename overview tokens", by: "mara", t: "1h" },
+];
+
+const SCENARIOS = {
+dirty: {
+label: "Uncommitted work",
+files: FILES,
+outgoing: [],
+incoming: [],
+upstream: true,
+branchCommits: 0,
+pr: null,
+},
+ahead: {
+label: "Never pushed",
+files: [],
+outgoing: [
+{ h: "e1f02bc", m: "Group git actions in the crown rail" },
+{ h: "9ad4410", m: "Show ahead/behind on the rail badge" },
+],
+incoming: [],
+upstream: false,
+branchCommits: 2,
+pr: null,
+},
+behind: {
+label: "Behind remote",
+files: [FILES[2]],
+outgoing: [{ h: "e1f02bc", m: "Group git actions in the crown rail" }],
+incoming: INCOMING,
+upstream: true,
+branchCommits: 3,
+pr: { number: 752, title: "Group git actions in the crown rail", state: "open", checks: { pass: 5, fail: 0, running: 0 }, approved: 1, requested: 2 },
+},
+checks: {
+label: "PR checks running",
+files: [],
+outgoing: [],
+incoming: [],
+upstream: true,
+branchCommits: 3,
+pr: { number: 752, title: "Group git actions in the crown rail", state: "open", checks: { pass: 2, fail: 1, running: 3 }, approved: 0, requested: 2 },
+},
+synced: {
+label: "Shipped",
+files: [],
+outgoing: [],
+incoming: [],
+upstream: true,
+branchCommits: 3,
+pr: { number: 741, title: "Keep project icons visible", state: "merged", checks: { pass: 6, fail: 0, running: 0 }, approved: 2, requested: 2 },
+},
+};
+let S;
+let V;
+let openKey = null;
+let pinned = false;
+let closeTimer = 0;
+let alertTimer = 0;
+let hash = 0x3f2a1;
+const nextHash = () => (hash = (hash * 2654435761 + 7) >>> 0).toString(16).slice(0, 7).padStart(7, "0");
+// ── Derived state ───────────────────────────────────────────
+function stats(s) {
+const ins = s.files.reduce((n, f) => n + f.a, 0);
+const del = s.files.reduce((n, f) => n + f.d, 0);
+return { files: s.files.length, ins, del, ahead: s.outgoing.length, behind: s.incoming.length };
+}
+function checksOf(s) {
+if (!s.pr) return null;
+const c = s.pr.checks;
+const total = c.pass + c.fail + c.running;
+const ci = c.running ? "running" : c.fail ? "fail" : "pass";
+return { ...c, total, ci };
+}
+
+function reasons(s) {
+const st = stats(s);
+return {
+commit: st.files ? null : "Nothing to commit",
+pull: !s.upstream ? "No upstream yet" : st.behind ? null : "Up to date",
+push: st.behind ? `Pull ${st.behind} first` : st.ahead ? null : "Nothing to push",
+pr: !s.pr && !s.branchCommits ? "No commits yet" : null,
+};
+}
+
+function nextStep(s) {
+const st = stats(s);
+if (st.files) return { act: "commit", label: `Commit ${plural(st.files, "file")}` };
+if (st.behind) return { act: "pull", label: `Pull ${plural(st.behind, "commit")}` };
+if (st.ahead && !s.pr) return { act: "pushpr", label: "Push & create PR" };
+if (st.ahead) return { act: "push", label: `Push ${plural(st.ahead, "commit")}` };
+if (!s.pr && s.branchCommits) return { act: "pr", label: "Create pull request" };
+if (s.pr && s.pr.state === "open") {
+const c = checksOf(s);
+if (c.running) return { act: "openpr", label: `Wait for ${plural(c.running, "check")}`, passive: true };
+if (c.fail) return { act: "openpr", label: `Fix ${plural(c.fail, "failing check")}` };
+return { act: "openpr", label: "Review & merge" };
+}
+return null;
+}
+function abText(s) {
+const st = stats(s);
+const parts = [];
+if (st.ahead) parts.push(`<span class="up">↑${st.ahead}</span>`);
+if (st.behind) parts.push(`<span class="down">↓${st.behind}</span>`);
+if (!parts.length) return s.upstream ? "in sync" : "local";
+return parts.join(" ");
+}
+function upstreamLine(s) {
+return s.upstream
+? `<span class="muted">tracking</span> <span class="mono">origin/${BRANCH}</span>`
+: `<span class="down">Not pushed yet</span> <span class="faint">· creates origin/${BRANCH}</span>`;
+}
+// ── Actions ─────────────────────────────────────────────────
+function newPr(s) {
+const title = (s.ui.prTitle || "").trim() || s.outgoing.at(-1)?.m || s.lastCommit || "Group git actions in the crown rail";
+return { number: 752, title, state: s.ui.draft ? "draft" : "open", checks: { pass: 0, fail: 0, running: 5 }, approved: 0, requested: 2 };
+}
+const ACTIONS = {
+commit: {
+verb: "Committing",
+run(s) {
+const n = s.files.length;
+const m = (s.ui.msg || "").trim() || "Refine crown rail git actions";
+s.outgoing.unshift({ h: nextHash(), m });
+s.lastCommit = m;
+s.files = [];
+s.branchCommits++;
+s.ui.msg = "";
+s.ui.commitOpen = false;
+return ["var(--ok)", "checkCircle", `Committed ${plural(n, "file")}`, m];
+},
+},
+pull: {
+verb: "Pulling",
+run(s) {
+const n = s.incoming.length;
+s.incoming = [];
+return ["var(--ok)", "cloudDown", `Pulled ${plural(n, "commit")}`, `from origin/${BRANCH}`];
+},
+},
+push: {
+verb: "Pushing",
+run(s) {
+const n = s.outgoing.length;
+const was = s.upstream;
+s.outgoing = [];
+s.upstream = true;
+if (s.pr && s.pr.state !== "merged") s.pr.checks = { pass: 0, fail: 0, running: 5 };
+return ["var(--inf)", "cloudUp", `Pushed ${plural(n, "commit")}`, was ? `to origin/${BRANCH}` : `published origin/${BRANCH}`];
+},
+},
+pr: {
+verb: "Opening pull request",
+run(s) {
+s.pr = newPr(s);
+return ["var(--ok)", "pr", `Opened PR #${s.pr.number}`, s.pr.title];
+},
+},
+pushpr: {
+verb: "Pushing & opening PR",
+run(s) {
+ACTIONS.push.run(s);
+s.pr = newPr(s);
+return ["var(--ok)", "pr", `Pushed · opened PR #${s.pr.number}`, s.pr.title];
+},
+},
+openpr: {
+verb: null,
+run(s) {
+return ["var(--isl-muted)", "ext", `PR #${s.pr.number}`, "Opened in the workspace panel"];
+},
+},
+};
+async function run(act) {
+if (S.busy) return;
+const a = ACTIONS[act];
+if (a.verb) {
+S.busy = act;
+showIsland("var(--isl-muted)", "loader", `${a.verb}…`, BRANCH, true);
+renderAll();
+await sleep(act === "pushpr" ? 1300 : 900);
+}
+const [tone, icon, title, sub] = a.run(S);
+S.busy = null;
+renderAll();
+showIsland(tone, icon, title, sub);
+}
+// ── Shared render helpers for variants ──────────────────────
+function badge(value, variant = "") {
+if (value === "" || value === 0 || value == null) return "";
+return `<span class="bd ${variant}">${value}</span>`;
+}
+
+function ring(segs, { gap = 9, cls = "ring", r = 12.5, box = 32 } = {}) {
+const c = box / 2;
+let out = `<svg class="${cls}" viewBox="0 0 ${box} ${box}" aria-hidden="true"><circle class="tr" cx="${c}" cy="${c}" r="${r}" pathLength="100"/>`;
+if (segs.length) {
+const g = segs.length > 1 ? gap : 0;
+const len = 100 / segs.length - g;
+segs.forEach((state, i) => {
+out += `<circle class="sg" data-s="${state}" cx="${c}" cy="${c}" r="${r}" pathLength="100" stroke-dasharray="${len} ${100 - len}" stroke-dashoffset="${-(i * (100 / segs.length) + g / 2)}"/>`;
+});
+}
+return out + "</svg>";
+}
+function checkSegs(s) {
+const c = checksOf(s);
+if (!c) return [];
+return [...Array(c.pass).fill("pass"), ...Array(c.fail).fill("fail"), ...Array(c.running).fill("running")];
+}
+function miniChecks(s) {
+const c = checksOf(s);
+if (!c) return "";
+return `${ring(checkSegs(s), { cls: "ring mini-ring", gap: 12, r: 11, box: 28 })}<span class="mono">${c.pass}/${c.total}</span>`;
+}
+function prPill(pr) {
+return `<span class="pill ${pr.state}">${pr.state === "merged" ? I("merge", "xs") : I("pr", "xs")}${pr.state[0].toUpperCase() + pr.state.slice(1)}</span>`;
+}
+
+function btn(act, label, { icon, primary = false, reason = null, title = "", cls = "" } = {}) {
+const busy = S.busy === act;
+const disabled = reason !== null || (S.busy && !busy);
+return `<button type="button" class="btn ${primary ? "primary" : ""} ${cls}" data-act="${act}" ${disabled ? "disabled" : ""} title="${esc(reason ?? title)}">${busy ? I("loader", "sm spin") : icon ? I(icon, "sm") : ""}${esc(busy ? ACTIONS[act]?.verb ?? label : label)}</button>`;
+}
+function fileRows(files, max = 4) {
+return (
+files
+.slice(0, max)
+.map(
+(f) =>
+`<div class="row"><span class="st ${f.s}">${f.s}</span><span class="nm trunc">${esc(f.p)} <span class="faint">${esc(f.dir)}</span></span><span class="num"><em class="add">+${f.a}</em> <em class="del">−${f.d}</em></span></div>`,
+)
+.join("") + (files.length > max ? `<div class="row faint">+${files.length - max} more</div>` : "")
+);
+}
+function commitRows(list, { author = false, max = 3 } = {}) {
+return (
+list
+.slice(0, max)
+.map(
+(c) =>
+`<div class="row commit-row"><span class="hash">${c.h.slice(0, 7)}</span><span class="nm trunc">${esc(c.m)}</span>${author ? `<span class="num faint">${c.by} · ${c.t}</span>` : ""}</div>`,
+)
+.join("") + (list.length > max ? `<div class="row faint">+${list.length - max} more</div>` : "")
+);
+}
+function diffBar(s) {
+const st = stats(s);
+const total = st.ins + st.del || 1;
+return `<div class="bar-split"><i style="flex:${st.ins / total};background:var(--ok)"></i><i style="flex:${st.del / total};background:var(--bad)"></i></div>`;
+}
+
+const COMMON_FLY = {
+changes(s) {
+const st = stats(s);
+return `<div class="dh">${I("fileDiff", "sm")}<span>Changes</span><span class="meta"><em class="add">+${st.ins}</em><em class="del">−${st.del}</em></span></div>
+${st.files ? `${diffBar(s)}<div class="grp"><span>Local</span><span>${st.files}</span></div>${fileRows(s.files)}` : `<div class="empty">Working tree clean</div>`}
+<div class="actions">${`<button class="btn" type="button">${I("fileDiff", "sm")}Open review</button>`}</div>`;
+},
+checks(s) {
+const c = checksOf(s);
+if (!c) return `<div class="dh">${I("checkCircle", "sm")}<span>Checks</span></div><div class="empty">No checks for this branch yet</div>`;
+const names = ["typecheck", "lint", "test (web)", "test (server)", "browser", "build"];
+const segs = checkSegs(s);
+return `<div class="dh">${I("checkCircle", "sm")}<span>Checks</span><span class="meta">${c.pass}/${c.total}</span></div>
+${segs
+.map((st, i) => {
+const tone = st === "pass" ? "var(--ok)" : st === "fail" ? "var(--bad)" : "var(--warn)";
+return `<div class="row"><span class="dot" data-ci="${st}" style="background:${tone}"></span><span class="nm trunc">${names[i % names.length]}</span><span class="num faint">${st === "running" ? "running" : st === "fail" ? "failed" : "1m 12s"}</span></div>`;
+})
+.join("")}`;
+},
+pr(s) {
+if (!s.pr) return `<div class="dh">${I("pr", "sm")}<span>Pull request</span></div><div class="empty">No pull request for this branch</div>`;
+return `<div class="dh">${I("pr", "sm")}<span>PR #${s.pr.number}</span><span class="meta">${prPill(s.pr)}</span></div>
+<div class="row"><span class="nm trunc" style="font-weight:500">${esc(s.pr.title)}</span></div>
+<div class="row"><span class="muted">main ← ${BRANCH}</span></div>
+<div class="row">${miniChecks(s)}<span class="faint">· ${s.pr.approved}/${s.pr.requested} approved</span></div>`;
+},
+plan() {
+return `<div class="dh">${I("sparkles", "sm")}<span>Plan</span><span class="meta">3/5</span></div>
+<div class="row"><span class="add">✓</span><span class="nm">Audit rail sections</span></div>
+<div class="row"><span class="add">✓</span><span class="nm">Merge branch + push items</span></div>
+<div class="row"><span class="add">✓</span><span class="nm">Ship panel detail</span></div>
+<div class="row"><span class="faint">○</span><span class="nm muted">Alerts for git actions</span></div>
+<div class="row"><span class="faint">○</span><span class="nm muted">Browser tests</span></div>`;
+},
+agents() {
+return `<div class="dh">${I("bot", "sm")}<span>Subagents</span><span class="meta">idle</span></div><div class="empty">No subagents ran in this thread</div>`;
+},
+notes() {
+return `<div class="dh">${I("notes", "sm")}<span>Notes</span></div><div class="empty">Remember: keep the PR section for review detail.</div>`;
+},
+};
+
+const COMMON_RAIL = {
+changes: (s) => ({ key: "changes", label: "Changes", group: "status", glyph: I("fileDiff") + badge(stats(s).files) }),
+checks: (s) => {
+const c = checksOf(s);
+return { key: "checks", label: "Checks", group: "status", glyph: ring(checkSegs(s)) + `<i class="dot" data-ci="${c?.ci ?? ""}"></i>` };
+},
+plan: () => ({
+key: "plan",
+label: "Plan",
+group: "status",
+glyph: `<svg class="ring" viewBox="0 0 32 32" aria-hidden="true"><circle class="tr" cx="16" cy="16" r="12.5" pathLength="100"/><circle class="sg" data-s="plan" cx="16" cy="16" r="12.5" pathLength="100" stroke-dasharray="60 40"/></svg><span style="color:var(--plan);display:grid">${I("sparkles", "xs")}</span>`,
+}),
+agents: () => ({ key: "agents", label: "Subagents", group: "status", glyph: I("bot") }),
+pr: (s) => ({ key: "pr", label: "Pull request", group: "status", glyph: I(s.pr?.state === "merged" ? "merge" : "pr"), attrs: `data-pr="${s.pr?.state ?? "none"}"` }),
+notes: () => ({ key: "notes", label: "Notes", group: "tools", glyph: I("notes") }),
+};
+// ── DOM ─────────────────────────────────────────────────────
+let stage, crown, island, rail, list, hl, fly;
+function showIsland(tone, icon, title, sub, sticky = false) {
+clearTimeout(alertTimer);
+island.style.setProperty("--tone", tone);
+island.querySelector(".al").innerHTML = `<span class="al-ic">${I(icon, icon === "loader" ? "spin" : "")}</span><div class="trunc"><b class="trunc">${esc(title)}</b><small class="trunc">${esc(sub)}</small></div>`;
+island.dataset.mode = "alert";
+if (!sticky) alertTimer = setTimeout(() => (island.dataset.mode = "dot"), 2600);
+}
+function renderRail() {
+const items = V.rail(S);
+let html = "";
+items.forEach((it, i) => {
+if (it.html) {
+html += it.html;
+return;
+}
+const prev = items[i - 1];
+if (prev && prev.group !== it.group) html += '<span class="sep" aria-hidden="true"></span>';
+html += `<button type="button" class="rb" data-key="${it.key}" aria-label="${esc(it.label)}" title="${esc(it.label)}" ${it.attrs ?? ""}>${it.glyph}</button>`;
+});
+list.innerHTML = '<span class="hl" aria-hidden="true"></span>' + html;
+hl = list.querySelector(".hl");
+syncHighlight(false);
+}
+function syncHighlight(animate = true) {
+list.querySelectorAll(".rb").forEach((b) => (b.dataset.active = b.dataset.key === openKey ? "true" : "false"));
+const b = openKey && list.querySelector(`[data-key="${openKey}"]`);
+if (!animate) hl.style.transition = "none";
+if (b) {
+const lr = list.getBoundingClientRect();
+const br = b.getBoundingClientRect();
+hl.style.width = `${br.width}px`;
+hl.style.height = `${br.height}px`;
+hl.style.transform = `translate(${br.left - lr.left}px, ${br.top - lr.top}px)`;
+hl.style.opacity = "1";
+} else hl.style.opacity = "0";
+if (!animate) requestAnimationFrame(() => (hl.style.transition = ""));
+}
+function captureFocus() {
+const a = document.activeElement;
+if (!a || !fly.contains(a) || !a.dataset.f) return null;
+return { f: a.dataset.f, s: a.selectionStart, e: a.selectionEnd };
+}
+function restoreFocus(c) {
+if (!c) return;
+const el = fly.querySelector(`[data-f="${c.f}"]`);
+if (!el) return;
+el.focus({ preventScroll: true });
+try {
+el.setSelectionRange(c.s, c.e);
+} catch {}
+}
+function renderFly(animate = false) {
+if (!openKey) {
+fly.hidden = true;
+return;
+}
+const focus = captureFocus();
+fly.innerHTML = V.fly[openKey]?.(S) ?? COMMON_FLY[openKey]?.(S) ?? "";
+fly.hidden = false;
+fly.classList.toggle("pinned", pinned);
+if (animate) {
+fly.classList.remove("enter");
+void fly.offsetWidth;
+fly.classList.add("enter");
+fly.style.transition = "none";
+}
+positionFly();
+if (animate) requestAnimationFrame(() => (fly.style.transition = ""));
+restoreFocus(focus);
+}
+function positionFly() {
+const b = list.querySelector(`[data-key="${openKey}"]`);
+if (!b) return;
+const cr = crown.getBoundingClientRect();
+const br = b.getBoundingClientRect();
+const center = br.top - cr.top + br.height / 2;
+const max = stage.clientHeight - 28 - fly.offsetHeight;
+fly.style.maxHeight = `${stage.clientHeight - 28}px`;
+fly.style.top = `${Math.max(-2, Math.min(center - 30, max))}px`;
+}
+function renderAll() {
+renderRail();
+renderFly();
+document.querySelectorAll(".seg[data-scn]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.scn === S.key)));
+}
+function open(key, { pin = false } = {}) {
+clearTimeout(closeTimer);
+const changed = key !== openKey;
+openKey = key;
+pinned = pin;
+syncHighlight();
+renderFly(changed);
+}
+function close() {
+openKey = null;
+pinned = false;
+syncHighlight();
+renderFly();
+}
+function scheduleClose() {
+if (pinned) return;
+clearTimeout(closeTimer);
+closeTimer = setTimeout(close, 240);
+}
+function load(key) {
+S = JSON.parse(JSON.stringify(SCENARIOS[key]));
+S.key = key;
+S.busy = null;
+S.ui = {};
+island.dataset.mode = "dot";
+renderAll();
+open(V.primaryKey, { pin: true });
+}
+function boot(variant) {
+V = variant;
+const root = document.getElementById("root");
+root.innerHTML = `
+<div class="wrap">
+<div class="bar"><span class="tag">${esc(V.tag)}</span>${Object.entries(SCENARIOS)
+.map(([k, s]) => `<button type="button" class="seg" data-scn="${k}">${s.label}</button>`)
+.join("")}</div>
+<div class="stage">
+<div class="chat">
+<div class="u">Group Commit, Push, Create PR and Pull in the crown rail.</div>
+<div class="tool">${I("fileDiff", "xs")} edited 3 files in crown/</div>
+<div class="a">${V.chat}</div>
+<div class="composer">Ask for follow-up changes…</div>
+</div>
+<div class="crown">
+<div class="island" data-mode="dot"><div class="face"><span class="logo">c</span></div><div class="al"></div></div>
+<nav class="rail" aria-label="Overview"><div class="rail-list"></div></nav>
+<div class="fly" hidden></div>
+</div>
+</div>
+<div class="hint">${esc(V.hint)}</div>
+</div>`;
+stage = root.querySelector(".stage");
+crown = root.querySelector(".crown");
+island = root.querySelector(".island");
+rail = root.querySelector(".rail");
+list = root.querySelector(".rail-list");
+fly = root.querySelector(".fly");
+root.querySelector(".bar").addEventListener("click", (e) => {
+const b = e.target.closest("[data-scn]");
+if (b) load(b.dataset.scn);
+});
+list.addEventListener("pointerover", (e) => {
+const b = e.target.closest("[data-key]");
+if (!b || pinned) return;
+open(b.dataset.key);
+});
+rail.addEventListener("pointerleave", scheduleClose);
+fly.addEventListener("pointerenter", () => clearTimeout(closeTimer));
+fly.addEventListener("pointerleave", scheduleClose);
+list.addEventListener("click", (e) => {
+const b = e.target.closest("[data-key]");
+if (!b) return;
+if (V.onRailClick?.(b.dataset.key)) return;
+if (pinned && openKey === b.dataset.key) close();
+else open(b.dataset.key, { pin: true });
+});
+fly.addEventListener("click", (e) => {
+const t = e.target.closest("[data-act]");
+if (!t || t.disabled) return;
+const act = t.dataset.act;
+if (V.ui?.(act, S, t)) renderAll();
+else if (ACTIONS[act]) run(act);
+});
+fly.addEventListener("input", (e) => {
+if (e.target.dataset.f) S.ui[e.target.dataset.f] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+});
+fly.addEventListener("change", (e) => {
+if (e.target.type === "checkbox") renderFly();
+});
+fly.addEventListener("keydown", (e) => {
+if (e.key === "Enter" && e.target.dataset.submit) {
+e.preventDefault();
+const target = fly.querySelector(`button[data-act="${e.target.dataset.submit}"]`);
+if (target && !target.disabled) target.click();
+}
+});
+document.addEventListener("pointerdown", (e) => {
+if (pinned && !crown.contains(e.target) && !e.target.closest(".bar")) close();
+});
+document.addEventListener("keydown", (e) => {
+if (e.key === "Escape") close();
+});
+// CI progresses on its own: one running check settles every 1.2s.
+setInterval(() => {
+const c = S.pr?.checks;
+if (!c?.running || S.busy) return;
+c.running--;
+c.pass++;
+renderAll();
+if (!c.running) showIsland(c.fail ? "var(--bad)" : "var(--ok)", c.fail ? "x" : "checkCircle", c.fail ? `${plural(c.fail, "check")} failed` : "All checks passed", `PR #${S.pr.number}`);
+}, 1200);
+load(Object.keys(SCENARIOS)[0]);
+}
+// ── One-click chains ────────────────────────────────────────
+const STEP = {
+pull: { verb: "Pulling", done: "Pulled", icon: "cloudDown" },
+commit: { verb: "Committing", done: "Committed", icon: "commit" },
+push: { verb: "Pushing", done: "Pushed", icon: "cloudUp" },
+pr: { verb: "Opening PR", done: "PR opened", icon: "pr" },
+};
+const GOALS = ["commit", "push", "pr"];
+
+function defaultGoal(s) {
+return s.pr && s.pr.state === "open" ? "push" : "pr";
+}
+
+function planChain(s, goal = defaultGoal(s)) {
+const st = stats(s);
+const g = GOALS.indexOf(goal);
+const steps = [];
+if (st.files) steps.push("commit");
+if (g >= 1) {
+if (st.behind) steps.push("pull");
+if (st.ahead || st.files) steps.push("push");
+}
+if (g >= 2 && !(s.pr && s.pr.state === "open")) {
+const fresh = s.pr?.state === "merged" ? st.ahead || st.files : s.branchCommits || st.files;
+if (fresh) steps.push("pr");
+}
+return steps;
+}
+const STEP_WORD = { commit: "commit", pull: "pull", push: "push", pr: "create PR" };
+function chainLabel(steps, s) {
+if (!steps.length) return s.pr && s.pr.state === "open" ? `View PR #${s.pr.number}` : "Up to date";
+const words = steps.map((x) => STEP_WORD[x]);
+const text = words.length === 1 ? words[0] : `${words.slice(0, -1).join(", ")} & ${words.at(-1)}`;
+return text[0].toUpperCase() + text.slice(1);
+}
+function stepDetail(step, s) {
+const st = stats(s);
+switch (step) {
+case "commit":
+return plural(st.files, "file");
+case "pull":
+return `${st.behind} incoming`;
+case "push":
+return s.upstream ? `to origin` : "new branch";
+case "pr":
+return "into main";
+}
+}
+let chainCancel = false;
+
+async function runChain(steps, { delay = 0 } = {}) {
+if (S.busy || !steps.length) {
+if (!steps.length && S.pr?.state === "open") run("openpr");
+return;
+}
+chainCancel = false;
+S.busy = "chain";
+// Step details are frozen at the click, so "3 files" stays "3 files" while it runs.
+S.chain = { steps, i: -1, total: steps.length, details: steps.map((x) => stepDetail(x, S)) };
+if (delay) {
+S.chain.counting = true;
+showIsland("var(--inf)", "loader", `Shipping in a moment…`, `${chainLabel(steps, S)} · Esc to cancel`, true);
+renderAll();
+await sleep(delay);
+S.chain.counting = false;
+if (chainCancel) {
+S.busy = null;
+S.chain = null;
+renderAll();
+showIsland("var(--isl-muted)", "x", "Cancelled", "Nothing was changed");
+return;
+}
+}
+let prNumber = null;
+for (let i = 0; i < steps.length; i++) {
+S.chain.i = i;
+const step = steps[i];
+showIsland("var(--isl-muted)", "loader", `${STEP[step].verb}… ${i + 1}/${steps.length}`, stepDetail(step, S), true);
+renderAll();
+await sleep(step === "pr" ? 1000 : 800);
+if (step === "pr") {
+S.pr = newPr(S);
+prNumber = S.pr.number;
+} else ACTIONS[step].run(S);
+}
+S.chain = null;
+S.busy = null;
+renderAll();
+const last = steps.at(-1);
+showIsland("var(--ok)", "checkCircle", prNumber ? `Shipped · PR #${prNumber} opened` : `${STEP[last].done}`, chainLabel(steps, { pr: null }) + " · done");
+}
+document.addEventListener("keydown", (e) => {
+if (e.key === "Escape" && S?.chain?.counting) chainCancel = true;
+});
+
+function stepChips(steps, s, { vertical = false } = {}) {
+if (!steps.length) return "";
+const running = s.chain;
+return `<ol class="chips ${vertical ? "vert" : ""}">${steps
+.map((step, i) => {
+const state = !running ? "todo" : i < running.i ? "done" : i === running.i ? "now" : "todo";
+const icon = state === "done" ? I("check", "xs") : state === "now" ? I("loader", "xs spin") : I(STEP[step].icon, "xs");
+return `<li class="chip" data-state="${state}">${icon}<span>${STEP_WORD[step][0].toUpperCase() + STEP_WORD[step].slice(1)}</span><small>${running?.details?.[i] ?? stepDetail(step, s)}</small></li>`;
+})
+.join(vertical ? "" : '<li class="arrow" aria-hidden="true">›</li>')}</ol>`;
+}
+// 1 · Smart button: the existing split button, grown up. One label that already knows the whole chain,
+// chips that say what the click will do, and the ▾ menu for the other choices.
+const v4css = document.createElement("style");
+v4css.textContent = `
+.fly { width: 316px; overflow: visible; }
+.say { margin: -4px 0 12px; font-size: 12px; color: var(--isl-muted); }
+.say b { color: var(--isl-fg); font-weight: 500; }
+.sb { position: relative; display: flex; height: 36px; border-radius: 12px; overflow: visible; }
+.sb-main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 8px; border: 0; cursor: pointer;
+border-radius: 12px 0 0 12px; background: #f4f4f5; color: #0d0d0e; font: 600 13px var(--sans); transition: background .15s, transform .15s; }
+.sb-main:hover:not([disabled]) { background: #fff; }
+.sb-main:active:not([disabled]) { transform: scale(.985); }
+.sb-main[disabled] { cursor: default; }
+.sb-main[data-quiet="true"] { background: rgba(255,255,255,.08); color: var(--isl-fg); }
+.sb-main .ic { width: 15px; height: 15px; }
+.sb-more { width: 36px; display: grid; place-items: center; border: 0; border-left: 1px solid rgba(0,0,0,.18); cursor: pointer;
+border-radius: 0 12px 12px 0; background: #e4e4e7; color: #0d0d0e; transition: background .15s; }
+.sb-more:hover { background: #fff; }
+.sb[data-quiet="true"] .sb-more { background: rgba(255,255,255,.08); color: var(--isl-fg); border-left-color: rgba(255,255,255,.08); }
+.sb-more .ic { transition: transform .2s var(--ease-out); }
+.sb-more[aria-expanded="true"] .ic { transform: rotate(180deg); }
+.sb-fill { position: absolute; left: 0; bottom: 0; height: 2px; border-radius: 2px; background: var(--inf); transition: width .6s var(--ease-out); }
+.menu { position: absolute; top: calc(100% + 6px); right: 0; left: 0; z-index: 3; padding: 5px; border-radius: 14px; background: #18181b;
+border: 1px solid rgba(255,255,255,.1); box-shadow: 0 18px 40px -10px rgba(0,0,0,.7); animation: fly-in .2s var(--ease-out); }
+.mi { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; column-gap: 8px; width: 100%; padding: 7px 8px; border: 0;
+border-radius: 9px; background: none; color: var(--isl-fg); text-align: left; cursor: pointer; }
+.mi:hover:not([disabled]) { background: rgba(255,255,255,.07); }
+.mi[disabled] { opacity: .38; cursor: default; }
+.mi .ic { color: var(--isl-muted); }
+.mi b { font-size: 12.5px; font-weight: 500; }
+.mi small { grid-column: 2; font-size: 11px; color: var(--isl-faint); }
+.mi kbd { grid-row: span 2; font: 600 9.5px var(--sans); padding: 2px 6px; border-radius: 6px; background: color-mix(in srgb, var(--inf) 20%, transparent); color: var(--inf-fg); }
+.msep { height: 1px; margin: 4px 6px; background: rgba(255,255,255,.07); }
+.mlab { padding: 6px 8px 3px; font-size: 10px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--isl-faint); }
+.msg { display: flex; align-items: center; gap: 6px; margin-top: 10px; font-size: 11px; color: var(--isl-faint); }
+.msg button { border: 0; background: none; padding: 0; color: var(--inf-fg); font: inherit; cursor: pointer; }
+.msg .field { height: 28px; }
+`;
+document.head.append(v4css);
+function sayStatus(s) {
+const st = stats(s);
+const bits = [];
+if (st.files) bits.push(`<b>${plural(st.files, "file")}</b> changed`);
+if (st.behind) bits.push(`<b>${st.behind} new</b> on origin`);
+if (st.ahead) bits.push(`<b>${plural(st.ahead, "commit")}</b> not pushed`);
+else if (!s.upstream) bits.push("branch not pushed");
+if (s.pr?.state === "open") bits.push(`PR <b>#${s.pr.number}</b> open`);
+else if (s.pr?.state === "merged") bits.push(`PR #${s.pr.number} merged`);
+else bits.push("no PR yet");
+return bits.join(" · ");
+}
+function menuItem(goalOrAct, icon, title, sub, steps, s) {
+const disabled = !steps.length || s.busy;
+const isDefault = goalOrAct === (s.ui.goal ?? defaultGoal(s));
+return `<button type="button" class="mi" data-act="go:${goalOrAct}" ${disabled ? "disabled" : ""}>${I(icon, "sm")}<b>${title}</b>${isDefault && steps.length ? "<kbd>default</kbd>" : "<span></span>"}<small>${steps.length ? sub : "nothing to do"}</small></button>`;
+}
+function smartFly(s) {
+const goal = s.ui.goal ?? defaultGoal(s);
+const steps = s.chain ? s.chain.steps : planChain(s, goal);
+const running = !!s.chain;
+const quiet = !steps.length;
+const label = running ? `${STEP[steps[s.chain.i]]?.verb ?? "Starting"}… ${s.chain.i + 1}/${steps.length}` : chainLabel(steps, s);
+const icon = running ? I("loader", "spin") : quiet ? I(s.pr?.state === "open" ? "ext" : "checkCircle") : I(STEP[steps.at(-1)].icon);
+const fill = running ? ((s.chain.i + 0.5) / steps.length) * 100 : 0;
+const st = stats(s);
+return `
+<div class="dh">${I("branch", "sm")}<span class="mono trunc">${BRANCH}</span><span class="meta">${abText(s)}</span></div>
+<div class="say">${sayStatus(s)}</div>
+<div class="sb" data-quiet="${quiet && !running}">
+<button type="button" class="sb-main" data-act="ship" data-quiet="${quiet && !running}" ${running || (quiet && !s.pr) ? "disabled" : ""}>${icon}<span class="trunc">${label}</span></button>
+<button type="button" class="sb-more" data-act="menu" aria-label="More git actions" aria-expanded="${!!s.ui.menu}" ${running ? "disabled" : ""}>${I("chevronDown", "sm")}</button>
+${running ? `<span class="sb-fill" style="width:${fill}%"></span>` : ""}
+${
+s.ui.menu
+? `<div class="menu">
+<div class="mlab">Do it in one click</div>
+${menuItem("commit", "commit", "Commit only", plural(st.files, "file"), planChain(s, "commit"), s)}
+${menuItem("push", "cloudUp", chainLabel(planChain(s, "push"), s).replace(/^Up to date$/, "Commit & push"), "to origin/" + BRANCH, planChain(s, "push"), s)}
+${menuItem("pr", "pr", chainLabel(planChain(s, "pr"), s).replace(/^(Up to date|View PR #\d+)$/, "Commit, push & create PR"), "into main", planChain(s, "pr"), s)}
+<div class="msep"></div>
+<button type="button" class="mi" data-act="go:pull" ${st.behind ? "" : "disabled"}>${I("cloudDown", "sm")}<b>Pull</b><span></span><small>${st.behind ? `${st.behind} incoming` : "up to date"}</small></button>
+${s.pr ? `<button type="button" class="mi" data-act="openpr">${I("ext", "sm")}<b>View PR #${s.pr.number}</b><span></span><small>${s.pr.state}</small></button>` : ""}
+</div>`
+: ""
+}
+</div>
+${steps.length ? stepChips(steps, s) : ""}
+${
+steps.includes("commit") && !running
+? s.ui.editMsg
+? `<div class="msg"><input class="field" data-f="msg" data-submit="ship" placeholder="Commit message" value="${esc(s.ui.msg ?? "")}" /></div>`
+: `<div class="msg">${I("sparkles", "xs")}<span>Message is written for you</span><button type="button" data-act="editmsg">Edit</button></div>`
+: ""
+}`;
+}
+boot({
+tag: "1 · Smart button",
+hint: "Hover the rail · the button picks the whole chain for you · ▾ shows the other one-click options · actions are simulated.",
+primaryKey: "git",
+chat: "One <b>Source control</b> item replaces Branch and Push. Its button already knows the full chain, so one click commits, pushes and opens the PR. The chips show what will happen and fill in as it runs.",
+rail(s) {
+const st = stats(s);
+const glyph = s.chain
+? ring(s.chain.steps.map((_, i) => (i < s.chain.i ? "done" : i === s.chain.i ? "current" : "q")), { gap: 10 }) + `<span style="display:grid">${I("branch", "xs")}</span>`
+: I("branch") + (st.files ? badge(st.files) : st.ahead ? badge(`↑${st.ahead}`, "info") : st.behind ? badge(`↓${st.behind}`, "warn") : "");
+return [
+{ key: "git", label: "Source control", group: "status", glyph },
+COMMON_RAIL.changes(s),
+COMMON_RAIL.checks(s),
+COMMON_RAIL.plan(s),
+COMMON_RAIL.agents(s),
+COMMON_RAIL.pr(s),
+COMMON_RAIL.notes(s),
+];
+},
+fly: { git: smartFly },
+ui(act, s) {
+if (act === "menu") {
+s.ui.menu = !s.ui.menu;
+return true;
+}
+if (act === "editmsg") {
+s.ui.editMsg = true;
+requestAnimationFrame(() => fly.querySelector('[data-f="msg"]')?.focus());
+return true;
+}
+if (act === "ship") {
+runChain(planChain(s, s.ui.goal ?? defaultGoal(s)));
+return false;
+}
+if (act.startsWith("go:")) {
+const goal = act.slice(3);
+s.ui.menu = false;
+runChain(goal === "pull" ? ["pull"] : planChain(s, goal));
+return false;
+}
+return false;
+},
+});
+</script></body></html>
