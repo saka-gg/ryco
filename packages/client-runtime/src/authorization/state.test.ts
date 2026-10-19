@@ -2157,6 +2157,86 @@ describe("hosted registration and directory state", () => {
     });
   });
 
+  describe("retryable relay failures", () => {
+    function selectOnlineNode(): HostedHubNode {
+      const selected = node();
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        directoryStatus: "ready",
+        browserStatus: "current",
+        nodes: [selected],
+        selectedNode: selected,
+        selectionStatus: "online",
+        effectiveRole: selected.effectiveRole,
+        transportStatus: "online",
+        sessionStatus: "ready",
+        sessionEstablished: true,
+        errorMessage: null,
+        generation: 5,
+      });
+      return selected;
+    }
+
+    it("keeps a spent transfer budget quiet while the relay reconnects", () => {
+      selectOnlineNode();
+
+      hostedHubController.failure(5, {
+        kind: "budget",
+        retryable: true,
+        closeReason: "transfer_limit",
+      });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        selectionStatus: "online",
+        effectiveRole: "operator",
+        transportStatus: "reconnecting",
+        sessionStatus: "stale",
+        sessionEstablished: true,
+        errorMessage: null,
+      });
+    });
+
+    it("keeps an unconfirmed action unconfirmed through a budget rotation", () => {
+      selectOnlineNode();
+      hostedHubStore.setState({ sessionStatus: "delivery-unknown" });
+
+      hostedHubController.failure(5, { kind: "budget", retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "reconnecting",
+        sessionStatus: "delivery-unknown",
+        errorMessage: null,
+      });
+    });
+
+    it("ignores a budget failure from a stale generation", () => {
+      selectOnlineNode();
+
+      hostedHubController.failure(4, { kind: "budget", retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "online",
+        sessionStatus: "ready",
+        errorMessage: null,
+      });
+    });
+
+    it.each([
+      ["network", "The relay connection was interrupted. Ryco is reconnecting."],
+      ["slow-consumer", "The relay closed a slow connection. Ryco will reconnect."],
+      ["draining", "Hub is draining connections. Ryco will retry shortly."],
+    ] as const)("still reports a %s failure", (kind, message) => {
+      selectOnlineNode();
+
+      hostedHubController.failure(5, { kind, retryable: true });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "reconnecting",
+        errorMessage: message,
+      });
+    });
+  });
+
   it("fails initial synchronization after exactly thirty seconds", async () => {
     vi.useFakeTimers();
     const selected = node();

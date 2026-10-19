@@ -1,5 +1,6 @@
 import {
   E2eeAuthorizationEpoch,
+  EnvironmentId,
   NativeE2eeEnrollmentId,
   NativeE2eeEnrollmentRevision,
   RELAY_INITIAL_LIMITS,
@@ -28,7 +29,18 @@ import {
 } from "@ryco/shared/relayPayloadCompression";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import type {
+  EndpointService,
+  HttpClientService,
+  PasskeyCeremonyService,
+  SessionCredentialsService,
+} from "@ryco/client-runtime/platform";
+
 import { deflateRaw } from "../../test/deflateRaw.ts";
+import type { HostedHubApi } from "../authorization/api.ts";
+import { configureHostedRuntime } from "../authorization/runtime.ts";
+import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
+import type { HostedHubNode } from "../authorization/types.ts";
 import { encodeBase64Url } from "./base64url.ts";
 import {
   HostedRelayEngine,
@@ -51,6 +63,7 @@ import {
   type RawDeflateDecompressor,
   type RelayPayloadInflater,
 } from "./relayPayloadInflation.ts";
+import { HostedRelayAttemptFactory } from "./transport.ts";
 
 const CHANNEL_ID = "ch_cccccccccccccccccccccc" as RelayChannelId;
 const VERSION = { protocolMajor: 1, protocolMinor: 2 } as const;
@@ -471,6 +484,7 @@ describe("HostedRelayEngine", () => {
     expect(handlers.onFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "protocol",
+        retryable: false,
         closeReason: "transfer_limit",
       }),
     );
@@ -666,7 +680,11 @@ describe("HostedRelayEngine", () => {
       "RPC payload exceeds the maximum relay message size.",
     );
     expect(handlers.onFailure).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "protocol", retryable: false }),
+      expect.objectContaining({
+        kind: "protocol",
+        retryable: false,
+        closeReason: "transfer_limit",
+      }),
     );
   });
 
@@ -839,6 +857,83 @@ describe("HostedRelayEngine", () => {
     });
     expect(handlers.onFailure).toHaveBeenCalledWith(expect.objectContaining({ kind, retryable }));
     expect(handlers.onSessionStatus).not.toHaveBeenCalledWith("closed");
+  });
+
+  it.each(["channel.close", "channel.reject"] as const)(
+    "reports a Hub transfer_limit %s as a retryable budget rotation",
+    (type) => {
+      const handlers = callbacks();
+      const { socket } = create(handlers);
+      authenticate(socket);
+      socket.frame({ type, ...VERSION, channelId: CHANNEL_ID, reason: "transfer_limit" });
+
+      expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+        kind: "budget",
+        retryable: true,
+        closeReason: "transfer_limit",
+      });
+    },
+  );
+
+  it("keeps a Hub channel.reject for an oversized frame terminal", () => {
+    const handlers = callbacks();
+    const { socket } = create(handlers);
+    authenticate(socket);
+    socket.frame({
+      type: "channel.reject",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      reason: "frame_too_large",
+    });
+
+    expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "protocol",
+      retryable: false,
+      closeReason: "frame_too_large",
+    });
+  });
+
+  it("keeps a transfer_limit close for another channel terminal", () => {
+    const handlers = callbacks();
+    const { socket } = create(handlers);
+    authenticate(socket);
+    socket.frame({
+      type: "channel.close",
+      ...VERSION,
+      channelId: "ch_dddddddddddddddddddddd" as RelayChannelId,
+      reason: "transfer_limit",
+    });
+
+    expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "protocol",
+      retryable: false,
+      closeReason: "channel_rejected",
+    });
+  });
+
+  it("keeps a malformed inbound reassembly terminal rather than a budget rotation", async () => {
+    const handlers = callbacks();
+    const { socket, events } = create(handlers);
+    authenticate(socket);
+    const [first] = splitRelayMessage(new Uint8Array(3_000), 1_024);
+    const corrupted = Uint8Array.from(first!);
+    corrupted[3] = 1;
+
+    socket.frame({
+      type: "data",
+      ...VERSION,
+      channelId: CHANNEL_ID,
+      sequence: 0 as never,
+      payload: corrupted,
+    });
+    await flush();
+
+    expect(events.onData).not.toHaveBeenCalled();
+    expect(handlers.onFailure).toHaveBeenCalledExactlyOnceWith({
+      kind: "protocol",
+      retryable: false,
+      closeReason: "transfer_limit",
+    });
   });
 });
 
@@ -2250,5 +2345,143 @@ describe("server-authenticated channels (Hub session version 2)", () => {
     expect(
       handlers.onTransportStatus.mock.calls.filter(([status]) => status === "authenticating"),
     ).toHaveLength(1);
+  });
+});
+
+describe("relay failures through the attempt factory", () => {
+  const sockets: MockRelaySocket[] = [];
+  const unusedService = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("platform service is not used by the relay failure tests");
+      },
+    },
+  );
+  const hostedHubApi = { clearSessionMaterial: vi.fn() } as unknown as HostedHubApi;
+  const node: HostedHubNode = {
+    id: "node_aaaaaaaaaaaaaaaaaaaaaa",
+    environmentId: EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa"),
+    label: "Node",
+    platformOs: "linux",
+    platformArch: "x64",
+    clientVersion: "0.9.0",
+    createdAt: 1,
+    updatedAt: 1,
+    lastAuthenticatedAt: 1,
+    revokedAt: null,
+    revocationReasonCode: null,
+    grant: { id: "grant_aaaaaaaaaaaaaaaaaaaaaa", role: "operator" },
+    effectiveRole: "operator",
+    presence: { online: true, lastHeartbeatAt: 1 },
+  };
+
+  beforeEach(() => {
+    sockets.length = 0;
+    configureHostedRuntime(
+      {
+        endpoint: unusedService as EndpointService,
+        httpClient: unusedService as HttpClientService,
+        passkeyCeremony: unusedService as PasskeyCeremonyService,
+        sessionCredentials: unusedService as SessionCredentialsService,
+        nodeLifecycle: {
+          activate: vi.fn(async () => undefined),
+          suspend: vi.fn(async () => undefined),
+          deactivate: vi.fn(async () => undefined),
+          clearNodeScopedState: vi.fn(),
+          writePrimaryEnvironmentDescriptor: vi.fn(),
+          connectPrimaryEnvironment: vi.fn(),
+          disconnectPrimaryEnvironment: vi.fn(async () => undefined),
+          setActiveEnvironmentId: vi.fn(),
+        },
+        timers: {
+          now: () => Date.now(),
+          setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+          clearTimeout: (timer) => globalThis.clearTimeout(timer),
+          queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+        },
+        isForeground: () => true,
+        subscribeForeground: () => () => undefined,
+        hasPendingRelayRequests: () => false,
+        resetRelayAttemptFactory: vi.fn(),
+        relayUrl: () => "wss://hub.example.test/v1/relay/client",
+        issueRelayAttempt: async ({ preparedSocketContext }) => ({
+          ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
+          expiresAt: Date.now() + 60_000,
+          preparedSocketContext,
+        }),
+        createRelaySocket: (input) => {
+          const socket = new MockRelaySocket();
+          sockets.push(socket);
+          return new HostedRelayEngine({
+            ticket: input.ticket,
+            ticketExpiresAt: input.ticketExpiresAt,
+            socket,
+            timers: realTimers(),
+            callbacks: input.callbacks,
+            events: { onOpen: vi.fn(), onData: vi.fn(), onError: vi.fn(), onClose: vi.fn() },
+          });
+        },
+      },
+      hostedHubApi,
+    );
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      selectedNode: node,
+      generation: 4,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      effectiveRole: node.effectiveRole,
+      transportStatus: "idle",
+    });
+  });
+
+  afterEach(() => {
+    hostedHubController.resetForTests();
+  });
+
+  async function openAttempt(factory: HostedRelayAttemptFactory) {
+    const engine = factory.createSocket(await factory.nextUrl()) as HostedRelayEngine;
+    const socket = sockets.at(-1)!;
+    authenticate(socket);
+    return { engine, socket };
+  }
+
+  it("reconnects quietly, and later each time, after Hub transfer_limit closes", async () => {
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    const delays: number[] = [];
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const { socket } = await openAttempt(factory);
+      socket.frame({
+        type: "channel.close",
+        ...VERSION,
+        channelId: CHANNEL_ID,
+        reason: "transfer_limit",
+      });
+
+      expect(hostedHubStore.getState()).toMatchObject({
+        transportStatus: "reconnecting",
+        errorMessage: null,
+      });
+      expect(lifecycle.shouldReconnect?.()).toBe(true);
+      delays.push(lifecycle.getReconnectDelayMs?.(attempt) ?? 0);
+    }
+
+    // One second base delay with up to 20% jitter, doubled for the second retry.
+    expect(delays[0]).toBeGreaterThanOrEqual(800);
+    expect(delays[1]).toBeGreaterThanOrEqual(1_600);
+  });
+
+  it("stops reconnecting after this client refuses an oversized message", async () => {
+    const factory = new HostedRelayAttemptFactory();
+    const lifecycle = factory.lifecycleHandlers();
+    const { engine } = await openAttempt(factory);
+
+    expect(() => engine.send(new Uint8Array(RELAY_MAX_RPC_MESSAGE_BYTES + 1))).toThrow();
+
+    expect(hostedHubStore.getState()).toMatchObject({ transportStatus: "terminal-failure" });
+    expect(lifecycle.shouldReconnect?.()).toBe(false);
   });
 });

@@ -349,6 +349,15 @@ interface OutboundReservationToken {
   active: boolean;
 }
 
+/**
+ * Classifies a close reason by what a client can do about it.
+ *
+ * `transfer_limit` here is this client's own refusal of a message it cannot
+ * carry (an oversized send, a rejected inbound reassembly, or an exhausted data
+ * sequence space). Retrying would fail the same way, so it is terminal. A
+ * `transfer_limit` the Hub reports on a channel goes through
+ * {@link remoteCloseFailure} instead.
+ */
 function failure(reason: RelayCloseReason | "protocol_invalid" | "network"): HostedRelayFailure {
   if (
     [
@@ -416,6 +425,20 @@ function failure(reason: RelayCloseReason | "protocol_invalid" | "network"): Hos
         retryable: true,
         closeReason: reason as RelayCloseReason,
       };
+}
+
+/**
+ * The failure for a `channel.close` or `channel.reject` the Hub sent.
+ *
+ * A Hub `transfer_limit` means the channel used up its transfer budget. That is
+ * routine and retryable: the next attempt opens a fresh channel, handshake and
+ * snapshot under the normal reconnect backoff. Every other reason classifies as
+ * it does anywhere else.
+ */
+function remoteCloseFailure(reason: RelayCloseReason): HostedRelayFailure {
+  return reason === "transfer_limit"
+    ? { kind: "budget", retryable: true, closeReason: reason }
+    : failure(reason);
 }
 
 /**
@@ -975,7 +998,7 @@ export class HostedRelayEngine {
     }
     if (frame.type === "channel.close" || frame.type === "channel.reject")
       return frame.channelId === this.#channel
-        ? this.#fail(failure(frame.reason ?? "channel_rejected"))
+        ? this.#fail(remoteCloseFailure(frame.reason ?? "channel_rejected"))
         : this.#fail(failure("channel_rejected"));
     if (frame.type === "e2ee.enrollment-revoked") {
       // The only relay signal about the device's account enrollment, so it

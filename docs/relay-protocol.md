@@ -294,6 +294,13 @@ The stable close-reason set is exactly:
 The reasons marked protocol 1.2+ are invalid on `channel.reject`, `channel.close`, or `error`
 frames declaring minor 0 or 1. Existing reasons retain their original meaning and availability.
 
+A client treats `transfer_limit` according to who ended the channel. A `channel.close` or
+`channel.reject` carrying it from the relay means the channel used up its transfer budget; the
+client reconnects under its normal backoff on a fresh channel, with a new ticket or stream, a new
+handshake, and a current snapshot, and nothing resumes the old channel. A client that itself refuses
+a message it cannot carry, such as one above the reassembly ceiling, fails the channel locally with
+the same reason and does not retry, because the same message would fail the same way.
+
 ## Deterministic validation errors
 
 Codec APIs return a bounded result rather than exposing CBOR, Effect Schema, or runtime exceptions.
