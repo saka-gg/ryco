@@ -710,6 +710,56 @@ describe("thread selection memoization", () => {
     ).toBe(true);
   });
 
+  it("keeps the stored message slice when a history page repeats", () => {
+    const thread = makeThread({
+      messages: [
+        {
+          id: MessageId.make("message-2"),
+          role: "assistant",
+          text: "newest",
+          createdAt: "2026-02-13T00:02:00.000Z",
+          streaming: false,
+        },
+      ],
+    });
+    const page = {
+      collection: "messages" as const,
+      snapshotSequence: 2,
+      items: [
+        {
+          id: MessageId.make("message-1"),
+          role: "user" as const,
+          text: "older",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-02-13T00:01:00.000Z",
+          updatedAt: "2026-02-13T00:01:00.000Z",
+        },
+      ],
+      page: {
+        oldestCursor: OrchestrationThreadHistoryCursor.make("v1.oldest"),
+        newestCursor: OrchestrationThreadHistoryCursor.make("v1.newest"),
+        hasMoreBefore: true,
+      },
+    };
+
+    const once = syncServerThreadHistoryPage(
+      makeState(thread),
+      page,
+      thread.id,
+      localEnvironmentId,
+    );
+    const twice = syncServerThreadHistoryPage(once, page, thread.id, localEnvironmentId);
+    const before = localEnvironmentStateOf(once);
+    const after = localEnvironmentStateOf(twice);
+
+    expect(after.messageIdsByThreadId).toBe(before.messageIdsByThreadId);
+    expect(after.messageByThreadId).toBe(before.messageByThreadId);
+    expect(selectThreadByRef(twice, scopeThreadRef(localEnvironmentId, thread.id))?.messages).toBe(
+      selectThreadByRef(once, scopeThreadRef(localEnvironmentId, thread.id))?.messages,
+    );
+  });
+
   it("returns stable thread references for repeated reads of the same state", () => {
     const thread = makeThread({
       messages: [
