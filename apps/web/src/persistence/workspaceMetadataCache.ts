@@ -1,3 +1,4 @@
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   isWorkspaceMetadataSnapshot,
   planWorkspaceMetadataCacheEvictions,
@@ -6,22 +7,11 @@ import {
   type WorkspaceMetadataCache,
   type WorkspaceMetadataCacheNamespace,
   type WorkspaceMetadataCacheRecord,
+  type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 
+/** Where an earlier build persisted this cache; it is cleared once and never read. */
 export const HOSTED_WORKSPACE_METADATA_CACHE_KEY = "ryco:hosted-workspace-metadata:v1";
-
-const DOCUMENT_VERSION = 1 as const;
-
-interface WorkspaceMetadataCacheDocument {
-  readonly version: typeof DOCUMENT_VERSION;
-  readonly records: ReadonlyArray<WorkspaceMetadataCacheRecord>;
-}
-
-export interface WorkspaceMetadataStorage {
-  readonly getItem: (key: string) => string | null;
-  readonly setItem: (key: string, value: string) => void;
-  readonly removeItem: (key: string) => void;
-}
 
 function normalizeOrigin(origin: string): string {
   try {
@@ -36,10 +26,6 @@ function normalizeNamespace(
   namespace: WorkspaceMetadataCacheNamespace,
 ): WorkspaceMetadataCacheNamespace {
   return { ...namespace, hubOrigin: normalizeOrigin(namespace.hubOrigin) };
-}
-
-function normalizeRecord(record: WorkspaceMetadataCacheRecord): WorkspaceMetadataCacheRecord {
-  return { ...record, namespace: normalizeNamespace(record.namespace) };
 }
 
 function isNamespace(value: unknown): value is WorkspaceMetadataCacheNamespace {
@@ -58,67 +44,75 @@ function isNamespace(value: unknown): value is WorkspaceMetadataCacheNamespace {
   );
 }
 
-function isRecord(value: unknown): value is WorkspaceMetadataCacheRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const candidate = value as Partial<WorkspaceMetadataCacheRecord>;
+function sharesMembers(
+  snapshot: unknown,
+  stored: WorkspaceMetadataSnapshot,
+): snapshot is WorkspaceMetadataSnapshot {
+  if (typeof snapshot !== "object" || snapshot === null) return false;
+  const candidate = snapshot as Partial<WorkspaceMetadataSnapshot>;
   return (
-    isNamespace(candidate.namespace) &&
-    isWorkspaceMetadataSnapshot(candidate.snapshot, candidate.namespace.environmentId) &&
-    Number.isSafeInteger(candidate.payloadBytes) &&
-    candidate.payloadBytes === workspaceMetadataPayloadBytes(candidate.snapshot) &&
-    Number.isSafeInteger(candidate.updatedAt) &&
-    Number(candidate.updatedAt) >= 0
-  );
-}
-
-function readDocument(storage: WorkspaceMetadataStorage): WorkspaceMetadataCacheDocument {
-  try {
-    const raw = storage.getItem(HOSTED_WORKSPACE_METADATA_CACHE_KEY);
-    if (!raw) return { version: DOCUMENT_VERSION, records: [] };
-    const value = JSON.parse(raw) as unknown;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return { version: DOCUMENT_VERSION, records: [] };
-    }
-    const document = value as Partial<WorkspaceMetadataCacheDocument>;
-    if (document.version !== DOCUMENT_VERSION || !Array.isArray(document.records)) {
-      return { version: DOCUMENT_VERSION, records: [] };
-    }
-    const unique = new Map<string, WorkspaceMetadataCacheRecord>();
-    for (const record of document.records) {
-      if (!isRecord(record)) continue;
-      const normalized = normalizeRecord(record);
-      const key = workspaceMetadataNamespaceKey(normalized.namespace);
-      const current = unique.get(key);
-      if (!current || normalized.updatedAt > current.updatedAt) unique.set(key, normalized);
-    }
-    return { version: DOCUMENT_VERSION, records: Array.from(unique.values()) };
-  } catch {
-    return { version: DOCUMENT_VERSION, records: [] };
-  }
-}
-
-function writeDocument(
-  storage: WorkspaceMetadataStorage,
-  records: ReadonlyArray<WorkspaceMetadataCacheRecord>,
-): void {
-  if (records.length === 0) {
-    storage.removeItem(HOSTED_WORKSPACE_METADATA_CACHE_KEY);
-    return;
-  }
-  storage.setItem(
-    HOSTED_WORKSPACE_METADATA_CACHE_KEY,
-    JSON.stringify({ version: DOCUMENT_VERSION, records } satisfies WorkspaceMetadataCacheDocument),
+    candidate.projects === stored.projects &&
+    candidate.worktrees === stored.worktrees &&
+    candidate.threads === stored.threads
   );
 }
 
 /**
- * Metadata-only hosted-Web cache. It deliberately uses the page's storage
- * adapter directly and never the service worker, authenticated HTTP cache, or
- * CacheStorage data plane.
+ * A snapshot that shares its member arrays with the stored one only changed
+ * its fixed fields: the arrays were validated when stored, so validating the
+ * snapshot with empty arrays covers everything that could differ.
  */
-export function createBrowserWorkspaceMetadataCache(
-  storage: WorkspaceMetadataStorage,
-): WorkspaceMetadataCache {
+function isSnapshotFor(
+  snapshot: unknown,
+  environmentId: EnvironmentId,
+  stored: WorkspaceMetadataCacheRecord | undefined,
+): snapshot is WorkspaceMetadataSnapshot {
+  if (stored !== undefined && sharesMembers(snapshot, stored.snapshot)) {
+    return isWorkspaceMetadataSnapshot(
+      { ...snapshot, projects: [], worktrees: [], threads: [] },
+      environmentId,
+    );
+  }
+  return isWorkspaceMetadataSnapshot(snapshot, environmentId);
+}
+
+/**
+ * Validates an incoming record against the records held, and returns it under
+ * its normalized namespace; null when it is not a well-formed record.
+ */
+function acceptRecord(
+  value: unknown,
+  records: ReadonlyMap<string, WorkspaceMetadataCacheRecord>,
+): WorkspaceMetadataCacheRecord | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const candidate = value as Partial<WorkspaceMetadataCacheRecord>;
+  if (!isNamespace(candidate.namespace)) return null;
+  const namespace = normalizeNamespace(candidate.namespace);
+  const { snapshot, payloadBytes, updatedAt } = candidate;
+  if (
+    !isSnapshotFor(
+      snapshot,
+      namespace.environmentId,
+      records.get(workspaceMetadataNamespaceKey(namespace)),
+    ) ||
+    typeof payloadBytes !== "number" ||
+    !Number.isSafeInteger(payloadBytes) ||
+    payloadBytes !== workspaceMetadataPayloadBytes(snapshot) ||
+    typeof updatedAt !== "number" ||
+    !Number.isSafeInteger(updatedAt) ||
+    updatedAt < 0
+  ) {
+    return null;
+  }
+  return { namespace, snapshot, payloadBytes, updatedAt };
+}
+
+/**
+ * Metadata-only hosted-Web cache. It lives in page memory and never touches
+ * the service worker, authenticated HTTP cache, CacheStorage, or page storage.
+ */
+export function createInMemoryWorkspaceMetadataCache(): WorkspaceMetadataCache {
+  const records = new Map<string, WorkspaceMetadataCacheRecord>();
   let pending: Promise<unknown> = Promise.resolve();
   const exclusive = <A>(operation: () => Promise<A>): Promise<A> => {
     const run = pending.then(operation, operation);
@@ -130,62 +124,43 @@ export function createBrowserWorkspaceMetadataCache(
   };
 
   return {
-    load: async (namespace) => {
-      const key = workspaceMetadataNamespaceKey(normalizeNamespace(namespace));
-      return (
-        readDocument(storage).records.find(
-          (record) => workspaceMetadataNamespaceKey(record.namespace) === key,
-        ) ?? null
+    load: async (namespace) =>
+      records.get(workspaceMetadataNamespaceKey(normalizeNamespace(namespace))) ?? null,
+    list: async ({ hubOrigin, accountId }) => {
+      const origin = normalizeOrigin(hubOrigin);
+      return Array.from(records.values()).filter(
+        (record) =>
+          record.namespace.hubOrigin === origin && record.namespace.accountId === accountId,
       );
     },
-    list: async ({ hubOrigin, accountId }) =>
-      readDocument(storage).records.filter(
-        (record) =>
-          normalizeOrigin(record.namespace.hubOrigin) === normalizeOrigin(hubOrigin) &&
-          record.namespace.accountId === accountId,
-      ),
     replace: (incoming) =>
       exclusive(async () => {
-        if (!isRecord(incoming)) throw new TypeError("Invalid hosted workspace metadata record.");
-        const normalizedIncoming = normalizeRecord(incoming);
-        const document = readDocument(storage);
+        const accepted = acceptRecord(incoming, records);
+        if (accepted === null) throw new TypeError("Invalid hosted workspace metadata record.");
         const plan = planWorkspaceMetadataCacheEvictions({
-          existing: document.records,
-          incoming: normalizedIncoming,
+          existing: Array.from(records.values()),
+          incoming: accepted,
         });
         if (!plan.accepted) return;
-        const incomingKey = workspaceMetadataNamespaceKey(normalizedIncoming.namespace);
-        const evicted = new Set(plan.evict.map(workspaceMetadataNamespaceKey));
-        writeDocument(storage, [
-          ...document.records.filter((record) => {
-            const key = workspaceMetadataNamespaceKey(record.namespace);
-            return key !== incomingKey && !evicted.has(key);
-          }),
-          normalizedIncoming,
-        ]);
+        for (const namespace of plan.evict)
+          records.delete(workspaceMetadataNamespaceKey(namespace));
+        // Delete first so the replaced record is also the most recently written.
+        const key = workspaceMetadataNamespaceKey(accepted.namespace);
+        records.delete(key);
+        records.set(key, accepted);
       }),
     purgeEnvironment: (namespace) =>
       exclusive(async () => {
-        const key = workspaceMetadataNamespaceKey(normalizeNamespace(namespace));
-        const document = readDocument(storage);
-        writeDocument(
-          storage,
-          document.records.filter(
-            (record) => workspaceMetadataNamespaceKey(record.namespace) !== key,
-          ),
-        );
+        records.delete(workspaceMetadataNamespaceKey(normalizeNamespace(namespace)));
       }),
     purgeAccount: ({ hubOrigin, accountId }) =>
       exclusive(async () => {
-        const document = readDocument(storage);
-        writeDocument(
-          storage,
-          document.records.filter(
-            (record) =>
-              normalizeOrigin(record.namespace.hubOrigin) !== normalizeOrigin(hubOrigin) ||
-              record.namespace.accountId !== accountId,
-          ),
-        );
+        const origin = normalizeOrigin(hubOrigin);
+        for (const [key, record] of records) {
+          if (record.namespace.hubOrigin === origin && record.namespace.accountId === accountId) {
+            records.delete(key);
+          }
+        }
       }),
   };
 }
@@ -201,16 +176,7 @@ export function getBrowserWorkspaceMetadataCache(): WorkspaceMetadataCache {
     } catch {
       /* Optional storage. */
     }
-    const memory = new Map<string, string>();
-    browserWorkspaceMetadataCache = createBrowserWorkspaceMetadataCache({
-      getItem: (key) => memory.get(key) ?? null,
-      setItem: (key, value) => {
-        memory.set(key, value);
-      },
-      removeItem: (key) => {
-        memory.delete(key);
-      },
-    });
+    browserWorkspaceMetadataCache = createInMemoryWorkspaceMetadataCache();
   }
   return browserWorkspaceMetadataCache;
 }

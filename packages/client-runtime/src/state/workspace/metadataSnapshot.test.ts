@@ -1,5 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { reconcileWorkspaceMachine } from "./machineCatalog.js";
 import {
@@ -167,6 +167,69 @@ describe("workspace metadata snapshots", () => {
       }),
     ).toEqual({ accepted: false, evict: [] });
     expect(workspaceMetadataPayloadBytes(snapshot("a"))).toBeGreaterThan(0);
+  });
+
+  describe("payload bytes", () => {
+    const encodedBytes = (value: WorkspaceMetadataSnapshot) =>
+      new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+    it("matches the encoded serialization", () => {
+      const value = snapshot("a");
+      expect(workspaceMetadataPayloadBytes(value)).toBe(encodedBytes(value));
+      const empty = { ...value, projects: [], worktrees: [], threads: [] };
+      expect(workspaceMetadataPayloadBytes(empty)).toBe(encodedBytes(empty));
+      const multibyte = {
+        ...value,
+        projects: [{ ...value.projects[0]!, name: "Projekt üß 日本語 🚀 \ud800" }],
+        threads: [{ ...value.threads[0]!, title: 'quote " slash \\ newline \n', branch: null }],
+      };
+      expect(workspaceMetadataPayloadBytes(multibyte)).toBe(encodedBytes(multibyte));
+    });
+
+    it("accounts for fixed fields, their order and extra properties", () => {
+      const value = snapshot("a");
+      const reordered = {
+        capturedAt: 1_700_000_000_000,
+        threads: value.threads,
+        environmentId: value.environmentId,
+        projects: value.projects,
+        schemaVersion: value.schemaVersion,
+        worktrees: value.worktrees,
+        note: "extra",
+        omitted: undefined,
+      } as unknown as WorkspaceMetadataSnapshot;
+      expect(workspaceMetadataPayloadBytes(reordered)).toBe(encodedBytes(reordered));
+    });
+
+    it("follows a changed capture time while the member arrays are reused", () => {
+      const value = snapshot("a", 9);
+      const initial = workspaceMetadataPayloadBytes(value);
+      const later = { ...value, capturedAt: 1_700_000_000_000 };
+      expect(workspaceMetadataPayloadBytes(later)).toBe(encodedBytes(later));
+      expect(workspaceMetadataPayloadBytes(later)).toBeGreaterThan(initial);
+      const grown = { ...later, threads: [...later.threads, ...later.threads] };
+      expect(workspaceMetadataPayloadBytes(grown)).toBe(encodedBytes(grown));
+    });
+
+    it("measures reused arrays and repeated snapshots only once", () => {
+      const value = snapshot("a");
+      const stringify = vi.spyOn(JSON, "stringify");
+      try {
+        const first = workspaceMetadataPayloadBytes(value);
+        const afterFirst = stringify.mock.calls.length;
+        expect(workspaceMetadataPayloadBytes(value)).toBe(first);
+        expect(stringify.mock.calls.length).toBe(afterFirst);
+
+        const next = { ...value, capturedAt: value.capturedAt + 1 };
+        workspaceMetadataPayloadBytes(next);
+        const serialized = stringify.mock.calls.slice(afterFirst).map(([argument]) => argument);
+        expect(serialized).toHaveLength(1);
+        expect(serialized[0]).not.toBe(value.threads);
+        expect(serialized[0]).toMatchObject({ projects: 0, worktrees: 0, threads: 0 });
+      } finally {
+        stringify.mockRestore();
+      }
+    });
   });
 
   it("maps machine eligibility to retain, lock, and purge cache actions", () => {

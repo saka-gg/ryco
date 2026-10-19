@@ -5,18 +5,21 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnId,
+  WorktreeId,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
 import {
+  applyOrchestrationEvent,
   hydrateEnvironmentStateFromCache,
   selectThreadByRef,
   syncServerShellSnapshot,
+  type AppState,
 } from "@ryco/client-runtime/state/threads";
 import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { useStore } from "./store";
 import { fullThreadEntry } from "./types";
@@ -344,5 +347,249 @@ describe("workspace metadata lineage", () => {
     const cached = workspaceMetadataToCachedShellSnapshot(snapshot);
     expect(cached.threads[0]?.summary.latestUserMessageAt).toBeNull();
     expect(fullThreadEntry(cached.threads[0]?.summary)?.latestTurn).toBeNull();
+  });
+});
+
+describe("workspace metadata memoization", () => {
+  const environmentId = EnvironmentId.make("memoized-metadata");
+  const projectId = ProjectId.make("project-memo");
+  const threadId = ThreadId.make("thread-memo");
+  const at = "2026-10-01T00:00:00.000Z";
+
+  const shell = (id: string, overrides: Partial<OrchestrationThreadShell> = {}) =>
+    ({
+      id: ThreadId.make(id),
+      projectId,
+      title: id,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      goal: null,
+      createdAt: at,
+      updatedAt: at,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...overrides,
+    }) as OrchestrationThreadShell;
+
+  const shellSnapshot = (
+    input: {
+      readonly title?: string;
+      readonly threads?: ReadonlyArray<OrchestrationThreadShell>;
+      readonly sequence?: number;
+    } = {},
+  ) =>
+    ({
+      snapshotSequence: input.sequence ?? 1,
+      projects: [
+        {
+          id: projectId,
+          title: input.title ?? "Project",
+          workspaceRoot: "/repo",
+          projectMetadataDir: ".ryco",
+          defaultModelSelection: null,
+          customAvatarContentHash: null,
+          preferredRemoteName: null,
+          scripts: [],
+          createdAt: at,
+          updatedAt: at,
+        },
+      ],
+      worktrees: [
+        {
+          worktreeId: WorktreeId.make("worktree-memo"),
+          projectId,
+          title: null,
+          branch: "feature",
+          worktreePath: "/repo-feature",
+          origin: "branch",
+          prNumber: null,
+          issueNumber: null,
+          prTitle: null,
+          issueTitle: null,
+          createdAt: at,
+          updatedAt: at,
+          archivedAt: null,
+          manualPosition: 0,
+        },
+      ],
+      threads: input.threads ?? [shell(threadId), shell("thread-other")],
+      updatedAt: at,
+    }) as unknown as Parameters<typeof syncServerShellSnapshot>[1];
+
+  const emptyState: AppState = { activeEnvironmentId: null, environmentStateById: {} };
+  const synced = (input?: Parameters<typeof shellSnapshot>[0]) =>
+    syncServerShellSnapshot(emptyState, shellSnapshot(input), environmentId);
+  const resynced = (state: AppState, input?: Parameters<typeof shellSnapshot>[0]) =>
+    syncServerShellSnapshot(state, shellSnapshot(input), environmentId);
+
+  const messageSent = (role: "assistant" | "user") =>
+    ({
+      sequence: 2,
+      eventId: "event-message",
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      occurredAt: at,
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.message-sent",
+      payload: {
+        threadId,
+        messageId: "message-1",
+        role,
+        text: "streamed text",
+        turnId: "turn-1",
+        streaming: true,
+        createdAt: at,
+        updatedAt: at,
+      },
+    }) as unknown as Parameters<typeof applyOrchestrationEvent>[1];
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns the same arrays for unchanged state, whatever the capture time", () => {
+    const state = synced();
+    const first = readWorkspaceMetadataSnapshot(environmentId, 1, false, state)!;
+    const second = readWorkspaceMetadataSnapshot(environmentId, 2, false, state)!;
+    expect(second).not.toBe(first);
+    expect(second.capturedAt).toBe(2);
+    expect(second.projects).toBe(first.projects);
+    expect(second.worktrees).toBe(first.worktrees);
+    expect(second.threads).toBe(first.threads);
+    expect(first.threads.map((thread) => thread.id)).toEqual([threadId, "thread-other"]);
+  });
+
+  it("keeps the arrays and does no JSON work across a message-only store tick", () => {
+    const state = synced();
+    const before = readWorkspaceMetadataSnapshot(environmentId, 1, false, state)!;
+    const stringify = vi.spyOn(JSON, "stringify");
+    const parse = vi.spyOn(JSON, "parse");
+
+    for (const role of ["assistant", "user"] as const) {
+      const next = applyOrchestrationEvent(state, messageSent(role), environmentId);
+      expect(next).not.toBe(state);
+      const after = readWorkspaceMetadataSnapshot(environmentId, 2, false, next)!;
+      expect(after.projects).toBe(before.projects);
+      expect(after.worktrees).toBe(before.worktrees);
+      expect(after.threads).toBe(before.threads);
+    }
+    expect(stringify).not.toHaveBeenCalled();
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds only the array whose source changed", () => {
+    const state = synced();
+    const before = readWorkspaceMetadataSnapshot(environmentId, 1, false, state)!;
+
+    const renamedThreads = [shell(threadId, { title: "Renamed" }), shell("thread-other")];
+    const renamedThread = resynced(state, { sequence: 2, threads: renamedThreads });
+    const afterThread = readWorkspaceMetadataSnapshot(environmentId, 2, false, renamedThread)!;
+    expect(afterThread.threads).not.toBe(before.threads);
+    expect(afterThread.threads.find((thread) => thread.id === threadId)?.title).toBe("Renamed");
+    expect(afterThread.projects).toBe(before.projects);
+    expect(afterThread.worktrees).toBe(before.worktrees);
+
+    const renamedProject = resynced(renamedThread, {
+      sequence: 3,
+      title: "Renamed project",
+      threads: renamedThreads,
+    });
+    const afterProject = readWorkspaceMetadataSnapshot(environmentId, 3, false, renamedProject)!;
+    expect(afterProject.projects).not.toBe(afterThread.projects);
+    expect(afterProject.projects[0]?.name).toBe("Renamed project");
+    expect(afterProject.worktrees).toBe(afterThread.worktrees);
+    expect(afterProject.threads).toBe(afterThread.threads);
+
+    const removedThread = resynced(renamedProject, {
+      sequence: 4,
+      title: "Renamed project",
+      threads: [renamedThreads[0]!],
+    });
+    const afterRemoval = readWorkspaceMetadataSnapshot(environmentId, 4, false, removedThread)!;
+    expect(afterRemoval.threads.map((thread) => thread.id)).toEqual([threadId]);
+    expect(afterRemoval.projects).toBe(afterProject.projects);
+  });
+
+  it("rebuilds the thread rows when delivery becomes unknown", () => {
+    const state = synced();
+    const known = readWorkspaceMetadataSnapshot(environmentId, 1, false, state)!;
+    const unknown = readWorkspaceMetadataSnapshot(environmentId, 2, true, state)!;
+    expect(unknown.threads).not.toBe(known.threads);
+    expect(unknown.threads.every((thread) => thread.deliveryUnknown)).toBe(true);
+    expect(known.threads.every((thread) => !thread.deliveryUnknown)).toBe(true);
+    expect(unknown.projects).toBe(known.projects);
+    expect(readWorkspaceMetadataSnapshot(environmentId, 3, false, state)!.threads).not.toBe(
+      unknown.threads,
+    );
+  });
+
+  it("matches a fresh derivation of the same state", () => {
+    const state = resynced(synced(), {
+      sequence: 2,
+      threads: [shell(threadId, { title: "Changed" }), shell("thread-other")],
+    });
+    const memoized = readWorkspaceMetadataSnapshot(environmentId, 7, false, state);
+    // A second environment id has no memo, so this derives from scratch.
+    const otherId = EnvironmentId.make("memoized-metadata-fresh");
+    const fresh = readWorkspaceMetadataSnapshot(otherId, 7, false, {
+      ...state,
+      environmentStateById: { [otherId]: state.environmentStateById[environmentId]! },
+    });
+    expect(memoized).toEqual(remapWorkspaceMetadataSnapshotEnvironment(fresh!, environmentId));
+  });
+
+  it("still rejects what it cannot publish when the arrays are cached", () => {
+    const state = synced();
+    expect(readWorkspaceMetadataSnapshot(environmentId, 1, false, state)).not.toBeNull();
+    // The capture time is validated on every read, cached arrays or not.
+    expect(readWorkspaceMetadataSnapshot(environmentId, Number.NaN, false, state)).toBeNull();
+    expect(readWorkspaceMetadataSnapshot(environmentId, 2, false, state)).not.toBeNull();
+
+    // A thread in a project the shell does not list is never published.
+    const environment = state.environmentStateById[environmentId]!;
+    const orphaned: AppState = {
+      ...state,
+      environmentStateById: {
+        [environmentId]: {
+          ...environment,
+          sidebarThreadSummaryById: {
+            ...environment.sidebarThreadSummaryById,
+            [threadId]: {
+              ...environment.sidebarThreadSummaryById[threadId]!,
+              projectId: ProjectId.make("missing"),
+            },
+          },
+        },
+      },
+    };
+    expect(readWorkspaceMetadataSnapshot(environmentId, 3, false, orphaned)).toBeNull();
+    expect(readWorkspaceMetadataSnapshot(environmentId, 4, false, orphaned)).toBeNull();
+    expect(readWorkspaceMetadataSnapshot(environmentId, 5, false, state)).not.toBeNull();
+  });
+
+  it("publishes nothing before the shell is complete", () => {
+    const state = synced();
+    const environment = state.environmentStateById[environmentId]!;
+    const booting: AppState = {
+      ...state,
+      environmentStateById: { [environmentId]: { ...environment, bootstrapComplete: false } },
+    };
+    expect(readWorkspaceMetadataSnapshot(environmentId, 1, false, booting)).toBeNull();
+    expect(
+      readWorkspaceMetadataSnapshot(EnvironmentId.make("unknown"), 1, false, state),
+    ).toBeNull();
   });
 });
