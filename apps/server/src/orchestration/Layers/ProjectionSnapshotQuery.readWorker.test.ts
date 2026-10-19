@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { MessageId, ThreadId } from "@ryco/contracts";
+import { MessageId, OrchestrationThreadHistoryError, ThreadId } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -16,6 +16,7 @@ import {
 } from "../../persistence/SqliteReadClient.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 
 const MODEL = '{"instanceId":"codex","model":"gpt-5-codex"}';
@@ -101,6 +102,96 @@ it.effect("runs history pages and message search on the read worker", () =>
       const beforeHydration = yield* workerStatements;
       yield* query.getCommandReadModel();
       assert.equal(yield* workerStatements, beforeHydration);
+    }),
+  ),
+);
+
+it.effect("reads thread windows on the read worker, matching the main connection", () =>
+  withFileDatabase(
+    Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      yield* insertMessage(sql, "message-2", "second message", "2026-10-01T00:00:02.000Z");
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        ) VALUES (
+          'activity-1', 'thread-1', NULL, 'info', 'tool.completed', 'Ran a tool', '{}',
+          '2026-10-01T00:00:03.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_proposed_plans (
+          plan_id, thread_id, turn_id, plan_markdown, created_at, updated_at
+        ) VALUES (
+          'plan-1', 'thread-1', NULL, '# Plan', '2026-10-01T00:00:04.000Z',
+          '2026-10-01T00:00:04.000Z'
+        )
+      `;
+      for (const projector of Object.values(ORCHESTRATION_PROJECTOR_NAMES)) {
+        yield* sql`
+          INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+          VALUES (${projector}, 7, ${NOW})
+        `;
+      }
+      const query = yield* ProjectionSnapshotQuery;
+      const input = {
+        threadId: ThreadId.make("thread-1"),
+        limits: { messages: 10, proposedPlans: 10, activities: 10, checkpoints: 10 },
+      };
+
+      const beforeWorkerRead = yield* workerStatements;
+      const onWorker = yield* query.getThreadWindow!(input);
+      assert.isAbove(yield* workerStatements, beforeWorkerRead);
+
+      // Inside a main-connection transaction the same read stays on that connection.
+      const beforeMainRead = yield* workerStatements;
+      const onMain = yield* sql.withTransaction(query.getThreadWindow!(input));
+      assert.equal(yield* workerStatements, beforeMainRead);
+
+      assert.deepEqual(onWorker, onMain);
+      assert.equal(onWorker.snapshotSequence, 7);
+      assert.deepEqual(
+        onWorker.thread.messages.map((message) => message.id),
+        ["message-1", "message-2"],
+      );
+      assert.deepEqual(
+        onWorker.thread.activities.map((activity) => activity.id),
+        ["activity-1"],
+      );
+      assert.deepEqual(
+        onWorker.thread.proposedPlans.map((plan) => plan.id),
+        ["plan-1"],
+      );
+      assert.equal(onWorker.workspaceCwd, "/project");
+    }),
+  ),
+);
+
+it.effect("reports a missing thread from the read worker like the main connection", () =>
+  withFileDatabase(
+    Effect.gen(function* () {
+      yield* seed;
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      const input = {
+        threadId: ThreadId.make("thread-missing"),
+        limits: { messages: 10, proposedPlans: 10, activities: 10, checkpoints: 10 },
+      };
+
+      const beforeWorkerRead = yield* workerStatements;
+      const onWorker = yield* Effect.flip(query.getThreadWindow!(input));
+      assert.isAbove(yield* workerStatements, beforeWorkerRead);
+      const onMain = yield* Effect.flip(sql.withTransaction(query.getThreadWindow!(input)));
+
+      assert.deepEqual(onWorker, onMain);
+      assert.deepEqual(
+        onWorker,
+        new OrchestrationThreadHistoryError({
+          reason: "thread-not-found",
+          threadId: input.threadId,
+        }),
+      );
     }),
   ),
 );

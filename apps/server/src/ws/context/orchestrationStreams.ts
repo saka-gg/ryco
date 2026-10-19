@@ -620,7 +620,9 @@ export const makeOrchestrationStreamHelpers = (deps: {
   /**
    * Wires one subscription's live feed: coalesces frames under `coalesceKey`
    * before enqueue, keeps a byte ledger over queued-but-undrained events, and
-   * runs the coalescer's flush tick for the feed's lifetime.
+   * flushes held frames once their window elapses. The flush is a one-shot
+   * timer armed when a frame is held, so a feed with nothing held (an idle
+   * subscription) schedules no wakeups at all.
    */
   const runLiveFeed = (input: {
     readonly stream: WsReplayStreamKind;
@@ -652,16 +654,43 @@ export const makeOrchestrationStreamHelpers = (deps: {
         windowMs: input.coalesceWindowMs,
         keyOf: input.coalesceKey,
       });
-      const flushTickFiber = yield* Effect.forkScoped(
-        Effect.forever(
-          Effect.sleep(input.coalesceWindowMs).pipe(Effect.andThen(coalescer.flush)),
-        ).pipe(Effect.ignoreCause({ log: true })),
-      );
+
+      // At most one flush is pending, armed by the frame the coalescer starts
+      // holding and cleared as it fires (before the flush, so a frame held
+      // while it runs arms the next). Nothing is armed while nothing is held.
+      const scope = yield* Effect.scope;
+      let flushArmed = false;
+      let flushFiber: Fiber.Fiber<void> | undefined;
+      const armFlush = Effect.suspend(() => {
+        if (flushArmed || input.coalesceWindowMs <= 0) return Effect.void;
+        flushArmed = true;
+        const flushHeldFrames = Effect.sleep(input.coalesceWindowMs).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              flushArmed = false;
+              return coalescer.flush;
+            }),
+          ),
+          Effect.ignoreCause({ log: true }),
+        );
+        return Effect.forkIn(flushHeldFrames, scope).pipe(
+          Effect.map((fiber) => {
+            flushFiber = fiber;
+          }),
+        );
+      });
+      const push = (event: OrchestrationEvent) =>
+        coalescer
+          .push(event)
+          .pipe(Effect.andThen(input.coalesceKey(event) === null ? Effect.void : armFlush));
+
       yield* Stream.fromSubscription(input.liveSubscription).pipe(
-        Stream.runForEach((event) => input.onEvent(event, coalescer.push)),
+        Stream.runForEach((event) => input.onEvent(event, push)),
         Effect.ensuring(
           Effect.gen(function* () {
-            yield* Fiber.interrupt(flushTickFiber).pipe(Effect.ignore);
+            if (flushFiber !== undefined) {
+              yield* Fiber.interrupt(flushFiber).pipe(Effect.ignore);
+            }
             yield* coalescer.flush.pipe(Effect.ignoreCause({ log: true }));
             yield* Queue.shutdown(input.liveQueue);
           }),
