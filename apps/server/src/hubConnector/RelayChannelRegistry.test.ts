@@ -61,6 +61,10 @@ function harness(
     readonly connection?: () => RelayConnectionIdentity | undefined;
     readonly onAccepted?: (input: ChannelOpenInput) => void | Promise<void>;
     readonly protocol?: RelayProtocolVersion;
+    /** Holds a channel's session in preparation until the returned promise settles. */
+    readonly preparing?: (input: ChannelOpenInput) => Promise<void> | undefined;
+    /** Sessions keep what they receive queued, as a consumer that has not read it yet. */
+    readonly queueReceived?: boolean;
   } = {},
 ) {
   const sent: Uint8Array[] = [];
@@ -90,6 +94,8 @@ function harness(
     factory: {
       open: async (input) => {
         opens.push(input);
+        const preparation = options.preparing?.(input);
+        if (preparation !== undefined) await preparation;
         const { channelId, send } = input;
         const values: Uint8Array[] = [];
         received.set(channelId as string, values);
@@ -102,6 +108,9 @@ function harness(
           requestClose: input.close,
           receive: async (bytes: Uint8Array) => {
             values.push(Uint8Array.from(bytes));
+            if (options.queueReceived === true && session.accept) {
+              session.queued += bytes.byteLength;
+            }
             return session.accept;
           },
           queuedBytes: async () => session.queued,
@@ -516,8 +525,8 @@ describe("RelayChannelRegistry", () => {
     released?.();
     await opening;
 
-    // The frame chain could only deliver this once `handle` resolved, which is
-    // the guarantee: the announcement completed first.
+    // The connection delivers a channel's next frame only once `handle`
+    // resolved, which is the guarantee: the announcement completed first.
     await registry.handle({
       type: "data",
       ...version,
@@ -809,5 +818,157 @@ describe("RelayChannelRegistry", () => {
     expect(spent.send(new Uint8Array(16)).accepted).toBe(true);
     spent.release();
     expect(sendQueue.reservedBytes).toBe(0);
+  });
+
+  describe("concurrent channels", () => {
+    const channelC = `ch_${"C".repeat(22)}` as RelayChannelId;
+
+    function gate() {
+      let release!: () => void;
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    }
+
+    it("admits exactly one of two opens that race for the last channel slot", async () => {
+      const preparation = gate();
+      const { registry, sendQueue, sent, opens } = harness({
+        preparing: ({ channelId }) => (channelId === channelA ? undefined : preparation.promise),
+      });
+      await registry.handle(openFrame(channelA));
+      // `limits.maxChannels` is 2: one slot is left, and both opens start
+      // before either session has finished preparing.
+      const first = registry.handle(openFrame(channelB));
+      const second = registry.handle(openFrame(channelC));
+      preparation.release();
+      await Promise.all([first, second]);
+
+      expect(registry.size).toBe(limits.maxChannels);
+      expect(registry.has(channelB)).toBe(true);
+      expect(registry.has(channelC)).toBe(false);
+      // The refused channel never had a session built for it.
+      expect(opens.map((input) => input.channelId)).toEqual([channelA, channelB]);
+      sendQueue.flush();
+      expect(
+        decodeAll(sent).map((frame) => [frame.type, "channelId" in frame && frame.channelId]),
+      ).toEqual([
+        ["channel.accept", channelA],
+        ["channel.reject", channelC],
+        ["channel.accept", channelB],
+      ]);
+    });
+
+    it("closes a session that finishes preparing after shutdown, and rejects its channel", async () => {
+      const preparation = gate();
+      const announced: RelayChannelId[] = [];
+      const { registry, sendQueue, sent, sessions } = harness({
+        preparing: () => preparation.promise,
+        onAccepted: ({ channelId }) => {
+          announced.push(channelId);
+        },
+      });
+      const opening = registry.handle(openFrame(channelA));
+      await registry.closeAll();
+      preparation.release();
+      await opening;
+
+      expect(registry.has(channelA)).toBe(false);
+      expect(registry.size).toBe(0);
+      expect(sessions.get(channelA as string)!.closes).toBe(1);
+      expect(announced).toEqual([]);
+      sendQueue.flush();
+      expect(decodeAll(sent)).toEqual([
+        expect.objectContaining({
+          type: "channel.reject",
+          channelId: channelA,
+          reason: "server_draining",
+        }),
+      ]);
+    });
+
+    it("keeps each channel's announcement at outbound sequence 0 while another opens", async () => {
+      const preparation = gate();
+      const carrier = (channelId: RelayChannelId) =>
+        Uint8Array.of(0xca, channelId === channelA ? 0x0a : 0x0b);
+      const { registry, sendQueue, sent, sessions, received } = harness({
+        preparing: ({ channelId }) => (channelId === channelA ? preparation.promise : undefined),
+        onAccepted: ({ channelId, send }) => {
+          send(carrier(channelId));
+        },
+      });
+      const openingA = registry.handle(openFrame(channelA));
+      // B opens, announces, and carries traffic in both directions while A's
+      // session is still being prepared.
+      await registry.handle(openFrame(channelB));
+      await registry.handle({
+        type: "data",
+        ...version,
+        channelId: channelB,
+        sequence: 0 as never,
+        payload: Uint8Array.of(1),
+      });
+      expect(sessions.get(channelB as string)!.send(Uint8Array.of(2)).accepted).toBe(true);
+      sendQueue.flush();
+      expect(registry.has(channelA)).toBe(false);
+      expect(received.get(channelB as string)).toEqual([Uint8Array.of(1)]);
+
+      preparation.release();
+      await openingA;
+      expect(sessions.get(channelA as string)!.send(Uint8Array.of(3)).accepted).toBe(true);
+      sendQueue.flush();
+
+      const frames = decodeAll(sent);
+      for (const channelId of [channelA, channelB]) {
+        const own = frames.filter((frame) => "channelId" in frame && frame.channelId === channelId);
+        expect(own.map((frame) => frame.type)).toEqual(["channel.accept", "data", "data"]);
+        const [, announcement, next] = own;
+        expect(announcement?.type === "data" && announcement.sequence).toBe(0);
+        expect(
+          announcement?.type === "data" &&
+            stripRelayChunkCapabilityPrelude(announcement.payload).message,
+        ).toEqual(carrier(channelId));
+        expect(next?.type === "data" && next.sequence).toBe(1);
+      }
+    });
+
+    it("counts a payload another channel is delivering against the aggregate budget", async () => {
+      const { registry, sendQueue, sent, sessions, received } = harness({ queueReceived: true });
+      await registry.handle(openFrame(channelA));
+      await registry.handle(openFrame(channelB));
+      sendQueue.flush();
+      sent.length = 0;
+      // Room for exactly one more full data frame across the connection.
+      sessions.get(channelA as string)!.queued =
+        limits.maxQueuedBytes - limits.maxControlFrameBytes - limits.maxDataChunkBytes;
+
+      // Both frames are handled at once. Each read of the budget alone has room
+      // for its payload, so only ordering the deliveries keeps the second from
+      // being admitted past it.
+      await Promise.all(
+        [channelA, channelB].map((channelId) =>
+          registry.handle({
+            type: "data",
+            ...version,
+            channelId,
+            sequence: 0 as never,
+            payload: new Uint8Array(limits.maxDataChunkBytes),
+          }),
+        ),
+      );
+
+      expect(received.get(channelA as string)).toHaveLength(1);
+      expect(received.get(channelB as string)).toEqual([]);
+      expect(registry.has(channelA)).toBe(true);
+      expect(registry.has(channelB)).toBe(false);
+      sendQueue.flush();
+      expect(decodeAll(sent)).toContainEqual(
+        expect.objectContaining({
+          type: "channel.close",
+          channelId: channelB,
+          reason: "slow_consumer",
+        }),
+      );
+    });
   });
 });

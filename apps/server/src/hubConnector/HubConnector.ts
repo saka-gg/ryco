@@ -140,6 +140,81 @@ const defaultScheduler: HubConnectorScheduler = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+/** The channel a frame belongs to, or undefined for a connection-scoped frame. */
+function relayFrameChannel(frame: RelayFrame): string | undefined {
+  switch (frame.type) {
+    case "channel.open":
+    case "data":
+    case "flow.pause":
+    case "flow.resume":
+    case "channel.close":
+      return frame.channelId as string;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The order one relay connection handles its inbound frames in.
+ *
+ * Each channel's frames — its `channel.open`, then its data, flow, and close
+ * frames — run one at a time, in arrival order, on that channel's own queue.
+ * Opening a channel prepares its session, which reads key custody and builds
+ * the E2EE advertisement; on one connection-wide queue every other client's
+ * traffic waited behind each open. A channel's own frames still wait for it.
+ *
+ * Every other frame is connection-scoped — statement acknowledgements, verifier
+ * keys, enrollment revocation, errors — and is a barrier in both directions: it
+ * runs after every frame received before it, on every channel, and every frame
+ * received after it waits for it. Its order against channel traffic is exactly
+ * what a single queue gave.
+ *
+ * A handler that rejects is reported to `onFailure` and does not stall the
+ * queue it ran on. The owner fails the connection, and the handlers of a
+ * connection that has failed ignore whatever is still queued.
+ */
+export class RelayInboundFrameOrder {
+  readonly #onFailure: (error: unknown) => Promise<void>;
+  readonly #channels = new Map<string, Promise<void>>();
+  #barrier: Promise<void> = Promise.resolve();
+
+  constructor(onFailure: (error: unknown) => Promise<void>) {
+    this.#onFailure = onFailure;
+  }
+
+  /** Channels with a frame scheduled whose handling has not finished. */
+  get queuedChannels(): number {
+    return this.#channels.size;
+  }
+
+  /** Run `handle` for `frame` once every frame it must follow has been handled. */
+  schedule(frame: RelayFrame, handle: () => Promise<void>): void {
+    const channel = relayFrameChannel(frame);
+    if (channel === undefined) {
+      this.#barrier = Promise.all([this.#barrier, ...this.#channels.values()])
+        .then(handle)
+        .catch(this.#onFailure);
+      return;
+    }
+    const tail = Promise.all([this.#channels.get(channel), this.#barrier])
+      .then(handle)
+      .catch(this.#onFailure);
+    this.#channels.set(channel, tail);
+    // An idle channel is forgotten, so the map holds only channels with work in
+    // flight however many a connection opens over its life. A newer frame for
+    // the channel has replaced the tail and keeps the entry.
+    const forget = () => {
+      if (this.#channels.get(channel) === tail) this.#channels.delete(channel);
+    };
+    void tail.then(forget, forget);
+  }
+
+  /** Settles once every frame scheduled so far has been handled. */
+  async settled(): Promise<void> {
+    await Promise.all([this.#barrier, ...this.#channels.values()]);
+  }
+}
+
 export class HubConnector {
   readonly #config: HubConnectorConfig;
   readonly #identity: HubIdentityRuntimeShape;
@@ -236,7 +311,8 @@ export class HubConnector {
    * Cleared once an attempt authenticates.
    */
   #proofFirst = false;
-  #frameChain: Promise<void> = Promise.resolve();
+  /** The current connection's inbound frames; replaced with each connection. */
+  #frames: RelayInboundFrameOrder | undefined;
   #e2eeRefreshChain: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -841,11 +917,11 @@ export class HubConnector {
     sendQueue?.close();
     session?.close();
     await registry?.closeAll();
-    await this.#frameChain.catch(() => undefined);
+    await this.#frames?.settled().catch(() => undefined);
   }
 
   async stop(): Promise<void> {
-    if (this.#stopping) return this.#frameChain;
+    if (this.#stopping) return this.#frames?.settled();
     this.#stopping = true;
     this.#stopLivenessWatch();
     this.#state.invalidateGeneration();
@@ -924,9 +1000,14 @@ export class HubConnector {
     if (origin === undefined) return;
     const generation = this.#state.beginGeneration();
     this.#connecting = generation;
+    const handleFrameFailure = (error: unknown) =>
+      this.#handleFailure(
+        generation,
+        error instanceof RelayChannelProtocolError ? "protocol_invalid" : "internal_error",
+      );
     // A retired channel's cleanup must not block the replacement socket's frames.
-    let frameChain = Promise.resolve();
-    this.#frameChain = frameChain;
+    const frames = new RelayInboundFrameOrder(handleFrameFailure);
+    this.#frames = frames;
     const current = this.#state.snapshot().state;
     if (current !== "connecting") this.#state.transition("connecting");
     const session = new RelayConnectionSession({
@@ -938,23 +1019,16 @@ export class HubConnector {
       proofFirst: this.#proofFirst,
       onFrame: (frame) => {
         if (!this.#state.isCurrent(generation) || this.#stopping) return;
-        const handleFailure = (error: unknown) =>
-          this.#handleFailure(
-            generation,
-            error instanceof RelayChannelProtocolError ? "protocol_invalid" : "internal_error",
-          );
         // Heartbeats describe this socket, not a channel. Key custody during
         // channel setup and asynchronous channel teardown must not delay a
         // received pong past the probe deadline or prevent answering Hub pings.
-        // All channel and authorization frames retain their wire order below.
+        // Channel and authorization frames keep their order (see
+        // `RelayInboundFrameOrder`).
         if (frame.type === "ping" || frame.type === "pong") {
-          void this.#handleFrame(generation, frame).catch(handleFailure);
+          void this.#handleFrame(generation, frame).catch(handleFrameFailure);
           return;
         }
-        frameChain = frameChain
-          .then(() => this.#handleFrame(generation, frame))
-          .catch(handleFailure);
-        this.#frameChain = frameChain;
+        frames.schedule(frame, () => this.#handleFrame(generation, frame));
       },
       onTerminal: (error) => {
         void this.#handleFailure(generation, error.kind, error.retryAfterMs);
@@ -1005,7 +1079,7 @@ export class HubConnector {
       this.#sendQueue = sendQueue;
       this.#registry = registry;
       session.activateFrameDelivery();
-      await frameChain;
+      await frames.settled();
       if (!this.#state.isCurrent(generation) || this.#stopping) {
         session.close();
         return;
