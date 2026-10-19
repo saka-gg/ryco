@@ -1,10 +1,22 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { WorktreeId } from "@ryco/contracts/worktree";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { isArchivedThreadStub, isThreadLineage } from "@ryco/client-runtime/state/threads";
+import {
+  createThreadContentCapture,
+  decodeCachedEnvironmentContent,
+  isArchivedThreadStub,
+  isThreadLineage,
+  selectThreadsForContentCache,
+  trimContentToBudget,
+  type CachedThreadContent,
+  type CapturedThreadContent,
+  type ThreadContentCapture,
+} from "@ryco/client-runtime/state/threads";
 import {
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT,
+  MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS,
   MAX_WORKSPACE_SNAPSHOT_THREADS_PER_ENVIRONMENT,
+  MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES,
   WORKSPACE_METADATA_SNAPSHOT_SCHEMA_VERSION,
   type WorkspaceMetadataSnapshot,
   type WorkspaceThreadMetadata,
@@ -34,10 +46,13 @@ import type {
  *      is stored as that stub in both halves. A v1 reader would take a stub
  *      for a full shell, so v2 records are discarded by it; v2 readers still
  *      read v1 records, which only hold full shells.
+ * v3 — an optional `content` map of bounded recent message text by thread id,
+ *      kept for display only. A v2 reader discards v3 records; v3 readers still
+ *      read v1 and v2 records, which carry no content.
  */
-export const ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION = 2;
+export const ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION = 3;
 /** Older record versions this client still reads. */
-const READABLE_LEGACY_SCHEMA_VERSIONS: ReadonlySet<unknown> = new Set([1]);
+const READABLE_LEGACY_SCHEMA_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
 
 export interface StoredEnvironmentSnapshotThread {
   /** An archived thread's stub is the same stub in both halves. */
@@ -47,12 +62,17 @@ export interface StoredEnvironmentSnapshotThread {
 
 export interface StoredEnvironmentSnapshot {
   /** Records are written as the current version; a legacy one decodes as is. */
-  readonly schemaVersion: typeof ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION | 1;
+  readonly schemaVersion: typeof ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION | 1 | 2;
   readonly environmentId: EnvironmentId;
   readonly capturedAt: number;
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
   readonly threads: ReadonlyArray<StoredEnvironmentSnapshotThread>;
+  /**
+   * Recent message text by thread id, for display while no connection is ready.
+   * Never a replay baseline, session or dispatch queue.
+   */
+  readonly content?: Readonly<Record<string, CachedThreadContent>>;
 }
 
 /**
@@ -63,11 +83,36 @@ export interface StoredEnvironmentSnapshot {
 export const MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT = MAX_WORKSPACE_SNAPSHOT_THREADS_PER_ENVIRONMENT;
 export const MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT =
   MAX_WORKSPACE_SNAPSHOT_BYTES_PER_ENVIRONMENT;
+/**
+ * The message text one environment's record may carry: an equal share of the
+ * total cache budget. Without it a record could fill its whole payload cap with
+ * text, and the least recently written rows would be evicted whole (shell
+ * included) to make room. The record's own cap still bounds shell and text
+ * together, and text is trimmed first.
+ */
+export const MAX_SNAPSHOT_CONTENT_BYTES_PER_ENVIRONMENT = Math.floor(
+  MAX_WORKSPACE_SNAPSHOT_TOTAL_BYTES / MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS,
+);
+
+/** Per-environment bounds a capture is held to. */
+export interface EnvironmentSnapshotCaps {
+  readonly maxThreads: number;
+  readonly maxPayloadBytes: number;
+  /** Defaults to `MAX_SNAPSHOT_CONTENT_BYTES_PER_ENVIRONMENT`. */
+  readonly maxContentBytes?: number;
+}
+
+const DEFAULT_SNAPSHOT_CAPS: EnvironmentSnapshotCaps = {
+  maxThreads: MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT,
+  maxPayloadBytes: MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
+};
+
+function threadActivityAt(summary: SidebarThreadOrStub): string {
+  return summary.updatedAt ?? summary.latestUserMessageAt ?? summary.createdAt;
+}
 
 function threadRecency(summary: SidebarThreadOrStub): number {
-  const timestamp = Date.parse(
-    summary.updatedAt ?? summary.latestUserMessageAt ?? summary.createdAt,
-  );
+  const timestamp = Date.parse(threadActivityAt(summary));
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
@@ -147,33 +192,115 @@ function dropByteCapRound<T extends StoredEnvironmentSnapshotThread>(
 }
 
 /**
+ * The bytes a record gains before its first content entry (`,"content":`).
+ * `trimContentToBudget` counts them as part of the record's body.
+ */
+const CONTENT_KEY_BYTES = payloadByteLength(',"content":');
+
+/** The serialized `content` object's length: its braces, entries and the commas between them. */
+function contentObjectBytes(entries: ReadonlyArray<CapturedThreadContent>): number {
+  let bytes = 2 + Math.max(0, entries.length - 1);
+  for (const entry of entries) bytes += entry.entryBytes;
+  return bytes;
+}
+
+/**
+ * The display content worth keeping for an environment, least recently active
+ * first, which is the order `trimContentToBudget` drops in. Mobile records no
+ * per-thread visit, so a thread's own latest activity stands in for it. Only
+ * threads whose message list changed since the previous capture through
+ * `capture` are captured again.
+ */
+export function captureEnvironmentContentCandidates(
+  environmentState: EnvironmentState,
+  environmentId: EnvironmentId,
+  capture: ThreadContentCapture,
+): ReadonlyArray<CapturedThreadContent> {
+  return capture.capture(
+    environmentId,
+    environmentState,
+    selectThreadsForContentCache({
+      threadIds: environmentState.threadIds,
+      hasMessages: (threadId) => (environmentState.messageIdsByThreadId[threadId]?.length ?? 0) > 0,
+      routedThreadId: null,
+      lastVisitedAt: (threadId) => {
+        const summary = environmentState.sidebarThreadSummaryById[threadId];
+        return summary ? threadActivityAt(summary) : null;
+      },
+    }),
+  );
+}
+
+/**
+ * The candidates a record keeps: those of threads the record lists, dropping
+ * the least recently active while the text would exceed its own cap or the
+ * record would exceed the payload cap. Content is trimmed after the shell has
+ * been bounded, so it never costs the record a thread. `bodyBytes` is the UTF-8
+ * length of the record without content.
+ */
+function keepContentWithinBudget(input: {
+  readonly candidates: ReadonlyArray<CapturedThreadContent>;
+  readonly threadIds: ReadonlySet<string>;
+  readonly bodyBytes: number;
+  readonly caps: EnvironmentSnapshotCaps;
+}): CapturedThreadContent[] {
+  const bodyBytes = input.bodyBytes + CONTENT_KEY_BYTES;
+  return trimContentToBudget({
+    bodyBytes,
+    entries: input.candidates.filter((entry) => input.threadIds.has(entry.threadId)),
+    budgetBytes: Math.min(
+      input.caps.maxPayloadBytes,
+      bodyBytes + (input.caps.maxContentBytes ?? MAX_SNAPSHOT_CONTENT_BYTES_PER_ENVIRONMENT),
+    ),
+  });
+}
+
+/**
  * Enforce the per-environment bounds by dropping threads — archived first,
  * then oldest — while preserving the survivors' original order. The byte cap
  * re-serializes after each trim round; projects and worktrees are never
  * dropped (they are small and the interface renders from them). The UTF-8
  * length is measured once per round and returned, so the store does not measure
- * the same payload again.
+ * the same payload again. Display `content` candidates are then trimmed to the
+ * same cap, the least recently active first; a stored `content` is replaced by
+ * what they leave.
  */
 export function boundStoredEnvironmentSnapshot(
   record: StoredEnvironmentSnapshot,
-  caps: { readonly maxThreads: number; readonly maxPayloadBytes: number } = {
-    maxThreads: MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT,
-    maxPayloadBytes: MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
-  },
+  caps: EnvironmentSnapshotCaps = DEFAULT_SNAPSHOT_CAPS,
+  contentCandidates: ReadonlyArray<CapturedThreadContent> = [],
 ): {
   readonly record: StoredEnvironmentSnapshot;
   readonly payload: string;
   readonly payloadBytes: number;
 } {
+  const { content: _storedContent, ...base } = record;
   let threads = boundThreadCount(record.threads, caps.maxThreads);
-  let payload = JSON.stringify({ ...record, threads });
+  let payload = JSON.stringify({ ...base, threads });
   let payloadBytes = payloadByteLength(payload);
   while (payloadBytes > caps.maxPayloadBytes && threads.length > 0) {
     threads = dropByteCapRound(threads);
-    payload = JSON.stringify({ ...record, threads });
+    payload = JSON.stringify({ ...base, threads });
     payloadBytes = payloadByteLength(payload);
   }
-  return { record: { ...record, threads }, payload, payloadBytes };
+  const kept = keepContentWithinBudget({
+    candidates: contentCandidates,
+    threadIds: new Set(threads.map((thread) => thread.shell.id)),
+    bodyBytes: payloadBytes,
+    caps,
+  });
+  if (kept.length === 0) return { record: { ...base, threads }, payload, payloadBytes };
+  const withContent: StoredEnvironmentSnapshot = {
+    ...base,
+    threads,
+    content: Object.fromEntries(kept.map((entry) => [entry.threadId, entry.content])),
+  };
+  const contentPayload = JSON.stringify(withContent);
+  return {
+    record: withContent,
+    payload: contentPayload,
+    payloadBytes: payloadByteLength(contentPayload),
+  };
 }
 
 interface SerializedThreadFragment {
@@ -189,13 +316,24 @@ export interface EnvironmentSnapshotSerializer {
    * Captures and bounds one environment exactly like
    * `boundStoredEnvironmentSnapshot(captureEnvironmentSnapshotRecord(...))`,
    * with a byte-identical payload, but serializes and measures only threads
-   * whose shell or summary changed since the previous call.
+   * whose shell or summary changed since the previous call. With
+   * `options.content`, recent message text is kept too, as
+   * `boundStoredEnvironmentSnapshot` does for the candidates of
+   * `captureEnvironmentContentCandidates`, re-capturing only threads whose
+   * messages changed.
    */
   readonly serialize: (
     environmentState: EnvironmentState,
     environmentId: EnvironmentId,
     capturedAt: number,
-  ) => { readonly payload: string; readonly payloadBytes: number; readonly threads: number };
+    options?: { readonly content?: boolean },
+  ) => {
+    readonly payload: string;
+    readonly payloadBytes: number;
+    readonly threads: number;
+    /** Threads whose message text the payload carries. */
+    readonly contentThreads: number;
+  };
   /** Threads serialized from scratch over this serializer's lifetime (tests). */
   readonly serializedThreadCount: () => number;
 }
@@ -207,16 +345,26 @@ export interface EnvironmentSnapshotSerializer {
  * measure the whole environment (up to the byte cap) for a change to one row.
  * Each thread's JSON fragment and UTF-8 length are kept by identity of its
  * store objects; a capture re-serializes only the rows that changed and joins
- * the rest, and the byte cap is enforced on the summed fragment lengths.
+ * the rest, and the byte cap is enforced on the summed fragment lengths. Display
+ * content is incremental the same way: a thread's captured text and its JSON
+ * are kept until its message list changes.
  */
 export function createEnvironmentSnapshotSerializer(
-  caps: { readonly maxThreads: number; readonly maxPayloadBytes: number } = {
-    maxThreads: MAX_SNAPSHOT_THREADS_PER_ENVIRONMENT,
-    maxPayloadBytes: MAX_SNAPSHOT_PAYLOAD_BYTES_PER_ENVIRONMENT,
-  },
+  caps: EnvironmentSnapshotCaps = DEFAULT_SNAPSHOT_CAPS,
 ): EnvironmentSnapshotSerializer {
   let fragments = new Map<string, SerializedThreadFragment>();
   let serializedThreads = 0;
+  const contentCapture = createThreadContentCapture();
+  /** Each captured thread's `"id":content` JSON; captured entries are reused while unchanged. */
+  const contentEntryJsons = new WeakMap<CapturedThreadContent, string>();
+  const contentEntryJson = (entry: CapturedThreadContent): string => {
+    let json = contentEntryJsons.get(entry);
+    if (json === undefined) {
+      json = `${JSON.stringify(entry.threadId)}:${JSON.stringify(entry.content)}`;
+      contentEntryJsons.set(entry, json);
+    }
+    return json;
+  };
 
   const fragmentFor = (shell: ThreadShellOrStub, summary: SidebarThreadOrStub) => {
     const cached = fragments.get(shell.id);
@@ -233,6 +381,7 @@ export function createEnvironmentSnapshotSerializer(
     environmentState,
     environmentId,
     capturedAt,
+    options,
   ) => {
     const record = captureEnvironmentSnapshotRecord(
       { ...environmentState, threadIds: [] },
@@ -278,8 +427,41 @@ export function createEnvironmentSnapshotSerializer(
       kept = dropByteCapRound(kept);
       payloadBytes = payloadBytesOf(kept);
     }
-    const payload = `${prefix}${kept.map((fragment) => fragment.json).join(",")}${suffix}`;
-    return { payload, payloadBytes, threads: kept.length };
+    const threadsJson = kept.map((fragment) => fragment.json).join(",");
+    let content: ReadonlyArray<CapturedThreadContent> = [];
+    if (options?.content) {
+      content = keepContentWithinBudget({
+        candidates: captureEnvironmentContentCandidates(
+          environmentState,
+          environmentId,
+          contentCapture,
+        ),
+        threadIds: new Set(kept.map((fragment) => fragment.shell.id)),
+        bodyBytes: payloadBytes,
+        caps,
+      });
+    } else {
+      // Nothing is kept while the setting is off, in memory either.
+      contentCapture.forget(environmentId);
+    }
+    if (content.length === 0) {
+      return {
+        payload: `${prefix}${threadsJson}${suffix}`,
+        payloadBytes,
+        threads: kept.length,
+        contentThreads: 0,
+      };
+    }
+    // `content` follows `threads`, the record's last key, so the suffix's
+    // closing brace moves to the end of the content object.
+    return {
+      payload: `${prefix}${threadsJson}${suffix.slice(0, -1)},"content":{${content
+        .map(contentEntryJson)
+        .join(",")}}}`,
+      payloadBytes: payloadBytes + CONTENT_KEY_BYTES + contentObjectBytes(content),
+      threads: kept.length,
+      contentThreads: content.length,
+    };
   };
 
   return { serialize, serializedThreadCount: () => serializedThreads };
@@ -312,7 +494,7 @@ function isValidWorktree(value: unknown, environmentId: string): boolean {
   );
 }
 
-function isValidThread(value: unknown, environmentId: string, legacy: boolean): boolean {
+function isValidThread(value: unknown, environmentId: string, mayHoldStubs: boolean): boolean {
   if (!isRecord(value) || !isRecord(value.shell) || !isRecord(value.summary)) return false;
   const shell = value.shell;
   const summary = value.summary;
@@ -328,7 +510,7 @@ function isValidThread(value: unknown, environmentId: string, legacy: boolean): 
   if (!shellIsStub && !summaryIsStub) return true;
   // A stub is stored whole (both halves) and archived; v1 never held one.
   return (
-    !legacy &&
+    mayHoldStubs &&
     shellIsStub &&
     summaryIsStub &&
     isNonEmptyString(shell.archivedAt) &&
@@ -355,8 +537,8 @@ export function decodeStoredEnvironmentSnapshot(
     return null;
   }
   if (!isRecord(value)) return null;
-  const legacy = READABLE_LEGACY_SCHEMA_VERSIONS.has(value.schemaVersion);
-  if (value.schemaVersion !== ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION && !legacy) return null;
+  const current = value.schemaVersion === ENVIRONMENT_SNAPSHOT_SCHEMA_VERSION;
+  if (!current && !READABLE_LEGACY_SCHEMA_VERSIONS.has(value.schemaVersion)) return null;
   if (value.environmentId !== environmentId) return null;
   if (typeof value.capturedAt !== "number" || !Number.isFinite(value.capturedAt)) return null;
   const { projects, worktrees, threads } = value;
@@ -365,18 +547,68 @@ export function decodeStoredEnvironmentSnapshot(
   }
   if (!projects.every((project) => isValidProject(project, environmentId))) return null;
   if (!worktrees.every((worktree) => isValidWorktree(worktree, environmentId))) return null;
-  if (!threads.every((thread) => isValidThread(thread, environmentId, legacy))) return null;
-  return value as unknown as StoredEnvironmentSnapshot;
+  if (!threads.every((thread) => isValidThread(thread, environmentId, value.schemaVersion !== 1))) {
+    return null;
+  }
+  // Content is a display extra: an entry that does not decode is dropped, not the record.
+  const { content: storedContent, ...rest } = value;
+  const content = current
+    ? decodeCachedEnvironmentContent(
+        { content: storedContent },
+        new Set(threads.map((thread) => thread.shell.id as string)),
+      )
+    : {};
+  return {
+    ...(rest as unknown as StoredEnvironmentSnapshot),
+    ...(Object.keys(content).length > 0 ? { content } : {}),
+  };
 }
 
+/**
+ * Whether a stored payload may carry message text, judged from the raw string so
+ * a launch need not parse every row to find out. `withoutStoredContent` decides.
+ */
+export function mayHoldStoredContent(raw: string): boolean {
+  return raw.includes('"content":');
+}
+
+/**
+ * A stored payload without its `content`, or null when it holds none (or is not
+ * a record). The rest of the record is kept as written.
+ */
+export function withoutStoredContent(raw: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value) || !Object.hasOwn(value, "content")) return null;
+  const { content: _content, ...rest } = value;
+  return JSON.stringify(rest);
+}
+
+/**
+ * The record as the threads store hydrates it. Stored message text is handed
+ * over only with `includeContent`; it is shown as last-known display state and
+ * live data replaces it.
+ */
 export function toCachedEnvironmentShellSnapshot(
   record: StoredEnvironmentSnapshot,
+  options: { readonly includeContent: boolean },
 ): CachedEnvironmentShellSnapshot {
+  const { content } = record;
   return {
     capturedAt: record.capturedAt,
     projects: record.projects,
     worktrees: record.worktrees,
-    threads: record.threads,
+    threads:
+      options.includeContent && content
+        ? record.threads.map((thread) => {
+            const threadContent = content[thread.shell.id];
+            return threadContent ? { ...thread, content: threadContent } : thread;
+          })
+        : record.threads,
   };
 }
 
