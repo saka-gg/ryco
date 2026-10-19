@@ -504,6 +504,304 @@ describe("thread subscription before the thread exists", () => {
   });
 });
 
+describe("thread detail attach demand", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function newLog() {
+    return { subscribed: [] as string[], unsubscribed: [] as string[] };
+  }
+
+  function trackedConnection(log: ReturnType<typeof newLog>, source = "manual") {
+    return {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source },
+      dispose: () => Promise.resolve(),
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (input: { readonly threadId: string }) => {
+            log.subscribed.push(input.threadId);
+            return () => {
+              log.unsubscribed.push(input.threadId);
+            };
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+  }
+
+  const shellSnapshot = (snapshotSequence: number, threadIds: ReadonlyArray<string>) =>
+    ({
+      snapshotSequence,
+      updatedAt: null,
+      projects: [],
+      worktrees: [],
+      threads: threadIds.map((id) => ({ id })),
+    }) as never;
+
+  const thread = (id: string) => id as ThreadId;
+
+  it("does not start idle cached threads when a connection registers", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const log = newLog();
+    // Retained and released while no connection exists: an idle cached thread.
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-open"), { view: true });
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"))();
+
+    supervisor.register(trackedConnection(log));
+
+    expect(log.subscribed).toEqual(["thread-open"]);
+  });
+
+  it("does not start idle cached threads after a shell snapshot", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const log = newLog();
+    supervisor.register(trackedConnection(log));
+    supervisor.syncShellSnapshot(shellSnapshot(1, ["thread-live"]), remote);
+
+    // Neither is listed yet, so neither starts; one is released meanwhile.
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-draft"));
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"))();
+    expect(log.subscribed).toEqual([]);
+
+    supervisor.syncShellSnapshot(
+      shellSnapshot(2, ["thread-live", "thread-draft", "thread-idle"]),
+      remote,
+    );
+    expect(log.subscribed).toEqual(["thread-draft"]);
+  });
+
+  it("starts the threads a user has open first, then the most recently used", async () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const log = newLog();
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-view-older"), { view: true });
+    await vi.advanceTimersByTimeAsync(10);
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-view-newer"), { view: true });
+    await vi.advanceTimersByTimeAsync(10);
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-warm-older"));
+    await vi.advanceTimersByTimeAsync(10);
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-warm-newer"));
+    await vi.advanceTimersByTimeAsync(10);
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"))();
+
+    supervisor.register(trackedConnection(log));
+
+    expect(log.subscribed).toEqual([
+      "thread-view-newer",
+      "thread-view-older",
+      "thread-warm-newer",
+      "thread-warm-older",
+    ]);
+  });
+
+  it("starts an idle cached thread at once when it is retained again", () => {
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    const log = newLog();
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"))();
+    supervisor.register(trackedConnection(log));
+    expect(log.subscribed).toEqual([]);
+
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"), { view: true });
+    expect(log.subscribed).toEqual(["thread-idle"]);
+  });
+
+  describe("when a connection is removed", () => {
+    const removeAndRegisterAgain = async (
+      source: string,
+      overrides: { readonly isHostedMode?: boolean } = {},
+    ) => {
+      const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+        isThreadDetailSubscriptionNonIdle: () => false,
+        ...overrides,
+      });
+      const log = newLog();
+      supervisor.register(trackedConnection(log, source));
+      supervisor.retainThreadDetailSubscription(remote, thread("thread-open"), { view: true });
+      supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"))();
+      expect(log.subscribed).toEqual(["thread-open", "thread-idle"]);
+
+      await supervisor.remove(remote);
+      expect(log.unsubscribed.toSorted()).toEqual(["thread-idle", "thread-open"]);
+
+      log.subscribed.length = 0;
+      supervisor.register(trackedConnection(log, source));
+      return { supervisor, log };
+    };
+
+    it("disposes the idle threads of a hub-hosted connection and keeps the open ones", async () => {
+      const { supervisor, log } = await removeAndRegisterAgain("hub-hosted");
+      expect(log.subscribed).toEqual(["thread-open"]);
+      expect(supervisor.disposeThreadDetailSubscription(remote, thread("thread-idle"))).toBe(false);
+      // The disposed thread has no eviction left to wait for.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("disposes the idle threads in hosted mode", async () => {
+      const { supervisor, log } = await removeAndRegisterAgain("manual", { isHostedMode: true });
+      expect(log.subscribed).toEqual(["thread-open"]);
+      expect(supervisor.disposeThreadDetailSubscription(remote, thread("thread-idle"))).toBe(false);
+    });
+
+    it("keeps the idle threads of a direct connection cached but detached", async () => {
+      const { supervisor, log } = await removeAndRegisterAgain("manual");
+      expect(log.subscribed).toEqual(["thread-open"]);
+      // Still cached, waiting for its idle window or the next retain.
+      expect(vi.getTimerCount()).toBe(1);
+      supervisor.retainThreadDetailSubscription(remote, thread("thread-idle"));
+      expect(log.subscribed).toEqual(["thread-open", "thread-idle"]);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+});
+
+describe("thread detail idle eviction", () => {
+  const idleWindowMs = 5 * 60 * 1000;
+  const minute = 60 * 1000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function setup(busy: ReadonlySet<string> = new Set()) {
+    const unsubscribed: string[] = [];
+    const connection = {
+      kind: "saved",
+      environmentId: remote,
+      knownEnvironment: { source: "manual" },
+      dispose: () => Promise.resolve(),
+      client: {
+        orchestration: {
+          subscribeThread: () => () => undefined,
+          subscribeThreadWindow: (input: { readonly threadId: string }) => () => {
+            unsubscribed.push(input.threadId);
+          },
+        },
+      },
+    } as unknown as EnvironmentConnection;
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record), {
+      isThreadDetailSubscriptionNonIdle: (_environmentId, threadId) => busy.has(threadId),
+    });
+    supervisor.register(connection);
+    return { supervisor, unsubscribed };
+  }
+
+  const thread = (id: string) => id as ThreadId;
+
+  it("arms one timer for every idle thread, however many an event chunk reconciles", async () => {
+    const busy = new Set(Array.from({ length: 10 }, (_, index) => `thread-${index}`));
+    const { supervisor, unsubscribed } = setup(busy);
+    for (const id of busy) supervisor.retainThreadDetailSubscription(remote, thread(id))();
+    // Busy threads are no candidates: nothing is armed.
+    expect(vi.getTimerCount()).toBe(0);
+
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    busy.clear();
+    supervisor.reconcileThreadDetailSubscriptionEvictionForEnvironment(remote);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Later chunks with nothing new to learn leave the timer alone.
+    setTimeoutSpy.mockClear();
+    for (let chunk = 0; chunk < 5; chunk += 1) {
+      supervisor.reconcileThreadDetailSubscriptionEvictionForEnvironment(remote);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(idleWindowMs);
+    expect(unsubscribed).toHaveLength(10);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("disposes each idle thread at its own deadline", async () => {
+    const { supervisor, unsubscribed } = setup();
+    for (const id of ["thread-0", "thread-1", "thread-2"]) {
+      supervisor.retainThreadDetailSubscription(remote, thread(id))();
+      await vi.advanceTimersByTimeAsync(minute);
+    }
+    // One timer serves all three.
+    expect(vi.getTimerCount()).toBe(1);
+
+    // thread-0 went idle at minute 0, thread-1 at 1, thread-2 at 2; it is minute 3.
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual(["thread-0"]);
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual(["thread-0", "thread-1"]);
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual(["thread-0", "thread-1", "thread-2"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels only the eviction of a thread that is retained again", async () => {
+    const { supervisor, unsubscribed } = setup();
+    for (const id of ["thread-0", "thread-1", "thread-2"]) {
+      supervisor.retainThreadDetailSubscription(remote, thread(id))();
+      await vi.advanceTimersByTimeAsync(minute);
+    }
+
+    const release = supervisor.retainThreadDetailSubscription(remote, thread("thread-1"), {
+      view: true,
+    });
+    await vi.advanceTimersByTimeAsync(10 * minute);
+    expect(unsubscribed).toEqual(["thread-0", "thread-2"]);
+
+    release();
+    await vi.advanceTimersByTimeAsync(idleWindowMs);
+    expect(unsubscribed).toEqual(["thread-0", "thread-2", "thread-1"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("restarts a thread's window on activity but not on an environment pass", async () => {
+    const { supervisor, unsubscribed } = setup();
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-active"))();
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-quiet"))();
+
+    await vi.advanceTimersByTimeAsync(4 * minute);
+    supervisor.reconcileThreadDetailSubscriptionEvictionForThread(remote, thread("thread-active"));
+    supervisor.reconcileThreadDetailSubscriptionEvictionForEnvironment(remote);
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual(["thread-quiet"]);
+
+    await vi.advanceTimersByTimeAsync(4 * minute);
+    expect(unsubscribed).toEqual(["thread-quiet", "thread-active"]);
+  });
+
+  it("leaves a thread that became busy at its deadline until it is idle again", async () => {
+    const busy = new Set<string>();
+    const { supervisor, unsubscribed } = setup(busy);
+    supervisor.retainThreadDetailSubscription(remote, thread("thread-1"))();
+
+    await vi.advanceTimersByTimeAsync(4 * minute);
+    busy.add("thread-1");
+    await vi.advanceTimersByTimeAsync(minute);
+    expect(unsubscribed).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    busy.delete("thread-1");
+    supervisor.reconcileThreadDetailSubscriptionEvictionForEnvironment(remote);
+    await vi.advanceTimersByTimeAsync(idleWindowMs - 1);
+    expect(unsubscribed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(unsubscribed).toEqual(["thread-1"]);
+  });
+});
+
 describe("archived thread stubs", () => {
   function stubHarness() {
     const subscribed: string[] = [];

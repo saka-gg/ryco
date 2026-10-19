@@ -213,7 +213,12 @@ type ThreadDetailSubscriptionEntry = {
   /** View retains ever taken; a retain handle compares it to tell whether a view came since. */
   viewRetains: number;
   lastAccessedAt: number;
-  evictionTimeoutId: ReturnType<typeof setTimeout> | null;
+  /**
+   * When the entry became a candidate for idle eviction, or null while it is
+   * retained or busy. The supervisor's one sweep disposes it once the idle
+   * window has passed.
+   */
+  idleSince: number | null;
   protocol: "bounded" | "legacy";
   /** The window this subscription asks for; shrunk after a response too large to carry. */
   windowLimits: OrchestrationThreadHistoryLimits;
@@ -415,15 +420,53 @@ export function createEnvironmentConnectionSupervisor<
     entry.retainedRows.recordHistoryPage(page);
     setRetainedBytes(entry, entry.retainedRows.bytes());
   };
-  const clearEviction = (entry: ThreadDetailSubscriptionEntry) => {
-    if (entry.evictionTimeoutId !== null) {
-      input.clearTimeout(entry.evictionTimeoutId);
-      entry.evictionTimeoutId = null;
-    }
-  };
   const shouldEvict = (entry: ThreadDetailSubscriptionEntry) =>
     entry.refCount === 0 &&
     !input.isThreadDetailSubscriptionNonIdle(entry.environmentId, entry.threadId);
+  // One timer serves every cached thread: it is armed for the earliest idle
+  // deadline and re-armed after each sweep, so an event chunk that reconciles a
+  // whole environment never touches a timer per entry.
+  let sweepTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  let sweepDeadline: number | null = null;
+  let sweeping = false;
+  const armEvictionSweep = () => {
+    if (sweeping) return;
+    let earliest: number | null = null;
+    for (const entry of threadDetailSubscriptions.values()) {
+      if (entry.idleSince === null) continue;
+      const deadline = entry.idleSince + THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS;
+      if (earliest === null || deadline < earliest) earliest = deadline;
+    }
+    if (earliest === sweepDeadline) return;
+    if (sweepTimeoutId !== null) input.clearTimeout(sweepTimeoutId);
+    sweepTimeoutId = null;
+    sweepDeadline = earliest;
+    if (earliest === null) return;
+    sweepTimeoutId = input.setTimeout(sweepIdleEntries, Math.max(0, earliest - input.now()));
+  };
+  const sweepIdleEntries = () => {
+    sweepTimeoutId = null;
+    sweepDeadline = null;
+    const now = input.now();
+    sweeping = true;
+    try {
+      for (const [key, entry] of threadDetailSubscriptions) {
+        if (entry.idleSince === null) continue;
+        if (entry.idleSince + THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS > now) continue;
+        if (shouldEvict(entry)) disposeByKey(key);
+        // Busy again since it was marked: it has no window until reconciled.
+        else entry.idleSince = null;
+      }
+    } finally {
+      sweeping = false;
+    }
+    armEvictionSweep();
+  };
+  /** The entry is retained again (or gone): it is no longer an eviction candidate. */
+  const clearEviction = (entry: ThreadDetailSubscriptionEntry) => {
+    entry.idleSince = null;
+    armEvictionSweep();
+  };
 
   const subscribe = (listener: () => void) => {
     listeners.add(listener);
@@ -682,9 +725,23 @@ export function createEnvironmentConnectionSupervisor<
     });
     attach(entry);
   };
+  /**
+   * Starts what is retained for an environment, the threads the user has open
+   * first and then the most recently used. Idle cached threads stay detached
+   * (their rows stay in the store) until something retains them again, so a
+   * connection coming back does not open a window per cached thread.
+   */
   const attachListedThreads = (environmentId: EnvironmentId) => {
-    for (const entry of threadDetailSubscriptions.values()) {
-      if (entry.environmentId !== environmentId || entry.unsubscribe !== NOOP) continue;
+    const retained = [...threadDetailSubscriptions.values()].filter(
+      (entry) =>
+        entry.environmentId === environmentId && entry.refCount > 0 && entry.unsubscribe === NOOP,
+    );
+    retained.sort(
+      (left, right) =>
+        Number(right.viewCount > 0) - Number(left.viewCount > 0) ||
+        right.lastAccessedAt - left.lastAccessedAt,
+    );
+    for (const entry of retained) {
       if (!attach(entry)) watch(entry);
     }
   };
@@ -731,20 +788,23 @@ export function createEnvironmentConnectionSupervisor<
       evictToCapacity();
     });
   };
-  const reconcileEntry = (entry: ThreadDetailSubscriptionEntry) => {
-    clearEviction(entry);
-    if (!shouldEvict(entry)) return;
-    entry.evictionTimeoutId = input.setTimeout(() => {
-      const current = threadDetailSubscriptions.get(keyFor(entry.environmentId, entry.threadId));
-      if (!current) return;
-      current.evictionTimeoutId = null;
-      if (shouldEvict(current)) disposeByKey(keyFor(current.environmentId, current.threadId));
-    }, THREAD_DETAIL_SUBSCRIPTION_IDLE_EVICTION_MS);
+  /**
+   * Marks whether the entry is an eviction candidate. A new idle window starts
+   * when the entry becomes idle, or on `restart` (the thread saw activity, or
+   * its last retain was just released); an entry already idle keeps its window.
+   */
+  const reconcileEntry = (entry: ThreadDetailSubscriptionEntry, restart: boolean) => {
+    if (!shouldEvict(entry)) {
+      entry.idleSince = null;
+    } else if (restart || entry.idleSince === null) {
+      entry.idleSince = input.now();
+    }
   };
   const reconcileForEnvironment = (environmentId: EnvironmentId) => {
     for (const entry of threadDetailSubscriptions.values()) {
-      if (entry.environmentId === environmentId) reconcileEntry(entry);
+      if (entry.environmentId === environmentId) reconcileEntry(entry, false);
     }
+    armEvictionSweep();
     evictToCapacity();
   };
   // Event application asks for this once per event; it runs once per chunk.
@@ -763,7 +823,9 @@ export function createEnvironmentConnectionSupervisor<
   };
   const reconcileForThread = (environmentId: EnvironmentId, threadId: ThreadId) => {
     const entry = threadDetailSubscriptions.get(keyFor(environmentId, threadId));
-    if (entry) reconcileEntry(entry);
+    if (!entry) return;
+    reconcileEntry(entry, true);
+    armEvictionSweep();
   };
   const reconcileSubscriptionsForEnvironment = (
     environmentId: EnvironmentId,
@@ -791,9 +853,7 @@ export function createEnvironmentConnectionSupervisor<
       throw new Error(`Environment ${connection.environmentId} already has an active connection.`);
     }
     connections.set(connection.environmentId, connection);
-    for (const entry of threadDetailSubscriptions.values()) {
-      if (entry.environmentId === connection.environmentId) attach(entry);
-    }
+    attachListedThreads(connection.environmentId);
     emit();
     return connection;
   };
@@ -807,8 +867,16 @@ export function createEnvironmentConnectionSupervisor<
     shellThreadIdsByEnvironment.delete(environmentId);
     historyPagination.clearEnvironment(environmentId);
     emit();
-    for (const entry of threadDetailSubscriptions.values()) {
+    // A hosted connection never resumes, so a cached idle stream would only
+    // reload from scratch when the node comes back: drop it now. The rows it
+    // delivered stay in the store.
+    const disposeIdle = input.isHostedMode() || connection.knownEnvironment.source === "hub-hosted";
+    for (const [key, entry] of threadDetailSubscriptions) {
       if (entry.environmentId !== environmentId) continue;
+      if (disposeIdle && entry.refCount === 0) {
+        disposeByKey(key);
+        continue;
+      }
       entry.unsubscribe();
       entry.unsubscribe = NOOP;
       watch(entry);
@@ -832,7 +900,7 @@ export function createEnvironmentConnectionSupervisor<
       viewCount: 0,
       viewRetains: 0,
       lastAccessedAt: input.now(),
-      evictionTimeoutId: null,
+      idleSince: null,
       protocol: "bounded" as const,
       windowLimits: THREAD_WINDOW_LIMITS,
       estimatedRetainedBytes: 0,
@@ -875,7 +943,8 @@ export function createEnvironmentConnectionSupervisor<
           disposeByKey(key);
           return;
         }
-        reconcileEntry(entry);
+        reconcileEntry(entry, true);
+        armEvictionSweep();
         evictToCapacity();
       }
     };
