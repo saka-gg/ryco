@@ -7,6 +7,7 @@ import {
 } from "../../storage/lifecycle.ts";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { restoreChatFolder } from "../../project/chatFolderRestore.ts";
 
 import {
   DEFAULT_TERMINAL_ID,
@@ -1727,7 +1728,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
      * spawning, history I/O and kill escalation run under the thread lock only.
      */
     const withStorageAdmission = <A, E, R>(cwd: string, commit: Effect.Effect<A, E, R>) =>
-      storageLifecycleLock.withPermit(assertValidCwd(cwd).pipe(Effect.andThen(commit)));
+      storageLifecycleLock.withPermit(
+        // Inside the lock empty-folder cleanup also takes, so a chat's recreated folder stays.
+        (Option.isSome(storageSql) ? restoreChatFolder(storageSql.value, cwd) : Effect.void).pipe(
+          Effect.andThen(assertValidCwd(cwd)),
+          Effect.andThen(commit),
+        ),
+      );
 
     /**
      * Admits a PTY start in `target.cwd` and, in the same critical section,

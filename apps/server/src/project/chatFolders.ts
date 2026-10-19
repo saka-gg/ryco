@@ -8,7 +8,6 @@
  *
  * @module ChatFolders
  */
-import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -61,6 +60,11 @@ import {
   resolveExistingAncestor,
   validateWorktreeRoot,
 } from "./worktreeRoot.ts";
+import {
+  CHAT_FOLDER_ALLOCATION_ATTEMPTS,
+  chatFolderSuffix,
+  isChatFolderNameOf,
+} from "./chatFolderNames.ts";
 
 /** A probe that could not finish (timeout, unreadable root) is retried after this delay. */
 const FAILED_PROBE_RETRY_MS = 30_000;
@@ -73,8 +77,6 @@ const GIT_PROBE_TIMEOUT = Duration.seconds(10);
 const PROBE_TIMEOUT = Duration.seconds(15);
 /** How long a config load waits for a first answer before it reports chats as unavailable. */
 const CAPABILITY_WAIT = Duration.seconds(2);
-/** Fresh suffixes tried after the stable one collides; a full run means something is wrong. */
-const CHAT_FOLDER_ALLOCATION_ATTEMPTS = 8;
 
 export class ChatFolderError extends Schema.TaggedError<ChatFolderError>()("ChatFolderError", {
   reason: Schema.Literals(["chats-unavailable", "allocation-failed", "folder-missing"]),
@@ -173,25 +175,9 @@ export const chatFolderDate = (createdAt: string): string => {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
 };
 
-/** Stable for a project on the first attempt; a collision retry derives a fresh one. */
-export const chatFolderSuffix = (projectId: string, attempt: number): string =>
-  createHash("sha256")
-    .update(attempt === 0 ? projectId : `${projectId}\0${attempt}`)
-    .digest("hex")
-    .slice(0, 8);
-
 /** One path segment: the slug never contains separators or `..`, the rest is digits and hex. */
 export const chatFolderName = (input: AllocateChatFolderInput, attempt = 0): string =>
   `${chatFolderDate(input.createdAt)}-${directorySlug(input.titleSeed, "chat")}-${chatFolderSuffix(input.projectId, attempt)}`;
-
-/** Whether a folder's name is one {@link createChatFolder} could have given this chat. */
-export const isChatFolderNameOf = (folder: string, projectId: string): boolean => {
-  const name = path.basename(folder);
-  for (let attempt = 0; attempt < CHAT_FOLDER_ALLOCATION_ATTEMPTS; attempt += 1) {
-    if (name.endsWith(`-${chatFolderSuffix(projectId, attempt)}`)) return true;
-  }
-  return false;
-};
 
 /**
  * Create the root on demand, then the leaf without `recursive` so an existing folder fails

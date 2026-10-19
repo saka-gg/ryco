@@ -38,6 +38,10 @@ export const makeChatProjectHandlers = (ctx: WsRpcContext) => {
         snapshots: ctx.projectionSnapshotQuery,
         relocations: projectRelocations.value,
         chatFolders: chatFolders.value,
+        ...Option.match(ctx.removedChatFolders, {
+          onNone: () => ({}),
+          onSome: ({ restore }) => ({ restoreChatFolder: restore }),
+        }),
         policy: ctx.workspaceAccessPolicy,
         config: ctx.config,
         settings: ctx.serverSettings,

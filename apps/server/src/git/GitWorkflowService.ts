@@ -256,17 +256,18 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
 
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
     function* (operation: string, cwd: string) {
-      const handle = yield* registry
-        .detect({ cwd })
-        .pipe(
-          Effect.mapError((error) =>
-            unsupportedGitWorkflow(
-              operation,
-              cwd,
-              error instanceof Error ? error.message : String(error),
-            ),
+      const handle = yield* registry.detect({ cwd }).pipe(
+        // A folder that is gone holds no repository: a chat folder empty-folder cleanup removed,
+        // or a checkout deleted by hand. Git cannot even start in it.
+        Effect.catch((error) => (existsSync(cwd) ? Effect.fail(error) : Effect.succeed(null))),
+        Effect.mapError((error) =>
+          unsupportedGitWorkflow(
+            operation,
+            cwd,
+            error instanceof Error ? error.message : String(error),
           ),
-        );
+        ),
+      );
       if (!handle) {
         return false;
       }
