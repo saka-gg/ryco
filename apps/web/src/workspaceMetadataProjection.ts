@@ -9,10 +9,13 @@ import {
 } from "@ryco/contracts";
 import { projectKindOf } from "@ryco/shared/projectKind";
 import {
+  MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS,
   isWorkspaceMetadataSnapshot,
   type WorkspaceMetadataSnapshot,
+  type WorkspaceProjectMetadata,
   type WorkspaceThreadLatestTurn,
   type WorkspaceThreadMetadata,
+  type WorkspaceWorktreeMetadata,
 } from "@ryco/client-runtime/state/workspace";
 import {
   isArchivedThreadStub,
@@ -21,8 +24,166 @@ import {
   type CachedEnvironmentShellSnapshot,
 } from "@ryco/client-runtime/state/threads";
 
-import { useStore, type AppState } from "./store";
+import { useStore, type AppState, type EnvironmentState } from "./store";
 import type { SidebarThreadSummary } from "./types";
+
+/** The last result of a derivation, reusable while every input keeps its identity. */
+interface Memoized<Value> {
+  readonly inputs: ReadonlyArray<unknown>;
+  readonly value: Value;
+}
+
+function memoize<Value>(
+  previous: Memoized<Value> | undefined,
+  inputs: ReadonlyArray<unknown>,
+  compute: () => Value,
+): Memoized<Value> {
+  if (previous && previous.inputs.every((input, index) => Object.is(input, inputs[index]))) {
+    return previous;
+  }
+  return { inputs, value: compute() };
+}
+
+/**
+ * The metadata arrays last derived for one environment. A store update that
+ * leaves a source collection untouched (a streamed message, for one) keeps the
+ * derived array's identity, so downstream equality checks, cached sizes and
+ * validation results stay valid instead of being recomputed on every read.
+ */
+interface EnvironmentMetadataMemo {
+  projects?: Memoized<ReadonlyArray<WorkspaceProjectMetadata>>;
+  worktrees?: Memoized<ReadonlyArray<WorkspaceWorktreeMetadata>>;
+  threads?: Memoized<ReadonlyArray<WorkspaceThreadMetadata>>;
+  validity?: Memoized<boolean>;
+}
+
+const metadataMemoByEnvironment = new Map<EnvironmentId, EnvironmentMetadataMemo>();
+
+/** Least recently read environments are forgotten beyond the number a cache can hold. */
+function metadataMemoFor(environmentId: EnvironmentId): EnvironmentMetadataMemo {
+  const existing = metadataMemoByEnvironment.get(environmentId);
+  metadataMemoByEnvironment.delete(environmentId);
+  const memo = existing ?? {};
+  metadataMemoByEnvironment.set(environmentId, memo);
+  if (metadataMemoByEnvironment.size > MAX_WORKSPACE_SNAPSHOT_ENVIRONMENTS) {
+    const oldest = metadataMemoByEnvironment.keys().next();
+    if (!oldest.done) metadataMemoByEnvironment.delete(oldest.value);
+  }
+  return memo;
+}
+
+function projectMetadata(
+  environmentId: EnvironmentId,
+  environment: EnvironmentState,
+): WorkspaceProjectMetadata[] {
+  return environment.projectIds.flatMap((projectId) => {
+    const project = environment.projectById[projectId];
+    return project
+      ? [
+          {
+            environmentId,
+            id: project.id,
+            kind: projectKindOf(project),
+            name: project.name,
+            cwd: project.cwd,
+            repositoryIdentity: project.repositoryIdentity ?? null,
+            createdAt: project.createdAt ?? null,
+            updatedAt: project.updatedAt ?? null,
+          },
+        ]
+      : [];
+  });
+}
+
+function worktreeMetadata(
+  environmentId: EnvironmentId,
+  environment: EnvironmentState,
+): WorkspaceWorktreeMetadata[] {
+  return (environment.worktreeIds ?? []).flatMap((worktreeId) => {
+    const worktree = environment.worktreeById?.[worktreeId];
+    return worktree
+      ? [
+          {
+            environmentId,
+            id: worktree.id,
+            projectId: worktree.projectId,
+            title: worktree.title ?? null,
+            branch: worktree.branch,
+            worktreePath: worktree.worktreePath,
+            workItemLabel: worktree.workItemKey ?? worktree.prTitle ?? worktree.issueTitle ?? null,
+            pullRequestNumber: worktree.prNumber,
+            archivedAt: worktree.archivedAt,
+            updatedAt: worktree.updatedAt,
+          },
+        ]
+      : [];
+  });
+}
+
+function threadMetadata(
+  environmentId: EnvironmentId,
+  environment: EnvironmentState,
+  deliveryUnknown: boolean,
+): WorkspaceThreadMetadata[] {
+  return environment.threadIds.flatMap((threadId): WorkspaceThreadMetadata[] => {
+    const thread = environment.sidebarThreadSummaryById[threadId];
+    if (isArchivedThreadStub(thread)) {
+      return [
+        {
+          environmentId,
+          id: thread.id,
+          projectId: thread.projectId,
+          worktreeId: thread.worktreeId ? WorktreeId.make(thread.worktreeId) : null,
+          title: thread.title,
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt,
+          archivedAt: thread.archivedAt,
+          // Unknown for a stub, and marked so (`shellDetail`) rather than read.
+          modelSelection: null,
+          providerDriver: null,
+          branch: thread.branch,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+          deliveryUnknown,
+          ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
+          latestUserMessageAt: thread.latestUserMessageAt,
+          shellDetail: "archived-stub" as const,
+        },
+      ];
+    }
+    return thread
+      ? [
+          {
+            environmentId,
+            id: thread.id,
+            projectId: thread.projectId,
+            worktreeId: thread.worktreeId ? WorktreeId.make(thread.worktreeId) : null,
+            title: thread.title,
+            createdAt: thread.createdAt,
+            updatedAt: thread.updatedAt ?? null,
+            archivedAt: thread.archivedAt,
+            settledOverride: thread.settledOverride ?? null,
+            settledAt: thread.settledAt ?? null,
+            snoozedUntil: thread.snoozedUntil ?? null,
+            snoozedAt: thread.snoozedAt ?? null,
+            modelSelection: thread.modelSelection ?? null,
+            providerDriver: thread.providerDriver ?? null,
+            branch: thread.branch,
+            hasPendingApprovals: thread.hasPendingApprovals,
+            hasPendingUserInput: thread.hasPendingUserInput,
+            hasActionableProposedPlan: thread.hasActionableProposedPlan,
+            deliveryUnknown,
+            // Cached so delegated folding does not flicker on a cold start.
+            ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
+            // Cached so rows settle and sort as the live ones do.
+            latestUserMessageAt: thread.latestUserMessageAt,
+            latestTurn: endedLatestTurn(thread.latestTurn),
+          },
+        ]
+      : [];
+  });
+}
 
 export function readWorkspaceMetadataSnapshot(
   environmentId: EnvironmentId,
@@ -32,107 +193,36 @@ export function readWorkspaceMetadataSnapshot(
 ): WorkspaceMetadataSnapshot | null {
   const environment = state.environmentStateById[environmentId];
   if (!environment?.bootstrapComplete) return null;
+  const memo = metadataMemoFor(environmentId);
+  memo.projects = memoize(memo.projects, [environment.projectIds, environment.projectById], () =>
+    projectMetadata(environmentId, environment),
+  );
+  memo.worktrees = memoize(
+    memo.worktrees,
+    [environment.worktreeIds, environment.worktreeById],
+    () => worktreeMetadata(environmentId, environment),
+  );
+  memo.threads = memoize(
+    memo.threads,
+    [environment.threadIds, environment.sidebarThreadSummaryById, deliveryUnknown],
+    () => threadMetadata(environmentId, environment, deliveryUnknown),
+  );
   const snapshot: WorkspaceMetadataSnapshot = {
     schemaVersion: 1,
     environmentId,
     capturedAt,
-    projects: environment.projectIds.flatMap((projectId) => {
-      const project = environment.projectById[projectId];
-      return project
-        ? [
-            {
-              environmentId,
-              id: project.id,
-              kind: projectKindOf(project),
-              name: project.name,
-              cwd: project.cwd,
-              repositoryIdentity: project.repositoryIdentity ?? null,
-              createdAt: project.createdAt ?? null,
-              updatedAt: project.updatedAt ?? null,
-            },
-          ]
-        : [];
-    }),
-    worktrees: (environment.worktreeIds ?? []).flatMap((worktreeId) => {
-      const worktree = environment.worktreeById?.[worktreeId];
-      return worktree
-        ? [
-            {
-              environmentId,
-              id: worktree.id,
-              projectId: worktree.projectId,
-              title: worktree.title ?? null,
-              branch: worktree.branch,
-              worktreePath: worktree.worktreePath,
-              workItemLabel:
-                worktree.workItemKey ?? worktree.prTitle ?? worktree.issueTitle ?? null,
-              pullRequestNumber: worktree.prNumber,
-              archivedAt: worktree.archivedAt,
-              updatedAt: worktree.updatedAt,
-            },
-          ]
-        : [];
-    }),
-    threads: environment.threadIds.flatMap((threadId): WorkspaceThreadMetadata[] => {
-      const thread = environment.sidebarThreadSummaryById[threadId];
-      if (isArchivedThreadStub(thread)) {
-        return [
-          {
-            environmentId,
-            id: thread.id,
-            projectId: thread.projectId,
-            worktreeId: thread.worktreeId ? WorktreeId.make(thread.worktreeId) : null,
-            title: thread.title,
-            createdAt: thread.createdAt,
-            updatedAt: thread.updatedAt,
-            archivedAt: thread.archivedAt,
-            // Unknown for a stub, and marked so (`shellDetail`) rather than read.
-            modelSelection: null,
-            providerDriver: null,
-            branch: thread.branch,
-            hasPendingApprovals: false,
-            hasPendingUserInput: false,
-            hasActionableProposedPlan: false,
-            deliveryUnknown,
-            ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
-            latestUserMessageAt: thread.latestUserMessageAt,
-            shellDetail: "archived-stub" as const,
-          },
-        ];
-      }
-      return thread
-        ? [
-            {
-              environmentId,
-              id: thread.id,
-              projectId: thread.projectId,
-              worktreeId: thread.worktreeId ? WorktreeId.make(thread.worktreeId) : null,
-              title: thread.title,
-              createdAt: thread.createdAt,
-              updatedAt: thread.updatedAt ?? null,
-              archivedAt: thread.archivedAt,
-              settledOverride: thread.settledOverride ?? null,
-              settledAt: thread.settledAt ?? null,
-              snoozedUntil: thread.snoozedUntil ?? null,
-              snoozedAt: thread.snoozedAt ?? null,
-              modelSelection: thread.modelSelection ?? null,
-              providerDriver: thread.providerDriver ?? null,
-              branch: thread.branch,
-              hasPendingApprovals: thread.hasPendingApprovals,
-              hasPendingUserInput: thread.hasPendingUserInput,
-              hasActionableProposedPlan: thread.hasActionableProposedPlan,
-              deliveryUnknown,
-              // Cached so delegated folding does not flicker on a cold start.
-              ...(isThreadLineage(thread.lineage) ? { lineage: thread.lineage } : {}),
-              // Cached so rows settle and sort as the live ones do.
-              latestUserMessageAt: thread.latestUserMessageAt,
-              latestTurn: endedLatestTurn(thread.latestTurn),
-            },
-          ]
-        : [];
-    }),
+    projects: memo.projects.value,
+    worktrees: memo.worktrees.value,
+    threads: memo.threads.value,
   };
-  return isWorkspaceMetadataSnapshot(snapshot, environmentId) ? snapshot : null;
+  // Validation walks every row, so it reruns only for a new set of arrays; the
+  // capture time is the one other field it reads.
+  memo.validity = memoize(
+    memo.validity,
+    [snapshot.projects, snapshot.worktrees, snapshot.threads, Number.isFinite(capturedAt)],
+    () => isWorkspaceMetadataSnapshot(snapshot, environmentId),
+  );
+  return memo.validity.value ? snapshot : null;
 }
 
 /**
