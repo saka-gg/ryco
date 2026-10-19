@@ -62,6 +62,8 @@ changing `patchedDependencies`. In particular, the list, navigation, and Expo JS
 patches must survive upgrades. The Pierre patch exposes the mobile parser and type
 subpaths without importing the browser entry point.
 
-After upgrading MSW, regenerate `apps/web/public/mockServiceWorker.js` with the
-installed CLI. This is the development/test worker, distinct from the hosted PWA's
-static-shell service worker.
+After upgrading MSW, regenerate `apps/web/test/public/mockServiceWorker.js` with the
+installed CLI (the root `msw.workerDirectory` entry points at that directory). This
+is the test-only worker: it lives outside `apps/web/public`, so production builds do
+not ship it, and the browser test config serves it at the site root. It is distinct
+from the hosted PWA's static-shell service worker.

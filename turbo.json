@@ -43,25 +43,6 @@
     "RYCO_OTLP_TRACES_URL",
     "RYCO_OTLP_METRICS_URL",
     "RYCO_OTLP_EXPORT_INTERVAL_MS",
-    "RYCO_OTLP_SERVICE_NAME",
-    "RYCO_LOG_WS_EVENTS",
-    "RYCO_MODE",
-    "RYCO_PORT",
-    "RYCO_NO_BROWSER",
-    "RYCO_HOME",
-    "RYCO_AUTH_TOKEN",
-    "RYCO_TAILSCALE_SERVE",
-    "RYCO_TAILSCALE_SERVE_PORT",
-    "RYCO_DESKTOP_WS_URL",
-    "RYCO_TRACE_MIN_LEVEL",
-    "RYCO_TRACE_TIMING_ENABLED",
-    "RYCO_TRACE_FILE",
-    "RYCO_TRACE_MAX_BYTES",
-    "RYCO_TRACE_MAX_FILES",
-    "RYCO_TRACE_BATCH_WINDOW_MS",
-    "RYCO_OTLP_TRACES_URL",
-    "RYCO_OTLP_METRICS_URL",
-    "RYCO_OTLP_EXPORT_INTERVAL_MS",
     "RYCO_OTLP_SERVICE_NAME"
   ],
   "globalPassThroughEnv": ["PATHEXT"],
@@ -97,7 +78,6 @@
       ]
     },
     "dev": {
-      "dependsOn": ["@ryco/contracts#build"],
       "cache": false,
       "persistent": true
     },
@@ -112,8 +92,9 @@
     "test": {
       // Not result-cached: tests may not be pure (clock/network/fs), so a green
       // must never be memoized. PR runs skip untouched packages via `--affected`
-      // instead, which is sound regardless of test purity.
-      "dependsOn": ["^build"],
+      // instead, which is sound regardless of test purity. Workspace packages
+      // resolve from source, so tests never wait on an upstream build.
+      "dependsOn": [],
       "cache": false,
       "outputs": []
     }

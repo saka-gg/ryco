@@ -2,13 +2,8 @@
   "name": "@ryco/contracts",
   "version": "0.1.32",
   "private": true,
-  "files": [
-    "dist"
-  ],
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
   "types": "./src/index.ts",
   "exports": {
     "./hub-session": {
@@ -194,12 +189,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts",
-      "require": "./dist/index.cjs"
+      "require": "./src/index.ts"
     }
   },
   "scripts": {
-    "dev": "tsdown src/index.ts --format esm,cjs --dts --watch --clean",
-    "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
     "typecheck": "tsc --noEmit",
     "test": "vp test run"
   },
@@ -209,7 +202,6 @@
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
-    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
     "vitest": "catalog:"

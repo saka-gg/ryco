@@ -22,15 +22,7 @@ export const DEFAULT_RYCO_HOME = Effect.map(Effect.service(Path.Path), (path) =>
 );
 
 const MODE_ARGS = {
-  dev: [
-    "run",
-    "dev",
-    "--ui=tui",
-    "--filter=@ryco/contracts",
-    "--filter=@ryco/web",
-    "--filter=ryco-cli",
-    "--parallel",
-  ],
+  dev: ["run", "dev", "--ui=tui", "--filter=@ryco/web", "--filter=ryco-cli", "--parallel"],
   "dev:server": ["run", "dev", "--filter=ryco-cli"],
   "dev:web": ["run", "dev", "--filter=@ryco/web"],
   "dev:desktop": ["run", "dev", "--filter=@ryco/desktop", "--filter=@ryco/web", "--parallel"],
