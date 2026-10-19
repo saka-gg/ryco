@@ -13,6 +13,7 @@ import {
   isHostedEnvironmentSessionLive,
   isJoinableHostedEnvironmentSession,
   resetHostedEnvironmentSessionsForTests,
+  selectedProjectionFields,
   type HostedEnvironmentSessionRecord,
   type HostedEnvironmentSessions,
 } from "./hostedEnvironmentSessions.ts";
@@ -159,6 +160,26 @@ describe("hosted environment sessions", () => {
     sessions.markSessionReady(ENV_A, a);
     expect(record(sessions, ENV_A)).toMatchObject({ transportStatus: "idle", suspended: true });
     expect(record(sessions, ENV_A).generation).toBeGreaterThan(b);
+  });
+
+  it("can leave records that are suspended already as they are", () => {
+    const sessions = createSessions();
+    establish(sessions, ENV_A);
+    sessions.suspendAll();
+    const suspendedA = record(sessions, ENV_A);
+    const b = establish(sessions, ENV_B);
+    const published = vi.fn();
+    sessions.subscribe(published);
+
+    const suspended = sessions.suspendAll({ exceptSuspended: true });
+
+    expect(suspended).toEqual([{ environmentId: ENV_B, previousGeneration: b }]);
+    expect(record(sessions, ENV_A)).toBe(suspendedA);
+    expect(record(sessions, ENV_B)).toMatchObject({ suspended: true });
+    expect(published).toHaveBeenCalledOnce();
+
+    expect(sessions.suspendAll({ exceptSuspended: true })).toEqual([]);
+    expect(published).toHaveBeenCalledOnce();
   });
 
   it("withdraws every record's role and session in the same tick", () => {
@@ -770,6 +791,115 @@ describe("hosted environment sessions", () => {
     for (const status of ["suspended", "offline", "checking-access", "stale"] as const) {
       expect(hostedBrowserRevalidated(status)).toBe(false);
     }
+  });
+});
+
+describe("the selected environment's projection", () => {
+  const ready = { directoryReady: true, deliveryUnknown: false } as const;
+
+  it("shows a fresh session for an environment without a record", () => {
+    const node = hubNode(ENV_A);
+    expect(selectedProjectionFields(undefined, node, ready)).toEqual({
+      transportStatus: "idle",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      sessionRecoveredAfterUnknown: false,
+      effectiveRole: "operator",
+      selectionStatus: "online",
+      error: null,
+      establishing: true,
+    });
+    expect(
+      selectedProjectionFields(
+        undefined,
+        hubNode(ENV_A, { presence: { online: false, lastHeartbeatAt: 1 } }),
+        { directoryReady: false, deliveryUnknown: true },
+      ),
+    ).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      effectiveRole: null,
+      selectionStatus: "offline",
+    });
+  });
+
+  it("reports an established session with the role its own connection reported", () => {
+    const sessions = createSessions();
+    const generation = establish(sessions, ENV_A);
+    sessions.role(ENV_A, generation, "viewer");
+
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready)).toEqual({
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      sessionRecoveredAfterUnknown: false,
+      effectiveRole: "viewer",
+      selectionStatus: "online",
+      error: null,
+      establishing: false,
+    });
+    expect(
+      selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), {
+        directoryReady: false,
+        deliveryUnknown: false,
+      }).effectiveRole,
+    ).toBeNull();
+  });
+
+  it("keeps a suspended or reconnecting session establishing, and a spent budget quiet", () => {
+    const sessions = createSessions();
+    const generation = establish(sessions, ENV_A);
+    sessions.failure(ENV_A, generation, { kind: "budget", retryable: true });
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready)).toMatchObject({
+      transportStatus: "reconnecting",
+      error: null,
+      establishing: false,
+    });
+
+    sessions.failure(ENV_A, generation, { kind: "offline", retryable: true });
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready).error).toEqual({
+      kind: "relay",
+      failure: { kind: "offline", retryable: true },
+    });
+
+    sessions.suspendAll();
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready)).toMatchObject({
+      transportStatus: "idle",
+      sessionStatus: "stale",
+      establishing: true,
+    });
+  });
+
+  it.each([
+    ["revoked", "revoked"],
+    ["authorization-removed", "authorization-removed"],
+    ["incompatible", "incompatible"],
+    ["authentication", "online"],
+  ] as const)("reports a terminal %s failure as %s", (kind, selectionStatus) => {
+    const sessions = createSessions();
+    const { generation } = sessions.ensureRecord(hubNode(ENV_A));
+    sessions.markConnectRequested(ENV_A, generation);
+    sessions.failure(ENV_A, generation, { kind, retryable: false });
+
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready)).toMatchObject({
+      transportStatus: "terminal-failure",
+      effectiveRole: null,
+      selectionStatus,
+      error: { kind: "relay", failure: { kind, retryable: false } },
+      establishing: false,
+    });
+  });
+
+  it("reports a missed synchronization deadline as its own error", async () => {
+    const sessions = createSessions();
+    const { generation } = sessions.ensureRecord(hubNode(ENV_A));
+    sessions.markConnectRequested(ENV_A, generation);
+    await vi.advanceTimersByTimeAsync(HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS);
+
+    expect(selectedProjectionFields(record(sessions, ENV_A), hubNode(ENV_A), ready)).toMatchObject({
+      transportStatus: "terminal-failure",
+      error: { kind: "session-sync" },
+      establishing: false,
+    });
   });
 });
 

@@ -62,7 +62,11 @@ Long term maintainability is a core priority. If you add new functionality, firs
 
 - Hosted Hub lifecycle recovery has one authoritative owner. A hosted browser must revalidate its
   session and authorized directory state, create a fresh relay attempt, and accept a current shell
-  snapshot before mutation capability becomes available.
+  snapshot before mutation capability becomes available. Selecting an environment whose
+  per-environment session completed its own fresh relay attempt and accepted its own current shell
+  snapshot, and has not been suspended or interrupted since, adopts that session; the rule above
+  governs establishing and recovering a session. The adoption rule lives in one function
+  (`canAdoptHostedEnvironmentSession`).
 - Generic direct/saved-environment reconnect helpers must not race or bypass hosted lifecycle
   ownership. Stale generations cannot publish readiness, role, snapshots, or mutation authority.
 - The production hosted service worker is a static-shell availability mechanism, not a data plane.

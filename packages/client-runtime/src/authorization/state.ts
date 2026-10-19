@@ -4,10 +4,34 @@ import type * as NativeE2ee from "@ryco/contracts/native-e2ee";
 
 import { HostedReconnectPolicy } from "../relay/reconnectPolicy.ts";
 import { HostedHubApiError, type HostedAccountStepUp, type HostedHubFailureReason } from "./api.ts";
-import { activateHostedNode, deactivateHostedNode, suspendHostedNode } from "./environment.ts";
+import {
+  activateHostedNode,
+  connectHostedEnvironment,
+  deactivateHostedNode,
+  releaseHostedEnvironment,
+  requestHostedEnvironmentReconcile,
+  retainedHostedNodeLifecycle,
+  setActiveHostedEnvironment,
+  suspendHostedEnvironment,
+  suspendHostedNode,
+} from "./environment.ts";
+import {
+  canAdoptHostedEnvironmentSession,
+  getHostedEnvironmentSessions,
+  HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS,
+  hostedBrowserRevalidated,
+  isHostedEnvironmentConnectBlocked,
+  isJoinableHostedEnvironmentSession,
+  selectedProjectionFields,
+  type HostedEnvironmentSessions,
+} from "./hostedEnvironmentSessions.ts";
 import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
-import { getHostedHubApi, getHostedRuntimeConfiguration } from "./runtime.ts";
+import {
+  getHostedHubApi,
+  getHostedRuntimeConfiguration,
+  hostedEnvironmentSessionsMode,
+} from "./runtime.ts";
 import {
   createHostedStore,
   INITIAL_HOSTED_ACCOUNT_STATE,
@@ -496,7 +520,8 @@ export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
  */
 export const DIRECTORY_PRESENCE_WINDOW_MS = 5 * 60_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
-const HOSTED_SESSION_SYNC_DEADLINE_MS = 30_000;
+/** The selected session's synchronization deadline; every environment session has the same one. */
+export const HOSTED_SESSION_SYNC_DEADLINE_MS = HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS;
 /**
  * The bound on a cookie-mode access check (the session restore) while
  * nothing has timed out yet.
@@ -549,6 +574,65 @@ export const HOSTED_RECOVERY_CODES_UNDISPLAYED_MESSAGE =
  */
 export const HOSTED_TOTP_ENROLLMENT_UNDISPLAYED_MESSAGE =
   "Two-factor setup started but its key could not be shown. Remove two-factor authentication and set it up again.";
+
+/** How {@link HostedHubController.acquireEnvironment} answered. */
+export type HostedEnvironmentAcquisition = "adopted" | "joined" | "connecting" | "refused";
+
+/** The fields of `patch` whose values differ from `state`. */
+function changedFields(
+  state: HostedHubState,
+  patch: Partial<HostedHubState>,
+): Partial<HostedHubState> {
+  return Object.fromEntries(
+    Object.entries(patch).filter(
+      ([key, value]) => !Object.is(state[key as keyof HostedHubState], value),
+    ),
+  ) as Partial<HostedHubState>;
+}
+
+/**
+ * The shared fields that leave the selection: nothing is selected, connected
+ * or established any more. A `synchronizing` browser had already revalidated
+ * the session and the directory and was only waiting on the selected node's
+ * snapshot, so the directory it returns to is current.
+ */
+function clearedSelection(
+  state: HostedHubState,
+  kept: Pick<HostedHubState, "selectionStatus" | "errorMessage"> & {
+    readonly errorReason: HostedHubFailureReason | null;
+  },
+): Partial<HostedHubState> {
+  return {
+    selectedNode: null,
+    selectionStatus: kept.selectionStatus,
+    effectiveRole: null,
+    transportStatus: "idle",
+    sessionStatus: "closed",
+    sessionEstablished: false,
+    sessionRecoveredAfterUnknown: false,
+    browserStatus: state.browserStatus === "synchronizing" ? "current" : state.browserStatus,
+    errorMessage: kept.errorMessage,
+    errorReason: kept.errorReason,
+    generation: state.generation + 1,
+  };
+}
+
+/**
+ * Whether this client may not connect to the node at all: a node that requires
+ * a native client is locked for the browser, whose session is its ambient
+ * cookie.
+ */
+function lockedForThisClient(node: HostedHubNode): boolean {
+  return (
+    node.capabilities?.nativeClientRequired === true &&
+    getHostedHubApi().credentialMode === "cookie"
+  );
+}
+
+/** The application's environment session registry when sessions are retained. */
+function retainedEnvironmentSessions(): HostedEnvironmentSessions | null {
+  return hostedEnvironmentSessionsMode() === "retained" ? getHostedEnvironmentSessions() : null;
+}
 
 class HostedHubController {
   #operation: AbortController | null = null;
@@ -627,9 +711,51 @@ class HostedHubController {
   #externalIdentityConfigurationPromise: Promise<void> | null = null;
   #externalIdentityConfigurationGeneration = 0;
   #accountOperation: AbortController | null = null;
+  /**
+   * Retained mode's projection of the selected record onto the shared state,
+   * installed on first retained use; see {@link #projectionPatch}.
+   */
+  #projection: {
+    readonly sessions: HostedEnvironmentSessions;
+    readonly unsubscribe: () => void;
+  } | null = null;
+  #projecting = false;
+  #projectAgain = false;
+  #projectionPaused = 0;
+  /**
+   * The session error the projection last published, so a message another
+   * writer published since (a directory or access failure) stays until the
+   * selected record's own error changes.
+   */
+  #projectedError: {
+    readonly environmentId: EnvironmentId;
+    readonly message: string | null;
+  } | null = null;
+  /** Environments whose fresh record {@link acquireEnvironment} is publishing right now. */
+  #startingEnvironments = new Set<EnvironmentId>();
+  /**
+   * Nodes whose last acquisition was refused for a cause that passes — no
+   * account authenticated yet, the browser not revalidated, the directory not
+   * current (its first load included, before any node is known), or a
+   * generation replaced during the call — with the account they were refused
+   * for, `null` before one authenticated. Keyed by the node id the acquisition
+   * named, since the directory may not know the node yet. The platform's demand
+   * executor holds a refused environment back, so the next recovery asks it to
+   * re-plan each one; see {@link #replanRefusedEnvironments}.
+   */
+  #refusedUntilRecovery = new Map<string, string | null>();
+  /** Each record's readiness as last observed, so the dispatch replay hears every ready edge once. */
+  #recordReadiness = new Map<
+    EnvironmentId,
+    { readonly generation: number; readonly ready: boolean }
+  >();
 
   bootstrap(): Promise<void> {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
+    // A platform that opted into retained sessions without their lifecycle
+    // ports learns it here, at first use and before anything changed, rather
+    // than from an access check or directory read reporting a Hub failure.
+    this.#retainedSessions();
     const operation = this.#replaceOperation();
     const access = settledSignal();
     this.#accessCheckOperation = operation;
@@ -759,6 +885,8 @@ class HostedHubController {
    * directory read that follows it; see {@link bootstrapAccess}.
    */
   #restoreAccess(operation: AbortController, accessSettled?: () => void): Promise<void> {
+    // Missing retained lifecycle ports fail a credential adoption here too.
+    this.#retainedSessions();
     const options = this.#accessCheckOptions();
     // The session request goes out first; the directory read rides beside it.
     const restored = getHostedHubApi().restoreSession(operation.signal, options);
@@ -905,6 +1033,16 @@ class HostedHubController {
   recoverAfterConnectivity(): Promise<void> {
     const state = hostedHubStore.getState();
     if (state.accountStatus === "unavailable") return this.bootstrap();
+    if (state.accountStatus === "authenticated" && this.#retainedSessions()) {
+      // Every environment's transport recovers on its own and the platform
+      // re-plans the connections, so only a browser whose access is not
+      // revalidated needs the resume. A slow or offline selection must not
+      // re-check access, and pause every other environment's admission, on
+      // each signal.
+      return state.directoryStatus === "ready" && this.#browserRevalidated(state)
+        ? Promise.resolve()
+        : this.resumeBrowser();
+    }
     if (state.accountStatus === "authenticated") {
       const healthy =
         state.directoryStatus === "ready" &&
@@ -1209,20 +1347,29 @@ class HostedHubController {
   /**
    * Synchronously withdraw native account-grant authority without signing the account out. Platform
    * adapters call this before asynchronous channel teardown on enrollment revocation or account-epoch
-   * change, so stale generations cannot retain read or mutation readiness.
+   * change, so stale generations cannot retain read or mutation readiness. It covers every
+   * environment session: with retained sessions each one takes a fresh generation and loses its
+   * role and session before this returns, selected or not.
    */
   invalidateNativeE2eeAuthorization(): void {
     const state = hostedHubStore.getState();
     if (state.accountStatus !== "authenticated") return;
     getHostedRuntimeConfiguration().resetRelayAttemptFactory();
-    patchState({
+    const withdrawn: Partial<HostedHubState> = {
       generation: state.generation + 1,
       effectiveRole: null,
       transportStatus: "reconnecting",
       sessionStatus: "closed",
       sessionEstablished: false,
       sessionRecoveredAfterUnknown: false,
-    });
+    };
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      this.#pauseProjection(() => sessions.withdrawAll());
+      this.#publishProjected(sessions, withdrawn);
+      return;
+    }
+    patchState(withdrawn);
   }
 
   /**
@@ -1989,6 +2136,15 @@ class HostedHubController {
     // each one can only remove its own token, which is already gone.
     this.#recoveryCodesLeases.clear();
     this.#publishRecoveryCodeDisplayLease();
+    this.#projection?.unsubscribe();
+    this.#projection = null;
+    this.#projecting = false;
+    this.#projectAgain = false;
+    this.#projectionPaused = 0;
+    this.#projectedError = null;
+    this.#recordReadiness.clear();
+    this.#startingEnvironments.clear();
+    this.#refusedUntilRecovery.clear();
     getHostedDispatchReplay().resetForTests();
     getHostedHubApi().clearSessionMaterial();
     hostedHubStore.setState(initialState, true);
@@ -2017,7 +2173,13 @@ class HostedHubController {
   async expireSession(error?: unknown): Promise<void> {
     getHostedHubApi().clearSessionMaterial();
     await this.clearAccount("session-expired");
-    if (error instanceof HostedHubApiError && error.reason !== null) {
+    // Only onto the expired session's own surface: a newer session that signed
+    // in while the teardown ran is not this error's to explain.
+    if (
+      error instanceof HostedHubApiError &&
+      error.reason !== null &&
+      hostedHubStore.getState().accountStatus === "session-expired"
+    ) {
       patchState(hostedErrorPatch(error));
     }
   }
@@ -2105,12 +2267,21 @@ class HostedHubController {
     this.#directoryOperation = null;
     this.#directoryPromise = null;
     this.#directoryInvalidationFollowup = null;
-    patchState({
+    const suspension: Partial<HostedHubState> = {
       browserStatus: reason === "offline" ? "offline" : "suspended",
       sessionStatus: state.sessionStatus === "delivery-unknown" ? "delivery-unknown" : "stale",
       sessionRecoveredAfterUnknown: false,
       generation: state.generation + 1,
-    });
+    };
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      // Every environment session is suspended, not only the selected one. One
+      // an earlier suspension already reached (hidden, then offline) keeps its
+      // generation, and its transport is not suspended a second time.
+      this.#suspendRetained(sessions, suspension, true);
+      return;
+    }
+    patchState(suspension);
     if (state.selectedNode && !this.#browserSuspendPromise) {
       const environmentId = state.selectedNode.environmentId;
       const promise = suspendHostedNode(environmentId)
@@ -2119,6 +2290,30 @@ class HostedHubController {
           if (this.#browserSuspendPromise === promise) this.#browserSuspendPromise = null;
         });
       this.#browserSuspendPromise = promise;
+    }
+  }
+
+  /**
+   * Suspend the environment sessions and publish `patch` with the projection:
+   * each takes a fresh generation, so nothing still in flight can publish into
+   * it and none stays adoptable. The replaced generations' transports are
+   * suspended on their own environments' queues, so no environment's next
+   * connect waits for another's suspension. `exceptSuspended` skips the ones
+   * a suspension already reached.
+   *
+   * Nothing awaits these suspensions, a resume included: each environment's
+   * next connect queues behind its own suspension, so the
+   * `#browserSuspendPromise` a single-session resume awaits is not used here.
+   */
+  #suspendRetained(
+    sessions: HostedEnvironmentSessions,
+    patch: Partial<HostedHubState>,
+    exceptSuspended: boolean,
+  ): void {
+    const suspended = this.#pauseProjection(() => sessions.suspendAll({ exceptSuspended }));
+    this.#publishProjected(sessions, patch);
+    for (const { environmentId, previousGeneration } of suspended) {
+      void suspendHostedEnvironment(environmentId, previousGeneration).catch(() => undefined);
     }
   }
 
@@ -2140,7 +2335,20 @@ class HostedHubController {
     const browserGeneration = this.#browserLifecycleGeneration + 1;
     this.#browserLifecycleGeneration = browserGeneration;
     const expectedAccountId = initial.account?.id ?? null;
-    patchState({ browserStatus: "checking-access", errorMessage: null });
+    const checking: Partial<HostedHubState> = {
+      browserStatus: "checking-access",
+      errorMessage: null,
+    };
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      // No environment session keeps its authority across a resume. One that
+      // no suspension reached — a rotated session, a stale directory — is
+      // suspended now like the rest, so each regains it only through its own
+      // fresh relay attempt and accepted snapshot after this revalidation.
+      this.#suspendRetained(sessions, checking, true);
+    } else {
+      patchState(checking);
+    }
     const options = this.#accessCheckOptions();
     const restoring = getHostedHubApi().restoreSession(operation.signal, options);
     const check = { directory: this.#prefetchDirectory(operation.signal) };
@@ -2165,6 +2373,19 @@ class HostedHubController {
       if (refreshed.accountStatus !== "authenticated") return;
       if (refreshed.directoryStatus !== "ready") {
         patchState({ browserStatus: "stale" });
+        return;
+      }
+      if (sessions) {
+        // Revalidated. Every record was suspended and regains authority only
+        // through its own fresh attempt and accepted snapshot, which the
+        // platform starts when it re-plans (the selection first). Until its
+        // record is established the selection synchronizes. Each environment's
+        // connect queues behind its own suspension, so none waits for another.
+        // An acquisition refused while the browser was not revalidated is
+        // re-planned with it.
+        this.#publishProjected(sessions, { browserStatus: "current" });
+        requestHostedEnvironmentReconcile({ reason: "resume" });
+        this.#replanRefusedEnvironments(sessions);
         return;
       }
       if (!refreshed.selectedNode) {
@@ -2216,6 +2437,8 @@ class HostedHubController {
     // `bootstrap()` must start a fresh one rather than join it.
     this.#bootstrapPromise = null;
     this.#bootstrapAccessPromise = null;
+    // Nothing refused for this account session is re-planned for the next one.
+    this.#refusedUntilRecovery.clear();
     this.#clearAccountSurface();
     // No orchestration command replays into whatever account signs in next.
     getHostedDispatchReplay().endAccountSession();
@@ -2225,6 +2448,21 @@ class HostedHubController {
       accountStatus: status,
       generation: hostedHubStore.getState().generation + 1,
     });
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      this.#projectedError = null;
+      if (previousEnvironmentId) setActiveHostedEnvironment(null);
+      // Whoever signs in next starts without this session's node-scoped state,
+      // even on an environment it acquires before these releases finish. The
+      // records are gone at once; the releases run on their own environments'
+      // queues, and signing out never waits for a lifecycle port. A release
+      // port that fails has still forgotten its record.
+      for (const record of sessions.list()) {
+        void this.#releaseRecord(sessions, record.environmentId, false).catch(() => undefined);
+      }
+      sessions.clear();
+      return;
+    }
     if (previousEnvironmentId) {
       await deactivateHostedNode(previousEnvironmentId);
     }
@@ -2335,6 +2573,15 @@ class HostedHubController {
       prefetch?.abandon();
       return;
     }
+    // Resolved before the read, outside its failure handling: missing retained
+    // lifecycle ports are a configuration error, never a stale directory.
+    let sessions: HostedEnvironmentSessions | null;
+    try {
+      sessions = this.#retainedSessions();
+    } catch (error) {
+      prefetch?.abandon();
+      throw error;
+    }
     const sessionId = state.session?.id ?? null;
     this.#clearDirectoryTimer();
     if (state.nodes.length === 0 && state.directoryStatus !== "loading") {
@@ -2368,7 +2615,9 @@ class HostedHubController {
         refreshedNode !== null && selected !== null && sameDirectoryValue(selected, refreshedNode)
           ? selected
           : refreshedNode;
-      if (selected && (!refreshedSelection || refreshedSelection.revokedAt !== null)) {
+      if (sessions) {
+        this.#publishRetainedDirectory(sessions, current, nextNodes, refreshedSelection);
+      } else if (selected && (!refreshedSelection || refreshedSelection.revokedAt !== null)) {
         const generation = current.generation + 1;
         patchState({
           nodes: nextNodes,
@@ -2455,6 +2704,10 @@ class HostedHubController {
       return;
     const node = state.nodes.find((candidate) => candidate.id === nodeId);
     if (!node || node.revokedAt) return;
+    // With retained sessions a node locked to native clients is never selected,
+    // as the directory leaves it and no acquisition connects it: it could only
+    // show as synchronizing for good.
+    if (hostedEnvironmentSessionsMode() === "retained" && lockedForThisClient(node)) return;
     if (
       state.selectedNode?.id === node.id &&
       state.selectedNode.environmentId === node.environmentId
@@ -2470,6 +2723,11 @@ class HostedHubController {
     this.#retrySelectedNodeOperation?.abort();
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      this.#selectRetained(sessions, state, node);
+      return;
+    }
     const generation = state.generation + 1;
     patchState({
       selectedNode: node,
@@ -2491,11 +2749,186 @@ class HostedHubController {
   }
 
   /**
-   * Deactivate the selected node and return to the node directory without
-   * touching the Hub session. Used by history navigation (Back to the
-   * directory) and by fail-closed route fallbacks. Follows the documented
-   * switching-nodes teardown order via `deactivateHostedNode`; the generation
-   * bump prevents stale relay attempts from publishing readiness or role.
+   * Retained mode: move the selection and its projection, nothing else.
+   * Selecting never connects; the platform's demand executor connects through
+   * {@link acquireEnvironment}, so its cap is the only place connection slots
+   * are granted. A record that can be neither adopted nor joined (suspended,
+   * failed, or idle after a renew) starts over instead, as selecting a node
+   * always did, and the platform is asked to re-plan it.
+   */
+  #selectRetained(
+    sessions: HostedEnvironmentSessions,
+    state: HostedHubState,
+    node: HostedHubNode,
+  ): void {
+    const { environmentId } = node;
+    const record = sessions.read(environmentId);
+    const restart =
+      record !== undefined &&
+      !canAdoptHostedEnvironmentSession(record) &&
+      !isJoinableHostedEnvironmentSession(record);
+    if (restart) sessions.renew(environmentId);
+    this.#publishProjected(sessions, { selectedNode: node, generation: state.generation + 1 });
+    setActiveHostedEnvironment(node);
+    if (restart) requestHostedEnvironmentReconcile({ reason: "retry", environmentId });
+  }
+
+  /**
+   * Connect an environment, in retained mode the only way any connection is
+   * created. The platform's demand executor alone calls it, and decides when;
+   * this controller stays the lifecycle owner and decides how:
+   *
+   * - `adopted`: the environment's session completed its own fresh relay
+   *   attempt and accepted its own current snapshot, and has not been
+   *   suspended or interrupted since (`canAdoptHostedEnvironmentSession`, the
+   *   one adoption rule), so it is used as it is;
+   * - `joined`: a connection was already requested for its generation and is
+   *   still on its way, or another acquisition is opening it right now;
+   * - `refused`: the browser is not revalidated, the directory is not current,
+   *   the node is gone, revoked or locked for this client, a terminal failure
+   *   (an incompatible relay among them) blocks it until its directory entry
+   *   changes or the user retries, or a release, suspension or restart that
+   *   ran meanwhile replaced the generation this call started. The platform
+   *   holds a refused environment back, so one refused for a cause that passes
+   *   (no account yet, the browser, the directory or a replaced generation) is
+   *   re-planned once at the next recovery; see {@link #replanRefusedEnvironments};
+   * - `connecting`: anything else starts over with a fresh generation, relay
+   *   attempt and snapshot, after the environment's own pending release or
+   *   suspension.
+   *
+   * It never moves the selection. In single mode it selects the node, the one
+   * way that mode connects.
+   */
+  async acquireEnvironment(nodeId: string): Promise<HostedEnvironmentAcquisition> {
+    const sessions = this.#retainedSessions();
+    if (!sessions) {
+      await this.selectNode(nodeId);
+      return "connecting";
+    }
+    return this.#acquireRetained(sessions, nodeId);
+  }
+
+  #acquireRetained(
+    sessions: HostedEnvironmentSessions,
+    nodeId: string,
+  ): HostedEnvironmentAcquisition {
+    const state = hostedHubStore.getState();
+    const node = state.nodes.find((candidate) => candidate.id === nodeId);
+    if (node !== undefined && (node.revokedAt !== null || lockedForThisClient(node))) {
+      // Refused for good: no recovery re-plans it.
+      this.#refusedUntilRecovery.delete(nodeId);
+      return "refused";
+    }
+    // Before the account is restored, the browser revalidated and the
+    // directory current, the refusal passes, even for a node the directory
+    // does not know yet: before its first load it knows none.
+    if (!this.#browserRevalidated(state) || state.directoryStatus !== "ready") {
+      return this.#refuseUntilRecovery(nodeId);
+    }
+    if (node === undefined) {
+      // Gone from a current directory: refused for good.
+      this.#refusedUntilRecovery.delete(nodeId);
+      return "refused";
+    }
+    const { environmentId } = node;
+    // A registry listener that acquires the environment again while this call
+    // publishes its fresh record joins the connection this call opens.
+    if (this.#startingEnvironments.has(environmentId)) return "joined";
+    // This answer replaces whatever an earlier refusal left to re-plan.
+    this.#refusedUntilRecovery.delete(nodeId);
+    const record = sessions.read(environmentId);
+    if (record !== undefined) {
+      if (canAdoptHostedEnvironmentSession(record)) {
+        sessions.ensureRecord(node);
+        return "adopted";
+      }
+      if (isJoinableHostedEnvironmentSession(record)) return "joined";
+      if (isHostedEnvironmentConnectBlocked(record)) return "refused";
+    }
+    this.#startingEnvironments.add(environmentId);
+    let generation: number;
+    try {
+      generation = sessions.ensureRecord(node).generation;
+      if (record !== undefined) {
+        generation = sessions.renew(environmentId)?.generation ?? generation;
+      }
+      sessions.markConnectRequested(environmentId, generation);
+    } finally {
+      this.#startingEnvironments.delete(environmentId);
+    }
+    // Something a listener ran while the record was published — a release, a
+    // suspension, a selection that started it over — replaced this generation,
+    // and whatever did so owns what comes next: a connection for it would only
+    // be dropped. That cause passes, so the next recovery re-plans the
+    // environment.
+    if (!sessions.isCurrentGeneration(environmentId, generation)) {
+      return this.#refuseUntilRecovery(nodeId);
+    }
+    // A connect queued behind the environment's pending release or suspension
+    // opens nothing for a generation that a withdrawal, a sign-out or anything
+    // else replaced by the time its turn comes.
+    const current = () => sessions.isCurrentGeneration(environmentId, generation);
+    void connectHostedEnvironment(node, generation, current).catch(() => {
+      // The connection could not even be opened: this generation's
+      // synchronization fails now instead of at its deadline.
+      sessions.reportShellSnapshotFailure(environmentId, generation);
+    });
+    return "connecting";
+  }
+
+  /**
+   * Retained mode: close an environment's session and connection — the
+   * platform's demand executor decides when. Requests the connection still had
+   * in flight leave the environment's delivery uncertain for its next session.
+   * Releasing the selected environment also returns to the node directory, as
+   * {@link returnToDirectory} does. In single mode only the selected
+   * environment has a connection, and releasing it returns to the directory.
+   */
+  async releaseEnvironment(environmentId: EnvironmentId): Promise<void> {
+    const sessions = this.#retainedSessions();
+    const state = hostedHubStore.getState();
+    const selected = state.selectedNode?.environmentId === environmentId;
+    if (!sessions) {
+      if (selected) await this.returnToDirectory();
+      return;
+    }
+    // Leave the selection first, so nothing ever shows it without its session.
+    if (selected) {
+      this.#leaveSelection(state, false);
+      setActiveHostedEnvironment(null);
+    }
+    await this.#releaseRecord(sessions, environmentId);
+  }
+
+  /**
+   * Release an environment's record and connection. Its node-scoped state is
+   * kept for a newer session of the environment that started meanwhile only
+   * when `keepStateForNewerSession`; ending the account session never hands
+   * one account's cached state to the next session.
+   */
+  #releaseRecord(
+    sessions: HostedEnvironmentSessions,
+    environmentId: EnvironmentId,
+    keepStateForNewerSession = true,
+  ): Promise<void> {
+    const record = sessions.read(environmentId);
+    if (record === undefined) return Promise.resolve();
+    sessions.release(environmentId);
+    return releaseHostedEnvironment(
+      environmentId,
+      record.generation,
+      keepStateForNewerSession ? () => sessions.read(environmentId) !== undefined : () => false,
+    );
+  }
+
+  /**
+   * Leave the selected node for the node directory without touching the Hub
+   * session. Used by history navigation (Back to the directory) and by
+   * fail-closed route fallbacks. In single mode it deactivates the node through
+   * the documented switching-nodes teardown order (`deactivateHostedNode`); in
+   * retained mode it releases nothing, since connections belong to the
+   * platform's demand executor. Either way the generation bump prevents stale
+   * relay attempts from publishing readiness or role into the directory.
    * `preserveTerminalSelection` keeps a terminal selection status (revoked,
    * authorization removed, incompatible) and its bounded message so the
    * directory renders the existing explanation.
@@ -2506,7 +2939,16 @@ class HostedHubController {
     const state = hostedHubStore.getState();
     const node = state.selectedNode;
     if (!node) return;
-    const preserve = options?.preserveTerminalSelection === true;
+    const sessions = this.#retainedSessions();
+    this.#leaveSelection(state, options?.preserveTerminalSelection === true);
+    if (sessions) {
+      setActiveHostedEnvironment(null);
+      return;
+    }
+    await deactivateHostedNode(node.environmentId);
+  }
+
+  #leaveSelection(state: HostedHubState, preserve: boolean): void {
     // Mirror clearAccount: an in-flight browser resume belongs to the
     // selection being torn down. Abort it and invalidate its lifecycle
     // generation so it can neither publish stale state nor leave
@@ -2523,35 +2965,38 @@ class HostedHubController {
     this.#retrySelectedNodeOperation = null;
     this.#retrySelectedNodePromise = null;
     this.#clearSessionSyncTimer();
-    // A `synchronizing` resume had already revalidated the session and the
-    // directory and was only waiting on the node's snapshot, so the directory
-    // it returns to is current. A `checking-access` one had not: the browser
+    // A `checking-access` resume had not revalidated anything yet: the browser
     // goes `stale` and a fresh resume, with no selection left to reconnect,
     // re-runs that check rather than handing back `current` unverified.
     const accessUnchecked = state.browserStatus === "checking-access";
     patchState({
-      selectedNode: null,
-      selectionStatus: preserve ? state.selectionStatus : "none",
-      effectiveRole: null,
-      transportStatus: "idle",
-      sessionStatus: "closed",
-      sessionEstablished: false,
-      sessionRecoveredAfterUnknown: false,
-      browserStatus:
-        state.browserStatus === "synchronizing"
-          ? "current"
-          : accessUnchecked
-            ? "stale"
-            : state.browserStatus,
-      errorMessage: preserve ? state.errorMessage : null,
-      errorReason: preserve ? (state.errorReason ?? null) : null,
-      generation: state.generation + 1,
+      ...clearedSelection(
+        state,
+        preserve
+          ? {
+              selectionStatus: state.selectionStatus,
+              errorMessage: state.errorMessage,
+              errorReason: state.errorReason ?? null,
+            }
+          : { selectionStatus: "none", errorMessage: null, errorReason: null },
+      ),
+      ...(accessUnchecked ? { browserStatus: "stale" } : {}),
     });
+    this.#projectedError = null;
     if (accessUnchecked) void this.resumeBrowser();
-    await deactivateHostedNode(node.environmentId);
   }
 
+  /**
+   * Start the selected node over with a fresh generation. In retained mode its
+   * record is renewed and the platform asked to re-plan it; the demand
+   * executor reconnects it through {@link acquireEnvironment}.
+   */
   retrySelectedNode(): Promise<void> {
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      this.#retryRetained(sessions);
+      return Promise.resolve();
+    }
     if (this.#retrySelectedNodePromise) return this.#retrySelectedNodePromise;
     const operation = new AbortController();
     this.#retrySelectedNodeOperation = operation;
@@ -2563,6 +3008,21 @@ class HostedHubController {
     });
     this.#retrySelectedNodePromise = promise;
     return promise;
+  }
+
+  #retryRetained(sessions: HostedEnvironmentSessions): void {
+    const state = hostedHubStore.getState();
+    const node = state.selectedNode;
+    if (
+      !node ||
+      node.revokedAt !== null ||
+      state.accountStatus !== "authenticated" ||
+      state.directoryStatus !== "ready"
+    ) {
+      return;
+    }
+    sessions.renew(node.environmentId);
+    requestHostedEnvironmentReconcile({ reason: "retry", environmentId: node.environmentId });
   }
 
   async #retrySelectedNode(signal: AbortSignal): Promise<void> {
@@ -2676,6 +3136,11 @@ class HostedHubController {
    * other still waits for its snapshot first.
    */
   markEnvironmentDeliveryUnknown(environmentId: EnvironmentId): void {
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      sessions.markEnvironmentDeliveryUnknown(environmentId);
+      return;
+    }
     const state = hostedHubStore.getState();
     if (state.selectedNode?.environmentId !== environmentId) return;
     if (state.sessionStatus === "delivery-unknown") return;
@@ -2778,11 +3243,41 @@ class HostedHubController {
     this.#failSessionSync(state.generation);
   }
 
-  acknowledgeDeliveryUnknown(): void {
+  /**
+   * The user has seen that an action could not be confirmed and continues; the
+   * selected environment's by default. In retained mode any environment's
+   * session can be acknowledged, and its readiness reaches the dispatch replay
+   * like any other.
+   */
+  acknowledgeDeliveryUnknown(environmentId?: EnvironmentId): void {
     const state = hostedHubStore.getState();
+    const sessions = this.#retainedSessions();
+    if (sessions) {
+      const acknowledged = environmentId ?? state.selectedNode?.environmentId;
+      if (acknowledged !== undefined) sessions.acknowledgeDeliveryUnknown(acknowledged);
+      return;
+    }
+    if (environmentId !== undefined && state.selectedNode?.environmentId !== environmentId) return;
     if (state.sessionStatus !== "delivery-unknown" || !state.sessionRecoveredAfterUnknown) return;
     patchState({ sessionStatus: "ready", sessionRecoveredAfterUnknown: false });
     if (state.selectedNode) getHostedDispatchReplay().markReady(state.selectedNode.environmentId);
+  }
+
+  /**
+   * A terminal failure of the account's Hub session, which every node channel
+   * depends on. In single mode it fails the selected node's session; in
+   * retained mode it reaches every environment session, each under its own
+   * generation.
+   */
+  reportHubSessionFailure(failure: HostedRelayFailure): void {
+    const sessions = this.#retainedSessions();
+    if (!sessions) {
+      this.failure(hostedHubStore.getState().generation, failure);
+      return;
+    }
+    for (const record of sessions.list()) {
+      sessions.failure(record.environmentId, record.generation, failure);
+    }
   }
 
   #replaceOperation(): AbortController {
@@ -2915,6 +3410,288 @@ class HostedHubController {
     });
   }
 
+  /**
+   * The environment session registry when sessions are retained, with the
+   * selected record's projection installed; `null` in single mode.
+   *
+   * Retained mode keeps this controller the only hosted lifecycle owner. The
+   * platform's demand executor only decides when to call
+   * {@link acquireEnvironment} and {@link releaseEnvironment}; every connection
+   * is created there. Every record that admits mutations earned it with its
+   * own fresh relay attempt and accepted snapshot, and every relay callback is
+   * fenced per environment by the record generation it names, so a stale
+   * generation can publish neither readiness, role, a snapshot nor mutation
+   * authority.
+   */
+  #retainedSessions(): HostedEnvironmentSessions | null {
+    const sessions = retainedEnvironmentSessions();
+    if (sessions === null) return null;
+    retainedHostedNodeLifecycle();
+    if (this.#projection?.sessions !== sessions) this.#installProjection(sessions);
+    return sessions;
+  }
+
+  #installProjection(sessions: HostedEnvironmentSessions): void {
+    this.#projection?.unsubscribe();
+    this.#recordReadiness.clear();
+    this.#observeRecordReadiness(sessions, false);
+    const unsubscribeSessions = sessions.subscribe(() => {
+      this.#observeRecordReadiness(sessions, true);
+      this.#projectSelection();
+    });
+    const unsubscribeStore = hostedHubStore.subscribe(() => this.#projectSelection());
+    this.#projection = {
+      sessions,
+      unsubscribe: () => {
+        unsubscribeSessions();
+        unsubscribeStore();
+      },
+    };
+    this.#projectSelection();
+  }
+
+  /**
+   * Hand each environment's readiness to the dispatch replay once per ready
+   * edge: when its session has accepted a current snapshot and admits commands
+   * again (a delivery-unknown session once the user has acknowledged it).
+   */
+  #observeRecordReadiness(sessions: HostedEnvironmentSessions, notify: boolean): void {
+    const { records } = sessions.getSnapshot();
+    for (const environmentId of Array.from(this.#recordReadiness.keys())) {
+      if (!records.has(environmentId)) this.#recordReadiness.delete(environmentId);
+    }
+    for (const record of records.values()) {
+      const ready = record.sessionEstablished && record.sessionStatus === "ready";
+      const previous = this.#recordReadiness.get(record.environmentId);
+      if (previous?.generation === record.generation && previous.ready === ready) continue;
+      this.#recordReadiness.set(record.environmentId, { generation: record.generation, ready });
+      if (notify && ready) getHostedDispatchReplay().markReady(record.environmentId);
+    }
+  }
+
+  /** Re-publish the projection after the registry or the shared state changed. */
+  #projectSelection(): void {
+    const projection = this.#projection;
+    if (projection === null || this.#projectionPaused > 0) return;
+    if (this.#projecting) {
+      this.#projectAgain = true;
+      return;
+    }
+    if (hostedEnvironmentSessionsMode() !== "retained") return;
+    this.#projecting = true;
+    try {
+      do {
+        this.#projectAgain = false;
+        const patch = this.#projectionPatch(projection.sessions, hostedHubStore.getState());
+        if (Object.keys(patch).length > 0) patchState(patch);
+      } while (this.#projectAgain);
+    } finally {
+      this.#projecting = false;
+    }
+  }
+
+  /**
+   * Hold the projection while `change` rewrites records, for the caller to
+   * publish it together with its own shared patch.
+   */
+  #pauseProjection<T>(change: () => T): T {
+    this.#projectionPaused += 1;
+    try {
+      return change();
+    } finally {
+      this.#projectionPaused -= 1;
+    }
+  }
+
+  /** Publish `patch` and the projection it leads to as one update. */
+  #publishProjected(sessions: HostedEnvironmentSessions, patch: Partial<HostedHubState>): void {
+    const next = { ...hostedHubStore.getState(), ...patch };
+    const update = { ...patch, ...this.#projectionPatch(sessions, next) };
+    if (Object.keys(update).length > 0) patchState(update);
+  }
+
+  /**
+   * The changes that make `state` show the selected environment's record.
+   *
+   * In retained mode the shared transport, session, role and selection fields
+   * describe the selected record and nothing else, and this is their only
+   * writer: the shared generation moves only with the selection, and relay
+   * callbacks write records. While the browser is revalidated, it is
+   * `synchronizing` until the selected record is established or has failed
+   * for good, and `current` from then on — a slow or offline selection never
+   * holds another record, whose admission needs only the revalidated browser
+   * and its own session. The session error is published when the record's own
+   * error changes, so a directory or access failure published since stays.
+   */
+  #projectionPatch(
+    sessions: HostedEnvironmentSessions,
+    state: HostedHubState,
+  ): Partial<HostedHubState> {
+    const node = state.selectedNode;
+    if (node === null) return {};
+    const { environmentId } = node;
+    const fields = selectedProjectionFields(sessions.read(environmentId), node, {
+      directoryReady: state.directoryStatus === "ready",
+      deliveryUnknown: sessions.getSnapshot().deliveryUnknown.has(environmentId),
+    });
+    const message =
+      fields.error === null
+        ? null
+        : fields.error.kind === "session-sync"
+          ? HOSTED_SESSION_SYNC_FAILURE_MESSAGE
+          : failureMessage(fields.error.failure);
+    const published = this.#projectedError;
+    const errorChanged =
+      published?.environmentId !== environmentId || published.message !== message;
+    if (errorChanged) this.#projectedError = { environmentId, message };
+    return changedFields(state, {
+      transportStatus: fields.transportStatus,
+      sessionStatus: fields.sessionStatus,
+      sessionEstablished: fields.sessionEstablished,
+      sessionRecoveredAfterUnknown: fields.sessionRecoveredAfterUnknown,
+      effectiveRole: fields.effectiveRole,
+      selectionStatus: fields.selectionStatus,
+      ...(this.#browserRevalidated(state)
+        ? { browserStatus: fields.establishing ? "synchronizing" : "current" }
+        : {}),
+      ...(errorChanged ? { errorMessage: message } : {}),
+    });
+  }
+
+  /**
+   * The account and the directory were checked in this browser lifecycle and
+   * nothing has suspended it since. The same rule every environment's relay
+   * admission reads, so the two can never disagree.
+   */
+  #browserRevalidated(state: HostedHubState): boolean {
+    return state.accountStatus === "authenticated" && hostedBrowserRevalidated(state.browserStatus);
+  }
+
+  /**
+   * Retained mode's directory publication. The selection follows the
+   * directory as in single mode. It leaves it with the revoked or
+   * authorization-removed status when its node is gone or revoked, and with
+   * no status when its node became locked for this client, which could never
+   * connect it. Every record whose node is gone, revoked or locked for this
+   * client is released, selected or not; every other one takes its directory
+   * entry, and one whose terminal failure that entry's change lifted is
+   * re-planned. A directory that becomes current — its first load included —
+   * while the browser is revalidated also re-plans the acquisitions refused
+   * until then. The shared role is the projection's to publish.
+   *
+   * Releases run on their own environments' queues and are not awaited: the
+   * directory, its next poll and a resume never wait for an environment's
+   * lifecycle ports.
+   */
+  #publishRetainedDirectory(
+    sessions: HostedEnvironmentSessions,
+    current: HostedHubState,
+    nodes: ReadonlyArray<HostedHubNode>,
+    refreshedSelection: HostedHubNode | null,
+  ): void {
+    const selected = current.selectedNode;
+    if (
+      selected &&
+      (!refreshedSelection ||
+        refreshedSelection.revokedAt !== null ||
+        lockedForThisClient(refreshedSelection))
+    ) {
+      patchState({
+        nodes,
+        directoryStatus: "ready",
+        ...clearedSelection(
+          current,
+          refreshedSelection && refreshedSelection.revokedAt === null
+            ? { selectionStatus: "none", errorMessage: null, errorReason: null }
+            : {
+                selectionStatus: refreshedSelection ? "revoked" : "authorization-removed",
+                errorMessage: current.errorMessage,
+                errorReason: current.errorReason ?? null,
+              },
+        ),
+      });
+      this.#projectedError = null;
+      setActiveHostedEnvironment(null);
+    } else {
+      // An unchanged directory publishes nothing: every hosted store
+      // subscriber would otherwise re-run for a read that changed nothing.
+      const update = changedFields(current, {
+        nodes,
+        directoryStatus: "ready",
+        ...(refreshedSelection ? { selectedNode: refreshedSelection } : {}),
+      });
+      if (Object.keys(update).length > 0) this.#publishProjected(sessions, update);
+    }
+    for (const record of sessions.list()) {
+      const node = nodes.find(
+        (candidate) =>
+          candidate.id === record.nodeId && candidate.environmentId === record.environmentId,
+      );
+      if (!node || node.revokedAt !== null || lockedForThisClient(node)) {
+        // A release port that fails has still forgotten the record; nothing
+        // here waits for it.
+        void this.#releaseRecord(sessions, record.environmentId).catch(() => undefined);
+        continue;
+      }
+      const refreshed = sessions.ensureRecord(node, { access: false });
+      if (
+        isHostedEnvironmentConnectBlocked(record) &&
+        !isHostedEnvironmentConnectBlocked(refreshed)
+      ) {
+        this.#refusedUntilRecovery.delete(record.nodeId);
+        requestHostedEnvironmentReconcile({
+          reason: "directory",
+          environmentId: record.environmentId,
+        });
+      }
+    }
+    if (current.directoryStatus !== "ready") this.#replanRefusedEnvironments(sessions);
+  }
+
+  /**
+   * An acquisition refused for a cause that passes: the platform holds the
+   * environment back, so the node is remembered for the next recovery to
+   * re-plan. One refused before any account authenticated belongs to whichever
+   * account does; signing out forgets every one.
+   */
+  #refuseUntilRecovery(nodeId: string): "refused" {
+    const state = hostedHubStore.getState();
+    this.#refusedUntilRecovery.set(
+      nodeId,
+      state.accountStatus === "authenticated" ? (state.account?.id ?? null) : null,
+    );
+    return "refused";
+  }
+
+  /**
+   * The browser is revalidated and the directory current again — after a
+   * successful resume, the directory's first load, or a directory that
+   * recovered: ask the platform once to re-plan each environment whose
+   * acquisition was refused for a cause that passed, so its demand executor
+   * no longer holds it back. Each refused node is looked up in the current
+   * directory; one now gone, revoked or locked for this client, one a terminal
+   * failure blocks, and one refused for another account are dropped instead.
+   * Each is forgotten before it is requested, so one refused again for a
+   * passing cause waits for the next recovery rather than being requested
+   * again at once.
+   */
+  #replanRefusedEnvironments(sessions: HostedEnvironmentSessions): void {
+    if (this.#refusedUntilRecovery.size === 0) return;
+    const state = hostedHubStore.getState();
+    if (!this.#browserRevalidated(state) || state.directoryStatus !== "ready") return;
+    const refused = Array.from(this.#refusedUntilRecovery);
+    this.#refusedUntilRecovery.clear();
+    for (const [nodeId, accountId] of refused) {
+      if (accountId !== null && accountId !== state.account?.id) continue;
+      const node = state.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node || node.revokedAt !== null || lockedForThisClient(node)) continue;
+      const { environmentId } = node;
+      const record = sessions.read(environmentId);
+      if (record !== undefined && isHostedEnvironmentConnectBlocked(record)) continue;
+      requestHostedEnvironmentReconcile({ reason: "directory", environmentId });
+    }
+  }
+
   async #deactivateSelection(environmentId: EnvironmentId, generation: number): Promise<void> {
     this.#clearSessionSyncTimer();
     await deactivateHostedNode(environmentId);
@@ -2958,12 +3735,26 @@ function failureMessage(failure: HostedRelayFailure): string {
 
 export const hostedHubController = new HostedHubController();
 
+// The connection callbacks below name the generation they belong to: the shared
+// selection generation in single mode, and the environment's own record
+// generation in retained mode, where each one is fenced per environment.
+
 export function markHostedSessionReady(environmentId: EnvironmentId, generation: number): void {
+  const sessions = retainedEnvironmentSessions();
+  if (sessions) {
+    sessions.markSessionReady(environmentId, generation);
+    return;
+  }
   if (hostedHubStore.getState().generation !== generation) return;
   hostedHubController.markSessionReady(environmentId);
 }
 
 export function markHostedSessionReplaying(environmentId: EnvironmentId, generation: number): void {
+  const sessions = retainedEnvironmentSessions();
+  if (sessions) {
+    sessions.markSessionReplaying(environmentId, generation);
+    return;
+  }
   if (hostedHubStore.getState().generation !== generation) return;
   hostedHubController.markSessionReplaying(environmentId);
 }
@@ -2972,6 +3763,16 @@ export function reportHostedShellSnapshotFailure(
   environmentId: EnvironmentId,
   generation: number,
 ): void {
+  const sessions = retainedEnvironmentSessions();
+  if (sessions) {
+    const record = sessions.read(environmentId);
+    // An established session keeps running on its accepted snapshot.
+    if (record?.generation === generation && record.sessionEstablished) {
+      console.warn("hosted_snapshot_reconciliation_failed");
+    }
+    sessions.reportShellSnapshotFailure(environmentId, generation);
+    return;
+  }
   if (hostedHubStore.getState().generation !== generation) return;
   hostedHubController.reportShellSnapshotFailure(environmentId);
 }
