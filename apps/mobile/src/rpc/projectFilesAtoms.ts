@@ -20,9 +20,11 @@ import type {
 import {
   clearKeyedQueriesForEnvironment,
   createKeyedQueryRegistry,
+  createRetainedKeyTracker,
   defineKeyedQueryByKey,
   KEY_SEP,
   type KeyedQueryByKey,
+  type RetainedKeyTracker,
 } from "@ryco/client-runtime/rpc";
 import {
   normalizeWorkspaceFileSearchQuery,
@@ -149,52 +151,7 @@ function dropCachedKey(compositeKey: string): void {
   trackedKeys.delete(compositeKey);
 }
 
-interface RetainedKeyTracker {
-  /** The key gained an observer again, so it is no longer evictable. */
-  readonly retain: (compositeKey: string) => void;
-  /** The key lost its last observer: evictable, most recently released last. */
-  readonly release: (compositeKey: string) => void;
-  readonly forgetEnvironment: (environmentId: EnvironmentId) => void;
-  readonly clear: () => void;
-}
-
 const retainedKeyTrackers: RetainedKeyTracker[] = [];
-
-function createRetainedKeyTracker(label: string, limit: number): RetainedKeyTracker {
-  // Insertion-ordered by release time: the first entry is the least recently
-  // released key, so eviction walks from the front.
-  const released = new Set<string>();
-
-  function evict(): void {
-    for (const compositeKey of released) {
-      if (released.size <= limit) return;
-      released.delete(compositeKey);
-      dropCachedKey(compositeKey);
-    }
-  }
-
-  const tracker: RetainedKeyTracker = {
-    retain: (compositeKey) => {
-      released.delete(compositeKey);
-    },
-    release: (compositeKey) => {
-      released.delete(compositeKey);
-      released.add(compositeKey);
-      evict();
-    },
-    forgetEnvironment: (environmentId) => {
-      const prefix = `${label}${KEY_SEP}${environmentId}${KEY_SEP}`;
-      for (const compositeKey of released) {
-        if (compositeKey.startsWith(prefix)) released.delete(compositeKey);
-      }
-    },
-    clear: () => {
-      released.clear();
-    },
-  };
-  retainedKeyTrackers.push(tracker);
-  return tracker;
-}
 
 function defineQuery<TInput, TData>(
   definition: ProjectFilesQueryDefinition<TInput, TData>,
@@ -209,7 +166,12 @@ function defineQuery<TInput, TData>(
       !controller.hasData || Date.now() - controller.lastFetchedAt >= controller.staleTime,
   ) as ProjectFilesQuery<TInput, TData>;
 
-  const tracker = createRetainedKeyTracker(definition.label, definition.retainedKeyLimit);
+  const tracker = createRetainedKeyTracker({
+    limit: definition.retainedKeyLimit,
+    onEvict: dropCachedKey,
+    environmentPrefix: (environmentId) => `${definition.label}${KEY_SEP}${environmentId}${KEY_SEP}`,
+  });
+  retainedKeyTrackers.push(tracker);
 
   // The shared watch has no release hook, so the eviction budget is applied
   // here: the wrapper re-retains a key on watch and hands it to the tracker once

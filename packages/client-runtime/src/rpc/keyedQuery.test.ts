@@ -4,7 +4,9 @@ import type { AppLifecycleEvent, AppLifecycleService } from "../platform/index.t
 
 import {
   createKeyedQueryRegistry,
+  createRetainedKeyTracker,
   defineKeyedQueryByInput,
+  KEY_SEP,
   type KeyedQueryRegistryConfig,
 } from "./keyedQuery.ts";
 
@@ -161,6 +163,80 @@ describe("keyed query retention", () => {
 
     releaseTwo();
     releaseThree();
+  });
+});
+
+describe("retained key tracker", () => {
+  const otherEnvironmentId = EnvironmentId.make("environment-keyed-query-other");
+
+  function makeTracker(limit: number) {
+    const evicted: string[] = [];
+    const tracker = createRetainedKeyTracker({
+      limit,
+      onEvict: (compositeKey) => evicted.push(compositeKey),
+      environmentPrefix: (id) => `${id}${KEY_SEP}`,
+    });
+    return { tracker, evicted };
+  }
+
+  it("keeps released keys up to the limit and evicts the oldest beyond it", () => {
+    const { tracker, evicted } = makeTracker(2);
+
+    tracker.release("a");
+    tracker.release("b");
+    expect(evicted).toEqual([]);
+
+    tracker.release("c");
+    expect(evicted).toEqual(["a"]);
+    tracker.release("d");
+    expect(evicted).toEqual(["a", "b"]);
+  });
+
+  it("moves a re-released key to the back of the eviction order", () => {
+    const { tracker, evicted } = makeTracker(2);
+
+    tracker.release("a");
+    tracker.release("b");
+    tracker.release("a");
+    tracker.release("c");
+
+    expect(evicted).toEqual(["b"]);
+  });
+
+  it("never evicts a key that was retained again after its release", () => {
+    const { tracker, evicted } = makeTracker(1);
+
+    tracker.release("a");
+    tracker.retain("a");
+    tracker.release("b");
+    tracker.release("c");
+
+    expect(evicted).toEqual(["b"]);
+  });
+
+  it("forgets one environment's released keys without evicting them", () => {
+    const { tracker, evicted } = makeTracker(2);
+    const kept = `${otherEnvironmentId}${KEY_SEP}kept`;
+
+    tracker.release(`${environmentId}${KEY_SEP}one`);
+    tracker.release(kept);
+    tracker.forgetEnvironment(environmentId);
+    expect(evicted).toEqual([]);
+
+    // The forgotten key no longer counts toward the limit.
+    tracker.release(`${otherEnvironmentId}${KEY_SEP}second`);
+    tracker.release(`${otherEnvironmentId}${KEY_SEP}third`);
+    expect(evicted).toEqual([kept]);
+  });
+
+  it("drops every released key on clear", () => {
+    const { tracker, evicted } = makeTracker(1);
+
+    tracker.release("a");
+    tracker.clear();
+    tracker.release("b");
+
+    expect(evicted).toEqual([]);
   });
 });
 
