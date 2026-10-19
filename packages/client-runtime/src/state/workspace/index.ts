@@ -1,5 +1,7 @@
 export * from "./connectionDemand.js";
+export * from "./connectionDemandExecutor.js";
 export * from "./executionTarget.js";
+export * from "./hostedNodeCatalogInput.js";
 export * from "./logicalProjects.js";
 export * from "./machineCatalog.js";
 export * from "./metadataSnapshot.js";
