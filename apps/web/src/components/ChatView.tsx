@@ -182,6 +182,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 import { useSettings } from "../hooks/useSettings";
 import {
   useChatsAvailability,
@@ -1387,10 +1388,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     [],
   );
-  const projectGroupingSettings = useSettings((settings) => ({
-    sidebarProjectGroupingMode: settings.sidebarProjectGroupingMode,
-    sidebarProjectGroupingOverrides: settings.sidebarProjectGroupingOverrides,
-  }));
+  const projectGroupingSettings = useProjectGroupingSettings();
   const desktopExecutionMachines = useMemo(
     () =>
       withDirectDesktopExecutionMachine({
