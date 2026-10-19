@@ -1,25 +1,130 @@
-import type { HostedNodeLifecycle } from "@ryco/client-runtime/authorization";
+import {
+  getHostedEnvironmentSessions,
+  reportHostedShellSnapshotFailure,
+  type HostedHubNode,
+  type HostedNodeLifecycle,
+} from "@ryco/client-runtime/authorization";
+import type {
+  EnvironmentConnection,
+  EnvironmentConnectionSupervisor,
+  PushSequenceMonitor,
+} from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
-import { hostedHubStore } from "@ryco/client-runtime/authorization";
 
-import { getMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
+import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { mobileRuntimeStartupBarrier } from "../runtime/startupBarrier";
 import { useStore } from "../state/threadsRuntime";
 import { demoteMobileHostedEnvironmentState } from "./nodeStateCleanup";
+import type { HostedPrimaryConnectionDeps } from "./primaryConnection";
+import { createHostedEnvironmentConnectionIfLoaded } from "./primaryConnectionFactory";
 import { writePrimaryEnvironmentDescriptor } from "./primaryEnvironment";
 
 /**
- * The hosted plane's node lifecycle.
+ * The hosted plane's node lifecycle, for retained environment sessions.
  *
- * The runtime owns teardown/turn-up ordering (`authorization/environment.ts`);
- * the app must not second-guess it. `activate`/`suspend`/`deactivate` are
- * intentionally no-ops, matching web: writing the descriptor and connecting the
- * primary environment is what actually does the work.
+ * The hosted controller owns every environment session and runs these ports
+ * on that environment's own transition queue; the app must not second-guess
+ * it. Selection is only a cursor (`writePrimaryEnvironmentDescriptor`,
+ * `setActiveEnvironmentId`); connections are created only by
+ * `connectEnvironment`, which only the controller's `acquireEnvironment`
+ * reaches. Every port names the session generation it acts for and does
+ * nothing when a newer generation owns the environment, so a late release or
+ * suspension of an old generation never tears down a newer connection. Whether
+ * a selected environment reuses its connection or starts over is the
+ * controller's decision (adopt, join or restart), never this lifecycle's.
  */
 
 function supervisor() {
   return createMobileConnectionRegistry().driver.supervisor;
+}
+
+/** Each hosted environment's connection, with the session generation it belongs to. */
+const environmentConnections = new Map<
+  EnvironmentId,
+  { readonly generation: number; readonly connection: EnvironmentConnection }
+>();
+
+// The push-sequence monitor is diagnostics-only; mobile has no monitor UI.
+const noPushSequenceMonitor: PushSequenceMonitor = {
+  recordEvent: () => undefined,
+  recordSnapshot: () => undefined,
+};
+
+/** The stream handlers that feed a connection into the supervisor registering it. */
+function supervisorHandlers(target: EnvironmentConnectionSupervisor): HostedPrimaryConnectionDeps {
+  return {
+    pushSequenceMonitor: noPushSequenceMonitor,
+    resetShellProjection: (environmentId) => target.resetShellProjection(environmentId),
+    applyShellEvent: (event, environmentId) => target.applyShellEvent(event, environmentId),
+    applyThreadPriorities: (item, environmentId) =>
+      target.applyThreadPriorities(item, environmentId),
+    syncShellSnapshot: (snapshot, environmentId, callbacks) =>
+      target.syncShellSnapshot(snapshot, environmentId, callbacks),
+  };
+}
+
+/** Remove a connection from the supervisor, or dispose it if it is no longer registered. */
+async function removeConnection(
+  target: EnvironmentConnectionSupervisor,
+  environmentId: EnvironmentId,
+  connection: EnvironmentConnection,
+): Promise<void> {
+  try {
+    if (target.read(environmentId) === connection) await target.remove(environmentId);
+    else await connection.dispose();
+  } catch {
+    // Local teardown: the connection is gone from the supervisor either way.
+  }
+}
+
+function openEnvironmentConnection(node: HostedHubNode, generation: number): void {
+  const { environmentId } = node;
+  // A generation released, suspended or started over while this waited opens nothing.
+  if (!getHostedEnvironmentSessions().isCurrentGeneration(environmentId, generation)) return;
+  const current = environmentConnections.get(environmentId);
+  if (current !== undefined && current.generation >= generation) return;
+  const registry = createMobileConnectionRegistry();
+  // Two-plane isolation: an environment the direct plane owns is never also
+  // reached through the relay.
+  if (registry.catalog.get(environmentId)) {
+    throw new Error("The direct connection plane owns this environment.");
+  }
+  const connections = registry.driver.supervisor;
+  if (current !== undefined) {
+    // An older generation's connection, started over without a release. The
+    // supervisor drops it at once; its transport closes on its own.
+    environmentConnections.delete(environmentId);
+    void removeConnection(connections, environmentId, current.connection);
+  }
+  const connection = createHostedEnvironmentConnectionIfLoaded({
+    node,
+    generation,
+    ...supervisorHandlers(connections),
+  });
+  if (connection === null) throw new Error("The hosted relay connection is not loaded.");
+  try {
+    connections.register(connection);
+  } catch (error) {
+    void connection.dispose().catch(() => undefined);
+    throw error;
+  }
+  environmentConnections.set(environmentId, { generation, connection });
+}
+
+/**
+ * Close the environment's connection when it belongs to `generation` or an
+ * older one. What it displayed stays: a release's node-scoped clear is the
+ * controller's to run after this resolves, and a suspension keeps it.
+ */
+async function closeEnvironmentConnection(
+  environmentId: EnvironmentId,
+  generation: number,
+): Promise<void> {
+  const current = environmentConnections.get(environmentId);
+  if (current === undefined || current.generation > generation) return;
+  environmentConnections.delete(environmentId);
+  await removeConnection(supervisor(), environmentId, current.connection);
 }
 
 /**
@@ -37,86 +142,56 @@ function clearNodeScopedState(environmentId: EnvironmentId): void {
   // its catalog, so leave that alone.
   const registry = createMobileConnectionRegistry();
   if (registry.catalog.get(environmentId)) return;
-  // Wave 3b retains non-selected hosted connections. The shared selection
-  // transition still invokes this legacy teardown callback while moving its
-  // cursor, but a registered connection proves the environment is alive and
-  // must not be demoted. The coordinator calls this again after real removal.
+  // The controller clears an environment after its release port resolved, and
+  // only when no newer session of it started meanwhile. A connection still
+  // registered here belongs to such a session: it is alive and keeps its state.
   if (registry.driver.supervisor.read(environmentId)) return;
   registry.driver.supervisor.disposeThreadDetailSubscriptionsForEnvironment(environmentId);
-  // Wave 2: demote instead of remove. A hosted node switch used to blank the
-  // switched-away node's rows; they now stay rendered as last-known state
-  // (sessions and liveness dropped, cache-provenance stamped). Revocation and
-  // authorization removal purge fully via the roster mirror in
-  // persistence/environmentSnapshotPersistence.ts.
+  // Demote instead of remove: a released node's rows stay rendered as
+  // last-known state (sessions and liveness dropped, cache-provenance
+  // stamped). Revocation and authorization removal purge fully via the roster
+  // mirror in persistence/environmentSnapshotPersistence.ts.
   demoteMobileHostedEnvironmentState(environmentId);
 }
 
 export const mobileHostedNodeLifecycle: HostedNodeLifecycle = {
+  // Single-session ports. Retained sessions never use them: selection does not
+  // own a connection's lifetime, the demand executor and the ports below do.
   activate: async () => undefined,
   suspend: async () => undefined,
   deactivate: async () => undefined,
+  connectPrimaryEnvironment: () => undefined,
+  disconnectPrimaryEnvironment: async () => undefined,
   clearNodeScopedState,
   writePrimaryEnvironmentDescriptor,
-  connectPrimaryEnvironment: () => {
-    mobileRuntimeStartupBarrier.runAfterHydration(
-      async () => {
-        const state = hostedHubStore.getState();
-        const node = state.selectedNode;
-        if (
-          !node ||
-          node.revokedAt !== null ||
-          state.accountStatus !== "authenticated" ||
-          state.directoryStatus !== "ready" ||
-          (state.browserStatus !== "current" && state.browserStatus !== "synchronizing")
-        )
-          return;
-        const coordinator = getMobileHostedConnectionCoordinator();
-        if (!coordinator.shouldActivate(node.environmentId)) return;
-        const record = coordinator.ensureRecord(node);
-        const existing = supervisor().read(node.environmentId);
-        if (!existing) {
-          supervisor().connectPrimary();
-          return;
-        }
-        // A retained healthy channel is the whole point of multi-connect. A stale
-        // retained channel is allowed to reconnect only after selection has moved
-        // back to it, so its E2EE preparation and relay ticket remain node-bound.
-        if (
-          state.sessionStatus !== "ready" ||
-          record.transportStatus !== "online" ||
-          record.sessionStatus !== "ready"
-        ) {
-          // Ended RPC subscriptions cannot be restored by replacing only the
-          // socket. The shared lifecycle owns this retry; replace its stale
-          // connection while leaving healthy retained nodes alone.
-          if (!(await coordinator.releaseEnvironment(node.environmentId))) return;
-          const current = hostedHubStore.getState();
-          if (
-            current.generation !== state.generation ||
-            current.accountStatus !== "authenticated" ||
-            current.directoryStatus !== "ready" ||
-            current.selectedNode?.id !== node.id ||
-            current.selectedNode.environmentId !== node.environmentId ||
-            current.selectedNode.revokedAt !== null ||
-            (current.browserStatus !== "current" && current.browserStatus !== "synchronizing")
-          ) {
-            return;
-          }
-          coordinator.ensureRecord(current.selectedNode);
-          if (coordinator.shouldActivate(node.environmentId)) supervisor().connectPrimary();
-        }
-      },
-      (error: unknown) => {
-        console.warn("[connection] hosted startup failed", error);
-      },
-    );
-  },
-  // Selection changes no longer own connection lifetime. Scope leases + LRU
-  // do, via the mobile coordinator; sign-out and background release call it
-  // explicitly. Keeping this callback inert prevents the shared cursor from
-  // tearing down a live environment just because another thread was opened.
-  disconnectPrimaryEnvironment: async () => undefined,
   setActiveEnvironmentId: (environmentId) => {
     useStore.getState().setActiveEnvironmentId(environmentId);
   },
+  connectEnvironment: (node, generation) => {
+    // Hosted connections wait for the cached roster and projections.
+    if (mobileRuntimeStartupBarrier.isHydrated()) {
+      openEnvironmentConnection(node, generation);
+      return;
+    }
+    mobileRuntimeStartupBarrier.runAfterHydration(
+      () => openEnvironmentConnection(node, generation),
+      (error: unknown) => {
+        console.warn("[connection] hosted startup failed", error);
+        // Fenced: fails only a generation that is still current.
+        reportHostedShellSnapshotFailure(node.environmentId, generation);
+      },
+    );
+  },
+  releaseEnvironment: closeEnvironmentConnection,
+  // The transport goes; the environment's rows stay rendered until its next
+  // session's snapshot replaces them.
+  suspendEnvironment: closeEnvironmentConnection,
+  requestEnvironmentReconcile: (request) => {
+    readMobileHostedConnectionCoordinator()?.requestEnvironmentReconcile(request);
+  },
 };
+
+/** Test seam: forget every environment's connection. */
+export function resetMobileHostedEnvironmentConnectionsForTests(): void {
+  environmentConnections.clear();
+}

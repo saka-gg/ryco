@@ -5,57 +5,42 @@ import {
   type OrchestrationHandlers,
 } from "@ryco/client-runtime/connection";
 import {
-  hostedHubStore,
+  getHostedEnvironmentSessions,
   hostedHubController,
+  hostedHubStore,
   markHostedSessionReady,
   markHostedSessionReplaying,
   reportHostedShellSnapshotFailure,
+  type HostedHubNode,
 } from "@ryco/client-runtime/authorization";
 import {
-  attachEnvironmentDescriptor,
   createKnownEnvironment,
+  type KnownEnvironment,
 } from "@ryco/client-runtime/knownEnvironment";
 import {
-  admitHostedRequestForState,
   bindHostedDispatchReplay,
+  createHostedEnvironmentAttemptFactory,
   hostedDispatchLineage,
-  HostedRelayAttemptFactory,
-  recoverHostedRelayConnection,
 } from "@ryco/client-runtime/relay";
 import { createWsRpcClient } from "@ryco/client-runtime/rpc";
 
 import { WsTransport } from "../rpc/wsTransport";
-import {
-  getMobileHostedConnectionCoordinator,
-  mobileHostedConnectionsStore,
-} from "../connection/hostedConnectionCoordinator";
+import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
 import {
   disposeMobileRelaySocketContext,
   issueMobileRelayAttempt,
   prepareMobileRelaySocketContext,
-  providerForMobileRelaySocketContext,
 } from "./accountE2eeAttempt";
-import { readPrimaryEnvironmentDescriptor } from "./primaryEnvironment";
-import {
-  MobileHostedRelaySocket,
-  mobileHostedRelayUrl,
-  openMobileEarlyRelaySocket,
-} from "./relaySocket";
+import type { MobileE2eeAttemptTarget } from "./e2eeAttempt";
+import { mobileHostedRelayUrl, openMobileEarlyRelaySocket } from "./relaySocket";
 import { getMobileHostedConfig } from "./runtimeConfig";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
 import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
 
 /**
- * Builds the node connection that runs **through the Hub relay**.
- *
- * `nodeLifecycle.connectPrimaryEnvironment()` drives `supervisor.connectPrimary()`,
- * which calls this. The relay attempt factory owns the ticket lifecycle — it
- * issues a fresh ticket per attempt and throws on any reuse — so this module
- * only consumes it and never caches or replays one.
- *
- * Returns `null` when no hosted node is selected, which is the normal state and
- * includes supervisor `start()` on a direct-only build. That `null` is what
- * keeps the direct plane's behavior byte-identical when hosted mode is absent.
+ * The supervisor's stream handlers a hosted node connection feeds. The
+ * connection driver hands them to its primary connection factory; the hosted
+ * node lifecycle builds them from the supervisor that registers the connection.
  */
 export interface HostedPrimaryConnectionDeps extends Pick<
   OrchestrationHandlers,
@@ -73,159 +58,85 @@ export interface HostedPrimaryConnectionDeps extends Pick<
   >[0]["pushSequenceMonitor"];
 }
 
-export function createHostedPrimaryConnection(
-  deps: HostedPrimaryConnectionDeps,
-): EnvironmentConnection | null {
-  const descriptor = readPrimaryEnvironmentDescriptor();
-  if (descriptor === null) return null;
-  const selectedState = hostedHubStore.getState();
-  const node = selectedState.selectedNode;
-  if (!node || node.environmentId !== descriptor.environmentId) return null;
-  const coordinator = getMobileHostedConnectionCoordinator();
-  if (!coordinator.shouldActivate(descriptor.environmentId)) return null;
-  const connectionState = coordinator.ensureRecord(node);
-  const connectionGeneration = connectionState.generation;
-  const acceptsEvent = () =>
-    coordinator.isCurrentGeneration(descriptor.environmentId, connectionGeneration);
-  const sharedSelectionGeneration = (): number | null => {
-    if (!acceptsEvent()) return null;
-    const state = hostedHubStore.getState();
-    return state.selectedNode?.environmentId === descriptor.environmentId ? state.generation : null;
+export interface HostedEnvironmentConnectionInput extends HostedPrimaryConnectionDeps {
+  readonly node: HostedHubNode;
+  /** The environment session's record generation this connection belongs to. */
+  readonly generation: number;
+}
+
+/**
+ * Builds one hosted environment's node connection, which runs **through the Hub
+ * relay**.
+ *
+ * Only the hosted node lifecycle's `connectEnvironment` port calls this, and
+ * only the hosted controller's `acquireEnvironment` reaches that port, so no
+ * connection exists outside the controller's bounded connect path. The
+ * connection belongs to one record generation of the environment's session:
+ * its relay binding admits requests and reconnects from that record alone —
+ * never from the selected node, so a warm environment that is not selected
+ * keeps working — and every callback is fenced by the generation, so a
+ * connection whose record was replaced or released publishes nothing. Its E2EE
+ * attempt is prepared for its own node and generation. The relay attempt
+ * factory owns the ticket lifecycle — a fresh ticket per attempt, never reused.
+ */
+export function createHostedEnvironmentConnection(
+  input: HostedEnvironmentConnectionInput,
+): EnvironmentConnection {
+  const { node, generation } = input;
+  const { environmentId } = node;
+  const sessions = getHostedEnvironmentSessions();
+  const acceptsEvent = () => sessions.isCurrentGeneration(environmentId, generation);
+  const target: MobileE2eeAttemptTarget = {
+    nodeId: node.id,
+    nodeLabel: node.label,
+    environmentId,
+    generation,
+    isCurrent: acceptsEvent,
   };
 
-  const attemptFactory = new HostedRelayAttemptFactory({
-    nodeId: () => node.id,
-    generation: () => connectionGeneration,
-    isAuthenticated: () => hostedHubStore.getState().accountStatus === "authenticated",
-    isCurrent: (generation) =>
-      coordinator.isCurrentGeneration(descriptor.environmentId, generation),
-    prepareSocketContext: async () => {
-      const before = hostedHubStore.getState();
-      if (
-        before.accountStatus !== "authenticated" ||
-        before.selectedNode?.environmentId !== descriptor.environmentId
-      ) {
-        throw new Error("Hosted environment is not the current reconnect target.");
-      }
-      const prepared = await prepareMobileRelaySocketContext();
-      const after = hostedHubStore.getState();
-      if (
-        after.accountStatus !== "authenticated" ||
-        after.selectedNode?.environmentId !== descriptor.environmentId
-      ) {
-        throw new Error("Hosted environment changed during E2EE preparation.");
-      }
-      return prepared;
-    },
-    issueRelayAttempt: (input) => issueMobileRelayAttempt(input),
-    disposeSocketContext: disposeMobileRelaySocketContext,
-    openEarlyRelaySocket: openMobileEarlyRelaySocket,
-    relayUrl: mobileHostedRelayUrl,
-    createRelaySocket: (input) =>
-      new MobileHostedRelaySocket({
-        ...input,
-        e2ee: providerForMobileRelaySocketContext(input.preparedSocketContext),
-        disposePreparedContext: () => disposeMobileRelaySocketContext(input.preparedSocketContext),
-      }),
-    subscribeAdmissionChanges: (listener) => {
-      const unsubscribeAccount = hostedHubStore.subscribe(listener);
-      const unsubscribeConnections = mobileHostedConnectionsStore.subscribe(listener);
-      return () => {
-        unsubscribeAccount();
-        unsubscribeConnections();
-      };
-    },
-    authorizeRequest: (info) => {
-      const shared = hostedHubStore.getState();
-      const current = coordinator.read(descriptor.environmentId);
-      // A superseded connection never becomes current again.
-      if (!current || current.generation !== connectionGeneration) return "forbidden";
-      return admitHostedRequestForState(
-        {
-          effectiveRole: current.effectiveRole,
-          directoryStatus: shared.directoryStatus,
-          transportStatus: current.transportStatus,
-          browserStatus: shared.browserStatus,
-          sessionStatus: current.sessionStatus,
-          sessionRecoveredAfterUnknown: current.sessionRecoveredAfterUnknown,
-        },
-        info,
-      );
-    },
-    shouldReconnect: (generation) => {
-      const shared = hostedHubStore.getState();
-      const current = coordinator.read(descriptor.environmentId);
-      return (
-        current?.generation === generation &&
-        shared.accountStatus === "authenticated" &&
-        shared.selectedNode?.environmentId === descriptor.environmentId &&
-        (shared.browserStatus === "current" || shared.browserStatus === "synchronizing") &&
-        current.transportStatus !== "terminal-failure"
-      );
-    },
-    transportStatus: (generation, status) => {
-      coordinator.transportStatus(descriptor.environmentId, generation, status);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.transportStatus(sharedGeneration, status);
-    },
-    sessionStatus: (generation, status) => {
-      coordinator.sessionStatus(descriptor.environmentId, generation, status);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.sessionStatus(sharedGeneration, status);
-    },
-    role: (generation, role) => {
-      coordinator.role(descriptor.environmentId, generation, role);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.role(sharedGeneration, role);
-    },
-    failure: (generation, failure) => {
+  const { factory: attemptFactory } = createHostedEnvironmentAttemptFactory({
+    sessions,
+    environmentId,
+    nodeId: node.id,
+    generation,
+    readShared: () => hostedHubStore.getState(),
+    subscribeShared: (listener) => hostedHubStore.subscribe(listener),
+    // A dropped channel reconnects by itself only while the app still wants
+    // this environment; otherwise the coordinator releases it.
+    isDemanded: () => readMobileHostedConnectionCoordinator()?.isDemanded(environmentId) ?? true,
+    // The channel's E2EE context and ticket are prepared for this node and
+    // generation. The relay URL and the socket, which takes the §4.4 provider
+    // from that context, are the hosted runtime's (`runtime.ts`).
+    ports: {
+      prepareSocketContext: () => prepareMobileRelaySocketContext(target),
+      issueRelayAttempt: (attempt) => issueMobileRelayAttempt(attempt),
+      disposeSocketContext: disposeMobileRelaySocketContext,
+      openEarlyRelaySocket: () => openMobileEarlyRelaySocket(),
       // Only the Hub's enrollment frame speaks for this device, and only when it
       // names this device's enrollment. A `revoked`, `node_revoked`, or
       // `grant_revoked` close ends one node's channel — node removal, key
       // rotation, a grant change — and invalidating the device enrollment for
       // it took every other node down with it.
-      if (failure.enrollmentRevoked !== undefined) {
-        getMobileNativeE2eeEnrollmentCoordinator()?.applyRevocation(failure.enrollmentRevoked);
-      }
-      coordinator.failure(descriptor.environmentId, generation, failure);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.failure(sharedGeneration, failure);
-    },
-    markDeliveryUnknown: (generation) => {
-      coordinator.markDeliveryUnknown(descriptor.environmentId, generation);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.markDeliveryUnknown(sharedGeneration);
-    },
-    connectionRecovered: (generation) => {
-      if (!coordinator.isCurrentGeneration(descriptor.environmentId, generation)) return;
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) recoverHostedRelayConnection(sharedGeneration);
-    },
-    connectionClosed: (generation) => {
-      coordinator.connectionClosed(descriptor.environmentId, generation);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) hostedHubController.connectionClosed(sharedGeneration);
+      onFailure: (failure) => {
+        if (failure.enrollmentRevoked !== undefined) {
+          getMobileNativeE2eeEnrollmentCoordinator()?.applyRevocation(failure.enrollmentRevoked);
+        }
+      },
     },
   });
-  coordinator.registerPendingRequestReader(descriptor.environmentId, connectionGeneration, () =>
-    attemptFactory.hasPendingRequests(),
-  );
   const dispatchReplay = bindHostedDispatchReplay({
-    environmentId: descriptor.environmentId,
-    lineage: hostedDispatchLineage(selectedState),
+    environmentId,
+    lineage: hostedDispatchLineage(hostedHubStore.getState()),
     // Environment-scoped, not generation-scoped: the replay may give up after
     // this connection's generation has been replaced.
-    markUncertain: () => {
-      coordinator.markEnvironmentDeliveryUnknown(descriptor.environmentId);
-      hostedHubController.markEnvironmentDeliveryUnknown(descriptor.environmentId);
-    },
+    markUncertain: () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId),
   });
   const client = dispatchReplay.wrap(
     createWsRpcClient(
       new WsTransport(() => attemptFactory.nextUrl(), {
         ...attemptFactory.lifecycleHandlers(dispatchReplay),
-        getConnectionLabel: () => descriptor.label ?? null,
-        getEnvironmentId: () => descriptor.environmentId,
+        getConnectionLabel: () => node.label,
+        getEnvironmentId: () => environmentId,
       }),
     ),
   );
@@ -233,73 +144,58 @@ export function createHostedPrimaryConnection(
   // The node is reached only through the relay, so the "target" is the Hub's
   // relay endpoint rather than any node-owned address — the app never learns
   // one, which is the point of the hosted plane.
-  const knownEnvironment = attachEnvironmentDescriptor(
-    createKnownEnvironment({
-      id: descriptor.environmentId,
-      label: descriptor.label,
+  const knownEnvironment: KnownEnvironment = {
+    ...createKnownEnvironment({
+      id: environmentId,
+      label: node.label,
       source: "hub-hosted",
       target: {
         httpBaseUrl: getMobileHostedConfig()?.hubOrigin ?? "",
         wsBaseUrl: mobileHostedRelayUrl(),
       },
     }),
-    descriptor,
-  );
+    environmentId,
+  };
 
   return createEnvironmentConnection({
-    // Must be "primary": `disconnectPrimary` finds the connection by this kind.
+    // The supervisor keeps hosted node connections as "primary" ones.
     kind: "primary",
     knownEnvironment,
     client,
-    // The coordinator's record for this environment owns the generation: once
-    // it is replaced or removed, this connection's config is neither
-    // published nor read.
+    // The environment's session record owns the generation: once it is
+    // replaced or released, this connection's config is neither published nor
+    // read.
     lifecycleGeneration: {
-      generation: connectionGeneration,
-      readCurrent: () => coordinator.read(descriptor.environmentId)?.generation ?? null,
+      generation,
+      readCurrent: () => sessions.read(environmentId)?.generation ?? null,
     },
     onConfigUpdated: (config) => {
       if (!acceptsEvent()) return;
-      writeEnvironmentServerConfig(descriptor.environmentId, config);
+      writeEnvironmentServerConfig(environmentId, config);
     },
-    pushSequenceMonitor: deps.pushSequenceMonitor,
-    resetShellProjection: (environmentId) => {
+    pushSequenceMonitor: input.pushSequenceMonitor,
+    resetShellProjection: (eventEnvironmentId) => {
       if (!acceptsEvent()) return;
-      deps.resetShellProjection(environmentId);
+      input.resetShellProjection(eventEnvironmentId);
     },
-    onResubscribe: (environmentId) => {
-      coordinator.markSessionReplaying(environmentId, connectionGeneration);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null) markHostedSessionReplaying(environmentId, sharedGeneration);
-    },
-    onShellError: (environmentId) => {
-      coordinator.reportShellSnapshotFailure(environmentId, connectionGeneration);
-      const sharedGeneration = sharedSelectionGeneration();
-      if (sharedGeneration !== null)
-        reportHostedShellSnapshotFailure(environmentId, sharedGeneration);
-    },
-    applyShellEvent: (event, environmentId) => {
+    // Session callbacks name this record generation; the controller fences them
+    // per environment.
+    onResubscribe: (eventEnvironmentId) =>
+      markHostedSessionReplaying(eventEnvironmentId, generation),
+    onShellError: (eventEnvironmentId) =>
+      reportHostedShellSnapshotFailure(eventEnvironmentId, generation),
+    applyShellEvent: (event, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
-      deps.applyShellEvent(event, environmentId);
+      input.applyShellEvent(event, eventEnvironmentId);
     },
-    applyThreadPriorities: (item, environmentId) => {
+    applyThreadPriorities: (item, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
-      deps.applyThreadPriorities(item, environmentId);
+      input.applyThreadPriorities(item, eventEnvironmentId);
     },
-    syncShellSnapshot: (snapshot, environmentId) => {
+    syncShellSnapshot: (snapshot, eventEnvironmentId) => {
       if (!acceptsEvent()) return;
-      deps.syncShellSnapshot(snapshot, environmentId, {
-        onCurrent: () => {
-          coordinator.markSessionReady(environmentId, connectionGeneration);
-          const sharedGeneration = sharedSelectionGeneration();
-          if (sharedGeneration !== null) markHostedSessionReady(environmentId, sharedGeneration);
-        },
-        onReady: () => {
-          coordinator.markSessionReady(environmentId, connectionGeneration);
-          const sharedGeneration = sharedSelectionGeneration();
-          if (sharedGeneration !== null) markHostedSessionReady(environmentId, sharedGeneration);
-        },
-      });
+      const ready = () => markHostedSessionReady(eventEnvironmentId, generation);
+      input.syncShellSnapshot(snapshot, eventEnvironmentId, { onCurrent: ready, onReady: ready });
     },
     // Terminal streaming is deferred, matching the direct plane.
     applyTerminalEvent: () => undefined,
