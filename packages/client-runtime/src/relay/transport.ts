@@ -7,7 +7,11 @@ import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPo
 import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { HostedHubApiError } from "../authorization/api.ts";
 import { hostedSessionAdmits } from "../authorization/capabilities.ts";
-import { getHostedHubApi, getHostedRuntimeConfiguration } from "../authorization/runtime.ts";
+import {
+  getHostedHubApi,
+  getHostedRuntimeConfiguration,
+  hostedEnvironmentSessionsMode,
+} from "../authorization/runtime.ts";
 import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
 import type {
   HostedEarlyRelaySocket,
@@ -26,6 +30,8 @@ import { HostedReconnectPolicy } from "./reconnectPolicy.ts";
 const SERVER_AUTHENTICATED_ATTEMPT_TTL_MS = 60_000;
 
 interface PendingTicket {
+  /** The node this attempt was prepared for. */
+  readonly nodeId: string;
   /** The client-held ticket; null for an attempt the Hub authenticates itself. */
   readonly ticket: string | null;
   /** Set when the Hub mints and consumes the ticket over the account session instead. */
@@ -163,7 +169,9 @@ export function ticketFailure(error: HostedHubApiError): HostedRelayFailure {
  * and retain the package-owned hosted store/controller behavior. Mobile Wave
  * 3b binds one factory to one environment so a retained socket can neither buy
  * a reconnect ticket for a later selection nor publish delivery state into a
- * different environment's row.
+ * different environment's row. With retained environment sessions the binding
+ * is mandatory (see `createHostedEnvironmentAttemptFactory`): the selection's
+ * binding would admit one environment's requests on another's session.
  */
 export interface HostedRelayAttemptBinding {
   readonly nodeId: () => string | null;
@@ -191,6 +199,8 @@ export interface HostedRelayAttemptBinding {
   readonly relayUrl?: () => string;
   readonly createRelaySocket?: (input: {
     readonly url: string;
+    /** The node this attempt's ticket was issued for. */
+    readonly nodeId: string;
     readonly ticket: string;
     readonly ticketExpiresAt: number;
     readonly earlySocket?: HostedEarlyRelaySocket;
@@ -252,12 +262,35 @@ export interface HostedRelayAttemptBinding {
  */
 export const HOSTED_REQUEST_STALL_PROBE_MS = 5_000;
 
-function defaultBinding(): HostedRelayAttemptBinding {
+/**
+ * The relay ports the hosted runtime configuration provides: how a channel's
+ * context is prepared, its ticket issued and its early upgrade started, how a
+ * channel the Hub authenticates itself is opened, and who hears about a refused
+ * session or a suspect account connection. The relay URL and socket are not
+ * among them: the factory falls back to the runtime's for any binding that
+ * omits them.
+ */
+export type HostedRuntimeAttemptPorts = Required<
+  Pick<
+    HostedRelayAttemptBinding,
+    | "prepareSocketContext"
+    | "issueRelayAttempt"
+    | "disposeSocketContext"
+    | "openEarlyRelaySocket"
+    | "serverAuthenticatedRelayAvailable"
+    | "createServerAuthenticatedRelaySocket"
+    | "revalidateSession"
+    | "connectionSuspect"
+  >
+>;
+
+/**
+ * The selected node's relay ports, and what an environment-bound binding falls
+ * back to for each one it omits. Every port reads the runtime configuration
+ * when it is called, never when this is.
+ */
+export function hostedRuntimeAttemptPorts(): HostedRuntimeAttemptPorts {
   return {
-    nodeId: () => hostedHubStore.getState().selectedNode?.id ?? null,
-    generation: () => hostedHubStore.getState().generation,
-    isAuthenticated: () => hostedHubStore.getState().accountStatus === "authenticated",
-    isCurrent: (generation) => hostedHubStore.getState().generation === generation,
     prepareSocketContext: () =>
       getHostedRuntimeConfiguration().prepareRelaySocketContext?.() ?? Promise.resolve(undefined),
     issueRelayAttempt: async (input) => {
@@ -286,6 +319,17 @@ function defaultBinding(): HostedRelayAttemptBinding {
       return create(input);
     },
     revalidateSession: () => void hostedHubController.revalidateSession(),
+    connectionSuspect: () => getHostedRuntimeConfiguration().probeHubSubscription?.(),
+  };
+}
+
+function defaultBinding(): HostedRelayAttemptBinding {
+  return {
+    nodeId: () => hostedHubStore.getState().selectedNode?.id ?? null,
+    generation: () => hostedHubStore.getState().generation,
+    isAuthenticated: () => hostedHubStore.getState().accountStatus === "authenticated",
+    isCurrent: (generation) => hostedHubStore.getState().generation === generation,
+    ...hostedRuntimeAttemptPorts(),
     authorizeRequest: admitHostedRequest,
     subscribeAdmissionChanges: hostedHubStore.subscribe,
     shouldReconnect: (generation) => {
@@ -306,7 +350,6 @@ function defaultBinding(): HostedRelayAttemptBinding {
     markDeliveryUnknown: (generation) => hostedHubController.markDeliveryUnknown(generation),
     connectionClosed: (generation) => hostedHubController.connectionClosed(generation),
     connectionRecovered: recoverHostedRelayConnection,
-    connectionSuspect: () => getHostedRuntimeConfiguration().probeHubSubscription?.(),
   };
 }
 
@@ -369,8 +412,9 @@ export class HostedRelayAttemptFactory {
    */
   #ticketStageFailed = false;
 
-  constructor(binding: HostedRelayAttemptBinding = defaultBinding()) {
-    this.#binding = binding;
+  constructor(binding?: HostedRelayAttemptBinding) {
+    if (binding === undefined) assertSingleEnvironmentSessions();
+    this.#binding = binding ?? defaultBinding();
   }
 
   async nextUrl(): Promise<string> {
@@ -412,6 +456,7 @@ export class HostedRelayAttemptFactory {
         discardEarlySocket(earlySocket);
         earlySocket = undefined;
         this.#pendingTicket = {
+          nodeId,
           ticket: null,
           serverAuthenticated: { nodeId, protocolMinor: RELAY_PROTOCOL_MINOR },
           expiresAt:
@@ -441,6 +486,7 @@ export class HostedRelayAttemptFactory {
       }
       this.#ticketStageFailed = false;
       this.#pendingTicket = {
+        nodeId,
         ticket: issued.ticket,
         serverAuthenticated: null,
         expiresAt: issued.expiresAt,
@@ -555,6 +601,7 @@ export class HostedRelayAttemptFactory {
         if (ticket === null) throw new Error("A relay ticket is required for this attempt.");
         const input = {
           url,
+          nodeId: pending.nodeId,
           ticket,
           ticketExpiresAt,
           callbacks,
@@ -797,9 +844,21 @@ function discardEarlySocket(socket: HostedEarlyRelaySocket | undefined): void {
   }
 }
 
+/**
+ * The selection's binding follows whichever node is selected. Retained
+ * environment sessions keep several connections at once, so each must be bound
+ * to its own environment instead.
+ */
+function assertSingleEnvironmentSessions(): void {
+  if (hostedEnvironmentSessionsMode() === "retained") {
+    throw new Error("Retained hosted sessions require an environment-bound relay attempt binding.");
+  }
+}
+
 let attemptFactory: HostedRelayAttemptFactory | null = null;
 
 export function getHostedRelayAttemptFactory(): HostedRelayAttemptFactory {
+  assertSingleEnvironmentSessions();
   attemptFactory ??= new HostedRelayAttemptFactory();
   return attemptFactory;
 }

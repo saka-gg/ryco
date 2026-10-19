@@ -3,6 +3,7 @@ export * from "./api.ts";
 export * from "./capabilities.ts";
 export * from "./deliveryNotice.ts";
 export * from "./environment.ts";
+export * from "./hostedEnvironmentSessions.ts";
 export * from "./hostedIdentityState.ts";
 export * from "./logging.ts";
 export * from "./nativeHandoff.ts";
