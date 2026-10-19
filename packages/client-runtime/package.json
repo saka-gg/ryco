@@ -134,6 +134,10 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/threadBodyResidency": {
+      "types": "./src/state/threads/threadBodyResidency.ts",
+      "import": "./src/state/threads/threadBodyResidency.ts"
+    },
     "./state/session": {
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"
