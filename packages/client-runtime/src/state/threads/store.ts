@@ -899,59 +899,103 @@ function markThreadMessagesLive(state: EnvironmentState, threadId: ThreadId) {
   return rest;
 }
 
-function buildMessageSlice(thread: Thread): {
-  ids: MessageId[];
-  byId: Record<MessageId, ChatMessage>;
-} {
+/** One thread's collection as an ordered id list plus the items keyed by id. */
+interface KeyedSlice<K extends string, V> {
+  ids: K[];
+  byId: Record<K, V>;
+}
+
+/**
+ * Builds a thread collection's slice. When `previous` is the slice stored for
+ * the same collection, an item deep-equal to its stored counterpart keeps the
+ * stored object, an unchanged id order keeps the stored `ids` array, and an
+ * unchanged set of entries keeps the stored `byId` record, so a re-applied
+ * window leaves every selector over the collection on the same references.
+ */
+function buildKeyedSlice<K extends string, V>(
+  items: ReadonlyArray<V>,
+  keyOf: (item: V) => K,
+  previous: KeyedSlice<K, V> | undefined,
+): KeyedSlice<K, V> {
+  const ids = items.map(keyOf);
+  const byId = Object.fromEntries(
+    items.map((item, index) => {
+      const id = ids[index]!;
+      const stored = previous !== undefined ? ownValue(previous.byId, id) : undefined;
+      return [id, stored !== undefined && plainDataEqual(stored, item) ? stored : item] as const;
+    }),
+  ) as Record<K, V>;
+  if (previous === undefined) return { ids, byId };
   return {
-    ids: thread.messages.map((message) => message.id),
-    byId: Object.fromEntries(
-      thread.messages.map((message) => [message.id, message] as const),
-    ) as Record<MessageId, ChatMessage>,
+    ids: reuseUnchangedIds(previous.ids, ids),
+    byId: reuseUnchangedRecord(previous.byId, byId, Object.keys(byId) as K[]),
   };
 }
 
-function buildActivitySlice(thread: Thread): {
-  ids: string[];
-  byId: Record<string, OrchestrationThreadActivity>;
-} {
-  return buildActivitySliceFromActivities(thread.activities);
+function buildMessageSlice(
+  messages: ReadonlyArray<ChatMessage>,
+  previous?: KeyedSlice<MessageId, ChatMessage>,
+): KeyedSlice<MessageId, ChatMessage> {
+  return buildKeyedSlice(messages, (message) => message.id, previous);
 }
 
-function buildActivitySliceFromActivities(activities: ReadonlyArray<OrchestrationThreadActivity>): {
-  ids: string[];
-  byId: Record<string, OrchestrationThreadActivity>;
-} {
+function buildActivitySliceFromActivities(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  previous?: KeyedSlice<string, OrchestrationThreadActivity>,
+): KeyedSlice<string, OrchestrationThreadActivity> {
+  return buildKeyedSlice(activities, (activity) => activity.id, previous);
+}
+
+function buildProposedPlanSlice(
+  plans: ReadonlyArray<ProposedPlan>,
+  previous?: KeyedSlice<string, ProposedPlan>,
+): KeyedSlice<string, ProposedPlan> {
+  return buildKeyedSlice(plans, (plan) => plan.id, previous);
+}
+
+function buildTurnDiffSlice(
+  summaries: ReadonlyArray<TurnDiffSummary>,
+  previous?: KeyedSlice<TurnId, TurnDiffSummary>,
+): KeyedSlice<TurnId, TurnDiffSummary> {
+  return buildKeyedSlice(summaries, (summary) => summary.turnId, previous);
+}
+
+/** The slice stored for a thread, when both of its records are present. */
+function storedThreadSlice<K extends string, V>(
+  idsByThreadId: Record<ThreadId, K[]>,
+  byIdByThreadId: Record<ThreadId, Record<K, V>>,
+  threadId: ThreadId,
+): KeyedSlice<K, V> | undefined {
+  const ids = ownValue(idsByThreadId, threadId);
+  const byId = ownValue(byIdByThreadId, threadId);
+  return ids !== undefined && byId !== undefined ? { ids, byId } : undefined;
+}
+
+/**
+ * Stores a thread's slice in its two per-thread records. A record whose entry
+ * is already the given array or object is returned as is, so an unchanged
+ * collection publishes no new container.
+ */
+function writeThreadSliceRecords<K extends string, V>(
+  idsByThreadId: Record<ThreadId, K[]>,
+  byIdByThreadId: Record<ThreadId, Record<K, V>>,
+  threadId: ThreadId,
+  slice: KeyedSlice<K, V>,
+): { idsByThreadId: Record<ThreadId, K[]>; byIdByThreadId: Record<ThreadId, Record<K, V>> } {
   return {
-    ids: activities.map((activity) => activity.id),
-    byId: Object.fromEntries(
-      activities.map((activity) => [activity.id, activity] as const),
-    ) as Record<string, OrchestrationThreadActivity>,
+    idsByThreadId: writeChangedRecordEntry(idsByThreadId, threadId, slice.ids),
+    byIdByThreadId: writeChangedRecordEntry(byIdByThreadId, threadId, slice.byId),
   };
 }
 
-function buildProposedPlanSlice(thread: Thread): {
-  ids: string[];
-  byId: Record<string, ProposedPlan>;
-} {
-  return {
-    ids: thread.proposedPlans.map((plan) => plan.id),
-    byId: Object.fromEntries(
-      thread.proposedPlans.map((plan) => [plan.id, plan] as const),
-    ) as Record<string, ProposedPlan>,
-  };
-}
-
-function buildTurnDiffSlice(thread: Thread): {
-  ids: TurnId[];
-  byId: Record<TurnId, TurnDiffSummary>;
-} {
-  return {
-    ids: thread.turnDiffSummaries.map((summary) => summary.turnId),
-    byId: Object.fromEntries(
-      thread.turnDiffSummaries.map((summary) => [summary.turnId, summary] as const),
-    ) as Record<TurnId, TurnDiffSummary>,
-  };
+function writeChangedRecordEntry<K extends string, V>(
+  record: Record<K, V>,
+  key: K,
+  value: V,
+): Record<K, V> {
+  return Object.hasOwn(record, key) && record[key] === value
+    ? record
+    : ({ ...record, [key]: value } as Record<K, V>);
 }
 
 function getProjects(state: EnvironmentState): Project[] {
@@ -1143,19 +1187,34 @@ function writeThreadState(
   }
 
   if (previousThread?.messages !== resolvedThread.messages) {
-    const nextMessageSlice = buildMessageSlice(resolvedThread);
-    nextState = {
-      ...nextState,
-      cachedMessageThreadIds: markThreadMessagesLive(nextState, resolvedThread.id),
-      messageIdsByThreadId: {
-        ...nextState.messageIdsByThreadId,
-        [resolvedThread.id]: nextMessageSlice.ids,
-      },
-      messageByThreadId: {
-        ...nextState.messageByThreadId,
-        [resolvedThread.id]: nextMessageSlice.byId,
-      },
-    };
+    const { idsByThreadId: messageIdsByThreadId, byIdByThreadId: messageByThreadId } =
+      writeThreadSliceRecords(
+        nextState.messageIdsByThreadId,
+        nextState.messageByThreadId,
+        resolvedThread.id,
+        buildMessageSlice(
+          resolvedThread.messages,
+          storedThreadSlice(
+            nextState.messageIdsByThreadId,
+            nextState.messageByThreadId,
+            resolvedThread.id,
+          ),
+        ),
+      );
+    // Identical messages still end the cached-body state: the body is live now.
+    const cachedMessageThreadIds = markThreadMessagesLive(nextState, resolvedThread.id);
+    if (
+      messageIdsByThreadId !== nextState.messageIdsByThreadId ||
+      messageByThreadId !== nextState.messageByThreadId ||
+      cachedMessageThreadIds !== nextState.cachedMessageThreadIds
+    ) {
+      nextState = {
+        ...nextState,
+        cachedMessageThreadIds,
+        messageIdsByThreadId,
+        messageByThreadId,
+      };
+    }
   }
   if (pendingMessages.length > 0) {
     const { [resolvedThread.id]: _removed, ...rest } = nextState.pendingMessagesByThreadId;
@@ -1166,48 +1225,72 @@ function writeThreadState(
   }
 
   if (previousThread?.activities !== nextThread.activities) {
-    const nextActivitySlice = buildActivitySlice(nextThread);
-    nextState = {
-      ...nextState,
-      activityIdsByThreadId: {
-        ...nextState.activityIdsByThreadId,
-        [nextThread.id]: nextActivitySlice.ids,
-      },
-      activityByThreadId: {
-        ...nextState.activityByThreadId,
-        [nextThread.id]: nextActivitySlice.byId,
-      },
-    };
+    const { idsByThreadId: activityIdsByThreadId, byIdByThreadId: activityByThreadId } =
+      writeThreadSliceRecords(
+        nextState.activityIdsByThreadId,
+        nextState.activityByThreadId,
+        nextThread.id,
+        buildActivitySliceFromActivities(
+          nextThread.activities,
+          storedThreadSlice(
+            nextState.activityIdsByThreadId,
+            nextState.activityByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      activityIdsByThreadId !== nextState.activityIdsByThreadId ||
+      activityByThreadId !== nextState.activityByThreadId
+    ) {
+      nextState = { ...nextState, activityIdsByThreadId, activityByThreadId };
+    }
   }
 
   if (previousThread?.proposedPlans !== nextThread.proposedPlans) {
-    const nextProposedPlanSlice = buildProposedPlanSlice(nextThread);
-    nextState = {
-      ...nextState,
-      proposedPlanIdsByThreadId: {
-        ...nextState.proposedPlanIdsByThreadId,
-        [nextThread.id]: nextProposedPlanSlice.ids,
-      },
-      proposedPlanByThreadId: {
-        ...nextState.proposedPlanByThreadId,
-        [nextThread.id]: nextProposedPlanSlice.byId,
-      },
-    };
+    const { idsByThreadId: proposedPlanIdsByThreadId, byIdByThreadId: proposedPlanByThreadId } =
+      writeThreadSliceRecords(
+        nextState.proposedPlanIdsByThreadId,
+        nextState.proposedPlanByThreadId,
+        nextThread.id,
+        buildProposedPlanSlice(
+          nextThread.proposedPlans,
+          storedThreadSlice(
+            nextState.proposedPlanIdsByThreadId,
+            nextState.proposedPlanByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      proposedPlanIdsByThreadId !== nextState.proposedPlanIdsByThreadId ||
+      proposedPlanByThreadId !== nextState.proposedPlanByThreadId
+    ) {
+      nextState = { ...nextState, proposedPlanIdsByThreadId, proposedPlanByThreadId };
+    }
   }
 
   if (previousThread?.turnDiffSummaries !== nextThread.turnDiffSummaries) {
-    const nextTurnDiffSlice = buildTurnDiffSlice(nextThread);
-    nextState = {
-      ...nextState,
-      turnDiffIdsByThreadId: {
-        ...nextState.turnDiffIdsByThreadId,
-        [nextThread.id]: nextTurnDiffSlice.ids,
-      },
-      turnDiffSummaryByThreadId: {
-        ...nextState.turnDiffSummaryByThreadId,
-        [nextThread.id]: nextTurnDiffSlice.byId,
-      },
-    };
+    const { idsByThreadId: turnDiffIdsByThreadId, byIdByThreadId: turnDiffSummaryByThreadId } =
+      writeThreadSliceRecords(
+        nextState.turnDiffIdsByThreadId,
+        nextState.turnDiffSummaryByThreadId,
+        nextThread.id,
+        buildTurnDiffSlice(
+          nextThread.turnDiffSummaries,
+          storedThreadSlice(
+            nextState.turnDiffIdsByThreadId,
+            nextState.turnDiffSummaryByThreadId,
+            nextThread.id,
+          ),
+        ),
+      );
+    if (
+      turnDiffIdsByThreadId !== nextState.turnDiffIdsByThreadId ||
+      turnDiffSummaryByThreadId !== nextState.turnDiffSummaryByThreadId
+    ) {
+      nextState = { ...nextState, turnDiffIdsByThreadId, turnDiffSummaryByThreadId };
+    }
   }
 
   return nextState;
@@ -2481,27 +2564,27 @@ function mergeThreadHistoryPageState(
     for (const message of page.items) {
       byId[message.id] = mapMessage(environmentId, message);
     }
-    const ids = Object.values(byId)
+    const messages = Object.values(byId)
       .toSorted(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       )
-      .slice(-MAX_THREAD_MESSAGES)
-      .map((message) => message.id);
-    const retainedIds = new Set(ids);
+      .slice(-MAX_THREAD_MESSAGES);
+    const { idsByThreadId: messageIdsByThreadId, byIdByThreadId: messageByThreadId } =
+      writeThreadSliceRecords(
+        state.messageIdsByThreadId,
+        state.messageByThreadId,
+        threadId,
+        buildMessageSlice(
+          messages,
+          storedThreadSlice(state.messageIdsByThreadId, state.messageByThreadId, threadId),
+        ),
+      );
     nextState = {
       ...nextState,
       cachedMessageThreadIds: markThreadMessagesLive(state, threadId),
-      messageIdsByThreadId: {
-        ...nextState.messageIdsByThreadId,
-        [threadId]: ids,
-      },
-      messageByThreadId: {
-        ...nextState.messageByThreadId,
-        [threadId]: Object.fromEntries(
-          Object.entries(byId).filter(([messageId]) => retainedIds.has(messageId as MessageId)),
-        ) as Record<MessageId, ChatMessage>,
-      },
+      messageIdsByThreadId,
+      messageByThreadId,
     };
   } else if (page.collection === "activities") {
     const byId = { ...state.activityByThreadId[threadId] };
@@ -2512,18 +2595,17 @@ function mergeThreadHistoryPageState(
       Object.values(byId).toSorted(compareActivities),
       MAX_THREAD_ACTIVITIES,
     );
-    const slice = buildActivitySliceFromActivities(activities);
-    nextState = {
-      ...nextState,
-      activityIdsByThreadId: {
-        ...nextState.activityIdsByThreadId,
-        [threadId]: slice.ids,
-      },
-      activityByThreadId: {
-        ...nextState.activityByThreadId,
-        [threadId]: slice.byId,
-      },
-    };
+    const { idsByThreadId: activityIdsByThreadId, byIdByThreadId: activityByThreadId } =
+      writeThreadSliceRecords(
+        state.activityIdsByThreadId,
+        state.activityByThreadId,
+        threadId,
+        buildActivitySliceFromActivities(
+          activities,
+          storedThreadSlice(state.activityIdsByThreadId, state.activityByThreadId, threadId),
+        ),
+      );
+    nextState = { ...nextState, activityIdsByThreadId, activityByThreadId };
   } else if (page.collection === "proposedPlans") {
     const byId = { ...state.proposedPlanByThreadId[threadId] };
     for (const plan of page.items) {
@@ -2535,17 +2617,21 @@ function mergeThreadHistoryPageState(
           left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
       )
       .slice(-MAX_THREAD_PROPOSED_PLANS);
-    nextState = {
-      ...nextState,
-      proposedPlanIdsByThreadId: {
-        ...nextState.proposedPlanIdsByThreadId,
-        [threadId]: plans.map((plan) => plan.id),
-      },
-      proposedPlanByThreadId: {
-        ...nextState.proposedPlanByThreadId,
-        [threadId]: Object.fromEntries(plans.map((plan) => [plan.id, plan] as const)),
-      },
-    };
+    const { idsByThreadId: proposedPlanIdsByThreadId, byIdByThreadId: proposedPlanByThreadId } =
+      writeThreadSliceRecords(
+        state.proposedPlanIdsByThreadId,
+        state.proposedPlanByThreadId,
+        threadId,
+        buildProposedPlanSlice(
+          plans,
+          storedThreadSlice(
+            state.proposedPlanIdsByThreadId,
+            state.proposedPlanByThreadId,
+            threadId,
+          ),
+        ),
+      );
+    nextState = { ...nextState, proposedPlanIdsByThreadId, proposedPlanByThreadId };
   } else {
     const byId = { ...state.turnDiffSummaryByThreadId[threadId] };
     for (const checkpoint of page.items) {
@@ -2558,19 +2644,17 @@ function mergeThreadHistoryPageState(
           left.turnId.localeCompare(right.turnId),
       )
       .slice(-MAX_THREAD_CHECKPOINTS);
-    nextState = {
-      ...nextState,
-      turnDiffIdsByThreadId: {
-        ...nextState.turnDiffIdsByThreadId,
-        [threadId]: summaries.map((summary) => summary.turnId),
-      },
-      turnDiffSummaryByThreadId: {
-        ...nextState.turnDiffSummaryByThreadId,
-        [threadId]: Object.fromEntries(
-          summaries.map((summary) => [summary.turnId, summary] as const),
-        ) as Record<TurnId, TurnDiffSummary>,
-      },
-    };
+    const { idsByThreadId: turnDiffIdsByThreadId, byIdByThreadId: turnDiffSummaryByThreadId } =
+      writeThreadSliceRecords(
+        state.turnDiffIdsByThreadId,
+        state.turnDiffSummaryByThreadId,
+        threadId,
+        buildTurnDiffSlice(
+          summaries,
+          storedThreadSlice(state.turnDiffIdsByThreadId, state.turnDiffSummaryByThreadId, threadId),
+        ),
+      );
+    nextState = { ...nextState, turnDiffIdsByThreadId, turnDiffSummaryByThreadId };
   }
 
   return {
@@ -2589,13 +2673,24 @@ export function syncServerThreadWindow(
 ): AppState {
   const withThread = syncServerThreadDetail(state, snapshot.thread, environmentId);
   const environmentState = getStoredEnvironmentState(withThread, environmentId);
-  const { [snapshot.thread.id]: _previousLoad, ...threadHistoryLoadByThreadId } =
+  const threadId = snapshot.thread.id;
+  const previousHistory = ownValue(environmentState.threadHistoryByThreadId, threadId);
+  const hasHistoryLoadState =
+    environmentState.threadHistoryLoadByThreadId !== undefined &&
+    Object.hasOwn(environmentState.threadHistoryLoadByThreadId, threadId);
+  // A re-applied window usually carries the history state already stored.
+  const history =
+    previousHistory !== undefined && plainDataEqual(previousHistory, snapshot.history)
+      ? previousHistory
+      : snapshot.history;
+  if (history === previousHistory && !hasHistoryLoadState) return withThread;
+  const { [threadId]: _previousLoad, ...threadHistoryLoadByThreadId } =
     environmentState.threadHistoryLoadByThreadId ?? {};
   return commitEnvironmentState(withThread, environmentId, {
     ...environmentState,
     threadHistoryByThreadId: {
       ...environmentState.threadHistoryByThreadId,
-      [snapshot.thread.id]: snapshot.history,
+      [threadId]: history,
     },
     threadHistoryLoadByThreadId,
   });
@@ -4242,6 +4337,14 @@ export function hydrateEnvironmentStatesFromCache(
   return nextState;
 }
 
+/** A stub claims no live activity, and a summary with no session or liveness has none to drop. */
+function summaryHasNothingToDemote(summary: SidebarThreadOrStub): boolean {
+  return (
+    isArchivedThreadStub(summary) ||
+    (summary.session === null && summary.backgroundLiveness == null)
+  );
+}
+
 /**
  * Demote a live environment to last-known state when its connection is
  * disposed without the environment being forgotten (e.g. switching the
@@ -4259,18 +4362,27 @@ export function demoteEnvironmentStateToCachedSnapshot(
     return state;
   }
 
-  const threadSessionById = Object.fromEntries(
-    Object.keys(environmentState.threadSessionById).map((threadId) => [threadId, null]),
-  ) as Record<ThreadId, ThreadSession | null>;
-  const sidebarThreadSummaryById = Object.fromEntries(
-    Object.entries(environmentState.sidebarThreadSummaryById).map(([threadId, summary]) => [
-      threadId,
-      // A stub claims no live activity to begin with.
-      isArchivedThreadStub(summary)
-        ? summary
-        : { ...summary, session: null, backgroundLiveness: null },
-    ]),
-  ) as Record<ThreadId, SidebarThreadOrStub>;
+  // Only entries that hold a session or liveness change; a record with none of
+  // them keeps its identity, so leaving a node does not re-render every row.
+  const threadSessionById = Object.values(environmentState.threadSessionById).every(
+    (session) => session === null,
+  )
+    ? environmentState.threadSessionById
+    : (Object.fromEntries(
+        Object.keys(environmentState.threadSessionById).map((threadId) => [threadId, null]),
+      ) as Record<ThreadId, ThreadSession | null>);
+  const sidebarThreadSummaryById = Object.values(environmentState.sidebarThreadSummaryById).every(
+    summaryHasNothingToDemote,
+  )
+    ? environmentState.sidebarThreadSummaryById
+    : (Object.fromEntries(
+        Object.entries(environmentState.sidebarThreadSummaryById).map(([threadId, summary]) => [
+          threadId,
+          summaryHasNothingToDemote(summary)
+            ? summary
+            : { ...summary, session: null, backgroundLiveness: null },
+        ]),
+      ) as Record<ThreadId, SidebarThreadOrStub>);
   return commitEnvironmentState(state, environmentId, {
     ...environmentState,
     threadSessionById,

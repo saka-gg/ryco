@@ -303,6 +303,23 @@ describe("cache hydration", () => {
     expect(selectSidebarThreadsAcrossEnvironments(demoted)).toHaveLength(1);
   });
 
+  it("demotion keeps the rows and sessions that hold nothing to drop", () => {
+    const state = hydrateEnvironmentStateFromCache(EMPTY_STATE, cachedSnapshot(ENV_A), ENV_A);
+    const environmentState = state.environmentStateById[ENV_A];
+    if (!environmentState) throw new Error("missing environment state");
+
+    const demoted = demoteEnvironmentStateToCachedSnapshot(state, ENV_A, 42);
+    const demotedEnvironment = demoted.environmentStateById[ENV_A];
+    expect(demotedEnvironment?.hydratedFromCacheAt).toBe(42);
+    expect(demotedEnvironment?.threadSessionById).toBe(environmentState.threadSessionById);
+    expect(demotedEnvironment?.sidebarThreadSummaryById).toBe(
+      environmentState.sidebarThreadSummaryById,
+    );
+    expect(demotedEnvironment?.sidebarThreadSummaryById["thread-1" as never]).toBe(
+      environmentState.sidebarThreadSummaryById["thread-1" as never],
+    );
+  });
+
   it("demote is a no-op for an unknown environment", () => {
     expect(demoteEnvironmentStateToCachedSnapshot(EMPTY_STATE, ENV_A, 1)).toBe(EMPTY_STATE);
   });
