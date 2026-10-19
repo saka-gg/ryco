@@ -57,7 +57,6 @@
     "test:device:sweep": "bun scripts/device-helper-sweep.ts",
     "fmt": "vp fmt",
     "fmt:check": "vp fmt --check",
-    "build:contracts": "turbo run build --filter=@ryco/contracts",
     "generate:relay-fixtures": "bun scripts/generate-relay-fixtures.ts",
     "generate:node-identity-fixtures": "bun scripts/generate-node-identity-fixtures.ts",
     "generate:e2ee-fixtures": "bun scripts/generate-e2ee-fixtures.ts",
@@ -137,7 +136,7 @@
   "packageManager": "bun@1.4.3",
   "msw": {
     "workerDirectory": [
-      "apps/web/public"
+      "apps/web/test/public"
     ]
   },
   "patchedDependencies": {

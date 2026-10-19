@@ -103,7 +103,7 @@ const rootConfig = {
       "bun.lock",
       "*.tsbuildinfo",
       "**/routeTree.gen.ts",
-      "apps/web/public/mockServiceWorker.js",
+      "apps/web/test/public/mockServiceWorker.js",
       "apps/web/src/lib/vendor/qrcodegen.ts",
       "*.icon/**",
       // Generated and transcoded test vectors. `scripts/generate-e2ee-fixtures.ts`
