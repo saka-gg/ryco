@@ -12,7 +12,7 @@ import { memo, useMemo, type MouseEvent } from "react";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import { openFolderWithFeedback } from "../../lib/chatFolderActions";
 import type { CrownChatBinding } from "../overview/crown/crownTypes";
-import { getEditorLabel } from "../settings/SettingsPanels.editor";
+import { getEditorLabel } from "../settings/editorLabels.logic";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {

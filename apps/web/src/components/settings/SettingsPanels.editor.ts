@@ -1,3 +1,4 @@
+import { createElement } from "react";
 import { FolderClosedIcon, TerminalIcon } from "lucide-react";
 import { EDITORS, type EditorId } from "@ryco/contracts";
 import {
@@ -12,6 +13,7 @@ import {
   Zed,
 } from "../Icons";
 import { isMacPlatform, isWindowsPlatform } from "../../lib/utils";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import {
   AndroidStudioIcon,
   ExplorerIcon,
@@ -24,21 +26,28 @@ import {
   WindsurfIcon,
   XcodeIcon,
 } from "../OpenAppIcons";
-import {
-  AquaIcon,
-  CLionIcon,
-  DataGripIcon,
-  DataSpellIcon,
-  GoLandIcon,
-  IntelliJIdeaIcon,
-  PhpStormIcon,
-  PyCharmIcon,
-  RiderIcon,
-  RubyMineIcon,
-  RustRoverIcon,
-  WebStormIcon,
-} from "../JetBrainsIcons";
 import { getEditorLabel } from "./editorLabels.logic";
+
+// A failed load keeps the placeholder instead of throwing to an error boundary.
+const QUIET_LOAD_ERROR = { onLoadError: () => undefined };
+
+/**
+ * An editor logo whose module loads the first time one renders. The JetBrains
+ * logos are about 35 KiB of gradient SVG and the thread header's "Open in"
+ * control shows at most one of them, so the thread route does not carry the
+ * rest. Until the module arrives, or if its chunk fails to load, the icon is an
+ * empty svg in the same box: a decorative logo never suspends a menu.
+ */
+function lazyIcon<Module>(load: () => Promise<Module>, pick: (module: Module) => Icon): Icon {
+  const Loaded = preloadableLazy(() => load().then(pick));
+  const LazyIcon: Icon = (props) => {
+    const ready = useLazyComponentReady(Loaded, true, QUIET_LOAD_ERROR);
+    return createElement(ready ? Loaded : "svg", props);
+  };
+  return LazyIcon;
+}
+
+const loadJetBrainsIcons = () => import("../JetBrainsIcons");
 
 export const EDITOR_ICONS = {
   cursor: CursorIcon,
@@ -55,18 +64,18 @@ export const EDITOR_ICONS = {
   xcode: XcodeIcon,
   antigravity: AntigravityIcon,
   "android-studio": AndroidStudioIcon,
-  idea: IntelliJIdeaIcon,
-  aqua: AquaIcon,
-  clion: CLionIcon,
-  datagrip: DataGripIcon,
-  dataspell: DataSpellIcon,
-  goland: GoLandIcon,
-  phpstorm: PhpStormIcon,
-  pycharm: PyCharmIcon,
-  rider: RiderIcon,
-  rubymine: RubyMineIcon,
-  rustrover: RustRoverIcon,
-  webstorm: WebStormIcon,
+  idea: lazyIcon(loadJetBrainsIcons, (icons) => icons.IntelliJIdeaIcon),
+  aqua: lazyIcon(loadJetBrainsIcons, (icons) => icons.AquaIcon),
+  clion: lazyIcon(loadJetBrainsIcons, (icons) => icons.CLionIcon),
+  datagrip: lazyIcon(loadJetBrainsIcons, (icons) => icons.DataGripIcon),
+  dataspell: lazyIcon(loadJetBrainsIcons, (icons) => icons.DataSpellIcon),
+  goland: lazyIcon(loadJetBrainsIcons, (icons) => icons.GoLandIcon),
+  phpstorm: lazyIcon(loadJetBrainsIcons, (icons) => icons.PhpStormIcon),
+  pycharm: lazyIcon(loadJetBrainsIcons, (icons) => icons.PyCharmIcon),
+  rider: lazyIcon(loadJetBrainsIcons, (icons) => icons.RiderIcon),
+  rubymine: lazyIcon(loadJetBrainsIcons, (icons) => icons.RubyMineIcon),
+  rustrover: lazyIcon(loadJetBrainsIcons, (icons) => icons.RustRoverIcon),
+  webstorm: lazyIcon(loadJetBrainsIcons, (icons) => icons.WebStormIcon),
   terminal: TerminalIcon,
   "file-manager": FolderClosedIcon,
 } satisfies Record<EditorId, Icon>;

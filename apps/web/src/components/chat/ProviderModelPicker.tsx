@@ -11,7 +11,8 @@ import { Button, buttonVariants } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
-import { ModelPickerContent } from "./ModelPickerContent";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
+import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { ModelTriggerTraits } from "./ModelTriggerTraits";
 import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import type { ModelTuningSummary } from "./modelTuning.logic";
@@ -27,6 +28,20 @@ import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { boundedDisabledReason } from "~/lib/boundedReason";
 import { setModelPickerOpen } from "../../modelPickerOpenState";
 import type { ProviderInstanceEntry } from "../../providerInstances";
+
+/**
+ * The popover body (search, grouping, the tuning footer) only renders once the
+ * picker opens, so it loads as its own chunk instead of with every thread. The
+ * popover opens once the chunk has landed, so it never commits a fallback.
+ */
+const LazyModelPickerContent = preloadableLazy(() =>
+  import("./ModelPickerContent").then((module) => module.ModelPickerContent),
+);
+
+/** Hover or focus on the trigger: have the body loaded before the click lands. */
+function preloadModelPickerContentForIntent(): void {
+  void LazyModelPickerContent.preload();
+}
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   /**
@@ -141,6 +156,16 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       setModelPickerOpen(false);
     };
   }, [isMenuOpen]);
+
+  // An open that arrives before the body's chunk (a shortcut, or a click with
+  // no hover first) waits for it. A failed load closes the picker, and the
+  // toast's Retry opens it again.
+  const contentReady = useLazyComponentReady(LazyModelPickerContent, isMenuOpen && !useSheet, {
+    onLoadError: (error) => {
+      setIsMenuOpen(false);
+      notifySurfaceLoadFailure("model picker", error, () => setIsMenuOpen(true));
+    },
+  });
 
   const handleInstanceModelChange = (
     instanceId: ProviderInstanceId,
@@ -274,7 +299,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
 
   return (
     <Popover
-      open={isMenuOpen}
+      open={isMenuOpen && contentReady}
       onOpenChange={(open) => {
         if (props.disabled) {
           setIsMenuOpen(false);
@@ -296,6 +321,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             className={triggerButtonClassName}
             disabled={props.disabled}
             title={disabledReasonTitle}
+            onPointerEnter={preloadModelPickerContentForIntent}
+            onFocus={preloadModelPickerContentForIntent}
           />
         }
       >
@@ -306,7 +333,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         morph={{ origin: () => triggerRef.current }}
         className="border-0 bg-transparent p-0 shadow-none before:hidden [--viewport-inline-padding:0] *:data-[slot=popover-viewport]:p-0"
       >
-        <ModelPickerContent
+        <LazyModelPickerContent
           modelOptions={props.modelOptions}
           savedModelOptionsByInstance={props.savedModelOptionsByInstance}
           activeInstanceId={activeInstanceId}

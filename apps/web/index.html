@@ -11,6 +11,12 @@
     <meta name="theme-color" content="#0b0b0c" />
     <meta name="apple-mobile-web-app-title" content="Ryco" />
     <script>
+      // First script in the document. The entry marks below only begin once the
+      // deferred module script runs, which would leave the earlier HTML parse and
+      // theme setup out of the startup timeline.
+      performance.mark("ryco:startup:html");
+    </script>
+    <script>
       (() => {
         const LIGHT_BACKGROUND = "#ffffff";
         const DARK_BACKGROUND = "#0b0b0c";
