@@ -1,8 +1,14 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { parseScopedThreadKey, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
-  captureThreadReadContent,
-  decodeThreadReadContent,
+  THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES,
+  THREAD_CONTENT_CACHE_MAX_DRAFT_CHARS,
+  THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
+  createThreadContentCapture,
+  decodeCachedEnvironmentContent,
+  measureRecordBodyBytes,
+  selectThreadsForContentCache,
+  trimContentToBudget,
   type CachedThreadContent,
 } from "@ryco/client-runtime/state/threads";
 import {
@@ -17,7 +23,7 @@ import {
   toHydratedDraftThreadState,
   type DraftThreadState,
 } from "@ryco/client-runtime/state/composer";
-import { useStore, type EnvironmentState } from "../store";
+import { useStore } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -110,7 +116,7 @@ interface SavedEnvironmentInputs {
   readonly drafts: Readonly<Record<string, string>>;
   readonly scroll: Readonly<Record<string, number>>;
   readonly visits: Readonly<Record<string, string>>;
-  readonly routedThreadId: string;
+  readonly routedThreadId: string | null;
 }
 const savedInputs = new Map<EnvironmentId, SavedEnvironmentInputs>();
 
@@ -135,20 +141,8 @@ function sameEnvironmentInputs(left: SavedEnvironmentInputs, right: SavedEnviron
     sameRecordEntries(left.visits, right.visits)
   );
 }
-/**
- * Captured display content per thread, kept while the thread's message list is
- * the same object, with the UTF-8 length of its serialized record entry — so a
- * streaming thread is re-captured and re-measured alone, not all 32.
- */
-interface CapturedThread {
-  readonly messageIds: unknown;
-  readonly messages: unknown;
-  readonly content: CachedThreadContent;
-  readonly entryBytes: number;
-}
-const capturedThreads = new Map<EnvironmentId, Map<string, CapturedThread>>();
-const RECORD_BUDGET_BYTES = 1_900_000;
-const utf8Length = (value: string) => new TextEncoder().encode(value).byteLength;
+/** Captured display content per thread, re-captured only when a thread's messages change. */
+const threadContentCapture = createThreadContentCapture();
 const queue = (operation: () => Promise<void>) => {
   pending = pending.then(operation).catch(() => undefined);
   return pending;
@@ -160,7 +154,7 @@ function forgetInMemory(clearUi: boolean) {
   configureHostedReadViewState(null);
   environments.clear();
   savedInputs.clear();
-  capturedThreads.clear();
+  threadContentCapture.clear();
   writtenCatalog = null;
   scrollPositions.clear();
   publish({ accountId: null, nodes: [], snapshots: [] });
@@ -204,7 +198,6 @@ function decodeEnvironment(value: unknown, environmentId: EnvironmentId): Cached
   if (!value || typeof value !== "object") return null;
   const record = value as Partial<CachedEnvironment>;
   if (!isWorkspaceMetadataSnapshot(record.metadata, environmentId)) return null;
-  const content: Record<string, CachedThreadContent> = {};
   const drafts: Record<string, string> = {};
   const scroll: Record<string, number> = {};
   const draftSessions: Record<string, DraftThreadState> = {};
@@ -219,21 +212,24 @@ function decodeEnvironment(value: unknown, environmentId: EnvironmentId): Cached
     )
       draftSessions[key] = toHydratedDraftThreadState(decoded.value);
   }
-  for (const [id, value] of Object.entries(record.content ?? {}).slice(0, 32)) {
-    const decoded = decodeThreadReadContent(value);
-    if (threadIds.has(id) && decoded) content[id] = decoded;
-  }
-  for (const [key, value] of Object.entries(record.drafts ?? {}).slice(0, 64)) {
+  const content = decodeCachedEnvironmentContent(record, threadIds);
+  for (const [key, value] of Object.entries(record.drafts ?? {}).slice(
+    0,
+    THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES,
+  )) {
     const ref = parseScopedThreadKey(key);
     if (
       ((ref?.environmentId === environmentId && threadIds.has(ref.threadId)) ||
         Object.hasOwn(draftSessions, key)) &&
       typeof value === "string" &&
-      value.length <= 100_000
+      value.length <= THREAD_CONTENT_CACHE_MAX_DRAFT_CHARS
     )
       drafts[key] = value;
   }
-  for (const [key, value] of Object.entries(record.scroll ?? {}).slice(0, 64)) {
+  for (const [key, value] of Object.entries(record.scroll ?? {}).slice(
+    0,
+    THREAD_CONTENT_CACHE_DECODE_MAX_DRAFT_ENTRIES,
+  )) {
     if (
       parseScopedThreadKey(key)?.environmentId === environmentId &&
       typeof value === "number" &&
@@ -421,7 +417,7 @@ async function reconcile() {
       if (nodes.some((node) => node.environmentId === environmentId)) continue;
       environments.delete(environmentId);
       savedInputs.delete(environmentId);
-      capturedThreads.delete(environmentId);
+      threadContentCapture.forget(environmentId);
       useStore.getState().removeEnvironmentState(environmentId);
       const composer = useComposerDraftStore.getState();
       for (const [key, draft] of Object.entries(composer.draftThreadsByThreadKey)) {
@@ -472,39 +468,6 @@ function onScrollChanged(): void {
   scheduleSave();
 }
 
-/**
- * The record's display content, re-capturing only threads whose message list
- * changed, and the UTF-8 length of each serialized `"id":content` entry.
- */
-function captureContent(
-  environmentId: EnvironmentId,
-  state: EnvironmentState,
-  threadIds: ReadonlyArray<EnvironmentState["threadIds"][number]>,
-): Map<string, CapturedThread> {
-  const previous = capturedThreads.get(environmentId);
-  const next = new Map<string, CapturedThread>();
-  for (const id of threadIds) {
-    const messageIds = state.messageIdsByThreadId[id];
-    const messages = state.messageByThreadId[id];
-    const cached = previous?.get(id);
-    if (cached && cached.messageIds === messageIds && cached.messages === messages) {
-      next.set(id, cached);
-      continue;
-    }
-    const content = captureThreadReadContent(
-      (messageIds ?? []).flatMap((messageId) => messages?.[messageId] ?? []),
-    );
-    next.set(id, {
-      messageIds,
-      messages,
-      content,
-      entryBytes: utf8Length(JSON.stringify(id)) + 1 + utf8Length(JSON.stringify(content)),
-    });
-  }
-  capturedThreads.set(environmentId, next);
-  return next;
-}
-
 async function save() {
   const owner = account;
   if (!owner || !snapshot.enabled) return;
@@ -518,9 +481,8 @@ async function save() {
     // An input of this record only while the routed thread is one of its own
     // (it is kept last when trimming), so a navigation rewrites just the
     // records it enters or leaves.
-    const routedThreadId = state.threadIds.some((id) => encodeURIComponent(id) === routedSegment)
-      ? routedSegment
-      : "";
+    const routedThreadId =
+      state.threadIds.find((id) => encodeURIComponent(id) === routedSegment) ?? null;
     const drafts: Record<string, string> = {};
     const scroll: Record<string, number> = {};
     const draftSessions: Record<string, DraftThreadState> = {};
@@ -533,7 +495,7 @@ async function save() {
       if (
         (parseScopedThreadKey(key)?.environmentId === node.environmentId ||
           Object.hasOwn(draftSessions, key)) &&
-        draft.prompt.length <= 100_000
+        draft.prompt.length <= THREAD_CONTENT_CACHE_MAX_DRAFT_CHARS
       )
         drafts[key] = draft.prompt;
     }
@@ -559,41 +521,26 @@ async function save() {
       readWorkspaceMetadataSnapshot(node.environmentId, Date.now(), false, appState) ??
       environments.get(node.environmentId)?.metadata;
     if (!metadata) continue;
-    const content: Record<string, CachedThreadContent> = {};
-    const threadIds = state.threadIds
-      .filter((id) => state.messageIdsByThreadId[id]?.length)
-      .toSorted(
-        (left, right) =>
-          Number(encodeURIComponent(left) === routedThreadId) -
-            Number(encodeURIComponent(right) === routedThreadId) ||
-          (
-            visits[scopedThreadKey({ environmentId: node.environmentId, threadId: left })] ?? ""
-          ).localeCompare(
-            visits[scopedThreadKey({ environmentId: node.environmentId, threadId: right })] ?? "",
-          ),
-      )
-      .slice(-32);
-    const captured = captureContent(node.environmentId, state, threadIds);
+    const captured = threadContentCapture.capture(
+      node.environmentId,
+      state,
+      selectThreadsForContentCache({
+        threadIds: state.threadIds,
+        hasMessages: (id) => (state.messageIdsByThreadId[id]?.length ?? 0) > 0,
+        routedThreadId,
+        lastVisitedAt: (id) =>
+          visits[scopedThreadKey({ environmentId: node.environmentId, threadId: id })],
+      }),
+    );
     // Trim display history before allowing a busy workspace to exceed the
-    // per-record budget, least recently visited first and the routed thread
-    // last. Measured from the cached entry lengths rather than by
-    // re-serializing the whole record once per dropped thread: the record's
-    // length is its body with an empty `content` plus that object's entries.
-    const bodyBytes =
-      utf8Length(JSON.stringify({ metadata, content: {}, drafts, draftSessions, scroll })) - 2;
-    const kept = threadIds.flatMap((id) => {
-      const thread = captured.get(id);
-      return thread ? [{ id, thread }] : [];
-    });
-    let contentBytes =
-      2 +
-      kept.reduce((total, entry) => total + entry.thread.entryBytes, 0) +
-      Math.max(0, kept.length - 1);
-    while (kept.length > 0 && bodyBytes + contentBytes > RECORD_BUDGET_BYTES) {
-      const dropped = kept.shift()!;
-      contentBytes -= dropped.thread.entryBytes + (kept.length > 0 ? 1 : 0);
-    }
-    for (const { id, thread } of kept) content[id] = thread.content;
+    // per-record budget.
+    const content: Record<string, CachedThreadContent> = Object.fromEntries(
+      trimContentToBudget({
+        bodyBytes: measureRecordBodyBytes({ metadata, drafts, draftSessions, scroll }),
+        entries: captured,
+        budgetBytes: THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
+      }).map((thread) => [thread.threadId, thread.content]),
+    );
     const record: CachedEnvironment = { metadata, content, drafts, draftSessions, scroll };
     if (owner !== account) return;
     environments.set(node.environmentId, record);
