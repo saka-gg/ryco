@@ -33,6 +33,7 @@ import { ServerConfig } from "../../config.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
+import { makeCodexStoredThreadReader } from "../Layers/CodexStoredThreadReader.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
@@ -167,6 +168,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         });
       }
 
+      // One read-only app-server per instance serves the adapter's history reads and the
+      // status probe, so a probe while it is up starts no process. A change to the binary
+      // (upgrade, removal) or to the login retires it at the next probe.
+      const storedThreadReader = yield* makeCodexStoredThreadReader({
+        binaryPath: effectiveConfig.binaryPath,
+        cwd: process.cwd(),
+        ...(effectiveConfig.homePath ? { homePath: effectiveConfig.homePath } : {}),
+        environment: processEnv,
+        binaryIdentity: probeFingerprint,
+      });
+
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the
       // per-operation closures they return. No `mapError` wrapper is needed
@@ -176,6 +188,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        storedThreadReader,
         ...(Option.isSome(agentControl) ? { agentControl: agentControl.value } : {}),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
@@ -185,7 +198,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // in as instance rebuilds from the registry rather than in-place
       // updates. Pre-provide `ChildProcessSpawner` so the check fits
       // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      const checkProvider = checkCodexProviderStatus(
+        effectiveConfig,
+        undefined,
+        processEnv,
+        storedThreadReader,
+      ).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );

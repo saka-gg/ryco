@@ -1,5 +1,5 @@
 import { parseResetCredits } from "./CodexResetCredits.ts";
-import { DateTime, Duration, Effect, Layer, Option, Result, Schema, Types } from "effect";
+import { DateTime, Duration, Effect, Option, Result, Schema, Types } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
@@ -20,8 +20,11 @@ import { ServerSettingsError } from "@ryco/contracts";
 import { createModelCapabilities } from "@ryco/shared/model";
 
 import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
-import { expandHomePath } from "../../pathExpansion.ts";
 import { scopedSafeTeardown } from "./scopedSafeTeardown.ts";
+import {
+  makeCodexStoredThreadReader,
+  type CodexStoredThreadReader,
+} from "./CodexStoredThreadReader.ts";
 import { codexSpeedOptionDescriptors } from "../CodexServiceTier.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 
@@ -301,53 +304,26 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   };
 }
 
-// Wrapped with `scopedSafeTeardown("codex-probe")` rather than the usual
-// `Effect.scoped` so that a defect from the `Layer.build` finalizer (e.g.
-// `ChildProcess.kill` throwing because the `codex app-server` child exited
-// early) cannot override a successful probe body. Without this guard the
-// defect bubbles past `Effect.result` in `checkCodexProviderStatus`, dies
-// `refreshOneSource`, and `providersRef` never receives the snapshot.
-const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
+export interface CodexProviderProbeInput {
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<string>;
   readonly environment?: NodeJS.ProcessEnv;
-}) {
-  // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
-  // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
-  // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
-  const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
-  const clientContext = yield* Layer.build(
-    CodexClient.layerCommand({
-      command: input.binaryPath,
-      args: ["app-server"],
-      cwd: input.cwd,
-      env: {
-        ...(input.environment ?? process.env),
-        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-      },
-    }),
-  );
-  const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-    Effect.provide(clientContext),
-  );
+  /**
+   * The instance's shared app-server process to read through. Without one the probe starts
+   * its own process and stops it again when it finishes.
+   */
+  readonly reader?: CodexStoredThreadReader;
+}
 
-  const initialize = yield* client.request("initialize", {
-    clientInfo: {
-      name: "ryco_desktop",
-      title: "Ryco Desktop",
-      version: "0.1.0",
-    },
-    capabilities: {
-      experimentalApi: true,
-    },
-  });
-  yield* client.notify("initialized", undefined);
-
+const readCodexProviderSnapshot = Effect.fn("readCodexProviderSnapshot")(function* (
+  client: CodexClient.CodexAppServerClientShape,
+  userAgent: string,
+  input: CodexProviderProbeInput,
+) {
   // Extract the version string after the first '/' in userAgent, up to the next space or the end
-  const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
+  const versionMatch = userAgent.match(/\/([^\s]+)/);
   const version = versionMatch ? versionMatch[1] : undefined;
 
   const accountResponse = yield* client.request("account/read", {});
@@ -395,6 +371,50 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
     rateLimits,
   } satisfies CodexAppServerProviderSnapshot;
+});
+
+// Reads go through the instance's shared app-server process, so a probe while one is up
+// starts no process of its own. The shared process is retired first when its binary changed
+// (an upgrade, or a binary that went missing) and when a probe times out, so neither a stale
+// nor a wedged process answers the next probe. `~` in `CODEX_HOME` is expanded by the reader.
+//
+// Wrapped with `scopedSafeTeardown("codex-probe")` rather than the usual
+// `Effect.scoped` so that a defect from the process finalizer (e.g.
+// `ChildProcess.kill` throwing because the `codex app-server` child exited
+// early) cannot override a successful probe body. Without this guard the
+// defect bubbles past `Effect.result` in `checkCodexProviderStatus`, dies
+// `refreshOneSource`, and `providersRef` never receives the snapshot.
+const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (
+  input: CodexProviderProbeInput,
+) {
+  const reader =
+    input.reader ??
+    (yield* makeCodexStoredThreadReader({
+      binaryPath: input.binaryPath,
+      cwd: input.cwd,
+      ...(input.homePath ? { homePath: input.homePath } : {}),
+      ...(input.environment ? { environment: input.environment } : {}),
+    }));
+  yield* reader.retireIfBinaryChanged;
+
+  // The shared process can be retired under a probe (another user's transport failure, a
+  // crash). That says nothing about the binary: probe once more, against a fresh process. A
+  // process that cannot be started, or a JSON-RPC error answer, is a verdict and is not retried.
+  let reachedProcess = false;
+  return yield* Effect.suspend(() => {
+    reachedProcess = false;
+    return reader.withClient((client, session) => {
+      reachedProcess = true;
+      return readCodexProviderSnapshot(client, session.initialize.userAgent, input).pipe(
+        Effect.onInterrupt(() => session.retire),
+      );
+    });
+  }).pipe(
+    Effect.retry({
+      times: 1,
+      while: (error) => reachedProcess && error._tag !== "CodexAppServerRequestError",
+    }),
+  );
 }, scopedSafeTeardown("codex-probe"));
 
 const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] =>
@@ -476,18 +496,16 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
 
 export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(function* (
   codexSettings: CodexSettings,
-  probe: (input: {
-    readonly binaryPath: string;
-    readonly homePath?: string;
-    readonly cwd: string;
-    readonly customModels: ReadonlyArray<string>;
-    readonly environment?: NodeJS.ProcessEnv;
-  }) => Effect.Effect<
+  probe: (
+    input: CodexProviderProbeInput & { readonly customModels: ReadonlyArray<string> },
+  ) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
     ChildProcessSpawner.ChildProcessSpawner
   > = probeCodexAppServerProvider,
   environment: NodeJS.ProcessEnv = process.env,
+  /** The instance's shared app-server process, when it has one. */
+  reader?: CodexStoredThreadReader,
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
@@ -519,6 +537,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment,
+    ...(reader ? { reader } : {}),
   }).pipe(Effect.timeoutOption(Duration.millis(PROVIDER_PROBE_TIMEOUT_MS)), Effect.result);
 
   if (Result.isFailure(probeResult)) {

@@ -37,10 +37,12 @@ its compatible resume path when supported.
 
 Use the owner-only `api.server.refreshProviders({ instanceId })` to force discovery for
 one instance, or omit the argument to refresh all configured instances. Codex discovery
-opens a fresh app-server probe and requests `skills/list` for the probe's working directory;
-it is not a new per-thread, arbitrary-directory discovery API. A refresh updates discovery
-snapshots; it does not restart an already running agent. Ryco has no additional `fresh`
-flag or per-turn MCP reload barrier in this change.
+reads through the instance's shared app-server process, starting one only when none is
+running or when the binary or login changed since it started, and requests `skills/list`
+for the probe's working directory; it is not a new per-thread, arbitrary-directory
+discovery API. A refresh updates discovery snapshots; it does not restart an already
+running agent. Ryco has no additional `fresh` flag or per-turn MCP reload barrier in this
+change.
 
 ## Local voice transcription
 
