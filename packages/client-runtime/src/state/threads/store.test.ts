@@ -2196,6 +2196,200 @@ describe("incremental orchestration updates", () => {
     });
   });
 
+  // These scenarios mirror the server projector's revert tests (same fixtures, same expected
+  // ids): the optimistic client projection of a revert must equal the server's result.
+  describe("reverting with the authoritative result", () => {
+    const t = (minute: number) => `2026-02-23T09:${String(minute).padStart(2, "0")}:00.000Z`;
+    const latestTurnAt = (turn: number, minute: number, assistantMessageId: string | null) => ({
+      turnId: TurnId.make(`turn-${turn}`),
+      state: "completed" as const,
+      requestedAt: t(minute),
+      startedAt: t(minute),
+      completedAt: t(minute),
+      assistantMessageId: assistantMessageId === null ? null : MessageId.make(assistantMessageId),
+    });
+    const turnMessage = (
+      id: string,
+      role: "user" | "assistant",
+      turnId: string | null,
+      minute: number,
+    ): Thread["messages"][number] => ({
+      id: MessageId.make(id),
+      role,
+      text: id,
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      createdAt: t(minute),
+      completedAt: t(minute),
+      streaming: false,
+    });
+    const turnPlan = (
+      id: string,
+      turnId: string,
+      minute: number,
+    ): Thread["proposedPlans"][number] => ({
+      id,
+      turnId: TurnId.make(turnId),
+      planMarkdown: id,
+      implementedAt: null,
+      implementationThreadId: null,
+      createdAt: t(minute),
+      updatedAt: t(minute),
+    });
+    const turnActivity = (
+      id: string,
+      kind: string,
+      turnId: string | null,
+      minute: number,
+    ): Thread["activities"][number] => ({
+      id: EventId.make(id),
+      tone: "tool",
+      kind,
+      summary: id,
+      payload: {},
+      turnId: turnId === null ? null : TurnId.make(turnId),
+      createdAt: t(minute),
+    });
+    const checkpoint = (
+      threadRef: string,
+      count: number,
+      completedMinute: number,
+    ): Thread["turnDiffSummaries"][number] => ({
+      turnId: TurnId.make(`turn-${count}`),
+      completedAt: t(completedMinute),
+      status: "ready",
+      checkpointTurnCount: count,
+      checkpointRef: CheckpointRef.make(`refs/ryco/checkpoints/${threadRef}/turn/${count}`),
+      assistantMessageId: MessageId.make(`assistant-${count}`),
+      files: [],
+    });
+
+    const turnIds = (...turns: number[]) => turns.map((turn) => TurnId.make(`turn-${turn}`));
+
+    function revertThread(
+      thread: Thread,
+      payload: Omit<
+        Extract<OrchestrationEvent, { type: "thread.reverted" }>["payload"],
+        "threadId"
+      >,
+    ): Thread {
+      const next = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent("thread.reverted", { threadId: thread.id, ...payload }),
+        localEnvironmentId,
+      );
+      return threadsOf(next)[0]!;
+    }
+
+    // A thread rebuilt without checkpoints: turn-less prompts and items of later turns.
+    function hydratedThread(): Thread {
+      return makeThread({
+        id: ThreadId.make("thread-hydrated"),
+        latestTurn: latestTurnAt(9, 9, null),
+        messages: [
+          turnMessage("user-anchor-1", "user", null, 1),
+          turnMessage("user-anchor-9", "user", null, 9),
+        ],
+        proposedPlans: [turnPlan("plan-3", "turn-3", 3), turnPlan("plan-9", "turn-9", 9)],
+        activities: [turnActivity("activity-9", "tool.completed", "turn-9", 9)],
+      });
+    }
+
+    it("uses the authoritative latest turn and boundary on a thread without checkpoints", () => {
+      const reverted = revertThread(hydratedThread(), {
+        turnCount: 5,
+        droppedTurnIds: turnIds(6, 7, 8, 9),
+        latestTurn: latestTurnAt(5, 5, null),
+      });
+      expect(reverted.latestTurn?.turnId).toBe("turn-5");
+      expect(reverted.messages.map((entry) => entry.id)).toEqual(["user-anchor-1"]);
+      expect(reverted.proposedPlans.map((entry) => entry.id)).toEqual(["plan-3"]);
+      expect(reverted.activities).toEqual([]);
+    });
+
+    it("keeps the count-based projection for a revert without the authoritative fields", () => {
+      const reverted = revertThread(hydratedThread(), { turnCount: 5 });
+      expect(reverted.latestTurn).toBeNull();
+      expect(reverted.messages.map((entry) => entry.id)).toEqual([
+        "user-anchor-1",
+        "user-anchor-9",
+      ]);
+      expect(reverted.proposedPlans).toEqual([]);
+    });
+
+    it("projects a full thread the same with and without the authoritative fields", () => {
+      const live = makeThread({
+        id: ThreadId.make("thread-live"),
+        latestTurn: latestTurnAt(2, 5, "assistant-2"),
+        turnDiffSummaries: [checkpoint("thread-live", 1, 3), checkpoint("thread-live", 2, 5)],
+        messages: [1, 2].flatMap((count) => [
+          turnMessage(`user-${count}`, "user", `turn-${count}`, count * 2),
+          turnMessage(`assistant-${count}`, "assistant", `turn-${count}`, count * 2 + 1),
+        ]),
+      });
+      const legacy = revertThread(live, { turnCount: 1 });
+      const authoritative = revertThread(live, {
+        turnCount: 1,
+        droppedTurnIds: turnIds(2),
+        latestTurn: latestTurnAt(1, 3, "assistant-1"),
+      });
+      expect(authoritative.messages).toEqual(legacy.messages);
+      expect(authoritative.latestTurn).toEqual(legacy.latestTurn);
+      expect(authoritative.turnDiffSummaries).toEqual(legacy.turnDiffSummaries);
+      expect(legacy.messages.map((entry) => entry.id)).toEqual(["user-1", "assistant-1"]);
+    });
+
+    it("always keeps a fork's inherited history, apart from the count fallback", () => {
+      const forkId = ThreadId.make("fork-1");
+      const inherited = (id: string) => `${forkId}:inherited:${id}`;
+      const fork = makeThread({
+        id: forkId,
+        latestTurn: latestTurnAt(2, 22, "assistant-2"),
+        turnDiffSummaries: [checkpoint("fork-1", 1, 12), checkpoint("fork-1", 2, 22)],
+        // Live user prompts carry no turn id, inherited ones may not either: an inherited
+        // prompt must not take the fallback slot of the fork's own first prompt.
+        messages: [
+          turnMessage(inherited("user-0"), "user", null, 1),
+          turnMessage(inherited("assistant-0"), "assistant", "turn-source", 2),
+          turnMessage("user-1", "user", null, 10),
+          turnMessage("assistant-1", "assistant", "turn-1", 12),
+          turnMessage("user-2", "user", null, 20),
+          turnMessage("assistant-2", "assistant", "turn-2", 22),
+        ],
+        proposedPlans: [
+          turnPlan(inherited("plan-0"), "turn-source", 3),
+          turnPlan("plan-2", "turn-2", 21),
+        ],
+        activities: [
+          turnActivity(inherited("tool-0"), "tool.completed", "turn-source", 2),
+          turnActivity(`${forkId}:forked`, "thread.forked", null, 5),
+          turnActivity("tool-2", "tool.completed", "turn-2", 21),
+        ],
+      });
+      const inheritedMessageIds = [inherited("user-0"), inherited("assistant-0")];
+
+      for (const payload of [
+        { turnCount: 0 },
+        { turnCount: 0, droppedTurnIds: turnIds(1, 2), latestTurn: null },
+      ]) {
+        const toZero = revertThread(fork, payload);
+        expect(toZero.messages.map((entry) => entry.id)).toEqual(inheritedMessageIds);
+        expect(toZero.proposedPlans.map((entry) => entry.id)).toEqual([inherited("plan-0")]);
+        expect(toZero.activities.map((entry) => entry.id)).toEqual([
+          inherited("tool-0"),
+          `${forkId}:forked`,
+        ]);
+        expect(toZero.latestTurn).toBeNull();
+      }
+
+      const toOne = revertThread(fork, { turnCount: 1 });
+      expect(toOne.messages.map((entry) => entry.id)).toEqual([
+        ...inheritedMessageIds,
+        "user-1",
+        "assistant-1",
+      ]);
+    });
+  });
+
   it("clears pending source proposed plans after revert before a new session-set event", () => {
     const thread = makeThread({
       latestTurn: {

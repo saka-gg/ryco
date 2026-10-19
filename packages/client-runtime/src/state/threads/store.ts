@@ -34,8 +34,13 @@ import type { ThreadId, TurnId } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@ryco/shared/model";
 import { projectKindOf } from "@ryco/shared/projectKind";
-import { capThreadActivitiesPreservingMilestones } from "@ryco/shared/threadActivity";
-import { isForkBaseItemId } from "@ryco/shared/threadFork";
+import {
+  capThreadActivitiesPreservingMilestones,
+  compareThreadActivities,
+  resolveRevertRetention,
+  retainThreadMessagesAfterForkRevert,
+  retainTurnItemsAfterRevert,
+} from "@ryco/shared/threadActivity";
 import { checkpointStatusToTurnState, mergeReleasedTurn } from "@ryco/shared/turnFinalization";
 import {
   applySourceControlStateToPullRequestLinks,
@@ -1652,23 +1657,6 @@ function removeWorktreeState(state: EnvironmentState, worktreeId: WorktreeId): E
   };
 }
 
-function compareActivities(
-  left: Thread["activities"][number],
-  right: Thread["activities"][number],
-): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
 /** Apply a server-decided release to the latest turn it names; other turns are untouched. */
 function settleReleasedLatestTurn(
   latestTurn: Thread["latestTurn"],
@@ -1711,126 +1699,6 @@ function buildLatestTurn(params: {
     assistantMessageId: params.assistantMessageId,
     ...(resolvedPlan ? { sourceProposedPlan: resolvedPlan } : {}),
   };
-}
-
-function retainThreadMessagesAfterRevert(
-  messages: ReadonlyArray<ChatMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ChatMessage[] {
-  const retainedMessageIds = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "system") {
-      retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (
-      message.turnId !== undefined &&
-      message.turnId !== null &&
-      retainedTurnIds.has(message.turnId)
-    ) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === undefined ||
-            message.turnId === null ||
-            retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
-}
-
-/**
- * The messages a revert of `threadId` keeps. A fork's inherited history (and its provenance)
- * predates every checkpoint the fork owns, so it always stays; it is kept apart from the
- * count-based fallback, which only ever fills in the fork's own messages. The server's
- * projections apply the same rule (`isForkBaseItemId`).
- */
-function retainThreadMessagesAfterForkRevert(
-  threadId: ThreadId,
-  messages: ReadonlyArray<ChatMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ChatMessage[] {
-  const ownMessages = retainThreadMessagesAfterRevert(
-    messages.filter((message) => !isForkBaseItemId(threadId, message.id)),
-    retainedTurnIds,
-    turnCount,
-  );
-  const keptOwnMessageIds = new Set(ownMessages.map((message) => message.id));
-  return messages.filter(
-    (message) => isForkBaseItemId(threadId, message.id) || keptOwnMessageIds.has(message.id),
-  );
-}
-
-function retainThreadActivitiesAfterRevert(
-  threadId: ThreadId,
-  activities: ReadonlyArray<OrchestrationThreadActivity>,
-  retainedTurnIds: ReadonlySet<string>,
-): OrchestrationThreadActivity[] {
-  return activities.filter(
-    (activity) =>
-      activity.turnId === null ||
-      isForkBaseItemId(threadId, activity.id) ||
-      retainedTurnIds.has(activity.turnId),
-  );
-}
-
-function retainThreadProposedPlansAfterRevert(
-  threadId: ThreadId,
-  proposedPlans: ReadonlyArray<ProposedPlan>,
-  retainedTurnIds: ReadonlySet<string>,
-): ProposedPlan[] {
-  return proposedPlans.filter(
-    (proposedPlan) =>
-      proposedPlan.turnId === null ||
-      isForkBaseItemId(threadId, proposedPlan.id) ||
-      retainedTurnIds.has(proposedPlan.turnId),
-  );
 }
 
 function toLegacySessionStatus(
@@ -2171,14 +2039,14 @@ function insertActivityIdByOrder(
   activity: OrchestrationThreadActivity,
 ): string[] {
   const lastActivity = ids.length > 0 ? byId[ids[ids.length - 1]!] : undefined;
-  if (!lastActivity || compareActivities(lastActivity, activity) <= 0) {
+  if (!lastActivity || compareThreadActivities(lastActivity, activity) <= 0) {
     return [...ids, activity.id];
   }
 
   const nextIds = [...ids];
   const insertIndex = nextIds.findIndex((id) => {
     const existing = byId[id];
-    return existing ? compareActivities(activity, existing) < 0 : false;
+    return existing ? compareThreadActivities(activity, existing) < 0 : false;
   });
   if (insertIndex === -1) {
     nextIds.push(activity.id);
@@ -2663,7 +2531,7 @@ function mergeThreadHistoryPageState(
       byId[activity.id] = { ...activity };
     }
     const activities = capThreadActivitiesPreservingMilestones(
-      Object.values(byId).toSorted(compareActivities),
+      Object.values(byId).toSorted(compareThreadActivities),
       MAX_THREAD_ACTIVITIES,
     );
     const { idsByThreadId: activityIdsByThreadId, byIdByThreadId: activityByThreadId } =
@@ -3266,34 +3134,31 @@ function applyEnvironmentOrchestrationEvent(
               (right.checkpointTurnCount ?? Number.MAX_SAFE_INTEGER),
           )
           .slice(-MAX_THREAD_CHECKPOINTS);
-        const retainedTurnIds = new Set(turnDiffSummaries.map((entry) => entry.turnId));
+        // Events carrying `latestTurn` are authoritative; older ones keep the count-based rule.
+        // The server's projection applies the same retention (`resolveRevertRetention`).
+        const { keepTurnItem, boundaryAt } = resolveRevertRetention({
+          retainedTurnIds: turnDiffSummaries.map((entry) => entry.turnId),
+          latestTurn: event.payload.latestTurn,
+          droppedTurnIds: event.payload.droppedTurnIds,
+        });
         const messages = retainThreadMessagesAfterForkRevert(
           thread.id,
           thread.messages,
-          retainedTurnIds,
+          keepTurnItem,
           event.payload.turnCount,
+          boundaryAt,
         ).slice(-MAX_THREAD_MESSAGES);
-        const proposedPlans = retainThreadProposedPlansAfterRevert(
+        const proposedPlans = retainTurnItemsAfterRevert(
           thread.id,
           thread.proposedPlans,
-          retainedTurnIds,
+          keepTurnItem,
         ).slice(-MAX_THREAD_PROPOSED_PLANS);
-        const activities = retainThreadActivitiesAfterRevert(
-          thread.id,
-          thread.activities,
-          retainedTurnIds,
-        );
+        const activities = retainTurnItemsAfterRevert(thread.id, thread.activities, keepTurnItem);
         const latestCheckpoint = turnDiffSummaries.at(-1) ?? null;
-
-        return {
-          ...thread,
-          turnDiffSummaries,
-          messages,
-          proposedPlans,
-          activities,
-          pendingSourceProposedPlan: undefined,
-          latestTurn:
-            latestCheckpoint === null
+        const latestTurn =
+          event.payload.latestTurn !== undefined
+            ? event.payload.latestTurn
+            : latestCheckpoint === null
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
@@ -3304,7 +3169,16 @@ function applyEnvironmentOrchestrationEvent(
                   startedAt: latestCheckpoint.completedAt,
                   completedAt: latestCheckpoint.completedAt,
                   assistantMessageId: latestCheckpoint.assistantMessageId ?? null,
-                },
+                };
+
+        return {
+          ...thread,
+          turnDiffSummaries,
+          messages,
+          proposedPlans,
+          activities,
+          pendingSourceProposedPlan: undefined,
+          latestTurn,
           updatedAt: event.occurredAt,
         };
       });

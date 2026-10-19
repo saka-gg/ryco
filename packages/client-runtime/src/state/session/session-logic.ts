@@ -4,7 +4,15 @@ import {
 } from "@ryco/contracts/approval-responses";
 import * as Schema from "effect/Schema";
 import { extractToolContentText, extractToolResultText } from "@ryco/shared/toolOutput";
-import { isContextCompactionActivity } from "@ryco/shared/threadActivity";
+import {
+  CHANGED_FILE_NESTED_KEYS,
+  CHANGED_FILE_PATH_KEYS,
+  CHANGED_FILE_SCAN_MAX_DEPTH,
+  CHANGED_FILE_SCAN_MAX_FILES,
+  collectChangedFiles,
+  compareThreadActivitySequence,
+  isContextCompactionActivity,
+} from "@ryco/shared/threadActivity";
 import { readTurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 
 import { isBackgroundTaskActivity } from "./subagentRuntime.ts";
@@ -1971,17 +1979,8 @@ function extractWorkLogRequestKind(
   return requestKindFromRequestType(payload?.requestType) ?? undefined;
 }
 
-function pushChangedFile(target: string[], seen: Set<string>, value: unknown) {
-  const normalized = asTrimmedString(value);
-  if (!normalized || seen.has(normalized)) {
-    return;
-  }
-  seen.add(normalized);
-  target.push(normalized);
-}
-
 function readChangedFilePath(record: Record<string, unknown>): string | null {
-  for (const key of ["path", "filePath", "relativePath", "filename", "newPath", "oldPath"]) {
+  for (const key of CHANGED_FILE_PATH_KEYS) {
     const normalized = asTrimmedString(record[key]);
     if (normalized) {
       return normalized;
@@ -2024,67 +2023,19 @@ function readChangedFileStat(record: Record<string, unknown>): TurnDiffFileChang
   };
 }
 
-function collectChangedFiles(value: unknown, target: string[], seen: Set<string>, depth: number) {
-  if (depth > 4 || target.length >= 12) {
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      collectChangedFiles(entry, target, seen, depth + 1);
-      if (target.length >= 12) {
-        return;
-      }
-    }
-    return;
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return;
-  }
-
-  pushChangedFile(target, seen, record.path);
-  pushChangedFile(target, seen, record.filePath);
-  pushChangedFile(target, seen, record.relativePath);
-  pushChangedFile(target, seen, record.filename);
-  pushChangedFile(target, seen, record.newPath);
-  pushChangedFile(target, seen, record.oldPath);
-
-  for (const nestedKey of [
-    "item",
-    "result",
-    "input",
-    "data",
-    "changes",
-    "files",
-    "edits",
-    "patch",
-    "patches",
-    "operations",
-  ]) {
-    if (!(nestedKey in record)) {
-      continue;
-    }
-    collectChangedFiles(record[nestedKey], target, seen, depth + 1);
-    if (target.length >= 12) {
-      return;
-    }
-  }
-}
-
 function collectChangedFileStats(
   value: unknown,
   target: TurnDiffFileChange[],
   seen: Set<string>,
   depth: number,
 ) {
-  if (depth > 4 || target.length >= 12) {
+  if (depth > CHANGED_FILE_SCAN_MAX_DEPTH || target.length >= CHANGED_FILE_SCAN_MAX_FILES) {
     return;
   }
   if (Array.isArray(value)) {
     for (const entry of value) {
       collectChangedFileStats(entry, target, seen, depth + 1);
-      if (target.length >= 12) {
+      if (target.length >= CHANGED_FILE_SCAN_MAX_FILES) {
         return;
       }
     }
@@ -2102,23 +2053,12 @@ function collectChangedFileStats(
     target.push(stat);
   }
 
-  for (const nestedKey of [
-    "item",
-    "result",
-    "input",
-    "data",
-    "changes",
-    "files",
-    "edits",
-    "patch",
-    "patches",
-    "operations",
-  ]) {
+  for (const nestedKey of CHANGED_FILE_NESTED_KEYS) {
     if (!(nestedKey in record)) {
       continue;
     }
     collectChangedFileStats(record[nestedKey], target, seen, depth + 1);
-    if (target.length >= 12) {
+    if (target.length >= CHANGED_FILE_SCAN_MAX_FILES) {
       return;
     }
   }
@@ -2142,14 +2082,9 @@ function compareActivitiesByOrder(
   left: OrchestrationThreadActivity,
   right: OrchestrationThreadActivity,
 ): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
+  const sequenceComparison = compareThreadActivitySequence(left, right);
+  if (sequenceComparison !== 0) {
+    return sequenceComparison;
   }
 
   const createdAtComparison = left.createdAt.localeCompare(right.createdAt);

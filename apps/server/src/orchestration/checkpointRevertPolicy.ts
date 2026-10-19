@@ -15,6 +15,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { compareThreadActivities } from "@ryco/shared/threadActivity";
 import { hasQueuedTurnStart, type ThreadSettlementInput } from "@ryco/shared/threadSettlement";
 import { Effect, Option, Schema } from "effect";
 
@@ -92,20 +93,6 @@ export function makeCheckpointRevertActivity(input: {
   };
 }
 
-function compareActivities(
-  left: OrchestrationThreadActivity,
-  right: OrchestrationThreadActivity,
-): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) return left.sequence - right.sequence;
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
-}
-
 const decodeRevertPayload = Schema.decodeUnknownOption(CheckpointRevertActivityPayload);
 
 export interface CheckpointRevertEntry {
@@ -120,7 +107,7 @@ export function latestCheckpointRevert(
   let latest: OrchestrationThreadActivity | null = null;
   for (const activity of activities) {
     if (activity.kind !== CHECKPOINT_REVERT_ACTIVITY_KIND) continue;
-    if (latest === null || compareActivities(activity, latest) > 0) latest = activity;
+    if (latest === null || compareThreadActivities(activity, latest) > 0) latest = activity;
   }
   if (latest === null) return null;
   const activity = latest;
