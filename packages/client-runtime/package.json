@@ -58,6 +58,10 @@
       "types": "./src/authorization/e2ee.ts",
       "import": "./src/authorization/e2ee.ts"
     },
+    "./authorization/hostedEnvironmentSessions": {
+      "types": "./src/authorization/hostedEnvironmentSessions.ts",
+      "import": "./src/authorization/hostedEnvironmentSessions.ts"
+    },
     "./authorization/hostedStores": {
       "types": "./src/authorization/hostedStores.ts",
       "import": "./src/authorization/hostedStores.ts"
@@ -86,9 +90,17 @@
       "types": "./src/relay/dpop.ts",
       "import": "./src/relay/dpop.ts"
     },
+    "./relay/earlyRelaySocket": {
+      "types": "./src/relay/earlyRelaySocket.ts",
+      "import": "./src/relay/earlyRelaySocket.ts"
+    },
     "./relay/ecdsa": {
       "types": "./src/relay/ecdsa.ts",
       "import": "./src/relay/ecdsa.ts"
+    },
+    "./relay/environmentAttemptBinding": {
+      "types": "./src/relay/environmentAttemptBinding.ts",
+      "import": "./src/relay/environmentAttemptBinding.ts"
     },
     "./relay/reconnectPolicy": {
       "types": "./src/relay/reconnectPolicy.ts",

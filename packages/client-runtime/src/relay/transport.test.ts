@@ -21,6 +21,7 @@ import type {
 import { HostedHubApi, HostedHubApiError } from "../authorization/api.ts";
 import {
   configureHostedRuntime,
+  hostedEnvironmentSessionsMode,
   type HostedNodeLifecycle,
   type HostedRuntimeConfiguration,
 } from "../authorization/runtime.ts";
@@ -48,8 +49,10 @@ import { HostedHubSession, type HubSessionSocket } from "./hostedHubSession.ts";
 import { relayCompressionFailure } from "./relayEngine.ts";
 import {
   admitHostedRequestForState,
+  getHostedRelayAttemptFactory,
   HostedRelayAttemptFactory,
   HostedRelayPreparationError,
+  resetHostedRelayAttemptFactory,
   ticketFailure,
   type HostedRelayAttemptBinding,
 } from "./transport.ts";
@@ -1733,5 +1736,96 @@ describe("server-authenticated relay attempts (Hub session version 2)", () => {
     expect(() => factory.createSocket(url)).toThrow("fresh relay ticket");
     expect(serverAuthenticated).toEqual([]);
     session.dispose();
+  });
+});
+
+describe("environment session modes", () => {
+  const issuedTicket = () =>
+    vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
+      ticket: encodeBase64Url(new Uint8Array(32).fill(4)),
+      expiresAt: Date.now() + 60_000,
+      protocolMajor: 1,
+      protocolMinor: 2,
+    });
+
+  function environmentBinding(
+    createRelaySocket: NonNullable<HostedRelayAttemptBinding["createRelaySocket"]>,
+  ): HostedRelayAttemptBinding {
+    return {
+      nodeId: () => "node_bbbbbbbbbbbbbbbbbbbbbb",
+      generation: () => 1,
+      isAuthenticated: () => true,
+      isCurrent: () => true,
+      relayUrl: () => RELAY_URL,
+      createRelaySocket,
+      authorizeRequest: () => "forbidden",
+      shouldReconnect: () => true,
+      transportStatus: () => undefined,
+      sessionStatus: () => undefined,
+      role: () => undefined,
+      failure: () => undefined,
+      markDeliveryUnknown: () => undefined,
+      connectionClosed: () => undefined,
+    };
+  }
+
+  afterEach(() => {
+    resetHostedRelayAttemptFactory();
+  });
+
+  it("refuses the selection's binding when environment sessions are retained", () => {
+    configureHostedRuntime({ ...fakeRuntime(), environmentSessions: "retained" }, hostedHubApi);
+    expect(hostedEnvironmentSessionsMode()).toBe("retained");
+    const message = "Retained hosted sessions require an environment-bound relay attempt binding.";
+    expect(() => new HostedRelayAttemptFactory()).toThrow(message);
+    expect(() => getHostedRelayAttemptFactory()).toThrow(message);
+    expect(() => new HostedRelayAttemptFactory(environmentBinding(() => undefined))).not.toThrow();
+  });
+
+  it("keeps the selection's binding in single mode", async () => {
+    const runtimes: ReadonlyArray<HostedRuntimeConfiguration> = [
+      fakeRuntime(),
+      { ...fakeRuntime(), environmentSessions: "single" },
+    ];
+    for (const runtime of runtimes) {
+      configureHostedRuntime(runtime, hostedHubApi);
+      resetHostedRelayAttemptFactory();
+      expect(hostedEnvironmentSessionsMode()).toBe("single");
+      const factory = getHostedRelayAttemptFactory();
+      expect(getHostedRelayAttemptFactory()).toBe(factory);
+    }
+    issuedTicket();
+    const factory = getHostedRelayAttemptFactory();
+    const socket = factory.createSocket(await factory.nextUrl()) as MockRelaySocket;
+    socket.callbacks.onTransportStatus("online");
+    expect(hostedHubStore.getState().transportStatus).toBe("online");
+  });
+
+  it("tells the relay socket which node its attempt is for", async () => {
+    issuedTicket();
+    const runtimeNodes: Array<string | undefined> = [];
+    configureHostedRuntime(
+      {
+        ...fakeRuntime(),
+        createRelaySocket: (input) => {
+          runtimeNodes.push(input.nodeId);
+          return new MockRelaySocket(input.callbacks as RelaySocketCallbacks);
+        },
+      },
+      hostedHubApi,
+    );
+    const selected = new HostedRelayAttemptFactory();
+    selected.createSocket(await selected.nextUrl());
+    expect(runtimeNodes).toEqual([selectedNode.id]);
+
+    const boundNodes: string[] = [];
+    const bound = new HostedRelayAttemptFactory(
+      environmentBinding((input) => {
+        boundNodes.push(input.nodeId);
+        return {};
+      }),
+    );
+    bound.createSocket(await bound.nextUrl());
+    expect(boundNodes).toEqual(["node_bbbbbbbbbbbbbbbbbbbbbb"]);
   });
 });

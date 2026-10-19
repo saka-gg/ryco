@@ -28,6 +28,7 @@ function MockWsTransport() {
 
 vi.mock("../primary", () => ({
   getPrimaryKnownEnvironment: mockGetPrimaryKnownEnvironment,
+  writePrimaryEnvironmentDescriptor: vi.fn(),
 }));
 
 vi.mock("../remote/api", () => ({
