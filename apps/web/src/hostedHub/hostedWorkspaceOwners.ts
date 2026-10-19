@@ -6,6 +6,7 @@ import {
   parseHostedScopedThreadPath,
   startHostedNodeRouteOrchestrator,
 } from "./nodeRouteOrchestrator";
+import { installNodeSwitchTelemetry } from "./nodeSwitchTelemetry";
 import { startHostedBrowserLifecycle } from "./useHostedBrowserLifecycle";
 
 /**
@@ -32,6 +33,9 @@ let stopOwners: (() => void) | null = null;
 export function retainHostedWorkspaceOwners(): () => void {
   retainCount += 1;
   if (retainCount === 1) {
+    // First, so a route publication or store patch reaches the telemetry
+    // before any owner reacts to it.
+    const stopTelemetry = installNodeSwitchTelemetry();
     const stopOrchestrator = startHostedNodeRouteOrchestrator();
     const stopCoordinator = startHostedWorkspaceCoordinator({
       canDiscoverHome: () => getHostedNodeRouteNotice() === null,
@@ -41,6 +45,7 @@ export function retainHostedWorkspaceOwners(): () => void {
       stopOrchestrator();
       stopCoordinator();
       stopLifecycle();
+      stopTelemetry();
     };
   }
   let released = false;
