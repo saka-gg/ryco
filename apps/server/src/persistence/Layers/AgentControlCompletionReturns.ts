@@ -120,7 +120,8 @@ const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRe
 
 /**
  * Statuses in which a child's result is still owed to its parent. The SQL `IN (...)`
- * lists in `listDue`, `listProposalIds` and `hasOutstandingDelegations` must match.
+ * lists in `listDue`, `earliestPendingCheckAt`, `listProposalIds` and
+ * `hasOutstandingDelegations` must match.
  */
 export const PENDING_COMPLETION_RETURN_STATUSES = ["waiting", "ready", "dispatching"] as const;
 // A turn shows at most 8 attachments; the bound only keeps the read small.
@@ -182,6 +183,27 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   );
   const safe = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(Effect.mapError(toPersistenceSqlError("AgentControlCompletionReturns")));
+  const changeListeners = new Set<() => void>();
+  /** Called after a write changed a row, so a listener's next read sees it. */
+  const notifyChange = () => {
+    for (const listener of changeListeners) {
+      try {
+        listener();
+      } catch {
+        // The write already happened; a listener never fails it.
+      }
+    }
+  };
+  /**
+   * Calls `listener` (synchronously, and with no arguments) after every insert or update that
+   * changed the ledger through this repository. Returns the unsubscribe.
+   */
+  const subscribeChanges = (listener: () => void) => {
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
+  };
   const readRows = (rows: ReadonlyArray<{ childThreadId: string; record: string }>) =>
     Effect.gen(function* () {
       const records: CompletionReturnRecord[] = [];
@@ -207,7 +229,12 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       (child_thread_id, proposal_id, status, revision, next_check_at, record_json)
     VALUES (${record.childThreadId}, ${record.proposalId}, ${record.status}, ${record.revision},
       ${record.nextCheckAt}, ${JSON.stringify(record)}) ON CONFLICT DO NOTHING
-  `.pipe(Effect.asVoid),
+    RETURNING child_thread_id
+  `.pipe(
+        Effect.map((rows) => {
+          if (rows.length === 1) notifyChange();
+        }),
+      ),
     );
   const listDue = (now: string) =>
     safe(
@@ -216,6 +243,14 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE status IN ('waiting', 'ready', 'dispatching') AND next_check_at <= ${now}
     ORDER BY next_check_at, child_thread_id LIMIT 100
   `.pipe(Effect.flatMap(readRows)),
+    );
+  /** When the soonest pending row is due, or null when nothing is owed. */
+  const earliestPendingCheckAt = () =>
+    safe(
+      sql<{ earliest: string | null }>`
+    SELECT MIN(next_check_at) AS earliest FROM agent_control_completion_returns
+    WHERE status IN ('waiting', 'ready', 'dispatching')
+  `.pipe(Effect.map((rows) => rows[0]?.earliest ?? null)),
     );
   const listForProposal = (proposalId: AgentControlProposalId) =>
     safe(
@@ -248,7 +283,13 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       next_check_at = ${next.nextCheckAt}, record_json = ${JSON.stringify({ ...next, revision: previous.revision + 1 })}
     WHERE child_thread_id = ${previous.childThreadId} AND revision = ${previous.revision}
     RETURNING child_thread_id
-  `.pipe(Effect.map((rows) => rows.length === 1)),
+  `.pipe(
+        Effect.map((rows) => {
+          const updated = rows.length === 1;
+          if (updated) notifyChange();
+          return updated;
+        }),
+      ),
     );
   // The initial user message, not the latest turn, owns the delegation.
   const initialTurnId = (record: CompletionReturnRecord) =>
@@ -444,6 +485,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
           }),
         )
         .pipe(
+          Effect.tap(() => (pairs.length > 0 ? Effect.sync(notifyChange) : Effect.void)),
           Effect.catch((error) =>
             error instanceof CompletionReturnCasConflict
               ? Effect.succeed(false)
@@ -638,6 +680,8 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   return {
     insert,
     listDue,
+    earliestPendingCheckAt,
+    subscribeChanges,
     listForProposal,
     listProposalIds,
     get,

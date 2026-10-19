@@ -25,7 +25,7 @@ import {
   type QueuedTurnIdleInput,
 } from "@ryco/shared/threadSettlement";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
-import { Context, Duration, Effect, Layer, Option, Schedule, Semaphore } from "effect";
+import { Clock, Context, Effect, Layer, Option, Semaphore } from "effect";
 import { isPersistableChatAttachment } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -1119,6 +1119,74 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     );
   return { scan };
 });
+/** The shortest pause between scans, and the scan cadence while a pending row is held. */
+const SCAN_MIN_DELAY_MS = 2_000;
+/** The longest pause: an idle ledger is rescanned this often as a safety net. */
+const SCAN_MAX_DELAY_MS = 60_000;
+
+/**
+ * How long to wait after a scan: until the earliest pending row is due, kept within
+ * `[SCAN_MIN_DELAY_MS, SCAN_MAX_DELAY_MS]`. An unreadable ledger is retried at the short pause.
+ */
+const nextScanDelayMs = (repository: ScanLoopRepository) =>
+  Effect.gen(function* () {
+    const earliest = yield* repository.earliestPendingCheckAt();
+    if (earliest === null) return SCAN_MAX_DELAY_MS;
+    const untilDueMs = Date.parse(earliest) - (yield* Clock.currentTimeMillis);
+    return Number.isFinite(untilDueMs)
+      ? Math.min(SCAN_MAX_DELAY_MS, Math.max(SCAN_MIN_DELAY_MS, untilDueMs))
+      : SCAN_MIN_DELAY_MS;
+  }).pipe(Effect.catch(() => Effect.succeed(SCAN_MIN_DELAY_MS)));
+
+type ScanLoopRepository = Pick<
+  CompletionReturnRepository["Service"],
+  "earliestPendingCheckAt" | "subscribeChanges"
+>;
+
+/**
+ * Scans, then sleeps until the earliest pending row is due or the ledger changes, so an idle
+ * node does not poll. A failed scan is logged and retried after the short pause. Changes made
+ * while a scan runs are its own (holds, claims) and are not a reason to scan again: the pause
+ * is computed from the ledger as the scan left it.
+ */
+export const runCompletionReturnScans = <E>(input: {
+  readonly scan: Effect.Effect<unknown, E>;
+  readonly repository: ScanLoopRepository;
+}) =>
+  Effect.gen(function* () {
+    let changed = false;
+    let wake: (() => void) | undefined;
+    yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        input.repository.subscribeChanges(() => {
+          changed = true;
+          wake?.();
+        }),
+      ),
+      (unsubscribe) => Effect.sync(unsubscribe),
+    );
+    const untilChanged = Effect.callback<void>((resume) => {
+      wake = () => resume(Effect.void);
+      if (changed) wake();
+      return Effect.sync(() => {
+        wake = undefined;
+      });
+    });
+    return yield* Effect.forever(
+      Effect.gen(function* () {
+        const failed = yield* input.scan.pipe(
+          Effect.as(false),
+          Effect.catch(() =>
+            Effect.logWarning("Completion return recovery will retry.").pipe(Effect.as(true)),
+          ),
+        );
+        changed = false;
+        const delayMs = failed ? SCAN_MIN_DELAY_MS : yield* nextScanDelayMs(input.repository);
+        yield* Effect.race(Effect.sleep(delayMs), untilChanged);
+      }),
+    );
+  }).pipe(Effect.scoped);
+
 export class CompletionReturnDelivery extends Context.Service<
   CompletionReturnDelivery,
   Effect.Success<typeof makeCompletionReturnDelivery>
@@ -1127,14 +1195,15 @@ export const CompletionReturnDeliveryLive = Layer.effect(
   CompletionReturnDelivery,
   Effect.gen(function* () {
     const delivery = yield* makeCompletionReturnDelivery;
+    const repository = yield* CompletionReturnRepository;
     const startup = yield* ServerRuntimeStartup;
     yield* Effect.forkScoped(
       startup.awaitCommandReady.pipe(
         Effect.andThen(
-          Effect.suspend(() => delivery.scan()).pipe(
-            Effect.catch(() => Effect.logWarning("Completion return recovery will retry.")),
-            Effect.repeat(Schedule.spaced(Duration.seconds(2))),
-          ),
+          runCompletionReturnScans({
+            scan: Effect.suspend(() => delivery.scan()),
+            repository,
+          }),
         ),
       ),
     );

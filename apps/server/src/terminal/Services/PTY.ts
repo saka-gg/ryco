@@ -29,6 +29,13 @@ export interface PtyProcess {
   kill(signal?: string): void;
   onData(callback: (data: string) => void): () => void;
   onExit(callback: (event: PtyExitEvent) => void): () => void;
+  /**
+   * Name of the process in the foreground of the session's terminal, when the platform can
+   * tell. Cheap to read and never throws; `undefined` when it cannot be determined. It is
+   * not proof that nothing else runs: a shell with a background job, or a program that goes
+   * by the shell's name, shows as the shell.
+   */
+  readonly foregroundProcessName?: () => string | undefined;
 }
 
 export interface PtySpawnInput {

@@ -57,6 +57,8 @@ class FakePtyProcess implements PtyProcess {
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(event: PtyExitEvent) => void>();
   killed = false;
+  /** Present only on PTYs that can name their foreground process. */
+  foregroundProcessName?: () => string | undefined;
 
   constructor(pid: number) {
     this.pid = pid;
@@ -106,6 +108,8 @@ class FakePtyAdapter implements PtyAdapterShape {
   readonly spawnInputs: PtySpawnInput[] = [];
   readonly processes: FakePtyProcess[] = [];
   readonly spawnFailures: Error[] = [];
+  /** By pid: spawned PTYs with an entry can name their foreground process. */
+  readonly foregroundReaders = new Map<number, () => string | undefined>();
   private readonly mode: "sync" | "async";
   private nextPid = 9000;
 
@@ -126,6 +130,8 @@ class FakePtyAdapter implements PtyAdapterShape {
       );
     }
     const process = new FakePtyProcess(this.nextPid++);
+    const foregroundReader = this.foregroundReaders.get(process.pid);
+    if (foregroundReader) process.foregroundProcessName = foregroundReader;
     this.processes.push(process);
     if (this.mode === "async") {
       return Effect.tryPromise({
@@ -179,6 +185,12 @@ const waitFor = <E, R>(
     ),
   );
 
+/** The `hasRunningSubprocess` values of a thread's activity events, in order. */
+const activityStates = (events: ReadonlyArray<TerminalEvent>, threadId = "thread-1") =>
+  events.flatMap((event) =>
+    event.type === "activity" && event.threadId === threadId ? [event.hasRunningSubprocess] : [],
+  );
+
 function openInput(overrides: Partial<TerminalOpenInput> = {}): TerminalOpenInput {
   return {
     threadId: "thread-1",
@@ -229,7 +241,9 @@ interface CreateManagerOptions {
   shellResolver?: () => string;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
-  processTableSnapshotter?: () => Effect.Effect<
+  processTableSnapshotter?: (
+    shellPids: ReadonlyArray<number>,
+  ) => Effect.Effect<
     { readonly childrenByParent: ReadonlyMap<number, ReadonlyArray<number>> },
     Error
   >;
@@ -1502,6 +1516,266 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
       yield* tick();
       yield* tick();
       expect(snapshots - quietStart).toBe(1);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("reads a foreground command as running without a process table", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      let foreground: string | undefined = "bash";
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.foregroundReaders.set(9000, () => foreground);
+      const { manager, getEvents } = yield* createManager(5, {
+        ptyAdapter,
+        // The shell goes by another name than the one it was started as.
+        shellResolver: () => "/bin/sh",
+        processTableSnapshotter: () => {
+          snapshots += 1;
+          return Effect.succeed({ childrenByParent: new Map<number, number[]>() });
+        },
+        subprocessPollIntervalMs: 20,
+      });
+      const activityIs = (expected: ReadonlyArray<boolean>) =>
+        waitFor(
+          Effect.map(getEvents, (events) => activityStates(events).join() === expected.join()),
+          "1200 millis",
+        );
+
+      yield* manager.open(openInput());
+      // The first polls ask the table, which finds the shell idle under the name it goes by.
+      yield* waitFor(Effect.sync(() => snapshots >= 2));
+      assert.deepEqual(activityStates(yield* getEvents), []);
+
+      foreground = "sleep";
+      yield* activityIs([true]);
+      const askedWhileRunning = snapshots;
+      yield* Effect.sleep("100 millis");
+      assert.equal(snapshots, askedWhileRunning);
+
+      foreground = "bash";
+      yield* activityIs([true, false]);
+    }),
+  );
+
+  it.effect("asks the process table while the shell itself stays in the foreground", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      let hasChild = false;
+      const ptyAdapter = new FakePtyAdapter();
+      // A background job, a nested shell and a script run by the shell's own interpreter all
+      // leave the shell's name in the foreground.
+      ptyAdapter.foregroundReaders.set(9000, () => "zsh");
+      const { manager, getEvents } = yield* createManager(5, {
+        ptyAdapter,
+        shellResolver: () => "/bin/zsh",
+        processTableSnapshotter: () => {
+          snapshots += 1;
+          return Effect.succeed({
+            childrenByParent: hasChild ? new Map([[9000, [100]]]) : new Map<number, number[]>(),
+          });
+        },
+        subprocessPollIntervalMs: 20,
+      });
+      const activityIs = (expected: ReadonlyArray<boolean>) =>
+        waitFor(
+          Effect.map(getEvents, (events) => activityStates(events).join() === expected.join()),
+          "1200 millis",
+        );
+
+      yield* manager.open(openInput());
+      yield* waitFor(Effect.sync(() => snapshots >= 2));
+      assert.deepEqual(activityStates(yield* getEvents), []);
+
+      hasChild = true;
+      yield* activityIs([true]);
+      hasChild = false;
+      yield* activityIs([true, false]);
+    }),
+  );
+
+  it.effect("asks the process table about a terminal whose foreground cannot be read", () =>
+    Effect.gen(function* () {
+      let hasChild = false;
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.foregroundReaders.set(9000, () => {
+        throw new Error("pty is gone");
+      });
+      const { manager, getEvents } = yield* createManager(5, {
+        ptyAdapter,
+        processTableSnapshotter: () =>
+          Effect.succeed({
+            childrenByParent: hasChild ? new Map([[9000, [100]]]) : new Map<number, number[]>(),
+          }),
+        subprocessPollIntervalMs: 20,
+      });
+
+      yield* manager.open(openInput());
+      yield* Effect.sleep("100 millis");
+      hasChild = true;
+      yield* waitFor(
+        Effect.map(getEvents, (events) => activityStates(events).join() === "true"),
+        "1200 millis",
+      );
+    }),
+  );
+
+  it.effect(
+    "asks the process table only about terminals that cannot name a foreground command",
+    () =>
+      Effect.gen(function* () {
+        let snapshotPids: Array<ReadonlyArray<number>> = [];
+        let foreground = "zsh";
+        const ptyAdapter = new FakePtyAdapter();
+        // 9000 names its foreground, 9001 has the accessor but cannot tell, 9002 has none.
+        ptyAdapter.foregroundReaders.set(9000, () => foreground);
+        ptyAdapter.foregroundReaders.set(9001, () => undefined);
+        const { manager, getEvents } = yield* createManager(5, {
+          ptyAdapter,
+          shellResolver: () => "/bin/zsh",
+          processTableSnapshotter: (shellPids) => {
+            snapshotPids.push(shellPids);
+            return Effect.succeed({
+              childrenByParent: new Map([
+                [9001, [100]],
+                [9002, [200]],
+              ]),
+            });
+          },
+          subprocessPollIntervalMs: 20,
+        });
+
+        yield* manager.open(openInput({ threadId: "thread-1" }));
+        yield* manager.open(openInput({ threadId: "thread-2" }));
+        yield* manager.open(openInput({ threadId: "thread-3" }));
+        // Until its idle name is known, 9000 is asked about like the others.
+        yield* waitFor(
+          Effect.sync(() => snapshotPids.filter((pids) => pids.includes(9000)).length >= 2),
+        );
+        foreground = "vim";
+        yield* waitFor(
+          Effect.map(getEvents, (events) => activityStates(events, "thread-1").join() === "true"),
+          "1200 millis",
+        );
+
+        snapshotPids = [];
+        yield* Effect.sleep("120 millis");
+        expect(snapshotPids.length).toBeGreaterThan(0);
+        expect(snapshotPids.every((pids) => !pids.includes(9000))).toBe(true);
+        expect(snapshotPids.every((pids) => pids.includes(9001) && pids.includes(9002))).toBe(true);
+      }),
+  );
+
+  it.effect("lets the process table correct a shell that replaced itself", () =>
+    Effect.gen(function* () {
+      let foreground = "bash";
+      const ptyAdapter = new FakePtyAdapter();
+      ptyAdapter.foregroundReaders.set(9000, () => foreground);
+      const { manager, getEvents } = yield* createManager(5, {
+        ptyAdapter,
+        processTableSnapshotter: () =>
+          Effect.succeed({ childrenByParent: new Map<number, number[]>() }),
+        subprocessPollIntervalMs: 1_000,
+        subprocessIdlePollIntervalMs: 5_000,
+      });
+      yield* manager.open(openInput());
+      const settle = Effect.gen(function* () {
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+      });
+      const tick = Effect.gen(function* () {
+        yield* TestClock.adjust("1000 millis");
+        yield* settle;
+      });
+      // Let the start-up window lapse with the shell known as bash.
+      for (let index = 0; index < 10; index += 1) yield* tick;
+      assert.deepEqual(activityStates(yield* getEvents), []);
+
+      // `exec zsh`: a new name in the foreground and still no children. Right after input the
+      // new name reads as a command.
+      foreground = "zsh";
+      yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" });
+      yield* tick;
+      assert.deepEqual(activityStates(yield* getEvents), [true]);
+
+      // Once the fast window lapses, the idle cadence asks the table, which finds the shell
+      // idle, and the new name is taken for the shell's from then on.
+      for (let index = 0; index < 12; index += 1) yield* tick;
+      assert.deepEqual(activityStates(yield* getEvents), [true, false]);
+      for (let index = 0; index < 20; index += 1) yield* tick;
+      assert.deepEqual(activityStates(yield* getEvents), [true, false]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("lengthens the idle cadence after a minute without input or output", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      const { manager } = yield* createManager(5, {
+        processTableSnapshotter: () =>
+          Effect.sync(() => {
+            snapshots += 1;
+            return { childrenByParent: new Map<number, number[]>() };
+          }),
+        subprocessPollIntervalMs: 1_000,
+        subprocessIdlePollIntervalMs: 5_000,
+      });
+      yield* manager.open(openInput());
+      const tick = Effect.gen(function* () {
+        yield* TestClock.adjust("1000 millis");
+        yield* Effect.yieldNow;
+      });
+      // Past the start-up I/O window and the minute that follows it.
+      for (let index = 0; index < 65; index += 1) yield* tick;
+
+      const deepIdleStart = snapshots;
+      for (let index = 0; index < 60; index += 1) yield* tick;
+      expect(snapshots - deepIdleStart).toBe(2);
+
+      // Input restores the fast cadence on the next tick.
+      const activeStart = snapshots;
+      for (let index = 0; index < 5; index += 1) {
+        yield* manager.write({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID, data: "x" });
+        yield* tick;
+      }
+      expect(snapshots - activeStart).toBe(5);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps the idle cadence while output keeps arriving", () =>
+    Effect.gen(function* () {
+      let snapshots = 0;
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: () =>
+          Effect.sync(() => {
+            snapshots += 1;
+            return { childrenByParent: new Map<number, number[]>() };
+          }),
+        subprocessPollIntervalMs: 1_000,
+        subprocessIdlePollIntervalMs: 5_000,
+      });
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const settle = Effect.gen(function* () {
+        for (let index = 0; index < 5; index += 1) yield* Effect.yieldNow;
+      });
+      const tick = (output?: string) =>
+        Effect.gen(function* () {
+          yield* TestClock.adjust("900 millis");
+          if (output !== undefined) process.emitData(output);
+          yield* settle;
+          yield* TestClock.adjust("100 millis");
+          yield* settle;
+        });
+      for (let index = 0; index < 70; index += 1) yield* tick(`line ${index}\n`);
+
+      // A watcher printing every second never counts as quiet, minute after minute.
+      const busyStart = snapshots;
+      for (let index = 0; index < 10; index += 1) yield* tick(`more ${index}\n`);
+      expect(snapshots - busyStart).toBe(2);
+
+      // A minute of silence later, the terminal reaches the deep-idle cadence.
+      for (let index = 0; index < 65; index += 1) yield* tick();
+      const quietStart = snapshots;
+      for (let index = 0; index < 60; index += 1) yield* tick();
+      expect(snapshots - quietStart).toBe(2);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
