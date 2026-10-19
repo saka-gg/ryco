@@ -56,6 +56,12 @@ client, or hiding hosted Web, releases non-retained connections. Foreground or v
 restores retained demand only and staggers reconnects; there is no reconnect-all-cached-machines
 path.
 
+On Desktop, switching to another app or window does not background the client, so warm connections
+survive it. Minimizing or hiding the window, or locking the screen, backgrounds it after a
+three-minute grace period; sleeping does so at once, and any return to use ends it. Machine
+presence is refreshed when the window gains focus (at most every 30 seconds), on wake and unlock,
+and every 90 seconds while a window is in sight.
+
 ## Cache and failure behavior
 
 The shared workspace index contains bounded project, worktree, thread-shell, and status summaries.

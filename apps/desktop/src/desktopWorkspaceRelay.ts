@@ -85,8 +85,17 @@ function opaqueTransportId(): string {
   return Crypto.randomBytes(24).toString("base64url");
 }
 
-function bytesFromRawData(data: RawData): Uint8Array | null {
-  if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+/**
+ * One inbound frame as bytes, or null when it is too large.
+ *
+ * The socket asks `ws` for `arraybuffer`, which hands the listener an
+ * ArrayBuffer nothing else references, so it is wrapped as is: the relay engine
+ * owns it from here and wipes it once decoded. A Buffer (only delivered if the
+ * binary type ever changes) can be a window onto a chunk shared with later
+ * frames, so it is copied out before the engine can wipe it.
+ */
+export function bytesFromRawData(data: RawData): Uint8Array | null {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (Array.isArray(data)) {
     const total = data.reduce((sum, part) => sum + part.byteLength, 0);
     if (total > MAX_APPLICATION_FRAME_BYTES) return null;
@@ -167,6 +176,8 @@ class DesktopWorkspaceRelaySocket {
       get readyState() {
         return socket.readyState;
       },
+      // The engine wipes its frame as soon as this returns, while `ws` can keep
+      // the buffer past that (compression, write queue), so `ws` gets its own.
       send: (bytes) => socket.send(Buffer.from(bytes)),
       close: (code, reason) => socket.close(code, reason),
       onOpen: (listener) => openListeners.push(listener),
@@ -219,7 +230,8 @@ class DesktopWorkspaceRelaySocket {
     if (bytes.byteLength > MAX_APPLICATION_FRAME_BYTES) {
       throw new Error("Desktop workspace RPC frame is too large.");
     }
-    this.#engine.send(Uint8Array.from(bytes));
+    // The engine copies whatever it keeps, so the caller's bytes are sent as is.
+    this.#engine.send(bytes);
   }
 
   close(): void {

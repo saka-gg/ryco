@@ -202,3 +202,72 @@ describe("desktop transport recovery", () => {
     expect(f.bridge.activateDesktopWorkspaceTransport).not.toHaveBeenCalled();
   });
 });
+
+describe("desktop transport frame buffers", () => {
+  async function openSocket() {
+    const transportId = "E".repeat(32);
+    let listener: ((event: DesktopWorkspaceTransportEvent) => void) | undefined;
+    const send = vi.fn();
+    const bridge = {
+      prepareDesktopWorkspaceTransport: vi.fn(async () => ({ transportId })),
+      activateDesktopWorkspaceTransport: vi.fn(async () => ({ ok: true }) as const),
+      sendDesktopWorkspaceTransport: send,
+      closeDesktopWorkspaceTransport: vi.fn(),
+      onDesktopWorkspaceTransportEvent: vi.fn((next) => {
+        listener = next;
+        return () => undefined;
+      }),
+    };
+    const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("remote"), bridge);
+    const socket = factory.createSocket(await factory.nextUrl());
+    listener?.({ type: "open", transportId });
+    return {
+      socket,
+      send,
+      deliver: (data: Uint8Array) => listener?.({ type: "message", transportId, data }),
+    };
+  }
+
+  it("sends bytes that span their buffer without copying them", async () => {
+    const { socket, send } = await openSocket();
+    const frame = Uint8Array.of(1, 2, 3);
+    socket.send(frame);
+    socket.send(frame.buffer);
+
+    for (const [, sent] of send.mock.calls) {
+      expect(sent).toEqual(frame);
+      expect(sent.buffer).toBe(frame.buffer);
+    }
+  });
+
+  it("copies a view onto part of a larger buffer so only its own bytes are sent", async () => {
+    const { socket, send } = await openSocket();
+    const backing = Uint8Array.of(9, 9, 1, 2, 3, 9, 9);
+    socket.send(backing.subarray(2, 5));
+    backing.fill(0);
+
+    const sent = send.mock.calls[0]?.[1] as Uint8Array;
+    expect(sent).toEqual(Uint8Array.of(1, 2, 3));
+    expect(sent.buffer.byteLength).toBe(3);
+    expect(sent.buffer).not.toBe(backing.buffer);
+  });
+
+  it("encodes text payloads into their own exact-size buffer", async () => {
+    const { socket, send } = await openSocket();
+    socket.send("abc");
+
+    const sent = send.mock.calls[0]?.[1] as Uint8Array;
+    expect(sent).toEqual(new TextEncoder().encode("abc"));
+    expect(sent.buffer.byteLength).toBe(3);
+  });
+
+  it("hands received bytes to listeners as delivered", async () => {
+    const { socket, deliver } = await openSocket();
+    const message = vi.fn();
+    socket.addEventListener("message", message);
+    const frame = Uint8Array.of(4, 5, 6);
+    deliver(frame);
+
+    expect(message.mock.calls[0]?.[0].data).toBe(frame);
+  });
+});

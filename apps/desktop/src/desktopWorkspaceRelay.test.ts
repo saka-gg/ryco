@@ -2,6 +2,8 @@ import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  bytesFromRawData,
+  DESKTOP_WORKSPACE_MAX_RPC_FRAME_BYTES,
   DesktopWorkspaceRelayManager,
   RELAY_COMPRESSION_RETRY_AFTER_MS,
   type DesktopWorkspaceRelayAuthority,
@@ -434,6 +436,60 @@ describe("desktop relay attempt ownership", () => {
     f.manager.dispose();
     await f.manager.activate(f.manager.prepare(f.environmentId));
     expect(f.socketFactory.mock.calls[4]![0].relayCompression).toBe(true);
+    f.manager.dispose();
+  });
+});
+
+describe("inbound relay frame bytes", () => {
+  it("wraps the ArrayBuffer ws delivers without copying it", () => {
+    const frame = Uint8Array.of(1, 2, 3).buffer;
+    const bytes = bytesFromRawData(frame);
+
+    expect(bytes).toEqual(Uint8Array.of(1, 2, 3));
+    expect(bytes?.buffer).toBe(frame);
+  });
+
+  it("joins fragments into a buffer of their own", () => {
+    const first = Buffer.from([1, 2]);
+    const second = Buffer.from([3]);
+    const bytes = bytesFromRawData([first, second]);
+
+    expect(bytes).toEqual(Uint8Array.of(1, 2, 3));
+    bytes?.fill(0);
+    expect([...first, ...second]).toEqual([1, 2, 3]);
+  });
+
+  it("copies a Buffer window so wiping the result leaves the shared chunk intact", () => {
+    const chunk = Buffer.from([7, 1, 2, 3, 8]);
+    const bytes = bytesFromRawData(chunk.subarray(1, 4));
+
+    expect(bytes).toEqual(Uint8Array.of(1, 2, 3));
+    expect(bytes?.buffer).not.toBe(chunk.buffer);
+    bytes?.fill(0);
+    expect([...chunk]).toEqual([7, 1, 2, 3, 8]);
+  });
+
+  it("refuses a Buffer or fragment set above the application frame limit", () => {
+    const oversize = Buffer.alloc(DESKTOP_WORKSPACE_MAX_RPC_FRAME_BYTES + 1);
+
+    expect(bytesFromRawData(oversize)).toBeNull();
+    expect(bytesFromRawData([oversize])).toBeNull();
+  });
+});
+
+describe("outbound relay frame bytes", () => {
+  it("hands the caller's bytes to the transport as is", async () => {
+    const f = relayFixture();
+    const send = vi.fn();
+    f.socketFactory.mockImplementation(() => ({ send, close: f.close }));
+    const id = f.manager.prepare(f.environmentId);
+    await f.manager.activate(id);
+
+    const frame = Uint8Array.of(4, 5, 6);
+    f.manager.send(id, frame);
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0]?.[0]).toBe(frame);
     f.manager.dispose();
   });
 });
