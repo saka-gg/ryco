@@ -3985,92 +3985,97 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         stateRows,
       ] = yield* sql
         .withTransaction(
-          Effect.all([
-            getActiveThreadRowById({ threadId: input.threadId }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:getThread:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:getThread:decodeRow",
+          // Issued together: on the read worker every statement is a round trip,
+          // so awaiting each reply in turn pays for all of them one after another.
+          Effect.all(
+            [
+              getActiveThreadRowById({ threadId: input.threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getThread:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getThread:decodeRow",
+                  ),
                 ),
               ),
-            ),
-            listNewestThreadMessageRows({
-              threadId: input.threadId,
-              limit: limits.messages + 1,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:listMessages:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:listMessages:decodeRows",
+              listNewestThreadMessageRows({
+                threadId: input.threadId,
+                limit: limits.messages + 1,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:listMessages:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:listMessages:decodeRows",
+                  ),
                 ),
               ),
-            ),
-            listNewestThreadProposedPlanRows({
-              threadId: input.threadId,
-              limit: limits.proposedPlans + 1,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:listPlans:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:listPlans:decodeRows",
+              listNewestThreadProposedPlanRows({
+                threadId: input.threadId,
+                limit: limits.proposedPlans + 1,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:listPlans:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:listPlans:decodeRows",
+                  ),
                 ),
               ),
-            ),
-            listNewestThreadActivityRows({
-              threadId: input.threadId,
-              limit: limits.activities + 1,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:listActivities:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:listActivities:decodeRows",
+              listNewestThreadActivityRows({
+                threadId: input.threadId,
+                limit: limits.activities + 1,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:listActivities:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:listActivities:decodeRows",
+                  ),
                 ),
               ),
-            ),
-            listBackgroundTaskEvidence({ threadId: input.threadId }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:decodeRows",
+              listBackgroundTaskEvidence({ threadId: input.threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:backgroundEvidence:decodeRows",
+                  ),
                 ),
               ),
-            ),
-            listNewestCheckpointRows({
-              threadId: input.threadId,
-              limit: limits.checkpoints + 1,
-            }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:listCheckpoints:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:listCheckpoints:decodeRows",
+              listNewestCheckpointRows({
+                threadId: input.threadId,
+                limit: limits.checkpoints + 1,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:listCheckpoints:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:listCheckpoints:decodeRows",
+                  ),
                 ),
               ),
-            ),
-            getLatestTurnRowByThread({ threadId: input.threadId }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:getLatestTurn:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:getLatestTurn:decodeRow",
+              getLatestTurnRowByThread({ threadId: input.threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getLatestTurn:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getLatestTurn:decodeRow",
+                  ),
                 ),
               ),
-            ),
-            getThreadSessionRowByThread({ threadId: input.threadId }).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:getSession:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:getSession:decodeRow",
+              getThreadSessionRowByThread({ threadId: input.threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:getSession:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:getSession:decodeRow",
+                  ),
                 ),
               ),
-            ),
-            listProjectionStateRows(undefined).pipe(
-              Effect.mapError(
-                toPersistenceSqlOrDecodeError(
-                  "ProjectionSnapshotQuery.getThreadWindow:listProjectionState:query",
-                  "ProjectionSnapshotQuery.getThreadWindow:listProjectionState:decodeRows",
+              listProjectionStateRows(undefined).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadWindow:listProjectionState:query",
+                    "ProjectionSnapshotQuery.getThreadWindow:listProjectionState:decodeRows",
+                  ),
                 ),
               ),
-            ),
-          ]),
+            ],
+            { concurrency: "unbounded" },
+          ),
         )
         .pipe(
           Effect.mapError((error) =>
@@ -4794,17 +4799,21 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
  * front of) every write. Reads move to the read-only worker connection (SqliteReadClient) when
  * all of these hold:
  * - they are heavy or unbounded enough to matter (whole read models, full-text search, history
- *   pages), and run on behalf of a reader (an RPC, an MCP tool), not the engine;
+ *   pages), or they sit on the path a client waits on (a thread window must not queue behind a
+ *   shell build or a streaming write), and run on behalf of a reader (an RPC, an MCP tool), not
+ *   the engine;
  * - they need no read-your-writes beyond committed data: the worker sees every commit that
  *   precedes the read, and a caller inside a main-connection transaction keeps reading there
  *   (`readClientFor`), where its uncommitted rows are visible;
- * - they do not order themselves against the live event stream (event replay keeps reading on
- *   the main connection, which serializes it behind in-flight commits).
+ * - they do not order themselves against the live event stream, or they take their own sequence
+ *   inside one read transaction (`getSnapshot`, `getThreadWindow`), so the events after it replay
+ *   in order from the main connection, which serializes that replay behind in-flight commits.
  * Engine hydration (`getCommandReadModel`), shell builds and the small lookups the decider and
  * reactors issue stay on the main connection.
  */
 const READ_WORKER_METHODS = [
   "getSnapshot",
+  "getThreadWindow",
   "getThreadHistoryPage",
   "searchThreadMessages",
 ] as const satisfies ReadonlyArray<keyof ProjectionSnapshotQueryShape>;
@@ -4830,6 +4839,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   return {
     ...main,
     getSnapshot: routed("getSnapshot"),
+    getThreadWindow: routed("getThreadWindow"),
     getThreadHistoryPage: routed("getThreadHistoryPage"),
     searchThreadMessages: routed("searchThreadMessages"),
   } satisfies ProjectionSnapshotQueryShape;

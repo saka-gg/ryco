@@ -10,11 +10,13 @@ import {
   ThreadId,
   WorktreeId,
 } from "@ryco/contracts";
-import { Cause, Effect, Metric, Option, Queue, Ref } from "effect";
+import { Cause, Clock, Duration, Effect, Metric, Option, PubSub, Queue, Ref, Stream } from "effect";
+import { TestClock } from "effect/testing";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { makeWsReplayMetrics } from "../../wsReplayMetrics.ts";
+import { ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS } from "./constants.ts";
 import {
   makeOrchestrationStreamHelpers,
   releaseQueuedEventBytes,
@@ -270,10 +272,155 @@ describe("orchestrationStreams", () => {
   );
 });
 
+describe("live feed flushing", () => {
+  const threadId = ThreadId.make("thread-live-feed");
+  const windowMs = ORCHESTRATION_PROGRESS_COALESCE_WINDOW_MS;
+
+  /** Records the duration of every sleep scheduled on the test clock. */
+  const withRecordedSleeps = <A, E, R>(
+    body: (sleeps: ReadonlyArray<number>) => Effect.Effect<A, E, R>,
+  ) =>
+    TestClock.testClockWith((testClock) => {
+      const sleeps: Array<number> = [];
+      const recording: TestClock.TestClock = {
+        ...testClock,
+        sleep: (duration) => {
+          sleeps.push(Duration.toMillis(duration));
+          return testClock.sleep(duration);
+        },
+      };
+      return body(sleeps).pipe(Effect.provideService(Clock.Clock, recording));
+    });
+
+  /** Lets every runnable fiber (and the microtasks behind it) run to quiescence. */
+  const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+
+  /**
+   * A thread subscription over an in-memory event feed. `delivered` receives
+   * the sequence of each live event the subscriber is sent, in order.
+   */
+  const startThreadFeed = Effect.gen(function* () {
+    const live = yield* PubSub.unbounded<OrchestrationEvent>();
+    const helpers = makeOrchestrationStreamHelpers({
+      orchestrationEngine: {
+        subscribeDomainEvents: PubSub.subscribe(live),
+        readEventsPage: (fromSequenceExclusive: number) =>
+          Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
+      } as unknown as OrchestrationEngineShape,
+      projectionSnapshotQuery: {} as unknown as ProjectionSnapshotQueryShape,
+      repositoryIdentityResolver: { resolve: () => Effect.succeed(null) },
+    });
+    const delivered = yield* Queue.unbounded<number | string>();
+    yield* helpers
+      .makeReplayableThreadStream(Effect.succeed({ snapshotSequence: 10 }), threadId)
+      .pipe(
+        Stream.runForEach((item) =>
+          Queue.offer(delivered, item.kind === "event" ? item.event.sequence : item.kind),
+        ),
+        Effect.forkChild,
+      );
+    // The head is sent after the feed is wired to the live events.
+    assert.equal(yield* Queue.take(delivered), "snapshot");
+    return { live, delivered };
+  });
+
+  it.effect("schedules no timer while no frame is held", () =>
+    withRecordedSleeps((sleeps) =>
+      Effect.gen(function* () {
+        const { live, delivered } = yield* startThreadFeed;
+        yield* TestClock.adjust("10 seconds");
+        yield* settle;
+        assert.deepEqual(sleeps, []);
+
+        // A frame that is never held passes straight through and arms nothing.
+        yield* PubSub.publish(live, makeThreadMessageEvent(11, threadId));
+        assert.equal(yield* Queue.take(delivered), 11);
+        yield* TestClock.adjust("10 seconds");
+        yield* settle;
+        assert.deepEqual(sleeps, []);
+        assert.equal(yield* Queue.size(delivered), 0);
+      }),
+    ),
+  );
+
+  it.effect("flushes a held frame once, when its window elapses", () =>
+    withRecordedSleeps((sleeps) =>
+      Effect.gen(function* () {
+        const { live, delivered } = yield* startThreadFeed;
+        yield* PubSub.publish(live, makeLargeActivityEvent(11, threadId, 0, "shared"));
+        yield* settle;
+        assert.deepEqual(sleeps, [windowMs]);
+
+        yield* TestClock.adjust(windowMs - 1);
+        yield* settle;
+        assert.equal(yield* Queue.size(delivered), 0);
+        yield* TestClock.adjust(1);
+        assert.equal(yield* Queue.take(delivered), 11);
+
+        // The flush is spent: nothing wakes the feed again until another frame is held.
+        yield* TestClock.adjust("10 seconds");
+        yield* settle;
+        assert.equal(yield* Queue.size(delivered), 0);
+        assert.deepEqual(sleeps, [windowMs]);
+      }),
+    ),
+  );
+
+  it.effect("arms a new flush for a frame held after the previous flush fired", () =>
+    withRecordedSleeps((sleeps) =>
+      Effect.gen(function* () {
+        const { live, delivered } = yield* startThreadFeed;
+        yield* PubSub.publish(live, makeLargeActivityEvent(11, threadId, 0, "shared"));
+        yield* settle;
+        yield* TestClock.adjust(windowMs);
+        assert.equal(yield* Queue.take(delivered), 11);
+
+        yield* PubSub.publish(live, makeLargeActivityEvent(12, threadId, 0, "shared"));
+        yield* settle;
+        assert.deepEqual(sleeps, [windowMs, windowMs]);
+        yield* TestClock.adjust(windowMs);
+        assert.equal(yield* Queue.take(delivered), 12);
+      }),
+    ),
+  );
+
+  it.effect("shares one pending flush across frames and keeps sequence order", () =>
+    withRecordedSleeps((sleeps) =>
+      Effect.gen(function* () {
+        const { live, delivered } = yield* startThreadFeed;
+        yield* PubSub.publish(live, makeLargeActivityEvent(11, threadId, 0, "first"));
+        yield* PubSub.publish(live, makeLargeActivityEvent(12, threadId, 0, "second"));
+        yield* settle;
+        assert.deepEqual(sleeps, [windowMs]);
+        assert.equal(yield* Queue.size(delivered), 0);
+
+        // A frame that is never held releases the held ones first, without the timer.
+        yield* PubSub.publish(live, makeThreadMessageEvent(13, threadId));
+        assert.deepEqual(
+          [
+            yield* Queue.take(delivered),
+            yield* Queue.take(delivered),
+            yield* Queue.take(delivered),
+          ],
+          [11, 12, 13],
+        );
+
+        // The timer still fires, finds nothing held, and delivers nothing twice.
+        yield* TestClock.adjust("10 seconds");
+        yield* settle;
+        assert.equal(yield* Queue.size(delivered), 0);
+        assert.deepEqual(sleeps, [windowMs]);
+      }),
+    ),
+  );
+});
+
 const makeLargeActivityEvent = (
   sequence: number,
   threadId: ThreadId,
   payloadChars: number,
+  /** Frames sharing an activity key replace one another when coalesced. */
+  activityKey: string | number = sequence,
 ): OrchestrationEvent => ({
   sequence,
   eventId: EventId.make(`event-large-${sequence}`),
@@ -288,7 +435,7 @@ const makeLargeActivityEvent = (
   payload: {
     threadId,
     activity: {
-      id: EventId.make(`task-progress:${threadId}:task-${sequence}`),
+      id: EventId.make(`task-progress:${threadId}:task-${activityKey}`),
       tone: "info",
       kind: "task.progress",
       summary: "Reasoning update",

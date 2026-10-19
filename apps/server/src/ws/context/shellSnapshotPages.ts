@@ -9,6 +9,20 @@ import type {
 import { ORCHESTRATION_SHELL_SNAPSHOT_PAGE_MAX_BYTES } from "./constants.ts";
 
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+// Thread shells are not modified once a read has built them, and a snapshot
+// shared by several subscribers hands each the same objects, so a shell is
+// measured once, not once per delivery.
+const entryBytes = new WeakMap<object, number>();
+const entryJsonBytes = (entry: OrchestrationThreadShell | OrchestrationArchivedThreadStub) => {
+  let bytes = entryBytes.get(entry);
+  if (bytes === undefined) {
+    bytes = jsonBytes(entry);
+    entryBytes.set(entry, bytes);
+  }
+  return bytes;
+};
+
 // The JSON around the threads of one message: the page wrapper, the end marker
 // and the separators, with room to spare.
 const PAGE_FRAMING_BYTES = 128;
@@ -80,7 +94,7 @@ export const pageShellSnapshot = (
   };
   const addThreads = (threads: ReadonlyArray<OrchestrationThreadShell>) => {
     for (const thread of threads) {
-      fit(jsonBytes(thread) + 1);
+      fit(entryJsonBytes(thread) + 1);
       page.push(thread);
     }
   };
@@ -92,7 +106,7 @@ export const pageShellSnapshot = (
       messageBytes += PAGE_FRAMING_BYTES / 2;
     }
     for (const thread of threads) {
-      fit(jsonBytes(thread) + 1);
+      fit(entryJsonBytes(thread) + 1);
       stubPage.push(thread);
     }
   };
