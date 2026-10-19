@@ -198,6 +198,73 @@ restoration uses the authoritative hosted recovery path.
 Tabs do not share tickets, sockets, queues, reconnect timers, or store instances. Closing a hosted
 channel cannot close direct clients or another tab.
 
+### Retained environment sessions
+
+A client can keep several node sessions alive side by side instead of one session for the selected
+node. The hosted lifecycle owner stays the same single owner; the session state moves into one
+record per environment.
+
+- **Records and fencing.** Each environment's record carries its own transport status, session
+  status, role, failure, and snapshot. Every record generation is drawn from one monotonic counter
+  shared by all environments, and every relay callback names the environment and generation it
+  belongs to, so a stale connection can never publish readiness, a role, a snapshot, or mutation
+  authority into another generation's or another environment's record. Each environment's connect,
+  release, and suspension run on that environment's own queue and name the generation they act
+  for: nothing of one environment ever waits for another.
+- **Selection is a cursor.** Selecting a node moves the selection and the shared session fields,
+  which show the selected record, and nothing else. It never opens a connection. Connections are
+  created only when the platform's bounded demand executor acquires an environment, so the
+  executor's connection ceiling is the only place a slot is granted; a routed environment it cannot
+  admit stays queued and is shown as such. The browser never selects a node that requires a native
+  client.
+- **Adopt, join, restart.** Acquiring an environment adopts its session when that session completed
+  its own fresh relay attempt and accepted its own current shell snapshot and has not been
+  suspended or interrupted since; selecting it then shows it ready at once, without a network
+  request. An acquisition joins a connection already requested for the record's generation, so a
+  press followed by a click buys one attempt. A terminal failure refuses it until the node's
+  directory entry changes or the user retries. Anything else starts over with a fresh generation, a
+  fresh relay attempt, and a fresh snapshot. Selecting an environment whose session can be neither
+  adopted nor joined starts it over in the same way. A connect that waited behind the
+  environment's own release or suspension opens nothing once a withdrawal, a sign-out, or anything
+  else has replaced its generation.
+- **Suspension and withdrawal.** Page freeze, page hide, going offline, and backgrounding suspend
+  every record, not only the selected one: each takes a fresh generation and none stays adoptable.
+  A second suspension before a resume (hidden, then offline) leaves the records already suspended
+  alone. Revoking native account authorization withdraws every record's role and session before
+  the call returns, ahead of any asynchronous channel teardown. A terminal failure of the account's
+  Hub session reaches every record.
+- **Resume.** No record keeps its authority across a resume: one that no suspension reached, as
+  after a rotated Hub session, is suspended when the resume starts. Resuming revalidates the Hub
+  session and the authorized directory first. Only then does the platform re-plan its connections —
+  the selected environment first, the others staggered — and each suspended record regains
+  authority only through its own fresh attempt and snapshot.
+- **Refused acquisitions.** The demand executor holds back an environment whose acquisition was
+  refused. One refused only for a cause that passes — the account not yet restored, the browser not
+  yet revalidated, the directory not current (before its first load the directory knows no node at
+  all), or its generation replaced during the call — is re-planned once, when a resume succeeds or
+  when the directory becomes current, its first load included, while the browser is revalidated;
+  if it is refused again, it waits for the next such recovery. The node is looked up in the
+  directory current by then: a recovery never re-plans one whose node is gone, revoked, or requires
+  a native client, nor one a terminal failure blocks (that waits for its directory entry to change
+  or for a retry), nor anything refused before signing out or for another account.
+- **Readiness per record.** An environment admits requests once the browser is revalidated and its
+  own session is current. While the selected environment is still synchronizing the browser reports
+  `synchronizing`, which never holds back another environment whose own session is ready; a slow or
+  offline selection does not trigger a fresh access check on every foreground signal either.
+- **Release.** The demand executor releases environments; returning to the node directory releases
+  nothing. A directory refresh releases every environment whose node is gone, revoked, or (in the
+  browser) requires a native client, without waiting for those releases, and leaves the selection
+  when it is one of them. Releasing an environment ends the commands waiting to replay there and
+  clears only that environment's node-scoped state — its queries, project, git, and checkpoint-diff
+  caches, its encryption projection, and its config entry — unless a newer session of the same
+  environment has already started. Signing out or an expired Hub session releases every environment
+  and always clears that state, so no account's cached state reaches the next session; it never
+  waits for those releases, and an expired session's explanation is never published onto a session
+  that signed in meanwhile.
+
+No client enables retained environment sessions yet: every client still runs one session for the
+selected node.
+
 ## Stable node routes
 
 The owning node is a stable URL segment: hosted browser URLs take the shape

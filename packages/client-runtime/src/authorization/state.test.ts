@@ -41,6 +41,7 @@ const { activateHostedNode, deactivateHostedNode, suspendHostedNode, resetRelayA
 vi.mock("./environment", () => ({ activateHostedNode, deactivateHostedNode, suspendHostedNode }));
 
 import { HostedHubApiError, STEP_UP_REQUIRED_CODE, type HostedHubApi } from "./api.ts";
+import { HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS } from "./hostedEnvironmentSessions.ts";
 import {
   configureHostedRuntime,
   type HostedNodeLifecycle,
@@ -62,6 +63,7 @@ import {
   hostedHubStore,
   hostedRecoveryCodeDisplayStore,
   HOSTED_SESSION_REVALIDATION_INTERVAL_MS,
+  HOSTED_SESSION_SYNC_DEADLINE_MS,
   markHostedSessionReady,
 } from "./state.ts";
 
@@ -804,6 +806,43 @@ describe("hosted account state", () => {
       accountStatus: "session-expired",
       effectiveRole: null,
       selectedNode: null,
+    });
+  });
+
+  it("keeps an expired session's error off a session that signed in during its teardown", async () => {
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([node()]);
+    await hostedHubController.bootstrap();
+    await hostedHubController.selectNode(node().id);
+    let finishTeardown: () => void = () => undefined;
+    deactivateHostedNode.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishTeardown = resolve;
+        }),
+    );
+
+    const expiring = hostedHubController.expireSession(
+      new HostedHubApiError(
+        "session_invalid",
+        401,
+        undefined,
+        undefined,
+        undefined,
+        "token-invalidated",
+      ),
+    );
+    expect(hostedHubStore.getState().accountStatus).toBe("session-expired");
+    await hostedHubController.bootstrap();
+    expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+
+    finishTeardown();
+    await expiring;
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      errorMessage: null,
+      errorReason: null,
     });
   });
 
@@ -4508,6 +4547,63 @@ describe("relay-triggered session revalidation", () => {
     expect(hostedHubStore.getState()).toMatchObject({
       accountStatus: "authenticated",
       generation: 7,
+    });
+  });
+});
+
+describe("single environment session mode", () => {
+  it("synchronizes the selected session within the environment sessions' deadline", () => {
+    expect(HOSTED_SESSION_SYNC_DEADLINE_MS).toBe(HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS);
+  });
+
+  it("fails the selected session on a terminal Hub session failure", () => {
+    const selected = node();
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "synchronizing",
+      nodes: [selected],
+      selectedNode: selected,
+      selectionStatus: "online",
+      effectiveRole: selected.effectiveRole,
+      transportStatus: "connecting",
+      sessionStatus: "synchronizing",
+      generation: 5,
+    });
+
+    hostedHubController.reportHubSessionFailure({ kind: "authentication", retryable: false });
+
+    expect(hostedHubStore.getState()).toMatchObject({
+      browserStatus: "current",
+      effectiveRole: null,
+      transportStatus: "terminal-failure",
+      sessionStatus: "stale",
+      errorMessage: "The relay authentication attempt expired or was rejected.",
+    });
+  });
+
+  it("connects by selecting the node and releases by returning to the directory", async () => {
+    const first = node();
+    const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
+    hostedHubStore.setState({
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      nodes: [first, second],
+    });
+
+    expect(await hostedHubController.acquireEnvironment(first.id)).toBe("connecting");
+    expect(activateHostedNode).toHaveBeenCalledWith(first, null);
+    expect(hostedHubStore.getState().selectedNode).toBe(first);
+
+    await hostedHubController.releaseEnvironment(second.environmentId);
+    expect(deactivateHostedNode).not.toHaveBeenCalled();
+
+    await hostedHubController.releaseEnvironment(first.environmentId);
+    expect(deactivateHostedNode).toHaveBeenCalledWith(first.environmentId);
+    expect(hostedHubStore.getState()).toMatchObject({
+      selectedNode: null,
+      selectionStatus: "none",
+      sessionStatus: "closed",
     });
   });
 });

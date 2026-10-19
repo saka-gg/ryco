@@ -6,6 +6,7 @@ import type {
   HostedRelayFailure,
   HostedRelayTransportStatus,
   HostedRycoSessionStatus,
+  HostedSelectionStatus,
 } from "./types.ts";
 
 /**
@@ -91,6 +92,10 @@ export interface HostedEnvironmentRecordOptions {
   readonly access?: boolean | undefined;
 }
 
+export interface HostedEnvironmentSuspendOptions {
+  readonly exceptSuspended?: boolean | undefined;
+}
+
 export interface HostedEnvironmentSessions {
   readonly read: (environmentId: EnvironmentId) => HostedEnvironmentSessionRecord | undefined;
   /** Every record, most recently accessed first. */
@@ -133,8 +138,12 @@ export interface HostedEnvironmentSessions {
    * in flight are ignored, and none stays adoptable. Requests a replaced
    * connection still had in flight leave its environment's delivery uncertain.
    * Returns the replaced generations, whose connections the caller suspends.
+   * `exceptSuspended` leaves a record that is suspended already as it is: no
+   * connection was requested for its generation, so it has none to suspend.
    */
-  readonly suspendAll: () => ReadonlyArray<HostedEnvironmentSuspension>;
+  readonly suspendAll: (
+    options?: HostedEnvironmentSuspendOptions,
+  ) => ReadonlyArray<HostedEnvironmentSuspension>;
   /** {@link suspendAll}, and every record also loses its role and closes its session. */
   readonly withdrawAll: () => ReadonlyArray<HostedEnvironmentSuspension>;
   /** Sign-out: drop every record, timer and uncertain delivery. */
@@ -255,6 +264,75 @@ export function hostedNodeEntryKey(node: HostedHubNode): string {
  */
 export function hostedBrowserRevalidated(status: HostedBrowserStatus): boolean {
   return status === "current" || status === "synchronizing";
+}
+
+/** What the selected environment's session reports as the shared error. */
+export type HostedSelectedSessionError =
+  | { readonly kind: "session-sync" }
+  | { readonly kind: "relay"; readonly failure: HostedRelayFailure };
+
+/** The shared session fields that describe the selected environment. */
+export interface HostedSelectedSessionProjection {
+  readonly transportStatus: HostedRelayTransportStatus;
+  readonly sessionStatus: HostedRycoSessionStatus;
+  readonly sessionEstablished: boolean;
+  readonly sessionRecoveredAfterUnknown: boolean;
+  readonly effectiveRole: RelayEffectiveRole | null;
+  readonly selectionStatus: HostedSelectionStatus;
+  /** `null` also for a spent transfer budget: its reconnect is a routine rotation. */
+  readonly error: HostedSelectedSessionError | null;
+  /**
+   * The session is not established yet and has not failed for good — no
+   * record, suspended, connecting or synchronizing — so a revalidated browser
+   * is still synchronizing the selection.
+   */
+  readonly establishing: boolean;
+}
+
+/**
+ * Project the selected environment's record onto the shared session fields.
+ * Without a record the environment shows what a fresh session would: idle and
+ * synchronizing, or `delivery-unknown` while an earlier action is unconfirmed.
+ * The role needs a current directory; the record's own role wins over the
+ * directory entry's once it has one.
+ */
+export function selectedProjectionFields(
+  record: HostedEnvironmentSessionRecord | undefined,
+  node: HostedHubNode,
+  context: { readonly directoryReady: boolean; readonly deliveryUnknown: boolean },
+): HostedSelectedSessionProjection {
+  const failure = record?.failure ?? null;
+  const selectionStatus: HostedSelectionStatus =
+    failure?.kind === "revoked"
+      ? "revoked"
+      : failure?.kind === "authorization-removed"
+        ? "authorization-removed"
+        : failure?.kind === "incompatible"
+          ? "incompatible"
+          : node.presence.online
+            ? "online"
+            : "offline";
+  return {
+    transportStatus: record?.transportStatus ?? "idle",
+    sessionStatus:
+      record?.sessionStatus ?? (context.deliveryUnknown ? "delivery-unknown" : "synchronizing"),
+    sessionEstablished: record?.sessionEstablished ?? false,
+    sessionRecoveredAfterUnknown: record?.sessionRecoveredAfterUnknown ?? false,
+    effectiveRole: context.directoryReady
+      ? record
+        ? record.effectiveRole
+        : node.effectiveRole
+      : null,
+    selectionStatus,
+    error: record?.syncFailed
+      ? { kind: "session-sync" }
+      : failure === null || (failure.retryable && failure.kind === "budget")
+        ? null
+        : { kind: "relay", failure },
+    establishing:
+      record === undefined ||
+      (!record.sessionEstablished && record.transportStatus !== "terminal-failure"),
+  };
 }
 
 function unchangedRecord(
@@ -388,9 +466,11 @@ export function createHostedEnvironmentSessions(
 
   const replaceGenerations = (
     changes: (current: HostedEnvironmentSessionRecord) => RecordChanges,
+    exceptSuspended = false,
   ): ReadonlyArray<HostedEnvironmentSuspension> => {
     const replaced: HostedEnvironmentSuspension[] = [];
     for (const current of Array.from(records.values())) {
+      if (exceptSuspended && current.suspended) continue;
       clearDeadline(current.environmentId);
       // The caller suspends or tears down the replaced connection next, which
       // drops what it still had in flight, so read its requests first.
@@ -564,7 +644,8 @@ export function createHostedEnvironmentSessions(
       publish();
     },
 
-    suspendAll: () => replaceGenerations(suspendedChanges),
+    suspendAll: (options) =>
+      replaceGenerations(suspendedChanges, options?.exceptSuspended === true),
 
     withdrawAll: () =>
       replaceGenerations((current) => ({

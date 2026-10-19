@@ -115,6 +115,8 @@ const standardHostedHubController: {
   notifyDirectoryInvalidated: ignore,
   watchDirectoryPresence: release,
   selectNode: settled,
+  acquireEnvironment: () => Promise.resolve("refused"),
+  releaseEnvironment: settled,
   returnToDirectory: settled,
   retrySelectedNode: settled,
   transportStatus: ignore,
@@ -128,6 +130,7 @@ const standardHostedHubController: {
   markSessionReady: ignore,
   markSessionReplaying: ignore,
   reportShellSnapshotFailure: ignore,
+  reportHubSessionFailure: ignore,
   acknowledgeDeliveryUnknown: ignore,
 };
 
