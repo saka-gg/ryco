@@ -388,6 +388,9 @@ async function openHostedShellSession(options: {
       revocationReasonCode: null,
     },
     directoryStatus: "ready",
+    // Channels resolve their E2EE attempt for their own node, which must be in
+    // the directory: a selected node always comes from it.
+    nodes: [selectedNode],
     selectedNode,
     selectionStatus: "online",
     effectiveRole: "operator",

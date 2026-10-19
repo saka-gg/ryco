@@ -1,7 +1,13 @@
-import { useSyncExternalStore } from "react";
+import type { EnvironmentId } from "@ryco/contracts";
+import { useCallback, useSyncExternalStore } from "react";
 
 import type { WebHostedE2eeChannelStatus } from "./connectionStatus";
-import { subscribeWebE2eeSession, webE2eeSessionState } from "./e2eeSession";
+import {
+  subscribeWebE2eeSession,
+  subscribeWebE2eeSessionFor,
+  webE2eeSessionState,
+  webE2eeSessionStateFor,
+} from "./e2eeSession";
 
 /**
  * React binding for this tier's §13 channel projection.
@@ -15,7 +21,8 @@ const channelStatus = (): WebHostedE2eeChannelStatus => webE2eeSessionState().st
 
 /**
  * What `docs/relay-e2ee-protocol.md` §4.4 locked on the channel behind this
- * session, for the hosted status derivation.
+ * session, for the hosted status derivation. It is the displayed environment's
+ * channel — the selected node's — and never another node's.
  *
  * EVERY HOSTED STATUS SURFACE TAKES IT, and §12.2 is why: "A client that falls
  * back MUST label the channel **legacy** in every user-facing surface and
@@ -35,10 +42,26 @@ export function useWebE2eeChannelStatus(): WebHostedE2eeChannelStatus {
   return useSyncExternalStore(subscribeWebE2eeSession, channelStatus, channelStatus);
 }
 
+/**
+ * {@link useWebE2eeChannelStatus} for one environment's channel, displayed or
+ * not, for a surface that describes a specific node rather than the selection.
+ */
+export function useWebE2eeChannelStatusFor(
+  environmentId: EnvironmentId,
+): WebHostedE2eeChannelStatus {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeWebE2eeSessionFor(environmentId, listener),
+    [environmentId],
+  );
+  const status = useCallback(() => webE2eeSessionStateFor(environmentId).status, [environmentId]);
+  return useSyncExternalStore(subscribe, status, status);
+}
+
 const verificationCode = (): string | null => webE2eeSessionState().verificationCode;
 
 /**
- * §13.5's rendered code for the current session, or `null`.
+ * §13.5's rendered code for the displayed environment's current session, or
+ * `null`.
  *
  * Narrowed to the one field for the reason {@link useWebE2eeChannelStatus} is:
  * the two change on different events, and a surface drawing the code should not

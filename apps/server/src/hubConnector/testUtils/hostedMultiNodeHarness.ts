@@ -1450,6 +1450,9 @@ export async function createHostedMultiNodeHarness(
         revocationReasonCode: null,
       },
       directoryStatus: "ready",
+      // Channels resolve their E2EE attempt for their own node, which must be
+      // in the directory: a selected node always comes from it.
+      nodes: nodes.map((_, index) => selectedNodeRecord(index)),
       generation,
     });
     cleanups.push(web.watchWebHostedHubSession());
