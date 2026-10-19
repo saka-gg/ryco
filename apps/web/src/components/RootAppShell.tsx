@@ -19,7 +19,10 @@ import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
-import { WebSocketConnectionCoordinator } from "./WebSocketConnectionSurface";
+import {
+  WebSocketConnectionCoordinator,
+  type ConnectionRecoveryOwner,
+} from "./WebSocketConnectionSurface";
 import { AnchoredToastProvider, ToastProvider } from "./ui/toast";
 import { getPresentationTier } from "../lib/presentationTier";
 import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
@@ -31,6 +34,7 @@ import {
 import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
 import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
+import { isHostedHubMode } from "../env";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -68,9 +72,42 @@ export interface RootAppShellProps {
   };
 }
 
+type ShellGateStatus = RootAppShellProps["authGateState"]["status"];
+
+/** Workspace owners a gate state can opt into beyond what its authentication already mounts. */
+type ShellOwner = "serverStateBootstrap" | "messageQueueDrain";
+
+/**
+ * The owners a hosted-cached shell runs. The shell stays mounted through an
+ * in-app node switch and shows last-known data read-only, so the config
+ * projection and the follow-up queue keep working across it; the queue only
+ * dispatches through the capability-gated send path. Every other owner stays
+ * off, because a cached view owns no connection lifecycle.
+ */
+const HOSTED_CACHED_OWNERS: ReadonlySet<ShellOwner> = new Set([
+  "serverStateBootstrap",
+  "messageQueueDrain",
+]);
+
+function hostedCachedRunsOwner(status: ShellGateStatus, owner: ShellOwner): boolean {
+  return status === "hosted-cached" && HOSTED_CACHED_OWNERS.has(owner);
+}
+
+/**
+ * Who recovers the primary connection for a gate state, or `null` for none.
+ * Hosted builds only ever use the hosted lifecycle's owner: the generic one
+ * reconnects by itself and would race it.
+ */
+function connectionRecoveryOwner(status: ShellGateStatus): ConnectionRecoveryOwner | null {
+  if (status === "hosted-hub") return "hosted-lifecycle";
+  if (status === "authenticated") return isHostedHubMode() ? "hosted-lifecycle" : "generic";
+  return null;
+}
+
 export function RootAppShell({ authGateState }: RootAppShellProps) {
   const primaryEnvironmentAuthenticated =
     authGateState.status === "authenticated" || authGateState.status === "hosted-hub";
+  const recoveryOwner = connectionRecoveryOwner(authGateState.status);
   // Every state with chat routes can queue, including hosted-static, which sends
   // to saved environments; readiness is per environment.
   const chatAvailable = primaryEnvironmentAuthenticated || authGateState.status === "hosted-static";
@@ -91,10 +128,15 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
       <AnchoredToastProvider>
         {localTracingAllowed ? <AuthenticatedTracingBootstrap /> : null}
         {authGateState.status === "authenticated" ? <OnboardingCoordinator /> : null}
-        {primaryEnvironmentAuthenticated ? <ServerStateBootstrap /> : null}
+        {primaryEnvironmentAuthenticated ||
+        hostedCachedRunsOwner(authGateState.status, "serverStateBootstrap") ? (
+          <ServerStateBootstrap />
+        ) : null}
         <EnvironmentConnectionManagerBootstrap />
         {primaryEnvironmentAuthenticated ? <ThreadPriorityRefreshBridge /> : null}
-        {chatAvailable ? <MessageQueueDrainBridge /> : null}
+        {chatAvailable || hostedCachedRunsOwner(authGateState.status, "messageQueueDrain") ? (
+          <MessageQueueDrainBridge />
+        ) : null}
         <ContextMenuActionSheetHost />
         <SshPasswordPromptDialog />
         <WorkspaceReviewDialog />
@@ -107,11 +149,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
-        {primaryEnvironmentAuthenticated ? (
-          <WebSocketConnectionCoordinator
-            recoveryOwner={authGateState.status === "hosted-hub" ? "hosted-lifecycle" : "generic"}
-          />
-        ) : null}
+        {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
         {appShell}
       </AnchoredToastProvider>
@@ -226,7 +264,8 @@ function ShellIdlePreloads({
 }
 
 function RoleAwareProviderUpdateLaunchNotification() {
-  const capability = useHostedRpcCapability(WS_METHODS.serverUpdateProvider);
+  // hosted-capability: routed node
+  const capability = useHostedRpcCapability(WS_METHODS.serverUpdateProvider, null);
   return capability.allowed ? <ProviderUpdateLaunchNotification /> : null;
 }
 

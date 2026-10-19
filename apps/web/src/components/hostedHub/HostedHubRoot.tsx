@@ -5,6 +5,7 @@ import {
 import { DeviceIcon } from "../DeviceIcon";
 import { useNavigate } from "@tanstack/react-router";
 import { hostedHubFailureExplanation } from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import type { ExternalIdentityPendingResponse } from "@ryco/contracts/hosted-identity";
 import {
   ChevronDownIcon,
@@ -82,7 +83,12 @@ import type { HostedHubNode } from "../../hostedHub/types";
 import { useHostedWorkspaceOwners } from "../../hostedHub/hostedWorkspaceOwners";
 import { hostedNodeRequiresNativeClient } from "../../hostedHub/hostedConnectionCoordinator";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { selectThreadExistsByRef, useStore } from "../../store";
+import {
+  selectEnvironmentState,
+  selectThreadExistsByRef,
+  useStore,
+  type AppState,
+} from "../../store";
 import { PHONE_ANCHORED_ACTIONS_CLASS_NAME } from "../mobile/phoneAnchoredActions";
 import { GitHubIcon } from "../Icons";
 import {
@@ -182,6 +188,15 @@ function useHubDocumentTitle(): void {
   }, [route]);
 }
 
+/**
+ * Whether the store holds a shell for the environment to show: a live snapshot,
+ * or rows restored from a cache (which are presented as last-known state).
+ */
+function selectEnvironmentHasShell(state: AppState, environmentId: EnvironmentId | null): boolean {
+  const environment = selectEnvironmentState(state, environmentId);
+  return environment.bootstrapComplete || environment.hydratedFromCacheAt !== undefined;
+}
+
 export function HostedHubRoot() {
   const readCache = useHostedReadCache();
   const directoryNodes = useHostedHubStore((state) => state.nodes);
@@ -205,6 +220,20 @@ export function HostedHubRoot() {
   );
   const hasCachedRoutedThread = useStore(
     useMemo(() => (state) => selectThreadExistsByRef(state, routedThreadRef), [routedThreadRef]),
+  );
+  const browserStatus = useHostedHubStore((state) => state.browserStatus);
+  const routedDirectoryNode = useMemo(
+    () =>
+      routedNode.nodeId === null
+        ? null
+        : (directoryNodes.find((node) => node.id === routedNode.nodeId) ?? null),
+    [directoryNodes, routedNode.nodeId],
+  );
+  const routedEnvironmentHasShell = useStore(
+    useMemo(
+      () => (state) => selectEnvironmentHasShell(state, routedDirectoryNode?.environmentId ?? null),
+      [routedDirectoryNode?.environmentId],
+    ),
   );
   const routeNotice = useHostedNodeRouteNotice();
   // The routed-node orchestrator, the workspace coordinator and the single
@@ -246,21 +275,24 @@ export function HostedHubRoot() {
   }
 
   // No shell: there is no account to configure yet.
+  const routedSelectionTerminal =
+    selectedNode?.id === routedNode.nodeId &&
+    (selectionStatus === "revoked" ||
+      selectionStatus === "authorization-removed" ||
+      selectionStatus === "incompatible");
+  // The directory lists the routed node as one this browser may open, and for a
+  // thread route it owns the thread's environment.
+  const routedNodeOpenable =
+    routedDirectoryNode !== null &&
+    !routedSelectionTerminal &&
+    routedDirectoryNode.revokedAt === null &&
+    !routedDirectoryNode.capabilities?.nativeClientRequired &&
+    (routedThreadRef === null ||
+      routedDirectoryNode.environmentId === routedThreadRef.environmentId);
   const cachedNodeMatchesRoute =
     routedThreadRef !== null &&
-    !(
-      selectedNode?.id === routedNode.nodeId &&
-      (selectionStatus === "revoked" ||
-        selectionStatus === "authorization-removed" ||
-        selectionStatus === "incompatible")
-    ) &&
-    (directoryNodes.some(
-      (node) =>
-        node.id === routedNode.nodeId &&
-        node.environmentId === routedThreadRef.environmentId &&
-        node.revokedAt === null &&
-        !node.capabilities?.nativeClientRequired,
-    ) ||
+    !routedSelectionTerminal &&
+    (routedNodeOpenable ||
       (directoryStatus !== "ready" &&
         canShowHostedReadPreview() &&
         readCache.nodes.some(
@@ -269,6 +301,12 @@ export function HostedHubRoot() {
             node.environmentId === routedThreadRef.environmentId,
         )));
   const canReadCachedRoute = hasCachedRoutedThread && cachedNodeMatchesRoute;
+  // An in-app switch: access was already checked for this browser lifecycle
+  // (`current`), so any route of a listed node can open on the shell the store
+  // already holds for its environment while the relay session is established.
+  // Cold boot and resume never qualify before that check completes.
+  const canOpenRoutedNodeInShell =
+    routedNodeOpenable && browserStatus === "current" && routedEnvironmentHasShell;
   const canReadPendingDraft =
     draftTarget !== null &&
     routedNode.logicalPathname === `/draft/${encodeURIComponent(draftTarget.draftId)}` &&
@@ -326,8 +364,16 @@ export function HostedHubRoot() {
   // render another environment merely because it remains the compatibility
   // `selectedNode` while the scoped coordinator switches targets.
   if (!selectedNode || selectedNode.id !== routedNode.nodeId) {
-    if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
-    return <HostedNodeRestoringSurface />;
+    if (canReadCachedRoute || canOpenRoutedNodeInShell) {
+      return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
+    }
+    // Access was checked and the node validated, so it only waits for its
+    // session: name it instead of repeating the access-check copy.
+    return (
+      <HostedNodeRestoringSurface
+        opening={browserStatus === "current" && routedNodeOpenable ? routedDirectoryNode : null}
+      />
+    );
   }
   if (transportStatus === "terminal-failure") {
     if (canReadCachedRoute) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
@@ -335,10 +381,11 @@ export function HostedHubRoot() {
   }
   if (!sessionEstablished) {
     // The routed target has already passed the fail-closed node/environment
-    // validation above. When its exact thread is cached, keep the workspace
+    // validation above. When its exact thread is cached, or the store already
+    // holds a shell for its environment on an in-app switch, keep the workspace
     // mounted read-only while the fresh relay channel synchronizes instead of
-    // replacing the whole route with the three-second connection surface.
-    if (hasCachedRoutedThread) {
+    // replacing the whole route with a full-page connection surface.
+    if (hasCachedRoutedThread || canOpenRoutedNodeInShell) {
       return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
     }
     return <HostedNodeStartingSurface node={selectedNode} />;
@@ -495,7 +542,7 @@ function HubStatus({
   );
 }
 
-function HostedNodeRestoringSurface() {
+function HostedNodeRestoringSurface({ opening }: { readonly opening: HostedHubNode | null }) {
   // Validation stays fail-closed. A pending draft switch can return to its
   // source through the same route orchestrator that owns the reconcile.
   return (
@@ -506,7 +553,7 @@ function HostedNodeRestoringSurface() {
       >
         <p role="status" aria-live="polite" className="text-muted-foreground text-sm">
           <InlineProgress />
-          Checking your access before reconnecting…
+          {opening ? `Opening ${opening.label}…` : "Checking your access before reconnecting…"}
         </p>
         <HostedDraftSwitchCancel />
       </HubStatus>

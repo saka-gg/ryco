@@ -57,6 +57,11 @@ import { E2EE_WEB_SAS_DETAIL } from "./HostedE2eeVerification.logic";
 import { resetWebE2eeSession } from "../../hostedHub/e2eeSession";
 import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
 import { resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
+import {
+  installHostedNodeHistory,
+  resetHostedNodeRoutesForTests,
+} from "../../hostedHub/nodeRoutes";
+import { createFakeHistoryWindow } from "../../../test/fakeHistoryWindow";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { getPresentationTier, syncDocumentPresentationTier } from "../../lib/presentationTier";
@@ -166,6 +171,12 @@ function computedAlpha(color: string): number {
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
+/** Puts the address on a node route, as an in-app switch does before the selection follows. */
+function routeTo(node: HostedHubNode) {
+  const fakeWindow = createFakeHistoryWindow(`/node/${node.id}/`);
+  installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
+}
+
 describe("hosted connection controls", () => {
   beforeAll(() => {
     syncDocumentPresentationTier();
@@ -184,6 +195,7 @@ describe("hosted connection controls", () => {
     mounted = null;
     hostedHubController.resetForTests();
     resetHubRoutesForTests();
+    resetHostedNodeRoutesForTests();
     useSettingsDialogStore.setState({ open: false, section: "general" });
     resetPrimaryEnvironmentDescriptorForTests();
     // The §13 projection is module state, not store state, so
@@ -294,7 +306,7 @@ describe("hosted connection controls", () => {
       .mockResolvedValue();
     mounted = await render(<HostedNodeMenu />);
 
-    await page.getByText("Unavailable", { exact: true }).click();
+    await page.getByText("Connecting…", { exact: true }).click();
     await page.getByRole("button", { name: "All nodes" }).click();
     // No hosted history is installed in this suite, so the control falls back
     // to the router navigation plus the controller primitive.
@@ -313,7 +325,7 @@ describe("hosted connection controls", () => {
     useHostedHubStore.setState({ transportStatus: "reconnecting", sessionStatus: "stale" });
     mounted = await render(<HostedNodeMenu />);
 
-    await page.getByText("Unavailable", { exact: true }).click();
+    await page.getByText("Connecting…", { exact: true }).click();
     const disclosure = document.querySelector<HTMLDetailsElement>("details");
     expect(disclosure, "no desktop menu rendered").not.toBeNull();
     expect(disclosure!.open, "the menu did not open, so this proves nothing").toBe(true);
@@ -446,12 +458,22 @@ describe("hosted connection controls", () => {
     expect(region!.textContent).toContain("Online");
 
     // Every derived status change re-renders the region content, which is
-    // what triggers a live-region announcement.
+    // what triggers a live-region announcement. A reconnect that is merely
+    // under way is one quiet word; the same drop with an error behind it is not.
     useHostedHubStore.setState({ transportStatus: "reconnecting" });
+    await vi.waitFor(() => {
+      expect(announcer()!.textContent).toContain("Connecting…");
+    });
+    expect(announcer()!.textContent).not.toContain("Unavailable");
+    useHostedHubStore.setState({ errorMessage: "The relay connection dropped." });
     await vi.waitFor(() => {
       expect(announcer()!.textContent).toContain("Unavailable");
     });
-    useHostedHubStore.setState({ browserStatus: "synchronizing" });
+    useHostedHubStore.setState({
+      errorMessage: null,
+      transportStatus: "online",
+      browserStatus: "synchronizing",
+    });
     await vi.waitFor(() => {
       expect(announcer()!.textContent).toContain("Synchronizing");
     });
@@ -593,6 +615,160 @@ describe("hosted connection controls", () => {
     expect(rendered.size, "two states rendered the same collapsed label").toBe(
       representatives.size,
     );
+  });
+
+  it("says Connecting… and never a transport step on any surface while a connection is established", async () => {
+    await page.viewport(390, 844);
+    seedConnectedState();
+    mounted = await render(
+      <>
+        <HostedNodeMenu />
+        <HostedConnectionPill />
+      </>,
+    );
+    const summary = () => document.querySelector<HTMLElement>("details > summary")!;
+    const statusPart = () =>
+      document.querySelector<HTMLElement>('[data-slot="mobile-status-chip-status"]')!;
+    const pill = () =>
+      document.querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]')!;
+
+    for (const transportStatus of [
+      "idle",
+      "requesting-ticket",
+      "connecting",
+      "authenticating",
+      "opening-channel",
+      "reconnecting",
+    ] as const) {
+      useHostedHubStore.setState({
+        transportStatus,
+        sessionStatus: "synchronizing",
+        selectionStatus: "online",
+        browserStatus: "current",
+      });
+      await vi.waitFor(() => {
+        expect(statusPart().textContent, transportStatus).toBe("Connecting");
+      });
+      expect(summary().textContent, transportStatus).toContain("Connecting…");
+      expect(pill().getAttribute("aria-label"), transportStatus).toContain("Connecting…");
+      const spoken = `${summary().textContent} ${pill().getAttribute("aria-label")}`;
+      for (const rawWord of [
+        "ticket",
+        "authenticating",
+        "opening channel",
+        "idle",
+        "Unavailable",
+      ]) {
+        expect(spoken, `${transportStatus} leaked "${rawWord}"`).not.toContain(rawWord);
+      }
+    }
+  });
+
+  it("names the node the route is opening instead of the one still selected", async () => {
+    seedConnectedState();
+    routeTo(otherNode);
+    mounted = await render(<HostedNodeMenu />);
+    const summary = () => document.querySelector<HTMLElement>("details > summary")!.textContent!;
+
+    await vi.waitFor(() => {
+      expect(summary()).toContain(otherNode.label);
+    });
+    expect(summary()).toContain("Connecting…");
+    expect(summary()).not.toContain(selectedNode.label);
+    expect(document.body.textContent).not.toContain("Saved view");
+    expect(document.body.textContent).not.toContain("Reconnecting");
+
+    // The switch can be listed from the other node's menu: the node the chip
+    // names is not offered as a destination, the one being left is.
+    const disclosure = document.querySelector<HTMLDetailsElement>("details")!;
+    disclosure.open = true;
+    const destinations = [...disclosure.querySelectorAll<HTMLElement>("button")].map(
+      (button) => button.textContent ?? "",
+    );
+    expect(destinations.some((text) => text.includes(selectedNode.label))).toBe(true);
+    expect(destinations.some((text) => text.includes(otherNode.label))).toBe(false);
+
+    // The selection catching up with the route changes nothing the reader sees.
+    useHostedHubStore.setState({
+      selectedNode: otherNode,
+      selectionStatus: "online",
+      transportStatus: "authenticating",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+    });
+    await vi.waitFor(() => {
+      expect(summary()).toContain(otherNode.label);
+    });
+    expect(summary()).toContain("Connecting…");
+    useHostedHubStore.setState({
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    await vi.waitFor(() => {
+      expect(summary()).toContain("Online");
+    });
+    expect(summary()).toContain(otherNode.label);
+  });
+
+  it.each([
+    ["the phone pill", "pill"],
+    ["the phone connection sheet", "sheet"],
+  ] as const)("names the opening node on %s with no node selected yet", async (_name, surface) => {
+    await page.viewport(390, 844);
+    seedConnectedState();
+    useHostedHubStore.setState({
+      selectedNode: null,
+      selectionStatus: "none",
+      transportStatus: "idle",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      effectiveRole: null,
+    });
+    routeTo(otherNode);
+    mounted = await render(
+      surface === "pill" ? (
+        <HostedConnectionPill />
+      ) : (
+        <HostedConnectionSheet open onOpenChange={() => undefined} />
+      ),
+    );
+
+    // The header names the target; the node left behind is only a destination
+    // in the sheet's list. The collapsed pill names its node in its accessible
+    // label.
+    const heading = () => {
+      const pill = document.querySelector<HTMLElement>('[data-testid="hosted-connection-pill"]');
+      return surface === "pill"
+        ? (pill?.getAttribute("aria-label") ?? "")
+        : (document.querySelector<HTMLElement>('[data-slot="mobile-sheet-header"]')?.textContent ??
+            "");
+    };
+    await vi.waitFor(() => {
+      expect(heading()).toContain(otherNode.label);
+    });
+    expect(heading()).toContain("Connecting…");
+    expect(heading()).not.toContain(selectedNode.label);
+    expect(document.body.textContent).not.toContain("Saved view");
+    if (surface === "pill") {
+      expect(heading()).toBe(`Connection: ${otherNode.label}, Connecting…`);
+    }
+  });
+
+  it("does not call a problem a switch", async () => {
+    // The route names another node, but the browser is not current: the chip
+    // keeps describing the selection, with the honest word for that state.
+    seedConnectedState();
+    useHostedHubStore.setState({ browserStatus: "stale" });
+    routeTo(otherNode);
+    mounted = await render(<HostedNodeMenu />);
+    const summary = () => document.querySelector<HTMLElement>("details > summary")!.textContent!;
+
+    await vi.waitFor(() => {
+      expect(summary()).toContain("Stale");
+    });
+    expect(summary()).toContain(selectedNode.label);
+    expect(summary()).not.toContain("Connecting");
   });
 
   it("never shows a connected glyph while the ryco session is not ready", async () => {

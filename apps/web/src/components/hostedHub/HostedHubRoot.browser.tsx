@@ -44,6 +44,7 @@ import {
 } from "../../hostedHub/hubRoutes";
 import { hostedHubApi, HostedHubApiError } from "../../hostedHub/api";
 import type { HostedHubNode } from "../../hostedHub/types";
+import { selectEnvironmentState, useStore } from "../../store";
 import { HostedHubRoot, HostedNodeMenu } from "./HostedHubRoot";
 import { preloadHostedRootAppShell } from "./hostedRootAppShell";
 import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
@@ -122,6 +123,7 @@ beforeEach(() => {
   // case would render this one's disclosure at the wrong claim.
   resetWebE2eeSession();
   navigate.mockClear();
+  useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   navigateHub({ kind: "nodes" }, { replace: true });
   vi.spyOn(hostedHubApi, "getPublicSignupConfiguration").mockResolvedValue({
     status: "disabled",
@@ -815,6 +817,8 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
   });
 
   it("keeps the node session UI unmounted until the initial snapshot is ready", async () => {
+    // The store holds nothing for this node yet, so there is no shell to keep on
+    // screen and the page says it is connecting.
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
     installHostedNodeHistory();
@@ -833,6 +837,63 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       .element(page.getByRole("heading", { name: `Connecting to ${selectedNode.label}` }))
       .toBeVisible();
     await expect.element(page.getByRole("status")).toMatchTextContent(/synchronizing Ryco state/);
+  });
+
+  it("keeps the workspace mounted through a switch to a node the store already has a shell for", async () => {
+    const current = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
+    const target = {
+      ...node("node_bbbbbbbbbbbbbbbbbbbbbb", true, "owner"),
+      label: "Second node",
+    };
+    window.history.replaceState(window.history.state, "", `/node/${target.id}/projects`);
+    installHostedNodeHistory();
+    useStore.setState({
+      activeEnvironmentId: current.environmentId,
+      environmentStateById: {
+        [target.environmentId]: {
+          ...selectEnvironmentState(useStore.getState(), target.environmentId),
+          hydratedFromCacheAt: 1,
+        },
+      },
+    });
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      nodes: [current, target],
+      selectedNode: current,
+      selectionStatus: "online",
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
+      useHostedHubStore.setState({
+        selectedNode: target,
+        sessionStatus: "synchronizing",
+        sessionEstablished: false,
+      });
+    });
+
+    mounted = await render(<HostedHubRoot />);
+
+    const sidebar = () => document.querySelector('[data-slot="sidebar-wrapper"]');
+    await vi.waitFor(() => expect(sidebar()).not.toBeNull());
+    const mountedSidebar = sidebar();
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(target.id));
+    useHostedHubStore.setState({
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+    });
+    await vi.waitFor(() => expect(useHostedHubStore.getState().sessionEstablished).toBe(true));
+
+    // Never a full-page surface, and the very same workspace throughout.
+    await expect
+      .element(page.getByRole("heading", { name: /Connecting to|Restoring your node/ }))
+      .not.toBeInTheDocument();
+    expect(sidebar()).toBe(mountedSidebar);
   });
 
   it("shows a labelled relay failure without mounting the node session UI", async () => {
@@ -1063,6 +1124,9 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       selectionStatus: "online",
       transportStatus: "reconnecting",
       sessionStatus: "stale",
+      // A reconnect with nothing wrong is a quiet "Connecting…"; the dropped
+      // connection the owner has to know about carries an error.
+      errorMessage: "The relay connection dropped.",
     });
     const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
     mounted = await render(<HostedNodeMenu />);
@@ -1101,7 +1165,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       generation: 9,
     });
     mounted = await render(<HostedNodeMenu />);
-    await page.getByText("Synchronizing", { exact: true }).click();
+    await page.getByText("Connecting…", { exact: true }).click();
     const replacementButton = page.getByRole("button", { name: new RegExp(replacement.label) });
     await expect.element(replacementButton).toBeDisabled();
 
