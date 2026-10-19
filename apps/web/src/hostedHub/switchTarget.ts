@@ -103,3 +103,13 @@ export function hostedSyncingCopy(label: string | null | undefined): string {
 export function hostedQueuedCopy(label: string | null | undefined): string {
   return `Waiting for a free connection to ${label || UNNAMED_NODE}…`;
 }
+
+/** When a send that waits for a node's connection goes out. */
+export function hostedSendsWhenReadyCopy(label: string | null | undefined): string {
+  return `Sends when ${label || UNNAMED_NODE} is ready`;
+}
+
+/** Why a queued send cannot go out: the user's role on the node does not allow it. */
+export function hostedRoleRefusesSendCopy(label: string | null | undefined): string {
+  return `Can't send — your role on ${label || UNNAMED_NODE} doesn't allow it`;
+}

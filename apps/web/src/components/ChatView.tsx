@@ -175,7 +175,13 @@ import {
   shouldIgnoreGlobalNavigationShortcut,
   shortcutLabelForCommand,
 } from "../keybindings";
-import { ChevronDownIcon, CircleAlertIcon, TriangleAlertIcon, WifiOffIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CircleAlertIcon,
+  LoaderCircleIcon,
+  TriangleAlertIcon,
+  WifiOffIcon,
+} from "lucide-react";
 import { BackgroundLivenessChip } from "./chat/BackgroundLivenessChip";
 import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
@@ -331,7 +337,7 @@ import {
 } from "../messageQueueDrain";
 import type { QueuedMessage } from "../messageQueue.logic";
 import { deriveComposerFileUploadSendBlock } from "~/composerFileUpload";
-import { ComposerQueuedMessages } from "./chat/ComposerQueuedMessages";
+import { ComposerQueuedMessages, type QueuedMessagesWait } from "./chat/ComposerQueuedMessages";
 import {
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   buildExpiredTerminalContextToastCopy,
@@ -365,6 +371,15 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { createTurnCompletionTracker } from "../lib/turnCompletion.logic";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
 import { useHostedDeliveryNotice, useHostedRpcCapability } from "../hostedHub/capabilities";
+import {
+  hostedCapabilityCopy,
+  hostedQueuedCopy,
+  hostedRoleRefusesSendCopy,
+  hostedSendsWhenReadyCopy,
+  hostedSyncingCopy,
+  useHostedSwitchTarget,
+} from "../hostedHub/switchTarget";
+import { markNodeSwitchPhase } from "../perf/nodeSwitchInstrumentation";
 import {
   loadOlderThreadHistory,
   loadThreadHistoryAroundMessage,
@@ -610,10 +625,6 @@ export default function ChatView(props: ChatViewProps) {
   const paneFocused = usePaneFocus();
   const paneThreadRef = usePaneThreadRef();
   const paneFocusedRef = usePaneFocusRef();
-  const dispatchCapability = useHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand);
-  const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen);
-  const sideChatCapability = useHostedRpcCapability(WS_METHODS.textGenerationAskSideQuestion);
-  const cliProxyHubsCapability = useHostedRpcCapability(WS_METHODS.serverReadCliProxyHubs);
   const {
     environmentId,
     threadId,
@@ -627,6 +638,34 @@ export default function ChatView(props: ChatViewProps) {
     reserveTitleBarControlInset = true,
   } = props;
   const draftId = routeKind === "draft" ? props.draftId : null;
+  const dispatchCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    environmentId,
+  );
+  const terminalCapability = useHostedRpcCapability(WS_METHODS.terminalOpen, environmentId);
+  const sideChatCapability = useHostedRpcCapability(
+    WS_METHODS.textGenerationAskSideQuestion,
+    environmentId,
+  );
+  const cliProxyHubsCapability = useHostedRpcCapability(
+    WS_METHODS.serverReadCliProxyHubs,
+    environmentId,
+  );
+  const hostedSwitchTarget = useHostedSwitchTarget(environmentId);
+  // A connection on its way (a node switch) still takes a plain send: it waits
+  // in the queue and goes out once the node is ready. Every other refusal
+  // (stale authorization, the role, an unconfirmed delivery) stops it.
+  const dispatchEstablishing = dispatchCapability.kind === "establishing";
+  // Stop, answers, approvals, steering, reverts and plan follow-ups reach the
+  // node at once or not at all: while the connection is not ready they are
+  // refused with this reason and never held for later.
+  const mutationUnavailableReason = dispatchCapability.allowed
+    ? null
+    : (hostedCapabilityCopy(dispatchCapability, hostedSwitchTarget.label) ??
+      "Commands are unavailable on this connection.");
+  const sendsQueueUntilReady = dispatchEstablishing
+    ? hostedSendsWhenReadyCopy(hostedSwitchTarget.label)
+    : null;
   const hostedDeliveryNotice = useHostedDeliveryNotice(environmentId);
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -1013,9 +1052,9 @@ export default function ChatView(props: ChatViewProps) {
     [draftId, routeThreadRef, serverThread, setStoreThreadError],
   );
   const {
-    interruptTurn: onInterrupt,
+    interruptTurn,
     respondToApproval: onRespondToApproval,
-    respondToUserInput: onRespondToUserInput,
+    respondToUserInput,
     revertToTurnCount,
     respondingRequestIds,
     respondingUserInputRequestIds,
@@ -1025,6 +1064,30 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadId,
     setThreadError,
   });
+  /** Says why an action that must reach the node now was refused. */
+  const notifyMutationUnavailable = useCallback((reason: string) => {
+    toastManager.add(stackedThreadToast({ type: "info", title: reason }));
+  }, []);
+  const onInterrupt = useCallback(async () => {
+    if (mutationUnavailableReason !== null) {
+      notifyMutationUnavailable(mutationUnavailableReason);
+      return;
+    }
+    await interruptTurn();
+  }, [interruptTurn, mutationUnavailableReason, notifyMutationUnavailable]);
+  // An answer reaches the waiting turn now or not at all; it is never queued.
+  // Choosing an option on the last question answers at once, so the refusal
+  // lives here rather than only on the submit button.
+  const onRespondToUserInput = useCallback(
+    async (...args: Parameters<typeof respondToUserInput>) => {
+      if (mutationUnavailableReason !== null) {
+        notifyMutationUnavailable(mutationUnavailableReason);
+        return;
+      }
+      await respondToUserInput(...args);
+    },
+    [mutationUnavailableReason, notifyMutationUnavailable, respondToUserInput],
+  );
   const activeThreadRef = useMemo(
     () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
     [activeThread],
@@ -1045,6 +1108,23 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadLiveDetailLoaded = useStore((store) =>
     isServerThread && activeThreadRef ? selectThreadLiveDetailLoaded(store, activeThreadRef) : true,
   );
+  // What the external switch probe reads on the chat root: whether the thread
+  // shows live detail, detail from the read cache, or none yet.
+  const threadDetailState = !activeThreadDetailLoaded
+    ? "loading"
+    : activeThreadLiveDetailLoaded
+      ? "live"
+      : "cached";
+  // A node switch's content is painted the first time the routed thread's
+  // detail (live or cached) commits after the route changed.
+  const hasActiveThread = activeThread !== undefined;
+  const contentPaintedRouteKeyRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!hasActiveThread || !activeThreadDetailLoaded) return;
+    if (contentPaintedRouteKeyRef.current === routeThreadKey) return;
+    contentPaintedRouteKeyRef.current = routeThreadKey;
+    markNodeSwitchPhase("content-painted", environmentId);
+  }, [activeThreadDetailLoaded, environmentId, hasActiveThread, routeThreadKey]);
   const activeThreadMessageHistory = useStore((state) =>
     activeThreadRef
       ? state.environmentStateById[activeThreadRef.environmentId]?.threadHistoryByThreadId?.[
@@ -1138,6 +1218,32 @@ export default function ChatView(props: ChatViewProps) {
   const queueHold = useMessageQueueStore((store) =>
     activeThreadKey ? (store.holdsByThreadKey[activeThreadKey] ?? null) : null,
   );
+  // Why queued messages are not going out, for the queue's header: a hosted
+  // environment that is still being established, or one that refuses them.
+  const queuedMessagesWait = useMemo<QueuedMessagesWait | null>(() => {
+    if (!dispatchCapability.hosted || dispatchCapability.allowed) return null;
+    if (dispatchEstablishing) {
+      return {
+        kind: "connecting",
+        copy: hostedSendsWhenReadyCopy(hostedSwitchTarget.label),
+        failure: dispatchCapability.reason,
+      };
+    }
+    if (dispatchCapability.kind === "role") {
+      return { kind: "role", copy: hostedRoleRefusesSendCopy(hostedSwitchTarget.label) };
+    }
+    return {
+      kind: "unavailable",
+      copy: dispatchCapability.reason ?? "Commands are unavailable on this connection.",
+    };
+  }, [
+    dispatchCapability.allowed,
+    dispatchCapability.hosted,
+    dispatchCapability.kind,
+    dispatchCapability.reason,
+    dispatchEstablishing,
+    hostedSwitchTarget.label,
+  ]);
   const handleRemoveQueuedMessage = useCallback(
     (id: string) => {
       if (!activeThreadKey) return;
@@ -1754,6 +1860,17 @@ export default function ChatView(props: ChatViewProps) {
           </Button>
         ),
       });
+    } else if (dispatchCapability.hosted && dispatchEstablishing) {
+      // A connection on its way is not a problem: a quiet note instead of a
+      // warning, while sends wait in the queue.
+      items.push({
+        id: "hosted-dispatch-syncing",
+        variant: "info",
+        icon: <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />,
+        title: hostedSwitchTarget.queued
+          ? hostedQueuedCopy(hostedSwitchTarget.label)
+          : hostedSyncingCopy(hostedSwitchTarget.label),
+      });
     } else if (dispatchCapability.hosted && !dispatchCapability.allowed) {
       items.push({
         id: "hosted-dispatch-unavailable",
@@ -1829,6 +1946,9 @@ export default function ChatView(props: ChatViewProps) {
     dispatchCapability.allowed,
     dispatchCapability.hosted,
     dispatchCapability.reason,
+    dispatchEstablishing,
+    hostedSwitchTarget.label,
+    hostedSwitchTarget.queued,
     hostedDeliveryNotice,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
@@ -2796,6 +2916,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const envLocked = Boolean(
     worktreeSetupOnScreen ||
+    // A queued first send belongs to the draft's environment: moving the draft
+    // would leave it behind.
+    queuedMessages.length > 0 ||
     (activeThread &&
       (activeThread.messages.length > 0 ||
         (activeThread.session !== null && activeThread.session.status !== "closed"))),
@@ -3838,6 +3961,11 @@ export default function ChatView(props: ChatViewProps) {
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
+      // A revert rewrites the checkout now or not at all; it is never queued.
+      if (mutationUnavailableReason !== null) {
+        notifyMutationUnavailable(mutationUnavailableReason);
+        return;
+      }
       const providerInstanceId =
         activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId;
       const provider = providerInstanceId
@@ -3859,6 +3987,8 @@ export default function ChatView(props: ChatViewProps) {
       composerProviderStatuses,
       isConnecting,
       isSendBusy,
+      mutationUnavailableReason,
+      notifyMutationUnavailable,
       phase,
       revertToTurnCount,
     ],
@@ -3929,29 +4059,39 @@ export default function ChatView(props: ChatViewProps) {
     };
   };
 
+  // `allowed`: a send may proceed, now or through the queue while the
+  // connection is being established. `writable`: the node takes writes now.
+  const sendTargetAllowed = dispatchCapability.allowed || dispatchEstablishing;
   const editorSendTargetRef = useRef({
     environmentId,
     threadId: activeThread?.id,
     cwd: gitCwd,
-    allowed: dispatchCapability.allowed,
+    allowed: sendTargetAllowed,
+    writable: dispatchCapability.allowed,
   });
   editorSendTargetRef.current = {
     environmentId,
     threadId: activeThread?.id,
     cwd: gitCwd,
-    allowed: dispatchCapability.allowed,
+    allowed: sendTargetAllowed,
+    writable: dispatchCapability.allowed,
   };
   useEffect(() => {
     editorSendTargetRef.current = {
       environmentId,
       threadId: activeThread?.id,
       cwd: gitCwd,
-      allowed: dispatchCapability.allowed,
+      allowed: sendTargetAllowed,
+      writable: dispatchCapability.allowed,
     };
     return () => {
-      editorSendTargetRef.current = { ...editorSendTargetRef.current, allowed: false };
+      editorSendTargetRef.current = {
+        ...editorSendTargetRef.current,
+        allowed: false,
+        writable: false,
+      };
     };
-  }, [activeThread?.id, dispatchCapability.allowed, environmentId, gitCwd]);
+  }, [activeThread?.id, dispatchCapability.allowed, environmentId, gitCwd, sendTargetAllowed]);
   const drainEditorsBeforeSend = useCallback(async () => {
     if (!activeThread) return false;
     if (!activeProject) {
@@ -3965,6 +4105,15 @@ export default function ChatView(props: ChatViewProps) {
       );
     }
     const scope = { environmentId, cwd: activeThread.worktreePath ?? activeProject.cwd };
+    if (hasUnsavedPreviewFiles(scope) && !editorSendTargetRef.current.writable) {
+      // Saving them is a file write, which is never held for a connection.
+      toastManager.add({
+        type: "info",
+        title: "Editor changes could not be saved",
+        description: `${mutationUnavailableReason ?? "The connection is not ready."} Your message and file draft are preserved.`,
+      });
+      return false;
+    }
     if (hasUnsavedPreviewFiles(scope) && !(await flushPreviewFiles(scope))) {
       toastManager.add({
         type: "error",
@@ -3981,7 +4130,7 @@ export default function ChatView(props: ChatViewProps) {
       current.threadId === activeThread.id &&
       current.cwd === scope.cwd
     );
-  }, [activeProject, activeThread, environmentId, isPendingChat]);
+  }, [activeProject, activeThread, environmentId, isPendingChat, mutationUnavailableReason]);
 
   const prepareEditorSend = useCallback(async () => {
     const preparing = threadSendsPreparing.ref(routeThreadKey);
@@ -4008,6 +4157,10 @@ export default function ChatView(props: ChatViewProps) {
         : undefined;
       const activeTokenMode = activeThread?.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
       const activeInteractionMode = activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
+      // A steer reaches the running turn now or not at all; it is never queued.
+      if (mutationUnavailableReason !== null) {
+        return { allowed: false as const, reason: mutationUnavailableReason };
+      }
       return resolveQueuedMessageSteerEligibility({
         mutationReady: dispatchCapability.allowed && !activeEnvironmentUnavailable,
         turnRunning: phase === "running",
@@ -4028,6 +4181,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThread,
       composerProviderStatuses,
       dispatchCapability.allowed,
+      mutationUnavailableReason,
       phase,
     ],
   );
@@ -4491,12 +4645,31 @@ export default function ChatView(props: ChatViewProps) {
     options?: { readonly invertFollowUp?: boolean },
   ) => {
     e?.preventDefault();
-    if (!dispatchCapability.allowed || hostedDraftTarget.pending !== null) return;
+    if (
+      (!dispatchCapability.allowed && !dispatchEstablishing) ||
+      hostedDraftTarget.pending !== null
+    )
+      return;
     const api = readEnvironmentApi(environmentId);
+    // A plain send waits in the queue, instead of going out now, while its
+    // environment is not ready for it: the connection is being established,
+    // the rows are last-known state, or the connection is not there yet. The
+    // queue sends it once the environment is live and takes mutations.
+    const sendWaitsForEnvironment =
+      dispatchEstablishing || !activeEnvironmentShellLive || api === undefined;
+    // Everything else a submit can do (answers, goals, plan follow-ups, side
+    // questions) reaches the node now or not at all.
+    const reachNodeUnavailableReason =
+      mutationUnavailableReason ??
+      (api === undefined ? "Available once this environment is connected." : null);
     // When a turn is already running the submit is queued, so don't let the
     // transient post-dispatch `isSendBusy` window swallow a mid-turn message.
     const sideQuestion = parseSideQuestionCommand(promptRef.current);
     if (sideQuestion !== null && presentationTier !== "phone" && activeThreadRef && activeThread) {
+      if (mutationUnavailableReason !== null) {
+        notifyMutationUnavailable(mutationUnavailableReason);
+        return;
+      }
       const sideContext = readComposer()?.getSendContext();
       if (
         sideContext &&
@@ -4547,7 +4720,6 @@ export default function ChatView(props: ChatViewProps) {
     }
     const turnActive = phase === "running";
     if (
-      !api ||
       !activeThread ||
       (isSendBusy && !turnActive) ||
       isConnecting ||
@@ -4556,6 +4728,12 @@ export default function ChatView(props: ChatViewProps) {
     )
       return;
     if (activePendingProgress) {
+      // Moving between questions stays local; only the last one's answer
+      // reaches the node.
+      if (activePendingProgress.isLastQuestion && reachNodeUnavailableReason !== null) {
+        notifyMutationUnavailable(reachNodeUnavailableReason);
+        return;
+      }
       onAdvanceActivePendingUserInput();
       return;
     }
@@ -4583,6 +4761,14 @@ export default function ChatView(props: ChatViewProps) {
       terminalContexts: composerTerminalContexts,
     });
     const goalCommand = parseThreadGoalSlashCommand(trimmed);
+    if (
+      goalCommand !== null &&
+      goalCommand.action !== "show" &&
+      reachNodeUnavailableReason !== null
+    ) {
+      notifyMutationUnavailable(reachNodeUnavailableReason);
+      return;
+    }
     if (goalCommand !== null) {
       const clearGoalDraft = () => {
         promptRef.current = "";
@@ -4642,6 +4828,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (showPlanFollowUpPrompt && activeProposedPlan && !parseComputerInvocation(promptForSend)) {
+      if (reachNodeUnavailableReason !== null) {
+        notifyMutationUnavailable(reachNodeUnavailableReason);
+        return;
+      }
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -4737,7 +4927,7 @@ export default function ChatView(props: ChatViewProps) {
             throw new Error(
               "This provider does not support Computer Use. Select Codex, Claude, Cursor, Copilot or managed OpenCode.",
             );
-          if (!api.server)
+          if (!api?.server)
             throw new Error(
               "Local desktop settings are unavailable. Reconnect before sending this task.",
             );
@@ -4781,13 +4971,16 @@ export default function ChatView(props: ChatViewProps) {
     // messages auto-dispatch, in order, once the thread reaches quiescence. A
     // queued send whose turn has not started yet (an off-screen background send
     // included) counts too: a direct send would race it into the bind window.
-    // So does a thread shown from last-known state: the queue only drains once
-    // its environment's shell is live again.
+    // So does an environment that is not ready yet (a node switch, last-known
+    // rows): the queue only drains once its shell is live and it takes
+    // mutations. A draft's first send queues under the draft and goes out from
+    // this view, the draft's own, which creates its thread; nothing is sent
+    // for a draft that is not open.
     if (
       activeThreadKey &&
       (phase === "running" ||
         hasOutstandingQueuedDispatch(activeThreadKey) ||
-        (isServerThread && !activeEnvironmentShellLive))
+        sendWaitsForEnvironment)
     ) {
       const preparing = threadSendsPreparing.ref(routeThreadKey);
       if (preparing.current) return;
@@ -5745,6 +5938,8 @@ export default function ChatView(props: ChatViewProps) {
   return (
     <div
       ref={chatShellRef}
+      data-thread-detail-state={threadDetailState}
+      data-mutation-ready={String(dispatchCapability.allowed)}
       className="app-content-surface relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
     >
       {!isPhoneTier && activeThreadRef ? (
@@ -6201,6 +6396,7 @@ export default function ChatView(props: ChatViewProps) {
                         activeEnvironmentUnavailable ||
                         sideChatConnection.phase !== "connected"
                       }
+                      disabledReason={mutationUnavailableReason}
                       onRespond={onRespondToUserInput}
                     />
                   ))
@@ -6229,8 +6425,11 @@ export default function ChatView(props: ChatViewProps) {
                 )
               ) : null}
               <ComposerQueuedMessages
+                // A thread's wait starts its own deadline.
+                key={activeThreadKey ?? undefined}
                 messages={queuedMessages}
                 hold={queueHold}
+                wait={queuedMessagesWait}
                 onResume={() => {
                   if (activeThreadKey) resumeMessageQueue(activeThreadKey);
                 }}
@@ -6270,10 +6469,14 @@ export default function ChatView(props: ChatViewProps) {
                   isConnecting={isConnecting}
                   isSendBusy={
                     isSendBusy ||
-                    !dispatchCapability.allowed ||
+                    // A connection being established takes sends into the queue;
+                    // any other refusal keeps the send button busy.
+                    (!dispatchCapability.allowed && !dispatchEstablishing) ||
                     workspaceExecutionTargetUnavailable ||
                     hostedDraftTarget.pending !== null
                   }
+                  sendsQueueUntilReady={sendsQueueUntilReady}
+                  mutationUnavailableReason={mutationUnavailableReason}
                   isPreparingWorktree={isPreparingWorktree}
                   isWorktreeSetupRunning={
                     // Until the thread's own view takes over after the hand-off,

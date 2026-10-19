@@ -29,6 +29,12 @@ export function watchDirectChatFileUploadReadiness(input: {
   readonly environmentId: EnvironmentId;
   readonly readConnection: () => EnvironmentConnection | null;
   readonly canUpload: () => boolean;
+  /**
+   * Hosted builds only: whether the hosted environment's connection is being
+   * established (a node switch). It only words the wait; it never makes an
+   * upload ready.
+   */
+  readonly hostedEstablishing?: () => boolean;
   readonly subscribe: (listener: () => void) => () => void;
   readonly onChange: () => void;
 }): ChatFileUploadReadiness {
@@ -47,6 +53,20 @@ export function watchDirectChatFileUploadReadiness(input: {
   const unavailable = (): ChatFileUploadUnavailable => {
     const connection = readConnection();
     const status = getWsConnectionStatusForEnvironment(input.environmentId);
+    // A hosted node on its way (its connection may not exist yet): the upload
+    // waits for it rather than asking to reconnect or authorize. The copy
+    // promises nothing more: once connected, a hosted upload still fails
+    // closed below.
+    if (
+      (!connection || connection.knownEnvironment.source === "hub-hosted") &&
+      input.hostedEstablishing?.() === true
+    ) {
+      return {
+        label: "Syncing",
+        message: "Waiting for this node to connect.",
+        cancelInFlight: false,
+      };
+    }
     if (!connection)
       return {
         label: "Reconnect",

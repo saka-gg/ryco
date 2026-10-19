@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -13,10 +13,61 @@ import { describeQueueHold, type QueueHold } from "@ryco/client-runtime/state/me
 import { cn } from "~/lib/utils";
 import { summarizeQueuedMessage, type QueuedMessage } from "~/messageQueue.logic";
 
+/**
+ * Why queued messages are not going out yet, shown under the queue's title.
+ * The caller words it; a draft's queue is only ever shown from the open draft,
+ * which is the one view that sends it, so it never waits on another view.
+ */
+export interface QueuedMessagesWait {
+  /**
+   * `connecting`: the environment's connection is being established. `role`:
+   * the user's role on the node does not allow sending. `unavailable`: the
+   * environment refuses for another reason.
+   */
+  readonly kind: "connecting" | "role" | "unavailable";
+  readonly copy: string;
+  /**
+   * The environment's own reason, shown instead of a `connecting` wait once it
+   * has lasted longer than a session may take to synchronize.
+   */
+  readonly failure?: string | null;
+}
+
+/**
+ * How long a send waits on a connection before the wait shows the connection's
+ * own reason: the time a hosted environment session is given to synchronize
+ * (a test keeps the two equal). Declared here so the thread route never loads
+ * the hosted session registry in standard builds.
+ */
+export const CONNECTING_WAIT_DEADLINE_MS = 30_000;
+
+/** Keyed by the wait's kind: a connection that starts waiting again starts a new deadline. */
+function QueuedMessagesWaitCaption({ wait }: { readonly wait: QueuedMessagesWait }) {
+  const connecting = wait.kind === "connecting";
+  const [overdue, setOverdue] = useState(false);
+  useEffect(() => {
+    if (!connecting) return;
+    const timeout = window.setTimeout(() => setOverdue(true), CONNECTING_WAIT_DEADLINE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [connecting]);
+  const copy = connecting && overdue && wait.failure ? wait.failure : wait.copy;
+  return (
+    <span
+      data-queued-messages-wait={wait.kind}
+      className="min-w-0 flex-1 truncate text-muted-foreground/70"
+      title={copy}
+    >
+      {copy}
+    </span>
+  );
+}
+
 interface ComposerQueuedMessagesProps {
   messages: readonly QueuedMessage[];
   /** A recorded pause (Stop, error, review, stalled start); shown on every tier. */
   hold?: QueueHold | null | undefined;
+  /** Why the queue is not sending yet, when it is waiting on something outside it. */
+  wait?: QueuedMessagesWait | null | undefined;
   onResume?: (() => void) | undefined;
   onRemove: (id: string) => void;
   /** Pulls the message back into the composer for editing; it leaves the queue. */
@@ -43,6 +94,7 @@ const iconButtonClass = cn(
 export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   messages,
   hold = null,
+  wait = null,
   onResume,
   onRemove,
   onEdit,
@@ -84,6 +136,13 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               Resume
             </button>
           ) : null}
+        </div>
+      ) : wait ? (
+        <div className="flex min-w-0 items-center gap-1.5 px-1.5 pb-1 text-[11px]">
+          <span className="shrink-0 font-medium uppercase tracking-wide text-muted-foreground">
+            Queued · {messages.length}
+          </span>
+          <QueuedMessagesWaitCaption key={wait.kind} wait={wait} />
         </div>
       ) : (
         <div className="px-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
