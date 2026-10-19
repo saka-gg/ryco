@@ -12,8 +12,8 @@ import type { TurnSteerRejectionActivity } from "@ryco/shared/turnSteer";
 import { derivePendingApprovals, derivePendingUserInputs } from "../session/session-logic.ts";
 import { indexTurnSteerRejections } from "./logic.ts";
 import { PROVIDER_DIFF_CHECKPOINT_REF_PREFIX } from "../threads/checkpointSummary.ts";
-import { selectEnvironmentState, type AppState } from "../threads/store.ts";
-import { selectThreadDetailLoaded } from "../threads/storeSelectors.ts";
+import { selectEnvironmentState, type AppState, type EnvironmentState } from "../threads/store.ts";
+import { selectThreadLiveDetailLoaded } from "../threads/storeSelectors.ts";
 import { isArchivedThreadStub } from "../threads/types.ts";
 
 /**
@@ -26,7 +26,10 @@ export interface QueueThreadView {
   readonly started: boolean;
   /** The thread or its worktree is archived. */
   readonly archived: boolean;
-  /** A thread-detail window or full-detail snapshot has been applied. */
+  /**
+   * A live thread-detail window or full-detail snapshot has been applied. Message
+   * text hydrated from a read cache does not count.
+   */
   readonly detailLoaded: boolean;
   /**
    * Same overlap window as mobile's `threadBusy`, plus a `starting` session; a
@@ -107,6 +110,20 @@ function readProjectedMessageIds(ids: readonly string[] | undefined): ReadonlySe
   const next = new Set(ids);
   projectedMessageIdCache.set(ids, next);
   return next;
+}
+
+/**
+ * The ids the thread's live detail has projected. Message text hydrated from a
+ * read cache is last-known display state that can predate messages the thread
+ * has received since, so it never stands in for them: a queued message missing
+ * from it may well have been delivered.
+ */
+function readLiveProjectedMessageIds(
+  environmentState: EnvironmentState,
+  threadId: ScopedThreadRef["threadId"],
+): ReadonlySet<string> {
+  if (environmentState.cachedMessageThreadIds?.[threadId] === true) return EMPTY_MESSAGE_ID_SET;
+  return readProjectedMessageIds(environmentState.messageIdsByThreadId[threadId]);
 }
 
 function readPayloadString(payload: unknown, key: string): string | null {
@@ -203,7 +220,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
       session: null,
       latestTurn: null,
       latestTurnPlaceholderCheckpoint: false,
-      projectedMessageIds: readProjectedMessageIds(environmentState.messageIdsByThreadId[threadId]),
+      projectedMessageIds: readLiveProjectedMessageIds(environmentState, threadId),
       turnStartFailures: EMPTY_ACTIVITY_VIEW.turnStartFailures,
       steerRejectionsByActivityId: EMPTY_ACTIVITY_VIEW.steerRejectionsByActivityId,
       turnStartCancelledMessageIds: EMPTY_ACTIVITY_VIEW.turnStartCancelledMessageIds,
@@ -217,7 +234,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
   const storedSummary = environmentState.sidebarThreadSummaryById[threadId];
   const summary = isArchivedThreadStub(storedSummary) ? undefined : storedSummary;
   const messageIds = environmentState.messageIdsByThreadId[threadId];
-  const detailLoaded = selectThreadDetailLoaded(state, ref);
+  const detailLoaded = selectThreadLiveDetailLoaded(state, ref);
   const activityView = detailLoaded
     ? readActivityView(
         environmentState.activityIdsByThreadId[threadId],
@@ -260,7 +277,7 @@ export function readQueueThreadView(state: AppState, ref: ScopedThreadRef): Queu
         ? environmentState.turnDiffSummaryByThreadId[threadId]?.[latestTurn.turnId]
         : undefined,
     ),
-    projectedMessageIds: readProjectedMessageIds(messageIds),
+    projectedMessageIds: readLiveProjectedMessageIds(environmentState, threadId),
     turnStartFailures: activityView.turnStartFailures,
     steerRejectionsByActivityId: activityView.steerRejectionsByActivityId,
     turnStartCancelledMessageIds: activityView.turnStartCancelledMessageIds,
@@ -284,6 +301,7 @@ export function queueThreadViewInputs(state: AppState, ref: ScopedThreadRef): re
     environmentState.turnDiffSummaryByThreadId[threadId],
     environmentState.sidebarThreadSummaryById[threadId],
     environmentState.messageIdsByThreadId[threadId],
+    environmentState.cachedMessageThreadIds?.[threadId],
     environmentState.activityIdsByThreadId[threadId],
     environmentState.activityByThreadId[threadId],
     environmentState.threadHistoryByThreadId?.[threadId],

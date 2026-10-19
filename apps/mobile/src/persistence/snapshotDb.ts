@@ -40,13 +40,18 @@ export interface EnvironmentSnapshotStat {
   readonly updatedAt: number;
 }
 
-export interface StoredEnvironmentSnapshotRow extends StoredSnapshotRow {
-  readonly environmentId: string;
+export interface StoredEnvironmentSnapshotRecord extends StoredSnapshotRow {
   readonly updatedAt: number;
 }
 
+export interface StoredEnvironmentSnapshotRow extends StoredEnvironmentSnapshotRecord {
+  readonly environmentId: string;
+}
+
 export interface SnapshotDb {
-  readonly loadEnvironmentSnapshot: (environmentId: string) => Promise<StoredSnapshotRow | null>;
+  readonly loadEnvironmentSnapshot: (
+    environmentId: string,
+  ) => Promise<StoredEnvironmentSnapshotRecord | null>;
   /** Every stored environment snapshot in one read, most recently written first. */
   readonly loadEnvironmentSnapshots: () => Promise<ReadonlyArray<StoredEnvironmentSnapshotRow>>;
   readonly saveEnvironmentSnapshot: (input: {
@@ -142,11 +147,19 @@ export function createSnapshotDb(
   return {
     loadEnvironmentSnapshot: async (environmentId) => {
       const handle = await acquire();
-      const row = await handle.getFirstAsync<{ schema_version: number; payload: string }>(
-        "SELECT schema_version, payload FROM environment_snapshots WHERE environment_id = ?",
+      const row = await handle.getFirstAsync<{
+        schema_version: number;
+        payload: string;
+        updated_at: number;
+      }>(
+        `SELECT schema_version, payload, updated_at
+           FROM environment_snapshots
+          WHERE environment_id = ?`,
         [environmentId],
       );
-      return row ? { schemaVersion: row.schema_version, payload: row.payload } : null;
+      return row
+        ? { schemaVersion: row.schema_version, payload: row.payload, updatedAt: row.updated_at }
+        : null;
     },
     loadEnvironmentSnapshots: async () => {
       const handle = await acquire();

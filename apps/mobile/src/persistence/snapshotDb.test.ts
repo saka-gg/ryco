@@ -37,6 +37,7 @@ describe("snapshotDb", () => {
     expect(await db.loadEnvironmentSnapshot("env-1")).toEqual({
       schemaVersion: 1,
       payload: '{"v":2}',
+      updatedAt: 200,
     });
     expect(await db.listEnvironmentSnapshotStats()).toEqual([
       { environmentId: "env-1", payloadBytes: payloadByteLength('{"v":2}'), updatedAt: 200 },
@@ -110,5 +111,43 @@ describe("snapshotDb", () => {
       (await db.listEnvironmentSnapshotStats()).find((stat) => stat.environmentId === "env-new")
         ?.payloadBytes,
     ).toBe(7);
+  });
+
+  it("accounts for stored conversation text in the payload bytes", async () => {
+    const db = createSnapshotDb(openNodeSqliteHandle);
+    const record = (text: string) =>
+      JSON.stringify({
+        threads: [],
+        content: { "thread-1": { messages: [{ id: "m1", role: "user", text }] } },
+      });
+    // Multi-byte text, an astral character and a lone surrogate, about 2 MB.
+    const text = `${"naïve 日本語 🚀 \ud800 ".repeat(70_000)}end`;
+    const payload = record(text);
+    expect(new TextEncoder().encode(payload).byteLength).toBeGreaterThan(1_800_000);
+
+    await db.saveEnvironmentSnapshot({
+      environmentId: "env-content",
+      schemaVersion: 3,
+      payload,
+      updatedAt: 1,
+    });
+    expect(await db.loadEnvironmentSnapshot("env-content")).toEqual({
+      schemaVersion: 3,
+      payload,
+      updatedAt: 1,
+    });
+    const [stat] = await db.listEnvironmentSnapshotStats();
+    expect(stat?.payloadBytes).toBe(new TextEncoder().encode(payload).byteLength);
+
+    // Rewritten without the text, the row is accounted for at its new size.
+    const shellOnly = JSON.stringify({ threads: [] });
+    await db.saveEnvironmentSnapshot({
+      environmentId: "env-content",
+      schemaVersion: 3,
+      payload: shellOnly,
+      payloadBytes: payloadByteLength(shellOnly),
+      updatedAt: 1,
+    });
+    expect((await db.listEnvironmentSnapshotStats())[0]?.payloadBytes).toBe(shellOnly.length);
   });
 });
