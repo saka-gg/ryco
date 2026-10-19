@@ -511,6 +511,12 @@ export default function Sidebar() {
   const primaryDeviceName = useDeviceName();
   const desktopWorkspace = useDesktopWorkspaceState();
   const hostedWorkspace = useHostedWorkspaceState();
+  // The workspace republishes about every 100 ms while threads stream. The inbox
+  // reads only these parts, whose identities survive such a republish.
+  const hostedStatus = hostedWorkspace.status;
+  const hostedMachines = hostedWorkspace.machines;
+  const hostedQueuedEnvironmentIds = hostedWorkspace.demand.queuedEnvironmentIds;
+  const hostedThreads = hostedWorkspace.workspace.threads;
   const selectedHostedEnvironmentId = useHostedHubStore(
     (state) => state.selectedNode?.environmentId ?? null,
   );
@@ -552,10 +558,10 @@ export default function Sidebar() {
     }
     const byEnvironmentId = new Map<EnvironmentId, InboxSidebarEnvironment>();
 
-    if (hostedWorkspace.status !== "signed-out") {
-      for (const machine of hostedWorkspace.machines) {
+    if (hostedStatus !== "signed-out") {
+      for (const machine of hostedMachines) {
         knownEnvironmentIds.add(machine.environmentId);
-        const queued = hostedWorkspace.demand.queuedEnvironmentIds.includes(machine.environmentId);
+        const queued = hostedQueuedEnvironmentIds.includes(machine.environmentId);
         const stale = !machine.presence.online || machine.cacheDisposition !== "available";
         byEnvironmentId.set(machine.environmentId, {
           environmentId: machine.environmentId,
@@ -569,6 +575,7 @@ export default function Sidebar() {
                 : machine.connectionState === "connecting"
                   ? "connecting"
                   : "idle",
+          ...(queued ? { queued: true } : {}),
           stale,
           ...(stale ? { staleDetail: "Offline · last known" } : {}),
           role: machine.effectiveRole,
@@ -614,6 +621,7 @@ export default function Sidebar() {
                 : machine.connectionState === "connecting"
                   ? "connecting"
                   : "idle",
+          ...(queued ? { queued: true } : {}),
           stale,
           ...(stale ? { staleDetail: "Offline · last known" } : {}),
           role: null,
@@ -671,7 +679,9 @@ export default function Sidebar() {
     inboxServerConfig,
     cacheHydratedEnvironmentIds,
     desktopWorkspace,
-    hostedWorkspace,
+    hostedMachines,
+    hostedQueuedEnvironmentIds,
+    hostedStatus,
     primaryConnectionState,
     primaryEnvironmentDescriptor,
     primaryDeviceName,
@@ -681,9 +691,11 @@ export default function Sidebar() {
     savedEnvironmentRuntimeById,
     sidebarThreads,
   ]);
-  const deliveryUnknownThreadKeys = useMemo(() => {
+  // A republish rebuilds the thread lists but almost never changes which
+  // threads are unknown: the set follows its content, not the lists' identity.
+  const deliveryUnknownKeysJson = useMemo(() => {
     const keys = new Set<string>();
-    for (const thread of hostedWorkspace.workspace.threads) {
+    for (const thread of hostedThreads) {
       if (thread.deliveryUnknown) {
         keys.add(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)));
       }
@@ -696,8 +708,12 @@ export default function Sidebar() {
         }
       }
     }
-    return keys;
-  }, [desktopWorkspace.snapshots, hostedWorkspace.workspace.threads]);
+    return JSON.stringify([...keys].toSorted());
+  }, [desktopWorkspace.snapshots, hostedThreads]);
+  const deliveryUnknownThreadKeys = useMemo(
+    () => new Set<string>(JSON.parse(deliveryUnknownKeysJson) as string[]),
+    [deliveryUnknownKeysJson],
+  );
   const { orderedProjects, snapshots: sidebarProjects } = useLogicalProjectSnapshots();
 
   // Target for the sidebar-level "New thread" button: the project whose thread

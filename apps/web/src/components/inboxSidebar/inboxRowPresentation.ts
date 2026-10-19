@@ -136,13 +136,45 @@ export function formatInboxAge(isoDate: string): string {
   return value === "just now" ? "now" : value;
 }
 
+const DAY_TIME_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
+  weekday: "short",
+  hour: "numeric",
+  minute: "2-digit",
+};
+
+/**
+ * Building a formatter costs about as much as resolving the default locale, so
+ * the formatter is reused and the locale is only re-read this often: one check
+ * serves every row of a render.
+ */
+const LOCALE_RECHECK_INTERVAL_MS = 1_000;
+
+let dayTimeFormatter: Intl.DateTimeFormat | null = null;
+let dayTimeFormatterLocale = "";
+let localeCheckedAtMs = 0;
+
+function getDayTimeFormatter(): Intl.DateTimeFormat {
+  const nowMs = Date.now();
+  if (
+    dayTimeFormatter === null ||
+    Math.abs(nowMs - localeCheckedAtMs) >= LOCALE_RECHECK_INTERVAL_MS
+  ) {
+    localeCheckedAtMs = nowMs;
+    const locale = new Intl.DateTimeFormat().resolvedOptions().locale;
+    if (dayTimeFormatter === null || locale !== dayTimeFormatterLocale) {
+      dayTimeFormatter = new Intl.DateTimeFormat(undefined, DAY_TIME_FORMAT_OPTIONS);
+      dayTimeFormatterLocale = locale;
+    }
+  }
+  return dayTimeFormatter;
+}
+
 /** Weekday and time, the way the inbox names moments: `Thu 14:26`. */
 export function formatInboxDayTime(isoDate: string): string {
-  return new Date(isoDate).toLocaleString(undefined, {
-    weekday: "short",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const date = new Date(isoDate);
+  // A formatter throws on an invalid date; the inbox has always shown this text.
+  if (Number.isNaN(date.getTime())) return String(date);
+  return getDayTimeFormatter().format(date);
 }
 
 /** What hovering the status glyph says: the state, plus the fact behind it. */
