@@ -1,4 +1,5 @@
 import type {
+  DesktopThreadContentProjectionMap,
   DesktopWorkspaceMetadataProjection,
   DesktopWorkspaceScopeProjection,
   DesktopWorkspaceStateProjection,
@@ -6,12 +7,14 @@ import type {
   DesktopWorkspaceStateSummary,
 } from "@ryco/contracts";
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
+import { decodeCachedEnvironmentContent } from "@ryco/client-runtime/state/threads/threadContentCachePolicy";
 import {
   isWorkspaceMetadataSnapshot,
   type WorkspaceConnectionScope,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 
+import type { DesktopThreadContentCache } from "./desktopThreadContentCache.ts";
 import type {
   DesktopWorkspaceClient,
   DesktopWorkspaceClientSnapshot,
@@ -116,11 +119,43 @@ export function projectDesktopWorkspaceState(
     : projectDesktopWorkspaceFullState(state);
 }
 
+/** What the handlers need of the Desktop thread content cache. */
+export type DesktopWorkspaceThreadContent = Pick<
+  DesktopThreadContentCache,
+  "isEnabled" | "setEnabled" | "load" | "publish"
+>;
+
+/** For a workspace client without a content cache: nothing is kept, and the setting reads off. */
+const NO_THREAD_CONTENT: DesktopWorkspaceThreadContent = {
+  isEnabled: async () => false,
+  setEnabled: async () => undefined,
+  load: async () => ({}),
+  publish: async () => undefined,
+};
+
+/**
+ * Thread content is kept and served only for the signed-in account's machines
+ * whose metadata may be shown, the same eligibility as their snapshots.
+ */
+function threadContentScope(state: DesktopWorkspaceClientSnapshot, environment: EnvironmentId) {
+  if (state.status !== "ready" || state.accountId === null) return null;
+  const eligible = state.catalog.some(
+    (machine) =>
+      machine.environmentId === environment &&
+      machine.canReadMetadata &&
+      machine.cacheDisposition === "available",
+  );
+  return eligible ? { accountId: state.accountId, environmentId: environment } : null;
+}
+
 /**
  * Replies to invoked commands carry no snapshot bodies: the renderer learns of
  * changed snapshots from the pushed state and reads the full state with `getState`.
  */
-export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient) {
+export function createDesktopWorkspaceIpcHandlers(
+  client: DesktopWorkspaceClient,
+  threadContent: DesktopWorkspaceThreadContent = NO_THREAD_CONTENT,
+) {
   return {
     getState: async () => projectDesktopWorkspaceFullState(client.snapshot()),
     refreshCatalog: async () => projectDesktopWorkspaceSummary(await client.refreshCatalog()),
@@ -180,6 +215,35 @@ export function createDesktopWorkspaceIpcHandlers(client: DesktopWorkspaceClient
         nodeId: input.nodeId,
         environmentId: environmentId(input.environmentId),
       });
+    },
+    publishThreadContent: async (rawEnvironmentId: unknown, raw: unknown) => {
+      const environment = environmentId(rawEnvironmentId);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error("Desktop thread content is invalid.");
+      }
+      const scope = threadContentScope(client.snapshot(), environment);
+      // The cache bounds what it is handed to the shared policy: thread count and record size.
+      if (scope !== null) await threadContent.publish(scope, raw);
+    },
+    getThreadContent: async (
+      rawEnvironmentId: unknown,
+    ): Promise<DesktopThreadContentProjectionMap> => {
+      const environment = environmentId(rawEnvironmentId);
+      const state = client.snapshot();
+      const scope = threadContentScope(state, environment);
+      const snapshot = state.snapshots.find((entry) => entry.environmentId === environment);
+      if (scope === null || snapshot === undefined) return {};
+      // Only threads the environment's own metadata lists, each decoded within the shared limits.
+      return decodeCachedEnvironmentContent(
+        { content: await threadContent.load(scope) },
+        new Set(snapshot.threads.map((thread) => String(thread.id))),
+      );
+    },
+    getThreadContentCacheEnabled: async () => threadContent.isEnabled(),
+    setThreadContentCacheEnabled: async (raw: unknown) => {
+      if (typeof raw !== "boolean") throw new Error("Desktop thread content setting is invalid.");
+      await threadContent.setEnabled(raw);
+      return threadContent.isEnabled();
     },
     cancelVerification: async (raw: unknown) => client.cancelVerification(opaqueHandle(raw)),
     verifyApproval: async (raw: unknown) => {

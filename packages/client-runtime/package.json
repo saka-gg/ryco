@@ -138,6 +138,10 @@
       "types": "./src/state/threads/threadBodyResidency.ts",
       "import": "./src/state/threads/threadBodyResidency.ts"
     },
+    "./state/threads/threadContentCachePolicy": {
+      "types": "./src/state/threads/threadContentCachePolicy.ts",
+      "import": "./src/state/threads/threadContentCachePolicy.ts"
+    },
     "./state/session": {
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"

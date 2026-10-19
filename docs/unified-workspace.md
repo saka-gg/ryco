@@ -81,6 +81,21 @@ Explicit sign-out, observed expiry, account change and loss of node eligibility 
 data. Disabling the setting deletes records and keys. Cross-tab invalidation and account epochs
 prevent pending writes from restoring a deleted copy.
 
+Desktop can also keep recent conversation text on the device, so a cold start shows a thread before
+the relay connects. This is a separate, device-local exception to the opt-in browser boundary above.
+The **Keep recent conversations on this device** setting controls it; it is on by default, and
+turning it off deletes what was kept. The Desktop main process owns the cache. The renderer hands it
+bounded display content and reads it back, and never receives a key. The cache is one file
+encrypted with the operating system's protected storage, and nothing is written when that storage
+is unavailable. It holds up to three machines of one account, each with its 32 most recently
+visited conversations (150 messages at most per conversation) within about 1.9 MB; larger histories
+are trimmed oldest-visited first, with the open conversation preferred. Only message text is kept:
+attachments, drafts, scroll positions, tool output, credentials and transport secrets are not.
+Sign-out, another account signing in, a machine being removed, revoked or losing eligibility,
+revoking this installation's account authorization, and turning the setting off all delete the
+affected content. Cached text is display only: a live snapshot always wins over it, it is never a
+replay baseline, and it grants no role, session or mutation authority.
+
 The service worker only caches build-generated static entry points and immutable assets. Its
 data-free boot document lets the page open the encrypted cache while offline; authenticated APIs,
 relay traffic and live HTML responses never enter CacheStorage.

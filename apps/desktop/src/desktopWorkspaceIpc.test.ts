@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
@@ -8,8 +9,14 @@ import {
   type WorkspaceMachineCatalogEntry,
   type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
-import { describe, expect, it, vi } from "vite-plus/test";
+import {
+  THREAD_CONTENT_CACHE_MAX_THREADS,
+  THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
+} from "@ryco/client-runtime/state/threads/threadContentCachePolicy";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createDesktopThreadContentCache } from "./desktopThreadContentCache.ts";
+import type { DesktopSecretProtection } from "./protectedRecordStore.ts";
 import { DESKTOP_WORKSPACE_IPC } from "./desktopWorkspaceChannels.ts";
 import type {
   DesktopWorkspaceClient,
@@ -42,6 +49,10 @@ describe("Desktop workspace IPC boundary", () => {
       "beginVerification",
       "cancelVerification",
       "verifyApproval",
+      "publishThreadContent",
+      "getThreadContent",
+      "getThreadContentCacheEnabled",
+      "setThreadContentCacheEnabled",
       "stateChanged",
       "connectionCommand",
       "prepareTransport",
@@ -65,6 +76,20 @@ describe("Desktop workspace IPC boundary", () => {
       expect(ipc).not.toContain(forbidden);
       expect(preload).not.toContain(forbidden);
     }
+  });
+
+  it("hands the renderer only bounded display content and the cache setting", () => {
+    const preload = source("preload.ts");
+    for (const channel of [
+      "publishThreadContent",
+      "getThreadContent",
+      "getThreadContentCacheEnabled",
+      "setThreadContentCacheEnabled",
+    ]) {
+      expect(preload).toContain(`DESKTOP_WORKSPACE_IPC.${channel}`);
+    }
+    // Publishing is one-way: nothing is awaited and nothing about the cache is returned.
+    expect(preload).toMatch(/publishDesktopThreadContent:[^\n]*\n?[^\n]*ipcRenderer\.send\(/u);
   });
 
   it("keeps relay authorization and native handshake material in main", () => {
@@ -222,5 +247,171 @@ describe("Desktop workspace state projections", () => {
       expect(JSON.stringify(value), name).not.toContain(bodyMarker);
       expect((value as { machines: unknown[] }).machines, name).toHaveLength(1);
     }
+  });
+
+  describe("thread content", () => {
+    const threadId = String(metadata.threads[0]!.id);
+    const directories: string[] = [];
+    const mask = (bytes: Buffer) => Buffer.from(bytes.map((byte) => byte ^ 0x5a));
+    const protection: DesktopSecretProtection = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plaintext) => mask(Buffer.from(plaintext, "utf8")),
+      decryptString: (ciphertext) => mask(ciphertext).toString("utf8"),
+    };
+    const content = (name: string, text = `text of ${name}`) => ({
+      messages: [
+        {
+          id: `${name}-message`,
+          role: "user",
+          text,
+          createdAt: "2026-10-01T00:00:00Z",
+          turnId: null,
+          streaming: false,
+        },
+      ],
+    });
+    const threadsOf = (names: ReadonlyArray<string>) =>
+      Object.fromEntries(names.map((name) => [name, content(name)]));
+
+    function setup(overrides: Partial<DesktopWorkspaceClientSnapshot> = {}) {
+      const directory = mkdtempSync(join(tmpdir(), "ryco-desktop-thread-content-ipc-"));
+      directories.push(directory);
+      const cache = createDesktopThreadContentCache({
+        directory,
+        hubOrigin: "https://hub.example",
+        protection,
+      });
+      const client = { snapshot: () => state(overrides) } as unknown as DesktopWorkspaceClient;
+      return {
+        cache,
+        handlers: createDesktopWorkspaceIpcHandlers(client, cache),
+        scope: { accountId: "account-projection", environmentId },
+      };
+    }
+
+    afterEach(() => {
+      for (const directory of directories.splice(0)) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps published content and serves it back for threads the metadata lists", async () => {
+      const { handlers, cache, scope } = setup();
+      await handlers.publishThreadContent(environmentId, {
+        ...threadsOf([threadId]),
+        "thread-the-environment-does-not-list": content("stray"),
+      });
+
+      // Everything published is kept; only what the environment lists is served.
+      expect(Object.keys(await cache.load(scope))).toEqual([
+        threadId,
+        "thread-the-environment-does-not-list",
+      ]);
+      expect(await handlers.getThreadContent(environmentId)).toEqual({
+        [threadId]: expect.objectContaining({
+          messages: [expect.objectContaining({ text: `text of ${threadId}` })],
+        }),
+      });
+      await cache.dispose();
+    });
+
+    it("rejects a malformed environment or payload", async () => {
+      const { handlers } = setup();
+      for (const invalid of [undefined, null, "", "x".repeat(2_049), 7, {}]) {
+        await expect(handlers.publishThreadContent(invalid, {})).rejects.toThrow("environment");
+        await expect(handlers.getThreadContent(invalid)).rejects.toThrow("environment");
+      }
+      for (const invalid of [undefined, null, [], "content", 3]) {
+        await expect(handlers.publishThreadContent(environmentId, invalid)).rejects.toThrow(
+          "thread content",
+        );
+      }
+      for (const invalid of [undefined, null, "true", 1]) {
+        await expect(handlers.setThreadContentCacheEnabled(invalid)).rejects.toThrow(
+          "thread content setting",
+        );
+      }
+    });
+
+    it("bounds what it keeps to the shared thread and size limits", async () => {
+      const { handlers, cache, scope } = setup();
+      const names = Array.from(
+        { length: THREAD_CONTENT_CACHE_MAX_THREADS + 5 },
+        (_, index) => `thread-${String(index).padStart(2, "0")}`,
+      );
+      await handlers.publishThreadContent(environmentId, threadsOf(names));
+      expect(Object.keys(await cache.load(scope))).toEqual(
+        names.slice(-THREAD_CONTENT_CACHE_MAX_THREADS),
+      );
+
+      const large = Object.fromEntries(
+        ["a", "b", "c", "d", "e"].map((name) => [name, content(name, "x".repeat(450_000))]),
+      );
+      await handlers.publishThreadContent(environmentId, large);
+      const kept = await cache.load(scope);
+      expect(Object.keys(kept)).toEqual(["b", "c", "d", "e"]);
+      expect(Buffer.byteLength(JSON.stringify(kept))).toBeLessThanOrEqual(
+        THREAD_CONTENT_CACHE_RECORD_BUDGET_BYTES,
+      );
+      await cache.dispose();
+    });
+
+    it("keeps and serves nothing for a machine or account it may not show", async () => {
+      const otherEnvironment = EnvironmentId.make("environment-other");
+      for (const overrides of [
+        { catalog: [{ ...machine, canReadMetadata: false }] },
+        { catalog: [{ ...machine, cacheDisposition: "locked-stale" as const }] },
+        { catalog: [] },
+        { status: "signed-out" as const, accountId: null },
+        { status: "unavailable" as const },
+      ]) {
+        const { handlers, cache, scope } = setup(overrides);
+        await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+        expect(await cache.load(scope), JSON.stringify(Object.keys(overrides))).toEqual({});
+        await cache.dispose();
+      }
+
+      const { handlers, cache } = setup();
+      await handlers.publishThreadContent(otherEnvironment, threadsOf([threadId]));
+      expect(await handlers.getThreadContent(otherEnvironment)).toEqual({});
+      // A machine that stops being shown stops being served, whatever the cache still holds.
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      const withdrawn = createDesktopWorkspaceIpcHandlers(
+        {
+          snapshot: () => state({ catalog: [], snapshots: [] }),
+        } as unknown as DesktopWorkspaceClient,
+        cache,
+      );
+      expect(await withdrawn.getThreadContent(environmentId)).toEqual({});
+      await cache.dispose();
+    });
+
+    it("reports the setting, and turning it off forgets and refuses content", async () => {
+      const { handlers, cache, scope } = setup();
+      expect(await handlers.getThreadContentCacheEnabled()).toBe(true);
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect(Object.keys(await handlers.getThreadContent(environmentId))).toEqual([threadId]);
+
+      expect(await handlers.setThreadContentCacheEnabled(false)).toBe(false);
+      expect(await handlers.getThreadContentCacheEnabled()).toBe(false);
+      expect(await handlers.getThreadContent(environmentId)).toEqual({});
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect(await cache.load(scope)).toEqual({});
+
+      expect(await handlers.setThreadContentCacheEnabled(true)).toBe(true);
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect(Object.keys(await handlers.getThreadContent(environmentId))).toEqual([threadId]);
+      await cache.dispose();
+    });
+
+    it("keeps nothing when the client has no content cache", async () => {
+      const handlers = createDesktopWorkspaceIpcHandlers({
+        snapshot: () => state(),
+      } as unknown as DesktopWorkspaceClient);
+      await handlers.publishThreadContent(environmentId, threadsOf([threadId]));
+      expect(await handlers.getThreadContent(environmentId)).toEqual({});
+      expect(await handlers.getThreadContentCacheEnabled()).toBe(false);
+      expect(await handlers.setThreadContentCacheEnabled(true)).toBe(false);
+    });
   });
 });
