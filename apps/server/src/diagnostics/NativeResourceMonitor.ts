@@ -67,6 +67,10 @@ interface ExternalProcess {
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 64 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 5_000;
+/** After this long without a request the sidecar drops to its background sampling rate. */
+const BACKGROUND_AFTER_IDLE_MS = 90_000;
+/** After this long without a request the sidecar is stopped; the next request starts it again. */
+const STOP_AFTER_IDLE_MS = 10 * 60_000;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const numeric = (value: unknown): value is number =>
@@ -192,6 +196,7 @@ export function makeNativeResourceMonitor(
   let generation = 0;
   let requestSequence = 0;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleStopTimer: ReturnType<typeof setTimeout> | undefined;
   let retryAfter = 0;
   let hostPower: NativeHostPowerState | null = null;
   let activeDemand = false;
@@ -200,6 +205,7 @@ export function makeNativeResourceMonitor(
   const stop = (message?: string) => {
     generation += 1;
     if (idleTimer) clearTimeout(idleTimer);
+    if (idleStopTimer) clearTimeout(idleStopTimer);
     activeDemand = false;
     const previous = child;
     child = undefined;
@@ -247,8 +253,13 @@ export function makeNativeResourceMonitor(
     idleTimer = setTimeout(() => {
       activeDemand = false;
       updateInterval();
-    }, 90_000);
+    }, BACKGROUND_AFTER_IDLE_MS);
     idleTimer.unref();
+    // Nobody is reading the samples any more: stop the sidecar instead of
+    // sampling forever. The next request starts it again.
+    if (idleStopTimer) clearTimeout(idleStopTimer);
+    idleStopTimer = setTimeout(() => stop(), STOP_AFTER_IDLE_MS);
+    idleStopTimer.unref();
   };
   const start = (): Promise<void> => {
     if (startPromise) return startPromise;

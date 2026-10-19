@@ -1,6 +1,5 @@
 import type { NetworkInterfaceInfo } from "node:os";
 
-import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
   AdvertisedEndpoint,
@@ -12,6 +11,7 @@ import {
   type CreateAdvertisedEndpointInput,
 } from "@ryco/shared/advertisedEndpoint";
 import { Effect, Layer } from "effect";
+import { FetchHttpClient } from "effect/http";
 
 import {
   buildTailscaleHttpsBaseUrl,
@@ -27,7 +27,9 @@ import {
  * the same addresses the same way.
  */
 
-const TailscaleEndpointLayer = Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici);
+// The probe is one plain GET, so the runtime's fetch is enough and no HTTP
+// client implementation has to stay loaded for it.
+const TailscaleEndpointLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
 const TAILSCALE_MAGIC_DNS_CACHE_TTL_MS = 60_000;
 
 export const TAILSCALE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
