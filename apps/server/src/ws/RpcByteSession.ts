@@ -1,8 +1,8 @@
-import { Clock, Effect, Queue, Scope, Semaphore } from "effect";
-import type { Layer } from "effect";
+import { Clock, Effect, Exit, Queue, Scope, Semaphore } from "effect";
+import type { Layer, Tracer } from "effect";
 import type { Rpc } from "effect/rpc";
 import { RelayMessageAssembler } from "@ryco/shared/relayMessageChunks";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
+import { RpcMessage, RpcSchema, RpcSerialization, RpcServer } from "effect/rpc";
 import type { RpcGroup } from "effect/rpc";
 
 import type { RelayResponseCompressor } from "./relayResponseCompression.ts";
@@ -130,9 +130,16 @@ export type RpcInboundInterceptor = (
 
 const encoder = new TextEncoder();
 
+/**
+ * Measures, per streaming request, the time from the request reaching the RPC
+ * server to its first chunk being written to the channel. Tagged with the
+ * method only.
+ */
+const FIRST_RESPONSE_SPAN = "relay.rpc.first_response";
+
 const passThrough: RpcInboundInterceptor = (message) => Effect.succeed({ kind: "rpc", message });
 
-export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
+export function makeRpcByteSession<Rpcs extends Rpc.AnyWithProps, E, R>(
   group: RpcGroup.RpcGroup<Rpcs>,
   handlers: Layer.Layer<Rpc.ToHandler<Rpcs> | Rpc.Middleware<Rpcs>, E, R>,
   sink: (bytes: Uint8Array) => Effect.Effect<void, RpcOutputRefusedError>,
@@ -237,6 +244,49 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
     // that needs one is being sent BY the request fiber it interrupts, and a
     // fiber cannot wait for its own interruption.
     const interrupts = yield* Queue.unbounded<RpcMessage.RequestId>();
+    // Streaming requests that have not written a chunk yet, by request id. An
+    // entry leaves when its first chunk is written, its request ends or is
+    // interrupted, or the session closes.
+    const streamingMethods = new Set(
+      [...group.requests.values()].flatMap((rpc) =>
+        RpcSchema.isStreamSchema(rpc.successSchema) ? [rpc._tag] : [],
+      ),
+    );
+    const awaitingFirstChunk = new Map<string, Tracer.Span>();
+    const trackFirstResponse = (message: unknown) => {
+      if (typeof message !== "object" || message === null) return Effect.void;
+      const { _tag, id, tag, requestId } = message as {
+        readonly _tag?: unknown;
+        readonly id?: unknown;
+        readonly tag?: unknown;
+        readonly requestId?: unknown;
+      };
+      if (_tag === "Interrupt") {
+        awaitingFirstChunk.delete(String(requestId));
+        return Effect.void;
+      }
+      if (_tag !== "Request" || typeof tag !== "string" || !streamingMethods.has(tag)) {
+        return Effect.void;
+      }
+      return Effect.makeSpan(FIRST_RESPONSE_SPAN, {
+        root: true,
+        attributes: { "rpc.method": tag },
+      }).pipe(
+        Effect.flatMap((span) =>
+          Effect.sync(() => {
+            awaitingFirstChunk.set(String(id), span);
+          }),
+        ),
+      );
+    };
+    // Called under the output lock for every response, before it is written.
+    // Returns the span to end once a stream's first chunk is out.
+    const takeFirstChunkSpan = (response: RpcMessage.FromServerEncoded) => {
+      if (response._tag !== "Chunk" && response._tag !== "Exit") return undefined;
+      const span = awaitingFirstChunk.get(String(response.requestId));
+      if (span !== undefined) awaitingFirstChunk.delete(String(response.requestId));
+      return response._tag === "Chunk" ? span : undefined;
+    };
 
     const protocol = yield* RpcServer.Protocol.make((writeRequest) =>
       Effect.gen(function* () {
@@ -282,9 +332,14 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                     compressor === undefined
                       ? decoded
                       : decoded.filter((message) => compressor.admitInbound(message));
-                  yield* Effect.forEach(messages, (message) => writeRequest(0, message as never), {
-                    discard: true,
-                  });
+                  yield* Effect.forEach(
+                    messages,
+                    (message) =>
+                      trackFirstResponse(message).pipe(
+                        Effect.andThen(writeRequest(0, message as never)),
+                      ),
+                    { discard: true },
+                  );
                 }),
               ),
             ),
@@ -315,6 +370,7 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                 if (outputFailed) return;
                 const encoded = encodeResponse(response);
                 if (encoded === undefined) return;
+                const firstChunkSpan = takeFirstChunkSpan(response);
                 // Compressed here, inside the output lock, so a response that
                 // waits on the threadpool still holds its place in line. A
                 // response may become two messages (see `RelayResponseCompressor`),
@@ -331,7 +387,12 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
                   outcome = yield* deliver(part);
                   if (outcome !== undefined) break;
                 }
-                if (outcome === undefined) return;
+                if (outcome === undefined) {
+                  if (firstChunkSpan !== undefined) {
+                    firstChunkSpan.end(yield* Clock.currentTimeNanos, Exit.void);
+                  }
+                  return;
+                }
                 if (
                   outcome === "too_large" &&
                   (response._tag === "Chunk" || response._tag === "Exit")
@@ -386,6 +447,7 @@ export function makeRpcByteSession<Rpcs extends Rpc.Any, E, R>(
       yield* Effect.scope,
       Effect.gen(function* () {
         clients.clear();
+        awaitingFirstChunk.clear();
         queuedBytes = 0;
         assembler.reset();
         options.compressor?.reset();

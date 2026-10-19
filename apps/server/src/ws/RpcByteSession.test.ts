@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Queue, Schema, Stream } from "effect";
+import { Deferred, Effect, Exit, Queue, Schema, Stream, Tracer } from "effect";
 import { Rpc, RpcGroup } from "effect/rpc";
 import {
   prepareRelayMessage,
@@ -10,7 +10,7 @@ import {
   decodeCompressedRelayPayload,
   isCompressedRelayPayload,
 } from "@ryco/shared/relayPayloadCompression";
-import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { inflateRawSync } from "node:zlib";
 
 import { makeRpcByteSession, RpcOutputRefusedError } from "./RpcByteSession.ts";
@@ -511,6 +511,211 @@ describe("RpcByteSession relay payload compression", () => {
         const snapshot = yield* Queue.take(outputs);
         expect(snapshot[0]).toBe(0x7b);
         expect(decodeResponse(snapshot)).toMatchObject({ _tag: "Chunk", requestId: "2" });
+      }),
+    ),
+  );
+});
+
+// ─── first response span ─────────────────────────────────────────────────────
+
+const FIRST_RESPONSE_SPAN = "relay.rpc.first_response";
+
+const PingItem = Schema.Struct({ index: Schema.Number });
+const SubscribeRpc = Rpc.make("subscribe", {
+  payload: Schema.Struct({}),
+  success: PingItem,
+  stream: true,
+});
+const SubscribeEmptyRpc = Rpc.make("subscribeEmpty", {
+  payload: Schema.Struct({}),
+  success: PingItem,
+  stream: true,
+});
+const SubscribeIdleRpc = Rpc.make("subscribeIdle", {
+  payload: Schema.Struct({}),
+  success: PingItem,
+  stream: true,
+});
+const FirstResponseGroup = RpcGroup.make(
+  SubscribeRpc,
+  SubscribeEmptyRpc,
+  SubscribeIdleRpc,
+  EchoRpc,
+);
+const firstResponseHandlers = FirstResponseGroup.toLayer(
+  Effect.succeed(
+    FirstResponseGroup.of({
+      // Three separate chunks: only the first one is a "first response".
+      subscribe: () =>
+        Stream.concat(
+          Stream.concat(Stream.make({ index: 0 }), Stream.make({ index: 1 })),
+          Stream.make({ index: 2 }),
+        ),
+      subscribeEmpty: () => Stream.empty,
+      subscribeIdle: () => Stream.never,
+      echo: ({ value }: { readonly value: string }) => Effect.succeed({ value }),
+    } as never),
+  ),
+);
+
+const methodRequest = (id: string, tag: string) =>
+  new TextEncoder().encode(JSON.stringify({ _tag: "Request", id, tag, payload: {}, headers: [] }));
+const ackFor = (requestId: string) =>
+  new TextEncoder().encode(JSON.stringify({ _tag: "Ack", requestId }));
+const interruptFor = (requestId: string) =>
+  new TextEncoder().encode(JSON.stringify({ _tag: "Interrupt", requestId }));
+
+describe("RpcByteSession first response span", () => {
+  it.live("records one span per streaming request, tagged with the method only", () => {
+    const spans: Array<Tracer.NativeSpan> = [];
+    const tracer = Tracer.make({
+      span(options) {
+        const span = new Tracer.NativeSpan(options);
+        spans.push(span);
+        return span;
+      },
+    });
+    const firstResponseSpans = () => spans.filter((span) => span.name === FIRST_RESPONSE_SPAN);
+    const endedFirstResponseSpans = () =>
+      firstResponseSpans().filter((span) => span.status._tag === "Ended");
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const outputs = yield* Queue.unbounded<Uint8Array>();
+        const session = yield* makeRpcByteSession(
+          FirstResponseGroup,
+          firstResponseHandlers,
+          (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+        );
+
+        const streamIds = ["s1", "s2", "s3"];
+        for (const id of streamIds) {
+          expect(yield* session.receive(methodRequest(id, "subscribe"))).toBe(true);
+        }
+        expect(yield* session.receive(request("e1", "plain"))).toBe(true);
+        expect(yield* session.receive(methodRequest("empty", "subscribeEmpty"))).toBe(true);
+        expect(yield* session.receive(methodRequest("idle", "subscribeIdle"))).toBe(true);
+        yield* Effect.yieldNow;
+        expect(yield* session.receive(interruptFor("idle"))).toBe(true);
+
+        // Acknowledge every chunk so each stream runs to its end.
+        const exited = new Set<string>();
+        const chunks = new Map<string, number>();
+        while (!["s1", "s2", "s3", "e1", "empty"].every((id) => exited.has(id))) {
+          const response = decodeResponse(yield* Queue.take(outputs));
+          if (response.requestId === undefined) continue;
+          if (response._tag === "Chunk") {
+            chunks.set(response.requestId, (chunks.get(response.requestId) ?? 0) + 1);
+            yield* session.receive(ackFor(response.requestId));
+          }
+          if (response._tag === "Exit") exited.add(response.requestId);
+        }
+        expect(chunks.get("s1")).toBeGreaterThan(1);
+
+        // A stream that ended or was interrupted without writing a chunk never
+        // had a first response, so its span stays open and is never reported.
+        expect(firstResponseSpans()).toHaveLength(streamIds.length + 2);
+        const recorded = endedFirstResponseSpans();
+        expect(recorded).toHaveLength(streamIds.length);
+        for (const span of recorded) {
+          expect([...span.attributes.entries()]).toEqual([["rpc.method", "subscribe"]]);
+          expect(span.status._tag).toBe("Ended");
+          if (span.status._tag === "Ended") {
+            expect(span.status.endTime).toBeGreaterThanOrEqual(span.status.startTime);
+          }
+        }
+      }),
+    ).pipe(Effect.provideService(Tracer.Tracer, tracer));
+  });
+});
+
+// ─── inbound burst ───────────────────────────────────────────────────────────
+
+/** The inbound queue capacity the hub connector opens each relay channel's session with. */
+const HUB_CONNECTOR_QUEUE_CAPACITY = 64;
+
+const BurstItem = Schema.Struct({ kind: Schema.String });
+const burstMethods = [
+  WS_METHODS.subscribeServerLifecycle,
+  WS_METHODS.subscribeServerConfig,
+  ORCHESTRATION_WS_METHODS.subscribeShell,
+] as const;
+const burstRpcs = [
+  ...burstMethods,
+  ORCHESTRATION_WS_METHODS.subscribeThreadWindow,
+  WS_METHODS.subscribeVcsStatus,
+].map((tag) => Rpc.make(tag, { payload: Schema.Struct({}), success: BurstItem, stream: true }));
+const BurstGroup = RpcGroup.make(...(burstRpcs as [(typeof burstRpcs)[number]]));
+const burstHandlers = BurstGroup.toLayer(
+  Effect.succeed(
+    BurstGroup.of(
+      Object.fromEntries(
+        burstRpcs.map((rpc) => [rpc._tag, () => Stream.make({ kind: rpc._tag })]),
+      ) as never,
+    ),
+  ),
+);
+
+// A hosted connection's first flight: lifecycle, config, shell, a window per
+// retained thread, and a few VCS statuses, all sent before anything is read.
+const hostedFirstFlight = [
+  ...burstMethods,
+  ...Array.from({ length: 32 }, () => ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
+  ...Array.from({ length: 3 }, () => WS_METHODS.subscribeVcsStatus),
+].map((tag, index) => methodRequest(String(index + 1), tag));
+
+const sendFirstFlight = (queueCapacity: number | undefined) =>
+  Effect.gen(function* () {
+    const outputs = yield* Queue.unbounded<Uint8Array>();
+    const consumerGate = yield* Deferred.make<void>();
+    const session = yield* makeRpcByteSession(
+      BurstGroup,
+      burstHandlers,
+      (bytes) => Queue.offer(outputs, Uint8Array.from(bytes)).pipe(Effect.asVoid),
+      {
+        ...(queueCapacity === undefined ? {} : { queueCapacity }),
+        // Holds the session's consumer, so the burst lands on the inbound
+        // queue with nothing draining it.
+        interceptor: (message) =>
+          Deferred.await(consumerGate).pipe(Effect.as({ kind: "rpc" as const, message })),
+      },
+    );
+    const accepted: Array<boolean> = [];
+    for (const bytes of hostedFirstFlight) accepted.push(yield* session.receive(bytes));
+    return { session, outputs, consumerGate, accepted };
+  });
+
+describe("RpcByteSession inbound burst", () => {
+  it.effect("receives a hosted first flight sent in one burst at the production capacity", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        expect(hostedFirstFlight).toHaveLength(38);
+        const { session, outputs, consumerGate, accepted } = yield* sendFirstFlight(
+          HUB_CONNECTOR_QUEUE_CAPACITY,
+        );
+        expect(accepted).toEqual(hostedFirstFlight.map(() => true));
+        expect(yield* session.queuedMessages).toBeLessThanOrEqual(HUB_CONNECTOR_QUEUE_CAPACITY);
+
+        // Every request is answered once the consumer runs: none was dropped.
+        yield* Deferred.succeed(consumerGate, undefined);
+        const exited = new Set<string>();
+        while (exited.size < hostedFirstFlight.length) {
+          const response = decodeResponse(yield* Queue.take(outputs));
+          if (response.requestId === undefined) continue;
+          if (response._tag === "Chunk") yield* session.receive(ackFor(response.requestId));
+          if (response._tag === "Exit") exited.add(response.requestId);
+        }
+        expect(exited.size).toBe(hostedFirstFlight.length);
+      }),
+    ),
+  );
+
+  it.effect("drops part of the same burst when the inbound queue is smaller", () =>
+    // Guards the test above: the burst only proves the capacity if a smaller
+    // queue visibly overflows under the same load.
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { accepted } = yield* sendFirstFlight(16);
+        expect(accepted.filter((admitted) => !admitted).length).toBeGreaterThan(0);
       }),
     ),
   );
