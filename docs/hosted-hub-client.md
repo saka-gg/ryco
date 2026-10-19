@@ -288,7 +288,8 @@ or discarded unflushed when the channel fails closed. The legacy branch is the o
 buffer to the Hub in readable form, and it is reached whenever a channel falls back — against an
 un-upgraded node, or against any node whose capability advertisement did not arrive. The UI stays on
 read-only until each stage completes. A remembered browser can show its saved conversation text and
-allow local draft editing during that interval. Possession of a node URL grants nothing.
+allow local draft editing during that interval, and messages sent then wait in the tab (see
+**Sending while a node connects**). Possession of a node URL grants nothing.
 
 A reload starts a fresh application session, and the tab's downgrade check starts empty again with
 it. That check is set on the first capability statement the session validates for a node and is held
@@ -310,6 +311,43 @@ Forward re-enters through the restore pipeline with a fresh ticket when acquisit
 without the node segment redirect to the node-scoped shape when the directory can identify the
 node, otherwise to the directory. No session, ticket, credential, challenge, or signature material
 appears in URLs, history state, or browser storage.
+
+## Sending while a node connects
+
+While a node's connection is being established — an intentional switch, or a connection that is on
+its way without any error — the chat stays usable and quiet. It shows "Syncing with <node>…" as a
+note rather than a warning, and the composer accepts a send at once.
+
+- **Queued sends are local draft state.** A plain message sent while the node is being established
+  waits in the tab's message queue, image attachments included. Nothing leaves the tab: the queue
+  sends it only once that environment has made a fresh relay attempt, accepted a current shell
+  snapshot, and admits mutations. The send button keeps its usual look with the caption "Sends when
+  <node> is ready", and the queued message says the same. If the node is still not ready after the
+  session's synchronization deadline (30 seconds), the queued message shows the connection's own
+  reason instead; a role that does not allow sending reads "Can't send — your role on <node> doesn't
+  allow it". A stale connection, a role refusal, or an unconfirmed delivery refuses new sends as
+  before.
+- **A draft's first send** waits under the draft. Only the draft's own open view sends it, creating
+  its thread with the same receipt-idempotent bootstrap as any first send. Leaving the draft before
+  the node is ready leaves the message queued: nothing is sent in the background and no thread is
+  created. It is sent once, when the user returns to the draft and the node is ready. A draft's queue
+  is therefore only ever shown from the open draft. While a draft has a queued send, its device
+  cannot be changed.
+- **Never queued.** Actions whose meaning depends on the moment they reach the node are not held
+  for later: stop, approval decisions and user-input answers (moving between questions stays local;
+  the answer to the last one is what reaches the node), steering a running turn, reverts,
+  terminal input, git and file writes (saving open editor changes included), Agent Control decisions,
+  project and settings writes, plan follow-ups, goals, side questions, and non-image uploads. While
+  the connection is being established they are disabled or refused with "Available when <node> is
+  connected"; any other refusal keeps its own reason.
+- **Attachments.** Images travel inside the queued message. A non-image upload is never queued with
+  a send: while the node connects the composer keeps it pending as "Syncing" ("Waiting for this node
+  to connect."), and a message that includes it cannot be sent until the upload is resolved. Hosted
+  builds do not stream non-image uploads to a node, so once the connection is established the
+  attachment shows the usual "Authorize" state and has to be removed before the message can be sent.
+- **Waiting for a free connection.** A routed node can wait for one of the limited connection slots
+  when every slot is held by an open view. The chat then reads "Waiting for a free connection to
+  <node>…", and sends wait in the queue the same way.
 
 ## Relay transport and ticket custody
 

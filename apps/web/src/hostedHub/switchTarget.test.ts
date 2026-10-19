@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   hostedCapabilityCopy,
   hostedQueuedCopy,
+  hostedRoleRefusesSendCopy,
+  hostedSendsWhenReadyCopy,
   hostedSwitchTargetLabel,
   hostedSwitchTargetQueued,
   hostedSyncingCopy,
@@ -115,5 +117,19 @@ describe("switch target captions", () => {
   it("explains that the routed node waits for a free connection", () => {
     expect(hostedQueuedCopy("Studio Mac")).toBe("Waiting for a free connection to Studio Mac…");
     expect(hostedQueuedCopy(undefined)).toBe("Waiting for a free connection to this node…");
+  });
+
+  it("says when a send waiting for the node goes out", () => {
+    expect(hostedSendsWhenReadyCopy("Studio Mac")).toBe("Sends when Studio Mac is ready");
+    expect(hostedSendsWhenReadyCopy(null)).toBe("Sends when this node is ready");
+  });
+
+  it("explains a send the node's role refuses", () => {
+    expect(hostedRoleRefusesSendCopy("Studio Mac")).toBe(
+      "Can't send — your role on Studio Mac doesn't allow it",
+    );
+    expect(hostedRoleRefusesSendCopy("")).toBe(
+      "Can't send — your role on this node doesn't allow it",
+    );
   });
 });

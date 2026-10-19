@@ -11,10 +11,13 @@ import {
 export function OptionalQuestionCard({
   input,
   disabled,
+  disabledReason = null,
   onRespond,
 }: {
   input: PendingUserInput;
   disabled: boolean;
+  /** Why answering is unavailable right now, shown while the card is disabled. */
+  disabledReason?: string | null;
   onRespond: (
     requestId: ApprovalRequestId,
     answers: Record<string, unknown>,
@@ -50,6 +53,11 @@ export function OptionalQuestionCard({
       <p className="mt-2 text-xs text-muted-foreground">
         Answer while this turn is running. This is not an approval request.
       </p>
+      {disabled && disabledReason ? (
+        <p role="status" className="mt-1 text-xs text-muted-foreground">
+          {disabledReason}
+        </p>
+      ) : null}
       <form
         onSubmit={(event) => {
           event.preventDefault();

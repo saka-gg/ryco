@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import {
   createChatFileUploadEngine,
   watchDirectChatFileUploadReadiness,
@@ -8,6 +8,7 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";
 
+import { isHostedHubMode } from "./env";
 import { usePrimaryEnvironmentDescriptor } from "./environments/primary/context";
 import {
   getEnvironmentHttpBaseUrl,
@@ -27,6 +28,30 @@ export {
 } from "@ryco/client-runtime/state/composer";
 
 /**
+ * Hosted builds only: whether the hosted environment's connection is being
+ * established, and the stores that change it (the hosted state for the
+ * selected node, the session registry for every other one). Loaded on demand
+ * so standard builds never reach the hosted modules from here.
+ */
+async function loadHostedUploadPhase(environmentId: EnvironmentId) {
+  const [{ readHostedRpcCapability }, { getHostedEnvironmentSessions, useHostedHubStore }] =
+    await Promise.all([import("./hostedHub/capabilities"), import("./hostedHub/state")]);
+  return {
+    establishing: () =>
+      readHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand, environmentId).kind ===
+      "establishing",
+    subscribe: (listener: () => void) => {
+      const stopHosted = useHostedHubStore.subscribe(listener);
+      const stopSessions = getHostedEnvironmentSessions().subscribe(listener);
+      return () => {
+        stopHosted();
+        stopSessions();
+      };
+    },
+  };
+}
+
+/**
  * Process-wide upload queue for composer file attachments. Records are keyed
  * by composer attachment id and hold bytes only in memory — the draft store
  * persists token metadata, never streamed bytes.
@@ -36,6 +61,7 @@ export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUp
     // Lazy: the connection service imports composer drafts back.
     const { readEnvironmentConnection, subscribeEnvironmentConnections } =
       await import("./environments/runtime/service");
+    const hostedPhase = isHostedHubMode() ? await loadHostedUploadPhase(environmentId) : null;
     return watchDirectChatFileUploadReadiness({
       environmentId,
       onChange,
@@ -45,14 +71,17 @@ export const composerFileUploadEngine = createChatFileUploadEngine(webChatFileUp
         (readEnvironmentConnection(environmentId)?.kind === "primary" ||
           useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.authState ===
             "authenticated"),
+      ...(hostedPhase ? { hostedEstablishing: hostedPhase.establishing } : {}),
       subscribe: (listener) => {
         const stopConnections = subscribeEnvironmentConnections(listener);
         const stopRuntime = useSavedEnvironmentRuntimeStore.subscribe(listener);
         const stopRegistry = useSavedEnvironmentRegistryStore.subscribe(listener);
+        const stopHosted = hostedPhase?.subscribe(listener);
         return () => {
           stopConnections();
           stopRuntime();
           stopRegistry();
+          stopHosted?.();
         };
       },
     });

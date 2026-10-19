@@ -20,7 +20,7 @@ const flush = async () => {
 
 afterEach(resetWsConnectionStateForTests);
 
-function harness() {
+function harness(options: { readonly hostedEstablishing?: () => boolean } = {}) {
   let snapshot: object | null = null;
   let snapshotAttempt = -1;
   const shellListeners = new Set<() => void>();
@@ -51,6 +51,7 @@ function harness() {
     environmentId,
     readConnection: () => current,
     canUpload: () => allowed,
+    ...(options.hostedEstablishing ? { hostedEstablishing: options.hostedEstablishing } : {}),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => {
@@ -144,6 +145,49 @@ describe("direct upload readiness", () => {
     h.resolve();
     await flush();
     expect(h.readiness.read()).toBeNull();
+    h.readiness.dispose();
+  });
+
+  it("words a hosted node's connection being established as a wait, never as ready", async () => {
+    let establishing = true;
+    const h = harness({ hostedEstablishing: () => establishing });
+    const hosted = {
+      ...h.connection,
+      knownEnvironment: { ...h.connection.knownEnvironment, source: "hub-hosted" },
+    } as EnvironmentConnection;
+    const syncing = {
+      label: "Syncing",
+      message: "Waiting for this node to connect.",
+      cancelInFlight: false,
+    };
+
+    // Before its connection exists, and once it is on its way.
+    h.setConnection(null);
+    expect(h.readiness.unavailable?.()).toEqual(syncing);
+    h.setConnection(hosted);
+    h.open();
+    h.resolve();
+    await flush();
+    expect(h.readiness.unavailable?.()).toEqual(syncing);
+    expect(h.readiness.read()).toBeNull();
+
+    // Established: hosted uploads keep failing closed with the usual reason.
+    establishing = false;
+    expect(h.readiness.unavailable?.()).toMatchObject({
+      label: "Authorize",
+      cancelInFlight: true,
+    });
+    expect(h.readiness.read()).toBeNull();
+    h.readiness.dispose();
+  });
+
+  it("ignores the hosted wait for a direct connection", async () => {
+    const h = harness({ hostedEstablishing: () => true });
+    expect(h.readiness.unavailable?.()).toMatchObject({ label: "Reconnect" });
+    h.open();
+    h.resolve();
+    await flush();
+    expect(h.readiness.read()).not.toBeNull();
     h.readiness.dispose();
   });
 

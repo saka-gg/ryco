@@ -328,6 +328,17 @@ export interface ChatComposerProps {
   phase: SessionPhase;
   isConnecting: boolean;
   isSendBusy: boolean;
+  /**
+   * Set while the environment's connection is being established: a send is
+   * still accepted and waits in the queue. The caption says when it goes out.
+   */
+  sendsQueueUntilReady?: string | null;
+  /**
+   * Why actions that must reach the node now (stop, answers, plan follow-ups,
+   * draft-local controls gated like them) are unavailable, worded for this
+   * environment; `null` when they are available.
+   */
+  mutationUnavailableReason?: string | null;
   isPreparingWorktree: boolean;
   /**
    * A first send's new worktree is being set up: the primary action is Stop
@@ -544,6 +555,8 @@ export const ChatComposer = memo(
       phase,
       isConnecting,
       isSendBusy,
+      sendsQueueUntilReady = null,
+      mutationUnavailableReason = null,
       isPreparingWorktree,
       isWorktreeSetupRunning = false,
       environmentUnavailable,
@@ -1239,9 +1252,12 @@ export const ChatComposer = memo(
     // disabled policy control is exactly the retrofit this step exists to avoid.
     const traitsMutationCapability = useHostedRpcCapability(
       ORCHESTRATION_WS_METHODS.dispatchCommand,
+      environmentId,
     );
     const traitsDisabled = !traitsMutationCapability.allowed;
-    const traitsDisabledReason = traitsMutationCapability.reason;
+    const traitsDisabledReason = traitsDisabled
+      ? (mutationUnavailableReason ?? traitsMutationCapability.reason)
+      : null;
 
     const providerTraitsInput = {
       hideAgent: enforceBuildMode,
@@ -2897,6 +2913,7 @@ export const ChatComposer = memo(
               (activePendingApproval ? (
                 <div className="rounded-t-[max(0px,calc(var(--radius-3xl)-3px))] border-b border-border/65 bg-muted/20">
                   <ApprovalCard
+                    environmentId={environmentId}
                     approval={activePendingApproval}
                     pendingCount={pendingApprovals.length}
                     isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
@@ -2939,6 +2956,7 @@ export const ChatComposer = memo(
                 data-chat-composer-collapsed-controls="true"
               >
                 <ApprovalCard
+                  environmentId={environmentId}
                   approval={activePendingApproval}
                   pendingCount={pendingApprovals.length}
                   isResponding={respondingRequestIds.includes(activePendingApproval.requestId)}
@@ -2975,6 +2993,7 @@ export const ChatComposer = memo(
                         isEnvironmentUnavailable={environmentUnavailable !== null}
                         isPreparingWorktree={false}
                         hasSendableContent={false}
+                        mutationUnavailableReason={mutationUnavailableReason}
                         preserveComposerFocusOnPointerDown
                         onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                         onInterrupt={handleInterruptPrimaryAction}
@@ -3140,6 +3159,8 @@ export const ChatComposer = memo(
                 isPreparingWorktree={isPreparingWorktree}
                 hasSendableContent={composerHasSendableContent}
                 sendDisabledReason={composerSendBlockedReason}
+                sendsQueueUntilReady={sendsQueueUntilReady}
+                mutationUnavailableReason={mutationUnavailableReason}
                 onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                 onInterrupt={handleInterruptPrimaryAction}
                 onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
