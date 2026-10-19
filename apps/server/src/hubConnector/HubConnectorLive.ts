@@ -49,7 +49,11 @@ import {
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
 import { relayChannelAuthority } from "./relayChannelAuthority.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
 import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorService.ts";
@@ -310,6 +314,74 @@ export interface HubConnectorLiveDependencies {
 const machineDependencies: HubConnectorLiveDependencies = {
   makeProcessLock: (path) => makeHubIdentityProcessLock({ path }),
   makeIdentityRuntime: makeHubIdentityRuntime,
+};
+
+/**
+ * Times every channel `factory` opens as a root `relay.channel.open` span: from the factory's
+ * open to the session the registry accepts the channel with, enqueueing its `channel.accept` as
+ * the open resolves. The span carries the open's duration and nothing else, no channel,
+ * account, key or payload data (§11.4); a failed open is timed too and rethrown unchanged.
+ *
+ * Once a channel's session is ready, `warm` runs detached and a macrotask later: the registry
+ * sends the accept and the E2EE carrier first, so the work overlaps the client's handshake round
+ * trips instead of delaying them. It never touches the channel; a failure is logged at debug.
+ */
+export const instrumentRelayChannelOpens = <WarmError>(
+  factory: RelayChannelSessionFactory,
+  options: {
+    readonly run: <A>(effect: Effect.Effect<A>) => Promise<A>;
+    readonly warm?: Effect.Effect<unknown, WarmError> | undefined;
+  },
+): RelayChannelSessionFactory => {
+  const warm =
+    options.warm === undefined
+      ? undefined
+      : Effect.yieldNow.pipe(
+          Effect.andThen(options.warm),
+          Effect.asVoid,
+          Effect.catchCause((cause) =>
+            Effect.logDebug("relay channel open: shell warm-up failed", { cause }),
+          ),
+        );
+  return {
+    connectionReady: (input) => factory.connectionReady?.(input),
+    open: async (input) => {
+      const startedAt = performance.now();
+      const opened = await options.run(
+        Effect.promise(() =>
+          factory.open(input).then(
+            (session) => ({ ok: true as const, session }),
+            (error: unknown) => ({ ok: false as const, error }),
+          ),
+        ).pipe(
+          Effect.tap(() =>
+            Effect.annotateCurrentSpan(
+              "relay.channel.open.durationMs",
+              Math.round(performance.now() - startedAt),
+            ),
+          ),
+          Effect.withSpan("relay.channel.open", { root: true }, { captureStackTrace: false }),
+        ),
+      );
+      if (!opened.ok) throw opened.error;
+      if (warm !== undefined) void options.run(warm);
+      return opened.session;
+    },
+  };
+};
+
+/**
+ * What a relay channel open warms: the stubbed shell, the form a hosted client subscribes to
+ * right after its handshake, so the node's shell memo holds it by then. Nothing without a shell
+ * query that builds that form.
+ */
+export const relayChannelShellWarmUp = (
+  query: Option.Option<Pick<ProjectionSnapshotQueryShape, "getStubbedShellSnapshot">>,
+): Effect.Effect<unknown, ProjectionRepositoryError> | undefined => {
+  const getStubbedShellSnapshot = Option.getOrUndefined(query)?.getStubbedShellSnapshot;
+  return getStubbedShellSnapshot === undefined
+    ? undefined
+    : Effect.suspend(() => getStubbedShellSnapshot());
 };
 
 const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
@@ -643,11 +715,17 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       },
     };
 
+    // Every channel open warms the shell a hosted client subscribes to right after its
+    // handshake; the memo serves that build while it is still exactly the current shell.
+    const shellQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
     connector = new HubConnector({
       config: connectorConfig,
       identity,
       transport: makeHubRelayTransport(),
-      channels: channelFactory,
+      channels: instrumentRelayChannelOpens(channelFactory, {
+        run: runPromise,
+        warm: relayChannelShellWarmUp(shellQuery),
+      }),
       enrollmentMetadata: {
         label: descriptor.label,
         platformOs: descriptor.platform.os,
@@ -686,15 +764,14 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       Config.withDefault(false),
     );
     if (cloudHistoryEnabled && connectorConfig.enabled && connectorConfig.origin) {
-      const query = yield* Effect.serviceOption(ProjectionSnapshotQuery);
-      if (Option.isSome(query)) {
+      if (Option.isSome(shellQuery)) {
         const sync = yield* Effect.acquireRelease(
           Effect.sync(() =>
             startThreadReadCacheSync({
               hubOrigin: connectorConfig.origin!,
               identity,
               connector,
-              query: query.value,
+              query: shellQuery.value,
               reportFailure: () => {
                 void runPromise(
                   Effect.logWarning("Cloud thread history synchronization is retrying."),

@@ -1,10 +1,16 @@
+import { Effect, Exit, Scope } from "effect";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  makeCurrentShellMemo,
+  SHELL_MEMO_MAX_AGE_MS,
+} from "../orchestration/Layers/ProjectionSnapshotQuery.ts";
 import {
   createHostedMultiNodeHarness,
   formatHostedNodeOpen,
   type HostedMultiNodeHarness,
   type HostedNodeOpenResult,
+  type HostedNodeShellSnapshot,
 } from "./testUtils/hostedMultiNodeHarness.ts";
 
 // What opening a hosted node costs, counted on the real browser and node relay
@@ -192,6 +198,71 @@ describe("hosted multi-node open cost", () => {
       expect(secondA.shell).toEqual(firstA.shell);
       expect(toB.shell.projectIds).toEqual(["project-node-1"]);
       expect(hub.counters().nodeErrors).toEqual([]);
+    },
+    TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "a second cold open of a node within 2 s of its last shell build, with no new event, builds no shell",
+    async () => {
+      // Each node reads its shell through the node's shell memo in front of a
+      // build it counts; the node's projection sequence is the shell's version.
+      const scope = await Effect.runPromise(Scope.make());
+      try {
+        const sequences = [1, 1];
+        const builds = [0, 0];
+        const seeded: Array<HostedNodeShellSnapshot | undefined> = [];
+        const memos = await Promise.all(
+          sequences.map((_, index) =>
+            Effect.runPromise(
+              makeCurrentShellMemo({
+                build: () =>
+                  Effect.sync(() => {
+                    builds[index]! += 1;
+                    return { snapshot: seeded[index]!, version: String(sequences[index]) };
+                  }),
+                readVersion: Effect.sync(() => String(sequences[index])),
+              }).pipe(Scope.provide(scope)),
+            ),
+          ),
+        );
+        const hub = await createHarness({
+          nodes: 2,
+          hopDelayMs: HOP_DELAY_MS,
+          readShell: (index, shell) => {
+            seeded[index] = shell;
+            return memos[index]!.read();
+          },
+        });
+
+        const firstA = await hub.openNode(0);
+        expect(builds).toEqual([1, 0]);
+        const toB = await hub.switchTo(1);
+        const secondA = await hub.switchTo(0);
+        report(secondA);
+
+        // Within the memo's age and at the same sequence, the reopen is served
+        // the shell A already built, over the same wire cost as a cold open.
+        expect(hub.now()).toBeLessThan(SHELL_MEMO_MAX_AGE_MS);
+        expect(builds).toEqual([1, 1]);
+        expect(secondA.traffic.channelsOpened).toBe(1);
+        expect(secondA.relayRoundTrips).toBe(COLD_OPEN_RELAY_ROUND_TRIPS);
+        expect(secondA.relayRoundTrips).toBe(firstA.relayRoundTrips);
+        expect(secondA.shellAcceptedMs).toBe(firstA.shellAcceptedMs);
+        expect(secondA.shell).toEqual(firstA.shell);
+        expect(toB.shell.projectIds).toEqual(["project-node-1"]);
+
+        // A new event on A: its next open builds again, and B's still does not.
+        sequences[0]! += 1;
+        await hub.switchTo(1);
+        const thirdA = await hub.switchTo(0);
+        expect(builds).toEqual([2, 1]);
+        expect(thirdA.relayRoundTrips).toBe(COLD_OPEN_RELAY_ROUND_TRIPS);
+        expect(thirdA.shell).toEqual(firstA.shell);
+        expect(hub.counters().nodeErrors).toEqual([]);
+      } finally {
+        await Effect.runPromise(Scope.close(scope, Exit.void));
+      }
     },
     TEST_TIMEOUT_MS,
   );
