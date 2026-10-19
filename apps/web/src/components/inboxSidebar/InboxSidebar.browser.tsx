@@ -1,6 +1,7 @@
 import "../../index.css";
 
 import { Schema } from "effect";
+import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import { ServerProvider } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
@@ -23,6 +24,7 @@ import {
 } from "../../environmentApi";
 import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
 import { readPaneDragSource } from "../../chatPanesStore";
+import { useTerminalStateStore } from "../../terminalStateStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 vi.mock("../../sidebarUndo", () => ({
@@ -92,6 +94,67 @@ describe("Inbox sidebar rendering and settlement", () => {
       expect(document.querySelectorAll('[data-testid="inbox-thread-row"]')).toHaveLength(2);
     } finally {
       await mounted.unmount();
+    }
+  });
+
+  it("marks open and running terminals with an icon only", async () => {
+    const [openRef, runningRef] = ["Open terminals", "Running server"].map((title) =>
+      scopeThreadRef(ENVIRONMENT_ID, ThreadId.make(title)),
+    ) as [ReturnType<typeof scopeThreadRef>, ReturnType<typeof scopeThreadRef>];
+    const terminals = useTerminalStateStore.getState();
+    terminals.newTerminal(openRef, "terminal-2");
+    terminals.newTerminal(openRef, "terminal-3");
+    terminals.setTerminalActivity(runningRef, "default", true);
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: ["Open terminals", "Running server"].map((title) => ({
+        id: ThreadId.make(title),
+        environmentId: ENVIRONMENT_ID,
+        projectId: PROJECT_ID,
+        title,
+        interactionMode: "default",
+        session: null,
+        createdAt: "2026-09-01T00:00:00.000Z",
+        archivedAt: null,
+        latestTurn: null,
+        branch: null,
+        worktreePath: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      })),
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      aiFocusEnabled: false,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = (title: string) =>
+        [...document.querySelectorAll('[data-testid="inbox-thread-row"]')].find((element) =>
+          element.textContent?.includes(title),
+        )!;
+      const openIndicator = row("Open terminals").querySelector("[data-terminal-count]");
+      expect(openIndicator?.getAttribute("aria-label")).toBe("3 terminals open");
+      expect(openIndicator?.textContent).toBe("3");
+
+      const runningIndicator = () => row("Running server").querySelector("[data-terminal-count]");
+      expect(runningIndicator()?.getAttribute("aria-label")).toBe("Terminal process running");
+      expect(runningIndicator()?.getAttribute("data-terminal-running")).toBe("1");
+      expect(row("Running server").textContent).not.toContain("Terminal running");
+
+      useTerminalStateStore.getState().setTerminalActivity(runningRef, "default", false);
+      await expect.poll(runningIndicator).toBeNull();
+    } finally {
+      await mounted.unmount();
+      useTerminalStateStore.getState().removeTerminalState(openRef);
+      useTerminalStateStore.getState().removeTerminalState(runningRef);
     }
   });
 

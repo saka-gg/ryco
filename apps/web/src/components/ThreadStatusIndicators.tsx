@@ -1,7 +1,7 @@
 import { DeviceIcon } from "./DeviceIcon";
 import { scopeProjectRef, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { VcsStatusResult } from "@ryco/contracts";
-import { TerminalIcon, type LucideIcon } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useMemo } from "react";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import {
@@ -10,11 +10,11 @@ import {
 } from "../environments/runtime";
 import { useGitStatus } from "../lib/gitStatusState";
 import { type AppState, selectProjectByRef, useStore } from "../store";
-import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { useUiStateStore } from "../uiStateStore";
 import { resolveChangeRequestPresentation } from "../sourceControlPresentation";
 import { resolveChangeRequestStateBadgeVariant } from "./sourceControl/stateBadgeVariants";
 import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic";
+import { ThreadTerminalIndicator, useThreadTerminalStatus } from "./ThreadTerminalStatus";
 import type { SidebarThreadSummary } from "../types";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
@@ -24,11 +24,6 @@ export interface PrStatusIndicator {
   tooltip: string;
   url: string;
   Icon: LucideIcon;
-}
-
-export interface TerminalStatusIndicator {
-  label: "Terminal process running";
-  colorClass: string;
 }
 
 export type ThreadPr = VcsStatusResult["pr"];
@@ -58,18 +53,6 @@ export function resolveThreadPr(
   }
 
   return gitStatus.pr ?? null;
-}
-
-export function terminalStatusFromRunningIds(
-  runningTerminalIds: string[],
-): TerminalStatusIndicator | null {
-  if (runningTerminalIds.length === 0) {
-    return null;
-  }
-  return {
-    label: "Terminal process running",
-    colorClass: "text-teal-600 dark:text-teal-300/90",
-  };
 }
 
 export function ThreadStatusLabel({
@@ -231,15 +214,12 @@ export function ThreadStatusDetailLine({ thread }: { thread: SidebarThreadSummar
 
 /**
  * Non-interactive trailing status icons for a thread row in compact contexts
- * like the command palette. Shows a terminal-running indicator and a remote
+ * like the command palette. Shows the terminal indicator and a remote
  * environment indicator, matching the sidebar's trailing indicators.
  */
 export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSummary }) {
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
-  const runningTerminalIds = useTerminalStateStore(
-    (state) =>
-      selectThreadTerminalState(state.terminalStateByThreadKey, threadRef).runningTerminalIds,
-  );
+  const terminalStatus = useThreadTerminalStatus(threadRef);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const isRemoteThread =
     primaryEnvironmentId !== null && thread.environmentId !== primaryEnvironmentId;
@@ -252,8 +232,6 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   const threadEnvironmentLabel = isRemoteThread
     ? (remoteEnvLabel ?? remoteEnvSavedLabel ?? "Remote")
     : null;
-  const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
-
   if (!terminalStatus && !isRemoteThread) {
     return null;
   }
@@ -261,14 +239,7 @@ export function ThreadRowTrailingStatus({ thread }: { thread: SidebarThreadSumma
   return (
     <span className="inline-flex shrink-0 items-center gap-1.5">
       {terminalStatus ? (
-        <span
-          role="img"
-          aria-label={terminalStatus.label}
-          title={terminalStatus.label}
-          className={`inline-flex items-center justify-center ${terminalStatus.colorClass}`}
-        >
-          <TerminalIcon className="size-3" />
-        </span>
+        <ThreadTerminalIndicator status={terminalStatus} dotClassName="ring-popover" withTitle />
       ) : null}
       {isRemoteThread ? (
         <Tooltip>

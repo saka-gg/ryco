@@ -1,0 +1,272 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { --term: #2bb3a3; --term-soft: color-mix(in oklab, #2bb3a3 16%, transparent); --sel: color-mix(in oklab, var(--foreground) 9%, transparent); --hov: color-mix(in oklab, var(--foreground) 5%, transparent); }
+  * { box-sizing: border-box; }
+  body { font-family: var(--font-sans); font-size: 13px; color: var(--foreground); }
+  .wrap { display: flex; flex-direction: column; gap: 12px; }
+  .tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--muted); align-self: flex-start; }
+  .tabs button { all: unset; cursor: pointer; padding: 5px 12px; border-radius: 7px; font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
+  .tabs button[aria-pressed="true"] { background: var(--background); color: var(--foreground); box-shadow: 0 1px 2px rgb(0 0 0 / .15); }
+  .desc { font-size: 12.5px; color: var(--muted-foreground); line-height: 1.5; min-height: 38px; }
+  .desc b { color: var(--foreground); font-weight: 600; }
+  .stage { display: grid; grid-template-columns: 272px minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; height: 430px; }
+  @media (max-width: 600px) { .stage { grid-template-columns: 1fr; height: auto; } }
+
+  /* inbox */
+  .side { background: color-mix(in oklab, var(--card) 70%, var(--background)); border-right: 1px solid var(--border); padding: 8px 6px; display: flex; flex-direction: column; gap: 1px; }
+  .side h6 { margin: 4px 8px 6px; font-size: 11px; font-weight: 600; color: var(--muted-foreground); letter-spacing: .02em; }
+  .row { all: unset; cursor: pointer; display: grid; grid-template-columns: 22px minmax(0,1fr); padding: 6px 8px; border-radius: 8px; }
+  .row:hover { background: var(--hov); }
+  .row[aria-current="page"] { background: var(--sel); }
+  .title { font-size: 13px; font-weight: 500; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .glyph { display: flex; align-items: center; height: 18px; }
+  .line2 { grid-column: 1 / -1; display: grid; grid-template-columns: 22px minmax(0,1fr); align-items: center; padding-top: 1px; font-size: 11.5px; line-height: 16px; color: var(--muted-foreground); }
+  .meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .state { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+  .age { flex-shrink: 0; font-variant-numeric: tabular-nums; opacity: .7; }
+  .proj { width: 13px; height: 13px; border-radius: 3.5px; display: grid; place-items: center; font-size: 8px; font-weight: 700; color: #fff; position: relative; }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.6px solid color-mix(in oklab, var(--info) 30%, transparent); border-top-color: var(--info); animation: r .9s linear infinite; }
+  .done { width: 13px; height: 13px; border-radius: 50%; background: var(--success); display: grid; place-items: center; }
+  .attn { width: 9px; height: 9px; border-radius: 50%; background: var(--warning); margin-left: 2px; }
+  .idle { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted-foreground); opacity: .6; margin-left: 2px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+
+  /* main */
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .chat { flex: 1; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+  .bubble { align-self: flex-end; max-width: 75%; padding: 7px 11px; border-radius: 12px; background: var(--secondary); color: var(--secondary-foreground); font-size: 12.5px; }
+  .reply { font-size: 12.5px; color: var(--muted-foreground); line-height: 1.5; }
+  .toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--border); min-height: 38px; }
+  .tb { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: 6px; font-size: 12px; color: var(--muted-foreground); position: relative; }
+  .tb:hover { background: var(--sel); color: var(--foreground); }
+  .tb[aria-pressed="true"] { color: var(--foreground); }
+  .tb .muted { opacity: .7; font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  .branch { font-size: 12px; color: var(--muted-foreground); display: inline-flex; gap: 5px; align-items: center; }
+
+  .drawer { height: 0; overflow: hidden; border-top: 1px solid transparent; background: color-mix(in oklab, var(--code-background) 85%, var(--background)); transition: height .28s cubic-bezier(.22,1,.36,1); }
+  .drawer.open { height: 150px; border-top-color: var(--border); }
+  .dtabs { display: flex; align-items: center; gap: 2px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .dtab { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 5px; font-size: 11.5px; color: var(--muted-foreground); }
+  .dtab.active { background: var(--sel); color: var(--foreground); }
+  .dtab .x { opacity: .5; font-size: 13px; line-height: 1; }
+  .dtab .x:hover { opacity: 1; }
+  .add { all: unset; cursor: pointer; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; color: var(--muted-foreground); }
+  .add:hover { background: var(--sel); }
+  .term { font-family: var(--font-mono); font-size: 11.5px; padding: 8px 12px; color: var(--code-foreground); line-height: 1.55; }
+  .term .p { color: var(--term); }
+  .runbtn { all: unset; cursor: pointer; margin-left: 8px; font-family: var(--font-sans); font-size: 11px; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border); color: var(--foreground); }
+  .runbtn:hover { background: var(--sel); }
+  .empty-drawer { padding: 14px; font-size: 12px; color: var(--muted-foreground); }
+
+  /* shared atoms */
+  svg.i { width: 12px; height: 12px; flex-shrink: 0; }
+  .t-on { color: var(--term); }
+  .t-off { color: var(--muted-foreground); opacity: .75; }
+  .pulse { position: relative; }
+  .pulse::after { content: ""; position: absolute; right: -2px; top: -2px; width: 5px; height: 5px; border-radius: 50%; background: var(--term); box-shadow: 0 0 0 1.5px var(--background); animation: p 1.6s ease-in-out infinite; }
+  @keyframes p { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* concept B: activity bars */
+  .bars { display: inline-flex; align-items: flex-end; gap: 1.5px; height: 10px; }
+  .bars i { width: 2.5px; border-radius: 1px; background: var(--muted-foreground); opacity: .45; height: 4px; }
+  .bars i.on { background: var(--term); opacity: 1; animation: eq 1s ease-in-out infinite; }
+  .bars i.on:nth-child(2) { animation-delay: -.3s; } .bars i.on:nth-child(3) { animation-delay: -.6s; } .bars i.on:nth-child(4) { animation-delay: -.15s; }
+  @keyframes eq { 0%,100% { height: 4px; } 50% { height: 10px; } }
+  .pill { display: inline-flex; align-items: center; gap: 4px; height: 16px; padding: 0 5px; border-radius: 99px; background: color-mix(in oklab, var(--muted) 80%, transparent); flex-shrink: 0; }
+  .pill.on { background: var(--term-soft); }
+  .tb .pill { height: 18px; padding: 0 6px; }
+
+  /* concept C: corner badge + state line */
+  .cbadge { position: absolute; right: -5px; bottom: -4px; min-width: 10px; height: 10px; padding: 0 2px; border-radius: 99px; font-size: 7.5px; font-weight: 700; line-height: 10px; text-align: center; color: #fff; background: var(--muted-foreground); box-shadow: 0 0 0 1.5px var(--background); font-variant-numeric: tabular-nums; }
+  .cbadge.on { background: var(--term); }
+  .cbadge.on::before { content: ""; position: absolute; inset: -3px; border-radius: 99px; border: 1.5px solid var(--term); opacity: 0; animation: ring 1.8s ease-out infinite; }
+  @keyframes ring { 0% { opacity: .7; transform: scale(.7); } 100% { opacity: 0; transform: scale(1.5); } }
+  .tline { color: var(--term); font-weight: 500; }
+  .split { display: inline-flex; align-items: center; }
+  .count { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; background: var(--muted); color: var(--foreground); position: relative; }
+  .count.on { background: var(--term); color: #fff; }
+  .count.on::after { content: ""; position: absolute; inset: -3px; border-radius: 99px; border: 1.5px solid transparent; border-top-color: var(--term); border-right-color: var(--term); animation: r 1.1s linear infinite; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11.5px; color: var(--muted-foreground); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .hint { font-size: 11.5px; color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div class="desc" id="desc"></div>
+  <div class="stage">
+    <aside class="side" id="side"></aside>
+    <section class="main">
+      <div class="chat" id="chat"></div>
+      <div class="drawer" id="drawer"></div>
+      <div class="toolbar" id="toolbar"></div>
+    </section>
+  </div>
+  <div class="hint">Click an inbox row to select its chat. Use the toolbar button to open or close the drawer. In the drawer, <b>+</b> adds a terminal, ▶ starts or stops a process and × closes a terminal. The selected tab and the terminal state carry over between concepts.</div>
+</div>
+
+<script>
+const ICON = {
+  term: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/></svg>',
+  branch: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>',
+  check: '<svg viewBox="0 0 14 14" width="9" height="9"><path d="M3.3 7.3l2.4 2.3 5-5" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  plus: '<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+};
+
+const CMDS = ["bun run dev", "bun run test --watch", "tail -f server.log", "vite build --watch"];
+let tid = 10;
+const threads = [
+  { id: 1, title: "Add terminal count to inbox", project: "ryco", color: "#7c5cff", state: "working", line: "Editing InboxThreadRow.tsx", age: "1:42", branch: "task/terminal-count",
+    drawerOpen: true, active: 0, terms: [{ id: 1, name: "Terminal 1", run: "bun run dev" }, { id: 2, name: "Terminal 2", run: null }, { id: 3, name: "Terminal 3", run: "bun run test --watch" }] },
+  { id: 2, title: "Fix relay reconnect race", project: "ryco", color: "#7c5cff", state: "done", line: "Ready for review", age: "12m", branch: "fix/relay-race",
+    drawerOpen: false, active: 0, terms: [{ id: 4, name: "Terminal 1", run: "tail -f server.log" }] },
+  { id: 3, title: "Hub pin bump to 0.4.2", project: "ryco-hub", color: "#e9873a", state: "attention", line: "Needs approval: run docker build", age: "34m", branch: "chore/pin-bump",
+    drawerOpen: false, active: 0, terms: [{ id: 5, name: "Terminal 1", run: null }] },
+  { id: 4, title: "Weapon paint filter UI", project: "cs2-paints", color: "#2f9e6a", state: "idle", line: "Waiting for input", age: "2h", branch: "main",
+    drawerOpen: false, active: 0, terms: [] },
+];
+let selected = 1;
+let concept = "A";
+
+const CONCEPTS = {
+  A: { name: "A · Quiet icon", desc: "<b>Quiet icon.</b> Brings the project-tree row's teal terminal icon to the inbox. A grey icon means a terminal is open and idle. A teal icon with a pulsing dot means a process is running. A small number appears when there are 2 or more terminals. The toolbar reads <i>Terminal · 3 · 2 running</i>. This is the lowest-noise option and is closest to what ships today." },
+  B: { name: "B · Activity bars", desc: "<b>Activity bars.</b> A small pill with one bar per terminal. A running bar moves like an equalizer and an idle bar stays flat. You can read the count and the activity together at a glance, and the same pill sits on the toolbar button. This is the most informative option and adds about 30px to each row." },
+  C: { name: "C · Badge + state line", desc: "<b>Badge + state line.</b> A count badge sits on the project icon. It is grey when terminals are idle and teal with a ring when a process runs. When the agent is idle but a process is still running, the state line names it, for example <i>bun run dev running</i>. The toolbar puts a count bubble with a spinning ring next to the label. This option says the most when the chat itself is idle." },
+};
+
+const sel = () => threads.find(t => t.id === selected);
+const runningOf = t => t.terms.filter(x => x.run);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+function termSummary(t) {
+  const n = t.terms.length, r = runningOf(t).length;
+  if (!n) return "No terminals";
+  return `${plural(n, "terminal")} open${r ? ` · ${r} running` : ""}`;
+}
+
+function glyph(t) {
+  if (t.state === "working") return '<span class="spin"></span>';
+  if (t.state === "done") return `<span class="done">${ICON.check}</span>`;
+  if (t.state === "attention") return '<span class="attn"></span>';
+  return '<span class="idle"></span>';
+}
+
+/* ---- per-concept inbox fragments ---- */
+function inboxA(t) {
+  const n = t.terms.length, r = runningOf(t).length;
+  if (!n) return "";
+  return `<span title="${termSummary(t)}" style="display:inline-flex;align-items:center;gap:2px;flex-shrink:0" class="${r ? "t-on" : "t-off"}">
+    <span class="${r ? "pulse" : ""}" style="display:inline-flex">${ICON.term}</span>${n > 1 ? `<span style="font-size:10.5px;font-weight:600">${n}</span>` : ""}</span>`;
+}
+function bars(t) {
+  return `<span class="bars">${t.terms.slice(0, 4).map(x => `<i class="${x.run ? "on" : ""}"></i>`).join("")}</span>`;
+}
+function inboxB(t) {
+  if (!t.terms.length) return "";
+  const r = runningOf(t).length;
+  return `<span class="pill ${r ? "on" : ""}" title="${termSummary(t)}"><span class="${r ? "t-on" : "t-off"}" style="display:inline-flex">${ICON.term}</span>${bars(t)}</span>`;
+}
+function projIcon(t) {
+  let badge = "";
+  if (concept === "C" && t.terms.length) {
+    const r = runningOf(t).length;
+    badge = `<span class="cbadge ${r ? "on" : ""}" title="${termSummary(t)}">${t.terms.length}</span>`;
+  }
+  return `<span class="proj" style="background:${t.color}">${t.project[0].toUpperCase()}${badge}</span>`;
+}
+function stateLine(t) {
+  const r = runningOf(t);
+  if (concept === "C" && r.length && (t.state === "idle" || t.state === "done")) {
+    return `<span class="state tline">${ICON.term}<span style="overflow:hidden;text-overflow:ellipsis">${r[0].run} running${r.length > 1 ? ` +${r.length - 1}` : ""}</span></span>`;
+  }
+  const tone = t.state === "attention" ? 'style="color:var(--warning-foreground);font-weight:500"' : "";
+  return `<span class="state" ${tone}>${t.line}</span>`;
+}
+
+function renderSide() {
+  const side = document.getElementById("side");
+  side.innerHTML = `<h6>Active</h6>` + threads.map(t => {
+    const ind = concept === "A" ? inboxA(t) : concept === "B" ? inboxB(t) : "";
+    return `<button class="row" data-id="${t.id}" ${t.id === selected ? 'aria-current="page"' : ""}>
+      <span class="glyph">${glyph(t)}</span>
+      <span class="title" style="${t.state === "done" ? "font-weight:600" : ""}">${t.title}</span>
+      <span class="line2"><span style="display:flex">${projIcon(t)}</span>
+        <span class="meta">${stateLine(t)}${ind}<span class="age">${t.age}</span></span>
+      </span>
+    </button>`;
+  }).join("");
+  side.querySelectorAll(".row").forEach(b => b.onclick = () => { selected = +b.dataset.id; render(); });
+}
+
+/* ---- toolbar per concept ---- */
+function toolbarButton(t) {
+  const n = t.terms.length, r = runningOf(t).length;
+  const label = t.drawerOpen ? "Close Terminal" : "Open Terminal";
+  if (concept === "A") {
+    return `<span class="${r ? "pulse t-on" : ""}" style="display:inline-flex">${ICON.term}</span><span>${label}</span>
+      ${n ? `<span class="muted">· ${n}</span>` : ""}${r ? `<span class="t-on" style="font-variant-numeric:tabular-nums">· ${r} running</span>` : ""}`;
+  }
+  if (concept === "B") {
+    return `${ICON.term}<span>${label}</span>${n ? `<span class="pill ${r ? "on" : ""}"><span style="font-size:10.5px;font-weight:600;font-variant-numeric:tabular-nums" class="${r ? "t-on" : ""}">${n}</span>${bars(t)}</span>` : ""}`;
+  }
+  return `<span class="split">${ICON.term}</span><span>${label}</span>${n ? `<span class="count ${r ? "on" : ""}">${n}</span>` : ""}`;
+}
+function renderToolbar() {
+  const t = sel();
+  const tb = document.getElementById("toolbar");
+  tb.innerHTML = `<button class="tb" id="toggle" aria-pressed="${t.drawerOpen}" title="${termSummary(t)}">${toolbarButton(t)}</button>
+    <span class="spacer"></span><span class="branch">${ICON.branch}${t.branch}</span>`;
+  document.getElementById("toggle").onclick = () => {
+    t.drawerOpen = !t.drawerOpen;
+    if (t.drawerOpen && !t.terms.length) t.terms.push({ id: ++tid, name: "Terminal 1", run: null });
+    render();
+  };
+}
+
+function renderDrawer() {
+  const t = sel();
+  const d = document.getElementById("drawer");
+  d.classList.toggle("open", t.drawerOpen);
+  if (!t.terms.length) { d.innerHTML = '<div class="empty-drawer">No terminals</div>'; return; }
+  t.active = Math.min(t.active, t.terms.length - 1);
+  const cur = t.terms[t.active];
+  d.innerHTML = `<div class="dtabs">${t.terms.map((x, i) => `<span class="dtab ${i === t.active ? "active" : ""}" data-i="${i}">
+      <span class="${x.run ? "t-on" : "t-off"}" style="display:inline-flex">${ICON.term}</span>${x.name}${x.run ? '<span class="bars" style="height:8px"><i class="on"></i><i class="on"></i></span>' : ""}<span class="x" data-x="${i}">×</span></span>`).join("")}
+      <button class="add" id="add" title="New terminal">${ICON.plus}</button></div>
+    <div class="term"><span class="p">~/ryco ❯</span> ${cur.run ?? ""}${cur.run ? `<br><span style="opacity:.6">● running · watching for changes…</span>` : '<span style="opacity:.5">▍</span>'}
+      <button class="runbtn" id="run">${cur.run ? "■ Stop" : "▶ Run process"}</button></div>`;
+  d.querySelectorAll(".dtab").forEach(el => el.onclick = e => {
+    if (e.target.dataset.x !== undefined) {
+      t.terms.splice(+e.target.dataset.x, 1);
+      if (!t.terms.length) t.drawerOpen = false;
+    } else t.active = +el.dataset.i;
+    render();
+  });
+  document.getElementById("add").onclick = () => { t.terms.push({ id: ++tid, name: `Terminal ${t.terms.length + 1}`, run: null }); t.active = t.terms.length - 1; render(); };
+  document.getElementById("run").onclick = () => { cur.run = cur.run ? null : CMDS[cur.id % CMDS.length]; render(); };
+}
+
+function renderChat() {
+  const t = sel();
+  document.getElementById("chat").innerHTML = `<div class="bubble">${t.title}</div>
+    <div class="reply">${t.state === "working" ? "Working… reading the terminal state store and inbox row model." : t.line + "."}</div>
+    <div class="reply" style="margin-top:auto;font-size:11.5px">${termSummary(t)}${t.drawerOpen ? "" : t.terms.length ? " · drawer closed" : ""}</div>`;
+}
+
+function renderTabs() {
+  const tabs = document.getElementById("tabs");
+  tabs.innerHTML = Object.entries(CONCEPTS).map(([k, c]) => `<button aria-pressed="${k === concept}" data-k="${k}">${c.name}</button>`).join("");
+  tabs.querySelectorAll("button").forEach(b => b.onclick = () => { concept = b.dataset.k; render(); });
+  document.getElementById("desc").innerHTML = CONCEPTS[concept].desc;
+}
+
+function render() { renderTabs(); renderSide(); renderChat(); renderDrawer(); renderToolbar(); }
+render();
+</script>
+</body>
+</html>

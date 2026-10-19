@@ -6399,6 +6399,7 @@ export default function ChatView(props: ChatViewProps) {
                   terminalToggleShortcutLabel={terminalToggleShortcutLabel}
                   onToggleTerminal={toggleTerminalVisibility}
                   terminalCount={terminalState.terminalIds.length}
+                  runningTerminalCount={terminalState.runningTerminalIds.length}
                 />
               </div>
             )}
