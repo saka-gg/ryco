@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   getThreadState: vi.fn(),
 }));
 const hub = create(() => ({
+  selectedNode: { environmentId: "preview-env" },
+  nodes: [],
   effectiveRole: "owner",
   directoryStatus: "ready",
   transportStatus: "online",

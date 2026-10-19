@@ -15,8 +15,8 @@ import SimulatorPanel from "./SimulatorPanel";
 vi.mock("../../composerDraftStore", () => ({ DraftId: { make: (value: string) => value } }));
 vi.mock("../../env", () => ({ isHostedHubMode: () => false }));
 vi.mock("../../hostedHub/state", () => ({
-  useHostedHubStore: (selector: (state: { effectiveRole: string }) => unknown) =>
-    selector({ effectiveRole: "owner" }),
+  useHostedHubStore: (selector: (state: { effectiveRole: string; nodes: [] }) => unknown) =>
+    selector({ effectiveRole: "owner", nodes: [] }),
   hostedHubController: {
     acknowledgeDeliveryUnknown: vi.fn(),
     markEnvironmentDeliveryUnknown: vi.fn(),

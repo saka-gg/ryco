@@ -32,6 +32,8 @@ import {
 } from "../../../environments/runtime";
 import { useEvent } from "../../../hooks/useEvent";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
+import { useHostedHubStore } from "../../../hostedHub/state";
+import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../../hostedHub/switchTarget";
 import { selectEnvironmentState, useStore } from "../../../store";
 import type { SidebarWorktreeSummary } from "../../../types";
 import type { NotesPaneView, NotesSaveState } from "./noteView";
@@ -164,7 +166,8 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
   const requested = target?.available === true && environmentId !== null && projectId !== null;
   const checkout = target?.checkout ?? null;
   const worktreeKey = checkout ? noteWorktreeKey(checkout) : null;
-  const capability = useHostedRpcCapability(WS_METHODS.notesCommand);
+  const capability = useHostedRpcCapability(WS_METHODS.notesCommand, environmentId);
+  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
   const key = environmentId && projectId ? projectNotesKey(environmentId, projectId) : null;
 
   const [bound, setBound] = useState(false);
@@ -454,7 +457,7 @@ export function useWorktreeNotes(target: WorktreeNotesTarget | null): WorktreeNo
     ? NOTES_UNREACHABLE_REASON
     : capability.allowed
       ? null
-      : (capability.reason ?? NOTES_READ_ONLY_REASON);
+      : (hostedCapabilityCopy(capability, nodeLabel) ?? NOTES_READ_ONLY_REASON);
   const worktreeViewDisabledReason = checkout ? null : NOTES_DRAFT_REASON;
 
   /** A view's document address, or null while it has none (a draft's Worktree view). */

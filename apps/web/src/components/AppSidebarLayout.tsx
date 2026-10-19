@@ -142,7 +142,8 @@ export function useAppShellGlobalEffects(): void {
 function CollapsedAppSidebarChrome({ sidebarOpen }: { sidebarOpen: boolean }) {
   const { toggleSidebar } = useSidebar();
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
-  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics);
+  // hosted-capability: routed node
+  const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
 
   return (
     <div
