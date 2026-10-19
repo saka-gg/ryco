@@ -96,7 +96,13 @@ import {
   environmentQueryRefresh,
   isHostedEnvironmentQueryRefreshReady,
 } from "../../rpc/environmentQueryRefresh";
-import { applySettingsUpdated, getServerConfig } from "../../rpc/serverState";
+import {
+  applySettingsUpdated,
+  clearEnvironmentServerConfigs,
+  forgetEnvironmentServerConfig,
+  getServerConfig,
+  writeEnvironmentServerConfig,
+} from "../../rpc/serverState";
 import { DeviceWsTransport, HostedWsTransport, WsTransport } from "../../rpc/wsTransport";
 import { createWsRpcClient, type WsRpcClient } from "../../rpc/wsRpcClient";
 import { appendVersionMismatchHint, resolveServerConfigVersionMismatch } from "../../versionSkew";
@@ -1264,8 +1270,9 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
   if (!knownEnvironment?.environmentId) {
     throw new Error("Unable to resolve the primary environment.");
   }
+  const environmentId = knownEnvironment.environmentId;
 
-  const existing = getEnvironmentSupervisor().read(knownEnvironment.environmentId);
+  const existing = getEnvironmentSupervisor().read(environmentId);
   if (existing) {
     return existing;
   }
@@ -1286,9 +1293,12 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
               readCurrent: () => useHostedHubStore.getState().generation,
             },
           }),
+      // The config stream starts with the connection and feeds the
+      // per-environment config store, ahead of any shell that shows it.
+      onConfigUpdated: (config, type) => writeEnvironmentServerConfig(environmentId, config, type),
       ...createEnvironmentConnectionHandlers(
         hostedGeneration,
-        hostedGeneration !== null ? knownEnvironment.environmentId : undefined,
+        hostedGeneration !== null ? environmentId : undefined,
         { resumeShell: hostedGeneration === null },
       ),
     }),
@@ -1346,7 +1356,8 @@ export async function connectDesktopWorkspaceEnvironment(input: {
       kind: "saved",
       knownEnvironment: { ...knownEnvironment, environmentId: input.environmentId },
       client: createWsRpcClient(transport),
-      onConfigUpdated: (config) => {
+      onConfigUpdated: (config, type) => {
+        writeEnvironmentServerConfig(input.environmentId, config, type);
         useSavedEnvironmentRuntimeStore.getState().ensure(input.environmentId);
         useSavedEnvironmentRuntimeStore.getState().patch(input.environmentId, {
           descriptor: config.environment,
@@ -1574,7 +1585,8 @@ async function connectSavedEnvironment(
           throw toSavedEnvironmentCredentialError(error);
         }
       },
-      onConfigUpdated: (config) => {
+      onConfigUpdated: (config, type) => {
+        writeEnvironmentServerConfig(activeRecord.environmentId, config, type);
         initialConfigSnapshot.resolve(config);
         useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
           descriptor: config.environment,
@@ -1839,6 +1851,7 @@ export async function removeSavedEnvironment(environmentId: EnvironmentId): Prom
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
   useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
+  forgetEnvironmentServerConfig(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
   // Project artwork is cached per node, past its connections: forget it too.
   clearProjectIconCache(environmentId);
@@ -1961,6 +1974,7 @@ export function startEnvironmentConnectionService(): () => void {
 export async function resetEnvironmentServiceForTests(): Promise<void> {
   await getEnvironmentSupervisor().resetForTests();
   environmentSupervisor = null;
+  clearEnvironmentServerConfigs();
   lastBrowserHiddenAt = null;
   primaryShellSnapshotApplied = false;
   primaryShellSnapshotAppliedPromise = new Promise<void>((resolve) => {

@@ -21,6 +21,7 @@ vi.mock("./wsTransport.ts", () => ({
 
 import {
   createProviderCatalogCache,
+  PROVIDER_CATALOG_LOAD_MAX_WAIT_MS,
   providerCatalogCache,
   restoreSnapshotCatalogs,
   type ProviderCatalog,
@@ -123,6 +124,63 @@ describe("provider catalog cache", () => {
     await Promise.resolve();
     expect(saved.at(-1)?.map(([digest]) => digest)).toEqual(["old", "live", "new"]);
   });
+
+  it("reports a pending load until every declared load has settled, rejected or not", async () => {
+    const cache = createProviderCatalogCache();
+    expect(cache.loaded()).toBeNull();
+
+    let finishFirst!: () => void;
+    let failSecond!: (error: Error) => void;
+    cache.expectLoad(
+      new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      }),
+    );
+    cache.expectLoad(
+      new Promise<void>((_resolve, reject) => {
+        failSecond = reject;
+      }),
+    );
+    const pending = cache.loaded();
+    expect(pending).not.toBeNull();
+    let settled = false;
+    void pending?.then(() => {
+      settled = true;
+    });
+
+    finishFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    failSecond(new Error("indexeddb unavailable"));
+    await pending;
+    expect(settled).toBe(true);
+    await Promise.resolve();
+    expect(cache.loaded()).toBeNull();
+  });
+
+  it("stops waiting for a load that never settles once its wait runs out", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = createProviderCatalogCache();
+      cache.expectLoad(new Promise<void>(() => undefined));
+      let settled = false;
+      void cache.loaded()?.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(PROVIDER_CATALOG_LOAD_MAX_WAIT_MS - 1);
+      expect(settled).toBe(false);
+      expect(cache.loaded()).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expect(cache.loaded()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("restoreSnapshotCatalogs", () => {
@@ -209,6 +267,69 @@ describe("wsRpcClient config subscription", () => {
     const legacy = snapshotEvent([provider("codex", "a")]);
     harness.attempts[0]!.listener(legacy);
     expect(listener).toHaveBeenCalledWith(legacy);
+  });
+
+  it("opens the subscription only once the page's persisted catalogs have loaded", async () => {
+    providerCatalogCache.clear();
+    let attachCatalogs!: () => void;
+    providerCatalogCache.expectLoad(
+      new Promise<void>((resolve) => {
+        attachCatalogs = resolve;
+      }),
+    );
+    const harness = makeHarness();
+    harness.client.server.subscribeConfig(vi.fn());
+    await Promise.resolve();
+    expect(harness.attempts).toHaveLength(0);
+
+    providerCatalogCache.put("digest-a", catalog("a"));
+    attachCatalogs();
+    await providerCatalogCache.loaded();
+    await Promise.resolve();
+    expect(harness.attempts).toHaveLength(1);
+    expect(harness.inputOf(0)).toEqual({
+      providerStatuses: "delta",
+      knownProviderCatalogs: ["digest-a"],
+    });
+    providerCatalogCache.clear();
+  });
+
+  it("opens the subscription without catalogs when the load never settles", async () => {
+    providerCatalogCache.clear();
+    vi.useFakeTimers();
+    try {
+      providerCatalogCache.expectLoad(new Promise<void>(() => undefined));
+      const harness = makeHarness();
+      harness.client.server.subscribeConfig(vi.fn());
+      await vi.advanceTimersByTimeAsync(PROVIDER_CATALOG_LOAD_MAX_WAIT_MS - 1);
+      expect(harness.attempts).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.attempts).toHaveLength(1);
+      expect(harness.inputOf(0)).toEqual({ providerStatuses: "delta" });
+
+      // Later subscriptions are not held up by the same load either.
+      harness.client.server.subscribeConfig(vi.fn());
+      expect(harness.attempts).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never opens a subscription that is disposed while catalogs are still loading", async () => {
+    let attachCatalogs!: () => void;
+    providerCatalogCache.expectLoad(
+      new Promise<void>((resolve) => {
+        attachCatalogs = resolve;
+      }),
+    );
+    const harness = makeHarness();
+    const stop = harness.client.server.subscribeConfig(vi.fn());
+    stop();
+    attachCatalogs();
+    await providerCatalogCache.loaded();
+    await Promise.resolve();
+    expect(harness.attempts).toHaveLength(0);
   });
 
   it("starts over without naming catalogs when a snapshot cannot be completed", async () => {

@@ -1040,7 +1040,16 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
             { ...options, tag: WS_METHODS.subscribeServerConfig },
           );
         };
-        start(true);
+        // Catalogs the page is still loading would go unnamed, and the server
+        // would send them all again: the first subscription waits for them.
+        const loading = providerCatalogCache.loaded();
+        if (loading === null) {
+          start(true);
+        } else {
+          void loading.then(() => {
+            if (!disposed) start(true);
+          });
+        }
         return () => {
           disposed = true;
           unsubscribeCurrent();

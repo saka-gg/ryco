@@ -10,6 +10,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
 import { forgetRememberedProjectPreferences } from "../hooks/newDraftDefaults";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { setModelPickerOpen } from "../modelPickerOpenState";
@@ -17,7 +18,14 @@ import { clearKeyedQueriesForEnvironment } from "../rpc/keyedQuery";
 import { clearProjectAtomState } from "../rpc/projectAtoms";
 import { clearGitAtomState } from "../rpc/gitAtoms";
 import { clearCheckpointDiffState } from "../rpc/providerAtoms";
-import { clearServerState } from "../rpc/serverState";
+import {
+  clearEnvironmentServerConfigs,
+  clearServerConfigState,
+  clearServerState,
+  clearWelcomeState,
+  forgetEnvironmentServerConfig,
+  isEnvironmentServerConfigShown,
+} from "../rpc/serverState";
 import { defaultQueryClient } from "../rpc/queryClient";
 import { useSettingsDialogStore } from "../settingsDialogStore";
 import { clearShortcutModifierState } from "../shortcutModifierState";
@@ -55,7 +63,16 @@ export function clearWebHostedNodeScopedState(environmentId: EnvironmentId): voi
   useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, Date.now());
   // Owner-only analytics are not list-safe: never repaint them after leaving the node.
   statisticsSnapshotCache.forget(environmentId);
-  clearServerState();
+  // Only the left environment's config goes; another environment's entry
+  // survives the switch. The global config atoms follow the active entry while
+  // the shell's projection is mounted, but a switch can render without it, so
+  // the left environment's config leaves the atoms here too.
+  if (isEnvironmentServerConfigShown(environmentId)) clearServerConfigState();
+  forgetEnvironmentServerConfig(environmentId);
+  // The welcome is the primary connection's, and the node being left is that
+  // primary (its descriptor is replaced only after this runs): its bootstrap
+  // thread, project and cwd must not be replayed against the next node.
+  if (readPrimaryEnvironmentDescriptor()?.environmentId === environmentId) clearWelcomeState();
 }
 
 /** Account-session teardown. Unlike a node switch, this may clear every environment-keyed UI. */
@@ -99,6 +116,7 @@ export function clearWebHostedAccountScopedState(): void {
   });
   defaultQueryClient.clear();
   statisticsSnapshotCache.clear();
+  clearEnvironmentServerConfigs();
   clearServerState();
   // Project artwork outlives a connection (it is keyed by node), not an account.
   clearAllProjectIconCaches();

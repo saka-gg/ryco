@@ -373,4 +373,38 @@ describe("saved environment startup", () => {
     stop();
     await resetEnvironmentServiceForTests();
   });
+
+  it("feeds the config store from the primary connection's own stream, before any shell", async () => {
+    const { connectPrimaryEnvironment } = await import("./service");
+    const { getServerConfig, readEnvironmentServerConfig } =
+      await import("@ryco/client-runtime/rpc");
+
+    // The connection exists (and so does its config handler) with no
+    // ServerStateBootstrap mounted: nothing waits for the shell or a gate.
+    connectPrimaryEnvironment();
+    const primaryCall = mockCreateEnvironmentConnection.mock.calls.find(
+      ([input]) => input.kind === "primary",
+    );
+    expect(primaryCall?.[0].onConfigUpdated).toBeTypeOf("function");
+
+    const primaryConfig = {
+      environment: { environmentId: EnvironmentId.make("env-1"), label: "Primary environment" },
+    };
+    primaryCall?.[0].onConfigUpdated(primaryConfig, "snapshot");
+    expect(readEnvironmentServerConfig(EnvironmentId.make("env-1"))).toBe(primaryConfig);
+    // The global config follows only once the shell's projection runs.
+    expect(getServerConfig()).toBeNull();
+  });
+
+  it("feeds the config store from a saved connection's stream under its own environment", async () => {
+    const { startEnvironmentConnectionService } = await import("./service");
+    const { readEnvironmentServerConfig } = await import("@ryco/client-runtime/rpc");
+
+    const stop = startEnvironmentConnectionService();
+    await vi.runAllTimersAsync();
+
+    expect(readEnvironmentServerConfig(savedRecord.environmentId)).toBe(configSnapshot);
+    expect(readEnvironmentServerConfig(EnvironmentId.make("env-1"))).toBeNull();
+    stop();
+  });
 });
