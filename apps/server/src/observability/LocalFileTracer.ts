@@ -18,13 +18,34 @@ export interface LocalFileTracerOptions {
    * SQL statement spans (spans carrying `db.query.text`) that succeed faster
    * than this are left out of the local trace: they are most of its volume.
    * Failed and slower statements are kept. `0` keeps every statement. The
-   * OTLP delegate always receives every span.
+   * OTLP delegate always receives every span. Neither threshold applies when
+   * tracer timing is disabled, because spans then carry no durations.
    */
   readonly sqlSpanMinDurationMs?: number;
+  /**
+   * Child spans (spans with a local parent) that succeed faster than this are
+   * left out of the local trace: sub-millisecond children make up much of its
+   * volume. Root spans, including those continuing a remote trace, failed or
+   * interrupted spans, and spans that recorded a log message are always kept;
+   * statement spans follow `sqlSpanMinDurationMs` alone. `0` keeps every span.
+   * The OTLP delegate always receives every span.
+   */
+  readonly spanMinDurationMs?: number;
 }
 
 /** Default for {@link LocalFileTracerOptions.sqlSpanMinDurationMs}. */
 export const DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS = 50;
+
+/** Default for {@link LocalFileTracerOptions.spanMinDurationMs}. */
+export const DEFAULT_LOCAL_TRACE_SPAN_MIN_DURATION_MS = 5;
+
+interface LocalRecordThresholds {
+  readonly sqlSpanMinDurationNs: bigint;
+  readonly spanMinDurationNs: bigint;
+}
+
+const millisToNanos = (millis: number): bigint =>
+  BigInt(Math.max(0, Math.round(millis * 1_000_000)));
 
 const DB_QUERY_TEXT_ATTRIBUTE = "db.query.text";
 
@@ -48,19 +69,19 @@ class LocalFileSpan implements Tracer.Span {
   private readonly delegate: Tracer.Span;
   private readonly push: (record: EffectTraceRecord) => void;
   private readonly redactAttribute: (key: string, value: unknown) => unknown;
-  private readonly sqlSpanMinDurationNs: bigint;
+  private readonly thresholds: LocalRecordThresholds;
 
   constructor(
     options: Parameters<Tracer.Tracer["span"]>[0],
     delegate: Tracer.Span,
     push: (record: EffectTraceRecord) => void,
     redactAttribute: (key: string, value: unknown) => unknown,
-    sqlSpanMinDurationMs: number,
+    thresholds: LocalRecordThresholds,
   ) {
     this.delegate = delegate;
     this.push = push;
     this.redactAttribute = redactAttribute;
-    this.sqlSpanMinDurationNs = BigInt(Math.max(0, Math.round(sqlSpanMinDurationMs * 1_000_000)));
+    this.thresholds = thresholds;
     this.name = delegate.name;
     this.spanId = delegate.spanId;
     this.traceId = delegate.traceId;
@@ -98,12 +119,20 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   private keepsLocalRecord(endTime: bigint, exit: Exit.Exit<unknown, unknown>): boolean {
-    if (this.sqlSpanMinDurationNs === 0n || !this.attributes.has(DB_QUERY_TEXT_ATTRIBUTE)) {
-      return true;
-    }
     if (exit._tag === "Failure") return true;
     const startTime = this.status.startTime;
-    return endTime - startTime >= this.sqlSpanMinDurationNs;
+    // With timing disabled every span starts and ends at zero: there is no duration to judge.
+    if (startTime === 0n && endTime === 0n) return true;
+    const minDurationNs = this.minDurationNs();
+    return minDurationNs === 0n || endTime - startTime >= minDurationNs;
+  }
+
+  /** The duration below which this span, if it succeeded, is left out of the local trace. */
+  private minDurationNs(): bigint {
+    if (this.attributes.has(DB_QUERY_TEXT_ATTRIBUTE)) return this.thresholds.sqlSpanMinDurationNs;
+    if (!Option.exists(this.parent, (parent) => parent._tag === "Span")) return 0n;
+    // Log messages are stored as span events, so a span that logged is the only place they live.
+    return this.events.length > 0 ? 0n : this.thresholds.spanMinDurationNs;
   }
 
   attribute(key: string, value: unknown): void {
@@ -145,8 +174,14 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
       span: (spanOptions) => new Tracer.NativeSpan(spanOptions),
     });
 
-  const sqlSpanMinDurationMs =
-    options.sqlSpanMinDurationMs ?? DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS;
+  const thresholds: LocalRecordThresholds = {
+    sqlSpanMinDurationNs: millisToNanos(
+      options.sqlSpanMinDurationMs ?? DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS,
+    ),
+    spanMinDurationNs: millisToNanos(
+      options.spanMinDurationMs ?? DEFAULT_LOCAL_TRACE_SPAN_MIN_DURATION_MS,
+    ),
+  };
 
   return Tracer.make({
     span(spanOptions) {
@@ -155,7 +190,7 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
         delegate.span(spanOptions),
         sink.push,
         redactAttribute,
-        sqlSpanMinDurationMs,
+        thresholds,
       );
     },
     ...(delegate.context ? { context: delegate.context } : {}),

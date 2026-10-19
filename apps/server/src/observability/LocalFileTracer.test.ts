@@ -6,9 +6,14 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Logger, References, Tracer } from "effect";
 
 import type { EffectTraceRecord } from "./TraceRecord.ts";
-import { makeLocalFileTracer } from "./LocalFileTracer.ts";
+import { makeLocalFileTracer, type LocalFileTracerOptions } from "./LocalFileTracer.ts";
 
-const makeTestLayer = (tracePath: string, sqlSpanMinDurationMs?: number) =>
+type ThresholdOptions = Pick<
+  LocalFileTracerOptions,
+  "sqlSpanMinDurationMs" | "spanMinDurationMs" | "delegate"
+>;
+
+const makeTestLayer = (tracePath: string, thresholds: ThresholdOptions = {}) =>
   Layer.mergeAll(
     Layer.effect(
       Tracer.Tracer,
@@ -17,7 +22,7 @@ const makeTestLayer = (tracePath: string, sqlSpanMinDurationMs?: number) =>
         maxBytes: 1024 * 1024,
         maxFiles: 2,
         batchWindowMs: 10_000,
-        ...(sqlSpanMinDurationMs === undefined ? {} : { sqlSpanMinDurationMs }),
+        ...thresholds,
       }),
     ),
     Logger.layer([Logger.tracerLogger], { mergeWithExisting: false }),
@@ -54,7 +59,7 @@ describe("LocalFileTracer", () => {
               }).pipe(Effect.withSpan("child-span"));
             }).pipe(Effect.withSpan("parent-span"));
 
-            yield* program.pipe(Effect.provide(makeTestLayer(tracePath)));
+            yield* program.pipe(Effect.provide(makeTestLayer(tracePath, { spanMinDurationMs: 0 })));
           }),
         );
 
@@ -140,7 +145,7 @@ describe("LocalFileTracer", () => {
             yield* sqlStatement("slow-sql", { sleepMs: 40 });
             yield* sqlStatement("failed-sql", { fail: true });
             yield* Effect.void.pipe(Effect.withSpan("plain-span"));
-          }).pipe(Effect.provide(makeTestLayer(tracePath, 25))),
+          }).pipe(Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 25 }))),
         );
 
         const records = readTraceRecords(tracePath);
@@ -177,7 +182,7 @@ describe("LocalFileTracer", () => {
           Effect.gen(function* () {
             yield* statement("fast-sql", 0);
             yield* statement("slow-sql", 40);
-          }).pipe(Effect.provide(makeTestLayer(tracePath, 25))),
+          }).pipe(Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 25 }))),
         );
 
         const [fast, slow] = spans;
@@ -207,7 +212,9 @@ describe("LocalFileTracer", () => {
 
       try {
         yield* Effect.scoped(
-          sqlStatement("fast-sql", {}).pipe(Effect.provide(makeTestLayer(tracePath, 0))),
+          sqlStatement("fast-sql", {}).pipe(
+            Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 0 })),
+          ),
         );
         assert.deepEqual(
           readTraceRecords(tracePath).map((record) => record.name),
@@ -215,6 +222,252 @@ describe("LocalFileTracer", () => {
         );
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  const spanNames = (tracePath: string) =>
+    readTraceRecords(tracePath)
+      .map((record) => record.name)
+      .toSorted();
+
+  /** A root span around a fast child, a slow child and a failed child. */
+  const childSpans = Effect.gen(function* () {
+    yield* Effect.void.pipe(Effect.withSpan("fast-child"));
+    yield* Effect.sleep("40 millis").pipe(Effect.withSpan("slow-child"));
+    yield* Effect.fail("boom").pipe(Effect.withSpan("failed-child"), Effect.ignore);
+  }).pipe(Effect.withSpan("root"));
+
+  const runChildSpans = (thresholds?: ThresholdOptions) =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      try {
+        yield* Effect.scoped(childSpans.pipe(Effect.provide(makeTestLayer(tracePath, thresholds))));
+        return spanNames(tracePath);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+  it.live("leaves short successful child spans out of the local trace", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(yield* runChildSpans({ spanMinDurationMs: 25 }), [
+        "failed-child",
+        "root",
+        "slow-child",
+      ]);
+    }),
+  );
+
+  it.live("drops short child spans by default", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(yield* runChildSpans(), ["failed-child", "root", "slow-child"]);
+    }),
+  );
+
+  it.live("keeps every span when the span threshold is zero", () =>
+    Effect.gen(function* () {
+      assert.deepEqual(yield* runChildSpans({ spanMinDurationMs: 0 }), [
+        "failed-child",
+        "fast-child",
+        "root",
+        "slow-child",
+      ]);
+    }),
+  );
+
+  it.live("keeps short root spans, including ones continuing a remote trace", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Effect.void.pipe(Effect.withSpan("plain-root"));
+            yield* Effect.void.pipe(
+              Effect.withSpan("remote-continuation", {
+                parent: Tracer.externalSpan({ traceId: "remote-trace", spanId: "remote-span" }),
+              }),
+            );
+          }).pipe(Effect.provide(makeTestLayer(tracePath, { spanMinDurationMs: 25 }))),
+        );
+        assert.deepEqual(spanNames(tracePath), ["plain-root", "remote-continuation"]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("keeps interrupted child spans", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          Effect.exit(
+            Effect.interrupt.pipe(
+              Effect.withSpan("interrupted-child"),
+              Effect.withSpan("root"),
+              Effect.provide(makeTestLayer(tracePath, { spanMinDurationMs: 25 })),
+            ),
+          ),
+        );
+        assert.deepEqual(spanNames(tracePath), ["interrupted-child", "root"]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("keeps short child spans that recorded a log message", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Effect.logWarning("recovered from a hiccup").pipe(Effect.withSpan("warned"));
+            yield* Effect.logError("gave up on a retry").pipe(Effect.withSpan("errored"));
+            yield* Effect.logInfo("finished quickly").pipe(Effect.withSpan("informed"));
+            yield* Effect.void.pipe(Effect.withSpan("silent"));
+          }).pipe(
+            Effect.withSpan("root"),
+            Effect.provide(makeTestLayer(tracePath, { spanMinDurationMs: 25 })),
+          ),
+        );
+
+        const records = readTraceRecords(tracePath);
+        assert.deepEqual(spanNames(tracePath), ["errored", "informed", "root", "warned"]);
+        assert.deepEqual(
+          records
+            .filter((record) => record.name !== "root")
+            .map((record) => [
+              record.name,
+              record.events.map((event) => [event.name, event.attributes["effect.logLevel"]]),
+            ])
+            .toSorted(),
+          [
+            ["errored", [["gave up on a retry", "ERROR"]]],
+            ["informed", [["finished quickly", "INFO"]]],
+            ["warned", [["recovered from a hiccup", "WARN"]]],
+          ],
+        );
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("applies no duration threshold when tracer timing is disabled", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* childSpans;
+            yield* sqlStatement("fast-sql", {});
+          }).pipe(
+            Effect.provideService(References.TracerTimingEnabled, false),
+            Effect.provide(makeTestLayer(tracePath, { sqlSpanMinDurationMs: 25 })),
+          ),
+        );
+        assert.deepEqual(spanNames(tracePath), [
+          "failed-child",
+          "fast-child",
+          "fast-sql",
+          "root",
+          "slow-child",
+        ]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("sends every span to the delegate tracer", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      const delegated: Array<string> = [];
+      const delegate = Tracer.make({
+        span: (spanOptions) => {
+          const span = new Tracer.NativeSpan(spanOptions);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            delegated.push(span.name);
+            end(endTime, exit);
+          };
+          return span;
+        },
+      });
+
+      try {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* childSpans;
+            yield* sqlStatement("fast-sql", {}).pipe(Effect.withSpan("sql-parent"));
+          }).pipe(Effect.provide(makeTestLayer(tracePath, { spanMinDurationMs: 25, delegate }))),
+        );
+        assert.deepEqual(spanNames(tracePath), [
+          "failed-child",
+          "root",
+          "slow-child",
+          "sql-parent",
+        ]);
+        assert.deepEqual(delegated.toSorted(), [
+          "failed-child",
+          "fast-child",
+          "fast-sql",
+          "root",
+          "slow-child",
+          "sql-parent",
+        ]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.live("applies only the statement threshold to child statement spans", () =>
+    Effect.gen(function* () {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const tracePath = path.join(tempDir, "server.trace.ndjson");
+      const statements = sqlStatement("fast-sql", {}).pipe(Effect.withSpan("parent"));
+
+      try {
+        // Zero keeps the statement even though it is faster than the span threshold.
+        yield* Effect.scoped(
+          statements.pipe(
+            Effect.provide(
+              makeTestLayer(tracePath, { sqlSpanMinDurationMs: 0, spanMinDurationMs: 25 }),
+            ),
+          ),
+        );
+        assert.deepEqual(spanNames(tracePath), ["fast-sql", "parent"]);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+
+      const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
+      const otherPath = path.join(otherDir, "server.trace.ndjson");
+      try {
+        // A zero span threshold does not bring back statements the statement threshold drops.
+        yield* Effect.scoped(
+          statements.pipe(
+            Effect.provide(
+              makeTestLayer(otherPath, { sqlSpanMinDurationMs: 25, spanMinDurationMs: 0 }),
+            ),
+          ),
+        );
+        assert.deepEqual(spanNames(otherPath), ["parent"]);
+      } finally {
+        fs.rmSync(otherDir, { recursive: true, force: true });
       }
     }),
   );

@@ -7,6 +7,7 @@ import { Diagnostics } from "../../diagnostics/Services/Diagnostics.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import { HttpSpanHeadersLive } from "../HttpHeaderRedaction.ts";
 import {
+  DEFAULT_LOCAL_TRACE_SPAN_MIN_DURATION_MS,
   DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS,
   makeLocalFileTracer,
 } from "../LocalFileTracer.ts";
@@ -22,6 +23,14 @@ const otlpSerializationLayer = OtlpSerialization.layerJson;
  */
 const TraceSqlMinDurationConfig = Config.Int("RYCO_TRACE_SQL_MIN_DURATION_MS").pipe(
   Config.withDefault(DEFAULT_LOCAL_TRACE_SQL_MIN_DURATION_MS),
+);
+
+/**
+ * Short successful child spans are left out of the local trace file by default; set
+ * `RYCO_TRACE_SPAN_MIN_DURATION_MS=0` to record every span.
+ */
+const TraceSpanMinDurationConfig = Config.Int("RYCO_TRACE_SPAN_MIN_DURATION_MS").pipe(
+  Config.withDefault(DEFAULT_LOCAL_TRACE_SPAN_MIN_DURATION_MS),
 );
 
 export const ObservabilityLive = Layer.unwrap(
@@ -76,6 +85,7 @@ export const ObservabilityLive = Layer.unwrap(
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
           sqlSpanMinDurationMs: yield* TraceSqlMinDurationConfig,
+          spanMinDurationMs: yield* TraceSpanMinDurationConfig,
           sink: diagnosticsSink,
           ...(delegate ? { delegate } : {}),
         });
