@@ -13,4 +13,13 @@ describe("index.html", () => {
     );
     expect(classicInline).toHaveLength(1);
   });
+
+  it("sends no API request from the document head", () => {
+    // The same document serves the standard, desktop and hosted builds, so a
+    // head tag for an API URL would run in every one of them. The hosted access
+    // check starts from the entry module instead, behind the hosted-mode check.
+    const apiLinks = [...indexHtml.matchAll(/<link\b[^>]*\bhref=["']?\/api\//gi)];
+    expect(apiLinks).toEqual([]);
+    expect(indexHtml).not.toMatch(/\/api\/(?:auth\/session|nodes)\b/);
+  });
 });

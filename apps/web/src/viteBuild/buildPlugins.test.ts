@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -11,7 +12,10 @@ import { resolveBootAssets, type BundleGraphEntry } from "./bundleGraph";
 import {
   createBootGraphMatcher,
   createBootVendorMatcher,
+  createRouteGroupMatcher,
+  createSideEffectFreePackageLookup,
   createWebCodeSplittingOptions,
+  HOSTED_ROUTE_GROUP_MODULES,
   isLexicalModule,
   isMarkdownModule,
   isMergeableIconModule,
@@ -290,7 +294,179 @@ describe("web code splitting", () => {
     expect(bootVendor!.priority).toBeGreaterThan(boot!.priority);
   });
 
+  it("treats only packages whose manifest says sideEffects: false as side-effect free", () => {
+    const manifests: Record<string, string> = {
+      "/repo/packages/shared": '{ "name": "@ryco/shared", "sideEffects": false }',
+      "/repo/apps/web": '{ "name": "@ryco/web" }',
+      "/repo/node_modules/listed": '{ "sideEffects": ["./setup.js"] }',
+      "/repo/node_modules/nested": '{ "sideEffects": false }',
+      "/repo/node_modules/nested/dist/esm": '{ "type": "module" }',
+      "/repo/node_modules/broken": "{",
+    };
+    const reads: string[] = [];
+    const isSideEffectFree = createSideEffectFreePackageLookup((directory) => {
+      reads.push(directory);
+      return manifests[directory] ?? null;
+    });
+
+    expect(isSideEffectFree("/repo/packages/shared/src/git.ts")).toBe(true);
+    expect(isSideEffectFree("/repo/packages/shared/src/deep/path.ts")).toBe(true);
+    expect(isSideEffectFree("/repo/apps/web/src/main.tsx")).toBe(false);
+    expect(isSideEffectFree("/repo/node_modules/listed/index.js")).toBe(false);
+    // The nearest manifest decides, as it does for the bundler.
+    expect(isSideEffectFree("/repo/node_modules/nested/dist/esm/index.js")).toBe(false);
+    expect(isSideEffectFree("/repo/node_modules/broken/index.js")).toBe(false);
+    expect(isSideEffectFree("/repo/outside/file.js")).toBe(false);
+    expect(isSideEffectFree("\0vite/preload-helper.js")).toBe(false);
+    expect(isSideEffectFree("/repo/packages/shared/src/worker.ts?worker")).toBe(false);
+    // Each directory is read once.
+    expect(new Set(reads).size).toBe(reads.length);
+
+    // The workspace packages the route groups rely on declare it.
+    const repoLookup = createSideEffectFreePackageLookup();
+    const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+    for (const pkg of ["client-runtime", "shared", "contracts"]) {
+      expect(repoLookup(path.join(repoRoot, "packages", pkg, "src", "index.ts"))).toBe(true);
+    }
+    expect(repoLookup(path.join(repoRoot, "apps/web/src/main.tsx"))).toBe(false);
+  });
+
+  it("groups the routes' side-effect-free package modules that import only boot and each other", () => {
+    const nm = "/repo/node_modules/.bun/pkg@1/node_modules";
+    const web = "/repo/apps/web/src";
+    const graph: Record<string, { code: string; importedIds: string[] }> = {
+      [`${web}/main.tsx`]: { code: "main", importedIds: [`${web}/boot.ts`] },
+      [`${web}/boot.ts`]: { code: "boot", importedIds: [`${nm}/react/index.js`] },
+      [`${nm}/react/index.js`]: { code: "react", importedIds: [] },
+      [`${web}/Shell.tsx`]: {
+        code: "shell",
+        importedIds: [
+          `${web}/boot.ts`,
+          `${nm}/ui/dialog.js`,
+          `${nm}/ui/needsApp.js`,
+          "/repo/packages/shared/src/model.ts",
+          "/repo/packages/shared/src/usesApp.ts",
+          "/repo/packages/shared/src/signIn.ts",
+          `${nm}/lexical/Lexical.mjs`,
+          `${web}/panel.ts`,
+        ],
+      },
+      [`${web}/Thread.tsx`]: { code: "thread", importedIds: [`${nm}/ui/dialog.js`] },
+      [`${web}/panel.ts`]: { code: "panel", importedIds: [] },
+      [`${nm}/ui/dialog.js`]: {
+        code: "dialog",
+        importedIds: [`${nm}/react/index.js`, `${nm}/ui/utils.js`],
+      },
+      [`${nm}/ui/utils.js`]: { code: "utils", importedIds: [] },
+      // Imports an application module, which never joins a group.
+      [`${nm}/ui/needsApp.js`]: { code: "needsApp", importedIds: [`${web}/panel.ts`] },
+      "/repo/packages/shared/src/model.ts": {
+        code: "model",
+        importedIds: [`${nm}/ui/utils.js`, "/repo/packages/shared/src/format.ts"],
+      },
+      "/repo/packages/shared/src/format.ts": { code: "format", importedIds: [] },
+      // Depends on a module that cannot be grouped, so it stays out too.
+      "/repo/packages/shared/src/usesApp.ts": {
+        code: "usesApp",
+        importedIds: [`${nm}/ui/needsApp.js`],
+      },
+      // Reached from the signed-out root as well: keeps its layout.
+      "/repo/packages/shared/src/signIn.ts": { code: "signIn", importedIds: [] },
+      [`${web}/SignIn.tsx`]: {
+        code: "signIn root",
+        importedIds: ["/repo/packages/shared/src/signIn.ts"],
+      },
+      [`${nm}/lexical/Lexical.mjs`]: { code: "lexical", importedIds: [] },
+    };
+    const context: ModuleGraphContext = { getModuleInfo: (id) => graph[id] ?? null };
+    const isSideEffectFreePackageModule = (id: string) =>
+      id.includes("/node_modules/") || id.startsWith("/repo/packages/");
+    const groupOf = createRouteGroupMatcher({
+      bootEntry: `${web}/main.tsx`,
+      routeRoots: [`${web}/Shell.tsx`, `${web}/Thread.tsx`],
+      excludedRoots: [`${web}/SignIn.tsx`],
+      isSideEffectFreePackageModule,
+    });
+    const captured = Object.fromEntries(
+      Object.keys(graph)
+        .map((id) => [id, groupOf(id, context)] as const)
+        .filter(([, group]) => group !== null),
+    );
+
+    expect(captured).toEqual({
+      [`${nm}/ui/dialog.js`]: "route-vendor",
+      [`${nm}/ui/utils.js`]: "route-vendor",
+      "/repo/packages/shared/src/model.ts": "route-shared",
+      "/repo/packages/shared/src/format.ts": "route-shared",
+    });
+  });
+
+  it("never lets an installed-package group import the workspace group", () => {
+    const nm = "/repo/node_modules/.bun/pkg@1/node_modules";
+    const graph: Record<string, { code: string; importedIds: string[] }> = {
+      "/repo/apps/web/src/main.tsx": { code: "main", importedIds: [] },
+      "/repo/apps/web/src/Route.tsx": {
+        code: "route",
+        importedIds: [`${nm}/odd/index.js`, "/repo/packages/shared/src/a.ts"],
+      },
+      [`${nm}/odd/index.js`]: { code: "odd", importedIds: ["/repo/packages/shared/src/a.ts"] },
+      "/repo/packages/shared/src/a.ts": { code: "a", importedIds: [] },
+    };
+    const context: ModuleGraphContext = { getModuleInfo: (id) => graph[id] ?? null };
+    const groupOf = createRouteGroupMatcher({
+      bootEntry: "/repo/apps/web/src/main.tsx",
+      routeRoots: ["/repo/apps/web/src/Route.tsx"],
+      isSideEffectFreePackageModule: () => true,
+    });
+    expect(groupOf(`${nm}/odd/index.js`, context)).toBeNull();
+    expect(groupOf("/repo/packages/shared/src/a.ts", context)).toBe("route-shared");
+    expect(groupOf("/repo/apps/web/src/Route.tsx", context)).toBeNull();
+  });
+
+  it("adds the route groups only when a build passes route roots", () => {
+    // A renamed root would silently leave the groups empty.
+    for (const module of [
+      ...HOSTED_ROUTE_GROUP_MODULES.roots,
+      ...HOSTED_ROUTE_GROUP_MODULES.excludedRoots,
+    ]) {
+      expect(statSync(new URL(`../../${module}`, import.meta.url)).isFile(), module).toBe(true);
+    }
+    const standard = createWebCodeSplittingOptions({ bootEntry: "/repo/apps/web/src/main.tsx" });
+    const hosted = createWebCodeSplittingOptions({
+      bootEntry: "/repo/apps/web/src/main.tsx",
+      routeGroups: {
+        roots: HOSTED_ROUTE_GROUP_MODULES.roots.map((module) => `/repo/apps/web/${module}`),
+        excludedRoots: HOSTED_ROUTE_GROUP_MODULES.excludedRoots.map(
+          (module) => `/repo/apps/web/${module}`,
+        ),
+      },
+    });
+    expect(hosted.groups).toHaveLength(standard.groups.length + 1);
+    const routeGroup = hosted.groups[2] as unknown as {
+      readonly minShareCount: number;
+      readonly priority: number;
+      readonly entriesAware: boolean;
+    };
+    // Entry-private modules stay in their entry chunk; one chunk per group.
+    expect(routeGroup.minShareCount).toBe(2);
+    expect(routeGroup.entriesAware).toBe(false);
+    const priorities = hosted.groups.map((group) => group.priority);
+    // Below boot and boot vendor, above the entries-aware vendor groups.
+    expect(routeGroup.priority).toBeLessThan(Math.min(priorities[0]!, priorities[1]!));
+    expect(routeGroup.priority).toBeGreaterThan(Math.max(...priorities.slice(3)));
+    // Shared icons become one chunk too; every other group is unchanged.
+    expect(hosted.groups[3]).toMatchObject({
+      name: "icons",
+      minShareCount: 2,
+      entriesAware: false,
+    });
+    expect(standard.groups[2]).toMatchObject({ name: "icons", entriesAware: true });
+    expect(hosted.groups.slice(4)).toEqual(standard.groups.slice(3));
+  });
+
   it("gives merged groups short file names and leaves other chunks alone", () => {
+    expect(webChunkFileName({ name: "route-vendor" })).toBe("assets/route-vendor-[hash].js");
+    expect(webChunkFileName({ name: "route-shared" })).toBe("assets/route-shared-[hash].js");
     expect(webChunkFileName({ name: "boot-vendor" })).toBe("assets/boot-vendor-[hash].js");
     expect(webChunkFileName({ name: "icons~main~RootAppShell~ChatView" })).toBe(
       "assets/icons-[hash].js",

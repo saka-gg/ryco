@@ -3,19 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const gate = vi.hoisted(() => ({
   accountStatus: "signed-out" as string,
   finishAccess: null as null | (() => void),
+  events: [] as string[],
+  bootstrapAccess: vi.fn(),
+  openBeside: vi.fn(),
   preloadShell: vi.fn(() => Promise.resolve()),
   retainOwners: vi.fn(),
+  prefetchRouteCode: vi.fn(),
   storeListeners: new Set<() => void>(),
 }));
 
 vi.mock("./state", () => ({
   ensureWebHostedRuntimeConfigured: vi.fn(),
-  hostedHubController: {
-    bootstrapAccess: () =>
-      new Promise<void>((resolve) => {
-        gate.finishAccess = resolve;
-      }),
-  },
+  hostedHubController: { bootstrapAccess: gate.bootstrapAccess },
   hostedHubStore: {
     getState: () => ({ accountStatus: gate.accountStatus }),
     subscribe: (listener: () => void) => {
@@ -30,14 +29,17 @@ vi.mock("./readCache", () => ({
 }));
 vi.mock("./hostedWorkspaceOwners", () => ({
   retainHostedWorkspaceOwners: gate.retainOwners,
-  prefetchHostedRouteCode: vi.fn(),
+  prefetchHostedRouteCode: gate.prefetchRouteCode,
 }));
 vi.mock("../components/hostedHub/hostedRootAppShell", () => ({
   preloadHostedRootAppShell: gate.preloadShell,
 }));
+vi.mock("./hubSession", () => ({
+  openWebHubSessionBesideAccessCheck: gate.openBeside,
+}));
 
 import { readHostedSignedInHint, resetHostedBootHintsForTests } from "./bootHints";
-import { runHostedBootGate } from "./bootGate";
+import { runHostedBootGate, startHostedAccessCheck } from "./bootGate";
 
 function installStorage(): void {
   const values = new Map<string, string>();
@@ -62,8 +64,24 @@ beforeEach(() => {
   resetHostedBootHintsForTests();
   gate.accountStatus = "signed-out";
   gate.finishAccess = null;
-  gate.preloadShell.mockClear();
-  gate.retainOwners.mockClear();
+  gate.events.length = 0;
+  gate.bootstrapAccess.mockReset();
+  gate.bootstrapAccess.mockImplementation(() => {
+    gate.events.push("access check");
+    return new Promise<void>((resolve) => {
+      gate.finishAccess = resolve;
+    });
+  });
+  gate.openBeside.mockClear();
+  gate.preloadShell.mockReset();
+  gate.preloadShell.mockImplementation(() => {
+    gate.events.push("workspace shell code");
+    return Promise.resolve();
+  });
+  gate.retainOwners.mockReset();
+  gate.retainOwners.mockImplementation(() => gate.events.push("workspace owners"));
+  gate.prefetchRouteCode.mockReset();
+  gate.prefetchRouteCode.mockImplementation(() => gate.events.push("route code"));
   gate.storeListeners.clear();
 });
 
@@ -147,6 +165,115 @@ describe("runHostedBootGate", () => {
     await answerAccess("signed-out");
     await done;
     expect(preloadSignIn).toHaveBeenCalledOnce();
+  });
+
+  it("sends the access check before it fetches any code", async () => {
+    const preloadSignIn = vi.fn(() => {
+      gate.events.push("sign-in code");
+      return Promise.resolve();
+    });
+    const done = runHostedBootGate({
+      pathname: "/native/authorize/handoff",
+      hostedRoot: null,
+      preloadSignIn,
+    });
+    expect(gate.events).toEqual(["access check", "sign-in code"]);
+
+    await answerAccess("signed-out");
+    await done;
+    expect(gate.bootstrapAccess).toHaveBeenCalledOnce();
+  });
+
+  it("sends the access check before the hosted root's code prefetches", async () => {
+    // A browser last seen signed in prefetches the most code beside the check.
+    localStorage.setItem("ryco:hosted-signed-in:v1", "1");
+    const done = runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() });
+    // Sent before the gate's first await, ahead of the chunk imports below it.
+    expect(gate.events).toEqual(["access check"]);
+    await vi.waitFor(() => expect(gate.events).toHaveLength(4));
+    expect(gate.events[0]).toBe("access check");
+    expect(gate.events.slice(1).toSorted()).toEqual([
+      "route code",
+      "workspace owners",
+      "workspace shell code",
+    ]);
+    // The prefetches moved only code: the gate still waits on the answer.
+    expect(gate.finishAccess).not.toBeNull();
+
+    await answerAccess("authenticated");
+    await done;
+    expect(gate.bootstrapAccess).toHaveBeenCalledOnce();
+  });
+
+  it("waits for the access check the entry module sent instead of sending another", async () => {
+    startHostedAccessCheck();
+    startHostedAccessCheck();
+    expect(gate.bootstrapAccess).toHaveBeenCalledOnce();
+    // Sent before the router exists: no code is fetched for it.
+    await flush();
+    expect(gate.preloadShell).not.toHaveBeenCalled();
+    expect(gate.retainOwners).not.toHaveBeenCalled();
+
+    let settled = false;
+    const done = runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() }).then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(gate.bootstrapAccess).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+
+    await answerAccess("authenticated");
+    await done;
+    expect(gate.bootstrapAccess).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a failure to send the entry module's access check to the gate", async () => {
+    const failure = new Error("hosted runtime unavailable");
+    gate.bootstrapAccess.mockImplementationOnce(() => {
+      throw failure;
+    });
+    expect(() => startHostedAccessCheck()).not.toThrow();
+
+    await expect(runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() })).rejects.toBe(
+      failure,
+    );
+    // A retry of the failed root load checks access again.
+    const retry = runHostedBootGate({ pathname: "/pair", hostedRoot: null });
+    await answerAccess("signed-out");
+    await retry;
+    expect(gate.bootstrapAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks access again when the gate runs again", async () => {
+    const first = runHostedBootGate({ pathname: "/pair", hostedRoot: null });
+    await answerAccess("signed-out");
+    await first;
+
+    gate.finishAccess = null;
+    const retry = runHostedBootGate({ pathname: "/pair", hostedRoot: null });
+    await answerAccess("signed-out");
+    await retry;
+    expect(gate.bootstrapAccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the account socket beside the access check for a browser last seen signed in", async () => {
+    localStorage.setItem("ryco:hosted-signed-in:v1", "1");
+    startHostedAccessCheck();
+    // Bound to whatever this check answers, and to nothing before it does.
+    expect(gate.openBeside).toHaveBeenCalledExactlyOnceWith(
+      gate.bootstrapAccess.mock.results[0]!.value,
+    );
+    const done = runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() });
+    await answerAccess("authenticated");
+    await done;
+    expect(gate.openBeside).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the account socket to the answer for a browser without a signed-in hint", async () => {
+    const done = runHostedBootGate({ pathname: "/", hostedRoot: Promise.resolve() });
+    await answerAccess("authenticated");
+    await done;
+    expect(gate.openBeside).not.toHaveBeenCalled();
   });
 
   it("leaves the handoff sign-in to the route for a browser last seen signed in", async () => {

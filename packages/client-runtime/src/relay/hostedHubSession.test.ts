@@ -832,6 +832,49 @@ describe("Hub session protocol version 2", () => {
     });
     session.dispose();
   });
+
+  const identity = { accountId: ACCOUNT_ID, sessionId: SESSION_ID };
+  const otherSession = { accountId: ACCOUNT_ID, sessionId: `sess_${"o".repeat(22)}` };
+
+  it("binds an identity learned after the connection was authenticated", async () => {
+    const { session, sockets, onIdentityMismatch } = harness(Socket, { withoutIdentity: true });
+    session.start();
+    sockets[0]!.readyV2();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    expect(session.bindExpectedIdentity(identity)).toBe(true);
+    expect(session.serverMintedOpenAvailable()).toBe(true);
+    session.createSocket(serverMinted);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[0]!.frames()).toEqual([openNode(1)]);
+    expect(onIdentityMismatch).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it("checks a ready that arrives after the binding against the bound identity", () => {
+    const { session, sockets, onIdentityMismatch } = harness(Socket, { withoutIdentity: true });
+    session.start();
+    expect(session.bindExpectedIdentity(identity)).toBe(true);
+    otherReady(sockets[0]!, otherSession.accountId, otherSession.sessionId);
+    expect(onIdentityMismatch).toHaveBeenCalledOnce();
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    session.dispose();
+  });
+
+  it("refuses an identity the connection was not authenticated as, or one already expected", () => {
+    const { session, sockets } = harness(Socket, { withoutIdentity: true });
+    session.start();
+    otherReady(sockets[0]!, otherSession.accountId, otherSession.sessionId);
+    expect(session.bindExpectedIdentity(identity)).toBe(false);
+    expect(session.serverMintedOpenAvailable()).toBe(false);
+    session.dispose();
+    expect(session.bindExpectedIdentity(otherSession)).toBe(false);
+
+    // An identity given at creation is never replaced; binding it again is a no-op.
+    const bound = harness();
+    expect(bound.session.bindExpectedIdentity(otherSession)).toBe(false);
+    expect(bound.session.bindExpectedIdentity(identity)).toBe(true);
+    bound.session.dispose();
+  });
 });
 
 /** A socket the network (or a stripping proxy) fails before it ever opens. */
