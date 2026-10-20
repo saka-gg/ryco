@@ -20,6 +20,8 @@ const RESTORABLE_SETTINGS = {
   confirmThreadDelete: "Delete confirmation",
   confirmThreadUnpin: "Unpin confirmation",
   textGenerationModelSelection: "Git writing model",
+  commitMessageInstructions: "Commit message instructions",
+  pullRequestInstructions: "Pull request instructions",
 } as const satisfies Partial<Record<keyof UnifiedSettings, string>>;
 
 export function settingsRestorePlan(

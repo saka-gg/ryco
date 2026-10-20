@@ -36,6 +36,7 @@ import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import { useSettingsTarget } from "../../settingsTarget";
 import { formatRelativeTime } from "../../timestampFormat";
 import { Button } from "../ui/button";
+import { DraftTextarea } from "../ui/draft-textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -75,6 +76,26 @@ import {
 import { useServerProviders } from "../../rpc/serverState";
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+const GIT_WRITING_INSTRUCTION_ROWS = [
+  {
+    key: "commitMessageInstructions",
+    title: "Commit message instructions",
+    description:
+      "Added to the prompt whenever a commit message is generated. Leave empty for the default style.",
+    placeholder: "e.g. Use Conventional Commits and describe what changed, not file by file.",
+  },
+  {
+    key: "pullRequestInstructions",
+    title: "Pull request instructions",
+    description:
+      "Added to the prompt for generated pull request titles and descriptions. Leave empty for the default style.",
+    placeholder:
+      "e.g. Use plain, human-readable language and focus on what really changed. If the UI changed, add a Before / After section.",
+  },
+] as const;
+
+const GIT_WRITING_INSTRUCTIONS_MAX_LENGTH = 4_000;
 
 type PendingProviderDestructiveAction =
   | {
@@ -526,6 +547,30 @@ export function ProvidersSettingsPanel() {
             </div>
           }
         />
+        {GIT_WRITING_INSTRUCTION_ROWS.map((row) => (
+          <SettingsRow
+            key={row.key}
+            title={row.title}
+            description={row.description}
+            resetAction={
+              settings[row.key] !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
+                <SettingResetButton
+                  label={row.title.toLowerCase()}
+                  onClick={() => updateSettings({ [row.key]: DEFAULT_UNIFIED_SETTINGS[row.key] })}
+                />
+              ) : null
+            }
+          >
+            <DraftTextarea
+              value={settings[row.key]}
+              onCommit={(next) => updateSettings({ [row.key]: next.trim() })}
+              placeholder={row.placeholder}
+              maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
+              disabled={settingsBlocked}
+              aria-label={row.title}
+            />
+          </SettingsRow>
+        ))}
       </SettingsSection>
 
       <SettingsSection

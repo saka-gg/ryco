@@ -80,6 +80,20 @@ describe("AI Focus settings", () => {
   });
 });
 
+describe("Git writing instructions", () => {
+  it("default to empty, trim, and stay within the prompt budget", () => {
+    expect(decodeServerSettings({}).commitMessageInstructions).toBe("");
+    expect(DEFAULT_SERVER_SETTINGS.pullRequestInstructions).toBe("");
+    expect(
+      decodeServerSettingsPatch({ pullRequestInstructions: "  Plain language.  " })
+        .pullRequestInstructions,
+    ).toBe("Plain language.");
+    expect(() =>
+      decodeServerSettingsPatch({ commitMessageInstructions: "x".repeat(4_001) }),
+    ).toThrow();
+  });
+});
+
 describe("thread unpin confirmation", () => {
   it("preserves low-friction unpinning for existing settings and supports an opt-in patch", () => {
     expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
