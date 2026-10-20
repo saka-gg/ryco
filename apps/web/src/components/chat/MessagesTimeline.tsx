@@ -368,10 +368,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const workGroupExpandedById = useUiStateStore(
     (store) => store.threadWorkGroupExpandedById[routeThreadKey] ?? EMPTY_EXPANSION_OVERRIDES,
   );
-  const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);
-  revertTurnCountRef.current = revertTurnCountByUserMessageId;
-  const undoTurnCountRef = useRef(undoTurnCountByTurnId);
-  undoTurnCountRef.current = undoTurnCountByTurnId;
   // Turns seen running in this view keep their chapter outline open once they
   // settle; a fresh load starts every settled turn folded.
   const runningTurnIdForFolds = isWorking || activeTurnInProgress ? (activeTurnId ?? null) : null;
@@ -403,8 +399,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         activeTurnStartedAt,
         launchTurnDurationStart,
         turnDiffSummaryByAssistantMessageId,
-        revertTurnCountByUserMessageId: revertTurnCountRef.current,
-        undoTurnCountByTurnId: undoTurnCountRef.current,
+        revertTurnCountByUserMessageId,
+        undoTurnCountByTurnId,
         liveSettledTurnIds: observedRunningTurnIds,
         revealedMessageIds,
         offerFork,
@@ -417,8 +413,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isPhoneTier,
       timelineEntries,
       latestTurn,
-      activeTurnInProgress,
-      activeTurnId,
+      runningTurnIdForFolds,
       turnFoldExpandedById,
       workGroupExpandedById,
       isWorking,
@@ -426,6 +421,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnStartedAt,
       launchTurnDurationStart,
       turnDiffSummaryByAssistantMessageId,
+      revertTurnCountByUserMessageId,
+      undoTurnCountByTurnId,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -2421,6 +2418,10 @@ const UserMessageBody = memo(function UserMessageBody(props: {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight?: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
 }) {
+  // The search highlight cursor counts occurrences in render order: the
+  // children advance it while this render's output is built, so a memoized
+  // result would replay stale indexes. The compiler must not cache this body.
+  "use no memo";
   const isPhone = usePresentationTier() === "phone";
   const searchHighlightCursorRef = useRef({ occurrenceIndex: 0 });
   searchHighlightCursorRef.current.occurrenceIndex = 0;
@@ -2571,19 +2572,24 @@ const UserMessageBody = memo(function UserMessageBody(props: {
 // so LegendList (and React) can skip re-rendering unchanged items.
 // ---------------------------------------------------------------------------
 
+/** Returns a function that structurally shares each call's rows with the
+ *  previous call's: a row whose content hasn't changed keeps its object. */
+function createRowStabilizer(): (rows: MessagesTimelineRow[]) => MessagesTimelineRow[] {
+  let previous: StableMessagesTimelineRowsState = {
+    byId: new Map<string, MessagesTimelineRow>(),
+    result: [],
+  };
+  return (rows) => {
+    previous = computeStableMessagesTimelineRows(rows, previous);
+    return previous.result;
+  };
+}
+
 /** Returns a structurally-shared copy of `rows`: for each row whose content
  *  hasn't changed since last call, the previous object reference is reused. */
 function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
-  const prevState = useRef<StableMessagesTimelineRowsState>({
-    byId: new Map<string, MessagesTimelineRow>(),
-    result: [],
-  });
-
-  return useMemo(() => {
-    const nextState = computeStableMessagesTimelineRows(rows, prevState.current);
-    prevState.current = nextState;
-    return nextState.result;
-  }, [rows]);
+  const [stabilize] = useState(createRowStabilizer);
+  return useMemo(() => stabilize(rows), [stabilize, rows]);
 }
 
 // ---------------------------------------------------------------------------
