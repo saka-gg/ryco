@@ -721,11 +721,429 @@ content is a manual production check.
 
 ## After wave 3 (final)
 
-## Node
+Revision: the wave-2 tip plus the fourth set of changes. On the switch path: hosted web keeps up to
+three nodes connected per tab (a warm set), so a switch to one of them adopts its live session
+instead of opening a new stream; pressing a thread row of another node starts its connection before
+the click; every hosted capability check names the environment it acts on; thread bodies the store
+no longer needs are released, so retention frees memory; the hosted cold load sends its access
+check before any code prefetch, opens the account socket beside it and loads the thread route in
+fewer chunks; and the chat no longer re-measures its layout on every thread switch. The node code is
+unchanged.
 
-## Desktop
+Setup, as under "After wave 2" except:
 
-## Mobile
+- Two arms, interleaved in one session: "before" is the wave-2 tip (one hosted connection per tab)
+  and "final" the wave-3 tip (warm set of three). Neither the server code nor the probes differ
+  between them, so one Hub data directory, one owner and one set of nodes serve both; each block
+  restarts the Hub with that arm's bundle.
+- Four nodes with 120, 80, 100 and 100 threads (3–4 projects each, 20% archived, 4 turns), and a
+  fifth with 2,000 threads (30 projects, 60% archived) that runs only for the memory rows. Every
+  provider runtime is disabled, Hub session version 2, Hub thread cache off, every node span
+  recorded.
+- Blocks: before, final, three times at D = 0 and 40; one block per arm at D = 20 and 80. Per
+  block and delay, with nodes 1–3 online: one `hosted-switch --send` run (8 cross-node switches and
+  3 same-node controls; in the final arm every cross-node switch goes to a warm node); at D = 0
+  and 40, 3 rounds of switching back to threads already opened on the three nodes; at D = 0, 40
+  and 80, 10 fresh and 10 visited cold loads. Then with node 4 online, at every delay: 10 cold
+  cross-node switches without sends and a send-during-switch run with 8 switches. One more warm run
+  per arm at D = 0 CPU-profiles one cross-node and one same-node switch.
+- Cold switches. The harness rotates through the nodes in the inbox's order, which here never
+  reached the fourth node (the order moves the node in view, and sending moves it further), so in
+  the final arm it kept returning to warm nodes. The final arm's cold switches therefore use the
+  same page probe (the same marks and the same press-then-click on an inbox row) with a fixed
+  rotation through the four nodes in a fresh context. With one connection every cross-node switch
+  is cold, so the before arm keeps the harness. A switch counts as cold when the Hub recorded a new
+  client stream for it.
+- Medians pool the blocks: per delay and arm 24 warm cross-node switches and 9 same-node controls
+  at D = 0 and 40 (8 and 3 at D = 20 and 80), 27 (D = 0) and 24 (D = 40) switches back to an opened
+  thread, 30 cold switches at D = 0 and 40 (10 at D = 20 and 80), and 30 fresh and 30 visited cold
+  loads (10 at D = 80).
+- 1-minute load average 4.0–13.5 (median 6.1). Other jobs and system indexing ran on the machine,
+  which is why the arms alternate. No measured switch timed out or failed. Twice the whole fixture
+  stalled for two to four minutes during a cold-load run, after which the nodes registered with
+  the Hub again; one fresh cold load is left out for it (see "Against the targets").
+
+### Against the targets
+
+"Base commit" is the earlier session's cross-node switch (see "Baseline (base commit)"); "after
+wave 2" is the before arm of this session. ms after the click, median (min–max).
+
+Warm switch: nodes 1–3 online, so every final-arm cross-node switch goes to a node the tab keeps
+connected. Each switch opens a thread the tab has not shown yet. n = 24 per arm at D = 0 and 40,
+8 at D = 20 and 80. Targets: click task at most 150, content at most 200, writable at most 250
+(each ±10%).
+
+| D   | Metric     | Base commit | After wave 2          | Final           | Target | Result                                    |
+| --- | ---------- | ----------- | --------------------- | --------------- | ------ | ----------------------------------------- |
+| 0   | Click task | 1,019       | 198 (181–2,197)       | 120 (95–131)    | 150    | met                                       |
+| 0   | Content    | 1,366       | 353.5 (217–2,659)     | 147 (116–164)   | 200    | met                                       |
+| 0   | Writable   | 1,504       | 363 (328–2,659)       | 147 (116–164)   | 250    | met                                       |
+| 20  | Click task | 1,060       | 199 (184–224)         | 119.5 (112–127) | 150    | met                                       |
+| 20  | Content    | 1,612       | 586 (215–627)         | 202 (136–206)   | 200    | met (+1%)                                 |
+| 20  | Writable   | 1,642       | 586 (564–627)         | 202 (136–206)   | 250    | met                                       |
+| 40  | Click task | 1,042       | 198 (185–219)         | 118.5 (109–132) | 150    | met                                       |
+| 40  | Content    | 1,759       | 826.5 (210–880)       | 285 (128–298)   | 200    | missed: one browser-node round trip (4·D) |
+| 40  | Writable   | 1,766       | 831.5 (813–880)       | 285 (128–298)   | 250    | missed (+14%): the same round trip        |
+| 80  | Click task | 1,074       | 191 (186–197)         | 117 (111–125)   | 150    | met                                       |
+| 80  | Content    | 2,058       | 1,309.5 (210–1,314)   | 441 (131–445)   | 200    | missed: one browser-node round trip (4·D) |
+| 80  | Writable   | 2,112       | 1,309.5 (1,292–1,314) | 441 (131–445)   | 250    | missed: the same round trip               |
+
+- No final-arm warm switch opened a Hub stream, issued a ticket, opened a node channel or reached a
+  node's shell subscription (64 of 64 over the four delays). After wave 2 every cross-node switch
+  does all four (the bound of one), and all but a few show it in the window attributed to the
+  switch: for 3 at D = 0 the Hub's audit shows no stream there, and for 7 at D = 0 and 4 at D = 40
+  the node shows no channel open or shell subscription there, although their timing is that of
+  the others.
+- The warm environment is writable as soon as the thread shows: content and writable are equal in
+  every final-arm warm switch. What is left at D > 0 is the thread's messages: a thread the tab has
+  not shown yet costs one browser-node round trip (4·D, 160 ms at D = 40 and 320 ms at D = 80)
+  for its window. The fastest switches (128–136 ms) found the thread's window already in memory.
+- The warm target is judged on this table: a switch to a thread the tab has not shown yet, which
+  is what the switch probe does. It holds up to D = 20 (202 ms, inside the ±10%) and is missed from D = 40 on, because its fixed
+  budget leaves no room for the window's round trip. A switch back to a thread the tab has shown
+  before (next table) meets it at D = 0 and 40, the delays measured.
+- Follow-up: start fetching the thread's window when its row is pressed, as the node's connection
+  already is for a cold switch, so that the round trip overlaps the 117–120 ms click task instead
+  of following it; and keep the windows of each warm environment's most recently active threads in
+  memory, so that more of these switches are revisits. At D = 80 the round trip alone is above the
+  content target, so for a thread not shown yet the target would have to grow with D (200 + 4·D
+  content, 250 + 4·D writable).
+
+Switching back to a thread already opened (3 rounds over threads on the three nodes, row clicks
+only; n = 27 at D = 0 and 24 at D = 40 per arm):
+
+| D   | Metric     | After wave 2  | Final           | Target | Result |
+| --- | ---------- | ------------- | --------------- | ------ | ------ |
+| 0   | Click task | 197 (171–809) | 118 (105–133)   | 150    | met    |
+| 0   | Content    | 215 (186–820) | 139 (129–160)   | 200    | met    |
+| 0   | Writable   | 347 (306–974) | 139 (129–160)   | 250    | met    |
+| 40  | Click task | 203 (170–231) | 121.5 (96–383)  | 150    | met    |
+| 40  | Content    | 217 (194–246) | 141.5 (114–408) | 200    | met    |
+| 40  | Writable   | 820 (787–856) | 141.5 (114–408) | 250    | met    |
+
+After wave 2 the thread shows from memory, but the switch is writable only after a new stream
+and shell (one channel). In the final arm 50 of 51 returns opened no stream; the one that did
+directly followed a return the probe had to navigate (at D = 40 it leaves the first node before it
+has loaded, so the first return to it is left out of both arms).
+
+Cold switch: node 4 online as well, so the final arm keeps returning to a node it released; only
+switches that opened a Hub stream count (18 of 30 at D = 0 and 40, 6 of 10 at D = 20 and 80; the
+others found the node still warm, 163.5 ms writable at D = 0). Target: writable at most 12·D + 600.
+
+| D   | Base commit | After wave 2          | Final                 | Delta | Target | Result |
+| --- | ----------- | --------------------- | --------------------- | ----- | ------ | ------ |
+| 0   | 1,504       | 399 (367–431)         | 343 (312–394)         | -56   | 600    | met    |
+| 20  | 1,642       | 622 (602–649)         | 587 (543–610)         | -35   | 840    | met    |
+| 40  | 1,766       | 873 (835–897)         | 816.5 (783–854)       | -56.5 | 1,080  | met    |
+| 80  | 2,112       | 1,355.5 (1,334–1,387) | 1,307.5 (1,280–1,319) | -48   | 1,560  | met    |
+
+- The final arm is 35–56.5 ms faster at every delay. Its click task is 23–41 ms shorter (195–200
+  against 223–237.5 ms, median), and the press on the row starts the node's connection before that
+  task runs. A cold switch's click task is longer than a warm one's (117–120 ms) and stays within
+  its 250 ms target.
+- The previous session measured the wave-2 tip at 306 and 760.5 ms writable at D = 0 and 40 with
+  two nodes. With four nodes the inbox lists about 320 rows instead of 157 and the click task is
+  longer (233 against about 150 ms), which accounts for most of the difference.
+
+Same-node controls, content (ms). Target: at most 200.
+
+| D   | Base commit | After wave 2 | Final        | Result                                            |
+| --- | ----------- | ------------ | ------------ | ------------------------------------------------- |
+| 0   | 469         | 45 (31–158)  | 38 (25–46)   | met                                               |
+| 20  | 526         | 107 (32–107) | 104 (28–108) | met                                               |
+| 40  | 475         | 44 (27–189)  | 182 (28–210) | met by 8 of 9; a window not in memory costs 4·D   |
+| 80  | 536         | 347 (36–348) | 347 (28–350) | missed: a window not in memory costs 4·D (320 ms) |
+
+A same-node window already in memory shows in 25–46 ms at every delay in both arms; one that is
+not costs one browser-node round trip. Which of the three controls hit one or the other differs by
+run (4 of 9 against 5 of 9 at D = 40), so the medians at D = 40 and 80 move with that split, not
+with the revision. Follow-up: as for the warm switch, start the window's fetch when the row is
+pressed (on an environment that is already connected this needs no ticket); at D = 80 the round
+trip alone (320 ms) is above the target, so for a window not in memory the target would have to
+become 200 ms plus that round trip.
+
+Click task and render budget. Target: at most 250 ms for every cross-node switch (met at every
+delay, see above), at most 150 ms for a warm one (met), and at most 200 ms of long task in a
+same-node switch: no final-arm same-node control had a long task at D = 0, 20 or 80, and one at
+D = 40 had one of 116 ms (met). The profiled warm switch at D = 0 (one per arm, profiling stretches
+the task):
+
+| Self time inside the click task, ms       | After wave 2 | Final |
+| ----------------------------------------- | ------------ | ----- |
+| Whole task while profiled                 | 196          | 123   |
+| React DOM                                 | 61           | 36.9  |
+| Base UI                                   | 48.8         | 33.1  |
+| All inbox sidebar code                    | 11           | 6.9   |
+| Inbox row presentation and row component  | 3            | 2.8   |
+| Chat view                                 | 4.3          | 1.1   |
+| Message timeline and the git actions menu | 0.5          | 0     |
+| Garbage collection                        | 12.3         | 4.1   |
+
+The profiled same-node switch had no long task in either arm.
+
+Send accepted: ms from pressing Enter until the composer clears or a queued row shows. Target: at
+most 100.
+
+| Send                                    | D      | After wave 2            | Final                 | Result                               |
+| --------------------------------------- | ------ | ----------------------- | --------------------- | ------------------------------------ |
+| To a writable thread (`--send`), direct | 0      | 121 (26–140), n = 24    | 120 (115–128), n = 24 | missed: waits for the list to scroll |
+| To a writable thread (`--send`), direct | 40     | 118.5 (114–126), n = 24 | 119 (116–125), n = 24 | missed: the same                     |
+| During a cold switch, queued            | 0      | 7 (7–11), n = 5         | none: writable first  | not exercised                        |
+| During a cold switch, queued            | 40     | 7 (6–21), n = 24        | 8 (6–65), n = 12      | met                                  |
+| During a cold switch, queued            | 20, 80 | 7 (7–25), n = 16        | 7.5 (6–8), n = 8      | met                                  |
+
+- The direct send still waits for the message list to finish scrolling to its end (110–130 ms):
+  the chat layout change in this round did not move it. It does not grow with D. Follow-up: show
+  the sent message and clear the composer before the scroll settles.
+- During a switch the queued row shows 7–8 ms after Enter in both arms. In the final arm only the
+  switches that went cold were still connecting when Enter was pressed (12 of 24 at D = 40, 8 of 16
+  at D = 20 and 80; at D = 0 every switch was writable before the probe had typed, against 19 of
+  24 after wave 2).
+
+Cold load, first content (ms from navigation start, n = 30 per arm at D = 0 and 40, 10 at D = 80).
+Targets: at most 700 at D = 0; at most 3,000 at D = 40 (stretch 2,500).
+
+| D   | Profile | Base commit | After wave 2          | Final               | Delta  | Target | Result                           |
+| --- | ------- | ----------- | --------------------- | ------------------- | ------ | ------ | -------------------------------- |
+| 0   | fresh   | 788         | 533.5 (489–3,305)     | 504 (473–567)       | -29.5  | 700    | met                              |
+| 40  | fresh   | 3,472       | 3,268 (3,225–3,337)   | 2,974 (2,930–4,427) | -294   | 3,000  | met; stretch (2,500) missed      |
+| 80  | fresh   | 6,176       | 6,017 (6,001–6,045)   | 5,479 (5,455–5,490) | -538   |        | reported                         |
+| 0   | visited |             | 335.5 (326–388)       | 352.5 (326–397)     | +17    |        | reported (block medians overlap) |
+| 40  | visited |             | 965.5 (941–1,005)     | 905 (864–1,212)     | -60.5  |        | reported                         |
+| 80  | visited |             | 1,628.5 (1,618–1,639) | 1,477 (1,454–1,488) | -151.5 |        | reported                         |
+
+Round trips, `(first content at D = 40 − at D = 0) / 80 ms`. Target: at most 28.6 (the base
+commit's 33.6 minus 5).
+
+| Profile | Base commit | After wave 2 | Final | Target | Result                                      |
+| ------- | ----------- | ------------ | ----- | ------ | ------------------------------------------- |
+| fresh   | 33.6        | 34.2         | 30.9  | 28.6   | missed: queueing on six connections remains |
+| visited |             | 7.9          | 6.9   |        |                                             |
+
+Where a fresh load spends its time, from 8 more loads per arm and delay with a per-request
+timeline (ms from navigation start, median):
+
+| D   | Arm          | First content | Access check (session, directory) | Account socket opens | Thread route ready | Shell snapshot received | Shell painted |
+| --- | ------------ | ------------- | --------------------------------- | -------------------- | ------------------ | ----------------------- | ------------- |
+| 0   | After wave 2 | 534.5         | 129 to 223                        | 251                  | 268                | 334                     | 502           |
+| 0   | Final        | 531.5         | 116 to 119                        | 135                  | 252                | 323                     | 498           |
+| 40  | After wave 2 | 3,261         | 290 to 2,408                      | 2,433                | 2,913              | 3,070                   | 3,229         |
+| 40  | Final        | 2,993         | 279 to 363                        | 365                  | 2,648              | 2,788                   | 2,959         |
+| 80  | After wave 2 | 6,012.5       | 459 to 4,588                      | 4,613                | 5,575              | 5,817.5                 | 5,976         |
+| 80  | Final        | 5,478         | 442 to 606                        | 608                  | 5,055              | 5,269                   | 5,445         |
+
+"Thread route ready" is the end of the root route's load, which waits for the thread route's code.
+
+- The cold load is about 3.3 browser-Hub round trips shorter (30.9 against 34.2 in this session,
+  31.1 against 34.3 from D = 0 to 80). The access check now answers in one round trip and the
+  account socket opens right after it, 2 to 4 s earlier at D = 40 and 80, and a load makes
+  217–226 requests (239–249). The shell snapshot still waits for the thread route's code: the
+  route is ready 2.6 s after navigation at D = 40, and the snapshot arrives about 140 ms later in
+  both arms. That code queues on the browser's six connections per origin over plain HTTP/1.1,
+  together with the second node-directory request of every load (447 to 2,226 ms at D = 40), which
+  is most of the remaining 31 round trips and why the round-trip target is missed. Behind an
+  HTTP/2 front end those requests are multiplexed. Follow-up: group the rest of the thread route's
+  module closure into fewer chunks (the first item of the earlier cut list), make the second
+  directory request conditional, and measure behind an HTTP/2 proxy as well.
+- The cold-load change measured its own interleaved before and after on the same kind of fixture:
+  506 and 2,959 ms at D = 0 and 40, against 528 and 3,259 ms. Its change set is the one that
+  merged, and this session agrees (504 and 2,974 ms).
+- `serialRoundTrips` of the harness stays at 1–3 in both arms: it counts from the last response
+  before first content, which is a late, lazily loaded chunk.
+- One final-arm fresh load at D = 40 timed out (no first content within 30 s); it is left out of
+  the median. During it the whole fixture stalled: the Hub logged nothing for about two minutes,
+  and then all three nodes registered with it again. Two loads shortly after it took 3.8 and 4.4 s
+  and stay in the range. Three before-arm loads at D = 0 took 1.5–3.3 s in a run that ended in a
+  similar stall of about four minutes, and stay in the range as well.
+
+### Warm set qualification
+
+The change that raised the hosted warm set to three recorded its own qualification, on the same kind
+of local fixture, in
+[Hosted Web warm set qualification (measured)](./relay-capacity-assessment-3b.md#hosted-web-warm-set-qualification-measured).
+It was not measured again here. Its summary, per check:
+
+| Check                                   | Bound of one                                | Warm set of three                                                             | Result                                                                      |
+| --------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Traffic per warm environment            | 52 B/s per tab, idle, on its one connection | +58 B/s idle per extra warm environment; +2.9 KB/s while one of them streams  |                                                                             |
+| Browser memory, three nodes against one | 213 and 803 MiB after three nodes           | 0.98× and 1.00× of the bound of one (1,000 and 4,500 threads)                 | missed as written in both bounds: the inbox keeps every visited node's rows |
+| Node cost per idle channel              | 0.02 MiB RSS, about 0.015% of one core      | the same per channel                                                          |                                                                             |
+| Wake and Hub restart, up to 8 tabs      | no rate limiting; one stream per tab        | no rate limiting; a restart turned 24 warm streams into 8                     | met                                                                         |
+| Warm switch                             | click 197, content 352, writable 356 ms     | click 132, content 158, writable 158 ms; no Hub stream, no node shell request | met                                                                         |
+| Four simultaneous foreground wakes      | at most 2 channels per node                 | at most 4 channels per node, at most 2 opens per node in any second           | met                                                                         |
+
+This session's long-task run (see "Memory") agrees: a tab warm on three nodes carried 160 B/s idle
+and 3.06 KB/s while a node out of view streamed. The idle traffic per warm stream is the input for
+the deferred decision on the keepalive interval of warm streams.
+
+### Relay drops
+
+The relay-drop probe of "After wave 1": the tab first opens a thread on nodes 2 and 3, then 10
+threads of node 1 in a row and the routed thread, so the final arm holds a warm environment on each
+node and demands only node 1's. Restarting the delay proxy then drops every relay connection at
+once, the nodes' included; three drops 12–14 s apart per run, three runs per arm, D = 0, with
+fresh node processes before every run. ms after the drop, median (min–max), n = 3:
+
+| Drop | Arm          | Writable again       | Node back on the Hub | Retry gap (writable − node back) | Client streams per drop |
+| ---- | ------------ | -------------------- | -------------------- | -------------------------------- | ----------------------- |
+| 1st  | After wave 2 | 1,379 (1,310–3,067)  | 1,096 (869–1,100)    | 510 (210–1,971)                  | 1, 1, 1                 |
+| 1st  | Final        | 1,336 (1,090–3,290)  | 874 (839–1,159)      | 462 (251–2,131)                  | 1, 1, 1                 |
+| 2nd  | After wave 2 | 5,727 (4,778–6,248)  | 2,239 (2,047–2,301)  | 3,488 (2,731–3,947)              | 1, 1, 1                 |
+| 2nd  | Final        | 3,672 (1,981–7,108)  | 1,984 (1,693–2,418)  | 1,688 (288–4,690)                | 1, 1, 1                 |
+| 3rd  | After wave 2 | 7,337 (6,820–8,625)  | 4,571 (3,922–4,772)  | 2,766 (2,048–4,703)              | 1, 1, 1                 |
+| 3rd  | Final        | 9,632 (9,227–10,316) | 4,143 (3,260–4,535)  | 5,967 (5,097–6,173)              | 1, 1, 1                 |
+
+- "Node back" is the node's first relay authentication on the Hub after the drop. The nodes come
+  back later at every drop (about 1, 2 and 4 s), and the client's own retry comes later still: on
+  the first drop about 0.5 s after the node, on later drops 1.7–6 s after it, because the client
+  waits out its backoff although the node is already there. Wave 1 measured 1.05–1.30 s to
+  writable on the first drop and 1.9–12.2 s on later ones; this round is the same within the
+  spread.
+- Every drop cost exactly one client stream in both arms: in the final arm only the demanded
+  environment reconnected, and the two warm environments without a view were released, not
+  reconnected. The page stayed responsive (0.21–0.46 s of main-thread tasks during a recovery).
+- Follow-up: retry a demanded environment soon after its node is back instead of waiting out the
+  backoff (the 1.7–6 s retry gaps above are the starting point).
+- An earlier set of three runs per arm, with node processes that had been through the session's
+  earlier proxy restarts, saw nodes come back after up to 60 s (the nodes' backoff ceiling);
+  writable followed the node, and 3 of 15 drops were not writable within the 45 s observed. Those
+  runs are left out of the table.
+
+### Before the next changes
+
+Two behaviors that later changes target, measured at the final tip as their starting point.
+
+Foreground restore. One tab opens a thread on each of nodes 1, 2 and 3 (warm on all three, node 3
+in view), goes offline for 10 s and comes back; then it clicks the threads it had open on the two
+nodes out of view. Three rounds, D = 0:
+
+| What                                   | Final                                            |
+| -------------------------------------- | ------------------------------------------------ |
+| Routed thread writable after the wake  | 183 ms (175–187)                                 |
+| Switch to an out-of-view node, content | 201.5 ms (158–261), n = 6                        |
+| The same switch, writable              | 274.5 ms (239–353), n = 6                        |
+| Hub streams and tickets per switch     | at least one in 6 of 6; a warm switch opens none |
+| Node shell subscriptions per switch    | at least one in 6 of 6                           |
+
+After a wake the routed environment comes back and the other two warm environments stay released,
+so a switch to either is a cold switch (the thread itself still shows from memory first). Restoring
+the previous warm set after a wake would make these switches warm again (writable in about 150 ms,
+see "Against the targets").
+
+First read on a cold switch. In the D = 40 cold switches that opened a stream (18 in the final arm,
+30 after wave 2), the target node's RPC spans after the click, ms (median, min–max):
+
+| Request on the target node                                   | After the click, final | After the shell subscription, final | After wave 2, after the shell subscription |
+| ------------------------------------------------------------ | ---------------------- | ----------------------------------- | ------------------------------------------ |
+| Shell subscription                                           | 596 (580–644)          | 0                                   | 0 (656 after the click)                    |
+| Thread window, VCS status, terminal and server subscriptions | 598–599                | 2–3                                 | 2–3                                        |
+| Local tasks list and change subscription                     | 849 (823–901)          | 249 (240–265)                       | 250 (236–256)                              |
+| Change requests list (3 of 18; after wave 2 in 18 of 30)     | 895 (875–900)          | 254 (249–257)                       | 249 (235–254)                              |
+| Project icon read (3 of 18)                                  | 897 (875–901)          | 256 (250–258)                       | not issued                                 |
+| Writable, for reference                                      | 816.5                  | 222                                 | 215                                        |
+
+The streaming subscriptions (thread window, VCS status) go out together with the shell
+subscription. The one-shot reads reach the node about 250 ms after it, 27 ms after the thread is
+writable: the client sends them only once it has received and accepted the node's shell, so at
+D = 40 they wait for the shell's way to the browser and their own way back (80 ms each) plus the
+acceptance. The fixture issues no history or file reads on a switch. At D = 0 the same reads follow
+the shell subscription by 93 ms (82–116).
+
+### Memory
+
+One tab opens 100 listed threads of the 2,000-thread node in a row (in-app navigation, each until
+its messages show), then stays idle for 7 minutes, longer than the 5-minute window in which a
+recently opened thread keeps its body and long enough for the 60-second check of a store left over
+budget. Two runs per arm; every session is `ready`, as generated, which now counts as idle. The JS
+heap is measured after a garbage collection; bodies are counted in the store's message index of a
+heap snapshot taken after the idle period.
+
+| Metric                                            | After wave 2              | Final                     | Delta | Target                     | Result |
+| ------------------------------------------------- | ------------------------- | ------------------------- | ----- | -------------------------- | ------ |
+| Web JS heap after 1 / 32 / 64 / 100 threads (MiB) | 32.4 / 60.4 / 80.1 / 97.2 | 31.6 / 41.5 / 45.7 / 49.4 | -47.8 |                            |        |
+| Web JS heap after 7 minutes idle (MiB)            | 96.3–97.8                 | 47.7–47.8                 | -49   |                            |        |
+| Thread bodies in the store after 7 minutes idle   | 171–172 (100 opened)      | 64 in both runs           | -108  | at most 64, plus protected | met    |
+| Message ids in those bodies                       | 1,440–1,442               | 526                       | -915  |                            |        |
+
+- The final arm's heap is already 19 MiB lower after 32 threads and grows by about 0.1 MiB per
+  further thread (0.55 MiB after wave 2). After the idle period nothing is protected any more and
+  the store keeps exactly its budget: the most recently opened threads and 27 threads the tab never
+  opened.
+- In the before arm no body is evicted, as in earlier rounds.
+- The earlier count, the threads whose first reply's id is still anywhere in the heap, stays at 88
+  of 88 in both arms, so it no longer counts bodies: in the final arm those ids stay referenced
+  from small per-turn records, and in one traced case from a message array that a module-level
+  value keeps after its thread was evicted. Follow-up: find which memo keeps that array, and count
+  bodies from the store index from now on.
+
+Long tasks while a warm node streams. One tab opens a thread on nodes 1, 2 and 3 and stays on node
+3, warm on the other two. For 5 minutes a second context sends a message every 2 seconds into a
+thread of node 1, out of view (150 messages); a 5-minute idle window comes first. Final arm, D = 0:
+
+| Window                          | Long tasks per minute | Long-task time per minute | Traffic of the tab (in / out) |
+| ------------------------------- | --------------------- | ------------------------- | ----------------------------- |
+| Idle                            | 0                     | 0 ms                      | 81 / 79 B/s                   |
+| A warm node out of view streams | 0                     | 0 ms                      | 2,717 / 344 B/s               |
+
+The updates of a warm node out of view cost the tab no long task.
+
+### Node
+
+The node code is the same in both arms, so these rows were measured once, at the final tip, with
+the final arm's bundle (nodes 1–3 online, D = 0). "Wake-ups" are context switches of the node
+process, a proxy for timer wake-ups.
+
+| Row                                                          | After wave 0  | Final                                                            | Target                      | Result                     |
+| ------------------------------------------------------------ | ------------- | ---------------------------------------------------------------- | --------------------------- | -------------------------- |
+| Node RSS, idle, no client                                    | 275–279 MiB   | 260–291 MiB (three nodes)                                        |                             |                            |
+| Node wake-ups per second, idle, no client                    | 1.8–1.9       | 1.3 (1.29–1.34); 6.3–6.5 in the first minute after a Hub restart |                             |                            |
+| Wake-ups per idle subscription per second (10 subscriptions) | 0.26          | 0.06                                                             | no recurring timer wake-ups | met                        |
+| RSS of the node holding the 10 subscriptions                 |               | 276 MiB (+16 MiB)                                                |                             |                            |
+| `ps` spawns per minute with one idle terminal                | 12, then 2    | 13 in the first idle minute, then 2                              | at most 2 after a minute    | met after the first minute |
+| Codex status probe process starts while the reader lives     | not exercised | not exercised                                                    | 0                           | not exercised              |
+
+- Subscriptions: one tab opens 10 threads of node 1 in a row and stays idle; node 1 then wakes
+  1.89 times per second against 1.29 for node 2 in the same window (no client) and 1.34 for node 1
+  after the tab closed, about 0.06 per subscription, consistent with keepalive traffic on the open
+  channel rather than timers.
+- The fixture nodes run with every provider disabled, so no Codex status probe runs at all; the
+  path that reuses the long-lived reader was not exercised, as after wave 0.
+- The first idle window started 40 s after a Hub restart that the nodes had just reconnected to;
+  the later windows are the settled value.
+
+### Desktop
+
+Not measured on a native client: the local fixture cannot sign in a native client, and a run
+against the production Hub needs the owner's interactive sign-in and enrolls the desktop as a device
+on a real account. Both rows stay manual production checks (see "Production (manual)"). The evidence
+is the desktop tests at the final tip: 144 pass in the relay, handshake, prekey, security helper,
+background signal, content cache and workspace IPC suites, and 28 in the renderer's workspace
+suite.
+
+| Row                                               | Target                                     | Evidence                                                                         |
+| ------------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
+| Relay upgrades on Cmd-Tab or window blur          | 0, with warm connections kept              | met in the tests (focus loss never backgrounds the workspace); not measured live |
+| Cold remote connect                               | 50–130 ms faster, one key read per process | the tests show the trimmed connect order; time not measured                      |
+| Cold app start to the first cached thread content |                                            | the tests show cached conversations painted before live data; time not measured  |
+
+### Mobile
+
+Not measured on a device, for the same reason. The evidence is the mobile tests at the final tip:
+192 pass in the thread connection retarget, home catalog model, node lifecycle, connection
+coordinator, primary connection, retained wake, snapshot persistence, snapshot codec, snapshot
+database and preferences suites (44 of them in the first two, which this round changed).
+
+| Row                                               | Target                                  | Evidence                                                                           |
+| ------------------------------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------- |
+| Re-selecting a warm node                          | 0 network calls, mutation-ready at once | met in the tests, now without the retarget debounce; time on a device not measured |
+| Cold app start to the first cached thread content |                                         | the tests show cached messages before any live data; time not measured             |
+| Directory polls per hour                          |                                         | not measured: the change that makes polling demand-driven lands after this round   |
+| Native cipher decrypt time per MiB                |                                         | not applicable: the native cipher change was not taken                             |
+
+- Warm re-select: opening a thread on a node whose session is warm (connecting or established)
+  dispatches its open at once instead of waiting out the retarget debounce, which a node without a
+  warm session keeps; the home catalog model derives every node's connection state with the shared
+  rule.
 
 ## RAM/CPU scorecard
 
@@ -758,4 +1176,62 @@ node process, a proxy for timer wake-ups.
 - The web heap after visiting both nodes is higher after wave 0, while the heap after the switches
   is lower: switches retain less.
 
+Final, the wave-3 tip, on the same kind of fixture (see "After wave 3 (final)": the node rows under
+"Node", the web rows under "Memory"):
+
+| Metric                                                               | Base commit | After wave 0             | Final                               | Target                      | Result                     |
+| -------------------------------------------------------------------- | ----------- | ------------------------ | ----------------------------------- | --------------------------- | -------------------------- |
+| Node RSS, idle, no client                                            | 269–277 MiB | 275–279 MiB              | 260–291 MiB                         |                             |                            |
+| Node wake-ups per second, idle, no client                            | 4.5–4.7     | 1.8–1.9                  | 1.3                                 |                             |                            |
+| Wake-ups per idle subscription per second (10 subscriptions open)    | 10.0        | 0.26                     | 0.06                                | no recurring timer wake-ups | met                        |
+| `bun dev` peak RSS (process tree, 150 s, no browser)                 | 2,646 MiB   | 1,024 MiB                | 1,016 MiB                           | -1.4 GB                     | met (-1,630 MiB)           |
+| Codex status probe process starts while the reader lives             | 1           | 1                        | not exercised (providers disabled)  | 0                           | not exercised              |
+| `ps` spawns per minute with one idle terminal                        | 12          | 12, then 2               | 13 in the first idle minute, then 2 | at most 2                   | met after the first minute |
+| Web JS heap after opening 100 threads of the 2,000-thread node       |             | 98.9 MiB                 | 49.4 MiB                            |                             |                            |
+| The same after 7 minutes idle                                        |             | 98.7–98.9 MiB            | 47.7–47.8 MiB                       |                             |                            |
+| Thread bodies in the store after 7 minutes idle                      |             | every body (no eviction) | 64                                  | at most 64, plus protected  | met                        |
+| Long tasks per minute while a warm node out of view streams          |             |                          | 0                                   |                             |                            |
+| JSON stringify or parse of the metadata cache on a message-only tick | every tick  |                          | none (the change's tests)           | none                        | met in the tests           |
+
+- `bun dev`: 1,016 MiB with the web dev server's dependency cache in place, as in the earlier
+  measurement. The first start of a fresh checkout peaks at 2,378 MiB while the dev server
+  pre-bundles its dependencies, once.
+- The metadata tick is not measured on the fixture. Its tests pass at the final tip (20 in the
+  metadata cache and projection suites), including a message-only store tick that keeps the arrays
+  and does no JSON work, and a refreshed record whose arrays are not validated again.
+
 ## Production (manual)
+
+The local fixture cannot measure a production Hub or sign in a native client. To compare production
+with the local numbers above, the owner runs the same probes from a public checkout against their
+own Hub; nothing needs to be built or deployed for it:
+
+1. Sign in to the Hub in a browser and save that session as a cookie file (JSON with `cookieName`
+   and `cookieValue`, see [Performance Testing](./performance-testing.md#commands)). Keep the file
+   outside the repository and delete it afterwards.
+2. Warm switch: with at most three nodes online (or visit only three), run
+   `bun scripts/perf/cli.ts hosted-switch --hub-url <hub> --cookie-file <file> --iterations 8 --output <dir>/warm`.
+3. Cold switch: with a fourth node online, run the same command with `--output <dir>/cold`. The
+   probe picks the next node in the inbox's order, which can keep returning to nodes the tab still
+   holds: a warm switch is writable within about 200 ms plus the delay, so read the slower switches
+   as the cold ones. `hosted-correlate` can tell them apart exactly, but it needs the home
+   directories of the target nodes (it reads their trace files, `--node-dir`) and, for the Hub
+   side, a JSON-lines Hub log (`--hub-log`); use it only where both are at hand.
+4. Cold load: `bun scripts/perf/cli.ts hosted-cold-load --hub-url <hub> --cookie-file <file> --iterations 10 --output <dir>/load`,
+   once more with `--visited`.
+5. Check each result with `hosted-compare --baseline <file> --candidate <file> --targets <targets>`,
+   with targets taken from the local numbers in "Against the targets" (for example
+   `{"cross-node.writable": 250}` for the warm switch); use an earlier production result as the
+   baseline, or the same file for both on the first run. Production adds the real network delay:
+   read a result against the local row with the closest delay, using the `12·D + 600` budget for
+   cold switches.
+
+Native checks, by hand:
+
+- Desktop: Cmd-Tab away and back several times with a hosted node open. Expect no new relay
+  connection and the thread writable at once.
+- Desktop: quit and start the app, then open a remote node cold; note the time to a writable thread.
+- Mobile: with two nodes open, switch between them. Expect no network request and a writable thread
+  at once.
+- Mobile: force-quit and start the app; note the time to the first cached thread content, then to
+  live content.
