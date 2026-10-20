@@ -1,7 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 
 import type {
-  WorkspaceMachineCatalogEntry,
   WorkspaceMetadataCacheNamespace,
   WorkspaceMetadataCacheRecord,
   WorkspaceMetadataSnapshot,
@@ -72,33 +71,6 @@ export function isWorkspaceMetadataSnapshot(
     threadIds.add(thread.id);
   }
   return true;
-}
-
-export function decodeWorkspaceMetadataSnapshot(
-  raw: string,
-  environmentId: EnvironmentId,
-): WorkspaceMetadataSnapshot | null {
-  try {
-    const value: unknown = JSON.parse(raw);
-    return isWorkspaceMetadataSnapshot(value, environmentId) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A failed/partial candidate is a no-op; only a complete newer projection replaces cache. */
-export function reconcileWorkspaceMetadataSnapshot(
-  current: WorkspaceMetadataSnapshot | null,
-  candidate: unknown,
-  environmentId: EnvironmentId,
-): { readonly snapshot: WorkspaceMetadataSnapshot | null; readonly replaced: boolean } {
-  if (!isWorkspaceMetadataSnapshot(candidate, environmentId)) {
-    return { snapshot: current, replaced: false };
-  }
-  if (current && candidate.capturedAt < current.capturedAt) {
-    return { snapshot: current, replaced: false };
-  }
-  return { snapshot: candidate, replaced: true };
 }
 
 const payloadTextEncoder = new TextEncoder();
@@ -235,23 +207,4 @@ export function planWorkspaceMetadataCacheEvictions(input: {
     bytes -= candidate.payloadBytes;
   }
   return { accepted: count <= maxEntries && bytes <= maxBytes, evict };
-}
-
-export type WorkspaceCacheReconciliationAction =
-  | { readonly type: "retain" }
-  | { readonly type: "lock-stale" }
-  | { readonly type: "purge" };
-
-export function reconcileWorkspaceCacheForMachine(
-  machine: WorkspaceMachineCatalogEntry,
-): WorkspaceCacheReconciliationAction {
-  switch (machine.cacheDisposition) {
-    case "available":
-      return { type: "retain" };
-    case "locked-stale":
-      return { type: "lock-stale" };
-    case "purge":
-      return { type: "purge" };
-  }
-  return { type: "purge" };
 }
