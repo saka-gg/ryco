@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "./restartContinuation.ts";
 import { isThreadSnoozed, resolveSnoozePresets } from "./threadSnooze.ts";
 
 const since = "2026-09-06T10:00:00.000Z";
@@ -28,6 +29,14 @@ describe("snooze visibility", () => {
     expect(
       isThreadSnoozed({ ...snoozed, session: { status: "error", updatedAt: since } }, now),
     ).toBe(true);
+  });
+  it("stays deferred when a server restart releases the session", () => {
+    const released = {
+      status: "error",
+      lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+      updatedAt: "2026-09-06T11:00:00.000Z",
+    };
+    expect(isThreadSnoozed({ ...snoozed, session: released }, now)).toBe(true);
   });
   it.each([
     {},

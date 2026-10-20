@@ -24,6 +24,7 @@ import {
   WorktreeId,
   TurnId,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
@@ -1143,6 +1144,55 @@ describe("glyph row facts", () => {
     });
     const [queued] = rows({ threads: [thread("queued", running(null))] });
     expect(queued?.runningSince).toBe("2026-08-23T10:00:00.000Z");
+  });
+
+  it("rests a thread a server restart interrupted as idle, without error text", () => {
+    const session = {
+      provider: ProviderDriverKind.make("codex"),
+      status: "error" as const,
+      orchestrationStatus: "error" as const,
+      createdAt: "2026-08-23T10:00:00.000Z",
+      updatedAt: "2026-08-23T10:03:00.000Z",
+    };
+    const interrupted = {
+      turnId: TurnId.make("turn-interrupted"),
+      state: "interrupted" as const,
+      requestedAt: "2026-08-23T10:00:00.000Z",
+      startedAt: "2026-08-23T10:00:01.000Z",
+      completedAt: "2026-08-23T10:03:00.000Z",
+      assistantMessageId: null,
+    };
+    const sections = build({
+      threads: [
+        thread("a-working", running("2026-08-23T10:02:00.000Z")),
+        thread("b-released", {
+          session: { ...session, lastError: ORPHANED_PROVIDER_SESSION_ERROR },
+          latestTurn: interrupted,
+        }),
+        thread("c-failed", {
+          session: { ...session, lastError: "Provider exited (code 1)" },
+          latestTurn: interrupted,
+        }),
+      ],
+      nowMs: Date.parse("2026-08-23T10:05:00.000Z"),
+    });
+
+    expect(
+      sections.map((section) => [section.key, section.rows.map((row) => row.threadId)]),
+    ).toEqual([
+      ["active", ["c-failed", "a-working"]],
+      ["recent", ["b-released"]],
+    ]);
+    expect(sections[1]?.rows[0]).toMatchObject({
+      state: "idle",
+      statusLabel: "Idle",
+      placementState: "idle",
+      errorDetail: null,
+    });
+    expect(sections[0]?.rows[0]).toMatchObject({
+      state: "error",
+      errorDetail: "Provider exited (code 1)",
+    });
   });
 
   it("exposes the latest turn completion for unseen-work checks", () => {

@@ -8,6 +8,7 @@ import {
   type LocalTaskLink,
   type OrchestrationLatestTurn,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { describe, expect, it } from "vite-plus/test";
 
 import { extractThreadReferences } from "../composer/threadMentions.ts";
@@ -142,6 +143,16 @@ describe("resolveTaskChatStatus", () => {
     expect(resolveTaskChatStatus("running", summary({ latestTurn: turn("interrupted") }))).toBe(
       "review",
     );
+  });
+
+  it("reads a chat a server restart interrupted as review, not failed", () => {
+    const released = { ...session("error"), lastError: ORPHANED_PROVIDER_SESSION_ERROR };
+    expect(
+      resolveTaskChatStatus(
+        "running",
+        summary({ session: released, latestTurn: turn("interrupted") }),
+      ),
+    ).toBe("review");
   });
 
   it("lets a failed start go once the chat runs a turn of its own after it", () => {

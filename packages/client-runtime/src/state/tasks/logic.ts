@@ -10,6 +10,7 @@ import { resolveUniqueRefName, sanitizeBranchFragment } from "@ryco/shared/git";
 import { aggregateLocalTaskStatus, type LocalTaskChatAggregate } from "@ryco/shared/localTasks";
 
 import { deriveThreadActivityStatus } from "../threads/threadActivityStatus.ts";
+import { isThreadFailed } from "../threads/threadFailure.ts";
 import type {
   LocalTaskOptimisticStart,
   LocalTaskThreadSummary,
@@ -92,12 +93,7 @@ function liveChatStatus(
     case "connecting":
       return "starting";
     case "idle":
-      if (
-        startFailed ||
-        summary.latestTurn?.state === "error" ||
-        summary.session?.status === "error"
-      )
-        return "failed";
+      if (startFailed || isThreadFailed(summary)) return "failed";
       return summary.latestTurn === null ? beforeFirstTurn : "review";
   }
 }

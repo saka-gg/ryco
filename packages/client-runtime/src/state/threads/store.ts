@@ -66,6 +66,7 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import { sessionFailureDetail } from "./threadFailure.ts";
 import {
   forgetCollectedRows,
   forgetDerivedThread,
@@ -421,7 +422,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     session: thread.session ? mapSession(thread.session) : null,
     messages: thread.messages.map((message) => mapMessage(environmentId, message)),
     proposedPlans: thread.proposedPlans.map(mapProposedPlan),
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error: sanitizeThreadErrorMessage(sessionFailureDetail(thread.session)),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
@@ -463,7 +464,7 @@ function mapThreadShell(
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
     tokenMode: thread.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
-    error: sanitizeThreadErrorMessage(thread.session?.lastError),
+    error: sanitizeThreadErrorMessage(sessionFailureDetail(thread.session)),
     createdAt: thread.createdAt,
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
@@ -3024,7 +3025,7 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
         session: mapSession(event.payload.session),
-        error: sanitizeThreadErrorMessage(event.payload.session.lastError),
+        error: sanitizeThreadErrorMessage(sessionFailureDetail(event.payload.session)),
         // The server decided which turn this release ends; settle only that turn, in
         // the same frame as the session, so the open view never flashes Working.
         latestTurn:

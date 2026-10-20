@@ -6,6 +6,7 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
 import { buildInboxSections, resolveInboxEmptyState, type InboxEnvironment } from "./inboxModel";
 
@@ -676,6 +677,52 @@ describe("inbox usage limits", () => {
 
   it("falls back to Error when the thread targets another instance", () => {
     expect(rowFor("codex", "2026-07-26T09:00:00.000Z")).toMatchObject({
+      state: "error",
+      statusLabel: "Error",
+    });
+  });
+});
+
+describe("inbox errors", () => {
+  const session = (lastError: string) => ({
+    provider: "codex" as never,
+    status: "error" as const,
+    orchestrationStatus: "error" as const,
+    createdAt: "2026-07-26T08:00:00.000Z",
+    updatedAt: "2026-07-26T08:05:00.000Z",
+    lastError,
+  });
+  const interrupted = {
+    turnId: "turn-1" as never,
+    state: "interrupted" as const,
+    requestedAt: "2026-07-26T08:00:00.000Z",
+    startedAt: "2026-07-26T08:00:01.000Z",
+    completedAt: "2026-07-26T08:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const rowFor = (lastError: string) =>
+    buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco")],
+      worktrees: [],
+      environments: [{ environmentId: NODE_A, label: "Mac Studio", connectionState: "connected" }],
+      threads: [
+        thread(NODE_A, "thread", "project-a", {
+          session: session(lastError),
+          latestTurn: interrupted,
+        }),
+      ],
+      nowMs: Date.parse("2026-07-26T09:00:00.000Z"),
+    })[0]?.rows[0];
+
+  it("labels a thread a server restart interrupted Idle, not Error", () => {
+    expect(rowFor(ORPHANED_PROVIDER_SESSION_ERROR)).toMatchObject({
+      state: "idle",
+      statusLabel: "Idle",
+    });
+  });
+
+  it("keeps a genuine provider error an Error", () => {
+    expect(rowFor("Provider exited (code 1)")).toMatchObject({
       state: "error",
       statusLabel: "Error",
     });

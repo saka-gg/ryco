@@ -4,6 +4,8 @@ import { getModelDisplayName } from "@ryco/shared/model";
 import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
+  isThreadFailed,
+  sessionFailureDetail,
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
@@ -635,7 +637,8 @@ function resolveThreadState(
   }
   // A running resumed turn wins above; a usage limit outranks the error it ended in.
   if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
-  if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
+  // A restart release is an interruption, not a failure: it rests as idle.
+  if (isThreadFailed(thread)) return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
 }
@@ -1019,7 +1022,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       statusLabel: statusLabel(state, environment, usageLimit),
       placementState,
       attention: state === "needs-input" ? resolveAttention(thread) : null,
-      errorDetail: state === "error" ? thread.session?.lastError?.trim() || null : null,
+      errorDetail: state === "error" ? sessionFailureDetail(thread.session)?.trim() || null : null,
       usageLimit: usageLimit ? { phase: usageLimit.phase, resetAt: usageLimit.resetAt } : null,
       runningSince: state === "working" ? resolveRunningSince(thread) : null,
       latestTurnCompletedAt: thread.latestTurn?.completedAt ?? null,
