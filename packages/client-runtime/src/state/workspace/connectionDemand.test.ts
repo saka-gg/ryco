@@ -4,13 +4,19 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createWorkspaceConnectionDemandState,
   isWorkspaceEnvironmentDemanded,
+  isWorkspaceEnvironmentWarmOnly,
+  noteRecentWorkspaceEnvironment,
   planWorkspaceConnectionDemand,
+  pruneExpiredWorkspaceConnectionScopes,
   releaseWorkspaceConnectionScope,
   renewWorkspaceConnectionScope,
   retainWorkspaceConnectionScope,
   setWorkspaceConnectionBackgrounded,
   setWorkspaceEnvironmentConnected,
   UNIFIED_WORKSPACE_MAX_CONNECTIONS,
+  UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+  type WorkspaceConnectionDemandPlan,
+  type WorkspaceConnectionDemandState,
 } from "./connectionDemand.js";
 
 const environments = Array.from({ length: 5 }, (_, index) =>
@@ -42,6 +48,133 @@ function retainPreemptible(
     now,
     preemptible: true,
   });
+}
+
+function retainWarm(
+  state: ReturnType<typeof createWorkspaceConnectionDemandState>,
+  index: number,
+  now = index,
+) {
+  return retainWorkspaceConnectionScope(state, {
+    leaseId: `warm-${index}`,
+    environmentId: environments[index - 1]!,
+    scope: { type: "interactive" },
+    now,
+    ttlMs: UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+    warm: true,
+  });
+}
+
+function connect(state: WorkspaceConnectionDemandState, ...indexes: ReadonlyArray<number>) {
+  let next = state;
+  for (const index of indexes) {
+    next = setWorkspaceEnvironmentConnected(next, environments[index - 1]!, true, index);
+  }
+  return next;
+}
+
+/**
+ * The planner as it was before warm leases existed, kept verbatim in behavior
+ * so plans without a warm lease can be compared against it.
+ */
+function plannerWithoutWarmLeases(
+  source: WorkspaceConnectionDemandState,
+  input: {
+    readonly now: number;
+    readonly wakeStaggerMs?: number;
+    readonly foregroundEnvironmentId?: EnvironmentId | null;
+  },
+): WorkspaceConnectionDemandPlan {
+  const state = pruneExpiredWorkspaceConnectionScopes(source, input.now);
+  const retainedAt = new Map<EnvironmentId, number>();
+  const preemptible = new Map<EnvironmentId, boolean>();
+  for (const lease of state.leases) {
+    retainedAt.set(
+      lease.environmentId,
+      Math.max(retainedAt.get(lease.environmentId) ?? 0, lease.retainedAt),
+    );
+    preemptible.set(
+      lease.environmentId,
+      (preemptible.get(lease.environmentId) ?? true) && lease.preemptible === true,
+    );
+  }
+  const retained = Array.from(retainedAt.keys());
+  const retainedSet = new Set(retained);
+  const connected = state.connections.filter((entry) => entry.connected);
+  const connectedSet = new Set(connected.map((entry) => entry.environmentId));
+  const nonRetained = connected
+    .filter((entry) => !retainedSet.has(entry.environmentId))
+    .toSorted(
+      (left, right) =>
+        left.lastAccessedAt - right.lastAccessedAt ||
+        String(left.environmentId).localeCompare(String(right.environmentId)),
+    );
+  const foreground = input.foregroundEnvironmentId ?? null;
+  const missingByRecency = retained
+    .filter((environmentId) => !connectedSet.has(environmentId))
+    .toSorted(
+      (left, right) =>
+        (retainedAt.get(right) ?? 0) - (retainedAt.get(left) ?? 0) ||
+        String(left).localeCompare(String(right)),
+    );
+  const missing =
+    foreground !== null && missingByRecency.includes(foreground)
+      ? [foreground, ...missingByRecency.filter((environmentId) => environmentId !== foreground)]
+      : missingByRecency;
+  const release: EnvironmentId[] = [];
+  if (state.backgrounded) {
+    release.push(...nonRetained.map((entry) => entry.environmentId));
+    return {
+      state,
+      retain: retained.filter((environmentId) => connectedSet.has(environmentId)),
+      release,
+      connect: [],
+      queued: missing,
+    };
+  }
+  const max = state.platformMaxConnections;
+  let projected = connected.length;
+  const victims = [...nonRetained];
+  while (victims.length > 0 && (projected > max || projected + missing.length > max)) {
+    release.push(victims.shift()!.environmentId);
+    projected -= 1;
+  }
+  const preempted: EnvironmentId[] = [];
+  const slotsNeeded = projected - max + 1;
+  if (foreground !== null && missing[0] === foreground && slotsNeeded > 0) {
+    const candidates = connected
+      .map((entry) => entry.environmentId)
+      .filter(
+        (environmentId) =>
+          environmentId !== foreground &&
+          retainedSet.has(environmentId) &&
+          preemptible.get(environmentId) === true,
+      )
+      .toSorted(
+        (left, right) =>
+          (retainedAt.get(left) ?? 0) - (retainedAt.get(right) ?? 0) ||
+          String(left).localeCompare(String(right)),
+      );
+    if (candidates.length >= slotsNeeded) {
+      preempted.push(...candidates.slice(0, slotsNeeded));
+      release.push(...preempted);
+      projected -= preempted.length;
+    }
+  }
+  const connectNow = missing.slice(0, Math.max(0, max - projected));
+  const wakeStaggerMs = Math.max(0, input.wakeStaggerMs ?? 0);
+  return {
+    state,
+    retain: retained.filter(
+      (environmentId) => connectedSet.has(environmentId) && !preempted.includes(environmentId),
+    ),
+    release,
+    connect: connectNow.map((environmentId, index) => ({
+      environmentId,
+      delayMs: index * wakeStaggerMs,
+    })),
+    queued: [...missing.slice(connectNow.length), ...preempted],
+  };
 }
 
 function connectedState(count: number, retainLease = retain) {
@@ -328,5 +461,239 @@ describe("unified workspace connection demand", () => {
       ).toBe(entry.demanded);
     }
     expect(isWorkspaceEnvironmentDemanded(state, environments[0]!, { now: 5 })).toBe(true);
+  });
+});
+
+describe("warm leases", () => {
+  it("connects warm environments after the foreground and other demand, in stagger steps", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retain(state, 1, 1);
+    // Retained later than the view, yet they still follow it.
+    state = retainWarm(state, 2, 10);
+    state = retainWarm(state, 3, 9);
+
+    const plan = planWorkspaceConnectionDemand(state, {
+      now: 11,
+      wakeStaggerMs: 750,
+      foregroundEnvironmentId: environments[0]!,
+    });
+    expect(plan.connect).toEqual([
+      { environmentId: environments[0], delayMs: 0 },
+      { environmentId: environments[1], delayMs: 750 },
+      { environmentId: environments[2], delayMs: 1500 },
+    ]);
+
+    state = retain(state, 4, 2);
+    const crowded = planWorkspaceConnectionDemand(state, {
+      now: 11,
+      wakeStaggerMs: 750,
+      foregroundEnvironmentId: environments[0]!,
+    });
+    expect(crowded.connect).toEqual([
+      { environmentId: environments[0], delayMs: 0 },
+      { environmentId: environments[3], delayMs: 750 },
+      { environmentId: environments[1], delayMs: 1500 },
+    ]);
+    expect(crowded.queued).toEqual([environments[2]]);
+  });
+
+  it("lets a missing view or foreground displace warm-only environments, least recent first", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retainWarm(state, 1, 1);
+    state = retainWarm(state, 2, 2);
+    state = retain(state, 3, 3);
+    state = connect(state, 1, 2, 3);
+    state = retain(state, 4, 10);
+
+    const view = planWorkspaceConnectionDemand(state, { now: 11, wakeStaggerMs: 750 });
+    expect(view.release).toEqual([environments[0]]);
+    expect(view.connect).toEqual([{ environmentId: environments[3], delayMs: 0 }]);
+    expect(view.queued).toEqual([environments[0]]);
+    expect(view.retain).toEqual([environments[1], environments[2]]);
+    // The displaced environment keeps its warm lease.
+    expect(view.state.leases.map((lease) => lease.leaseId)).toContain("warm-1");
+
+    state = retain(state, 5, 11);
+    const foreground = planWorkspaceConnectionDemand(state, {
+      now: 12,
+      wakeStaggerMs: 750,
+      foregroundEnvironmentId: environments[4]!,
+    });
+    expect(foreground.release).toEqual([environments[0], environments[1]]);
+    expect(foreground.connect).toEqual([
+      { environmentId: environments[4], delayMs: 0 },
+      { environmentId: environments[3], delayMs: 750 },
+    ]);
+    expect(foreground.queued).toEqual([environments[0], environments[1]]);
+  });
+
+  it("never lets a warm-only environment displace a view or an intent", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retainPreemptible(state, 1, 1);
+    state = retain(state, 2, 2);
+    state = retain(state, 3, 3);
+    state = connect(state, 1, 2, 3);
+    state = retainWarm(state, 4, 10);
+
+    const plan = planWorkspaceConnectionDemand(state, { now: 11, wakeStaggerMs: 750 });
+    expect(plan.release).toEqual([]);
+    expect(plan.connect).toEqual([]);
+    expect(plan.queued).toEqual([environments[3]]);
+  });
+
+  it("never displaces an unleased or in-flight connection", () => {
+    // A view on 1; 2 is a connection nothing retains, and 3 a connect the user
+    // started later that nothing retains any more (in-flight connects plan as
+    // connected).
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retain(state, 1, 1);
+    state = connect(state, 1, 2);
+    state = setWorkspaceEnvironmentConnected(state, environments[2]!, true, 5);
+    state = retainWarm(state, 4, 10);
+    state = retainWarm(state, 5, 9);
+
+    const full = planWorkspaceConnectionDemand(state, { now: 11, wakeStaggerMs: 750 });
+    expect(full.release).toEqual([]);
+    expect(full.connect).toEqual([]);
+    expect(full.queued).toEqual([environments[3], environments[4]]);
+
+    // Other demand still makes room, but only the room it needs itself.
+    state = retain(state, 4, 11);
+    const crowded = planWorkspaceConnectionDemand(state, { now: 12, wakeStaggerMs: 750 });
+    expect(crowded.release).toEqual([environments[1]]);
+    expect(crowded.connect).toEqual([{ environmentId: environments[3], delayMs: 0 }]);
+    expect(crowded.queued).toEqual([environments[4]]);
+
+    // A slot that frees is the only kind a warm environment takes.
+    state = setWorkspaceEnvironmentConnected(state, environments[1]!, false, 12);
+    state = setWorkspaceEnvironmentConnected(state, environments[3]!, true, 12);
+    state = setWorkspaceEnvironmentConnected(state, environments[2]!, false, 13);
+    const free = planWorkspaceConnectionDemand(state, { now: 14, wakeStaggerMs: 750 });
+    expect(free.release).toEqual([]);
+    expect(free.connect).toEqual([{ environmentId: environments[4], delayMs: 0 }]);
+    expect(free.queued).toEqual([]);
+  });
+
+  it("releases warm-only environments in the background and queues none", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retainWarm(state, 1, 1);
+    state = retain(state, 2, 2);
+    state = connect(state, 1, 2);
+    state = retainWarm(state, 3, 3);
+    state = retain(state, 4, 4);
+    state = setWorkspaceConnectionBackgrounded(state, true);
+
+    const plan = planWorkspaceConnectionDemand(state, { now: 5, wakeStaggerMs: 750 });
+    expect(plan.release).toEqual([environments[0]]);
+    expect(plan.retain).toEqual([environments[1]]);
+    expect(plan.connect).toEqual([]);
+    expect(plan.queued).toEqual([environments[3]]);
+  });
+
+  it("treats a warm lease as no demand, unless something else holds the environment", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retainWarm(state, 1, 0);
+    const now = { now: 5 };
+    expect(isWorkspaceEnvironmentDemanded(state, environments[0]!, now)).toBe(false);
+    expect(isWorkspaceEnvironmentWarmOnly(state, environments[0]!, now)).toBe(true);
+    expect(
+      isWorkspaceEnvironmentDemanded(state, environments[0]!, {
+        ...now,
+        foregroundEnvironmentId: environments[0]!,
+      }),
+    ).toBe(true);
+    expect(
+      isWorkspaceEnvironmentWarmOnly(state, environments[0]!, {
+        ...now,
+        foregroundEnvironmentId: environments[0]!,
+      }),
+    ).toBe(false);
+    expect(isWorkspaceEnvironmentWarmOnly(state, environments[1]!, now)).toBe(false);
+
+    state = retain(state, 1, 1);
+    expect(isWorkspaceEnvironmentDemanded(state, environments[0]!, now)).toBe(true);
+    expect(isWorkspaceEnvironmentWarmOnly(state, environments[0]!, now)).toBe(false);
+    expect(state.leases.find((lease) => lease.leaseId === "warm-1")).toMatchObject({
+      warm: true,
+      preemptible: true,
+    });
+  });
+
+  it("lets a warm lease lapse after its TTL, leaving the environment as unleased LRU", () => {
+    let state = createWorkspaceConnectionDemandState(3);
+    state = retainWarm(state, 1, 0);
+    state = connect(state, 1);
+    const before = planWorkspaceConnectionDemand(state, {
+      now: UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS - 1,
+    });
+    expect(before.retain).toEqual([environments[0]]);
+
+    const after = planWorkspaceConnectionDemand(state, {
+      now: UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+    });
+    expect(after.state.leases).toEqual([]);
+    expect(after.retain).toEqual([]);
+    expect(after.release).toEqual([]);
+  });
+
+  it("plans exactly as before when no warm lease is held", () => {
+    // A deterministic sweep of states built from views, intents and connections.
+    let seed = 7;
+    const random = (bound: number) => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed % bound;
+    };
+    for (let round = 0; round < 400; round += 1) {
+      let state = createWorkspaceConnectionDemandState(1 + random(3));
+      for (let index = 1; index <= 5; index += 1) {
+        const choice = random(4);
+        if (choice === 1) state = retain(state, index, 1 + random(20));
+        if (choice === 2) state = retainPreemptible(state, index, 1 + random(20));
+        if (choice === 3) {
+          state = retain(state, index, 1 + random(20));
+          state = retainPreemptible(state, index, 1 + random(20));
+        }
+        if (random(2) === 0) {
+          state = setWorkspaceEnvironmentConnected(
+            state,
+            environments[index - 1]!,
+            true,
+            random(20),
+          );
+        }
+      }
+      state = setWorkspaceConnectionBackgrounded(state, random(4) === 0);
+      const foregroundIndex = random(6);
+      const input = {
+        now: 25,
+        wakeStaggerMs: random(2) * 750,
+        foregroundEnvironmentId: foregroundIndex === 5 ? null : environments[foregroundIndex]!,
+      };
+      expect(planWorkspaceConnectionDemand(state, input)).toEqual(
+        plannerWithoutWarmLeases(state, input),
+      );
+    }
+  });
+
+  it("keeps a bounded most-recently-used list and its identity when nothing changes", () => {
+    const [first, second, third, fourth] = environments as [
+      EnvironmentId,
+      EnvironmentId,
+      EnvironmentId,
+      EnvironmentId,
+    ];
+    const empty: ReadonlyArray<EnvironmentId> = [];
+    const one = noteRecentWorkspaceEnvironment(empty, first, 3);
+    expect(one).toEqual([first]);
+    expect(noteRecentWorkspaceEnvironment(one, first, 3)).toBe(one);
+
+    const three = [second, third, first].reduce<ReadonlyArray<EnvironmentId>>(
+      (recent, environmentId) => noteRecentWorkspaceEnvironment(recent, environmentId, 3),
+      one,
+    );
+    expect(three).toEqual([first, third, second]);
+    expect(noteRecentWorkspaceEnvironment(three, third, 3)).toEqual([third, first, second]);
+    expect(noteRecentWorkspaceEnvironment(three, fourth, 3)).toEqual([fourth, first, third]);
+    expect(noteRecentWorkspaceEnvironment(three, first, 2)).toEqual([first, third]);
   });
 });

@@ -64,8 +64,26 @@ Only demanded environments (the one in view, or one holding a scope) reconnect a
 drop; a warm environment nothing demands is released instead and reconnects when it is demanded
 again, so a Hub restart costs one reconnect per demanded environment rather than one per warm one.
 Backgrounding a native client releases non-retained connections; hosted Web does so once a tab has
-been hidden for 90 seconds. Foreground or visibility recovery restores retained demand only and
-staggers reconnects; there is no reconnect-all-cached-machines path.
+been hidden for 90 seconds.
+
+On hosted Web and Mobile, foreground or visibility recovery restores retained demand and then the
+last warm set: the up to three most recently used environments, never the catalog. The warm set
+comes back as preemptible leases that last 10 minutes unless use renews them, only after the
+environment in view has connected, and staggered after it. Warm leases take only free connections:
+they never displace a mounted view or other demand and never close a connection to make room.
+Backgrounding drops them (on hosted Web also a page freeze or going offline), and the next
+foreground restores them. They get one connection attempt and do not count as demanded: a warm
+environment whose connection drops, is refused or is rate limited is released, and is not restored
+again for a few minutes unless the user opens it or its directory entry changes, so the Hub-restart
+reconnect burst is unchanged. A warm environment waiting for a free connection is not shown as
+reconnecting or queued. Every restore stays within the limit of three connections and is staggered;
+there is no reconnect-all-cached-machines path.
+
+Hosted Web restores a warm set only in a visible tab, so the tabs of one browser do not each wake
+the same machines. At boot, once access is revalidated, a remembered browser restores the machines
+it cached the same way, newest first, and returning to the home screen re-warms the recently used
+machines. Mobile keeps the recently used environments in memory only, so a new process starts with
+none, and it re-warms only on returning to the foreground.
 
 On Desktop, switching to another app or window does not background the client, so warm connections
 survive it. Minimizing or hiding the window, or locking the screen, backgrounds it after a

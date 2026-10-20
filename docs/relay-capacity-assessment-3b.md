@@ -157,10 +157,26 @@ environment each:
 
 At the bound of 3, background release plus leases turn the eight-client shared-NAT reconnect case
 from an over-capacity 24-upgrade burst into an 8-upgrade burst. If there is no retained mounted
-scope after backgrounding, the retained contribution is zero. Foregrounding must reconnect only
-the retained set and stagger those attempts; reconnecting the LRU/catalog eagerly would erase the
-mitigation. While foregrounded, LRU recency may fill the remaining slots again as the user opens
-work, but it does so on demand rather than as one synchronized wake-up.
+scope after backgrounding, the retained contribution is zero. Foregrounding reconnects the retained
+set and at most the last warm set (no more than 3 connections per client in total, never the
+catalog), staggered after the foreground, as preemptible demand that yields first; eagerly
+reacquiring the catalog, or every environment a client has used, would erase the mitigation. While
+foregrounded, LRU recency may fill the remaining slots again as the user opens work, but it does so
+on demand rather than as one synchronized wake-up.
+
+Restoring the warm set gives back part of that reduction: a foreground may again cost a client up
+to 3 upgrades, the "Warm foreground maximum" row above (24 tokens for 8 clients behind one address
+at the bound of 3, against a 20-token bucket). Ordering spreads those upgrades but does not keep
+them under the bucket. A client restores its warm set only after the environment in view has
+connected, and its warm wakes trail its foreground and retained connects by whole stagger steps.
+That lowers the peak, but a stagger step of 750 ms refills less than one token, so eight clients
+behind one address that wake together can still exceed the bucket. Each client issues its warm
+connects last, so when the clients wake together the excess falls on warm connects, and it is not
+retried: a warm connect that is refused, rate limited or interrupted is dropped, and its
+environment is not restored again for a few minutes unless the user routes to it or its directory
+entry changes. Boot restore runs only in a visible tab; hidden tabs restore nothing until they
+become visible, so the tabs of one browser do not each wake the same machines. Warm leases are
+never demanded, so they add nothing to the reconnect burst after a Hub restart.
 
 Wave 3b's mobile scopes do not own the web simulator preview, so leases do not reduce the existing
 web screenshot fallback and must not be counted as if they did. The general invariant is still
@@ -262,7 +278,9 @@ Wave 3b may be built and reviewed against this gate:
 - define the maximum as a named constant no greater than 3;
 - land and test scope leases before raising the maximum;
 - acquire only on a user opening work in an environment;
-- release non-retained connections on background and do not eagerly reacquire the catalog;
+- release non-retained connections on background; foreground reacquires the retained set and at
+  most the last warm set (no more than 3 connections per client in total, never the catalog),
+  staggered after the foreground, as preemptible demand that yields first;
 - stagger reconnects so one peer address does not issue more than 20 upgrades in a burst;
 - assert at most 3 active hosted connections under a five-node fixture;
 - assert acquiring or retaining a connection does not start unrelated high-volume work; and
@@ -314,14 +332,16 @@ node or account identifiers, logs or raw traces.
 The bound stays within the gate above: it is a named constant no greater than three, the demand
 state refuses a larger platform ceiling, the five-node test asserts that at most three hosted
 connections exist at any time, and only scopes (a mounted view, a queued send, home discovery, a
-short navigation-press intent) acquire an environment. The full-PNG fallback stays bounded by the
-one device preview a tab may sample at a time.
+short navigation-press intent) and the restored warm set (at most the three most recently used
+environments, as preemptible leases that yield to every scope) acquire an environment. The
+full-PNG fallback stays bounded by the one device preview a tab may sample at a time.
 
 Only demanded environments reconnect on their own. After a Hub session loss — a deploy, a restart,
 an interruption at a proxy — a warm environment that nothing demands is released and reconnects
 when it is demanded again, so the reconnect burst after a Hub restart is the number of demanded
-environments across tabs, not three per tab. This holds whether or not any Hub-side rate-limit
-change is deployed.
+environments across tabs, not three per tab. Warm leases are not demand: a restored warm
+environment whose relay drops is released the same way, so restoring the warm set leaves this
+burst unchanged. This holds whether or not any Hub-side rate-limit change is deployed.
 
 | Check                                        | Target                                                                                                 | Bound of one                                                                                    | Bound of three                                                                                                       |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |

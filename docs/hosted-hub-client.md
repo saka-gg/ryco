@@ -211,7 +211,9 @@ its thread detail.
 Ordinary tab hiding preserves live channels for a grace period: a tab hidden for 90 seconds plans as
 backgrounded and releases every environment nothing demands. Offline, freeze, and page history
 suspension invalidate readiness; restoration uses the authoritative hosted recovery path, and
-foreground or visibility recovery restores retained demand only.
+foreground or visibility recovery restores retained demand and then, as preemptible demand, the
+last warm set of up to three recently used environments (see
+[unified-workspace.md](unified-workspace.md)).
 
 Hosted connections are created only through the lifecycle owner's connect port, for one session
 record generation. The generic primary-connection path never builds one: in hosted mode it returns

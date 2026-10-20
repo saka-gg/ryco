@@ -1,9 +1,15 @@
 import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import type { WorkspaceConnectionScope } from "./connectionDemand.js";
+import {
+  UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS,
+  UNIFIED_WORKSPACE_WARM_RESTORE_COOLDOWN_MS,
+  type WorkspaceConnectionScope,
+} from "./connectionDemand.js";
 import {
   createConnectionDemandExecutor,
+  isWarmRestoreForegroundSettled,
+  warmRestoreWaitsForForeground,
   type ConnectionDemandConnectResult,
   type ConnectionDemandExecutor,
 } from "./connectionDemandExecutor.js";
@@ -51,6 +57,9 @@ function createHarness(
     /** Resolve every release after this many milliseconds; `null` resolves them by hand. */
     readonly releaseMs?: number | null;
     readonly beforePlan?: (executor: ConnectionDemandExecutor) => void;
+    readonly warmRestore?: (
+      recent: ReadonlyArray<EnvironmentId>,
+    ) => ReadonlyArray<EnvironmentId> | null;
   } = {},
 ) {
   const maxConnections = options.maxConnections ?? 3;
@@ -101,6 +110,7 @@ function createHarness(
         });
       },
       ...(options.beforePlan ? { beforePlan: () => options.beforePlan!(executor) } : {}),
+      ...(options.warmRestore ? { warmRestore: options.warmRestore } : {}),
       onChange: () => {
         changes += 1;
         const snapshot = executor.snapshot();
@@ -580,5 +590,534 @@ describe("connection demand executor", () => {
         },
       }),
     ).toThrow(RangeError);
+  });
+});
+
+/** A harness whose warm restore port answers whatever the test last set; `null` until then. */
+function warmHarness(
+  options: Omit<Parameters<typeof createHarness>[0] & object, "warmRestore"> = {},
+) {
+  let answer: ReadonlyArray<EnvironmentId> | null = null;
+  const asked: Array<ReadonlyArray<EnvironmentId>> = [];
+  const harness = createHarness({
+    ...options,
+    warmRestore: (recent) => {
+      asked.push(recent);
+      return answer;
+    },
+  });
+  return {
+    ...harness,
+    asked,
+    answerWith: (next: ReadonlyArray<EnvironmentId> | null) => {
+      answer = next;
+    },
+  };
+}
+
+describe("connection demand executor warm set", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("restores the warm set once the port answers, in its order and staggered", async () => {
+    const harness = warmHarness();
+    expect(harness.executor.snapshot().warmRestorePending).toBe(true);
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.asked).toEqual([[]]);
+    expect(harness.connects).toEqual([]);
+    expect(harness.executor.snapshot().warmRestorePending).toBe(true);
+
+    harness.answerWith([env[1]!, env[0]!, env[1]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.connects.map((call) => [call.environmentId, call.at])).toEqual([[env[1], 0]]);
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [env[1], env[0]],
+      warmRestorePending: false,
+      pendingWakes: [{ environmentId: env[0], dueAt: 750 }],
+    });
+    await vi.advanceTimersByTimeAsync(750);
+    expect(harness.connects.map((call) => [call.environmentId, call.at])).toEqual([
+      [env[1], 0],
+      [env[0], 750],
+    ]);
+
+    // It ran once: nothing more is owed.
+    const asked = harness.asked.length;
+    harness.executor.pollWarmRestore();
+    harness.executor.reconcile();
+    await flush();
+    expect(harness.asked).toHaveLength(asked);
+  });
+
+  it("owes the restore again after every background and restores only in the foreground", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!, env[1]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    for (const call of harness.connects) call.resolve("connected");
+    await flush();
+
+    harness.executor.setBackgrounded(true);
+    await flush();
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      warmRestorePending: true,
+      recentEnvironmentIds: [],
+      warmCooldownEnvironmentIds: [],
+    });
+    expect(harness.releases.map((call) => call.environmentId).toSorted()).toEqual([env[0], env[1]]);
+
+    const asked = harness.asked.length;
+    harness.executor.pollWarmRestore();
+    harness.executor.requestWarmRestore();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(harness.asked).toHaveLength(asked);
+    expect(harness.connects).toHaveLength(2);
+
+    harness.executor.setBackgrounded(false);
+    await flush();
+    expect(harness.connects.map((call) => call.environmentId)).toEqual([
+      env[0],
+      env[1],
+      env[0],
+      env[1],
+    ]);
+    expect(harness.executor.snapshot().warmRestorePending).toBe(false);
+  });
+
+  it("restores what was warm before the background, not what was opened while it waited", async () => {
+    let ready = false;
+    const harness = createHarness({
+      wakeStaggerMs: 0,
+      warmRestore: (recent) => (ready ? recent : null),
+    });
+    harness.executor.noteUsed(env[1]!);
+    harness.executor.noteUsed(env[0]!);
+    harness.executor.setBackgrounded(true);
+    harness.executor.setBackgrounded(false);
+    await flush();
+    harness.executor.noteUsed(env[2]!);
+
+    ready = true;
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [env[0], env[1]],
+      recentEnvironmentIds: [env[2], env[0], env[1]],
+    });
+  });
+
+  it("wakes the warm set only after the foreground", async () => {
+    const harness = warmHarness();
+    harness.answerWith([env[0]!, env[1]!]);
+    harness.executor.retain({ environmentId: env[2]!, scope: view(2) });
+    harness.executor.setForeground(env[2]!);
+    await flush();
+    expect(harness.connects.map((call) => [call.environmentId, call.at])).toEqual([[env[2], 0]]);
+    expect(harness.executor.snapshot().pendingWakes).toEqual([
+      { environmentId: env[0], dueAt: 750 },
+      { environmentId: env[1], dueAt: 1500 },
+    ]);
+  });
+
+  it("yields warm environments to a view or the foreground and keeps their leases queued out of sight", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!, env[1]!, env[2]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    for (const call of harness.connects) call.resolve("connected");
+    await flush();
+
+    harness.executor.retain({ environmentId: env[3]!, scope: view(3) });
+    await flush();
+    expect(harness.releases.map((call) => call.environmentId)).toEqual([env[2]]);
+    expect(harness.connectsFor(env[3]!)).toHaveLength(1);
+    harness.connectsFor(env[3]!)[0]!.resolve("connected");
+    await flush();
+    // The platform hears of the release it ran; the displaced lease stays.
+    harness.executor.reportConnected(env[2]!, false);
+    await flush();
+    expect(harness.executor.snapshot()).toMatchObject({
+      queuedEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [env[2]],
+      warmEnvironmentIds: [env[0], env[1], env[2]],
+      warmCooldownEnvironmentIds: [],
+    });
+
+    harness.executor.retain({ environmentId: env[4]!, scope: view(4) });
+    harness.executor.setForeground(env[4]!);
+    await flush();
+    expect(harness.releases.map((call) => call.environmentId)).toEqual([env[2], env[1]]);
+    expect(harness.connectsFor(env[4]!)).toHaveLength(1);
+    expect(harness.executor.snapshot().queuedEnvironmentIds).toEqual([]);
+    expect(harness.executor.snapshot().warmQueuedEnvironmentIds.toSorted()).toEqual([
+      env[1],
+      env[2],
+    ]);
+    expect(harness.maxSlots()).toBeLessThanOrEqual(3);
+    expect(harness.maxLive()).toBeLessThanOrEqual(3);
+  });
+
+  it("never lists a warm environment among the demand waiting for a slot", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    for (let index = 0; index < 3; index += 1) {
+      harness.executor.retain({ environmentId: env[index]!, scope: view(index) });
+    }
+    await flush();
+    for (const call of harness.connects) call.resolve("connected");
+    await flush();
+
+    harness.answerWith([env[3]!, env[4]!]);
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(3);
+    expect(harness.executor.snapshot()).toMatchObject({
+      queuedEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [env[3], env[4]],
+    });
+  });
+
+  it("gives a warm-only environment one attempt: interrupted, refused or failed, it is dropped", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0, releaseMs: null });
+    harness.answerWith([env[0]!, env[1]!, env[2]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    harness.connects[0]!.resolve("connected");
+    harness.connects[1]!.resolve("refused");
+    harness.connects[2]!.reject(new Error("relay unavailable"));
+    await flush();
+    harness.executor.reportInterrupted(env[0]!);
+    expect(harness.releases.map((call) => call.environmentId)).toEqual([env[0]]);
+    harness.releases[0]!.resolve();
+    await flush();
+
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      parkedEnvironmentIds: [],
+      queuedEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [],
+    });
+    expect(harness.executor.snapshot().warmCooldownEnvironmentIds.toSorted()).toEqual([
+      env[0],
+      env[1],
+      env[2],
+    ]);
+    harness.executor.reconcile();
+    harness.executor.requestWarmRestore();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(harness.connects).toHaveLength(3);
+  });
+
+  it("skips parked environments and never unparks them", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.executor.retain({ environmentId: env[0]!, scope: view(0) });
+    await flush();
+    harness.connects[0]!.resolve("refused");
+    await flush();
+
+    harness.answerWith([env[0]!, env[1]!]);
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [env[1]],
+      parkedEnvironmentIds: [env[0]],
+    });
+    expect(harness.connects.map((call) => call.environmentId)).toEqual([env[0], env[1]]);
+  });
+
+  it("notes use without creating a lease, renews a held warm lease silently, and reports order changes", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    const changes = harness.changes();
+    harness.executor.noteUsed(env[0]!);
+    expect(harness.changes()).toBe(changes + 1);
+    expect(harness.executor.snapshot()).toMatchObject({
+      recentEnvironmentIds: [env[0]],
+      warmEnvironmentIds: [],
+    });
+    expect(harness.executor.snapshot().demand.leases).toEqual([]);
+
+    harness.answerWith(harness.executor.snapshot().recentEnvironmentIds);
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.executor.snapshot().warmEnvironmentIds).toEqual([env[0]]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const before = harness.changes();
+    harness.executor.noteUsed(env[0]!);
+    expect(harness.changes()).toBe(before);
+    expect(harness.executor.snapshot().demand.leases).toMatchObject([
+      { environmentId: env[0], warm: true, expiresAt: 1_000 + UNIFIED_WORKSPACE_WARM_LEASE_TTL_MS },
+    ]);
+
+    harness.executor.noteUsed(env[1]!);
+    expect(harness.changes()).toBe(before + 1);
+    expect(harness.executor.snapshot()).toMatchObject({
+      recentEnvironmentIds: [env[1], env[0]],
+      warmEnvironmentIds: [env[0]],
+    });
+    expect(
+      harness.executor.snapshot().demand.leases.some((lease) => lease.environmentId === env[1]),
+    ).toBe(false);
+  });
+
+  it("drops the warm set, the recent list and the owed restore on reset", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.executor.noteUsed(env[0]!);
+    harness.answerWith([env[0]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    harness.connects[0]!.resolve("connected");
+    await flush();
+    harness.executor.setBackgrounded(true);
+    await flush();
+    harness.executor.setBackgrounded(false);
+    harness.executor.resetWarmSet();
+    await flush();
+
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      recentEnvironmentIds: [],
+      warmRestorePending: false,
+    });
+    const asked = harness.asked.length;
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.asked).toHaveLength(asked);
+    expect(harness.connects).toHaveLength(1);
+  });
+
+  it("never holds more than three slots, nor aborts a connect, while restoring a warm set among five environments", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0, releaseMs: 5 });
+    harness.executor.retain({ environmentId: env[3]!, scope: view(3) });
+    const fifth = harness.executor.retain({ environmentId: env[4]!, scope: view(4) });
+    harness.answerWith([env[0]!, env[1]!, env[2]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    expect(harness.connects.map((call) => call.environmentId).toSorted()).toEqual([
+      env[0],
+      env[3],
+      env[4],
+    ]);
+    // The fifth environment's connect is still in flight.
+    harness.connectsFor(env[0]!)[0]!.resolve("connected");
+    harness.connectsFor(env[3]!)[0]!.resolve("connected");
+    await flush();
+    expect(harness.executor.snapshot().warmQueuedEnvironmentIds).toEqual([env[1], env[2]]);
+
+    // Nothing retains it any more, yet the warm set waiting for a slot never
+    // aborts it.
+    harness.executor.releaseLease(fifth);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(harness.connectsFor(env[4]!)[0]!.signal.aborted).toBe(false);
+    expect(harness.releases).toEqual([]);
+    expect(harness.connectsFor(env[1]!)).toEqual([]);
+
+    // Its failure frees the slot the next warm environment takes.
+    harness.connectsFor(env[4]!)[0]!.reject(new Error("relay unavailable"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(harness.connectsFor(env[1]!)).toHaveLength(1);
+    expect(harness.connectsFor(env[2]!)).toEqual([]);
+    expect(harness.maxSlots()).toBeLessThanOrEqual(3);
+    expect(harness.maxLive()).toBeLessThanOrEqual(3);
+  });
+
+  it("changes nothing without a warm restore port", async () => {
+    const harness = createHarness({ wakeStaggerMs: 0 });
+    harness.executor.noteUsed(env[0]!);
+    harness.executor.requestWarmRestore();
+    harness.executor.pollWarmRestore();
+    harness.executor.setBackgrounded(true);
+    await flush();
+    harness.executor.setBackgrounded(false);
+    await flush();
+    expect(harness.connects).toEqual([]);
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [],
+      warmRestorePending: false,
+      demand: { leases: [] },
+    });
+  });
+
+  it("never retries a rejected connect for a restore trigger while the restore waits", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.executor.retain({ environmentId: env[0]!, scope: view(0) });
+    await flush();
+    harness.connects[0]!.reject(new Error("transport backoff"));
+    await flush();
+    for (let round = 0; round < 3; round += 1) {
+      harness.executor.pollWarmRestore();
+      harness.executor.requestWarmRestore();
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(harness.connectsFor(env[0]!)).toHaveLength(1);
+    expect(harness.executor.snapshot().warmRestorePending).toBe(true);
+
+    harness.executor.reconcile();
+    await flush();
+    expect(harness.connectsFor(env[0]!)).toHaveLength(2);
+    harness.connects[1]!.reject(new Error("transport backoff"));
+    await flush();
+    harness.executor.pollWarmRestore();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(harness.connectsFor(env[0]!)).toHaveLength(2);
+
+    harness.executor.unpark(env[0]!);
+    await flush();
+    expect(harness.connectsFor(env[0]!)).toHaveLength(3);
+  });
+
+  it("drops a warm-only environment that stops being live", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    harness.connects[0]!.resolve("connected");
+    await flush();
+
+    harness.executor.reportConnected(env[0]!, false);
+    harness.executor.reconcile();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(harness.connects).toHaveLength(1);
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      warmCooldownEnvironmentIds: [env[0]],
+      queuedEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [],
+    });
+  });
+
+  it("drops a suspended warm-only environment without a cooldown, so the next foreground restores it", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!, env[1]!]);
+    harness.executor.pollWarmRestore();
+    await flush();
+    for (const call of harness.connects) call.resolve("connected");
+    await flush();
+
+    // Every connection is suspended before the background is planned.
+    harness.executor.reportConnected(env[0]!, false, { suspended: true });
+    harness.executor.reportConnected(env[1]!, false, { suspended: true });
+    await flush();
+    expect(harness.connects).toHaveLength(2);
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      warmCooldownEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [],
+    });
+
+    harness.executor.setBackgrounded(true);
+    await flush();
+    harness.executor.setBackgrounded(false);
+    await flush();
+    expect(harness.connects.map((call) => call.environmentId)).toEqual([
+      env[0],
+      env[1],
+      env[0],
+      env[1],
+    ]);
+    expect(harness.executor.snapshot().warmEnvironmentIds).toEqual([env[0], env[1]]);
+  });
+
+  it("reconnects a warm environment a view or the foreground also holds", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!, env[1]!]);
+    harness.executor.retain({ environmentId: env[0]!, scope: view(0) });
+    harness.executor.setForeground(env[1]!);
+    await flush();
+    for (const call of harness.connects) call.resolve("connected");
+    await flush();
+
+    harness.executor.reportConnected(env[0]!, false);
+    harness.executor.reportConnected(env[1]!, false);
+    await flush();
+    expect(harness.connectsFor(env[0]!)).toHaveLength(2);
+    expect(harness.connectsFor(env[1]!)).toHaveLength(2);
+    expect(harness.executor.snapshot()).toMatchObject({
+      warmEnvironmentIds: [env[0], env[1]],
+      warmCooldownEnvironmentIds: [],
+    });
+  });
+
+  it("restores a refused warm environment only after its cooldown or a demand edge for it", async () => {
+    const harness = warmHarness({ wakeStaggerMs: 0 });
+    harness.answerWith([env[0]!]);
+    const refuseLatest = async () => {
+      harness.connects.at(-1)!.resolve("refused");
+      await flush();
+    };
+    harness.executor.pollWarmRestore();
+    await flush();
+    await refuseLatest();
+    expect(harness.executor.snapshot().warmCooldownEnvironmentIds).toEqual([env[0]]);
+
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(1);
+    expect(harness.executor.snapshot().warmEnvironmentIds).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(UNIFIED_WORKSPACE_WARM_RESTORE_COOLDOWN_MS);
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(2);
+    await refuseLatest();
+
+    harness.executor.unpark(env[0]!);
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(3);
+    await refuseLatest();
+
+    // A lease retained and released again is still a demand edge.
+    harness.executor.releaseLease(
+      harness.executor.retain({ environmentId: env[0]!, scope: view(0) }),
+    );
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(4);
+    await refuseLatest();
+
+    harness.executor.setForeground(env[0]!);
+    harness.executor.setForeground(null);
+    harness.executor.requestWarmRestore();
+    await flush();
+    expect(harness.connects).toHaveLength(5);
+  });
+});
+
+describe("warm restore and the environment in view", () => {
+  const session = (
+    sessionEstablished: boolean,
+    transportStatus: "connecting" | "online" | "terminal-failure",
+  ) => ({ sessionEstablished, transportStatus });
+
+  it("treats an established or terminally failed session as settled", () => {
+    expect(isWarmRestoreForegroundSettled(session(true, "online"))).toBe(true);
+    expect(isWarmRestoreForegroundSettled(session(false, "terminal-failure"))).toBe(true);
+    expect(isWarmRestoreForegroundSettled(session(false, "connecting"))).toBe(false);
+  });
+
+  it("waits only for a connectable, unparked environment whose session has not settled", () => {
+    const waits = (input: Partial<Parameters<typeof warmRestoreWaitsForForeground>[0]>) =>
+      warmRestoreWaitsForForeground({
+        connectable: true,
+        parked: false,
+        session: session(false, "connecting"),
+        ...input,
+      });
+    expect(waits({})).toBe(true);
+    expect(waits({ session: undefined })).toBe(true);
+    expect(waits({ session: session(true, "online") })).toBe(false);
+    expect(waits({ session: session(false, "terminal-failure") })).toBe(false);
+    expect(waits({ connectable: false })).toBe(false);
+    expect(waits({ parked: true })).toBe(false);
   });
 });
