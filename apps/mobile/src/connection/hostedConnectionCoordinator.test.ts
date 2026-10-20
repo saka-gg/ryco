@@ -142,6 +142,8 @@ function settleRelease(environmentId: EnvironmentId): void {
 
 let coordinator: MobileHostedConnectionCoordinator;
 let scopes: MobileHostedScopeLeaseStore;
+/** Environments the direct plane owns. */
+const directEnvironments = new Set<EnvironmentId>();
 
 const connectEnvironment = vi.fn((node: HostedHubNode, _generation: number) => {
   live.add(node.environmentId);
@@ -231,6 +233,7 @@ beforeEach(async () => {
   connects.length = 0;
   holdReleases = false;
   heldReleases.length = 0;
+  directEnvironments.clear();
   configureHostedRuntime(
     {
       endpoint: unusedService as EndpointService,
@@ -264,7 +267,7 @@ beforeEach(async () => {
     clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
     nodeForId: (nodeId) =>
       hostedHubStore.getState().nodes.find((node) => node.id === nodeId) ?? null,
-    isDirectEnvironment: () => false,
+    isDirectEnvironment: (environmentId) => directEnvironments.has(environmentId),
   });
   await hostedHubController.bootstrap();
   expect(hostedHubStore.getState()).toMatchObject({
@@ -877,6 +880,203 @@ describe("mobile hosted connection coordinator", () => {
 
     expect(sessions().list()).toEqual([]);
     expect(live.size).toBe(0);
+  });
+});
+
+describe("mobile hosted warm set", () => {
+  /** Select each node in turn and let its session establish, as using it does. */
+  async function use(...used: ReadonlyArray<HostedHubNode>): Promise<void> {
+    for (const node of used) {
+      vi.advanceTimersByTime(10);
+      await coordinator.acquireNode(node.id);
+      establish(node.environmentId);
+      await flush();
+    }
+  }
+
+  const connected = () => connects.map(({ environmentId }) => environmentId);
+
+  it("restores the last warm set after a background, the selected node first, without moving the selection", async () => {
+    await use(nodeA, nodeB, nodeC);
+    expect(coordinator.demand().recentEnvironmentIds).toEqual([
+      nodeC.environmentId,
+      nodeB.environmentId,
+      nodeA.environmentId,
+    ]);
+    const select = vi.spyOn(hostedHubController, "selectNode");
+    await background();
+    connects.length = 0;
+
+    await hostedHubController.resumeBrowser();
+    coordinator.reconnectRetainedAfterForeground();
+    await flush();
+    // The restore waits for the selected node's own attempt.
+    expect(connected()).toEqual([nodeC.environmentId]);
+    establish(nodeC.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(connected()).toEqual([nodeC.environmentId, nodeB.environmentId, nodeA.environmentId]);
+    expect(connects[2]!.at - connects[1]!.at).toBeGreaterThanOrEqual(MOBILE_HOSTED_WAKE_STAGGER_MS);
+    expect(select).not.toHaveBeenCalled();
+    expect(hostedHubStore.getState().selectedNode?.id).toBe(nodeC.id);
+    expect(peak).toBeLessThanOrEqual(MAX_MOBILE_HOSTED_CONNECTIONS);
+  });
+
+  it("restores nothing while access is not revalidated", async () => {
+    await use(nodeA, nodeB);
+    await background();
+    connects.length = 0;
+
+    // A foreground request that arrives before revalidation restores nothing.
+    coordinator.requestEnvironmentReconcile({ reason: "resume" });
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(connects).toEqual([]);
+    expect(coordinator.demand()).toMatchObject({
+      warmEnvironmentIds: [],
+      warmRestorePending: true,
+    });
+  });
+
+  it("skips released and direct environments", async () => {
+    await use(nodeA, nodeB, nodeC);
+    expect(await coordinator.releaseEnvironment(nodeA.environmentId)).toBe(true);
+    directEnvironments.add(nodeB.environmentId);
+    await background();
+    connects.length = 0;
+
+    await hostedHubController.resumeBrowser();
+    await flush();
+    establish(nodeC.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(connected()).toEqual([nodeC.environmentId]);
+    expect(coordinator.demand().warmEnvironmentIds).toEqual([nodeC.environmentId]);
+  });
+
+  it("skips an environment the directory lists offline", async () => {
+    await use(nodeA, nodeB);
+    await background();
+    connects.length = 0;
+
+    vi.mocked(hostedHubApi.listNodes).mockResolvedValueOnce(
+      directoryWith({ ...nodeA, presence: { online: false, lastHeartbeatAt: 1 } }),
+    );
+    await hostedHubController.resumeBrowser();
+    await flush();
+    establish(nodeB.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(connected()).toEqual([nodeB.environmentId]);
+  });
+
+  it("forgets the warm set when the account signs out", async () => {
+    await use(nodeA, nodeB);
+    coordinator.cancelPendingRecovery();
+    expect(coordinator.demand()).toMatchObject({
+      recentEnvironmentIds: [nodeB.environmentId, nodeA.environmentId],
+      warmRestorePending: true,
+    });
+
+    await hostedHubController.clearAccount("signed-out");
+    await flush();
+
+    expect(coordinator.demand()).toMatchObject({
+      recentEnvironmentIds: [],
+      warmEnvironmentIds: [],
+      warmRestorePending: false,
+    });
+  });
+
+  it("forgets the warm set when the session changes while signed in", async () => {
+    await use(nodeA, nodeB, nodeC);
+    await background();
+    await hostedHubController.resumeBrowser();
+    await flush();
+    establish(nodeC.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+    expect(coordinator.demand().warmEnvironmentIds).toHaveLength(3);
+    // Backgrounded again: the warm set is owed for the next foreground.
+    await background();
+    expect(coordinator.demand()).toMatchObject({
+      recentEnvironmentIds: [nodeC.environmentId, nodeB.environmentId, nodeA.environmentId],
+      warmRestorePending: true,
+    });
+    connects.length = 0;
+
+    // The same account comes back with another session: the revalidation and
+    // the resume it starts both see it.
+    const rotated: HostedHubSessionResponse = {
+      ...sessionResponse,
+      session: { ...sessionResponse.session, id: "sess_bbbbbbbbbbbbbbbbbbbbbb" },
+    };
+    vi.mocked(hostedHubApi.restoreSession)
+      .mockResolvedValueOnce(rotated)
+      .mockResolvedValueOnce(rotated);
+    await hostedHubController.revalidateSession();
+    await flush();
+    expect(hostedHubStore.getState()).toMatchObject({
+      accountStatus: "authenticated",
+      session: { id: rotated.session.id },
+    });
+    expect(coordinator.demand()).toMatchObject({
+      recentEnvironmentIds: [],
+      warmEnvironmentIds: [],
+      warmRestorePending: false,
+    });
+
+    coordinator.reconnectRetainedAfterForeground();
+    await flush();
+    establish(nodeC.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    // Only the selected node reconnects; the previous session's warm set stays away.
+    expect(connected()).toEqual([nodeC.environmentId]);
+    expect(coordinator.demand().warmEnvironmentIds).toEqual([]);
+  });
+
+  it("neither reconnects nor queues a restored warm node whose session fails or drops", async () => {
+    await use(nodeA, nodeB, nodeC);
+    await background();
+    await hostedHubController.resumeBrowser();
+    await flush();
+    establish(nodeC.environmentId);
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+    expect(coordinator.demand().warmEnvironmentIds).toEqual([
+      nodeC.environmentId,
+      nodeB.environmentId,
+      nodeA.environmentId,
+    ]);
+    establish(nodeB.environmentId, nodeA.environmentId);
+    connectEnvironment.mockClear();
+
+    sessions().failure(nodeB.environmentId, generationOf(nodeB.environmentId), {
+      kind: "incompatible",
+      retryable: false,
+    });
+    sessions().connectionClosed(nodeA.environmentId, generationOf(nodeA.environmentId));
+    await flush();
+    await vi.advanceTimersByTimeAsync(3 * MOBILE_HOSTED_WAKE_STAGGER_MS);
+
+    expect(connectEnvironment).not.toHaveBeenCalled();
+    expect(coordinator.demand()).toMatchObject({
+      queuedEnvironmentIds: [],
+      warmQueuedEnvironmentIds: [],
+      warmEnvironmentIds: [nodeC.environmentId],
+    });
+    expect(coordinator.demand().warmCooldownEnvironmentIds.toSorted()).toEqual([
+      nodeA.environmentId,
+      nodeB.environmentId,
+    ]);
+    expect(releaseEnvironment.mock.calls.map(([environmentId]) => environmentId)).toEqual(
+      expect.arrayContaining([nodeA.environmentId, nodeB.environmentId]),
+    );
   });
 });
 

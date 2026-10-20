@@ -19,9 +19,12 @@ import {
   createWorkspaceConnectionDemandState,
   hostedNodeCatalogInput,
   hostedSessionConnectionState,
+  isWarmRestoreForegroundSettled,
   reconcileWorkspaceMachineCatalog,
+  warmRestoreWaitsForForeground,
   workspaceMetadataPayloadBytes,
   type ConnectionDemandConnectResult,
+  type ConnectionDemandDisconnectOptions,
   type ConnectionDemandExecutorSnapshot,
   type UnifiedWorkspaceIndex,
   type WorkspaceConnectionDemandState,
@@ -111,6 +114,14 @@ export interface HostedConnectionCoordinatorDeps {
    * environment's scopes never do.
    */
   readonly withholds?: (entry: RetainedHostedWebScope) => boolean;
+  /**
+   * The last warm set to restore now, most recent first, or `null` while the
+   * restore must wait; the shared executor's `warmRestore` port. Without it
+   * nothing is restored.
+   */
+  readonly warmRestore?: (
+    recent: ReadonlyArray<EnvironmentId>,
+  ) => ReadonlyArray<EnvironmentId> | null;
 }
 
 export interface HostedConnectionCoordinatorSnapshot {
@@ -124,14 +135,30 @@ export interface HostedConnectionCoordinator {
   /** The shared executor's own view, connects, releases and wakes included. */
   readonly executorSnapshot: () => ConnectionDemandExecutorSnapshot;
   readonly subscribe: (listener: () => void) => () => void;
-  readonly reportConnected: (environmentId: EnvironmentId, connected: boolean) => void;
+  readonly reportConnected: (
+    environmentId: EnvironmentId,
+    connected: boolean,
+    options?: ConnectionDemandDisconnectOptions,
+  ) => void;
   /** A live environment's relay dropped: one nothing demands is released instead of reconnecting. */
   readonly reportInterrupted: (environmentId: EnvironmentId) => void;
   readonly isDemanded: (environmentId: EnvironmentId) => boolean;
   readonly unpark: (environmentId: EnvironmentId) => void;
   /** The lifecycle owner asks for a re-plan (a resume, a retry, a directory change). */
   readonly handleReconcileRequest: (request: HostedEnvironmentReconcileRequest) => void;
-  /** Resolves once the resulting connects and releases have settled. */
+  /** The routed environment is in use: see the executor's `noteUsed`. */
+  readonly noteUsed: (environmentId: EnvironmentId) => void;
+  /** Owe a warm restore now, as on returning home. */
+  readonly requestWarmRestore: () => void;
+  /** A readiness edge the warm restore waits for: plans only while one is owed. */
+  readonly pollWarmRestore: () => void;
+  /** Forget the warm set and the recently used environments. */
+  readonly resetWarmSet: () => void;
+  /**
+   * Resolves once the resulting connects and releases have settled. Leaving
+   * the background also polls an owed warm restore, even when the workspace
+   * was not backgrounded.
+   */
   readonly setBackgrounded: (backgrounded: boolean) => Promise<void>;
   /** Resolves once the resulting connects and releases have settled. */
   readonly reconcile: () => Promise<void>;
@@ -149,7 +176,9 @@ export interface HostedConnectionCoordinator {
  * scopes — drafts, home discovery, a routed node without a thread, queued
  * sends, a press on a row — are background demand a routed environment may
  * displace, though never while their own environment is routed; views never
- * are. The routed environment is the executor's foreground.
+ * are. The routed environment is the executor's foreground. With a
+ * `warmRestore` port the executor also restores the last warm set, below all
+ * of that demand.
  */
 export function createHostedConnectionCoordinator(
   deps: HostedConnectionCoordinatorDeps,
@@ -231,6 +260,7 @@ export function createHostedConnectionCoordinator(
       connect: (environmentId, signal) => deps.connect(environmentId, signal),
       release: (environmentId) => deps.release(environmentId),
       beforePlan: syncLeases,
+      ...(deps.warmRestore ? { warmRestore: deps.warmRestore } : {}),
       onChange: () => {
         for (const listener of Array.from(listeners)) listener();
         const waiters = Array.from(changeWaiters);
@@ -250,13 +280,22 @@ export function createHostedConnectionCoordinator(
     snapshot() {
       const source = executor.snapshot();
       if (published?.source !== source) {
+        const current = published?.snapshot;
         published = {
           source,
-          snapshot: {
-            demand: source.demand,
-            queuedEnvironmentIds: source.queuedEnvironmentIds,
-            activeConnectionCount: source.activeConnectionCount,
-          },
+          // A change only the executor's own view shows (the recently used
+          // environments, warm environments waiting) publishes nothing.
+          snapshot:
+            current !== undefined &&
+            current.demand === source.demand &&
+            current.queuedEnvironmentIds === source.queuedEnvironmentIds &&
+            current.activeConnectionCount === source.activeConnectionCount
+              ? current
+              : {
+                  demand: source.demand,
+                  queuedEnvironmentIds: source.queuedEnvironmentIds,
+                  activeConnectionCount: source.activeConnectionCount,
+                },
         };
       }
       return published.snapshot;
@@ -266,8 +305,8 @@ export function createHostedConnectionCoordinator(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    reportConnected: (environmentId, connected) =>
-      executor.reportConnected(environmentId, connected),
+    reportConnected: (environmentId, connected, options) =>
+      executor.reportConnected(environmentId, connected, options),
     reportInterrupted: (environmentId) => executor.reportInterrupted(environmentId),
     isDemanded: (environmentId) => executor.isDemanded(environmentId),
     unpark: (environmentId) => executor.unpark(environmentId),
@@ -279,8 +318,15 @@ export function createHostedConnectionCoordinator(
       }
       executor.reconcile();
     },
+    noteUsed: (environmentId) => executor.noteUsed(environmentId),
+    requestWarmRestore: () => executor.requestWarmRestore(),
+    pollWarmRestore: () => executor.pollWarmRestore(),
+    resetWarmSet: () => executor.resetWarmSet(),
     setBackgrounded(backgrounded) {
       executor.setBackgrounded(backgrounded);
+      // Every visible recovery ends here, also for a tab that booted hidden
+      // and never planned as backgrounded.
+      if (!backgrounded) executor.pollWarmRestore();
       return settled();
     },
     reconcile() {
@@ -632,9 +678,15 @@ export function startHostedWorkspaceCoordinator(input?: {
   readonly startReadCache?: typeof startBrowserHostedThreadReadCache;
   /** Defaults to {@link MAX_HOSTED_WEB_CONNECTIONS}. */
   readonly maxConnections?: number;
+  /** Whether the tab is visible; only a visible tab restores its warm set. */
+  readonly isVisible?: () => boolean;
 }): () => void {
   const cache = input?.cache ?? getBrowserWorkspaceMetadataCache();
   const now = input?.now ?? Date.now;
+  const isVisible =
+    input?.isVisible ??
+    (() => typeof document === "undefined" || document.visibilityState === "visible");
+  const maxConnections = input?.maxConnections ?? MAX_HOSTED_WEB_CONNECTIONS;
   const schedule =
     input?.setTimeout ??
     ((callback: () => void, delayMs: number) => globalThis.setTimeout(callback, delayMs));
@@ -689,6 +741,30 @@ export function startHostedWorkspaceCoordinator(input?: {
     return index;
   };
   let accountKey: string | null = null;
+  /**
+   * When each machine this browser's own caches hold for the account was
+   * captured: its metadata listing and, in a remembered browser, the read
+   * cache. A restore with no recently used environment starts from them,
+   * newest first. The Hub's cached shells, read for every machine, never seed
+   * it.
+   */
+  const cachedMachineCapturedAt = new Map<EnvironmentId, number>();
+  const noteCachedMachine = (snapshot: WorkspaceMetadataSnapshot) => {
+    const known = cachedMachineCapturedAt.get(snapshot.environmentId);
+    if (known === undefined || known < snapshot.capturedAt) {
+      cachedMachineCapturedAt.set(snapshot.environmentId, snapshot.capturedAt);
+    }
+  };
+  /**
+   * The account keys whose metadata listing, and whose read cache load, those
+   * captures took in. A restore with none to start from waits for both. A read
+   * cache that never loads for the account (another tab reset it, or its vault
+   * would not open) leaves the boot restore owed: such a tab restores no
+   * cached machines, only those the user then uses, from the next background
+   * or return home on.
+   */
+  let snapshotsListedForAccountKey: string | null = null;
+  let readCacheAppliedForAccountKey: string | null = null;
   let activeAccountId: string | null = null;
   let activeAuthority: string | null = null;
   let authorityResetPending = false;
@@ -752,6 +828,53 @@ export function startHostedWorkspaceCoordinator(input?: {
     return acquisition === "refused" ? "refused" : "connected";
   };
 
+  /** The routed environment's attempt is still under way; a warm restore waits for it. */
+  const routedEnvironmentEstablishing = (): boolean => {
+    const routed = routedEnvironmentId();
+    if (routed === null) return false;
+    const node = hostedHubStore.getState().nodes.find((entry) => entry.environmentId === routed);
+    return warmRestoreWaitsForForeground({
+      connectable: node !== undefined && isHostedWebConnectableNode(node),
+      parked: coordinator.executorSnapshot().parkedEnvironmentIds.includes(routed),
+      session: sessions.read(routed),
+    });
+  };
+
+  // The last warm set to restore, once a visible tab has revalidated its access
+  // and directory, taken in this browser's cached machines and connected the
+  // routed environment: the recently used environments or, with none yet, the
+  // cached machines, newest first — at boot, those a remembered browser
+  // cached; never the catalog. A hidden tab restores nothing, so the tabs of a
+  // restored browser session do not each wake the same machines.
+  const warmRestore = (
+    recent: ReadonlyArray<EnvironmentId>,
+  ): ReadonlyArray<EnvironmentId> | null => {
+    if (disposed || !isVisible()) return null;
+    const state = hostedHubStore.getState();
+    const accountId = authenticatedAccountId(state);
+    if (accountId === null || accountId !== activeAccountId || authorityResetPending) return null;
+    if (state.directoryStatus !== "ready" || !hostedBrowserRevalidated(state.browserStatus)) {
+      return null;
+    }
+    if (accountKey === null || snapshotsListedForAccountKey !== accountKey) return null;
+    // Answering before the read cache's machines arrived would use up the
+    // restore with none of them.
+    if (recent.length === 0 && readCacheAppliedForAccountKey !== accountKey) return null;
+    if (routedEnvironmentEstablishing()) return null;
+    const connectable = new Set(
+      state.nodes.filter(isHostedWebConnectableNode).map((node) => node.environmentId),
+    );
+    const candidates =
+      recent.length > 0
+        ? recent
+        : Array.from(cachedMachineCapturedAt)
+            .toSorted(([, left], [, right]) => right - left)
+            .map(([environmentId]) => environmentId);
+    return candidates
+      .filter((environmentId) => connectable.has(environmentId))
+      .slice(0, maxConnections);
+  };
+
   const coordinator = createHostedConnectionCoordinator({
     scopes: hostedWebConnectionScopes,
     foregroundEnvironmentId: routedEnvironmentId,
@@ -760,7 +883,7 @@ export function startHostedWorkspaceCoordinator(input?: {
     clearTimeout: cancel,
     setInterval: repeat,
     clearInterval: cancelRepeat,
-    maxConnections: input?.maxConnections ?? MAX_HOSTED_WEB_CONNECTIONS,
+    maxConnections,
     connect,
     release: (environmentId) => hostedHubController.releaseEnvironment(environmentId),
     // Demand that yields holds no lease while its reason lasts: background
@@ -769,8 +892,23 @@ export function startHostedWorkspaceCoordinator(input?: {
     withholds: (entry) =>
       !keepsBackoff(entry.environmentId) &&
       (rateLimitedScopeKeys.has(entry.key) || awaitsPresence(entry.environmentId)),
+    warmRestore,
   });
   activeCoordinator = coordinator;
+
+  /** The routed environment's session is live and established: the user is using it. */
+  const noteRoutedUse = (records = sessions.getSnapshot().records) => {
+    const routed = routedEnvironmentId();
+    const record = routed === null ? undefined : records.get(routed);
+    if (
+      routed !== null &&
+      record !== undefined &&
+      isHostedEnvironmentSessionLive(record) &&
+      record.sessionEstablished
+    ) {
+      coordinator.noteUsed(routed);
+    }
+  };
 
   /** Environments holding a slot: connected, or connecting. */
   const liveEnvironmentIds = () => {
@@ -827,9 +965,14 @@ export function startHostedWorkspaceCoordinator(input?: {
       }
     }
     for (const environmentId of tracked) {
+      const record = records.get(environmentId);
+      // A freeze, pagehide or offline event suspends every record before the
+      // workspace plans as backgrounded; the warm set then waits for the
+      // foreground's restore instead of a cooldown.
       coordinator.reportConnected(
         environmentId,
-        isHostedEnvironmentSessionLive(records.get(environmentId)),
+        isHostedEnvironmentSessionLive(record),
+        record?.suspended === true ? { suspended: true } : undefined,
       );
     }
     for (const [environmentId, record] of records) {
@@ -854,6 +997,20 @@ export function startHostedWorkspaceCoordinator(input?: {
       }
     }
     yieldOfflineEnvironments();
+    // A warm restore waits for the routed environment's attempt to settle.
+    const routed = routedEnvironmentId();
+    const routedRecord = routed === null ? undefined : records.get(routed);
+    const routedBefore = routed === null ? undefined : previous?.get(routed);
+    if (
+      routedRecord !== undefined &&
+      isWarmRestoreForegroundSettled(routedRecord) &&
+      (routedBefore === undefined ||
+        !isWarmRestoreForegroundSettled(routedBefore) ||
+        routedBefore.generation !== routedRecord.generation)
+    ) {
+      coordinator.pollWarmRestore();
+    }
+    noteRoutedUse(records);
   };
   const observeRecords = () => {
     if (disposed) return;
@@ -1179,12 +1336,17 @@ export function startHostedWorkspaceCoordinator(input?: {
       // Fence the visible projection synchronously, before storage or another
       // session's cache response can complete.
       accountKey = null;
+      snapshotsListedForAccountKey = null;
+      readCacheAppliedForAccountKey = null;
+      cachedMachineCapturedAt.clear();
       authorityResetPending = true;
       const resetSequence = ++authorityResetSequence;
       releaseDiscovery();
       failedDiscoveryEnvironments.clear();
       clearSnapshots();
       liveSnapshotSources.clear();
+      // What the previous account, session or Space used is not this one's.
+      coordinator.resetWarmSet();
       // Mounted route leases express intent, not authority. Preserve them
       // across same-account credential/Space changes so fresh admission can
       // reconnect unchanged routes; an account switch discards that intent.
@@ -1209,14 +1371,28 @@ export function startHostedWorkspaceCoordinator(input?: {
     if (authorityResetPending) return;
     if (!accountId) {
       accountKey = null;
+      snapshotsListedForAccountKey = null;
+      readCacheAppliedForAccountKey = null;
+      cachedMachineCapturedAt.clear();
       releaseDiscovery();
       publish(NO_MACHINES);
       return;
     }
     const preview = readHostedReadCache();
     if (preview.accountId === accountId) {
-      for (const cached of preview.snapshots)
+      for (const cached of preview.snapshots) {
+        noteCachedMachine(cached);
         if (!snapshots.has(cached.environmentId)) setSnapshot(cached.environmentId, cached);
+      }
+    }
+    // A remembered browser's machines arrive with the read cache's load for
+    // this account; without the read cache none are coming.
+    if (
+      (preview.accountId === accountId || !preview.enabled) &&
+      readCacheAppliedForAccountKey !== nextAccountKey
+    ) {
+      readCacheAppliedForAccountKey = nextAccountKey;
+      coordinator.pollWarmRestore();
     }
     if (nextAccountKey !== accountKey && state.directoryStatus === "ready") {
       const cached = await cache.list({ hubOrigin, accountId });
@@ -1227,12 +1403,11 @@ export function startHostedWorkspaceCoordinator(input?: {
           .filter((node) => node.revokedAt === null && !hostedNodeRequiresNativeClient(node))
           .map((node) => node.environmentId),
       );
+      // Every listed machine is taken in before anything is purged, so a warm
+      // restore never reads the listing half applied.
       for (const record of cached) {
-        if (disposed || generation !== syncGeneration || authorityResetPending) return;
-        if (!eligibleEnvironmentIds.has(record.namespace.environmentId)) {
-          await cache.purgeEnvironment(record.namespace).catch(() => undefined);
-          continue;
-        }
+        if (!eligibleEnvironmentIds.has(record.namespace.environmentId)) continue;
+        noteCachedMachine(record.snapshot);
         const current = snapshots.get(record.namespace.environmentId);
         if (!current || current.capturedAt <= record.snapshot.capturedAt)
           setSnapshot(record.namespace.environmentId, record.snapshot);
@@ -1242,6 +1417,13 @@ export function startHostedWorkspaceCoordinator(input?: {
             workspaceMetadataToCachedShellSnapshot(record.snapshot),
             record.namespace.environmentId,
           );
+      }
+      snapshotsListedForAccountKey = nextAccountKey;
+      coordinator.pollWarmRestore();
+      for (const record of cached) {
+        if (disposed || generation !== syncGeneration || authorityResetPending) return;
+        if (eligibleEnvironmentIds.has(record.namespace.environmentId)) continue;
+        await cache.purgeEnvironment(record.namespace).catch(() => undefined);
       }
     }
 
@@ -1421,8 +1603,28 @@ export function startHostedWorkspaceCoordinator(input?: {
     }
   };
 
+  // The readiness edges a waiting warm restore polls on: the browser revalidated
+  // its access, the directory became current.
+  let warmRestoreReadiness = {
+    revalidated: hostedBrowserRevalidated(hostedHubStore.getState().browserStatus),
+    directoryReady: hostedHubStore.getState().directoryStatus === "ready",
+  };
+  const observeWarmRestoreReadiness = () => {
+    const state = hostedHubStore.getState();
+    const next = {
+      revalidated: hostedBrowserRevalidated(state.browserStatus),
+      directoryReady: state.directoryStatus === "ready",
+    };
+    const edge =
+      (next.revalidated && !warmRestoreReadiness.revalidated) ||
+      (next.directoryReady && !warmRestoreReadiness.directoryReady);
+    warmRestoreReadiness = next;
+    if (edge) coordinator.pollWarmRestore();
+  };
+
   const unsubscribeHub = hostedHubStore.subscribe(() => {
     observeDemand();
+    observeWarmRestoreReadiness();
     revokeStaleMutationLeases();
     // A new account, session or Space fences the visible projection in the
     // same patch; every other change coalesces.
@@ -1434,11 +1636,19 @@ export function startHostedWorkspaceCoordinator(input?: {
     observeDemand();
   });
   const unsubscribeReadCache = subscribeHostedReadCache(scheduleSynchronize);
+  const isHomeRoute = (route: ReturnType<typeof getRoutedHostedNode>) =>
+    route.nodeId === null && route.logicalPathname === "/" && !route.malformed;
+  let routedHome = isHomeRoute(getRoutedHostedNode());
   const unsubscribeRoute = subscribeRoutedHostedNode(() => {
     forgetRateLimitYields();
     scheduleHomeDiscovery();
     void coordinator.reconcile();
     yieldOfflineEnvironments();
+    noteRoutedUse();
+    // Returning home re-warms the recently used environments.
+    const home = isHomeRoute(getRoutedHostedNode());
+    if (home && !routedHome) coordinator.requestWarmRestore();
+    routedHome = home;
   });
   const unsubscribeSessions = sessions.subscribe(() => {
     observeRecords();

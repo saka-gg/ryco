@@ -17,7 +17,9 @@ import {
 } from "@ryco/client-runtime/authorization";
 import {
   createConnectionDemandExecutor,
+  isWarmRestoreForegroundSettled,
   UNIFIED_WORKSPACE_MAX_CONNECTIONS,
+  warmRestoreWaitsForForeground,
   type ConnectionDemandConnectResult,
   type ConnectionDemandExecutorSnapshot,
   type ConnectionDemandLeaseInput,
@@ -231,6 +233,22 @@ function accessRevalidated(state: HostedHubState): boolean {
   return state.accountStatus === "authenticated" && hostedBrowserRevalidated(state.browserStatus);
 }
 
+/**
+ * The account, session and Space whose use the warm set records, or `null`
+ * signed out. A check of access in progress keeps the current one.
+ */
+function warmSetAuthority(state: HostedHubState, current: string | null): string | null {
+  if (state.accountStatus === "authenticating" || state.accountStatus === "unavailable") {
+    return current;
+  }
+  if (state.accountStatus !== "authenticated" || state.account === null) return null;
+  return JSON.stringify([
+    state.account.id,
+    state.session?.id ?? null,
+    state.session?.activeSpaceId ?? null,
+  ]);
+}
+
 /** What decides whether connecting an environment can be planned again. */
 function connectabilityKey(state: HostedHubState): ReadonlyArray<unknown> {
   return [
@@ -307,7 +325,10 @@ function hostedNodeForEnvironment(environmentId: EnvironmentId): HostedHubNode |
  * the registry, so suspended sessions are planned again, and a failed one keeps
  * its slot while its channel may still be open. An environment nobody demands
  * whose connection is down or failed is released instead of reconnecting by
- * itself — also when its demand ends only after the drop.
+ * itself — also when its demand ends only after the drop. After the
+ * background the executor restores the last warm set, the recently selected
+ * environments, as preemptible demand once access is revalidated and the
+ * selected one has connected; it never moves the selection.
  */
 export function createMobileHostedConnectionCoordinator(
   deps: MobileHostedConnectionCoordinatorDeps,
@@ -348,11 +369,7 @@ export function createMobileHostedConnectionCoordinator(
     }
     // The selected node is the route the user is looking at: a mounted view
     // like any other, and the environment the executor connects first.
-    const selected = hostedHubStore.getState().selectedNode;
-    const foreground =
-      selected === null || deps.isDirectEnvironment(selected.environmentId)
-        ? null
-        : selected.environmentId;
+    const foreground = selectedEnvironmentId(hostedHubStore.getState());
     if (foreground !== null) {
       desired.set(JSON.stringify([foreground, "selected"]), {
         environmentId: foreground,
@@ -404,6 +421,49 @@ export function createMobileHostedConnectionCoordinator(
     return attempt;
   };
 
+  /** The non-direct environment the selection shows, if any. */
+  const selectedEnvironmentId = (state: HostedHubState): EnvironmentId | null => {
+    const selected = state.selectedNode;
+    return selected === null || deps.isDirectEnvironment(selected.environmentId)
+      ? null
+      : selected.environmentId;
+  };
+
+  /**
+   * The selected environment's attempt is still under way (its node is listed
+   * and online); a warm restore waits for it.
+   */
+  const selectedEnvironmentEstablishing = (state: HostedHubState): boolean => {
+    const environmentId = selectedEnvironmentId(state);
+    if (environmentId === null) return false;
+    return warmRestoreWaitsForForeground({
+      connectable: hostedNodeForEnvironment(environmentId)?.presence.online === true,
+      parked: executor.snapshot().parkedEnvironmentIds.includes(environmentId),
+      session: sessions.read(environmentId),
+    });
+  };
+
+  // The last warm set to restore, once access is revalidated and the selected
+  // environment has connected: the recently used environments the directory
+  // lists online, never a released, direct or offline one. Nothing is
+  // persisted, so a new process starts with none.
+  const warmRestore = (
+    recent: ReadonlyArray<EnvironmentId>,
+  ): ReadonlyArray<EnvironmentId> | null => {
+    if (disposed) return null;
+    const state = hostedHubStore.getState();
+    if (!accessRevalidated(state) || state.directoryStatus !== "ready") return null;
+    if (selectedEnvironmentEstablishing(state)) return null;
+    return recent
+      .filter(
+        (environmentId) =>
+          !held.has(environmentId) &&
+          !deps.isDirectEnvironment(environmentId) &&
+          hostedNodeForEnvironment(environmentId)?.presence.online === true,
+      )
+      .slice(0, MAX_MOBILE_HOSTED_CONNECTIONS);
+  };
+
   const executor = createConnectionDemandExecutor({
     maxConnections: MAX_MOBILE_HOSTED_CONNECTIONS,
     wakeStaggerMs: MOBILE_HOSTED_WAKE_STAGGER_MS,
@@ -420,6 +480,7 @@ export function createMobileHostedConnectionCoordinator(
             hostedHubController.releaseEnvironment(environmentId),
         ),
       beforePlan: syncLeases,
+      warmRestore,
     },
   });
 
@@ -459,6 +520,9 @@ export function createMobileHostedConnectionCoordinator(
     if (live !== (wasLive ?? false)) executor.reportConnected(environmentId, live);
   };
 
+  /** The selected session last seen settled, by environment and generation. */
+  let settledSelection: string | null = null;
+
   const syncRecords = () => {
     recordSyncScheduled = false;
     if (disposed) return;
@@ -467,6 +531,24 @@ export function createMobileHostedConnectionCoordinator(
       // A release this coordinator started keeps its slot until it resolved.
       if (!explicitReleases.has(environmentId)) syncRecord(environmentId);
     }
+    // The selected environment is in use once established, and its attempt
+    // settling is what a waiting warm restore waits for.
+    const selected = selectedEnvironmentId(hostedHubStore.getState());
+    const record = selected === null ? undefined : sessions.read(selected);
+    if (
+      selected !== null &&
+      record !== undefined &&
+      isHostedEnvironmentSessionLive(record) &&
+      record.sessionEstablished
+    ) {
+      executor.noteUsed(selected);
+    }
+    const settled =
+      record !== undefined && isWarmRestoreForegroundSettled(record)
+        ? JSON.stringify([record.environmentId, record.generation])
+        : null;
+    if (settled !== null && settled !== settledSelection) executor.pollWarmRestore();
+    settledSelection = settled;
   };
 
   // Registry callbacks run inside the controller's own updates; the executor
@@ -537,16 +619,30 @@ export function createMobileHostedConnectionCoordinator(
 
   let lastConnectability = connectabilityKey(hostedHubStore.getState());
   let wasRevalidated = accessRevalidated(hostedHubStore.getState());
+  let wasDirectoryReady = hostedHubStore.getState().directoryStatus === "ready";
+  let warmAuthority = warmSetAuthority(hostedHubStore.getState(), null);
   const unsubscribeHosted = hostedHubStore.subscribe(() => {
     const state = hostedHubStore.getState();
+    // What one account, session or Space used is not another's.
+    const authority = warmSetAuthority(state, warmAuthority);
+    if (authority !== warmAuthority) {
+      if (warmAuthority !== null) executor.resetWarmSet();
+      warmAuthority = authority;
+    }
     const next = connectabilityKey(state);
     if (next.every((value, index) => Object.is(value, lastConnectability[index]))) return;
     lastConnectability = next;
     // Access is revalidated only in the foreground — at launch, sign-in or a
     // resume — so nothing held back while the app was away is owed any more.
     const revalidated = accessRevalidated(state);
-    if (revalidated && !wasRevalidated) executor.setBackgrounded(false);
+    if (revalidated && !wasRevalidated) {
+      executor.setBackgrounded(false);
+      executor.pollWarmRestore();
+    }
     wasRevalidated = revalidated;
+    const directoryReady = state.directoryStatus === "ready";
+    if (directoryReady && !wasDirectoryReady) executor.pollWarmRestore();
+    wasDirectoryReady = directoryReady;
     // An environment the directory did not list may be listed now.
     for (const environmentId of Array.from(unlisted)) {
       if (!hostedNodeForEnvironment(environmentId)) continue;

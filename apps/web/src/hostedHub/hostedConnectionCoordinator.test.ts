@@ -18,7 +18,9 @@ import {
   type HostedHubNode,
 } from "@ryco/client-runtime/authorization";
 
+import { createFakeHistoryWindow } from "../../test/fakeHistoryWindow";
 import { useMessageQueueStore, type WebQueuedMessage } from "../messageQueueStore";
+import { createInMemoryWorkspaceMetadataCache } from "../persistence/workspaceMetadataCache";
 import { useStore } from "../store";
 import { workspaceMetadataToCachedShellSnapshot } from "../workspaceMetadataProjection";
 import {
@@ -40,7 +42,36 @@ import {
   retainHostedIntentScope,
   startQueuedSendScopeRetention,
 } from "./hostedConnectionScopes";
+import {
+  enterHostedNodeRoute,
+  installHostedNodeHistory,
+  resetHostedNodeRoutesForTests,
+} from "./nodeRoutes";
 import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
+
+/**
+ * What the read cache publishes while a test stands in for a remembered
+ * browser's restore; the real module's state otherwise.
+ */
+const readCacheOverride = vi.hoisted(() => ({
+  state: null as ReturnType<typeof import("./readCache").readHostedReadCache> | null,
+  listeners: new Set<() => void>(),
+}));
+vi.mock("./readCache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./readCache")>();
+  return {
+    ...actual,
+    readHostedReadCache: () => readCacheOverride.state ?? actual.readHostedReadCache(),
+    subscribeHostedReadCache: (listener: () => void) => {
+      readCacheOverride.listeners.add(listener);
+      const unsubscribe = actual.subscribeHostedReadCache(listener);
+      return () => {
+        readCacheOverride.listeners.delete(listener);
+        unsubscribe();
+      };
+    },
+  };
+});
 
 const environment = (index: number) => EnvironmentId.make(`env_${String(index).padStart(22, "0")}`);
 const thread = (index: number) => ThreadId.make(`thread_${String(index)}`);
@@ -376,6 +407,7 @@ function startCoordinator(
 
 afterEach(() => {
   for (const stop of Array.from(runningCoordinators)) stop();
+  readCacheOverride.state = null;
 });
 
 /** Let the coordinator finish the connect attempt the retained scope queued. */
@@ -829,6 +861,7 @@ describe("hosted Web retained environment sessions", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    resetHostedNodeRoutesForTests();
     hostedWebConnectionScopes.reset();
     hostedHubController.resetForTests();
     resetHostedEnvironmentSessionsForTests();
@@ -836,7 +869,12 @@ describe("hosted Web retained environment sessions", () => {
     useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   });
 
-  function retainedHarness(input: { readonly foreground: () => EnvironmentId | null }) {
+  function retainedHarness(input: {
+    readonly foreground: () => EnvironmentId | null;
+    readonly warmRestore?: (
+      recent: ReadonlyArray<EnvironmentId>,
+    ) => ReadonlyArray<EnvironmentId> | null;
+  }) {
     const scopes = createHostedWebScopeStore();
     const startedAt = Date.now();
     const connects: Array<{ readonly environmentId: EnvironmentId; readonly at: number }> = [];
@@ -857,9 +895,107 @@ describe("hosted Web retained environment sessions", () => {
       },
       setInterval: () => 1,
       clearInterval: () => undefined,
+      ...(input.warmRestore ? { warmRestore: input.warmRestore } : {}),
     });
     return { coordinator, scopes, connects, live, mostLive: () => mostLive };
   }
+
+  it("restores the last warm set after a resume only once access is revalidated, after the routed environment", async () => {
+    vi.useFakeTimers();
+    let revalidated = true;
+    const routed = environment(1);
+    const test = retainedHarness({
+      foreground: () => routed,
+      warmRestore: (recent) => (revalidated ? recent : null),
+    });
+    for (const index of [3, 2, 1]) test.coordinator.noteUsed(environment(index));
+    test.coordinator.requestWarmRestore();
+    test.scopes.retain(routed, { type: "thread-detail", threadId: thread(1) });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(test.live).toEqual(new Set([1, 2, 3].map(environment)));
+
+    revalidated = false;
+    await test.coordinator.setBackgrounded(true);
+    expect(test.live).toEqual(new Set([routed]));
+    // The lifecycle owner suspended the routed session meanwhile.
+    test.coordinator.reportConnected(routed, false);
+    test.live.delete(routed);
+    test.connects.length = 0;
+
+    await test.coordinator.setBackgrounded(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(test.connects.map((entry) => entry.environmentId)).toEqual([routed]);
+    expect(test.coordinator.executorSnapshot().warmRestorePending).toBe(true);
+
+    revalidated = true;
+    test.coordinator.pollWarmRestore();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(test.connects.map((entry) => entry.environmentId)).toEqual([
+      routed,
+      environment(2),
+      environment(3),
+    ]);
+    expect(test.connects[2]!.at - test.connects[1]!.at).toBe(750);
+    expect(test.mostLive()).toBeLessThanOrEqual(3);
+    test.coordinator.dispose();
+  });
+
+  it("never holds more than three connections when a warm set is restored among five nodes", async () => {
+    vi.useFakeTimers();
+    const test = retainedHarness({
+      foreground: () => null,
+      warmRestore: () => [1, 2, 3].map(environment),
+    });
+    test.scopes.retain(environment(4), { type: "thread-detail", threadId: thread(4) });
+    test.scopes.retain(environment(5), { type: "thread-detail", threadId: thread(5) });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(test.mostLive()).toBe(3);
+    expect(test.live).toEqual(new Set([1, 4, 5].map(environment)));
+    // Warm environments waiting for a slot are nobody's queued demand.
+    expect(test.coordinator.snapshot().queuedEnvironmentIds).toEqual([]);
+    expect(test.coordinator.executorSnapshot().warmQueuedEnvironmentIds).toEqual([
+      environment(2),
+      environment(3),
+    ]);
+    test.coordinator.dispose();
+  });
+
+  it("releases a restored warm environment whose relay drops instead of reconnecting it", async () => {
+    vi.useFakeTimers();
+    const test = retainedHarness({ foreground: () => null, warmRestore: () => [environment(1)] });
+    test.coordinator.reconcile();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.live).toEqual(new Set([environment(1)]));
+    expect(test.coordinator.isDemanded(environment(1))).toBe(false);
+
+    test.coordinator.reportInterrupted(environment(1));
+    await vi.advanceTimersByTimeAsync(5_000);
+    test.coordinator.reconcile();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(test.live).toEqual(new Set());
+    expect(test.connects).toHaveLength(1);
+    expect(test.coordinator.executorSnapshot().warmCooldownEnvironmentIds).toEqual([
+      environment(1),
+    ]);
+    test.coordinator.dispose();
+  });
+
+  it("forgets the warm set and the recently used environments on reset", async () => {
+    vi.useFakeTimers();
+    const test = retainedHarness({ foreground: () => null, warmRestore: (recent) => recent });
+    test.coordinator.noteUsed(environment(1));
+    test.coordinator.requestWarmRestore();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.coordinator.executorSnapshot().warmEnvironmentIds).toEqual([environment(1)]);
+
+    test.coordinator.resetWarmSet();
+    expect(test.coordinator.executorSnapshot()).toMatchObject({
+      warmEnvironmentIds: [],
+      recentEnvironmentIds: [],
+      warmRestorePending: false,
+    });
+    test.coordinator.dispose();
+  });
 
   it("connects a routed environment at once while staggered wakes are still pending", async () => {
     vi.useFakeTimers();
@@ -911,6 +1047,7 @@ describe("hosted Web retained environment sessions", () => {
       /** Nodes whose records are live before the coordinator starts. */
       readonly warm?: ReadonlyArray<HostedHubNode>;
       readonly cache?: WorkspaceMetadataCache;
+      readonly isVisible?: () => boolean;
     },
   ) {
     signedInDirectory(nodes);
@@ -934,6 +1071,7 @@ describe("hosted Web retained environment sessions", () => {
       hubOrigin: "https://hub.example.test",
       setInterval: (callback) => ticks.push(callback),
       clearInterval: () => undefined,
+      ...(options?.isVisible ? { isVisible: options.isVisible } : {}),
     });
     return {
       sessions,
@@ -1261,6 +1399,169 @@ describe("hosted Web retained environment sessions", () => {
     expect(test.released).toEqual([other]);
     releaseSelected();
     releaseOther();
+    test.stop();
+  });
+
+  /** The account's persisted metadata for one environment, as a remembered browser keeps it. */
+  function persistedRecord(environmentId: EnvironmentId, capturedAt: number) {
+    const snapshot = {
+      schemaVersion: 1 as const,
+      environmentId,
+      capturedAt,
+      projects: [],
+      worktrees: [],
+      threads: [],
+    };
+    return {
+      namespace: { hubOrigin: "https://hub.example.test", accountId: "account-a", environmentId },
+      snapshot,
+      payloadBytes: workspaceMetadataPayloadBytes(snapshot),
+      updatedAt: 1,
+    };
+  }
+
+  const cachedMachines = (
+    ...entries: ReadonlyArray<readonly [index: number, capturedAt: number]>
+  ) => entries.map(([index, capturedAt]) => persistedRecord(environment(index), capturedAt));
+
+  /** Environments the published demand holds a warm lease for, in restore order. */
+  const publishedWarm = () =>
+    readHostedWorkspaceState()
+      .demand.demand.leases.filter((lease) => lease.warm === true)
+      .map((lease) => lease.environmentId);
+
+  it("restores the cached machines newest first at boot, once the routed machine is established", async () => {
+    const nodes = [1, 2, 3, 4].map((index) => retainedNode(index));
+    installHostedNodeHistory(createFakeHistoryWindow("/") as unknown as Window & typeof globalThis);
+    enterHostedNodeRoute(nodes[3]!.id);
+    const records = cachedMachines([1, 10], [2, 30], [3, 20]);
+    const test = startRetained(nodes, { cache: { ...emptyCache, list: async () => records } });
+    const releaseView = hostedWebConnectionScopes.retain(environment(4), {
+      type: "thread-detail",
+      threadId: thread(4),
+    });
+
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(4)]));
+    await settleCoordinator();
+    await settleCoordinator();
+    expect(test.acquired).toEqual([environment(4)]);
+
+    establishRecord(test.sessions, environment(4));
+    await vi.waitFor(
+      () => expect(test.acquired).toEqual([environment(4), environment(2), environment(3)]),
+      { timeout: 3_000 },
+    );
+    expect(publishedWarm()).toEqual([environment(2), environment(3), environment(1)]);
+    // The warm machine still waiting for a slot is not shown as queued.
+    expect(readHostedWorkspaceState().demand.queuedEnvironmentIds).toEqual([]);
+    expect(test.mostLive()).toBeLessThanOrEqual(3);
+    releaseView();
+    test.stop();
+  });
+
+  it("restores nothing at boot in a hidden tab until it becomes visible", async () => {
+    let visible = false;
+    const records = cachedMachines([1, 10], [2, 20]);
+    const test = startRetained([retainedNode(1), retainedNode(2)], {
+      cache: { ...emptyCache, list: async () => records },
+      isVisible: () => visible,
+    });
+    await settleCoordinator();
+    await settleCoordinator();
+    expect(test.acquired).toEqual([]);
+
+    visible = true;
+    await setHostedWorkspaceBackgrounded(false);
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(2), environment(1)]), {
+      timeout: 3_000,
+    });
+    test.stop();
+  });
+
+  it("waits for a deferred listing of the cached machines before restoring them", async () => {
+    let resolveListing!: (records: ReturnType<typeof cachedMachines>) => void;
+    const listing = new Promise<ReturnType<typeof cachedMachines>>((resolve) => {
+      resolveListing = resolve;
+    });
+    const test = startRetained(
+      [1, 2, 3].map((index) => retainedNode(index)),
+      {
+        cache: { ...emptyCache, list: () => listing },
+      },
+    );
+    await settleCoordinator();
+    // A readiness edge while the listing is pending does not use up the restore.
+    hostedHubStore.setState({ directoryStatus: "stale" });
+    hostedHubStore.setState({ directoryStatus: "ready" });
+    await settleCoordinator();
+    expect(test.acquired).toEqual([]);
+
+    resolveListing(cachedMachines([1, 10], [2, 30], [3, 20]));
+    await vi.waitFor(
+      () => expect(test.acquired).toEqual([environment(2), environment(3), environment(1)]),
+      { timeout: 4_000 },
+    );
+    test.stop();
+  });
+
+  it("restores the machines a remembered browser cached once its read cache has loaded", async () => {
+    const nodes = [1, 2, 3, 4].map((index) => retainedNode(index));
+    // A remembered browser whose read cache is still loading.
+    readCacheOverride.state = { enabled: true, accountId: null, nodes: [], snapshots: [] };
+    const test = startRetained(nodes, { cache: createInMemoryWorkspaceMetadataCache() });
+    await settleCoordinator();
+    await settleCoordinator();
+    expect(test.acquired).toEqual([]);
+
+    const cached = [
+      [1, 10],
+      [2, 30],
+      [3, 20],
+    ] as const;
+    readCacheOverride.state = {
+      enabled: true,
+      accountId: "account-a",
+      nodes: cached.map(([index]) => ({
+        nodeId: nodes[index - 1]!.id,
+        environmentId: environment(index),
+        label: nodes[index - 1]!.label,
+      })),
+      snapshots: cached.map(
+        ([index, capturedAt]) => persistedRecord(environment(index), capturedAt).snapshot,
+      ),
+    };
+    for (const listener of Array.from(readCacheOverride.listeners)) listener();
+    await vi.waitFor(
+      () => expect(test.acquired).toEqual([environment(2), environment(3), environment(1)]),
+      { timeout: 4_000 },
+    );
+    expect(publishedWarm()).toEqual([environment(2), environment(3), environment(1)]);
+    test.stop();
+  });
+
+  it("drops the restored warm set when the session changes", async () => {
+    const records = cachedMachines([1, 10]);
+    const test = startRetained([retainedNode(1)], {
+      cache: { ...emptyCache, list: async () => records },
+    });
+    await vi.waitFor(() => expect(publishedWarm()).toEqual([environment(1)]));
+
+    hostedHubStore.setState({
+      session: {
+        id: "session-b",
+        accountId: "account-a",
+        createdAt: 1,
+        expiresAt: 9_999_999_999_999,
+        lastSeenAt: 1,
+        revokedAt: null,
+        revocationReasonCode: null,
+      },
+    });
+    expect(publishedWarm()).toEqual([]);
+    await settleCoordinator();
+    await settleCoordinator();
+    expect(publishedWarm()).toEqual([]);
+    expect(test.acquired).toEqual([environment(1)]);
     test.stop();
   });
 });
