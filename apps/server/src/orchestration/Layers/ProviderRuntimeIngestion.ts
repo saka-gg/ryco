@@ -2831,10 +2831,14 @@ const make = Effect.gen(function* () {
               : activeTurnId;
         const status = (() => {
           switch (event.type) {
-            case "session.state.changed":
-              return event.payload.state === "ready" && nextActiveTurnId !== null
-                ? "running"
-                : orchestrationSessionStatusFromRuntimeState(event.payload.state);
+            case "session.state.changed": {
+              const reported = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              if (nextActiveTurnId !== null) return reported === "ready" ? "running" : reported;
+              // Only a turn makes a session run. A status report between turns (Claude
+              // reports a permission mode change as `running`) would otherwise leave an
+              // idle session running with nothing left to end it.
+              return reported === "running" ? (thread.session?.status ?? reported) : reported;
+            }
             case "turn.started":
               return "running";
             case "session.exited":

@@ -19,6 +19,8 @@ import {
   TurnId,
   WorktreeId,
 } from "@ryco/contracts";
+import { classifyThreadSettlement } from "@ryco/shared/threadSettlement";
+import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { assert, it } from "@effect/vitest";
 import {
   Deferred,
@@ -62,6 +64,7 @@ import { OrchestrationProjectionPipelineLive } from "./orchestration/Layers/Proj
 import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
 import { ORPHANED_TURN_TERMINAL_STATE } from "./orchestration/restartReconciliation.ts";
+import { threadShellSettlementInput } from "./orchestration/threadSettlementInput.ts";
 import * as ThreadBackgroundLiveness from "./orchestration/ThreadBackgroundLiveness.ts";
 import { ServerSettingsService } from "./serverSettings.ts";
 import { metricNames } from "./observability/Metrics.ts";
@@ -154,8 +157,10 @@ const orphanedSessionThread = (input: {
   readonly activeTurnId?: TurnId | null;
   readonly runningLatestTurnId?: TurnId;
   readonly sessionUpdatedAt?: string;
+  readonly threadUpdatedAt?: string;
 }) => ({
   id: ThreadId.make(input.id),
+  updatedAt: input.threadUpdatedAt ?? "2026-01-01T00:00:00.000Z",
   archivedAt: null,
   deletedAt: null,
   activities: [] as OrchestrationThreadActivity[],
@@ -326,6 +331,8 @@ it.effect("repairs orphaned provider sessions while preserving resumable binding
     id: "thread-startup-orphan",
     status: "running",
     activeTurnId: TurnId.make("turn-startup-orphan"),
+    // Output kept arriving after the session last changed.
+    threadUpdatedAt: "2026-01-01T00:07:00.000Z",
   });
   const starting = orphanedSessionThread({
     id: "thread-startup-starting",
@@ -447,17 +454,19 @@ it.effect("repairs orphaned provider sessions while preserving resumable binding
         for (const command of dispatches) {
           if (command.type === "thread.session.set") {
             assert.match(command.session.lastError ?? "", /did not survive a server restart/);
+            // A restart is not new activity: it never wakes a snoozed thread.
+            assert.strictEqual(command.wakesSnoozed, false);
           }
         }
         const orphanCommand = dispatches[0];
+        // The turn ends when work was last observed, not at boot.
         assert.deepStrictEqual(
           orphanCommand?.type === "thread.session.set" ? orphanCommand.turnOutcome : undefined,
           {
             turnId: TurnId.make("turn-startup-orphan"),
             state: "interrupted",
             reason: "startup-orphaned-session",
-            completedAt:
-              orphanCommand?.type === "thread.session.set" ? orphanCommand.createdAt : "",
+            completedAt: "2026-01-01T00:07:00.000Z",
           },
         );
         const startingCommand = dispatches[1];
@@ -569,7 +578,7 @@ it.effect("settles stale running turns behind released sessions at startup", () 
                 turnId: TurnId.make("turn-orphan"),
                 state: "interrupted",
                 reason: "startup-orphaned-session",
-                completedAt: sessionSets.at(-1)?.createdAt ?? "",
+                completedAt: "2026-01-01T00:00:00.000Z",
               },
             },
           ],
@@ -1457,6 +1466,130 @@ it.live(
           );
         }),
       );
+    }).pipe(Effect.provide(layer));
+  },
+  30_000,
+);
+
+it.live(
+  "treats a restart as no new activity: old work still settles and snoozed work stays snoozed",
+  () => {
+    const staleId = ThreadId.make("restart-stale");
+    const snoozedId = ThreadId.make("restart-snoozed");
+    const instanceId = ProviderInstanceId.make("codex");
+    const layer = restartStartupLayer({
+      continueThreadsAfterRestart: false,
+      bindings: new Map(),
+      commands: [],
+    });
+    const eightDays = 8 * 24 * 3_600;
+
+    return Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const at = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
+      // The process died mid-turn eight days ago and has been down since.
+      yield* seedRunningRestartThread({
+        threadId: staleId,
+        turnId: TurnId.make("restart-stale-turn"),
+        instanceId,
+        createProject: true,
+        at,
+        secondsAgo: eightDays,
+      });
+      // A finished thread whose idle session still read `running` when it was snoozed.
+      const snoozedTurnId = TurnId.make("restart-snoozed-turn");
+      yield* seedRunningRestartThread({
+        threadId: snoozedId,
+        turnId: snoozedTurnId,
+        instanceId,
+        createProject: false,
+        at,
+        secondsAgo: 120,
+      });
+      const idleSession = {
+        threadId: snoozedId,
+        providerName: "codex",
+        providerInstanceId: instanceId,
+        runtimeSessionId: RuntimeSessionId.make(`${snoozedId}-runtime`),
+        runtimeMode: "full-access" as const,
+        activeTurnId: null,
+        lastError: null,
+      };
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("restart-snoozed-turn-done"),
+        threadId: snoozedId,
+        session: { ...idleSession, status: "ready", updatedAt: at(100) },
+        turnOutcome: { turnId: snoozedTurnId, state: "completed", reason: "test" },
+        createdAt: at(100),
+      });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("restart-snoozed-status-ping"),
+        threadId: snoozedId,
+        session: { ...idleSession, status: "running", updatedAt: at(90) },
+        createdAt: at(90),
+      });
+      const snoozedUntil = at(-3_600);
+      yield* engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("restart-snooze"),
+        threadId: snoozedId,
+        snoozedUntil,
+      });
+
+      const boot = Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* makeServerRuntimeStartup;
+          yield* startup.awaitCommandReady;
+        }),
+      );
+      yield* boot;
+      // A second boot finds nothing left to reconcile or explain.
+      yield* boot;
+
+      const shellOf = (threadId: ThreadId) =>
+        snapshots.getThreadShellById(threadId).pipe(Effect.map(Option.getOrThrow));
+      const stale = yield* shellOf(staleId);
+      assert.strictEqual(stale.session?.status, "error");
+      assert.strictEqual(stale.latestTurn?.state, ORPHANED_TURN_TERMINAL_STATE);
+      assert.isBelow(
+        Date.parse(stale.latestTurn?.completedAt ?? ""),
+        Date.now() - 7 * 24 * 3_600_000,
+      );
+      const nowIso = new Date().toISOString();
+      assert.strictEqual(
+        classifyThreadSettlement({
+          ...threadShellSettlementInput(stale, nowIso),
+          autoSettleAfterDays: 7,
+        }),
+        "settled",
+      );
+
+      const snoozed = yield* shellOf(snoozedId);
+      assert.strictEqual(snoozed.session?.status, "error");
+      assert.strictEqual(snoozed.snoozedUntil, snoozedUntil);
+      assert.strictEqual(snoozed.settledOverride, "active");
+      // Clients derive the same: the release is not dated after the snooze.
+      assert.isTrue(isThreadSnoozed(snoozed, Date.now()));
+      const events = Array.from(yield* Stream.runCollect(engine.readEvents(0)));
+      assert.isFalse(events.some((event) => event.type === "thread.unsnoozed"));
+
+      // One explanation for the cut-off turn; the idle thread had no turn to cut off.
+      const notices = (threadId: ThreadId) =>
+        snapshots.getThreadDetailById(threadId).pipe(
+          Effect.map(Option.getOrThrow),
+          Effect.map((thread) =>
+            thread.activities
+              .filter((activity) => activity.kind === "restart.continuation-skipped")
+              .map((activity) => activity.summary),
+          ),
+        );
+      assert.deepStrictEqual(yield* notices(staleId), [
+        "Interrupted by a server restart. Send a message to continue.",
+      ]);
+      assert.deepStrictEqual(yield* notices(snoozedId), []);
     }).pipe(Effect.provide(layer));
   },
   30_000,

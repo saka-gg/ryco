@@ -1888,7 +1888,7 @@ it.effect("decodes thread.session-set with and without a released turn", () =>
   }),
 );
 
-it.effect("decodes a turn outcome hint only on the internal thread.session.set command", () =>
+it.effect("decodes the turn outcome hint and snooze flag only on the internal session-set", () =>
   Effect.gen(function* () {
     const session = {
       threadId: "thread-1",
@@ -1909,6 +1909,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
         reason: "provider-turn-completed",
         completedAt: "2026-01-02T00:00:00.000Z",
       },
+      wakesSnoozed: false,
       createdAt: "2026-01-02T00:00:00.000Z",
     });
     if (command.type !== "thread.session.set") {
@@ -1919,6 +1920,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
       reason: "provider-turn-completed",
       completedAt: "2026-01-02T00:00:00.000Z",
     });
+    assert.strictEqual(command.wakesSnoozed, false);
 
     const fromClient = yield* Effect.exit(
       decodeClientOrchestrationCommand({
@@ -1927,6 +1929,7 @@ it.effect("decodes a turn outcome hint only on the internal thread.session.set c
         threadId: "thread-1",
         session,
         turnOutcome: { state: "completed", reason: "forged" },
+        wakesSnoozed: false,
         createdAt: "2026-01-02T00:00:00.000Z",
       }),
     );

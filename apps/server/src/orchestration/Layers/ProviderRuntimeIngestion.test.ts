@@ -68,6 +68,7 @@ import {
   ProviderRuntimeIngestionService,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { HISTORY_RECOVERY_SETTLED_SPACING_MS } from "../historyRecoveryPolicy.ts";
+import { isOrphanedProviderSession } from "../restartReconciliation.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
@@ -1930,26 +1931,7 @@ describe("ProviderRuntimeIngestion", () => {
 
   it("applies provider session.state.changed transitions directly", async () => {
     const harness = await createHarness();
-    const waitingAt = new Date().toISOString();
-
-    harness.emit({
-      type: "session.state.changed",
-      eventId: asEventId("evt-session-state-waiting"),
-      provider: ProviderDriverKind.make("codex"),
-      threadId: asThreadId("thread-1"),
-      createdAt: waitingAt,
-      payload: {
-        state: "waiting",
-        reason: "awaiting approval",
-      },
-    });
-
-    let thread = await waitForThread(
-      harness.readModel,
-      (entry) => entry.session?.status === "running" && entry.session?.activeTurnId === null,
-    );
-    expect(thread.session?.status).toBe("running");
-    expect(thread.session?.lastError).toBeNull();
+    let thread: ProviderRuntimeTestThread;
 
     harness.emit({
       type: "session.state.changed",
@@ -2014,6 +1996,57 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("ready");
     expect(thread.session?.lastError).toBeNull();
+  });
+
+  it("runs a session only for a turn, never for a status report between turns", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-status-report");
+    // What the Claude adapter emits for a `system/status` frame: a permission mode change
+    // reads `running`, a compaction `waiting`, whether or not a turn is open.
+    const statusReport = (id: string, state: "running" | "waiting") =>
+      harness.emit({
+        type: "session.state.changed",
+        eventId: asEventId(id),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        payload: { state, reason: "status:active" },
+      });
+    const idleSession = async () => {
+      await harness.drain();
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+      return { status: thread?.session?.status, activeTurnId: thread?.session?.activeTurnId };
+    };
+
+    statusReport("evt-status-before-turn", "running");
+    statusReport("evt-compacting-before-turn", "waiting");
+    expect(await idleSession()).toEqual({ status: "ready", activeTurnId: null });
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-status-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: new Date().toISOString(),
+    });
+    statusReport("evt-compacting-in-turn", "waiting");
+    expect(await idleSession()).toEqual({ status: "running", activeTurnId: turnId });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-status-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: new Date().toISOString(),
+      payload: { state: "completed" },
+    });
+    statusReport("evt-status-after-turn", "running");
+    expect(await idleSession()).toEqual({ status: "ready", activeTurnId: null });
+    // An idle session left `running` would read as cut off at the next restart.
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1")!;
+    expect(isOrphanedProviderSession(thread, new Set())).toBe(false);
   });
 
   it("settles a stale projected turn when a recovered provider is already idle", async () => {

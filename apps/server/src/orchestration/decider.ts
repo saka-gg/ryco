@@ -2761,7 +2761,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(releasedTurn ? { releasedTurn } : {}),
         },
       };
-      if (command.session.status === "error") {
+      // A provider error wakes a snoozed thread; a release the server decided on its own
+      // (startup reconciliation, a handoff rollback) is not new activity and does not.
+      if (command.session.status === "error" && command.wakesSnoozed !== false) {
         const wake = activityUnsnoozedEvent({
           command,
           thread,

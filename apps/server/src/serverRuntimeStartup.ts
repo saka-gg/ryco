@@ -10,9 +10,9 @@ import {
   fallbackReleasedTurnState,
 } from "./orchestration/turnFinalization.ts";
 import {
-  ORPHANED_PROVIDER_SESSION_ERROR,
-  ORPHANED_TURN_TERMINAL_STATE,
   isOrphanedProviderSession,
+  lastObservedWorkAt,
+  orphanedSessionRelease,
 } from "./orchestration/restartReconciliation.ts";
 import {
   CommandId,
@@ -624,7 +624,7 @@ const settleStaleProjectedTurns = Effect.fn("settleStaleProjectedTurns")(functio
         turnId,
         state: fallbackReleasedTurnState(session),
         reason: TURN_FINALIZATION_REASON.startupStaleTurn,
-        completedAt: session.updatedAt,
+        completedAt: lastObservedWorkAt(thread, session),
       },
       createdAt: new Date().toISOString(),
     };
@@ -760,28 +760,12 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
       ),
     );
 
-    const reconciledAt = new Date().toISOString();
-    // One session-set releases the session and settles its turn atomically. Without
-    // an active turn id, the decider still settles a running latest turn.
-    const sessionCommand = {
-      type: "thread.session.set" as const,
+    const sessionCommand = orphanedSessionRelease({
+      thread,
+      session,
       commandId: CommandId.make(`server:startup-reconciliation:${crypto.randomUUID()}`),
-      threadId: thread.id,
-      session: {
-        ...session,
-        status: "error" as const,
-        activeTurnId: null,
-        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
-        updatedAt: reconciledAt,
-      },
-      turnOutcome: {
-        ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
-        state: ORPHANED_TURN_TERMINAL_STATE,
-        reason: TURN_FINALIZATION_REASON.startupOrphanedSession,
-        completedAt: reconciledAt,
-      },
-      createdAt: reconciledAt,
-    };
+      reconciledAt: new Date().toISOString(),
+    });
     yield* Effect.suspend(() => orchestrationEngine.dispatch(sessionCommand)).pipe(
       Effect.retry(Schedule.recurs(1)),
       Effect.catchCause((cause) =>

@@ -166,7 +166,8 @@ export type RestartClassification =
 /**
  * Capture-time decision, first match wins (spec §3.3). An IO input is `undefined` when it
  * could not be read: the thread is then never continued (`check-failed`), but the reasons
- * that need no IO still win.
+ * that need no IO still win. A turn that had already ended by a stop or a failure keeps
+ * that reason even with continuation off: the restart did not cut it off.
  */
 export function classifyRestartCandidate(input: {
   readonly thread: OrchestrationThread;
@@ -186,11 +187,11 @@ export function classifyRestartCandidate(input: {
   const checkFailed = () => skip(input.usageLimited ? "usage-limited" : "check-failed");
   const latestTurn = input.thread.latestTurn;
   const signals = input.signals;
-  if (!input.settingEnabled) return skip("disabled");
   if (signals?.interruptRequested === true || latestTurn?.state === "interrupted") {
     return skip("user-interrupted");
   }
   if (latestTurn?.state === "error") return skip("turn-failed");
+  if (!input.settingEnabled) return skip("disabled");
   if (isRestartContinuationMessageId(latestTurn?.userMessageId)) return skip("repeated-restart");
   if (derivePendingThreadRequests(input.thread.activities).length > 0) {
     return skip("pending-request");
@@ -380,6 +381,7 @@ export interface RestartNotice {
 }
 
 const SKIP_NOTICES: Partial<Record<RestartSkipReason, string>> = {
+  disabled: "Interrupted by a server restart. Send a message to continue.",
   "repeated-restart":
     "Not continued automatically again: the previous automatic continuation was also interrupted by a restart.",
   "pending-request":
@@ -399,8 +401,16 @@ const SKIP_NOTICES: Partial<Record<RestartSkipReason, string>> = {
     "Not continued automatically: continuing this large Claude conversation would re-send its full context. Send a message to continue.",
 };
 
-/** The visible notice for a skip, or null for user-caused and closed-thread outcomes. */
-export function restartSkipNotice(reason: RestartSkipReason): RestartNotice | null {
+/**
+ * The visible notice for a skip, or null for user-caused and closed-thread outcomes. With
+ * continuation off, only an interrupted turn is explained: a settled thread whose background
+ * work stopped already has the stopped-work note.
+ */
+export function restartSkipNotice(
+  reason: RestartSkipReason,
+  kind: RestartContinuationKind,
+): RestartNotice | null {
+  if (reason === "disabled" && kind === "background-only") return null;
   const summary = SKIP_NOTICES[reason];
   return summary === undefined ? null : { summary, tone: "info" };
 }

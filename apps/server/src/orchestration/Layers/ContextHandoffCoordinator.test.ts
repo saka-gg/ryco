@@ -378,6 +378,8 @@ function makeHarness(input?: {
   readonly getSession?: ProviderServiceShape["getSession"];
   readonly startFreshSessionFailure?: ProviderServiceError;
   readonly repositoryHooks?: RepositoryHooks;
+  /** Whether putting the source binding back succeeds (default true). */
+  readonly restoreSucceeds?: boolean;
 }) {
   const repository = makeRepository(input?.initialRecord, input?.repositoryHooks);
   const thread = input?.thread ?? makeThread();
@@ -437,7 +439,7 @@ function makeHarness(input?: {
   const restoreSessionBinding = vi.fn((_binding: ProviderRuntimeBinding) =>
     Effect.sync(() => {
       deliveryOrder.push("restore");
-      return true;
+      return input?.restoreSucceeds ?? true;
     }),
   );
   const stopSession = vi.fn((_input: { readonly threadId: ThreadId }) =>
@@ -761,6 +763,33 @@ describe("ContextHandoffCoordinator", () => {
           (command.activity.payload as { status?: string }).status === "failed",
       ),
     ).toBe(true);
+  });
+
+  it("projects a source that cannot be put back as an error that does not wake the thread", async () => {
+    const sendFailure = new ProviderAdapterRequestError({
+      provider: "claudeAgent",
+      method: "sendTurn",
+      detail: "target rejected the turn",
+    });
+    const harness = makeHarness({ sendFailure, restoreSucceeds: false });
+    await harness.run(
+      Effect.gen(function* () {
+        const coordinator = yield* ContextHandoffCoordinator;
+        yield* coordinator.processTurnStart(turnStartEvent());
+      }),
+    );
+
+    const restore = harness.commands.findLast((command) => command.type === "thread.session.set");
+    expect(restore).toMatchObject({
+      session: {
+        providerInstanceId: sourceSelection.instanceId,
+        runtimeSessionId: sourceRuntimeSessionId,
+        status: "error",
+        lastError: "target rejected the turn",
+      },
+      // A rollback is not new activity: a snoozed thread stays snoozed.
+      wakesSnoozed: false,
+    });
   });
 
   it("never resends an ambiguous dispatch during recovery", async () => {

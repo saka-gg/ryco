@@ -508,6 +508,48 @@ describe("thread snooze commands", () => {
     ).rejects.toThrow("pending requests");
   });
 
+  it("wakes on a provider error but not on a release the server decided itself", async () => {
+    const original = await seedThread();
+    const thread = original.threads[0]!;
+    const snoozedAt = new Date(Date.now() - 60_000).toISOString();
+    const snoozed: OrchestrationReadModel = {
+      ...original,
+      threads: [
+        {
+          ...thread,
+          settledOverride: "active",
+          snoozedUntil: new Date(Date.now() + 3_600_000).toISOString(),
+          snoozedAt,
+        },
+      ],
+    };
+    const failedAt = new Date().toISOString();
+    const errorSet = (wakesSnoozed?: boolean) =>
+      decideOrchestrationCommand({
+        readModel: snoozed,
+        command: {
+          type: "thread.session.set",
+          threadId: thread.id,
+          commandId: asCommandId(`error-${String(wakesSnoozed)}`),
+          session: {
+            threadId: thread.id,
+            status: "error",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            tokenMode: "balanced",
+            activeTurnId: null,
+            lastError: "Provider crashed",
+            updatedAt: failedAt,
+          },
+          ...(wakesSnoozed === undefined ? {} : { wakesSnoozed }),
+          createdAt: failedAt,
+        },
+      }).pipe(Effect.map((result) => asEvents(result).map((event) => event.type)));
+
+    expect(await Effect.runPromise(errorSet())).toEqual(["thread.unsnoozed", "thread.session-set"]);
+    expect(await Effect.runPromise(errorSet(false))).toEqual(["thread.session-set"]);
+  });
+
   it("rejects a past deadline", async () => {
     const readModel = await seedThread();
     await expect(
