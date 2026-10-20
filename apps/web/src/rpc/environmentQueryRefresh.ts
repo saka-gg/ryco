@@ -9,7 +9,16 @@ import type { HostedEnvironmentSessionRecord } from "@ryco/client-runtime/author
 import { defaultQueryClient } from "./queryClient";
 
 export interface EnvironmentQueryRefreshBackend {
+  /**
+   * Fences the environment's active reads in flight and starts a new read
+   * epoch: reads issued from now on belong to the session being established.
+   */
   readonly fence: (environmentId: EnvironmentId) => void;
+  /**
+   * Re-runs active reads that failed, are stale, or were last fetched before
+   * the epoch began. A read already answered in this epoch (e.g. one admitted
+   * before the snapshot) is not fetched again.
+   */
   readonly refresh: (environmentId: EnvironmentId) => Promise<void>;
 }
 
@@ -98,6 +107,7 @@ export function isHostedRecordQueryRefreshReady(
   );
 }
 
+/** `begin` opens an environment's read epoch; `ready` refreshes it once. */
 export function createEnvironmentQueryRefreshCoordinator(
   backend: EnvironmentQueryRefreshBackend,
 ): EnvironmentQueryRefreshCoordinator {

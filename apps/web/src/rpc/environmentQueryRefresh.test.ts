@@ -5,15 +5,18 @@ import {
   type HostedBrowserStatus,
   type HostedHubNode,
 } from "@ryco/client-runtime/authorization";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { createKeyedQueryRegistry, defineKeyedQueryByInput } from "@ryco/client-runtime/rpc";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createEnvironmentQueryRefreshCoordinator,
+  environmentQueryRefresh,
   isHostedEnvironmentQueryRefreshReady,
   isHostedRecordQueryRefreshReady,
   type HostedEnvironmentQueryRefreshState,
   type HostedRecordQueryRefreshState,
 } from "./environmentQueryRefresh";
+import { defaultQueryClient } from "./queryClient";
 
 const environmentId = EnvironmentId.make("environment-query-refresh-test");
 
@@ -272,4 +275,82 @@ describe("retained environment session query refresh", () => {
       expect(harness.refresh).toHaveBeenCalledTimes(1);
     },
   );
+});
+
+describe("environment query refresh read epochs", () => {
+  const readEpochEnvironmentId = EnvironmentId.make("environment-query-refresh-read-epoch-test");
+
+  interface KeyedState {
+    readonly data: string | null;
+    readonly error: Error | null;
+  }
+
+  function makeRegistry() {
+    return createKeyedQueryRegistry<KeyedState>({
+      labelPrefix: "environment-query-refresh-read-epoch-test",
+      initialState: { data: null, error: null },
+      buildFetchingState: (current) => current,
+      buildSuccessState: (data) => ({ data: data as string, error: null }),
+      buildErrorState: (current, error) => ({ ...current, error }),
+      isErrorState: (state) => state.error !== null,
+    });
+  }
+
+  let registry: ReturnType<typeof makeRegistry>;
+
+  beforeEach(() => {
+    registry = makeRegistry();
+  });
+
+  afterEach(() => {
+    registry.dispose();
+    defaultQueryClient.clear();
+    environmentQueryRefresh.resetForTests();
+  });
+
+  it("fetches a read admitted before the snapshot once per session generation", async () => {
+    const key = ["read-epoch", readEpochEnvironmentId] as const;
+    const run = vi.fn(() => Promise.resolve("query"));
+    const keyedRun = vi.fn(() => Promise.resolve("keyed"));
+    const keyed = defineKeyedQueryByInput(
+      registry,
+      {
+        label: "read-epoch",
+        staleTime: 0,
+        isEnabled: () => true,
+        buildKey: (input: { readonly path: string }) => `${readEpochEnvironmentId}:${input.path}`,
+        resolveEnvironmentId: () => readEpochEnvironmentId,
+        createControllerFields: () => ({}),
+        run: () => keyedRun(),
+      },
+      (controller) => !controller.hasData,
+    );
+    const input = { path: "README.md" };
+
+    // The new session's channel is online: the route mounts and its reads are
+    // admitted before the shell snapshot is accepted.
+    const first = environmentQueryRefresh.begin(readEpochEnvironmentId);
+    const removeObserver = defaultQueryClient.addObserver(key, {
+      environmentId: readEpochEnvironmentId,
+      staleTime: 0,
+      refetch: () => defaultQueryClient.fetch(key, run, { force: true }),
+    });
+    await defaultQueryClient.fetch(key, run);
+    const release = keyed.watch(input);
+    await registry.controllers.get(keyed.targetKey(input) as string)?.inFlightPromise;
+
+    // The session becomes ready: both reads already answered from it.
+    await expect(environmentQueryRefresh.ready(readEpochEnvironmentId, first)).resolves.toBe(true);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(keyedRun).toHaveBeenCalledTimes(1);
+
+    // A new session generation refreshes them once more.
+    const second = environmentQueryRefresh.begin(readEpochEnvironmentId);
+    await expect(environmentQueryRefresh.ready(readEpochEnvironmentId, second)).resolves.toBe(true);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(keyedRun).toHaveBeenCalledTimes(2);
+
+    release();
+    removeObserver();
+  });
 });

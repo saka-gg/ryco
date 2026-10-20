@@ -257,6 +257,14 @@ export function createKeyedQueryRegistry<TState>(
   let disposed = false;
   const admissionStates = new WeakMap<KeyedQueryControllerBase, KeyedQueryAdmission>();
   const pendingAdmissionRefresh = new WeakSet<KeyedQueryControllerBase>();
+  /**
+   * Read epochs: the issue order of runs; per environment, the last run issued
+   * before its latest fence; per controller, the issue order of the run whose
+   * result it holds.
+   */
+  let readSequence = 0;
+  const readEpochs = new Map<EnvironmentId, number>();
+  const publishedReadSequences = new WeakMap<KeyedQueryControllerBase, number>();
 
   const queryStateAtom = Atom.family((compositeKey: string) => {
     knownStateKeys.add(compositeKey);
@@ -385,6 +393,8 @@ export function createKeyedQueryRegistry<TState>(
   function markLocalWrite(controller: KeyedQueryControllerBase & Record<string, unknown>): void {
     controller.localWriteEpoch = (controller.localWriteEpoch ?? 0) + 1;
     controller.lastLocalWriteAt = Date.now();
+    // The cache no longer holds what a read returned: the next refresh reads again.
+    publishedReadSequences.delete(controller);
   }
 
   async function runController(
@@ -405,6 +415,7 @@ export function createKeyedQueryRegistry<TState>(
     }
     touchController(controller);
     const token = ++controller.fetchToken;
+    const issuedReadSequence = ++readSequence;
     const isFenced = () =>
       token !== controller.fetchToken ||
       controllers.get(controller.compositeKey) !== controller ||
@@ -429,6 +440,7 @@ export function createKeyedQueryRegistry<TState>(
         if (isSupersededByLocalWrite()) return;
         controller.hasData = true;
         controller.lastFetchedAt = Date.now();
+        publishedReadSequences.set(controller, issuedReadSequence);
         setQueryState(controller.compositeKey, config.buildSuccessState(data));
         published = { data };
       } catch (error) {
@@ -582,6 +594,7 @@ export function createKeyedQueryRegistry<TState>(
       appAtomRegistry.set(queryStateAtom(compositeKey), config.initialState);
     }
     knownStateKeys.clear();
+    readEpochs.clear();
   }
 
   function synchronizeAdmission(controller: KeyedQueryControllerBase & Record<string, unknown>) {
@@ -660,7 +673,12 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
+  /**
+   * Fences the environment's active reads in flight and starts a new read epoch
+   * for it: reads issued from now on belong to its current session.
+   */
   function fenceActiveEnvironment(environmentId: EnvironmentId): void {
+    readEpochs.set(environmentId, readSequence);
     for (const compositeKey of controllerKeys({ environmentId })) {
       const controller = controllers.get(compositeKey);
       if (!controller || controller.subscriberCount <= 0) continue;
@@ -668,19 +686,33 @@ export function createKeyedQueryRegistry<TState>(
     }
   }
 
+  /**
+   * Re-runs the environment's active reads that failed or are stale, except a
+   * read whose current data was fetched after the environment's latest fence:
+   * that read already answered from the current session.
+   */
   async function refreshActiveEnvironment(environmentId: EnvironmentId): Promise<void> {
     const runs: Array<Promise<void>> = [];
     const now = Date.now();
+    const epoch = readEpochs.get(environmentId);
     for (const compositeKey of controllerKeys({ environmentId })) {
       const controller = controllers.get(compositeKey);
       if (!controller || controller.subscriberCount <= 0) continue;
       const state = getQueryState(compositeKey);
+      const isError = config.isErrorState?.(state) === true;
       const isStale =
         !controller.hasData ||
-        config.isErrorState?.(state) === true ||
+        isError ||
         (controller.staleTime !== Infinity &&
           now - controller.lastFetchedAt >= controller.staleTime);
       if (!isStale) continue;
+      const readInCurrentEpoch =
+        epoch !== undefined &&
+        controller.hasData &&
+        controller.lastFetchedAt !== 0 &&
+        !isError &&
+        (publishedReadSequences.get(controller) ?? 0) > epoch;
+      if (readInCurrentEpoch) continue;
       runs.push(runController(controller));
     }
     await Promise.all(runs);

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId } from "@ryco/contracts";
 import { RpcRequestRefusedError } from "@ryco/client-runtime/rpc";
 
-import { QueryClient } from "./queryClient.ts";
+import { QueryClient, type QueryKey } from "./queryClient.ts";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -228,6 +228,120 @@ describe("QueryClient reconnect refresh", () => {
 
     expect(refetch).toHaveBeenCalledTimes(1);
     expect(client.getQueryData(key)).toBe("current");
+    remove();
+  });
+});
+
+describe("QueryClient read epochs", () => {
+  const environmentId = EnvironmentId.make("environment-read-epoch-test");
+  const otherEnvironmentId = EnvironmentId.make("environment-read-epoch-other");
+
+  function observe(client: QueryClient, key: QueryKey, run: () => Promise<string>) {
+    return client.addObserver(key, {
+      environmentId,
+      staleTime: 0,
+      refetch: () => client.fetch(key, run, { force: true }),
+    });
+  }
+
+  it("does not refetch a read that succeeded after the environment's fence", async () => {
+    const client = new QueryClient();
+    const key = ["read-epoch", environmentId, "current"] as const;
+    const run = vi.fn(() => Promise.resolve("current"));
+    const remove = observe(client, key, run);
+
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.fetch(key, run);
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(client.getQueryData(key)).toBe("current");
+    remove();
+  });
+
+  it("refetches a read fetched before the fence", async () => {
+    const client = new QueryClient();
+    const key = ["read-epoch", environmentId, "before-fence"] as const;
+    const run = vi.fn().mockResolvedValueOnce("before").mockResolvedValue("after");
+    const remove = observe(client, key, run);
+
+    await client.fetch(key, run);
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(key)).toBe("after");
+    remove();
+  });
+
+  it("a later fence makes the earlier epoch's reads refresh again", async () => {
+    const client = new QueryClient();
+    const key = ["read-epoch", environmentId, "later-fence"] as const;
+    const run = vi.fn(() => Promise.resolve("value"));
+    const remove = observe(client, key, run);
+
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.fetch(key, run);
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    remove();
+  });
+
+  it("refetches a read of the current epoch after a local write or invalidation", async () => {
+    const client = new QueryClient();
+    const writtenKey = ["read-epoch", environmentId, "local-write"] as const;
+    const writtenRun = vi.fn(() => Promise.resolve("server"));
+    const removeWritten = observe(client, writtenKey, writtenRun);
+
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.fetch(writtenKey, writtenRun);
+    client.setQueryData(writtenKey, "local");
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(writtenRun).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(writtenKey)).toBe("server");
+    removeWritten();
+
+    const invalidatedKey = ["read-epoch", environmentId, "invalidated"] as const;
+    const invalidatedRun = vi.fn(() => Promise.resolve("server"));
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await client.fetch(invalidatedKey, invalidatedRun);
+    await client.invalidateQueries({ queryKey: invalidatedKey });
+    const removeInvalidated = observe(client, invalidatedKey, invalidatedRun);
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(invalidatedRun).toHaveBeenCalledTimes(2);
+    removeInvalidated();
+  });
+
+  it("still re-runs a read that failed in the current epoch", async () => {
+    const client = new QueryClient();
+    const key = ["read-epoch", environmentId, "failed"] as const;
+    const run = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue("ready");
+    const remove = observe(client, key, run);
+
+    client.fenceActiveQueriesForEnvironment(environmentId);
+    await expect(client.fetch(key, run, { retry: false })).rejects.toThrow("offline");
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(client.getQueryData(key)).toBe("ready");
+    remove();
+  });
+
+  it("a fence of another environment does not skip this one", async () => {
+    const client = new QueryClient();
+    const key = ["read-epoch", environmentId, "other-fence"] as const;
+    const run = vi.fn(() => Promise.resolve("value"));
+    const remove = observe(client, key, run);
+
+    client.fenceActiveQueriesForEnvironment(otherEnvironmentId);
+    await client.fetch(key, run);
+    await client.refreshActiveQueriesForEnvironment(environmentId);
+
+    expect(run).toHaveBeenCalledTimes(2);
     remove();
   });
 });
