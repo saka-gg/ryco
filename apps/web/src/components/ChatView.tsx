@@ -273,6 +273,7 @@ import {
   resolveProviderStatusNotice,
 } from "./chat/providerStatusNotice";
 import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
+import { useRestartInterruptionBannerItem } from "./chat/restartInterruptionBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
@@ -1871,6 +1872,13 @@ export default function ChatView(props: ChatViewProps) {
     savedEnvironmentRuntimeById,
     serverConfig?.environment.label,
   ]);
+  // A restart release is an interruption, not a thread error: a quiet line where the
+  // user would continue. The web phone tier is frozen: no new banners there.
+  const restartInterruptionBannerItem = useRestartInterruptionBannerItem(
+    isServerThread && activeThreadDetailLoaded && presentationTier !== "phone"
+      ? (activeThread ?? null)
+      : null,
+  );
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
     if (hostedDeliveryNotice) {
@@ -1973,6 +1981,9 @@ export default function ChatView(props: ChatViewProps) {
         },
       });
     }
+    if (restartInterruptionBannerItem) {
+      items.push(restartInterruptionBannerItem);
+    }
     return items;
   }, [
     dispatchCapability.allowed,
@@ -1986,6 +1997,7 @@ export default function ChatView(props: ChatViewProps) {
     handleReconnectActiveEnvironment,
     openSettings,
     reconnectingEnvironmentId,
+    restartInterruptionBannerItem,
     showVersionMismatchBanner,
     versionMismatch,
     versionMismatchDismissKey,

@@ -1,3 +1,7 @@
+import {
+  isRestartReleasedSession,
+  type RestartReleaseSessionState,
+} from "./restartContinuation.ts";
 import { canSettleThread, type ThreadSettlementInput } from "./threadSettlement.ts";
 
 export interface ThreadSnoozeState {
@@ -7,7 +11,7 @@ export interface ThreadSnoozeState {
   readonly hasPendingUserInput?: boolean | undefined;
   readonly latestUserMessageAt?: string | null | undefined;
   readonly session?:
-    | { readonly status: string; readonly updatedAt?: string | undefined }
+    | (RestartReleaseSessionState & { readonly updatedAt?: string | undefined })
     | null
     | undefined;
   readonly latestTurn?:
@@ -42,7 +46,12 @@ export function isThreadSnoozed(thread: ThreadSnoozeState, nowMs: number): boole
   if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
   if (Date.parse(thread.latestUserMessageAt ?? "") > since) return false;
   if (Date.parse(thread.latestTurn?.completedAt ?? "") > since) return false;
-  if (thread.session?.status === "error" && Date.parse(thread.session.updatedAt ?? "") > since)
+  // A new failure wakes the thread; a restart interrupting it does not.
+  if (
+    thread.session?.status === "error" &&
+    !isRestartReleasedSession(thread.session) &&
+    Date.parse(thread.session.updatedAt ?? "") > since
+  )
     return false;
   return true;
 }

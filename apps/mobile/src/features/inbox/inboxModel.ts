@@ -2,6 +2,7 @@ import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
 import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
+  isThreadFailed,
 } from "@ryco/client-runtime/state/threads";
 import type {
   Project,
@@ -168,7 +169,8 @@ function threadState(
   if (activity === "connecting") return "connecting";
   // Same predicate as web: a usage limit outranks the generic error it ended in.
   if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
-  if (thread.session?.status === "error" || thread.latestTurn?.state === "error") return "error";
+  // Same rule as web: a restart release is an interruption, not a failure.
+  if (isThreadFailed(thread)) return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
   return "idle";
 }

@@ -20,6 +20,7 @@ import {
   type OrchestrationThreadWindowSnapshot,
   type ThreadLineage,
 } from "@ryco/contracts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { configureThreadsRuntime, getThreadsRuntimeConfiguration } from "./runtime.ts";
 
@@ -3909,5 +3910,110 @@ describe("evicting thread bodies", () => {
     } finally {
       useStore.setState(previous, true);
     }
+  });
+});
+
+describe("thread errors", () => {
+  const releasedSession = {
+    threadId: ThreadId.make("thread-1"),
+    status: "error" as const,
+    providerName: "codex",
+    runtimeMode: "full-access" as const,
+    activeTurnId: null,
+    lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+    updatedAt: "2026-02-27T00:00:02.000Z",
+  };
+
+  it("shows no thread error for a session a server restart released", () => {
+    const released = applyOrchestrationEvent(
+      makeState(makeThread()),
+      makeEvent("thread.session-set", {
+        threadId: releasedSession.threadId,
+        session: releasedSession,
+      }),
+      localEnvironmentId,
+    );
+    expect(threadsOf(released)[0]?.session?.lastError).toBe(ORPHANED_PROVIDER_SESSION_ERROR);
+    expect(threadsOf(released)[0]?.error).toBeNull();
+
+    const failed = applyOrchestrationEvent(
+      released,
+      makeEvent(
+        "thread.session-set",
+        {
+          threadId: releasedSession.threadId,
+          session: { ...releasedSession, lastError: "Provider exited (code 1)" },
+        },
+        { sequence: 2 },
+      ),
+      localEnvironmentId,
+    );
+    expect(threadsOf(failed)[0]?.error).toBe("Provider exited (code 1)");
+  });
+
+  it("maps a released session from shell and detail snapshots without an error", () => {
+    const shell: OrchestrationThreadShell = {
+      id: releasedSession.threadId,
+      projectId: ProjectId.make("project-1"),
+      title: "Released",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      worktreeId: null,
+      manualStatusBucket: null,
+      manualPosition: 0,
+      latestTurn: null,
+      createdAt: "2026-02-27T00:00:00.000Z",
+      updatedAt: "2026-02-27T00:00:02.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      session: releasedSession,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const fromShell = syncServerShellSnapshot(
+      makeEmptyState(),
+      { snapshotSequence: 1, projects: [], threads: [shell], updatedAt: shell.updatedAt },
+      localEnvironmentId,
+    );
+    expect(
+      fullThreadEntry(localEnvironmentStateOf(fromShell).threadShellById[shell.id])?.error,
+    ).toBeNull();
+
+    const fromDetail = syncServerThreadDetail(
+      makeEmptyState(),
+      {
+        ...shell,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+      },
+      localEnvironmentId,
+    );
+    expect(threadsOf(fromDetail)[0]?.error).toBeNull();
+    expect(
+      threadsOf(
+        syncServerThreadDetail(
+          makeEmptyState(),
+          {
+            ...shell,
+            session: { ...releasedSession, lastError: "Provider exited (code 1)" },
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+          },
+          localEnvironmentId,
+        ),
+      )[0]?.error,
+    ).toBe("Provider exited (code 1)");
   });
 });
