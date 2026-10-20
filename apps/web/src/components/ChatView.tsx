@@ -5961,7 +5961,7 @@ export default function ChatView(props: ChatViewProps) {
     >
       {!isPhoneTier && activeThreadRef ? (
         <TranscriptSelectionActions
-          key={activeThreadKey}
+          key={`selection-actions:${activeThreadKey}`}
           containerRef={chatShellRef}
           source={activeThreadRef}
           canUseSide={isServerThread && sideChatCapability.allowed}
@@ -6044,8 +6044,11 @@ export default function ChatView(props: ChatViewProps) {
       {!isPhoneTier && activeThreadRef && sideChatPanelReady ? (
         // One instance per thread: the panel reads which entries were already
         // there when it opened, and ChatView now follows thread navigation.
+        // Keys of this list's per-thread children are prefixed: a key shared
+        // by two siblings makes React drop one of them without unmounting it,
+        // so its effects never clean up.
         <LazySideChatPanel
-          key={activeThreadKey}
+          key={`side-chat:${activeThreadKey}`}
           threadRef={activeThreadRef}
           providers={providerStatuses}
           connected={
