@@ -11,9 +11,8 @@ import { Effect, Layer, Option, type Scope, type Stream } from "effect";
 import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
 import { type Rpc, type RpcGroup, RpcSerialization } from "effect/rpc";
 
-import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
 import { makeWsRpcContext } from "./context.ts";
-import { directRpcPrincipal, type RpcPrincipal } from "./RpcPrincipal.ts";
+import type { RpcPrincipal } from "./RpcPrincipal.ts";
 import { makeAgentControlHandlers } from "./agentControlRpc.ts";
 import { makeOrchestrationHandlers } from "./orchestrationRpc.ts";
 import { makeGitHandlers } from "./gitRpc.ts";
@@ -113,6 +112,3 @@ export const makeWsRpcLayer = (principal: RpcPrincipal) => {
   >;
   return toLayer.call(WsRpcGroup, build);
 };
-
-export const makeDirectWsRpcLayer = (session: AuthenticatedSession) =>
-  makeWsRpcLayer(directRpcPrincipal(session));

@@ -1,6 +1,5 @@
 import type {
   DesktopThreadContentProjectionMap,
-  DesktopWorkspaceMetadataProjection,
   DesktopWorkspaceScopeProjection,
   DesktopWorkspaceStateProjection,
   DesktopWorkspaceStatePush,
@@ -272,10 +271,4 @@ export function createDesktopWorkspaceIpcHandlers(
       );
     },
   };
-}
-
-export function asDesktopWorkspaceMetadataProjection(
-  snapshot: WorkspaceMetadataSnapshot,
-): DesktopWorkspaceMetadataProjection {
-  return snapshot;
 }
