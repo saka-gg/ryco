@@ -66,7 +66,11 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
-import { forgetDerivedThread } from "./threadDerivationMemo.ts";
+import {
+  forgetCollectedRows,
+  forgetDerivedThread,
+  retireDerivedThread,
+} from "./threadDerivationMemo.ts";
 import {
   MAX_THREAD_ACTIVITIES,
   MAX_THREAD_CHECKPOINTS,
@@ -1163,6 +1167,7 @@ function writeThreadState(
   );
 
   if (!threadShellsEqual(previousShell, nextShell)) {
+    retireDerivedThread(previousShell, nextShell);
     nextState = {
       ...nextState,
       threadShellById: {
@@ -1340,6 +1345,7 @@ function writeThreadShellState(
   );
 
   if (!threadShellsEqual(previousShell, nextThread.shell)) {
+    retireDerivedThread(previousShell, nextThread.shell);
     nextState = {
       ...nextState,
       threadShellById: writeRecordEntry(
@@ -1404,6 +1410,7 @@ function writeArchivedThreadStub(
   state: EnvironmentState,
   stub: ArchivedThreadStub,
 ): EnvironmentState {
+  retireDerivedThread(state.threadShellById[stub.id], stub);
   return {
     ...state,
     threadShellById: { ...state.threadShellById, [stub.id]: stub },
@@ -1427,6 +1434,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   if (!shell) {
     return state;
   }
+  retireDerivedThread(shell, undefined);
 
   const nextThreadIds = removeId(state.threadIds, threadId);
   const currentProjectThreadIds = state.threadIdsByProjectId[shell.projectId] ?? EMPTY_THREAD_IDS;
@@ -1549,7 +1557,9 @@ function evictThreadBodiesFromEnvironment(
  *
  * The thread composed from the dropped body is forgotten too (a cache-only
  * side effect): it is memoized under the shell, which stays, and would keep
- * the body reachable until the thread was composed again.
+ * the body reachable until the thread was composed again. So are the arrays
+ * collected from the dropped body, so a holder of an older state does not keep
+ * them reachable through the module-level memo.
  */
 export function evictThreadBodies(
   state: AppState,
@@ -1568,6 +1578,12 @@ export function evictThreadBodies(
     for (const threadId of threadIds) {
       const shell = ownValue(environmentState.threadShellById, threadId);
       if (shell !== undefined) forgetDerivedThread(shell);
+      forgetCollectedRows(
+        ownValue(environmentState.messageIdsByThreadId, threadId),
+        ownValue(environmentState.activityIdsByThreadId, threadId),
+        ownValue(environmentState.proposedPlanIdsByThreadId, threadId),
+        ownValue(environmentState.turnDiffIdsByThreadId, threadId),
+      );
     }
     nextState = commitEnvironmentState(
       nextState,
@@ -1765,6 +1781,7 @@ function updateThreadShellTimestamp(
   if (!shell || shell.updatedAt === updatedAt || isArchivedThreadStub(shell)) {
     return state;
   }
+  retireDerivedThread(shell, undefined);
 
   return {
     ...state,
@@ -1810,6 +1827,8 @@ function updateThreadSettlementState(
   if (shellUnchanged && summaryUnchanged) {
     return state;
   }
+  // A full shell is written anew below even when only the summary differs.
+  retireDerivedThread(shell, undefined);
 
   return {
     ...state,
@@ -2328,9 +2347,9 @@ function syncEnvironmentShellSnapshot(
       nextState.threadIds.push(thread.id);
     }
     const previousShell = ownValue(state.threadShellById, thread.id);
-    nextState.threadShellById[thread.id] = threadShellsEqual(previousShell, mapped.shell)
-      ? previousShell!
-      : mapped.shell;
+    const shell = threadShellsEqual(previousShell, mapped.shell) ? previousShell! : mapped.shell;
+    retireDerivedThread(previousShell, shell);
+    nextState.threadShellById[thread.id] = shell;
     const previousSession = ownValue(state.threadSessionById, thread.id);
     nextState.threadSessionById[thread.id] =
       previousSession !== undefined && threadSessionsEqual(previousSession, mapped.session)
@@ -2376,10 +2395,17 @@ function syncEnvironmentShellSnapshot(
     const entry = archivedThreadStubsEqual(previousShell, stub)
       ? (previousShell as ArchivedThreadStub)
       : stub;
+    retireDerivedThread(previousShell, entry);
     nextState.threadShellById[stub.id] = entry;
     nextState.sidebarThreadSummaryById[stub.id] = entry;
     delete nextState.threadSessionById[stub.id];
     delete nextState.threadTurnStateById[stub.id];
+  }
+  // A thread the snapshot no longer lists leaves the store with its shell.
+  for (const threadId of state.threadIds) {
+    if (!nextThreadIds.has(threadId)) {
+      retireDerivedThread(ownValue(state.threadShellById, threadId), undefined);
+    }
   }
   for (const threadId of nextState.threadIds) {
     const projectId = nextState.threadShellById[threadId]!.projectId;

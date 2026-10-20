@@ -14,6 +14,7 @@ import {
   WorktreeId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
+  type OrchestrationStubbedShellSnapshot,
   type OrchestrationThread,
   type OrchestrationThreadShell,
   type OrchestrationThreadWindowSnapshot,
@@ -53,11 +54,15 @@ import {
 import { selectThreadDetailLoaded } from "./storeSelectors.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import { collectedByIdsCache, threadCache } from "./threadDerivationMemo.ts";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   fullThreadEntry,
+  isArchivedThreadStub,
   type Thread,
+  type ThreadShell,
+  type ThreadShellOrStub,
 } from "./types.ts";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
@@ -3497,26 +3502,51 @@ describe("evicting thread bodies", () => {
     } as unknown as OrchestrationThreadWindowSnapshot;
   }
 
+  function archivedStub(id: ThreadId) {
+    return {
+      id,
+      projectId: ProjectId.make("project-1"),
+      title: `Thread ${id}`,
+      branch: null,
+      worktreePath: null,
+      worktreeId: null,
+      createdAt: at(0),
+      updatedAt: at(7),
+      archivedAt: at(7),
+      latestUserMessageAt: null,
+      lineage: null,
+    };
+  }
+
+  function shellSnapshot(
+    snapshotSequence: number,
+    threads: ReadonlyArray<ReturnType<typeof shellThread>>,
+    archivedThreadStubs?: ReadonlyArray<ReturnType<typeof archivedStub>>,
+  ): OrchestrationStubbedShellSnapshot {
+    return {
+      snapshotSequence,
+      projects: [
+        {
+          id: ProjectId.make("project-1"),
+          title: "Project",
+          workspaceRoot: "/workspace/project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: at(0),
+          updatedAt: at(0),
+        },
+      ],
+      threads,
+      ...(archivedThreadStubs === undefined ? {} : { archivedThreadStubs }),
+      updatedAt: at(0),
+    } as unknown as OrchestrationStubbedShellSnapshot;
+  }
+
   /** Both threads listed by the shell, opened, and with a history page still loading. */
   function loadedState(): AppState {
     let state = syncServerShellSnapshot(
       makeEmptyState(),
-      {
-        snapshotSequence: 1,
-        projects: [
-          {
-            id: ProjectId.make("project-1"),
-            title: "Project",
-            workspaceRoot: "/workspace/project",
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: at(0),
-            updatedAt: at(0),
-          },
-        ],
-        threads: [shellThread(first), shellThread(second)],
-        updatedAt: at(0),
-      } as never,
+      shellSnapshot(1, [shellThread(first), shellThread(second)]),
       localEnvironmentId,
     );
     for (const id of [first, second]) {
@@ -3530,6 +3560,10 @@ describe("evicting thread bodies", () => {
     }
     return state;
   }
+
+  /** Whether a composed thread is memoized under the shell. */
+  const composedUnder = (shell: ThreadShellOrStub | undefined) =>
+    shell !== undefined && threadCache.has(shell as ThreadShell);
 
   const bodyRecords = [
     "messageIdsByThreadId",
@@ -3672,6 +3706,178 @@ describe("evicting thread bodies", () => {
     expect(after.threadSessionById[first]).toBe(environment.threadSessionById[first]);
     expect(after.threadTurnStateById[first]).toBe(environment.threadTurnStateById[first]);
     expect(after.sidebarThreadSummaryById[first]).toBe(environment.sidebarThreadSummaryById[first]);
+  });
+
+  it("forgets the rows collected from a dropped body", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    getThreadFromEnvironmentState(environment, first);
+    getThreadFromEnvironmentState(environment, second);
+    const idListsOf = (threadId: ThreadId): ReadonlyArray<readonly string[] | undefined> => [
+      environment.messageIdsByThreadId[threadId],
+      environment.activityIdsByThreadId[threadId],
+      environment.proposedPlanIdsByThreadId[threadId],
+      environment.turnDiffIdsByThreadId[threadId],
+    ];
+    for (const ids of [...idListsOf(first), ...idListsOf(second)]) {
+      expect(ids?.length).toBeGreaterThan(0);
+      expect(collectedByIdsCache.has(ids!)).toBe(true);
+    }
+
+    evictThreadBodies(loaded, [firstRef]);
+
+    // The state before the eviction still holds both keys of every dropped list.
+    for (const ids of idListsOf(first)) expect(collectedByIdsCache.has(ids!)).toBe(false);
+    for (const ids of idListsOf(second)) expect(collectedByIdsCache.has(ids!)).toBe(true);
+  });
+
+  it("forgets the thread composed under a shell an update replaced", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const previousShell = environment.threadShellById[first];
+    expect(getThreadFromEnvironmentState(environment, first)?.messages).toHaveLength(2);
+    expect(composedUnder(previousShell)).toBe(true);
+
+    const updated = applyOrchestrationEvent(
+      loaded,
+      makeEvent(
+        "thread.meta-updated",
+        { threadId: first, title: "Renamed", updatedAt: at(5) },
+        { sequence: 11 },
+      ),
+      localEnvironmentId,
+    );
+    const nextShell = localEnvironmentStateOf(updated).threadShellById[first];
+    expect(nextShell).not.toBe(previousShell);
+    expect(nextShell?.title).toBe("Renamed");
+    expect(composedUnder(previousShell)).toBe(false);
+
+    getThreadFromEnvironmentState(localEnvironmentStateOf(updated), first);
+    expect(composedUnder(nextShell)).toBe(true);
+    evictThreadBodies(updated, [firstRef]);
+
+    // No shell of the thread the test kept reaches a composed body any more.
+    expect(composedUnder(previousShell)).toBe(false);
+    expect(composedUnder(nextShell)).toBe(false);
+  });
+
+  it("forgets the thread composed under a shell the shell stream or a snapshot replaced or dropped", () => {
+    const composeBoth = () => {
+      const loaded = loadedState();
+      const environment = localEnvironmentStateOf(loaded);
+      getThreadFromEnvironmentState(environment, first);
+      getThreadFromEnvironmentState(environment, second);
+      const firstShell = environment.threadShellById[first];
+      const secondShell = environment.threadShellById[second];
+      expect(composedUnder(firstShell)).toBe(true);
+      expect(composedUnder(secondShell)).toBe(true);
+      return { loaded, firstShell, secondShell };
+    };
+
+    const upserted = composeBoth();
+    const afterUpsert = applyShellEvent(
+      upserted.loaded,
+      {
+        kind: "thread-upserted",
+        sequence: 2,
+        thread: shellThread(first, { title: "Upserted", updatedAt: at(6) }),
+      } as never,
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterUpsert).threadShellById[first]?.title).toBe("Upserted");
+    expect(composedUnder(upserted.firstShell)).toBe(false);
+    expect(composedUnder(upserted.secondShell)).toBe(true);
+
+    const resynced = composeBoth();
+    const afterSnapshot = syncServerShellSnapshot(
+      resynced.loaded,
+      shellSnapshot(2, [shellThread(first, { title: "Renamed", updatedAt: at(6) })]),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterSnapshot).threadIds).toEqual([first]);
+    expect(composedUnder(resynced.firstShell)).toBe(false);
+    expect(composedUnder(resynced.secondShell)).toBe(false);
+
+    const removed = composeBoth();
+    const afterRemoval = applyShellEvent(
+      removed.loaded,
+      { kind: "thread-removed", sequence: 2, threadId: first },
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(afterRemoval).threadShellById[first]).toBeUndefined();
+    expect(composedUnder(removed.firstShell)).toBe(false);
+    expect(composedUnder(removed.secondShell)).toBe(true);
+  });
+
+  it("forgets the thread composed under a shell a settlement or archive replaced", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    getThreadFromEnvironmentState(environment, first);
+    const previousShell = environment.threadShellById[first];
+    expect(composedUnder(previousShell)).toBe(true);
+
+    const settled = applyOrchestrationEvent(
+      loaded,
+      makeEvent(
+        "thread.settled",
+        { threadId: first, settledAt: at(7), updatedAt: at(7) },
+        { sequence: 11 },
+      ),
+      localEnvironmentId,
+    );
+    expect(localEnvironmentStateOf(settled).threadShellById[first]).toMatchObject({
+      settledAt: at(7),
+    });
+    expect(composedUnder(previousShell)).toBe(false);
+
+    const reloaded = loadedState();
+    const reloadedEnvironment = localEnvironmentStateOf(reloaded);
+    getThreadFromEnvironmentState(reloadedEnvironment, first);
+    const fullShell = reloadedEnvironment.threadShellById[first];
+    expect(composedUnder(fullShell)).toBe(true);
+
+    const archived = syncServerShellSnapshot(
+      reloaded,
+      shellSnapshot(2, [shellThread(second)], [archivedStub(first)]),
+      localEnvironmentId,
+    );
+    expect(isArchivedThreadStub(localEnvironmentStateOf(archived).threadShellById[first])).toBe(
+      true,
+    );
+    expect(composedUnder(fullShell)).toBe(false);
+  });
+
+  it("keeps the composed thread of a shell that stays", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const shell = environment.threadShellById[first];
+    const composed = getThreadFromEnvironmentState(environment, first);
+    expect(composedUnder(shell)).toBe(true);
+    const expectKept = (state: AppState) => {
+      expect(localEnvironmentStateOf(state).threadShellById[first]).toBe(shell);
+      expect(composedUnder(shell)).toBe(true);
+      expect(getThreadFromEnvironmentState(localEnvironmentStateOf(state), first)).toBe(composed);
+    };
+
+    expectKept(
+      syncServerShellSnapshot(
+        loaded,
+        shellSnapshot(2, [shellThread(first), shellThread(second)]),
+        localEnvironmentId,
+      ),
+    );
+
+    // An event that leaves the shell as it is, alone and inside a batch.
+    const unchanged = (sequence: number) =>
+      makeEvent(
+        "thread.meta-updated",
+        { threadId: first, title: `Thread ${first}`, updatedAt: at(0) },
+        { sequence },
+      );
+    expectKept(applyOrchestrationEvent(loaded, unchanged(12), localEnvironmentId));
+    expectKept(
+      applyOrchestrationEvents(loaded, [unchanged(12), unchanged(13)], localEnvironmentId),
+    );
   });
 
   it("loads the thread again as if it had never been opened", () => {

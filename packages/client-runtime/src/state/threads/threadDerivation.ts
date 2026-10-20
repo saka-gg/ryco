@@ -1,6 +1,6 @@
 import type { MessageId, ThreadId, TurnId } from "@ryco/contracts";
 import type { EnvironmentState } from "./store.ts";
-import { threadCache } from "./threadDerivationMemo.ts";
+import { collectedByIdsCache, threadCache } from "./threadDerivationMemo.ts";
 import { isArchivedThreadStub } from "./types.ts";
 import type { ChatMessage, ProposedPlan, Thread, TurnDiffSummary } from "./types.ts";
 
@@ -12,8 +12,6 @@ const EMPTY_MESSAGE_MAP: Record<MessageId, ChatMessage> = {};
 const EMPTY_ACTIVITY_MAP: Record<string, Thread["activities"][number]> = {};
 const EMPTY_PROPOSED_PLAN_MAP: Record<string, ProposedPlan> = {};
 const EMPTY_TURN_DIFF_MAP: Record<TurnId, TurnDiffSummary> = {};
-
-const collectedByIdsCache = new WeakMap<readonly string[], WeakMap<object, readonly unknown[]>>();
 
 function collectByIds<TKey extends string, TValue>(
   ids: readonly TKey[] | undefined,
