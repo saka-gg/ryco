@@ -296,20 +296,6 @@ export function adoptRoutedHostedNode(nodeId: string): boolean {
   return true;
 }
 
-/**
- * Leave the node-scoped route interactively and return to the plain node
- * directory with a new history entry (Back returns to the node's surface).
- * The route orchestrator observes the cleared segment and drives the actual
- * relay-session teardown through `hostedHubController.returnToDirectory`.
- */
-export function leaveHostedNodeRoute(): boolean {
-  const history = installedHistory;
-  if (!history) return false;
-  publishRoutedHostedNode(NO_ROUTED_NODE);
-  history.push("/");
-  return true;
-}
-
 /** User-facing node catalog navigation; unlike route demand release, this chooses the Hub page. */
 export function leaveHostedNodeRouteToHubDirectory(): boolean {
   const history = installedHistory;

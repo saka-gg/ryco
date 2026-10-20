@@ -3,7 +3,7 @@ import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import type { ReactNode } from "react";
 
 // The single app-level @effect/atom-react registry backs both the server-state
-// atoms and the AtomRpcClient atoms so they share reactivity and cached results,
+// atoms and the RPC-backed atoms so they share reactivity and cached results,
 // mirroring apps/web/src/rpc/atomRegistry.tsx.
 export { appAtomRegistry, resetAppAtomRegistryForTests } from "@ryco/client-runtime/rpc";
 

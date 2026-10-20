@@ -142,10 +142,6 @@ export function subscribeThreadOutbox(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function isThreadOutboxHydrated(): boolean {
-  return hydrated;
-}
-
 function threadKeyOf(message: Pick<QueuedThreadMessage, "environmentId" | "threadId">): string {
   return scopedThreadKey(scopeThreadRef(message.environmentId, message.threadId));
 }

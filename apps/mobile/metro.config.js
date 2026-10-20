@@ -61,7 +61,9 @@ config.resolver = {
       : config.resolver?.blockList
         ? [config.resolver.blockList]
         : []),
-    new RegExp(`${escapedWorkspaceRoot}[/\\\\]\\.t3[/\\\\].*`),
+    // Ryco keeps per-workspace state (managed worktrees, chat folders) under
+    // `.ryco/` at the workspace root, which Metro must not crawl.
+    new RegExp(`${escapedWorkspaceRoot}[/\\\\]\\.ryco[/\\\\].*`),
   ],
   extraNodeModules: {
     // oxlint-disable-next-line unicorn/no-useless-fallback-in-spread
