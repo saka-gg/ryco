@@ -215,10 +215,11 @@ describe("Mobile native workspace catalog adapter", () => {
       serverVersion: null,
       capabilities: {
         repositoryIdentity: true,
-        threadSettlement: false,
         nativeClientRequired: false,
       },
       removed: false,
     });
+    // The roster records no settlement capability: unknown, not unsupported.
+    expect(entry.capabilities).not.toHaveProperty("threadSettlement");
   });
 });

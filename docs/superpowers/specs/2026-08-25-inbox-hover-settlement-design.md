@@ -202,6 +202,9 @@ Native modules remain dynamically imported inside functions when required.
 
 - An unsupported or older environment renders its threads as Active and disables settlement with a
   clear capability reason.
+- An environment whose capability the client has not learned yet (cold, cached, or still
+  connecting) is not treated as unsupported: its threads keep the classification its recorded state
+  gives them, and settlement changes stay disabled until it answers.
 - A disconnected environment retains its last known classification but cannot mutate until current
   readiness is restored.
 - A command rejected by the server leaves the thread in its projected section and reports the

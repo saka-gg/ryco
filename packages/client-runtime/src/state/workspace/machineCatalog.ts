@@ -92,7 +92,9 @@ export function reconcileWorkspaceMachine(
     capabilities: {
       repositoryIdentity: input.capabilities?.repositoryIdentity ?? false,
       nativeClientRequired: input.capabilities?.nativeClientRequired ?? false,
-      threadSettlement: input.capabilities?.threadSettlement ?? false,
+      ...(input.capabilities?.threadSettlement !== undefined
+        ? { threadSettlement: input.capabilities.threadSettlement }
+        : {}),
       ...(input.capabilities?.threadSnooze !== undefined
         ? { threadSnooze: input.capabilities.threadSnooze }
         : {}),

@@ -110,5 +110,19 @@ describe("workspace machine catalog", () => {
       reconcileWorkspaceMachine(input("settlement", { capabilities: { threadSettlement: true } }))
         .capabilities.threadSettlement,
     ).toBe(true);
+    expect(
+      reconcileWorkspaceMachine(input("legacy", { capabilities: { threadSettlement: false } }))
+        .capabilities.threadSettlement,
+    ).toBe(false);
+  });
+
+  it("leaves thread settlement unstated when the directory does not state it", () => {
+    expect(reconcileWorkspaceMachine(input("unstated")).capabilities).not.toHaveProperty(
+      "threadSettlement",
+    );
+    expect(
+      reconcileWorkspaceMachine(input("unstated", { capabilities: { repositoryIdentity: true } }))
+        .capabilities,
+    ).not.toHaveProperty("threadSettlement");
   });
 });

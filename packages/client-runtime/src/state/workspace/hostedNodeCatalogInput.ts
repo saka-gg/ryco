@@ -63,8 +63,10 @@ export interface HostedNodeCatalogContext {
 /**
  * Maps a Hub directory node into the shared machine-catalog policy. Absent
  * directory capabilities keep current eligibility: repository identity is
- * assumed, settlement and the native-client requirement are not. The
- * session's role wins over the directory's, which may lag a grant change.
+ * assumed and the native-client requirement is not. Thread settlement is
+ * carried only when the directory states it, so a directory without the flag
+ * leaves it unknown rather than unsupported. The session's role wins over the
+ * directory's, which may lag a grant change.
  */
 export function hostedNodeCatalogInput(
   node: HostedHubNode,
@@ -79,7 +81,9 @@ export function hostedNodeCatalogInput(
     serverVersion: node.clientVersion,
     capabilities: {
       repositoryIdentity: capabilities?.repositoryIdentity ?? true,
-      threadSettlement: capabilities?.threadSettlement ?? false,
+      ...(capabilities?.threadSettlement !== undefined
+        ? { threadSettlement: capabilities.threadSettlement }
+        : {}),
       nativeClientRequired: capabilities?.nativeClientRequired ?? false,
     },
     clientTier: input.clientTier,

@@ -198,6 +198,17 @@ describe("Desktop workspace state projections", () => {
     expect(JSON.stringify(repeated)).not.toContain(bodyMarker);
   });
 
+  it("passes on the directory's thread settlement flag only when it states one", () => {
+    expect(projectDesktopWorkspaceSummary(state()).machines[0]).toMatchObject({
+      threadSettlementSupported: false,
+    });
+    const { threadSettlement: _unstated, ...capabilities } = machine.capabilities;
+    const unstated = projectDesktopWorkspaceSummary(
+      state({ catalog: [{ ...machine, capabilities }] }),
+    );
+    expect(unstated.machines[0]).not.toHaveProperty("threadSettlementSupported");
+  });
+
   it("answers a state read with every snapshot and a command with none", async () => {
     const reply = state({ snapshotsUnchanged: true });
     const client = {

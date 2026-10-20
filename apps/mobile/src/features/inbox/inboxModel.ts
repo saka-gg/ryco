@@ -1,3 +1,4 @@
+import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
 import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
@@ -66,8 +67,8 @@ export interface InboxEnvironment {
   readonly trust?: NodeTrust;
   /** Wave 3b: this environment, not the whole app, has an unconfirmed send. */
   readonly deliveryUnknown?: boolean;
-  readonly threadSettlementSupported?: boolean;
-  readonly threadSnoozeSupported?: boolean;
+  readonly threadSettlementSupported?: ThreadCapabilitySupport;
+  readonly threadSnoozeSupported?: ThreadCapabilitySupport;
   readonly mutationReady?: boolean;
   readonly shellCurrent?: boolean;
 }

@@ -1,4 +1,9 @@
-import type { EnvironmentId, ServerConfig, ServerConfigStreamEvent } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  ExecutionEnvironmentCapabilities,
+  ServerConfig,
+  ServerConfigStreamEvent,
+} from "@ryco/contracts";
 import type { ServerSettingsPatch } from "@ryco/contracts/settings";
 
 import {
@@ -35,6 +40,124 @@ export function subscribeEnvironmentServerConfigs(listener: Listener): () => voi
 }
 
 /**
+ * Whether a node supports a thread lifecycle feature: `true` or `false` as the
+ * node itself stated, or `"unknown"` while this client has no statement from
+ * it (a cold or cached node, one still connecting, or a directory entry that
+ * does not carry the flag).
+ */
+export type ThreadCapabilitySupport = boolean | "unknown";
+
+/** What a node's own config stated about its thread lifecycle features. */
+export interface ReportedThreadCapabilities {
+  readonly threadSettlement: boolean;
+  readonly threadSnooze: boolean;
+}
+
+export interface EnvironmentThreadCapabilities {
+  readonly threadSettlement: ThreadCapabilitySupport;
+  readonly threadSnooze: ThreadCapabilitySupport;
+}
+
+/**
+ * Each environment's thread capabilities as its node last reported them. Every
+ * config write records them, and they outlive the config itself: an environment
+ * released from the warm set keeps classifying its threads by its own answer
+ * until the account's state is cleared. Memory only. The map gets a new
+ * identity only when a node's answer changes, never on a status or settings
+ * push.
+ */
+let reportedThreadCapabilities: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities> = new Map();
+const threadCapabilityListeners = new Set<Listener>();
+
+function emitThreadCapabilities(): void {
+  for (const listener of Array.from(threadCapabilityListeners)) listener();
+}
+
+/** Records the node's answer; returns whether it changed. */
+function recordReportedThreadCapabilities(
+  environmentId: EnvironmentId,
+  capabilities: Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze">,
+): boolean {
+  // A node's config without a flag comes from a node that predates the feature.
+  const threadSettlement = capabilities.threadSettlement === true;
+  const threadSnooze = capabilities.threadSnooze === true;
+  const current = reportedThreadCapabilities.get(environmentId);
+  if (current?.threadSettlement === threadSettlement && current.threadSnooze === threadSnooze) {
+    return false;
+  }
+  const next = new Map(reportedThreadCapabilities);
+  next.set(environmentId, { threadSettlement, threadSnooze });
+  reportedThreadCapabilities = next;
+  return true;
+}
+
+function forgetReportedThreadCapabilities(): void {
+  if (reportedThreadCapabilities.size === 0) return;
+  reportedThreadCapabilities = new Map();
+  emitThreadCapabilities();
+}
+
+export function subscribeReportedThreadCapabilities(listener: Listener): () => void {
+  threadCapabilityListeners.add(listener);
+  return () => {
+    threadCapabilityListeners.delete(listener);
+  };
+}
+
+export function getReportedThreadCapabilitiesSnapshot(): ReadonlyMap<
+  EnvironmentId,
+  ReportedThreadCapabilities
+> {
+  return reportedThreadCapabilities;
+}
+
+/** A capability statement that may leave either flag out. */
+export interface ThreadCapabilityStatement {
+  readonly threadSettlement?: boolean | undefined;
+  readonly threadSnooze?: boolean | undefined;
+}
+
+export interface EnvironmentThreadCapabilitySources {
+  /** What nodes reported, by environment; the current snapshot when omitted. */
+  readonly reported?: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
+  /**
+   * A descriptor the node itself sent (a saved environment's, or a standard
+   * session's primary). Never a hosted placeholder built from the directory.
+   */
+  readonly descriptor?:
+    | Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze">
+    | null
+    | undefined;
+  /** Directory metadata, honored only for the flags it states. */
+  readonly directory?: ThreadCapabilityStatement | null | undefined;
+}
+
+/**
+ * The one rule for an environment's thread capabilities, the same for every
+ * client and whether or not the environment is selected or connected: what its
+ * node reported to this client (live, or last known since its connection was
+ * released), else a descriptor the node sent, else the flags a directory
+ * states, else unknown.
+ */
+export function resolveEnvironmentThreadCapabilities(
+  environmentId: EnvironmentId,
+  sources: EnvironmentThreadCapabilitySources = {},
+): EnvironmentThreadCapabilities {
+  const reported = (sources.reported ?? reportedThreadCapabilities).get(environmentId);
+  if (reported !== undefined) return reported;
+  if (sources.descriptor) {
+    return {
+      threadSettlement: sources.descriptor.threadSettlement === true,
+      threadSnooze: sources.descriptor.threadSnooze === true,
+    };
+  }
+  return {
+    threadSettlement: sources.directory?.threadSettlement ?? "unknown",
+    threadSnooze: sources.directory?.threadSnooze ?? "unknown",
+  };
+}
+
+/**
  * Stores `config` as the environment's current one. `type` is the stream event
  * that produced it (a snapshot when omitted) and is what the projection reports
  * when it shows the config.
@@ -49,7 +172,12 @@ export function writeEnvironmentServerConfig(
   const next = new Map(configs);
   next.set(environmentId, config);
   configs = next;
+  // A config without a capability block states nothing about them.
+  const capabilities = config.environment?.capabilities;
+  const capabilitiesChanged =
+    capabilities !== undefined && recordReportedThreadCapabilities(environmentId, capabilities);
   emit();
+  if (capabilitiesChanged) emitThreadCapabilities();
 }
 
 export function patchEnvironmentServerSettings(
@@ -79,7 +207,10 @@ export function getEnvironmentServerConfigsSnapshot(): ReadonlyMap<EnvironmentId
   return configs;
 }
 
-/** Drops one environment's entry; every other environment keeps its own. */
+/**
+ * Drops one environment's entry; every other environment keeps its own. Its
+ * reported thread capabilities stay, as the last known answer.
+ */
 export function forgetEnvironmentServerConfig(environmentId: EnvironmentId): void {
   if (!configs.has(environmentId)) return;
   const next = new Map(configs);
@@ -88,8 +219,9 @@ export function forgetEnvironmentServerConfig(environmentId: EnvironmentId): voi
   emit();
 }
 
-/** Drops every entry (account teardown). */
+/** Drops every entry and every reported thread capability (account teardown). */
 export function clearEnvironmentServerConfigs(): void {
+  forgetReportedThreadCapabilities();
   if (configs.size === 0) return;
   configs = new Map();
   emit();
@@ -98,6 +230,8 @@ export function clearEnvironmentServerConfigs(): void {
 export function resetEnvironmentServerConfigsForTests(): void {
   configs = new Map();
   listeners.clear();
+  reportedThreadCapabilities = new Map();
+  threadCapabilityListeners.clear();
 }
 
 /**

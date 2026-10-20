@@ -158,6 +158,14 @@ Mobile uses the cross-node Inbox and Projects views. Desktop and Web offer full-
 Projects sidebar modes over the same workspace projection. Changing modes or applying a machine
 filter changes presentation only; it does not reconnect, refetch, or retarget mutations.
 
+Every client sorts a machine's threads into Active and Settled with that machine's own settlement
+capability, resolved the same way everywhere: what the machine reported to this client (live, or its
+last answer this session), else a descriptor it sent, else the flag a directory states, else
+unknown. An unknown machine (cold, cached, or still connecting) is classified by the settlement and
+snooze state it recorded, with settlement and snooze changes disabled; a machine that reports no
+settlement support keeps every thread Active. Which machine is selected or connected does not change
+the result.
+
 Machines is an administration surface. It can verify an exact machine, inspect identity and channel
 security, retry a connection, or perform role-appropriate account actions. There is no global
 selected-machine application mode.

@@ -550,7 +550,8 @@ export interface DesktopWorkspaceMachineProjection {
   readonly canConnect: boolean;
   readonly canMutate: boolean;
   readonly effectiveRole: RelayEffectiveRole | null;
-  readonly threadSettlementSupported: boolean;
+  /** As the Hub directory states it; absent when it does not (unknown, not unsupported). */
+  readonly threadSettlementSupported?: boolean;
   readonly accessReasons: ReadonlyArray<string>;
 }
 

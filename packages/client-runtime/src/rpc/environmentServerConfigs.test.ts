@@ -15,12 +15,15 @@ import {
   clearEnvironmentServerConfigs,
   forgetEnvironmentServerConfig,
   getEnvironmentServerConfigsSnapshot,
+  getReportedThreadCapabilitiesSnapshot,
   isEnvironmentServerConfigShown,
   patchEnvironmentServerSettings,
   readEnvironmentServerConfig,
   resetEnvironmentServerConfigsForTests,
+  resolveEnvironmentThreadCapabilities,
   startActiveEnvironmentServerConfigProjection,
   subscribeEnvironmentServerConfigs,
+  subscribeReportedThreadCapabilities,
   writeEnvironmentServerConfig,
 } from "./environmentServerConfigs.ts";
 import {
@@ -168,6 +171,109 @@ describe("environment server config store", () => {
 
     stop();
     writeEnvironmentServerConfig(NODE_A, configA);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("environment thread capabilities", () => {
+  function withCapabilities(
+    environmentId: EnvironmentId,
+    capabilities: { readonly threadSettlement: boolean; readonly threadSnooze?: boolean },
+    providers: ReadonlyArray<string> = ["codex"],
+  ): ServerConfig {
+    const base = config(environmentId, providers);
+    return {
+      ...base,
+      environment: { ...base.environment, capabilities: { ...capabilities } },
+    } as ServerConfig;
+  }
+
+  it("takes the node's live config over every other source", () => {
+    writeEnvironmentServerConfig(
+      NODE_A,
+      withCapabilities(NODE_A, { threadSettlement: true, threadSnooze: true }),
+    );
+    expect(
+      resolveEnvironmentThreadCapabilities(NODE_A, {
+        descriptor: { threadSettlement: false },
+        directory: { threadSettlement: false, threadSnooze: false },
+      }),
+    ).toEqual({ threadSettlement: true, threadSnooze: true });
+  });
+
+  it("keeps a node's last answer after its config is forgotten", () => {
+    writeEnvironmentServerConfig(NODE_A, withCapabilities(NODE_A, { threadSettlement: true }));
+    forgetEnvironmentServerConfig(NODE_A);
+
+    expect(readEnvironmentServerConfig(NODE_A)).toBeNull();
+    expect(resolveEnvironmentThreadCapabilities(NODE_A)).toEqual({
+      threadSettlement: true,
+      threadSnooze: false,
+    });
+  });
+
+  it("falls back to a node's descriptor, then to the flags a directory states", () => {
+    expect(
+      resolveEnvironmentThreadCapabilities(NODE_B, {
+        descriptor: { threadSettlement: true },
+        directory: { threadSettlement: false },
+      }),
+    ).toEqual({ threadSettlement: true, threadSnooze: false });
+    expect(
+      resolveEnvironmentThreadCapabilities(NODE_B, { directory: { threadSettlement: false } }),
+    ).toEqual({ threadSettlement: false, threadSnooze: "unknown" });
+    expect(
+      resolveEnvironmentThreadCapabilities(NODE_B, {
+        directory: { threadSettlement: true, threadSnooze: true },
+      }),
+    ).toEqual({ threadSettlement: true, threadSnooze: true });
+  });
+
+  it("is unknown for a node nothing has stated anything about", () => {
+    const unknown = { threadSettlement: "unknown", threadSnooze: "unknown" };
+    expect(resolveEnvironmentThreadCapabilities(NODE_B)).toEqual(unknown);
+    expect(resolveEnvironmentThreadCapabilities(NODE_B, { directory: {} })).toEqual(unknown);
+    expect(resolveEnvironmentThreadCapabilities(NODE_B, { descriptor: null })).toEqual(unknown);
+  });
+
+  it("forgets every answer with the account", () => {
+    writeEnvironmentServerConfig(NODE_A, withCapabilities(NODE_A, { threadSettlement: true }));
+    forgetEnvironmentServerConfig(NODE_A);
+    const listener = vi.fn();
+    subscribeReportedThreadCapabilities(listener);
+
+    clearEnvironmentServerConfigs();
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(getReportedThreadCapabilitiesSnapshot().size).toBe(0);
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).threadSettlement).toBe("unknown");
+  });
+
+  it("changes its snapshot only when a node's answer changes", () => {
+    const listener = vi.fn();
+    subscribeReportedThreadCapabilities(listener);
+    writeEnvironmentServerConfig(NODE_A, withCapabilities(NODE_A, { threadSettlement: true }));
+    const snapshot = getReportedThreadCapabilitiesSnapshot();
+    const resolved = resolveEnvironmentThreadCapabilities(NODE_A);
+    expect(listener).toHaveBeenCalledOnce();
+
+    // Provider and settings pushes carry the same capabilities.
+    writeEnvironmentServerConfig(
+      NODE_A,
+      withCapabilities(NODE_A, { threadSettlement: true }, ["codex", "claude"]),
+      "providerStatusesDelta",
+    );
+    patchEnvironmentServerSettings(NODE_A, { enableLegacyTokenStreaming: true });
+    forgetEnvironmentServerConfig(NODE_A);
+    expect(getReportedThreadCapabilitiesSnapshot()).toBe(snapshot);
+    expect(resolveEnvironmentThreadCapabilities(NODE_A)).toBe(resolved);
+    expect(listener).toHaveBeenCalledOnce();
+
+    writeEnvironmentServerConfig(
+      NODE_A,
+      withCapabilities(NODE_A, { threadSettlement: true, threadSnooze: true }),
+    );
+    expect(getReportedThreadCapabilitiesSnapshot()).not.toBe(snapshot);
     expect(listener).toHaveBeenCalledTimes(2);
   });
 });
