@@ -9,6 +9,7 @@ import { RpcClientError } from "effect/rpc/RpcClientError";
 import * as Socket from "effect/socket/Socket";
 import type { HubSessionFrame } from "@ryco/contracts/hub-session";
 import { decodeHubSessionFrame, encodeHubSessionFrame } from "@ryco/shared/hubSessionCodec";
+import { rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type {
@@ -754,6 +755,74 @@ describe("HostedRelayAttemptFactory", () => {
       admitHostedRequestForState(
         { ...ready, transportStatus: "terminal-failure", sessionStatus: "stale" },
         proposals,
+      ),
+    ).toBe("forbidden");
+
+    // An observe-only unary read does not wait for the snapshot once the
+    // channel is online, whether a new session synchronizes or a reconnect
+    // replays, and while the browser only waits for the selection.
+    const reads = [
+      WS_METHODS.projectsReadFile,
+      WS_METHODS.vcsReadLocalChanges,
+      ORCHESTRATION_WS_METHODS.getThreadWindow,
+    ].map((tag) => ({ tag, stream: false }) as const);
+    const catchingUp = { ...ready, sessionStatus: "synchronizing" } as const;
+    for (const read of reads) {
+      for (const sessionStatus of ["synchronizing", "replaying"] as const) {
+        for (const browserStatus of ["current", "synchronizing"] as const) {
+          expect(
+            admitHostedRequestForState({ ...catchingUp, sessionStatus, browserStatus }, read),
+          ).toBe("allowed");
+        }
+      }
+      // A channel that is not up yet, a session that cannot catch up, a
+      // browser that has not revalidated, or a directory that is not current.
+      for (const waiting of [
+        { ...catchingUp, transportStatus: "connecting" },
+        { ...catchingUp, transportStatus: "opening-channel" },
+        { ...catchingUp, transportStatus: "reconnecting" },
+        { ...catchingUp, sessionStatus: "stale" },
+        { ...catchingUp, sessionStatus: "delivery-unknown" },
+        { ...catchingUp, sessionStatus: "closed" },
+        { ...catchingUp, browserStatus: "checking-access" },
+        { ...catchingUp, browserStatus: "suspended" },
+        { ...catchingUp, browserStatus: "offline" },
+        { ...catchingUp, directoryStatus: "loading" },
+      ] as const) {
+        expect(admitHostedRequestForState(waiting, read)).toBe("awaiting-session");
+      }
+    }
+    // Classified as reads, but they issue a credential, start a provider,
+    // call a model, or fetch: they wait for the snapshot.
+    for (const tag of [
+      WS_METHODS.authIssueLinkedDirectAccess,
+      WS_METHODS.providerPrewarmSession,
+      WS_METHODS.textGenerationGenerateBranchName,
+      WS_METHODS.vcsPrefetchWorktreeBase,
+      WS_METHODS.serverRefreshProviders,
+      WS_METHODS.vcsListRefs,
+    ]) {
+      expect(rpcDeliveryEffectFor(tag)).toBe("read");
+      expect(admitHostedRequestForState(catchingUp, { tag, stream: false })).toBe(
+        "awaiting-session",
+      );
+    }
+    // So do mutations, and read streams other than the session's own.
+    expect(
+      admitHostedRequestForState(catchingUp, {
+        tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+        stream: false,
+      }),
+    ).toBe("awaiting-session");
+    expect(admitHostedRequestForState(catchingUp, proposals)).toBe("awaiting-session");
+    // Early admission never widens a role, and a failed transport ends it.
+    expect(admitHostedRequestForState({ ...catchingUp, effectiveRole: "viewer" }, reads[0]!)).toBe(
+      "forbidden",
+    );
+    expect(
+      admitHostedRequestForState(
+        { ...catchingUp, transportStatus: "terminal-failure", sessionStatus: "stale" },
+        reads[0]!,
       ),
     ).toBe("forbidden");
   });

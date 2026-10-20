@@ -273,9 +273,13 @@ record per environment.
   a native client, nor one a terminal failure blocks (that waits for its directory entry to change
   or for a retry), nor anything refused before signing out or for another account.
 - **Readiness per record.** An environment admits requests once the browser is revalidated and its
-  own session is current. While the selected environment is still synchronizing the browser reports
-  `synchronizing`, which never holds back another environment whose own session is ready; a slow or
-  offline selection does not trigger a fresh access check on every foreground signal either.
+  own session is current. Observe-only unary reads — project lists, files, local changes, thread
+  history and diffs, the node's config and settings — do not wait for the session: they are
+  admitted once the environment's own channel is online (its mode locked) while its session is
+  synchronizing or replaying. Every other request, mutations included, waits for the session to
+  be current. While the selected environment is still synchronizing the browser reports
+  `synchronizing`, which never holds back another environment whose own session is ready; a slow
+  or offline selection does not trigger a fresh access check on every foreground signal either.
 - **Release.** The demand executor releases environments; returning to the node directory releases
   nothing. A relay drop of a live environment that nothing demands releases it instead of
   reconnecting it; it reconnects when it is demanded again. A rate limit hit by background demand
@@ -702,7 +706,12 @@ classified counts as a mutation.
   accepted its snapshot) from one refused for good (a role below the method's tier, a method no
   hosted role may call, or a terminally failed transport). A subscription refused only for now —
   such as the Agent Control queue on a client rebuilt during recovery — keeps re-checking locally
-  with a capped backoff and starts once the session is current, instead of ending.
+  with a capped backoff and starts once the session is current, instead of ending. Observe-only
+  unary reads do not wait that long: they are admitted as soon as the replacement channel is
+  online, before its session has accepted the snapshot. A read that refreshes derived state or
+  reaches out (a fetch, a model call, a credential) still waits for the session to be current, as
+  do read streams other than the session's own subscriptions, and an unconfirmed delivery holds
+  every read until the replacement session has accepted its snapshot.
 - **Orchestration commands** (`orchestration.dispatchCommand`) are idempotent by receipt: the node
   persists a receipt for each `commandId` in the same transaction as the command's events and
   answers a repeated id from it — before normalizing the command again — with the original result

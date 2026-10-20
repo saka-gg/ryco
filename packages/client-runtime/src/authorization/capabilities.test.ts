@@ -1,7 +1,9 @@
 import { EnvironmentId, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
+import { RPC_ACCESS_POLICY, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  hostedAdmitsReadBeforeSnapshot,
   hostedSessionAdmits,
   isHostedConnectionEstablishing,
   resolveHostedEnvironmentRpcCapability,
@@ -15,7 +17,11 @@ import {
   createHostedEnvironmentSessions,
   type HostedEnvironmentSessions,
 } from "./hostedEnvironmentSessions.ts";
-import { HOSTED_RELAY_TRANSPORT_STATUSES } from "./connectionStatus.ts";
+import {
+  HOSTED_BROWSER_STATUSES,
+  HOSTED_RELAY_TRANSPORT_STATUSES,
+  HOSTED_RYCO_SESSION_STATUSES,
+} from "./connectionStatus.ts";
 import type {
   HostedBrowserStatus,
   HostedHubNode,
@@ -111,6 +117,82 @@ describe("hosted session admission", () => {
         WS_METHODS.projectsReadFile,
       ),
     ).toBe(false);
+  });
+});
+
+/** Methods the delivery-effect policy calls reads, though they change or reach out. */
+const READS_THAT_REACH_OUT = [
+  WS_METHODS.authIssueLinkedDirectAccess,
+  WS_METHODS.providerPrewarmSession,
+  WS_METHODS.textGenerationGenerateBranchName,
+  WS_METHODS.textGenerationGenerateIssueContent,
+  WS_METHODS.vcsPrefetchWorktreeBase,
+  WS_METHODS.vcsRefreshStatus,
+  WS_METHODS.vcsListRefs,
+  WS_METHODS.serverRefreshProviders,
+  WS_METHODS.serverTestCliProxyHub,
+  ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
+  WS_METHODS.threadPriorityEnsureCurrent,
+] as const;
+
+describe("hosted reads before the snapshot", () => {
+  const catchingUp = {
+    transportStatus: "online",
+    browserStatus: "current",
+    sessionStatus: "synchronizing",
+  } as const;
+
+  it("admits exactly the observe-only reads, each classified as a read", () => {
+    const early = Object.keys(RPC_ACCESS_POLICY).filter((method) =>
+      hostedAdmitsReadBeforeSnapshot(catchingUp, method),
+    );
+    expect(early.toSorted()).toEqual(
+      [
+        WS_METHODS.projectsList,
+        WS_METHODS.projectsListEntries,
+        WS_METHODS.projectsSearchEntries,
+        WS_METHODS.projectsReadFile,
+        WS_METHODS.projectsReadIcon,
+        WS_METHODS.vcsReadLocalChanges,
+        WS_METHODS.vcsReadComparison,
+        WS_METHODS.vcsReadLineBlame,
+        ORCHESTRATION_WS_METHODS.getThreadWindow,
+        ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
+        ORCHESTRATION_WS_METHODS.getTurnDiff,
+        ORCHESTRATION_WS_METHODS.getFullThreadDiff,
+        WS_METHODS.serverGetConfig,
+        WS_METHODS.serverGetSettings,
+      ].toSorted(),
+    );
+    for (const method of early) expect(rpcDeliveryEffectFor(method)).toBe("read");
+  });
+
+  it("admits a read only on an online channel whose revalidated session is catching up", () => {
+    for (const transportStatus of HOSTED_RELAY_TRANSPORT_STATUSES) {
+      for (const browserStatus of HOSTED_BROWSER_STATUSES) {
+        for (const sessionStatus of HOSTED_RYCO_SESSION_STATUSES) {
+          const state = { transportStatus, browserStatus, sessionStatus };
+          expect(hostedAdmitsReadBeforeSnapshot(state, WS_METHODS.projectsReadFile)).toBe(
+            transportStatus === "online" &&
+              (browserStatus === "current" || browserStatus === "synchronizing") &&
+              (sessionStatus === "synchronizing" || sessionStatus === "replaying"),
+          );
+          for (const method of [
+            ...READS_THAT_REACH_OUT,
+            ORCHESTRATION_WS_METHODS.dispatchCommand,
+          ]) {
+            expect(hostedAdmitsReadBeforeSnapshot(state, method)).toBe(false);
+          }
+        }
+      }
+    }
+  });
+
+  it("never admits a read that changes or reaches out, though it is classified as a read", () => {
+    for (const method of READS_THAT_REACH_OUT) {
+      expect(rpcDeliveryEffectFor(method)).toBe("read");
+      expect(hostedAdmitsReadBeforeSnapshot(catchingUp, method)).toBe(false);
+    }
   });
 });
 
@@ -583,6 +665,140 @@ describe("per-environment hosted capability", () => {
     expect(resolve(sessions, ENV_X)).toBe(
       resolve(sessions, ENV_X, sharedState({ nodeOnline: null })),
     );
+  });
+
+  describe("observe-only reads before the snapshot", () => {
+    const resolveMethod = (
+      method: string,
+      sessions: HostedEnvironmentSessions,
+      environmentId: EnvironmentId | null | undefined,
+      shared: HostedSharedCapabilityState,
+      requireSnapshot?: boolean,
+    ) =>
+      resolveHostedEnvironmentRpcCapability({
+        hosted: true,
+        method,
+        shared,
+        record: environmentId == null ? undefined : sessions.read(environmentId),
+        environmentId,
+        ...(requireSnapshot === undefined ? {} : { requireSnapshot }),
+      });
+    const ready = resolveHostedRpcCapability({
+      hosted: true,
+      role: "operator",
+      fresh: true,
+      method: dispatch,
+    });
+    const read = WS_METHODS.projectsReadFile;
+
+    it.each([
+      ["current", "synchronizing"],
+      ["current", "replaying"],
+      ["synchronizing", "synchronizing"],
+    ] as const)(
+      "admits a read on the selection while the browser is %s and the session %s",
+      (browserStatus, sessionStatus) => {
+        const sessions = createSessions();
+        const shared = sharedState({ browserStatus, sessionStatus });
+        for (const environmentId of [undefined, null, ENV_Y]) {
+          expect(resolveMethod(read, sessions, environmentId, shared)).toBe(ready);
+          expect(resolveMethod(read, sessions, environmentId, shared, true)).toEqual({
+            hosted: true,
+            allowed: false,
+            reason: STALE_REASON,
+            kind: "establishing",
+          });
+          expect(resolveMethod(dispatch, sessions, environmentId, shared)).toMatchObject({
+            allowed: false,
+            kind: "establishing",
+          });
+        }
+      },
+    );
+
+    it.each([
+      ["current", "synchronizing"],
+      ["current", "replaying"],
+      ["synchronizing", "synchronizing"],
+    ] as const)(
+      "admits a read on another environment while the browser is %s and its session %s",
+      (browserStatus, session) => {
+        const sessions = createSessions();
+        connect(sessions, ENV_X, { session });
+        const shared = sharedState({ browserStatus, sessionStatus: "synchronizing" });
+        expect(resolveMethod(read, sessions, ENV_X, shared)).toBe(ready);
+        expect(resolveMethod(read, sessions, ENV_X, shared, true)).toEqual({
+          hosted: true,
+          allowed: false,
+          reason: STALE_REASON,
+          kind: "establishing",
+        });
+        expect(resolveMethod(dispatch, sessions, ENV_X, shared)).toMatchObject({
+          allowed: false,
+          kind: "establishing",
+        });
+      },
+    );
+
+    it("keeps a read that changes or reaches out waiting for the snapshot", () => {
+      const sessions = createSessions();
+      connect(sessions, ENV_X, { session: "synchronizing" });
+      const shared = sharedState({ sessionStatus: "synchronizing" });
+      for (const method of [WS_METHODS.providerPrewarmSession, WS_METHODS.vcsListRefs]) {
+        expect(resolveMethod(method, sessions, ENV_X, shared)).toMatchObject({
+          allowed: false,
+          kind: "establishing",
+        });
+        expect(resolveMethod(method, sessions, ENV_Y, shared)).toMatchObject({
+          allowed: false,
+          kind: "establishing",
+        });
+      }
+    });
+
+    it("still applies the role the read requires", () => {
+      const sessions = createSessions();
+      connect(sessions, ENV_X, { role: "viewer", session: "synchronizing" });
+      const shared = sharedState({ effectiveRole: "viewer", sessionStatus: "synchronizing" });
+      expect(resolveMethod(read, sessions, ENV_X, shared)).toEqual({
+        hosted: true,
+        allowed: false,
+        reason: NODE_ROLE_REASON,
+        kind: "role",
+      });
+      expect(resolveMethod(read, sessions, ENV_Y, shared)).toEqual({
+        hosted: true,
+        allowed: false,
+        reason: SELECTED_NODE_ROLE_REASON,
+        kind: "role",
+      });
+      // A viewer-tier read is open to the viewer.
+      expect(resolveMethod(WS_METHODS.projectsList, sessions, ENV_X, shared)).toBe(ready);
+    });
+
+    it("admits nothing early to a session that is not catching up on an online channel", () => {
+      const sessions = createSessions();
+      const generation = connect(sessions, ENV_X, { session: "synchronizing" });
+      sessions.markDeliveryUnknown(ENV_X, generation);
+      expect(resolveMethod(read, sessions, ENV_X, sharedState())).toMatchObject({
+        allowed: false,
+        kind: "delivery-unknown",
+      });
+      connect(sessions, ENV_Z, { transport: "opening-channel", session: "synchronizing" });
+      expect(resolveMethod(read, sessions, ENV_Z, sharedState())).toMatchObject({
+        allowed: false,
+        kind: "establishing",
+      });
+      for (const shared of [
+        sharedState({ sessionStatus: "delivery-unknown" }),
+        sharedState({ sessionStatus: "stale" }),
+        sharedState({ transportStatus: "reconnecting", sessionStatus: "stale" }),
+        sharedState({ browserStatus: "checking-access", sessionStatus: "synchronizing" }),
+        sharedState({ directoryStatus: "loading", sessionStatus: "synchronizing" }),
+      ]) {
+        expect(resolveMethod(read, sessions, ENV_Y, shared).allowed).toBe(false);
+      }
+    });
   });
 });
 
