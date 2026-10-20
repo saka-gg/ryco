@@ -662,8 +662,12 @@ reconnect after a relay drop or a Hub session loss (a deploy, a restart, a proxy
 warm environment nothing demands is released and reconnects on demand, so a Hub restart does not
 spend a reconnect, and a ticket, per warm environment of every tab. Reconnect uses exponential
 backoff from one second to 60 seconds with bounded ±20% jitter and bounded Hub `retryAfterMs` input.
-The delay resets only after a session remains stable for 60 seconds. Every retry obtains a fresh
-ticket.
+The delay resets only after a session remains stable for 60 seconds. A demanded environment
+waiting in that backoff retries after a short random delay when the directory reports its node
+online again: at most once per presence change and per ten seconds, never before a Hub
+`retryAfterMs`, and not while the Hub rate-limits the connection, has closed it as a slow consumer,
+or is draining. The backoff itself keeps growing until a session stays stable. Every retry obtains
+a fresh ticket.
 
 Retryable cases include generic browser network failure, node offline, Hub draining, connection
 replacement, rate limiting, slow-consumer closure, and retryable ticket expiry. Revocation,

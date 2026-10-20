@@ -157,6 +157,7 @@ const standardHostedEnvironmentSessions: {
   getSnapshot: () => EMPTY_ENVIRONMENT_SESSIONS,
   subscribe: release,
   isCurrentGeneration: () => false,
+  presenceOnlineEdges: () => 0,
   ensureRecord: () => hostedOnly("ensureRecord"),
   markConnectRequested: ignore,
   renew: () => undefined,

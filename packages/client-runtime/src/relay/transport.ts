@@ -238,6 +238,12 @@ export interface HostedRelayAttemptBinding {
     readonly stream: boolean;
   }) => RpcRequestAdmission;
   readonly subscribeAdmissionChanges?: (listener: () => void) => () => void;
+  /**
+   * Calls `listener` when the directory reports this connection's node online
+   * again while the connection may reconnect; held only while a reconnect
+   * delay is pending, so the retry can come early.
+   */
+  readonly subscribePresenceWake?: (listener: () => void) => () => void;
   readonly shouldReconnect: (generation: number) => boolean;
   readonly transportStatus: (generation: number, status: HostedRelayTransportStatus) => void;
   readonly sessionStatus: (generation: number, status: HostedRycoSessionStatus) => void;
@@ -630,6 +636,7 @@ export class HostedRelayAttemptFactory {
   lifecycleHandlers(
     receiptedRequestOwner?: HostedReceiptedRequestOwner,
   ): WsProtocolLifecycleHandlers {
+    const subscribePresenceWake = this.#binding.subscribePresenceWake;
     return {
       webSocketConstructor: (url) => this.createSocket(url) as WebSocket,
       isSocketCurrent: (socket) => socket === this.#activeSocket,
@@ -657,6 +664,18 @@ export class HostedRelayAttemptFactory {
       authorizeRequest: (info) => this.#binding.authorizeRequest(info),
       ...(this.#binding.subscribeAdmissionChanges
         ? { subscribeAdmissionChanges: this.#binding.subscribeAdmissionChanges }
+        : {}),
+      // The node is back: retry soon instead of waiting out the backoff,
+      // unless the reconnect policy holds the wait.
+      ...(subscribePresenceWake
+        ? {
+            subscribeReconnectWake: (listener: (delayMs: number) => void) =>
+              subscribePresenceWake(() => {
+                if (this.#disposed) return;
+                const delay = this.#reconnect.wake();
+                if (delay !== null) listener(delay);
+              }),
+          }
         : {}),
       getReconnectDelayMs: () => {
         const delay = this.#reconnect.nextDelay(this.#lastRetryAfterMs);

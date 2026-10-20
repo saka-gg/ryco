@@ -75,6 +75,14 @@ export interface WsProtocolLifecycleHandlers {
   readonly retryTransientErrors?: boolean;
   readonly reconnectMaxRetries?: number;
   readonly getReconnectDelayMs?: (retryCount: number) => number;
+  /**
+   * Lets the reconnect wait end early. Consulted only while a reconnect delay is
+   * pending: the listener is subscribed when the delay starts and unsubscribed
+   * when it ends. The first wake of a delay waits `delayMs` instead of the rest
+   * of the delay, whichever ends first; later wakes of the same delay do
+   * nothing.
+   */
+  readonly subscribeReconnectWake?: (listener: (delayMs: number) => void) => () => void;
   readonly preserveSocketPath?: boolean;
   readonly shouldReconnect?: () => boolean;
   /**
@@ -308,6 +316,32 @@ function withUrlProviderTimeout(
   );
 }
 
+/**
+ * Waits out a reconnect delay, unless a wake arrives first: the first wake
+ * while the delay is pending starts the wake's own delay, and whichever of the
+ * two ends first ends the wait. The wake listener lives only as long as the
+ * wait.
+ */
+function sleepUnlessWoken(
+  delay: Duration.Duration,
+  subscribeWake: (listener: (delayMs: number) => void) => () => void,
+): Effect.Effect<void> {
+  const woken = Effect.callback<void>((resume) => {
+    const wake: { fired: boolean; unsubscribe?: () => void } = { fired: false };
+    wake.unsubscribe = subscribeWake((delayMs) => {
+      if (wake.fired) return;
+      wake.fired = true;
+      wake.unsubscribe?.();
+      resume(Effect.sleep(Duration.millis(Math.max(0, delayMs))));
+    });
+    // A wake delivered while subscribing could not unsubscribe yet.
+    if (wake.fired) wake.unsubscribe();
+    // Interrupted: the delay ended first, or the socket's scope closed.
+    return Effect.sync(() => wake.unsubscribe?.());
+  });
+  return Effect.raceFirst(Effect.sleep(delay), woken);
+}
+
 export function createWsRpcProtocolLayer(
   url: WsRpcProtocolSocketUrlProvider,
   socketService: SocketService,
@@ -315,7 +349,8 @@ export function createWsRpcProtocolLayer(
 ) {
   const lifecycle = composeLifecycleHandlers(handlers);
   const persistent = handlers?.persistentReconnect === true;
-  const retryPolicy = Schedule.addDelay(
+  const subscribeReconnectWake = handlers?.subscribeReconnectWake;
+  const reconnectSchedule = Schedule.addDelay(
     Schedule.recurs(
       handlers?.reconnectMaxRetries ??
         (persistent ? Number.MAX_SAFE_INTEGER : WS_RECONNECT_MAX_RETRIES),
@@ -331,6 +366,14 @@ export function createWsRpcProtocolLayer(
         ),
       ),
   ).pipe(Schedule.while(() => lifecycle.isActive() && (handlers?.shouldReconnect?.() ?? true)));
+  // With a wake, the schedule waits out its delay itself, after the gate above
+  // allowed the retry, and leaves nothing for the retry to sleep.
+  const retryPolicy =
+    subscribeReconnectWake === undefined
+      ? reconnectSchedule
+      : Schedule.modifyDelay(reconnectSchedule, ({ duration }) =>
+          Effect.as(sleepUnlessWoken(duration, subscribeReconnectWake), Duration.zero),
+        );
   const isTerminalUrlError = (error: WsUrlProviderError) =>
     handlers?.isTerminalUrlError?.(error.cause) === true;
   const resolvedUrl =

@@ -9,6 +9,7 @@ import type {
   HostedBrowserStatus,
   HostedDirectoryStatus,
   HostedRelayFailure,
+  HostedRelayFailureKind,
 } from "../authorization/types.ts";
 import {
   admitHostedRequestForState,
@@ -75,6 +76,59 @@ export interface HostedEnvironmentAttemptFactory {
   readonly factory: HostedRelayAttemptFactory;
   readonly binding: HostedRelayAttemptBinding;
   readonly generation: number;
+  /** This connection's presence wake; see {@link createHostedPresenceWake}. */
+  readonly subscribePresenceWake: (listener: () => void) => () => void;
+}
+
+export interface HostedPresenceWakeOptions {
+  readonly sessions: HostedEnvironmentSessions;
+  readonly environmentId: EnvironmentId;
+  /** The record generation the waiting connection belongs to. */
+  readonly generation: number;
+  /** Whether the connection of that generation may reconnect at all. */
+  readonly shouldReconnect: (generation: number) => boolean;
+  /** The kind of the connection's last failure since its transport was last online. */
+  readonly outageFailure: () => HostedRelayFailureKind | null;
+}
+
+/**
+ * Failures whose wait is the Hub's to set: a node coming back online does not
+ * shorten it.
+ */
+const PRESENCE_WAKE_HELD_BY: ReadonlySet<HostedRelayFailureKind> = new Set([
+  "rate-limited",
+  "slow-consumer",
+  "draining",
+]);
+
+/**
+ * Tells a connection waiting to reconnect that the directory reported its
+ * node online again. Each subscription — one per pending reconnect delay —
+ * fires only for edges counted while it is held, at most once per edge, and
+ * only while the record of `generation` is current, its connection may
+ * reconnect and its outage is not waiting on the Hub. An edge that arrived
+ * before the subscription never fires, and it never fires while subscribing.
+ */
+export function createHostedPresenceWake(
+  options: HostedPresenceWakeOptions,
+): (listener: () => void) => () => void {
+  const { sessions, environmentId, generation, shouldReconnect, outageFailure } = options;
+  return (listener) => {
+    let consumed = sessions.presenceOnlineEdges(environmentId);
+    return sessions.subscribe(() => {
+      const edges = sessions.presenceOnlineEdges(environmentId);
+      if (edges <= consumed) return;
+      consumed = edges;
+      const failure = outageFailure();
+      if (
+        sessions.isCurrentGeneration(environmentId, generation) &&
+        shouldReconnect(generation) &&
+        (failure === null || !PRESENCE_WAKE_HELD_BY.has(failure))
+      ) {
+        listener();
+      }
+    });
+  };
 }
 
 /**
@@ -101,6 +155,16 @@ export function createHostedEnvironmentAttemptFactory(
       ? record
       : undefined;
   };
+  // The kind of this generation's last failure since its transport was last
+  // online: what the current outage, if any, is waiting out.
+  let outageFailure: HostedRelayFailureKind | null = null;
+  const subscribePresenceWake = createHostedPresenceWake({
+    sessions,
+    environmentId,
+    generation,
+    shouldReconnect: (attemptGeneration) => binding.shouldReconnect(attemptGeneration),
+    outageFailure: () => outageFailure,
+  });
 
   const binding: HostedRelayAttemptBinding = {
     ...hostedRuntimeAttemptPorts(),
@@ -140,6 +204,7 @@ export function createHostedEnvironmentAttemptFactory(
         unsubscribeSessions();
       };
     },
+    subscribePresenceWake,
     shouldReconnect(attemptGeneration) {
       const record = currentRecord(attemptGeneration);
       const shared = readShared();
@@ -153,12 +218,15 @@ export function createHostedEnvironmentAttemptFactory(
         (isDemanded?.() ?? true)
       );
     },
-    transportStatus: (attemptGeneration, status) =>
-      sessions.transportStatus(environmentId, attemptGeneration, status),
+    transportStatus: (attemptGeneration, status) => {
+      if (status === "online" && attemptGeneration === generation) outageFailure = null;
+      sessions.transportStatus(environmentId, attemptGeneration, status);
+    },
     sessionStatus: (attemptGeneration, status) =>
       sessions.sessionStatus(environmentId, attemptGeneration, status),
     role: (attemptGeneration, role) => sessions.role(environmentId, attemptGeneration, role),
     failure(attemptGeneration, failure) {
+      if (attemptGeneration === generation) outageFailure = failure.kind;
       // The record fails closed first: a broken platform hook can neither keep
       // it from doing so nor break the transport's own failure handling.
       sessions.failure(environmentId, attemptGeneration, failure);
@@ -181,5 +249,5 @@ export function createHostedEnvironmentAttemptFactory(
   sessions.registerPendingRequestReader(environmentId, generation, () =>
     factory.hasPendingRequests(),
   );
-  return { factory, binding, generation };
+  return { factory, binding, generation, subscribePresenceWake };
 }

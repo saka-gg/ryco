@@ -553,6 +553,72 @@ describe("hosted environment sessions", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
+  it("counts each time the directory reports a known node online again", () => {
+    const sessions = createSessions();
+    const offline = { presence: { online: false, lastHeartbeatAt: 1 } };
+    // A record created for a node that is online or offline has no edge yet.
+    sessions.ensureRecord(hubNode(ENV_A, offline));
+    sessions.ensureRecord(hubNode(ENV_B));
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(0);
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(0);
+
+    sessions.ensureRecord(hubNode(ENV_A), { access: false });
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(1);
+    // Online again, or a node that never went offline, is no edge.
+    sessions.ensureRecord(hubNode(ENV_A));
+    sessions.ensureRecord(hubNode(ENV_B), { access: false });
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(1);
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(0);
+
+    sessions.ensureRecord(hubNode(ENV_A, offline), { access: false });
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(1);
+    sessions.ensureRecord(hubNode(ENV_A));
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(2);
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(0);
+  });
+
+  it("shows an online edge to the listeners of the publish that carries it", () => {
+    const sessions = createSessions();
+    sessions.ensureRecord(hubNode(ENV_A, { presence: { online: false, lastHeartbeatAt: 1 } }));
+    const seen: number[] = [];
+    sessions.subscribe(() => seen.push(sessions.presenceOnlineEdges(ENV_A)));
+
+    sessions.ensureRecord(hubNode(ENV_A), { access: false });
+
+    expect(seen).toEqual([1]);
+  });
+
+  it("keeps online edges across a renew and drops them on release and clear", () => {
+    const sessions = createSessions();
+    const offline = { presence: { online: false, lastHeartbeatAt: 1 } };
+    const flap = (environmentId: EnvironmentId) => {
+      sessions.ensureRecord(hubNode(environmentId, offline), { access: false });
+      sessions.ensureRecord(hubNode(environmentId), { access: false });
+    };
+    sessions.ensureRecord(hubNode(ENV_A));
+    sessions.ensureRecord(hubNode(ENV_B));
+    flap(ENV_A);
+    flap(ENV_B);
+
+    sessions.renew(ENV_A);
+    sessions.suspendAll();
+    sessions.withdrawAll();
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(1);
+    flap(ENV_A);
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(2);
+
+    sessions.release(ENV_A);
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(0);
+    sessions.ensureRecord(hubNode(ENV_A));
+    expect(sessions.presenceOnlineEdges(ENV_A)).toBe(0);
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(1);
+
+    sessions.clear();
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(0);
+    sessions.ensureRecord(hubNode(ENV_B, offline));
+    expect(sessions.presenceOnlineEdges(ENV_B)).toBe(0);
+  });
+
   it("answers the adoption, join and live rules", () => {
     const sessions = createSessions();
     const { generation } = sessions.ensureRecord(hubNode(ENV_A));
