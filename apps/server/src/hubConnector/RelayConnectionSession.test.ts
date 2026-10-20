@@ -310,6 +310,35 @@ describe("RelayConnectionSession", () => {
     expect(() => session.activateFrameDelivery()).toThrow("Hub relay connection failed.");
   });
 
+  it.each([
+    ["sends the node's version beside the proof", "0.1.33", "0.1.33"],
+    ["omits a version the frame schema would refuse", " 0.1.33 ", undefined],
+    ["omits the version when none is known", undefined, undefined],
+  ])("%s", async (_name, clientVersion, expected) => {
+    const socket = new FakeSocket();
+    const session = new RelayConnectionSession({
+      identity: identity(),
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      ...(clientVersion === undefined ? {} : { clientVersion }),
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    void session.authenticate().catch(() => undefined);
+    await proofPrepared();
+    socket.emit("open", {} as Event);
+    await proofPrepared();
+    const sent = socket.sent[0];
+    if (sent === undefined) throw new Error("no auth frame sent");
+    const decoded = decodeRelayFrame(sent);
+    if (!decoded.ok || decoded.value.type !== "auth" || decoded.value.peer !== "node") {
+      throw new Error("expected a node auth frame");
+    }
+    expect(decoded.value.clientVersion).toBe(expected);
+    expect("clientVersion" in decoded.value).toBe(expected !== undefined);
+    session.close();
+  });
+
   it("negotiates minor 2 when a minor-3 node meets an older Hub", async () => {
     const socket = new FakeSocket();
     const routed: RelayFrame[] = [];

@@ -5,10 +5,12 @@ import {
   RELAY_PROTOCOL_MINOR,
   type RelayErrorFrame,
   type RelayFrame,
+  RelayNodeClientVersion,
   type RelayNodeAuthHandshake,
   type RelayReadyFrame,
 } from "@ryco/contracts/relay";
 import { decodeRelayFrame, encodeRelayFrame } from "@ryco/shared/relayCodec";
+import { Schema } from "effect";
 
 import type { ConnectorFailureKind } from "./HubConnectorState.ts";
 import { HubRelayAuthenticationError, type HubIdentityRuntimeShape } from "./HubIdentityRuntime.ts";
@@ -40,6 +42,8 @@ export const defaultRelayScheduler: RelaySessionScheduler = {
   setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
+
+const isRelayNodeClientVersion = Schema.is(RelayNodeClientVersion);
 
 function unwrapEncoded(frame: RelayFrame): Uint8Array {
   const result = encodeRelayFrame(frame);
@@ -214,6 +218,7 @@ export class RelayConnectionSession {
   readonly #onTerminal: (error: RelayConnectionError) => void;
   readonly #now: () => number;
   readonly #proofFirst: boolean;
+  readonly #clientVersion: string | undefined;
   #proofRefused = false;
   #proofRequestedAt: number | undefined;
   #proofSentAt: number | undefined;
@@ -251,6 +256,11 @@ export class RelayConnectionSession {
      * handed a relay upgrade it does not want on every retry.
      */
     readonly proofFirst?: boolean;
+    /**
+     * This node's software version, sent beside the proof so the Hub's record of the node stays
+     * current after updates. Display metadata only; it is not signed.
+     */
+    readonly clientVersion?: string;
     readonly onFrame: (frame: RelayFrame) => void;
     readonly onTerminal: (error: RelayConnectionError) => void;
   }) {
@@ -260,6 +270,11 @@ export class RelayConnectionSession {
     this.#scheduler = options.scheduler ?? defaultRelayScheduler;
     this.#now = options.now ?? Date.now;
     this.#proofFirst = options.proofFirst ?? false;
+    // A version the frame schema would refuse is left out rather than failing the connection.
+    this.#clientVersion =
+      options.clientVersion !== undefined && isRelayNodeClientVersion(options.clientVersion)
+        ? options.clientVersion
+        : undefined;
     this.#onFrame = options.onFrame;
     this.#onTerminal = options.onTerminal;
   }
@@ -341,7 +356,9 @@ export class RelayConnectionSession {
       throw new RelayConnectionError("network");
     }
     try {
-      return unwrapEncoded(auth);
+      return unwrapEncoded(
+        this.#clientVersion === undefined ? auth : { ...auth, clientVersion: this.#clientVersion },
+      );
     } finally {
       auth.nonce.fill(0);
       auth.signature.fill(0);
