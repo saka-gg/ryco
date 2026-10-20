@@ -34,6 +34,7 @@ const hostedMock = vi.hoisted(() => ({
   },
 }));
 const mountEffects = vi.hoisted(() => [] as Array<() => void>);
+const directoryDemandMock = vi.hoisted(() => vi.fn());
 const confirmMock = vi.hoisted(() =>
   vi.fn((request: { readonly onConfirm: () => void }) => request.onConfirm()),
 );
@@ -62,7 +63,13 @@ vi.mock("react", async (importOriginal) => {
     useSyncExternalStore: <T>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
   };
 });
-vi.mock("@react-navigation/native", () => ({ useNavigation: () => navigationMock }));
+vi.mock("@react-navigation/native", () => ({
+  useIsFocused: () => true,
+  useNavigation: () => navigationMock,
+}));
+vi.mock("../../hostedHub/directoryDemand", () => ({
+  useDirectoryPresenceDemand: directoryDemandMock,
+}));
 vi.mock("../../components/ConfirmDialogHost", () => ({ showConfirmDialog: confirmMock }));
 vi.mock("../../components/NavigationHeaderButton", () => ({
   NavigationHeaderButton: "NavigationHeaderButton",
@@ -183,12 +190,18 @@ beforeEach(() => {
   hostedMock.controller.refreshDirectory.mockClear();
   hostedMock.controller.retrySelectedNode.mockClear();
   mountEffects.length = 0;
+  directoryDemandMock.mockClear();
   hostedMock.available = false;
   threadsStoreMock.setActiveEnvironmentId.mockClear();
   rowsMock.rows = [savedRow("env-1", "Studio Mac")];
 });
 
 describe("Machines — direct plane", () => {
+  it("holds directory presence demand while focused", () => {
+    ConnectionsRouteScreen();
+    expect(directoryDemandMock).toHaveBeenCalledWith(true);
+  });
+
   it("labels both planes as separate sections", () => {
     const rendered = texts(ConnectionsRouteScreen());
     expect(rendered).toContain("Paired directly");

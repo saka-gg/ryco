@@ -142,7 +142,10 @@ report them even by mistake.
 The account-scoped Hub session pushes directory changes immediately. Directory refresh retains
 a two-minute visible-page backstop while the subscription is online. Without a live subscription,
 it runs every 20 seconds, or every 5 seconds while demand waits on an offline node for at most five
-minutes. The faster cadence never shortens a failure backoff. Failures retain the last bounded directory as stale, clear role
+minutes. A client that opts in (the native app, whose every directory read is signed with its device
+key) keeps the 20-second cadence only while a screen that shows node presence is in front, and
+otherwise uses the two-minute backstop; returning to such a screen refreshes at once when the last
+read is older than 20 seconds. The faster cadence never shortens a failure backoff. Failures retain the last bounded directory as stale, clear role
 authority, disable selection/actions, and retry with a capped delay.
 Machine-detail focus is preserved only while both node ID and environment ID match. Authorization
 removal or an identity change closes that exact environment's live demand.

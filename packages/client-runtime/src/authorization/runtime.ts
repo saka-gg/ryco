@@ -100,6 +100,15 @@ export interface HostedRuntimeConfiguration {
   /** A live account subscription pushes directory changes independently of node channels. */
   readonly hasLiveHubSubscription?: () => boolean;
   /**
+   * Without a live account subscription, poll the directory at the normal
+   * cadence only while a surface that shows node presence holds demand (see
+   * `retainHostedDirectoryPresenceDemand`), and at the two-minute backstop
+   * otherwise. For clients whose directory reads are costly: a device-key
+   * signature and a radio wakeup each. Omitted, the normal cadence always
+   * applies.
+   */
+  readonly demandDrivenDirectoryRefresh?: boolean;
+  /**
    * Ask the account subscription to prove it is alive now (a ping with a short
    * bound) because something suggests it may not be: a relay request has gone
    * unanswered unusually long. A dead connection then fails through the

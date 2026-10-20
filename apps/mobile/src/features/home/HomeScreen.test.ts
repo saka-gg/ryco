@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const navigationMock = vi.hoisted(() => ({ setOptions: vi.fn(), navigate: vi.fn() }));
 const dispatchMock = vi.hoisted(() => vi.fn());
+const directoryDemandMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
@@ -60,6 +61,9 @@ vi.mock("../../hostedHub/state", () => ({
   useMobileHostedConnectionsStore: (selector: (state: Record<string, unknown>) => unknown) =>
     selector({ selectedNodes: [], deliveryUnknownEnvironmentIds: [] }),
 }));
+vi.mock("../../hostedHub/directoryDemand", () => ({
+  useDirectoryPresenceDemand: directoryDemandMock,
+}));
 vi.mock("../../state/homeData", () => ({
   useHomeWorkspaceData: () => ({ projects: [], worktrees: [], threads: [] }),
 }));
@@ -94,6 +98,12 @@ describe("C1 Home header", () => {
     navigationMock.setOptions.mockClear();
     navigationMock.navigate.mockClear();
     dispatchMock.mockClear();
+    directoryDemandMock.mockClear();
+  });
+
+  it("holds directory presence demand while focused", () => {
+    HomeScreen();
+    expect(directoryDemandMock).toHaveBeenCalledWith(true);
   });
 
   it("labels the initial workspace Inbox and registers both header sides", () => {

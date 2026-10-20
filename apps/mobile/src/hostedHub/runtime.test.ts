@@ -257,6 +257,7 @@ describe("hosted runtime configuration", () => {
     expect(typeof configuration.isForeground).toBe("function");
     expect(typeof configuration.subscribeForeground).toBe("function");
     expect(typeof configuration.hasPendingRelayRequests).toBe("function");
+    expect(configuration.demandDrivenDirectoryRefresh).toBe(true);
     expect(typeof configuration.resetRelayAttemptFactory).toBe("function");
     expect(typeof configuration.relayUrl).toBe("function");
     expect(typeof configuration.createRelaySocket).toBe("function");
