@@ -26,14 +26,18 @@
 // is assertable from a node test and the `.tsx` owns only the name-to-component
 // mapping.
 
+import type { EnvironmentId } from "@ryco/contracts";
+
 import {
   deriveHostedConnectionStatusIndicator,
   describeHostedConnectionPhase,
   HOSTED_CONNECTION_STATUS_INDICATORS,
   hostedBrowserRevalidated,
+  selectedProjectionFields,
   type HostedConnectionGuarantee,
   type HostedConnectionStatusIndicator,
   type HostedConnectionStatusText,
+  type HostedEnvironmentSessionRecord,
   type HostedHubState,
   type WebHostedE2eeChannelStatus,
 } from "../../hostedHub/connectionStatus";
@@ -151,8 +155,20 @@ export interface HostedConnectionChipInput extends HostedConnectionChipSource {
   readonly e2eeStatus: WebHostedE2eeChannelStatus;
 }
 
+/** The hosted state a chip for one named environment is derived from. */
+export interface HostedEnvironmentConnectionChipInput extends HostedConnectionChipSource {
+  /** The environment the chip describes, whether or not it is the selected one. */
+  readonly environmentId: EnvironmentId;
+  /** Its own session record. Only read while it is not the selected environment. */
+  readonly record: HostedEnvironmentSessionRecord | undefined;
+  /** An earlier action on it is still unconfirmed. Only read while it has no record. */
+  readonly deliveryUnknown: boolean;
+  /** Its own channel's state, never the selected environment's. */
+  readonly e2eeStatus: WebHostedE2eeChannelStatus;
+}
+
 export interface HostedConnectionChip {
-  /** The node the chip names: the selected one, or the one the route is opening. */
+  /** The node the chip names: the selected one, the one the route is opening, or the one asked for. */
   readonly node: HostedHubNode;
   readonly role: HostedHubState["effectiveRole"];
   readonly statusText: HostedConnectionStatusText | typeof HOSTED_CONNECTING_STATUS_TEXT;
@@ -186,14 +202,116 @@ function hostedSwitchTargetNode(input: HostedConnectionChipInput): HostedHubNode
 }
 
 /**
- * The single chip every connection surface renders: which node it names, the
- * bounded status words, and the indicator beside them.
+ * One environment's session, as a connection surface describes it: the shared
+ * session fields for the selected environment, the environment's own record
+ * for any other.
+ */
+interface HostedEnvironmentConnection {
+  readonly node: HostedHubNode;
+  readonly role: HostedHubState["effectiveRole"];
+  readonly browserStatus: HostedHubState["browserStatus"];
+  readonly selectionStatus: HostedHubState["selectionStatus"];
+  readonly transportStatus: HostedHubState["transportStatus"];
+  readonly sessionStatus: HostedHubState["sessionStatus"];
+  /** No error is waiting to be shown, so a session that is not up yet is on its way. */
+  readonly quiet: boolean;
+  readonly e2eeStatus: WebHostedE2eeChannelStatus;
+}
+
+/** The selected environment, as the shared session fields describe it. */
+function selectedEnvironmentConnection(
+  input: HostedConnectionChipSource & { readonly e2eeStatus: WebHostedE2eeChannelStatus },
+  node: HostedHubNode,
+): HostedEnvironmentConnection {
+  return {
+    node,
+    role: input.effectiveRole,
+    browserStatus: input.browserStatus,
+    selectionStatus: input.selectionStatus,
+    transportStatus: input.transportStatus,
+    sessionStatus: input.sessionStatus,
+    quiet: input.errorMessage === null,
+    e2eeStatus: input.e2eeStatus,
+  };
+}
+
+/**
+ * Another environment, as its own record describes it — the projection the
+ * shared fields get when it is selected. The account and the directory were
+ * revalidated once for every environment, so a browser still synchronizing the
+ * selection counts as current here, the rule the capability policy applies to
+ * the same environment. The directory's revocation wins over a record that has
+ * not heard of it yet.
+ */
+function recordEnvironmentConnection(
+  input: HostedEnvironmentConnectionChipInput,
+  node: HostedHubNode,
+): HostedEnvironmentConnection {
+  const fields = selectedProjectionFields(input.record, node, {
+    directoryReady: input.directoryStatus === "ready",
+    deliveryUnknown: input.deliveryUnknown,
+  });
+  return {
+    node,
+    role: fields.effectiveRole,
+    browserStatus: hostedBrowserRevalidated(input.browserStatus) ? "current" : input.browserStatus,
+    selectionStatus: node.revokedAt !== null ? "revoked" : fields.selectionStatus,
+    transportStatus: fields.transportStatus,
+    sessionStatus: fields.sessionStatus,
+    quiet: fields.error === null,
+    e2eeStatus: input.e2eeStatus,
+  };
+}
+
+/**
+ * The one place a session becomes the bounded words and the indicator beside
+ * them, for every surface and every environment.
  *
- * An intentional connect — a fresh selection, a reconnect, or a switch to the
- * node the route is opening — reads `Connecting…` and nothing else, so the
- * transport's steps never reach the screen. During a switch the chip names the
- * TARGET node, not the one still selected. Failures, an offline node, a stale
+ * An intentional connect reads `Connecting…` and nothing else, so the
+ * transport's steps never reach the screen. Failures, an offline node, a stale
  * browser and every channel label come out of the shared derivation unchanged.
+ */
+function describeHostedEnvironmentConnection(
+  input: Pick<HostedHubState, "accountStatus" | "directoryStatus">,
+  connection: HostedEnvironmentConnection,
+): HostedConnectionChip {
+  const statusInput = {
+    browserStatus: connection.browserStatus,
+    sessionStatus: connection.sessionStatus,
+    selectionStatus: connection.selectionStatus,
+    transportStatus: connection.transportStatus,
+    e2eeStatus: connection.e2eeStatus,
+  };
+  const phase = describeHostedConnectionPhase({
+    ...statusInput,
+    accountAuthenticated: input.accountStatus === "authenticated",
+    directoryReady: input.directoryStatus === "ready",
+    quiet: connection.quiet,
+  });
+  if (phase === "Connecting") {
+    return {
+      node: connection.node,
+      role: connection.role,
+      statusText: HOSTED_CONNECTING_STATUS_TEXT,
+      indicator: HOSTED_CONNECTION_STATUS_INDICATORS.connecting,
+      switching: false,
+    };
+  }
+  return {
+    node: connection.node,
+    role: connection.role,
+    statusText: phase,
+    indicator: deriveHostedConnectionStatusIndicator(statusInput),
+    switching: false,
+  };
+}
+
+/**
+ * The chip the phone connection surfaces render: the selected node, with its
+ * bounded status words and the indicator beside them.
+ *
+ * During a switch to the node the route is opening the chip names the TARGET
+ * node, not the one still selected, and reads `Connecting…` (or `Offline`).
  * `null` while there is no node to name.
  */
 export function deriveHostedConnectionChip(
@@ -219,36 +337,42 @@ export function deriveHostedConnectionChip(
   }
   const node = input.selectedNode;
   if (!node) return null;
+  return describeHostedEnvironmentConnection(input, selectedEnvironmentConnection(input, node));
+}
 
-  const statusInput = {
-    browserStatus: input.browserStatus,
-    sessionStatus: input.sessionStatus,
-    selectionStatus: input.selectionStatus,
-    transportStatus: input.transportStatus,
-    e2eeStatus: input.e2eeStatus,
-  };
-  const phase = describeHostedConnectionPhase({
-    ...statusInput,
-    accountAuthenticated: input.accountStatus === "authenticated",
-    directoryReady: input.directoryStatus === "ready",
-    quiet: input.errorMessage === null,
-  });
-  if (phase === "Connecting") {
-    return {
-      node,
-      role: input.effectiveRole,
-      statusText: HOSTED_CONNECTING_STATUS_TEXT,
-      indicator: HOSTED_CONNECTION_STATUS_INDICATORS.connecting,
-      switching: false,
-    };
+/**
+ * The chip for one named environment — the open thread's — whether or not the
+ * selection cursor is on it.
+ *
+ * The selected environment reads the shared session fields, exactly as
+ * {@link deriveHostedConnectionChip} does; any other reads its own session
+ * record and its own channel, so a warm environment the cursor has left still
+ * reports its own legacy or browser channel rather than the selection's.
+ * `null` when the directory does not list the environment's node.
+ */
+export function deriveHostedEnvironmentConnectionChip(
+  input: HostedEnvironmentConnectionChipInput,
+): HostedConnectionChip | null {
+  const selected = input.selectedNode;
+  if (selected?.environmentId === input.environmentId) {
+    return describeHostedEnvironmentConnection(
+      input,
+      selectedEnvironmentConnection(input, selected),
+    );
   }
-  return {
-    node,
-    role: input.effectiveRole,
-    statusText: phase,
-    indicator: deriveHostedConnectionStatusIndicator(statusInput),
-    switching: false,
-  };
+  const node = input.nodes.find((candidate) => candidate.environmentId === input.environmentId);
+  if (!node) return null;
+  return describeHostedEnvironmentConnection(input, recordEnvironmentConnection(input, node));
+}
+
+/**
+ * Whether a chip may be drawn quietly — muted, without the outline that asks
+ * for attention. Only the steady browser channel qualifies (§2.2's `web` row):
+ * quiet is itself a claim, so it never stands for a `legacy` fallback (§12.2),
+ * for a connected session with no channel, or for anything still on its way.
+ */
+export function hostedConnectionChipQuiet(indicator: HostedConnectionStatusIndicator): boolean {
+  return indicator.guarantee === "web" && indicator.connected;
 }
 
 /** The live-region sentence for a chip, without doubling the ellipsis' full stop. */

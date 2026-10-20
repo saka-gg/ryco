@@ -64,7 +64,7 @@ const readNothing = () => undefined;
  * Without an environment there is nothing to follow and the registry is not
  * touched at all.
  */
-function useHostedEnvironmentRecord(
+export function useHostedEnvironmentRecord(
   environmentId: EnvironmentId | null | undefined,
 ): HostedEnvironmentSessionRecord | undefined {
   const sessions = environmentId == null ? null : getHostedEnvironmentSessions();
@@ -72,6 +72,24 @@ function useHostedEnvironmentRecord(
     sessions && environmentId != null
       ? () => sessions.getSnapshot().records.get(environmentId)
       : readNothing;
+  return useSyncExternalStore(sessions ? sessions.subscribe : subscribeToNothing, read, read);
+}
+
+const readNotUnknown = () => false;
+
+/**
+ * Whether an earlier action on the environment is still unconfirmed, as the
+ * registry keeps it across releases for the environment's next session;
+ * re-read only when that answer changes. Without an environment, `false`.
+ */
+export function useHostedEnvironmentDeliveryUnknown(
+  environmentId: EnvironmentId | null | undefined,
+): boolean {
+  const sessions = environmentId == null ? null : getHostedEnvironmentSessions();
+  const read =
+    sessions && environmentId != null
+      ? () => sessions.getSnapshot().deliveryUnknown.has(environmentId)
+      : readNotUnknown;
   return useSyncExternalStore(sessions ? sessions.subscribe : subscribeToNothing, read, read);
 }
 

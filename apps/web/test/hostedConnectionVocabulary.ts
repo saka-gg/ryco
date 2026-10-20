@@ -1,3 +1,5 @@
+import type { EnvironmentId } from "@ryco/contracts";
+
 import {
   deriveHostedConnectionStatusText,
   HOSTED_BROWSER_STATUSES,
@@ -113,13 +115,19 @@ export function hostedConnectionStatusRepresentatives(): ReadonlyMap<
  * would render a state the §4.4 machine's own transitions cannot produce. The
  * sequence here is the one `resolveWebRelayE2eeProvider` drives — a channel
  * begins, and then it locks once.
+ *
+ * Without an environment the whole projection is reset and the displayed entry
+ * is driven; with one, only that environment's own entry, as its channel would.
  */
-export function applyWebE2eeChannelStatus(status: WebHostedE2eeChannelStatus): void {
-  resetWebE2eeSession();
+export function applyWebE2eeChannelStatus(
+  status: WebHostedE2eeChannelStatus,
+  environmentId?: EnvironmentId,
+): void {
+  resetWebE2eeSession(environmentId);
   if (status === "unavailable") return;
-  beginWebE2eeChannelAttempt();
+  beginWebE2eeChannelAttempt(environmentId);
   if (status === "negotiating") return;
-  lockWebE2eeChannelMode(status === "web-unsigned" ? "e2ee" : "legacy");
+  lockWebE2eeChannelMode(status === "web-unsigned" ? "e2ee" : "legacy", environmentId);
 }
 
 /**
@@ -132,12 +140,14 @@ export function applyWebE2eeChannelStatus(status: WebHostedE2eeChannelStatus): v
  * post-operation sync moves it to `web-unsigned`. A helper that locked first
  * would drive a sequence the shipped machine never produces, and a surface
  * gating on the lock would pass here while failing in the app.
+ *
+ * The environment is addressed as in {@link applyWebE2eeChannelStatus}.
  */
-export function applyWebE2eeVerificationCode(code: string): void {
-  resetWebE2eeSession();
-  beginWebE2eeChannelAttempt();
-  publishWebE2eeVerificationCode(code);
-  lockWebE2eeChannelMode("e2ee");
+export function applyWebE2eeVerificationCode(code: string, environmentId?: EnvironmentId): void {
+  resetWebE2eeSession(environmentId);
+  beginWebE2eeChannelAttempt(environmentId);
+  publishWebE2eeVerificationCode(code, environmentId);
+  lockWebE2eeChannelMode("e2ee", environmentId);
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   CheckIcon,
   CopyIcon,
   KeyRoundIcon,
+  LayoutGridIcon,
   LifeBuoyIcon,
   Loader2Icon,
   LogOutIcon,
@@ -129,9 +130,6 @@ import {
 } from "./ExternalIdentityWeb.logic";
 import { HostedRelayTrustNotice } from "./HostedRelayTrustNotice";
 import { canShowHostedReadPreview, useHostedReadCache } from "../../hostedHub/readCache";
-
-// Browser suites and callers keep importing the menu from the hosted root.
-export { HostedNodeMenu } from "./HostedConnectionControls";
 
 type EmailVerificationLink = Extract<
   HostedIdentityLink,
@@ -489,12 +487,30 @@ function HostedNodeFailureSurface({
   readonly node: HostedHubNode;
   readonly message: string | null;
 }) {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const { returnToAllNodes } = useHostedConnectionActions();
   return (
-    // The connection control already carries "All nodes", "Refresh", "Account"
-    // and "Sign out", so the terminal-failure state needs no escape of its own.
-    // It moves into the Hub bar rather than floating above the message, which
-    // is where a page-level control belongs.
-    <HubShell measure="content" trailing={<HostedConnectionControl />}>
+    // The way out lives in the Hub bar, which is where page-level controls
+    // belong. The phone tier's connection pill opens a sheet that already
+    // carries "All nodes" and "Sign out". Desktop has no connection menu, so
+    // the bar offers both itself, as the node directory's bar does.
+    <HubShell
+      measure="content"
+      trailing={
+        isPhoneTier ? (
+          <HostedConnectionControl />
+        ) : (
+          <>
+            <Button variant="ghost" onClick={() => void returnToAllNodes()}>
+              <LayoutGridIcon aria-hidden /> Manage devices
+            </Button>
+            <Button variant="ghost" onClick={() => void hostedHubController.signOut()}>
+              <LogOutIcon aria-hidden /> Sign out
+            </Button>
+          </>
+        )
+      }
+    >
       <HubStatus
         tone="destructive"
         icon={<TriangleAlertIcon aria-hidden className="size-8 text-destructive" />}

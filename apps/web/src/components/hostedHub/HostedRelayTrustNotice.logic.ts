@@ -56,11 +56,12 @@
 // AND IT MAY NOT POINT AT WHAT THE SURFACE UNDER IT DOES NOT DRAW
 // ─────────────────────────────────────────────────────────────────────────────
 // This notice mounts at five sites across BOTH presentation tiers, and §13.5's
-// `WebSAS` renders at exactly one of them (the desktop node menu; `AGENTS.md`
-// freezes the web phone tier, so the phone connection sheet draws none). Copy
-// here therefore states the ceiling without presupposing a comparison value on
-// the page: a sentence about "the same session code" read identically on that
-// sheet, telling a reader they held a check they did not have. The pointer at
+// `WebSAS` renders at none of them: it is drawn in the desktop thread
+// connection popover, which carries no notice, and `AGENTS.md` freezes the web
+// phone tier, so the phone connection sheet draws none. Copy here therefore
+// states the ceiling without presupposing a comparison value on the page: a
+// sentence about "the same session code" read identically on that sheet,
+// telling a reader they held a check they did not have. The pointer at
 // the comparison lives WITH the comparison, in `HostedE2eeVerification.logic.ts`,
 // which by construction renders only where the characters do.
 // `HostedRelayTrustNotice.logic.test.ts` scans these bodies for that reference so

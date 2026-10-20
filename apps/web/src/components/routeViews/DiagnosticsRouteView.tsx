@@ -34,10 +34,9 @@ export function DiagnosticsRoute(): ReactElement {
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
             {APP_DISPLAY_NAME} · Diagnostics
           </span>
-          {/* The connection controls used to float over every routed surface;
-              with the overlay removed, hosted users keep status, switching,
-              and sign-out reachable from this header. Renders nothing outside
-              hosted-hub sessions. */}
+          {/* The phone tier keeps its connection pill and sheet in this
+              header. On desktop the page belongs to no node, so it draws no
+              chip; renders nothing outside hosted-hub sessions. */}
           <HostedConnectionControl />
         </header>
 

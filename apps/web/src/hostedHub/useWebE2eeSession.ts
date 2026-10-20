@@ -7,6 +7,7 @@ import {
   subscribeWebE2eeSessionFor,
   webE2eeSessionState,
   webE2eeSessionStateFor,
+  type WebE2eeSessionState,
 } from "./e2eeSession";
 
 /**
@@ -18,6 +19,28 @@ import {
  * asserted.
  */
 const channelStatus = (): WebHostedE2eeChannelStatus => webE2eeSessionState().status;
+
+const statusOf = (state: WebE2eeSessionState): WebHostedE2eeChannelStatus => state.status;
+const verificationCodeOf = (state: WebE2eeSessionState): string | null => state.verificationCode;
+
+/**
+ * One field of one environment's projection, displayed or not, re-read only
+ * when that environment's entry changes.
+ */
+function useWebE2eeSessionFieldFor<T>(
+  environmentId: EnvironmentId,
+  field: (state: WebE2eeSessionState) => T,
+): T {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeWebE2eeSessionFor(environmentId, listener),
+    [environmentId],
+  );
+  const read = useCallback(
+    () => field(webE2eeSessionStateFor(environmentId)),
+    [environmentId, field],
+  );
+  return useSyncExternalStore(subscribe, read, read);
+}
 
 /**
  * What `docs/relay-e2ee-protocol.md` §4.4 locked on the channel behind this
@@ -49,12 +72,7 @@ export function useWebE2eeChannelStatus(): WebHostedE2eeChannelStatus {
 export function useWebE2eeChannelStatusFor(
   environmentId: EnvironmentId,
 ): WebHostedE2eeChannelStatus {
-  const subscribe = useCallback(
-    (listener: () => void) => subscribeWebE2eeSessionFor(environmentId, listener),
-    [environmentId],
-  );
-  const status = useCallback(() => webE2eeSessionStateFor(environmentId).status, [environmentId]);
-  return useSyncExternalStore(subscribe, status, status);
+  return useWebE2eeSessionFieldFor(environmentId, statusOf);
 }
 
 const verificationCode = (): string | null => webE2eeSessionState().verificationCode;
@@ -78,4 +96,13 @@ const verificationCode = (): string | null => webE2eeSessionState().verification
  */
 export function useWebE2eeVerificationCode(): string | null {
   return useSyncExternalStore(subscribeWebE2eeSession, verificationCode, verificationCode);
+}
+
+/**
+ * {@link useWebE2eeVerificationCode} for one environment's channel, displayed or
+ * not: the code of the session that environment's own channel locked, gated by
+ * the surface on {@link useWebE2eeChannelStatusFor} for the same environment.
+ */
+export function useWebE2eeVerificationCodeFor(environmentId: EnvironmentId): string | null {
+  return useWebE2eeSessionFieldFor(environmentId, verificationCodeOf);
 }

@@ -628,6 +628,7 @@ const SUITE_FILES = {
   DP: "./DiffPanel.browser.tsx",
   SH: "./ui/sheet.browser.tsx",
   SP: "./settings/SettingsPanels.browser.tsx",
+  SPH: "./settings/SettingsPageHosted.browser.tsx",
   MSHEET: "./mobile/MobileSheet.browser.tsx",
   MSEL: "./mobile/MobileSelectSheet.browser.tsx",
   MSEG: "./mobile/MobileSegmentedControl.browser.tsx",
@@ -890,9 +891,39 @@ const PROVING_TESTS: readonly ProvingCell[] = [
     test: "renders inside the workspace header without a fixed overlay or control overlap",
   },
   {
-    cell: "connection desktop all-nodes",
+    cell: "connection desktop header names the thread's node",
     file: "HC",
-    test: "offers the All nodes return action from the desktop menu",
+    test: "names the open thread's node rather than the selected one",
+  },
+  {
+    cell: "connection desktop manage devices",
+    file: "HC",
+    test: "offers Manage devices from the thread connection badge",
+  },
+  {
+    cell: "connection desktop home without a node chip",
+    file: "HC",
+    test: "keeps the home header free of a node chip on desktop",
+  },
+  {
+    cell: "connection desktop session code for every role",
+    file: "HR",
+    test: "draws the thread badge's session code for every hosted role",
+  },
+  {
+    cell: "connection desktop failure escape",
+    file: "HR",
+    test: "offers Manage devices and Sign out on the desktop failure surface",
+  },
+  {
+    cell: "connection desktop account sign-out",
+    file: "HR",
+    test: "reaches the account page from the sidebar footer and signs out there",
+  },
+  {
+    cell: "connection desktop settings device",
+    file: "SPH",
+    test: "moves the settings target to another node through the hosted route",
   },
 
   // ── Cross-cutting properties ───────────────────────────────────────────

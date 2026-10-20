@@ -12,7 +12,7 @@ import ProjectScriptsControl, { type NewProjectScriptInput } from "../ProjectScr
 import { Toggle } from "../ui/toggle";
 import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
-import { HostedNodeMenu } from "../hostedHub/HostedConnectionControls";
+import { HostedThreadConnectionBadge } from "../hostedHub/HostedConnectionControls";
 import { ChatHeaderBar, type ChatHeaderBarProps } from "./ChatHeaderBar";
 import type { ChatHeaderBreadcrumbProjectIcon } from "./ChatHeaderBreadcrumb";
 import type { ChatProjectTarget } from "./ChatProjectActions";
@@ -117,10 +117,11 @@ export const ChatHeader = memo(function ChatHeader({
 
   const inlineActions = (
     <>
-      {/* Hosted connection control, relocated from the fixed overlay into the
-          workspace header so it can never overlap the other header controls.
-          Renders nothing outside hosted-hub sessions. */}
-      <HostedNodeMenu />
+      {/* The open thread's own node and connection, whichever node the
+          hosted selection is on. In the header's flow, so it can never overlap
+          the other header controls; renders nothing outside hosted-hub
+          sessions. */}
+      <HostedThreadConnectionBadge environmentId={props.activeThreadEnvironmentId} />
       <Tooltip>
         <TooltipTrigger
           render={

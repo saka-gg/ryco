@@ -599,10 +599,11 @@ describe("no public file still carries the retired claim", () => {
 describe("the disclosure may not point at what the surface under it does not draw", () => {
   it("refers to no session code, on any state", () => {
     // This notice mounts at six sites across BOTH presentation tiers, and
-    // §13.5's `WebSAS` renders at two of them (the desktop node menu, where
-    // `HostedConnectionControls.tsx` mounts `HostedE2eeVerification`, and
-    // Settings → Security, where `NodeSecuritySettings.tsx` draws this tab's own
-    // channel; `AGENTS.md` freezes the web phone tier). Copy here that
+    // §13.5's `WebSAS` renders at only two surfaces (the desktop thread
+    // connection popover, where `HostedConnectionControls.tsx` mounts
+    // `HostedE2eeVerification`, and Settings → Security, where
+    // `NodeSecuritySettings.tsx` draws this tab's own channel; `AGENTS.md`
+    // freezes the web phone tier). Copy here that
     // presupposed a comparison value on the page read identically on the phone
     // connection sheet, which draws none: it told that reader a §13.5
     // comparison existed and that a hostile Hub could forge it, while handing
