@@ -4,12 +4,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vite-plus/test";
 
 /**
- * The sidebar, inbox and composer components below re-render on store commits
- * while threads stream. They rely on the React Compiler for memoization; a single
- * rule violation (a render-time ref write, a conditional inside try/catch, a
- * store hook read as a value) makes it skip the whole component silently, and
- * the regression only shows up as per-commit CPU. Compile them the way the
- * build does and fail on any bailout.
+ * The sidebar, inbox, composer and thread view components below re-render on
+ * store commits while threads stream or the view switches. They rely on the
+ * React Compiler for memoization; a single rule violation (a render-time ref
+ * write, a conditional inside try/catch, a store hook read as a value) makes it
+ * skip the whole component silently, and the regression only shows up as
+ * per-commit CPU. Compile them the way the build does and fail on any bailout.
+ * A function that opts out with a `"use no memo"` directive does so on purpose
+ * and is not counted; every other function of a listed file must compile.
  */
 const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions: string[] }> = [
   { file: "../components/Sidebar.tsx", functions: ["Sidebar"] },
@@ -56,29 +58,79 @@ const HOT_COMPONENTS: ReadonlyArray<{ readonly file: string; readonly functions:
     file: "../components/BranchToolbarBranchSelector.tsx",
     functions: ["BranchToolbarBranchSelector"],
   },
+  // The transcript's list owner re-renders for every prop change of the thread
+  // view; its row stabilizer keeps unchanged rows referentially equal.
+  {
+    file: "../components/chat/MessagesTimeline.tsx",
+    functions: ["MessagesTimeline", "useStableRows"],
+  },
+  // Mounted wherever a thread offers source control actions; it re-renders on
+  // each git status update.
+  { file: "../components/GitActionsControl.tsx", functions: ["GitActionsControl"] },
 ];
 
 interface CompilerEvent {
   readonly kind: string;
   readonly fnName?: string | null;
+  readonly fnLoc?: { readonly start: { readonly line: number } } | null;
   readonly detail?: { readonly reason?: string; readonly options?: { readonly reason?: string } };
 }
 
-type BabelTransform = (
-  code: string,
-  options: Record<string, unknown>,
-) => { readonly code?: string | null } | null;
-
-/** @babel/core is a peer of the build's Babel plugin, not a direct dependency. */
-function loadBabelTransform(): BabelTransform {
-  const requireFromWeb = createRequire(import.meta.url);
-  const requireFromBabelPlugin = createRequire(requireFromWeb.resolve("@rolldown/plugin-babel"));
-  const babel = requireFromBabelPlugin("@babel/core") as { transformSync: BabelTransform };
-  return babel.transformSync;
+interface BabelFunctionPath {
+  readonly node: {
+    readonly loc?: { readonly start: { readonly line: number } } | null;
+    readonly body: {
+      readonly type: string;
+      readonly directives?: ReadonlyArray<{ readonly value: { readonly value: string } }>;
+    };
+  };
 }
 
-describe("React Compiler coverage of hot sidebar components", () => {
-  const transformSync = loadBabelTransform();
+interface Babel {
+  readonly transformSync: (
+    code: string,
+    options: Record<string, unknown>,
+  ) => { readonly code?: string | null } | null;
+  readonly parseSync: (code: string, options: Record<string, unknown>) => object | null;
+  readonly traverse: (
+    ast: object,
+    visitor: { readonly Function: (path: BabelFunctionPath) => void },
+  ) => void;
+}
+
+/** @babel/core is a peer of the build's Babel plugin, not a direct dependency. */
+function loadBabel(): Babel {
+  const requireFromWeb = createRequire(import.meta.url);
+  const requireFromBabelPlugin = createRequire(requireFromWeb.resolve("@rolldown/plugin-babel"));
+  return requireFromBabelPlugin("@babel/core") as Babel;
+}
+
+const PARSER_OPTIONS = { plugins: ["typescript", "jsx"] };
+
+/** First lines of the functions that opt out of compilation with `"use no memo"`. */
+function findOptedOutFunctionLines(babel: Babel, source: string, filename: string): Set<number> {
+  const lines = new Set<number>();
+  const ast = babel.parseSync(source, {
+    filename,
+    babelrc: false,
+    configFile: false,
+    parserOpts: PARSER_OPTIONS,
+  });
+  if (ast === null) return lines;
+  babel.traverse(ast, {
+    Function(path) {
+      const { body, loc } = path.node;
+      const optsOut =
+        body.type === "BlockStatement" &&
+        (body.directives ?? []).some((directive) => directive.value.value === "use no memo");
+      if (optsOut && loc) lines.add(loc.start.line);
+    },
+  });
+  return lines;
+}
+
+describe("React Compiler coverage of hot components", () => {
+  const babel = loadBabel();
   const requireFromWeb = createRequire(import.meta.url);
   const compilerModule = requireFromWeb("babel-plugin-react-compiler") as {
     readonly default?: unknown;
@@ -90,11 +142,13 @@ describe("React Compiler coverage of hot sidebar components", () => {
       const url = new URL(file, import.meta.url);
       const source = await readFile(url, "utf8");
       const events: CompilerEvent[] = [];
-      const output = transformSync(source, {
-        filename: fileURLToPath(url),
+      const filename = fileURLToPath(url);
+      const optedOutLines = findOptedOutFunctionLines(babel, source, filename);
+      const output = babel.transformSync(source, {
+        filename,
         babelrc: false,
         configFile: false,
-        parserOpts: { plugins: ["typescript", "jsx"] },
+        parserOpts: PARSER_OPTIONS,
         plugins: [
           [
             compilerPlugin,
@@ -108,6 +162,7 @@ describe("React Compiler coverage of hot sidebar components", () => {
 
       const failures = events
         .filter((event) => event.kind === "CompileError" || event.kind === "PipelineError")
+        .filter((event) => !(event.fnLoc && optedOutLines.has(event.fnLoc.start.line)))
         .map((event) => event.detail?.reason ?? event.detail?.options?.reason ?? event.kind);
       expect(failures).toEqual([]);
       const compiled = events

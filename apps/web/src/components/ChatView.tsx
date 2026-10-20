@@ -605,6 +605,31 @@ function shouldIgnoreThreadMessageSearchShortcut(
   return false;
 }
 
+/** Chat column custom properties carrying the floating bars' heights. */
+const COMPOSER_CLEARANCE_PROPERTY = "--chat-composer-clearance";
+const HEADER_CLEARANCE_PROPERTY = "--chat-header-clearance";
+
+/**
+ * Publishes `bar`'s rendered height plus a small gap on `host` as a CSS
+ * variable. The size comes from the observer's notifications, which run once
+ * layout is clean and before the first paint: reading the height here
+ * directly would force a layout of the freshly committed tree on every
+ * switch. Returns the cleanup that drops the variable.
+ */
+function publishOverlayClearance(
+  host: HTMLElement,
+  bar: HTMLElement,
+  property: string,
+): () => void {
+  const apply = () => host.style.setProperty(property, `${bar.offsetHeight + 8}px`);
+  const observer = new ResizeObserver(apply);
+  observer.observe(bar);
+  return () => {
+    observer.disconnect();
+    host.style.removeProperty(property);
+  };
+}
+
 /** How long the composer keeps focus on a thread before that focus prewarms its session. */
 const PROVIDER_SESSION_PREWARM_FOCUS_DWELL_MS = 400;
 
@@ -5873,25 +5898,20 @@ export default function ChatView(props: ChatViewProps) {
   const headerOverlayActive = presentationTier !== "phone";
   const chatShellRef = useRef<HTMLDivElement | null>(null);
   const headerOverlayRef = useRef<HTMLElement | null>(null);
+  // The overlay elements exist while a thread is on screen and keep their
+  // identity across thread switches, so one observer serves every switch.
+  const chatSurfaceMounted = activeThreadId !== null;
   useEffect(() => {
     const column = chatColumnRef.current;
     if (!column) return;
     if (!composerOverlayActive) {
-      column.style.removeProperty("--chat-composer-clearance");
+      column.style.removeProperty(COMPOSER_CLEARANCE_PROPERTY);
       return;
     }
     const bar = composerOverlayRef.current;
     if (!bar) return;
-    const apply = () =>
-      column.style.setProperty("--chat-composer-clearance", `${bar.offsetHeight + 8}px`);
-    apply();
-    const observer = new ResizeObserver(apply);
-    observer.observe(bar);
-    return () => {
-      observer.disconnect();
-      column.style.removeProperty("--chat-composer-clearance");
-    };
-  }, [composerOverlayActive, activeThreadId]);
+    return publishOverlayClearance(column, bar, COMPOSER_CLEARANCE_PROPERTY);
+  }, [composerOverlayActive, chatSurfaceMounted]);
   // Same mechanism for the top bar: the header overlays the transcript and
   // publishes its height so the timeline's list header, the search bar, the
   // Crown rail, and the (rare) banner stack clear it.
@@ -5899,21 +5919,13 @@ export default function ChatView(props: ChatViewProps) {
     const shell = chatShellRef.current;
     if (!shell) return;
     if (!headerOverlayActive) {
-      shell.style.removeProperty("--chat-header-clearance");
+      shell.style.removeProperty(HEADER_CLEARANCE_PROPERTY);
       return;
     }
     const header = headerOverlayRef.current;
     if (!header) return;
-    const apply = () =>
-      shell.style.setProperty("--chat-header-clearance", `${header.offsetHeight + 8}px`);
-    apply();
-    const observer = new ResizeObserver(apply);
-    observer.observe(header);
-    return () => {
-      observer.disconnect();
-      shell.style.removeProperty("--chat-header-clearance");
-    };
-  }, [headerOverlayActive, activeThreadId]);
+    return publishOverlayClearance(shell, header, HEADER_CLEARANCE_PROPERTY);
+  }, [headerOverlayActive, chatSurfaceMounted]);
 
   // Empty state: no active thread. An archived thread listed as a stub exists:
   // its full shell and window are loading (this view retains them).

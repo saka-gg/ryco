@@ -1415,7 +1415,11 @@ export default function GitActionsControl({
   const [pendingDefaultBranchAction, setPendingDefaultBranchAction] =
     useState<PendingDefaultBranchAction | null>(null);
   const activeGitActionProgressRef = useRef<ActiveGitActionProgress | null>(null);
-  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
+  // The follow-up a finished action offers runs the next action through the
+  // same entry point; the toast outlives the render that created it.
+  const rerunGitActionRef = useRef<((input: RunGitActionWithToastInput) => Promise<void>) | null>(
+    null,
+  );
 
   const setActiveGitActionProgress = useCallback((progress: ActiveGitActionProgress) => {
     activeGitActionProgressRef.current = progress;
@@ -1597,7 +1601,7 @@ export default function GitActionsControl({
     });
   }, [gitStatusForActions, threadToastData]);
 
-  runGitActionWithToast = useEffectEvent(
+  const runGitActionWithToast = useEffectEvent(
     async ({
       action,
       commitMessage,
@@ -1752,8 +1756,9 @@ export default function GitActionsControl({
         runImmediately: false,
       });
 
-      try {
-        const result = await promise;
+      // The conditionals live in a nested function: the compiler cannot lower
+      // them inside the `try` that also covers the awaited mutation.
+      const finishSucceeded = (result: GitRunStackedActionResult) => {
         elapsedTicker.stop();
         clearActiveGitActionProgress();
         syncThreadBranchAfterGitAction(result);
@@ -1772,7 +1777,7 @@ export default function GitActionsControl({
           toastCta.kind === "run_action"
             ? {
                 label: toastCta.label,
-                onClick: () => void runGitActionWithToast({ action: toastCta.action.kind }),
+                onClick: () => void rerunGitActionRef.current?.({ action: toastCta.action.kind }),
               }
             : toastCta.kind === "open_pr"
               ? {
@@ -1785,6 +1790,10 @@ export default function GitActionsControl({
           description: result.toast.description,
           action: followUp,
         });
+      };
+
+      try {
+        finishSucceeded(await promise);
       } catch (err) {
         elapsedTicker.stop();
         clearActiveGitActionProgress();
@@ -1795,6 +1804,10 @@ export default function GitActionsControl({
       }
     },
   );
+
+  useEffect(() => {
+    rerunGitActionRef.current = runGitActionWithToast;
+  }, []);
 
   const continuePendingDefaultBranchAction = () => {
     if (!pendingDefaultBranchAction) return;
