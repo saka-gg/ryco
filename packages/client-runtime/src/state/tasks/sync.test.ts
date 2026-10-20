@@ -4,6 +4,8 @@ import {
   MessageId,
   ThreadId,
   type LocalTask,
+  type LocalTaskChange,
+  type LocalTaskChangePosition,
   type LocalTaskListInput,
   type LocalTaskListResult,
 } from "@ryco/contracts";
@@ -68,6 +70,33 @@ type ListFn = (input: LocalTaskListInput) => Promise<LocalTaskListResult>;
 
 function makeApi(list: ListFn | undefined): LocalTasksApi {
   return list ? { listLocalTasks: list } : {};
+}
+
+/** A change position of the node's change feed. */
+const at = (sequence: number, feed = "feed-1"): LocalTaskChangePosition => ({ feed, sequence });
+
+/** A list page stamped with the node's change position. */
+function stamped(
+  tasks: LocalTask[],
+  position: LocalTaskChangePosition,
+  nextCursor: string | null = null,
+): LocalTaskListResult {
+  return { tasks, nextCursor, position };
+}
+
+/** A node with a change stream: `emit` sends a change to the sync's listener. */
+function streamApi(list: ListFn) {
+  let listener: (change: LocalTaskChange) => void = () => {};
+  const unsubscribe = vi.fn();
+  const api: LocalTasksApi = {
+    listLocalTasks: list,
+    getLocalTask: async ({ taskId }) => task(taskId),
+    subscribeLocalTaskChanges: (next) => {
+      listener = next;
+      return unsubscribe;
+    },
+  };
+  return { api, emit: (change: LocalTaskChange) => listener(change), unsubscribe };
 }
 
 const environment = () => selectLocalTasksEnvironment(useLocalTasksStore.getState(), ENV);
@@ -448,5 +477,171 @@ describe("retainLocalTasks", () => {
     expect(taskIds()).toEqual([]);
     release();
     await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("reads the list once when the stream starts listening while the first read is out", async () => {
+    vi.useFakeTimers();
+    const read = deferred<LocalTaskListResult>();
+    const list = vi
+      .fn<ListFn>()
+      .mockReturnValueOnce(read.promise)
+      .mockResolvedValue(stamped([task("a")], at(0)));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    // The node answers the subscription as the list's first answer comes: nothing changed between.
+    emit({ position: at(0) });
+    read.resolve(stamped([task("a")], at(0)));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(environment()).toMatchObject({ status: "ready", order: ["a"] });
+    release();
+  });
+
+  it("reads the list once when the first word comes after the first read landed", async () => {
+    vi.useFakeTimers();
+    const list = vi.fn<ListFn>().mockResolvedValue(stamped([task("a")], at(0)));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    emit({ position: at(0) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(environment()).toMatchObject({ status: "ready", order: ["a"] });
+    release();
+  });
+
+  it("reads again when a change came between the read and the word", async () => {
+    vi.useFakeTimers();
+    // The word comes while the read is out: decided once it lands.
+    const read = deferred<LocalTaskListResult>();
+    const list = vi
+      .fn<ListFn>()
+      .mockReturnValueOnce(read.promise)
+      .mockResolvedValue(stamped([task("a"), task("b")], at(1)));
+    const first = streamApi(list);
+    const release = retainLocalTasks(first.api, ENV);
+    first.emit({ position: at(1) });
+    read.resolve(stamped([task("a")], at(0)));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(taskIds()).toEqual(["a", "b"]);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The word comes after the read landed: read at once.
+    const again = vi
+      .fn<ListFn>()
+      .mockResolvedValueOnce(stamped([task("a")], at(0)))
+      .mockResolvedValue(stamped([task("a"), task("c")], at(1)));
+    const second = streamApi(again);
+    const next = retainLocalTasks(second.api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(again).toHaveBeenCalledTimes(1);
+    second.emit({ position: at(1) });
+    expect(again).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(taskIds()).toEqual(["a", "c"]);
+    next();
+  });
+
+  it("reads again on a word from another feed (a restarted node)", async () => {
+    vi.useFakeTimers();
+    const list = vi.fn<ListFn>().mockResolvedValue(stamped([task("a")], at(4, "feed-1")));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    emit({ position: at(0, "feed-2") });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    release();
+  });
+
+  it("reads on a word without a position, during the first read too", async () => {
+    vi.useFakeTimers();
+    const read = deferred<LocalTaskListResult>();
+    const list = vi
+      .fn<ListFn>()
+      .mockReturnValueOnce(read.promise)
+      .mockResolvedValue(stamped([task("a")], at(0)));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    // An older node's word says nothing about what it covers.
+    emit({});
+    read.resolve(stamped([task("a")], at(0)));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    release();
+  });
+
+  it("reads on a reconnect's word only when something changed", async () => {
+    vi.useFakeTimers();
+    const list = vi
+      .fn<ListFn>()
+      .mockResolvedValueOnce(stamped([task("a")], at(3)))
+      .mockResolvedValue(stamped([task("a"), task("b")], at(5)));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+
+    emit({ position: at(3) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    emit({ position: at(5) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(taskIds()).toEqual(["a", "b"]);
+
+    emit({ position: at(5) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    release();
+  });
+
+  it("still reads on a word that waited on a failed read", async () => {
+    vi.useFakeTimers();
+    let fail: (cause: unknown) => void = () => {};
+    const list = vi
+      .fn<ListFn>()
+      .mockReturnValueOnce(
+        new Promise<LocalTaskListResult>((_resolve, reject) => {
+          fail = reject;
+        }),
+      )
+      .mockResolvedValue(stamped([task("a")], at(0)));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    emit({ position: at(0) });
+    fail(new Error("offline"));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(environment()).toMatchObject({ status: "ready", order: ["a"] });
+    release();
+  });
+
+  it("takes a read whose pages disagree on the feed as covering nothing", async () => {
+    vi.useFakeTimers();
+    const list = vi
+      .fn<ListFn>()
+      .mockResolvedValueOnce(stamped([task("a")], at(0, "feed-1"), "a"))
+      .mockResolvedValueOnce(stamped([task("b")], at(0, "feed-2")))
+      .mockResolvedValue(stamped([task("a"), task("b")], at(0, "feed-2")));
+    const { api, emit } = streamApi(list);
+    const release = retainLocalTasks(api, ENV);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(2);
+
+    emit({ position: at(0, "feed-1") });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(list).toHaveBeenCalledTimes(3);
+    release();
   });
 });

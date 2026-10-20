@@ -62,10 +62,15 @@ and the stream `server.subscribeLocalTaskChanges`, which sends `{ taskId }` for 
 change touches from then on (created, edited, a file, a chat start; `{ taskId, deleted: true }`
 for a deleted one), whoever made it: another client or an agent through Agent Control (see
 [Agent Control](./agent-control.md#tasks)). Read the task on a change, or drop it when deleted;
-the stream carries no task content. Changes a subscriber hasn't read yet merge per task, and one
-that falls far behind (a stalled connection) gets `{}` in their place. Each subscription also
-starts with `{}` once it listens (again after a reconnect): read the list on `{}`, which covers
-whatever changed before it was heard. There is no
+the stream carries no task content. Changes a subscriber hasn't read yet merge per task. The
+stream also sends the read-all word `{ position }`: once each subscription listens (again after a
+reconnect), and in place of the changes a subscriber that fell far behind (a stalled connection)
+missed. The word and every `listLocalTasks` page carry the node's change position: `feed` names
+the node process's change feed (a restarted node has a new one) and `sequence` counts the changes
+it had published, each only after its write committed. Read the list on the word unless a list
+read stamped at or past its position, from the same feed, has landed or is still out (then
+decide once it lands): that read already holds every change the word stands for, and every later
+change arrives on the stream. A word without a position (an older node) always reads. There is no
 external task service; status changes of a task's chats arrive with the chats themselves.
 
 Create supplies `taskId`, `title`, `notes`, `priority`, `dueAt`, and nullable `projectId`.
