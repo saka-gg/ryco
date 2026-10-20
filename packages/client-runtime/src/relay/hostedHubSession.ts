@@ -84,7 +84,8 @@ export interface HostedHubSessionOptions {
    * The account and browser session the owner restored and created this session for. A version
    * 2 `ready` must name exactly these, or the connection offers no server-minted opens and
    * {@link onIdentityMismatch} runs. Without it the session never offers server-minted opens:
-   * `openNode` must name the session it expects.
+   * `openNode` must name the session it expects. An owner that starts the session before it
+   * knows the identity binds it later with {@link HostedHubSession.bindExpectedIdentity}.
    */
   readonly expectedIdentity?: HostedHubSessionIdentity;
   /** A version 2 `ready` named another identity; the owner should revalidate its session. */
@@ -143,6 +144,8 @@ export class HostedHubSession {
   /** What the current connection's `ready` negotiated; null until it arrives. */
   #protocolVersion: HubSessionProtocolVersion | null = null;
   #identity: HostedHubSessionIdentity | null = null;
+  /** {@link HostedHubSessionOptions.expectedIdentity}, or the identity bound since. */
+  #expectedIdentity: HostedHubSessionIdentity | undefined;
   /** The current connection offered the version subprotocol, and whether its socket opened. */
   #offered = true;
   #socketOpened = false;
@@ -173,6 +176,7 @@ export class HostedHubSession {
 
   constructor(options: HostedHubSessionOptions) {
     this.#options = options;
+    this.#expectedIdentity = options.expectedIdentity;
   }
 
   start(): void {
@@ -201,9 +205,30 @@ export class HostedHubSession {
     );
   }
 
+  /**
+   * Bind the identity of a session started without one: an owner that opened the connection
+   * before its access check answered binds the account and browser session that answer named.
+   * From then on the session behaves as if it had been created with
+   * {@link HostedHubSessionOptions.expectedIdentity}: server-minted opens name it, and a later
+   * `ready` naming anyone else runs {@link HostedHubSessionOptions.onIdentityMismatch}.
+   *
+   * Returns false and binds nothing when the session is closed, already expects another
+   * identity, or the current connection's `ready` named someone else; the owner then replaces
+   * the session rather than keep a connection authenticated as another identity.
+   */
+  bindExpectedIdentity(identity: HostedHubSessionIdentity): boolean {
+    if (this.#disposed) return false;
+    const sameAs = (other: HostedHubSessionIdentity | null | undefined) =>
+      other?.accountId === identity.accountId && other.sessionId === identity.sessionId;
+    if (this.#expectedIdentity !== undefined) return sameAs(this.#expectedIdentity);
+    if (this.#ready && this.#identity !== null && !sameAs(this.#identity)) return false;
+    this.#expectedIdentity = { accountId: identity.accountId, sessionId: identity.sessionId };
+    return true;
+  }
+
   /** This connection negotiated version 2 and was authenticated as the expected identity. */
   #serverMintedOpensHere(): boolean {
-    const expected = this.#options.expectedIdentity;
+    const expected = this.#expectedIdentity;
     return (
       this.#protocolVersion !== null &&
       this.#protocolVersion >= 2 &&
@@ -513,7 +538,7 @@ export class HostedHubSession {
         frame.protocolVersion >= 2 && "accountId" in frame
           ? { accountId: frame.accountId, sessionId: frame.sessionId }
           : null;
-      const expected = this.#options.expectedIdentity;
+      const expected = this.#expectedIdentity;
       const mismatch =
         this.#identity !== null &&
         expected !== undefined &&
@@ -630,7 +655,7 @@ export class HostedHubSession {
   #openFrame(stream: LogicalStream): HubSessionFrame | null {
     const serverMinted = stream.serverMinted;
     if (serverMinted === null) return { type: "open", streamId: stream.id };
-    const expected = this.#options.expectedIdentity;
+    const expected = this.#expectedIdentity;
     if (expected === undefined || !this.#serverMintedOpensHere()) return null;
     return {
       type: "openNode",

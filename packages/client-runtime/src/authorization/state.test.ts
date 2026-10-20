@@ -4055,6 +4055,45 @@ describe("cookie-mode access checks", () => {
     });
   });
 
+  it("follows the read sent beside the restore with a push that arrives as the session validates", async () => {
+    useCookieMode();
+    vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
+    const first = deferred<ReadonlyArray<HostedHubNode>>();
+    const signals: AbortSignal[] = [];
+    const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockImplementation((signal) => {
+      signals.push(signal!);
+      return signals.length === 1 ? first.promise : Promise.resolve([node()]);
+    });
+    // An account socket that heard from the Hub before the access check
+    // answered hands its invalidation over right after the authenticated
+    // publish.
+    let previousStatus = hostedHubStore.getState().accountStatus;
+    const unsubscribe = hostedHubStore.subscribe(() => {
+      const status = hostedHubStore.getState().accountStatus;
+      if (status === "authenticated" && previousStatus !== "authenticated") {
+        queueMicrotask(() => hostedHubController.notifyDirectoryInvalidated());
+      }
+      previousStatus = status;
+    });
+    try {
+      const bootstrapping = hostedHubController.bootstrap();
+      await hostedHubController.bootstrapAccess();
+      await Promise.resolve();
+      // The read sent beside the restore answers for the boot; the push waits for it.
+      expect(listNodes).toHaveBeenCalledOnce();
+      expect(signals[0]!.aborted).toBe(false);
+
+      first.resolve([node()]);
+      await bootstrapping;
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      expect(signals[0]!.aborted).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("discards the held directory when the Hub answers that the session is gone", async () => {
     useCookieMode();
     const session = deferred<HostedHubSessionResponse>();

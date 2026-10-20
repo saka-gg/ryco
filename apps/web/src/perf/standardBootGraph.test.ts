@@ -237,4 +237,13 @@ describe("standard build static import graph", () => {
     expect(reachable).toContain("apps/web/src/hostedHub/state.standard.ts");
     expect(reachable).not.toContain("apps/web/src/hostedHub/state.ts");
   });
+
+  it("reaches the hosted access check from the entry only through the boot gate seam", () => {
+    // The entry starts the hosted access check behind the hosted-mode check;
+    // standard builds resolve the gate to its inert sibling, which the root
+    // route already imports, so their boot graph gains nothing.
+    const entryImports = staticValueImports(path.join(srcRoot, "main.tsx")).map(display);
+    expect(entryImports).toContain("apps/web/src/hostedHub/bootGate.standard.ts");
+    expect(entryImports).not.toContain("apps/web/src/hostedHub/bootGate.ts");
+  });
 });

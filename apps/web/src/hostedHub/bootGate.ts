@@ -3,8 +3,56 @@ import {
   recordHostedSignedInHint,
   trackHostedSignedInHint,
 } from "./bootHints";
+import { openWebHubSessionBesideAccessCheck } from "./hubSession";
 import { bootstrapWithHostedReadCache, canShowHostedReadPreview } from "./readCache";
 import { ensureWebHostedRuntimeConfigured, hostedHubController, hostedHubStore } from "./state";
+
+/** The access check {@link startHostedAccessCheck} sent, until a boot gate takes it. */
+let sentAccessCheck: Promise<void> | null = null;
+
+/**
+ * Send the hosted access check — the session restore, with the directory read
+ * beside it — for this page load.
+ *
+ * The entry module calls this before it creates the router, so both requests
+ * leave ahead of every route and shell chunk instead of queueing behind them
+ * on the connection pool; the root `beforeLoad` then waits for this same check
+ * in {@link runHostedBootGate}. Idempotent until a gate takes the check, so a
+ * boot sends exactly one.
+ *
+ * Never throws: a failure to send the check is kept for the gate, so the root
+ * `beforeLoad` rejects with it and the root error surface offers a retry,
+ * instead of the entry module stopping before anything renders.
+ */
+export function startHostedAccessCheck(): void {
+  if (sentAccessCheck) return;
+  try {
+    sentAccessCheck = sendAccessCheck();
+  } catch (error) {
+    const failed = Promise.reject(error);
+    // Handled here so it is not reported as unhandled before the gate awaits it.
+    failed.catch(() => undefined);
+    sentAccessCheck = failed;
+  }
+}
+
+/**
+ * The access check, settling once its answer is published (or a remembered
+ * read cache can paint). `ensureWebHostedRuntimeConfigured` installs the
+ * fail-closed console boundary before any hosted runtime code runs.
+ *
+ * A browser that was signed in at its last access check most likely still is,
+ * so its account socket opens beside the check too: bound to nobody, granted
+ * nothing and opening no stream until the answer names the account, and
+ * closed by any other answer.
+ */
+function sendAccessCheck(): Promise<void> {
+  ensureWebHostedRuntimeConfigured();
+  trackHostedSignedInHint(hostedHubStore);
+  const accessCheck = hostedHubController.bootstrapAccess();
+  if (readHostedSignedInHint()) openWebHubSessionBesideAccessCheck(accessCheck);
+  return bootstrapWithHostedReadCache(() => accessCheck);
+}
 
 /**
  * The hosted root `beforeLoad`: the access check and the code the first hosted
@@ -12,9 +60,12 @@ import { ensureWebHostedRuntimeConfigured, hostedHubController, hostedHubStore }
  *
  * The root route imports this statically (standard builds resolve it to an
  * inert sibling through `src/clientModeSeams.ts`), so the hosted state and the
- * remembered-browser read cache are part of the boot chunk and the access check
- * starts without a chunk round trip. `ensureWebHostedRuntimeConfigured`
- * installs the fail-closed console boundary before any hosted runtime code runs.
+ * remembered-browser read cache are part of the boot chunk. The access check
+ * is the one {@link startHostedAccessCheck} sent, or starts here when nothing
+ * has; either way it is on the wire before any prefetch this gate starts, so
+ * its answer never waits for those chunk downloads. A check sent here (a gate
+ * run nothing sent one for, such as a retry of a failed root load) does follow
+ * the caller's own `hostedRoot` load, which starts before this gate runs.
  *
  * `hostedRoot` is the hosted root surface's own load, started by the caller,
  * or null on a path that renders no hosted root (pairing, a native app's
@@ -33,6 +84,9 @@ export async function runHostedBootGate(input: {
   readonly hostedRoot: Promise<void> | null;
   readonly preloadSignIn?: () => Promise<unknown>;
 }): Promise<void> {
+  const accessAnswered = sentAccessCheck ?? sendAccessCheck();
+  // Taken: a later gate run (a retry of a failed root load) checks access again.
+  sentAccessCheck = null;
   const rendersHostedRoot = input.hostedRoot !== null;
   // Code-only prefetches: fetching a chunk starts no session, ticket, relay or
   // store work. Each failure is settled here, so a chunk that fails to load
@@ -44,8 +98,6 @@ export async function runHostedBootGate(input: {
   const preloadWorkspaceShell = () =>
     hostedRootAppShell.then((shell) => shell?.preloadHostedRootAppShell().catch(() => undefined));
   const workspaceOwners = import("./hostedWorkspaceOwners").catch(() => undefined);
-  ensureWebHostedRuntimeConfigured();
-  trackHostedSignedInHint(hostedHubStore);
   // A browser that was signed in at its last access check most likely still
   // is: its workspace shell downloads while the access check is on the wire
   // instead of after it. Everyone else (first visits, signed-out browsers)
@@ -71,7 +123,7 @@ export async function runHostedBootGate(input: {
   // The gate waits for the account answer only. The directory has its own
   // loading and stale surfaces, and waiting for it held a stalled network on
   // the boot surface for a second request deadline.
-  await bootstrapWithHostedReadCache(() => hostedHubController.bootstrapAccess());
+  await accessAnswered;
   const accountStatus = hostedHubStore.getState().accountStatus;
   recordHostedSignedInHint(accountStatus);
   if (!rendersHostedRoot) return;

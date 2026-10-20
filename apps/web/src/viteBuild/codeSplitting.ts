@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 /**
  * Rolldown `output.codeSplitting` for the web build.
  *
@@ -29,6 +32,12 @@
  *   closest neighbour instead of becoming separate tiny files. Lexical, the
  *   markdown stack and Shiki get their own groups so their chunks keep the same
  *   bytes (and cache entries) across deploys that only change app code.
+ * - `route-vendor` and `route-shared` (hosted builds only, see
+ *   `HOSTED_ROUTE_GROUP_MODULES`): the shared modules of `sideEffects: false`
+ *   packages in the static closure of the routes a cold hosted load requests
+ *   together, as one chunk of installed packages and one of workspace
+ *   packages instead of a few dozen small ones. Hosted builds also keep the
+ *   shared icons in one chunk.
  *
  * Application modules outside the boot graph keep automatic chunking: their
  * top-level code may have side effects, so they must not be evaluated by
@@ -253,10 +262,169 @@ export function createBootVendorMatcher(
   };
 }
 
+function readPackageManifest(directory: string): string | null {
+  try {
+    return readFileSync(`${directory}/package.json`, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the package that contains a module declares itself free of side
+ * effects: its nearest `package.json` says `"sideEffects": false`. The bundler
+ * already drops unused modules of such a package, so evaluating one before its
+ * first importer is equally unobservable. A list of side-effectful files does
+ * not count; neither does an application `package.json` without the field.
+ */
+export function createSideEffectFreePackageLookup(
+  readManifest: (directory: string) => string | null = readPackageManifest,
+): (moduleId: string) => boolean {
+  const byDirectory = new Map<string, boolean>();
+  const declaresNoSideEffects = (directory: string): boolean => {
+    const cached = byDirectory.get(directory);
+    if (cached !== undefined) return cached;
+    const manifest = readManifest(directory);
+    let declared = false;
+    if (manifest !== null) {
+      try {
+        const parsed: unknown = JSON.parse(manifest);
+        declared =
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "sideEffects" in parsed &&
+          parsed.sideEffects === false;
+      } catch {
+        declared = false;
+      }
+    } else {
+      const parent = path.posix.dirname(directory);
+      declared = parent !== directory && declaresNoSideEffects(parent);
+    }
+    byDirectory.set(directory, declared);
+    return declared;
+  };
+  return (moduleId) => {
+    const id = normalizeModuleId(moduleId);
+    if (id.startsWith("\0") || id.includes("?") || !/^(?:[A-Za-z]:)?\//.test(id)) return false;
+    return declaresNoSideEffects(path.posix.dirname(id));
+  };
+}
+
+/**
+ * The hosted route groups' roots: the workspace shell and the thread route,
+ * which a cold signed-in load requests at the same time (their closures beyond
+ * boot used to arrive as ~150 files in one burst on a 6-connection HTTP/1.1
+ * pool). Excluded: what every hosted visit loads, signed in or not — the hosted
+ * root with its sign-in surfaces and the workspace owners the boot gate starts.
+ * Their modules stay out of the route groups, so a signed-out visit never
+ * downloads the routes' package code.
+ */
+export const HOSTED_ROUTE_GROUP_MODULES = {
+  roots: ["src/components/RootAppShell.tsx", "src/components/routeViews/ChatThreadRouteView.tsx"],
+  excludedRoots: [
+    "src/components/hostedHub/HostedHubRoot.tsx",
+    "src/components/hostedHub/hostedRootAppShell.tsx",
+    "src/hostedHub/hostedWorkspaceOwners.ts",
+  ],
+} as const;
+
+export type RouteGroupName = "route-vendor" | "route-shared";
+
+/**
+ * Which route group, if any, `moduleId` belongs to: a module of a
+ * `sideEffects: false` package that one of `routeRoots` reaches through static
+ * imports, outside the boot groups, the static closure of `excludedRoots` and
+ * the stable vendor groups (lexical, the markdown stack, Shiki). Installed
+ * packages go to `route-vendor`, which changes only with dependency upgrades;
+ * workspace packages to `route-shared`.
+ *
+ * Grouping can make an entry load a module it never imports, so only modules
+ * whose package declares evaluating them harmless are captured, and the group
+ * is applied with `minShareCount: 2` so entry-private modules stay in their
+ * entry chunk. A module is captured only when everything it imports is in boot,
+ * boot vendor or its own group (a workspace module may also import
+ * `route-vendor`): the route chunks then import nothing but boot and each
+ * other in one direction, so no chunk cycle can run a module before a binding
+ * it reads was initialised.
+ */
+export function createRouteGroupMatcher(input: {
+  readonly bootEntry: string;
+  readonly bootRoots?: ReadonlyArray<string> | undefined;
+  readonly routeRoots: ReadonlyArray<string>;
+  readonly excludedRoots?: ReadonlyArray<string>;
+  readonly isSideEffectFreePackageModule?: (moduleId: string) => boolean;
+}): (moduleId: string, context: ModuleGraphContext) => RouteGroupName | null {
+  const isBootGraphModule = createBootGraphMatcher(input.bootEntry, input.bootRoots);
+  const isBootVendorModule = createBootVendorMatcher(input.bootEntry, input.bootRoots);
+  const isSideEffectFree =
+    input.isSideEffectFreePackageModule ?? createSideEffectFreePackageLookup();
+  const entryId = normalizeModuleId(input.bootEntry);
+  const rootIds = input.routeRoots.map(normalizeModuleId);
+  const excludedRootIds = (input.excludedRoots ?? []).map(normalizeModuleId);
+  const isScript = (id: string) =>
+    !id.startsWith("\0") && !id.includes("?") && /\.[cm]?[jt]sx?$/.test(id);
+  const isBootModule = (id: string, context: ModuleGraphContext) =>
+    id === entryId || isBootGraphModule(id, context) || isBootVendorModule(id, context);
+  const groupOf = (id: string): RouteGroupName =>
+    /[\\/]node_modules[\\/]/.test(id) ? "route-vendor" : "route-shared";
+  /** The static closure of `roots` beyond boot, with each module's imports. */
+  const closureBeyondBoot = (roots: ReadonlyArray<string>, context: ModuleGraphContext) => {
+    const imports = new Map<string, ReadonlyArray<string>>();
+    const queue = [...roots];
+    while (queue.length > 0) {
+      const id = queue.pop()!;
+      if (imports.has(id) || !isScript(id) || isBootModule(id, context)) continue;
+      const importedIds = (context.getModuleInfo(id)?.importedIds ?? []).map(normalizeModuleId);
+      imports.set(id, importedIds);
+      queue.push(...importedIds);
+    }
+    return imports;
+  };
+  const passes = new WeakMap<object, ReadonlyMap<string, RouteGroupName>>();
+  const groupsFor = (context: ModuleGraphContext): ReadonlyMap<string, RouteGroupName> => {
+    const entryInfo = context.getModuleInfo(entryId);
+    if (!entryInfo) return new Map();
+    const cached = passes.get(entryInfo);
+    if (cached) return cached;
+    const imports = closureBeyondBoot(rootIds, context);
+    const excluded = closureBeyondBoot(excludedRootIds, context);
+    const groups = new Map<string, RouteGroupName>();
+    for (const id of imports.keys()) {
+      if (rootIds.includes(id) || excluded.has(id) || !isSideEffectFree(id)) continue;
+      if (isLexicalModule(id) || isMarkdownModule(id) || isShikiModule(id)) continue;
+      if (WASM_MODULE.test(id)) continue;
+      groups.set(id, groupOf(id));
+    }
+    // Drop every module that imports something outside boot and the groups it
+    // may depend on, until none is left.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [id, group] of groups) {
+        const closed = (imports.get(id) ?? []).every((imported) => {
+          if (isBootModule(imported, context)) return true;
+          const importedGroup = groups.get(imported);
+          return importedGroup === group || importedGroup === "route-vendor";
+        });
+        if (!closed) {
+          groups.delete(id);
+          changed = true;
+        }
+      }
+    }
+    passes.set(entryInfo, groups);
+    return groups;
+  };
+  return (moduleId, context) => groupsFor(context).get(normalizeModuleId(moduleId)) ?? null;
+}
+
 /** Group name prefixes; `chunkFileNames` maps their entry-set names to short files. */
 export const MERGED_CHUNK_GROUP_NAMES = [
   "boot-vendor",
   "boot",
+  "route-vendor",
+  "route-shared",
   "icons",
   "vendor",
   "lexical",
@@ -283,6 +451,16 @@ export function createWebCodeSplittingOptions(input: {
   readonly bootEntry: string;
   /** Lazily imported modules that join the boot chunk (absolute paths). */
   readonly bootRoots?: ReadonlyArray<string>;
+  /**
+   * Lazily imported routes whose side-effect-free package modules form the
+   * route groups, and the modules whose closures stay out of them (absolute
+   * paths; hosted builds pass `HOSTED_ROUTE_GROUP_MODULES`). Without them the
+   * build keeps the layout described above.
+   */
+  readonly routeGroups?: {
+    readonly roots: ReadonlyArray<string>;
+    readonly excludedRoots: ReadonlyArray<string>;
+  };
 }) {
   const isBootGraphModule = createBootGraphMatcher(input.bootEntry, input.bootRoots);
   const isBootVendorModule = createBootVendorMatcher(input.bootEntry, input.bootRoots);
@@ -291,6 +469,43 @@ export function createWebCodeSplittingOptions(input: {
     entriesAware: true,
     entriesAwareMergeThreshold: CODE_SPLITTING_MERGE_THRESHOLD_BYTES,
   } as const;
+  const routeGroupOf =
+    input.routeGroups && input.routeGroups.roots.length > 0
+      ? createRouteGroupMatcher({
+          bootEntry: input.bootEntry,
+          bootRoots: input.bootRoots,
+          routeRoots: input.routeGroups.roots,
+          excludedRoots: input.routeGroups.excludedRoots,
+        })
+      : null;
+  const routeGroups = routeGroupOf
+    ? [
+        {
+          // One chunk per group (not entries-aware): an entry that imports one
+          // of these modules loads the whole group, which the modules' packages
+          // declare harmless. Ahead of `icons` and `vendor`, which would
+          // otherwise split the routes' modules by importing entry set.
+          name: (moduleId: string, context: ModuleGraphContext) => routeGroupOf(moduleId, context),
+          priority: 6,
+          ...shared,
+          entriesAware: false,
+        },
+      ]
+    : [];
+  // With the route groups, the shared icons are one chunk as well: the routes
+  // reach every icon through the package's barrel, so the excluded closures
+  // keep all of them out of `route-vendor`, and split by entry set they were
+  // six files of a few KiB on the cold path. The signed-out root then loads
+  // that one chunk instead of three of them.
+  const icons = routeGroupOf
+    ? {
+        name: "icons",
+        test: isMergeableIconModule,
+        priority: 5,
+        ...shared,
+        entriesAware: false,
+      }
+    : { name: "icons", test: isMergeableIconModule, priority: 5, ...shared };
   return {
     groups: [
       {
@@ -310,7 +525,8 @@ export function createWebCodeSplittingOptions(input: {
           isBootVendorModule(moduleId, context) ? "boot-vendor" : null,
         priority: 11,
       },
-      { name: "icons", test: isMergeableIconModule, priority: 5, ...shared },
+      ...routeGroups,
+      icons,
       { name: "vendor", test: isMergeableVendorModule, priority: 4, ...shared },
       { name: "lexical", test: isLexicalModule, priority: 3, ...shared },
       { name: "markdown-stack", test: isMarkdownModule, priority: 2, ...shared },

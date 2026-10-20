@@ -13,6 +13,7 @@ import { createBootFontPreloadPlugin } from "./src/viteBuild/bootFontPreload";
 import {
   createWebCodeSplittingOptions,
   BOOT_ROOT_MODULES,
+  HOSTED_ROUTE_GROUP_MODULES,
   webChunkFileName,
 } from "./src/viteBuild/codeSplitting";
 import {
@@ -22,6 +23,7 @@ import {
 import { createPrecompressedAssetsPlugin } from "./src/viteBuild/precompressAssets";
 
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
+const resolveWebModule = (module: string) => fileURLToPath(new URL(`./${module}`, import.meta.url));
 const port = Number(process.env.PORT ?? 5733);
 const host = process.env.HOST?.trim() || "localhost";
 const configuredHttpUrl = process.env.VITE_HTTP_URL?.trim();
@@ -219,9 +221,17 @@ export function createWebViteConfig(
         output: {
           codeSplitting: createWebCodeSplittingOptions({
             bootEntry: fileURLToPath(new URL("./src/main.tsx", import.meta.url)),
-            bootRoots: BOOT_ROOT_MODULES.map((module) =>
-              fileURLToPath(new URL(`./${module}`, import.meta.url)),
-            ),
+            bootRoots: BOOT_ROOT_MODULES.map(resolveWebModule),
+            // Standard builds keep their chunk layout; their routes load from
+            // the local server, not across a Hub round trip.
+            ...(resolvedClientMode === "hosted-hub"
+              ? {
+                  routeGroups: {
+                    roots: HOSTED_ROUTE_GROUP_MODULES.roots.map(resolveWebModule),
+                    excludedRoots: HOSTED_ROUTE_GROUP_MODULES.excludedRoots.map(resolveWebModule),
+                  },
+                }
+              : {}),
           }),
           chunkFileNames: webChunkFileName,
         },
