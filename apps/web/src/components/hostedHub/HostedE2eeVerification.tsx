@@ -1,9 +1,13 @@
+import type { EnvironmentId } from "@ryco/contracts";
 import { isHostedHubMode } from "../../env";
 import { CopyIcon } from "lucide-react";
+import type { WebHostedE2eeChannelStatus } from "../../hostedHub/connectionStatus";
 import { useHostedHubStore } from "../../hostedHub/state";
 import {
   useWebE2eeChannelStatus,
+  useWebE2eeChannelStatusFor,
   useWebE2eeVerificationCode,
+  useWebE2eeVerificationCodeFor,
 } from "../../hostedHub/useWebE2eeSession";
 import {
   hostedSettingsRoleSnapshot,
@@ -55,16 +59,61 @@ import {
  *
  * The string is display state and stays that way: it is read from the in-memory
  * projection on every render and written nowhere. §13.5 — "never logged, never
- * persisted, never sent to analytics" — so there is no copy button, no `title`
- * attribute, and no form control whose value a browser could restore.
+ * persisted, never sent to analytics" — so there is no `title` attribute and no
+ * form control whose value a browser could restore; the one copy is the one the
+ * reader asks for.
+ *
+ * `environmentId` names the node whose session the code belongs to — the open
+ * thread's, whether or not the selection cursor is on it — so the code is
+ * always the one that node's CLI shows. Without it, the displayed (selected)
+ * environment's session.
  */
-export function HostedE2eeVerification() {
-  const status = useWebE2eeChannelStatus();
-  const code = useWebE2eeVerificationCode();
+export function HostedE2eeVerification({
+  environmentId,
+}: { readonly environmentId?: EnvironmentId } = {}) {
+  return environmentId === undefined ? (
+    <DisplayedHostedE2eeVerification />
+  ) : (
+    <EnvironmentHostedE2eeVerification environmentId={environmentId} />
+  );
+}
+
+function DisplayedHostedE2eeVerification() {
+  return (
+    <HostedE2eeVerificationView
+      status={useWebE2eeChannelStatus()}
+      code={useWebE2eeVerificationCode()}
+    />
+  );
+}
+
+function EnvironmentHostedE2eeVerification({
+  environmentId,
+}: {
+  readonly environmentId: EnvironmentId;
+}) {
+  return (
+    <HostedE2eeVerificationView
+      status={useWebE2eeChannelStatusFor(environmentId)}
+      code={useWebE2eeVerificationCodeFor(environmentId)}
+    />
+  );
+}
+
+function HostedE2eeVerificationView({
+  status,
+  code,
+}: {
+  readonly status: WebHostedE2eeChannelStatus;
+  readonly code: string | null;
+}) {
   const hostedRole = useHostedHubStore((state) => state.effectiveRole);
   const directoryStatus = useHostedHubStore((state) => state.directoryStatus);
   const transportStatus = useHostedHubStore((state) => state.transportStatus);
   if (status !== "web-unsigned") return null;
+  // Settings opens on the selected node, so whether its Security section is
+  // this reader's to open is asked of the shared role, whichever node's code
+  // this is.
   const placement = hostedE2eeVerificationPlacement(
     settingsSectionReachable("security", {
       hosted: isHostedHubMode(),

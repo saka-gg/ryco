@@ -59,9 +59,9 @@ export function NoActiveThreadState(
               <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground md:text-muted-foreground/60">
                 No active thread
               </span>
-              {/* Hosted connection control stays reachable without an active
-                  thread (pill and sheet on phone, inline menu on desktop);
-                  renders nothing outside hosted-hub sessions. */}
+              {/* The phone tier keeps its connection pill and sheet here. On
+                  desktop no node is foreground without a thread, so there is
+                  no chip; renders nothing outside hosted-hub sessions. */}
               <HostedConnectionControl />
             </div>
           )}

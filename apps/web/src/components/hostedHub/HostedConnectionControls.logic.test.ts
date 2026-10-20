@@ -9,14 +9,18 @@ import {
   HOSTED_RELAY_TRANSPORT_STATUSES,
   type HostedConnectionGuarantee,
   type HostedConnectionStatusIndicator,
+  type HostedEnvironmentSessionRecord,
 } from "../../hostedHub/connectionStatus";
 import type { HostedHubNode } from "../../hostedHub/types";
 import {
   deriveHostedConnectionChip,
+  deriveHostedEnvironmentConnectionChip,
   HOSTED_CONNECTING_STATUS_TEXT,
   hostedConnectionAnnouncement,
+  hostedConnectionChipQuiet,
   hostedConnectionStatusPresentation,
   type HostedConnectionChipInput,
+  type HostedEnvironmentConnectionChipInput,
 } from "./HostedConnectionControls.logic";
 
 const CONTROLS_SOURCE = readFileSync(
@@ -54,14 +58,25 @@ describe("every derivation call site supplies the §4.4 channel state", () => {
     expect(LOGIC_SOURCE).toMatch(/describeHostedConnectionPhase\(\{\s*\.\.\.statusInput,/u);
     // …and nothing derives from an inline object that could quietly omit it.
     expect(LOGIC_SOURCE).not.toMatch(/deriveHostedConnectionStatus(?:Text|Indicator)\(\{/u);
-    // The surfaces derive nothing themselves: all three render the one chip.
+    // The surfaces derive nothing themselves: the phone sheet and pill render
+    // the selected node's chip, the thread badge its own environment's — and
+    // both chips are the one description above.
     expect(CONTROLS_SOURCE).not.toMatch(/deriveHostedConnectionStatus(?:Text|Indicator)\(/u);
-    expect(CONTROLS_SOURCE.match(/= useHostedConnectionChip\(\)/gu)).toHaveLength(3);
+    expect(CONTROLS_SOURCE.match(/= useHostedConnectionChip\(\)/gu)).toHaveLength(2);
+    expect(
+      CONTROLS_SOURCE.match(/= useHostedEnvironmentConnectionChip\(environmentId\)/gu),
+    ).toHaveLength(1);
+    expect(LOGIC_SOURCE.match(/describeHostedEnvironmentConnection\(\s*input,/gu)).toHaveLength(3);
   });
 
-  it("reads the projection through the tier-fenced hook, once, for the chip", () => {
+  it("reads the projection through the tier-fenced hooks, once per chip", () => {
+    // The selected node's chip reads the displayed channel; the thread badge
+    // reads its own environment's channel by id and never takes a status
+    // handed to it from elsewhere.
     expect(CONTROLS_SOURCE.match(/useWebE2eeChannelStatus\(\)/gu)).toHaveLength(1);
+    expect(CONTROLS_SOURCE.match(/useWebE2eeChannelStatusFor\(environmentId\)/gu)).toHaveLength(1);
     expect(CONTROLS_SOURCE).toMatch(/deriveHostedConnectionChip\(\{[^}]*e2eeStatus/u);
+    expect(CONTROLS_SOURCE).toMatch(/deriveHostedEnvironmentConnectionChip\(\{[^}]*e2eeStatus/u);
   });
 
   it("chooses no glyph from the transport or from connectedness", () => {
@@ -259,6 +274,200 @@ describe("the connection chip", () => {
       "Node Studio: Connecting…",
     );
     expect(hostedConnectionAnnouncement("Studio", "Online")).toBe("Node Studio: Online.");
+  });
+});
+
+/** `node`'s own session record, connected and ready unless told otherwise. */
+function sessionRecord(
+  node: HostedHubNode,
+  overrides: Partial<HostedEnvironmentSessionRecord> = {},
+): HostedEnvironmentSessionRecord {
+  return {
+    environmentId: node.environmentId,
+    nodeId: node.id,
+    label: node.label,
+    nodeKey: node.id,
+    generation: 7,
+    lastAccessedAt: 1,
+    connectRequested: true,
+    transportStatus: "online",
+    transportReachedOnline: true,
+    sessionStatus: "ready",
+    effectiveRole: node.effectiveRole,
+    sessionEstablished: true,
+    sessionRecoveredAfterUnknown: false,
+    failure: null,
+    terminalNodeKey: null,
+    syncFailed: false,
+    snapshotAcceptedAt: 1,
+    suspended: false,
+    relayGap: false,
+    ...overrides,
+  };
+}
+
+/** The chip for the open thread's environment, while the selection is still on `SOURCE_NODE`. */
+function environmentChipInput(
+  overrides: Partial<HostedEnvironmentConnectionChipInput> = {},
+): HostedEnvironmentConnectionChipInput {
+  return {
+    ...chipInput({ e2eeStatus: "legacy" }),
+    environmentId: TARGET_NODE.environmentId,
+    record: sessionRecord(TARGET_NODE),
+    deliveryUnknown: false,
+    e2eeStatus: "web-unsigned",
+    ...overrides,
+  };
+}
+
+describe("the open thread's connection chip", () => {
+  it("names the thread's own node and reports its own record and channel, not the selection's", () => {
+    // The selection is on another node whose channel fell back to legacy; the
+    // thread's node holds a locked browser channel of its own.
+    const chip = deriveHostedEnvironmentConnectionChip(environmentChipInput());
+    expect(chip).toEqual({
+      node: TARGET_NODE,
+      role: "viewer",
+      statusText: "Encrypted web",
+      indicator: HOSTED_CONNECTION_STATUS_INDICATORS["Encrypted web"],
+      switching: false,
+    });
+    // …and the other way round: its own fallback is labelled even while the
+    // selection's channel is encrypted.
+    const legacy = deriveHostedEnvironmentConnectionChip(
+      environmentChipInput({ e2eeStatus: "legacy" }),
+    );
+    expect(legacy?.node).toBe(TARGET_NODE);
+    expect(legacy?.statusText).toBe("Legacy connection");
+    expect(legacy?.indicator.guarantee).toBe("legacy");
+  });
+
+  it("reads the shared session fields when the thread's node is the selected one", () => {
+    // The thread's environment's own record says something else entirely; the
+    // shared fields mirror the selected record and win.
+    const chip = deriveHostedEnvironmentConnectionChip(
+      environmentChipInput({
+        environmentId: SOURCE_NODE.environmentId,
+        record: sessionRecord(SOURCE_NODE, { transportStatus: "terminal-failure" }),
+        e2eeStatus: "legacy",
+      }),
+    );
+    expect(chip?.node).toBe(SOURCE_NODE);
+    expect(chip?.role).toBe("operator");
+    expect(chip?.statusText).toBe("Legacy connection");
+    expect(chip).toEqual(deriveHostedConnectionChip(chipInput({ e2eeStatus: "legacy" })));
+  });
+
+  it("says Connecting… for a node whose own connection is on its way, or not yet requested", () => {
+    for (const record of [
+      sessionRecord(TARGET_NODE, {
+        transportStatus: "authenticating",
+        sessionStatus: "synchronizing",
+      }),
+      sessionRecord(TARGET_NODE, { sessionStatus: "replaying" }),
+      undefined,
+    ]) {
+      const chip = deriveHostedEnvironmentConnectionChip(environmentChipInput({ record }));
+      expect(chip?.statusText).toBe(HOSTED_CONNECTING_STATUS_TEXT);
+      expect(chip?.indicator.connected).toBe(false);
+    }
+  });
+
+  it("counts a browser still synchronizing the selection as current for another node", () => {
+    // The account and the directory were checked for every environment; only
+    // the selection is still being established.
+    const chip = deriveHostedEnvironmentConnectionChip(
+      environmentChipInput({ browserStatus: "synchronizing" }),
+    );
+    expect(chip?.statusText).toBe("Encrypted web");
+    // A browser that has not been revalidated still says so.
+    expect(
+      deriveHostedEnvironmentConnectionChip(environmentChipInput({ browserStatus: "stale" }))
+        ?.statusText,
+    ).toBe("Stale");
+  });
+
+  it("reports the node's own failures, revocation and unconfirmed delivery", () => {
+    const cases: ReadonlyArray<
+      readonly [string, Partial<HostedEnvironmentConnectionChipInput>, string]
+    > = [
+      [
+        "a dropped connection with a failure",
+        {
+          record: sessionRecord(TARGET_NODE, {
+            transportStatus: "reconnecting",
+            sessionStatus: "stale",
+            failure: { kind: "slow-consumer", retryable: true },
+          }),
+        },
+        "Unavailable",
+      ],
+      [
+        "a relay revocation",
+        {
+          record: sessionRecord(TARGET_NODE, {
+            transportStatus: "terminal-failure",
+            failure: { kind: "revoked", retryable: false },
+          }),
+        },
+        "Revoked",
+      ],
+      [
+        "a revocation the directory reports first",
+        { nodes: [SOURCE_NODE, { ...TARGET_NODE, revokedAt: 5 }] },
+        "Revoked",
+      ],
+      [
+        "an offline node",
+        {
+          nodes: [SOURCE_NODE, { ...TARGET_NODE, presence: { online: false, lastHeartbeatAt: 1 } }],
+          record: undefined,
+        },
+        "Offline",
+      ],
+      [
+        "an unconfirmed delivery on its record",
+        { record: sessionRecord(TARGET_NODE, { sessionStatus: "delivery-unknown" }) },
+        "Delivery unknown",
+      ],
+      [
+        "an unconfirmed delivery with no record",
+        { record: undefined, deliveryUnknown: true },
+        "Delivery unknown",
+      ],
+    ];
+    for (const [name, overrides, expected] of cases) {
+      const chip = deriveHostedEnvironmentConnectionChip(environmentChipInput(overrides));
+      expect(chip?.statusText, name).toBe(expected);
+      expect(chip?.node.id, name).toBe(TARGET_NODE.id);
+    }
+  });
+
+  it("has nothing to name for a node the directory does not list", () => {
+    expect(
+      deriveHostedEnvironmentConnectionChip(environmentChipInput({ nodes: [SOURCE_NODE] })),
+    ).toBeNull();
+  });
+});
+
+describe("§2.2 quiet is a claim, and only the browser channel may make it", () => {
+  it("draws only a steady browser channel quietly", () => {
+    for (const text of HOSTED_CONNECTION_STATUS_TEXTS) {
+      const indicator = HOSTED_CONNECTION_STATUS_INDICATORS[text];
+      expect(hostedConnectionChipQuiet(indicator), text).toBe(text === "Encrypted web");
+    }
+    // Never the fallback or the unclaimed connected state, however connected.
+    expect(hostedConnectionChipQuiet(indicator("legacy", true))).toBe(false);
+    expect(hostedConnectionChipQuiet(indicator("none", true))).toBe(false);
+    expect(hostedConnectionChipQuiet(indicator("web", false))).toBe(false);
+  });
+
+  it("keeps the legacy word on the thread's chip in every connected state", () => {
+    const chip = deriveHostedEnvironmentConnectionChip(
+      environmentChipInput({ e2eeStatus: "legacy" }),
+    );
+    expect(chip?.statusText).toBe("Legacy connection");
+    expect(hostedConnectionChipQuiet(chip!.indicator)).toBe(false);
   });
 });
 

@@ -159,9 +159,9 @@ grant internals, or unbounded operations metadata.
 
 Two other surfaces deliberately do show identity material, and neither is the selector: node
 enrollment shows the enrolling node's public-key fingerprint for the owner to compare out of band
-(see **First-owner and node onboarding**), and a connected node's menu shows the current channel's
-session verification code for the same purpose (see **Relay payload encryption in the browser**).
-Both are comparison values an owner is asked to read, not directory metadata.
+(see **First-owner and node onboarding**), and an open thread's connection popover shows the current
+session verification code of that thread's node for the same purpose (see **Relay payload encryption
+in the browser**). Both are comparison values an owner is asked to read, not directory metadata.
 
 The shared RPC access table drives both the server RPC principal and hosted client affordances.
 Viewer can read supported projections, Operator can run node mutations, approvals, and terminals,
@@ -514,13 +514,13 @@ the owner re-pairs.
 The relay-trust disclosure is a function of the channel state, and it is shown on the hosted
 authentication, node-selection, connection, and installation surfaces. It takes no state from the
 surface it mounts on: every mount site reads the live channel projection, so install help opened
-from a connected node's menu or from the phone connection sheet states that channel's disclosure and
-not the no-channel one. The paragraphs below are the shipped strings, quoted verbatim from
-`apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather than
-paraphrased on purpose: a paraphrase here would be a second copy of a security claim, free to drift
-away from the one the application renders. `HostedRelayTrustNotice.logic.test.ts` reads this file
-and asserts that each quotation below is exactly the shipped copy for its state, so a divergence
-fails a test instead of surviving a review.
+from the account page or from the phone connection sheet states the selected node's channel
+disclosure and not the no-channel one. The paragraphs below are the shipped strings, quoted verbatim
+from `apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather
+than paraphrased on purpose: a paraphrase here would be a second copy of a security claim, free to
+drift away from the one the application renders. `HostedRelayTrustNotice.logic.test.ts` reads this
+file and asserts that each quotation below is exactly the shipped copy for its state, so a
+divergence fails a test instead of surviving a review.
 
 No node channel open in this tab — the sign-in surface, the node directory, and install help reached
 from the directory:
@@ -596,10 +596,12 @@ with the other admission options in the [hub connector guide](./hub-connector.md
 
 ## Comparing the session code with your node
 
-On an encrypted channel the connected node's menu shows a short per-session verification code
-together with the sentence that bounds it. The code is derived from the node's identity key and this
-tab's ephemeral key and is bound to the single channel that produced it, so it changes on every
-channel and is meaningless once that channel closes.
+On an encrypted channel the open thread's connection popover — opened from the node name in the
+desktop workspace header — shows a short per-session verification code for that thread's node,
+together with the sentence that bounds it. It is that node's own session's code even while the
+selection is on another node, so it is always the one that node's CLI shows. The code is derived
+from the node's identity key and this tab's ephemeral key and is bound to the single channel that
+produced it, so it changes on every channel and is meaningless once that channel closes.
 
 Compare it out of band with the node's own view of the same session:
 
@@ -611,8 +613,8 @@ The sentence shown beside the code states what a match is worth. It ships at two
 quoted here for the reason the disclosure above is, and the same test holds each to the shipped
 string.
 
-Beside the code in the node menu — where an owner is mid-comparison — the accompanying text is one
-line and the pointer at the rest of it:
+Beside the code in the connection popover — where an owner is mid-comparison — the accompanying text
+is one line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-advisory -->
 
@@ -662,13 +664,13 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop-width node menu and again in Settings → Security, which is where the
-menu's pointer leads. That section is owner-only in hosted mode, so the menu asks whether this
-reader can open it before it points there: a viewer, an operator, or an owner whose role snapshot
-has gone stale is shown the longer account in the menu itself, with the `ryco e2ee sessions`
-sentence in place of a pointer at a section their settings list does not have. The narrow phone
-presentation does not draw the code at all, and its disclosure deliberately points at no comparison
-it cannot show; on a phone, use the Ryco mobile app.
+The code renders in the desktop thread connection popover and again in Settings → Security, which is
+where the popover's pointer leads. That section is owner-only in hosted mode, so the popover asks
+whether this reader can open it before it points there: a viewer, an operator, or an owner whose
+role snapshot has gone stale is shown the longer account in the popover itself, with the `ryco e2ee
+sessions` sentence in place of a pointer at a section their settings list does not have. The narrow
+phone presentation does not draw the code at all, and its disclosure deliberately points at no
+comparison it cannot show; on a phone, use the Ryco mobile app.
 
 ## Reconnect, replay, and delivery uncertainty
 
@@ -887,17 +889,30 @@ for upload bounds and removal behavior.
 
 ## Accessibility and layout
 
-Authentication, invitation, directory, and node menus use native keyboard controls, explicit labels,
-focus-visible indicators, focus movement on flow changes, validation messages, and polite/assertive
-live regions. Online, offline, stale, reconnecting, delivery-unknown, and relay-encryption states use
-text and icons in addition to color, and an encrypted browser channel is given an advisory rather
-than a success treatment, so the weaker configuration is not dressed as the stronger one through
-styling. The same shell adapts from narrow browser widths through tablet and desktop; there is no
-second hosted feature UI, with one deliberate exception — the session verification code renders only
-in the desktop-width node menu, so the narrow presentation offers no comparison to make and its
-disclosure points at none. That sameness is otherwise about presentation and feature surface only.
-It says nothing about the encryption tier, which does fork between this browser client and the Ryco
-mobile app, as stated at the top of this document.
+Authentication, invitation, directory, and connection popovers use native keyboard controls,
+explicit labels, focus-visible indicators, focus movement on flow changes, validation messages, and
+polite/assertive live regions. Online, offline, stale, reconnecting, delivery-unknown, and
+relay-encryption states use text and icons in addition to color, and an encrypted browser channel is
+given an advisory rather than a success treatment, so the weaker configuration is not dressed as the
+stronger one through styling. The same shell adapts from narrow browser widths through tablet and
+desktop; there is no second hosted feature UI, with one deliberate exception — the session
+verification code renders only in the desktop thread connection popover, so the narrow presentation
+offers no comparison to make and its disclosure points at none. That sameness is otherwise about
+presentation and feature surface only. It says nothing about the encryption tier, which does fork
+between this browser client and the Ryco mobile app, as stated at the top of this document.
+
+The desktop workspace has no global connected-node control. Nodes stay connected in the background,
+so pages that belong to no thread — home, Settings, Diagnostics — name no node, and an open thread's
+header names that thread's own node and its connection: where the thread runs and over what channel,
+whichever node the selection is on. Every state keeps its word and its glyph; only a steady
+encrypted browser channel is drawn quietly, and a fallen-back channel always reads "Legacy
+connection". Its popover holds the role and full status, an unconfirmed delivery to acknowledge, the
+session verification code, and **Manage devices**, which opens the device directory. Switching nodes
+is opening another node's thread from the inbox, or a node from that directory; hosted Settings
+chooses which node it edits with its own **Switch device** control. Signing out and installing or
+updating the app live on the account page, one **Account** entry away in the sidebar footer, and a
+node that failed to connect offers **Manage devices** and **Sign out** on its own page. The phone
+presentation keeps its connection pill and sheet.
 
 ## First-owner and node onboarding
 

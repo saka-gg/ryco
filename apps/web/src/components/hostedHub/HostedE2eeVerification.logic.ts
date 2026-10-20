@@ -263,8 +263,9 @@ export const E2EE_WEB_SAS_UNAVAILABLE =
  * Which length is being drawn, and therefore which second sentence comes with
  * it.
  *
- * `inline` is the short form and its pointer at Settings → Security: the node
- * menu, where an owner is mid-comparison and has room for one line. `settings`
+ * `inline` is the short form and its pointer at Settings → Security: the thread
+ * connection popover, where an owner is mid-comparison and has room for one
+ * line. `settings`
  * is the long form and the command that reads the node's end — the page the
  * pointer leads to, and the form any surface must draw when that page is not
  * one this reader can open ({@link hostedE2eeVerificationPlacement}).

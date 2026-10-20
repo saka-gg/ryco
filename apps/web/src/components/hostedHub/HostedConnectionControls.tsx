@@ -1,3 +1,4 @@
+import type { EnvironmentId } from "@ryco/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import {
   BadgeCheckIcon,
@@ -17,7 +18,9 @@ import { useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { navigateHub } from "../../hostedHub/hubRoutes";
+import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { DeviceIcon } from "../DeviceIcon";
 import { MobileListRow } from "../mobile/MobileListRow";
 import {
   MobileSheet,
@@ -27,21 +30,33 @@ import {
   MobileSheetTitle,
 } from "../mobile/MobileSheet";
 import { MobileStatusChip } from "../mobile/MobileStatusChip";
+import {
+  useHostedDeliveryNotice,
+  useHostedEnvironmentDeliveryUnknown,
+  useHostedEnvironmentRecord,
+} from "../../hostedHub/capabilities";
 import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
+import { adoptRoutedHostedNode } from "../../hostedHub/nodeRoutes";
 import {
   leaveHostedNodeRouteToDirectory,
   selectHostedNodeRoute,
   useRoutedHostedNode,
 } from "../../hostedHub/nodeRouteOrchestrator";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import { hostedHubController, useHostedHubStore, type HostedHubState } from "../../hostedHub/state";
 import type { HostedHubNode } from "../../hostedHub/types";
-import { useWebE2eeChannelStatus } from "../../hostedHub/useWebE2eeSession";
+import {
+  useWebE2eeChannelStatus,
+  useWebE2eeChannelStatusFor,
+} from "../../hostedHub/useWebE2eeSession";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   deriveHostedConnectionChip,
+  deriveHostedEnvironmentConnectionChip,
   hostedConnectionAnnouncement,
+  hostedConnectionChipQuiet,
   hostedConnectionStatusPresentation,
   type HostedConnectionChip,
+  type HostedConnectionChipSource,
   type HostedConnectionGlyph,
 } from "./HostedConnectionControls.logic";
 import { HostedE2eeVerification } from "./HostedE2eeVerification";
@@ -121,6 +136,15 @@ export function useHostedConnectionActions() {
     await hostedHubController.selectNode(next.id);
   };
 
+  // Moves the selection cursor to another node and stays on the current page:
+  // the address takes that node's segment in place, and the route orchestrator
+  // selects it exactly as it does for a restored address. Without the hosted
+  // history there is no address to follow, so the controller selects it.
+  const switchNodeInPlace = async (next: HostedHubNode) => {
+    if (adoptRoutedHostedNode(next.id)) return;
+    await hostedHubController.selectNode(next.id);
+  };
+
   // "All nodes" releases this route's demand and opens the Hub catalog. The
   // coordinator, not navigation, decides whether a retained/LRU connection
   // remains live.
@@ -130,31 +154,32 @@ export function useHostedConnectionActions() {
     await hostedHubController.returnToDirectory();
   };
 
-  return { switchNode, returnToAllNodes };
+  return { switchNode, switchNodeInPlace, returnToAllNodes };
 }
 
+/** The hosted fields every connection chip reads, picked once for both chips. */
+const selectHostedConnectionChipSource = (state: HostedHubState): HostedConnectionChipSource => ({
+  accountStatus: state.accountStatus,
+  directoryStatus: state.directoryStatus,
+  browserStatus: state.browserStatus,
+  selectionStatus: state.selectionStatus,
+  transportStatus: state.transportStatus,
+  sessionStatus: state.sessionStatus,
+  errorMessage: state.errorMessage,
+  effectiveRole: state.effectiveRole,
+  selectedNode: state.selectedNode,
+  nodes: state.nodes,
+});
+
 /**
- * The one place the hosted state becomes what the connection surfaces show:
- * the node they name and its bounded status, including the channel state
- * (docs/relay-e2ee-protocol.md §12.2 asks for it on every user-facing surface).
- * Returns null while there is no node to name, which also covers every
- * non-hosted mode.
+ * The one place the hosted state becomes what the phone connection surfaces
+ * show: the selected node they name and its bounded status, including the
+ * channel state (docs/relay-e2ee-protocol.md §12.2 asks for it on every
+ * user-facing surface). Returns null while there is no node to name, which also
+ * covers every non-hosted mode.
  */
 function useHostedConnectionChip(): HostedConnectionChip | null {
-  const source = useHostedHubStore(
-    useShallow((state) => ({
-      accountStatus: state.accountStatus,
-      directoryStatus: state.directoryStatus,
-      browserStatus: state.browserStatus,
-      selectionStatus: state.selectionStatus,
-      transportStatus: state.transportStatus,
-      sessionStatus: state.sessionStatus,
-      errorMessage: state.errorMessage,
-      effectiveRole: state.effectiveRole,
-      selectedNode: state.selectedNode,
-      nodes: state.nodes,
-    })),
-  );
+  const source = useHostedHubStore(useShallow(selectHostedConnectionChipSource));
   const routedNodeId = useRoutedHostedNode().nodeId;
   const e2eeStatus = useWebE2eeChannelStatus();
   return useMemo(
@@ -163,10 +188,41 @@ function useHostedConnectionChip(): HostedConnectionChip | null {
   );
 }
 
-function DeliveryUnknownAcknowledgement() {
-  const session = useHostedHubStore((state) => state.sessionStatus);
-  const recoveredAfterUnknown = useHostedHubStore((state) => state.sessionRecoveredAfterUnknown);
-  if (session !== "delivery-unknown") return null;
+/**
+ * The same chip for one named environment — the open thread's — whether or not
+ * the selection cursor is on it: the shared session fields while it is
+ * selected, its own session record otherwise, and its own channel always.
+ * Null while the directory does not list its node.
+ */
+function useHostedEnvironmentConnectionChip(
+  environmentId: EnvironmentId,
+): HostedConnectionChip | null {
+  const source = useHostedHubStore(useShallow(selectHostedConnectionChipSource));
+  const other = source.selectedNode?.environmentId !== environmentId;
+  const record = useHostedEnvironmentRecord(other ? environmentId : null);
+  const deliveryUnknown = useHostedEnvironmentDeliveryUnknown(other ? environmentId : null);
+  const e2eeStatus = useWebE2eeChannelStatusFor(environmentId);
+  return useMemo(
+    () =>
+      deriveHostedEnvironmentConnectionChip({
+        ...source,
+        environmentId,
+        record,
+        deliveryUnknown,
+        e2eeStatus,
+      }),
+    [deliveryUnknown, e2eeStatus, environmentId, record, source],
+  );
+}
+
+/** The delivery-unknown warning and its replay-gated acknowledgement. */
+function DeliveryUnknownNotice({
+  recovered,
+  onAcknowledge,
+}: {
+  readonly recovered: boolean;
+  readonly onAcknowledge: () => void;
+}) {
   return (
     <div
       role="alert"
@@ -177,72 +233,137 @@ function DeliveryUnknownAcknowledgement() {
         className="mt-2"
         size="sm"
         variant="outline"
-        disabled={!recoveredAfterUnknown}
+        disabled={!recovered}
         title={
-          recoveredAfterUnknown
+          recovered
             ? undefined
             : "Wait for session replay to finish before acknowledging this warning."
         }
-        onClick={() => hostedHubController.acknowledgeDeliveryUnknown()}
+        onClick={onAcknowledge}
       >
-        {recoveredAfterUnknown ? "Acknowledge" : "Synchronizing…"}
+        {recovered ? "Acknowledge" : "Synchronizing…"}
       </Button>
     </div>
   );
 }
 
+/** The selected node's unconfirmed delivery, for the phone connection sheet. */
+function DeliveryUnknownAcknowledgement() {
+  const session = useHostedHubStore((state) => state.sessionStatus);
+  const recoveredAfterUnknown = useHostedHubStore((state) => state.sessionRecoveredAfterUnknown);
+  if (session !== "delivery-unknown") return null;
+  return (
+    <DeliveryUnknownNotice
+      recovered={recoveredAfterUnknown}
+      onAcknowledge={() => hostedHubController.acknowledgeDeliveryUnknown()}
+    />
+  );
+}
+
 /**
- * The hosted node connection menu (desktop presentation). Renders in normal
- * flow — callers place it inside the workspace header's inline actions or an
- * entry surface — so it can never overlap other header controls. Returns null
- * while no node is selected, which also covers every non-hosted mode.
+ * One environment's unconfirmed delivery: the selected one's from the shared
+ * session, any other one's from its own record, acknowledged where it lives.
  */
-export function HostedNodeMenu() {
+function EnvironmentDeliveryUnknownAcknowledgement({
+  environmentId,
+}: {
+  readonly environmentId: EnvironmentId;
+}) {
+  const notice = useHostedDeliveryNotice(environmentId);
+  if (!notice) return null;
+  return (
+    <DeliveryUnknownNotice recovered={notice.canAcknowledge} onAcknowledge={notice.acknowledge} />
+  );
+}
+
+/**
+ * What the thread header shows for a thread the browser can only read from its
+ * saved copy: no node to describe, a fresh connection on its way. Renders
+ * nothing unless that saved copy is what is on screen.
+ */
+function HostedSavedViewMenu() {
   const readCache = useHostedReadCache();
-  const chip = useHostedConnectionChip();
-  const nodes = useHostedHubStore((state) => state.nodes);
-  const directory = useHostedHubStore((state) => state.directoryStatus);
+  if (!readCache.accountId || !canShowHostedReadPreview()) return null;
+  return (
+    <details className="relative text-xs">
+      <summary className="cursor-pointer rounded-lg px-3 py-2 text-muted-foreground">
+        Saved view · Reconnecting
+      </summary>
+      <div className="absolute right-0 z-50 mt-2 grid w-64 gap-2 rounded-lg border bg-popover p-3 shadow-md">
+        <p>Reading saved text. Sending work waits for a fresh connection.</p>
+        <Button variant="ghost" size="sm" onClick={() => void hostedHubController.bootstrap()}>
+          Retry connection
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => void setHostedReadCacheEnabled(false)}>
+          Forget saved conversations
+        </Button>
+      </div>
+    </details>
+  );
+}
+
+/**
+ * The open thread's connection, in the desktop workspace header: the thread's
+ * own node and its bounded status, whichever node the selection cursor is on.
+ *
+ * It is a location, not a switch. Nodes stay connected in the background, so
+ * the header names where this thread runs and over what channel, and nothing
+ * else; switching happens by opening another node's thread, and the node list
+ * lives on the device directory the popover links to. Renders in normal flow
+ * inside the header's inline actions, so it can never overlap other controls.
+ *
+ * The steady browser channel is drawn quietly and every other state keeps its
+ * outline, and every state keeps its word and its glyph (text and icon, never
+ * colour alone). Renders nothing outside hosted sessions.
+ */
+export function HostedThreadConnectionBadge({
+  environmentId,
+}: {
+  readonly environmentId: EnvironmentId;
+}) {
+  const chip = useHostedEnvironmentConnectionChip(environmentId);
+  const selected = useHostedHubStore(
+    (state) => state.selectedNode?.environmentId === environmentId,
+  );
   const error = useHostedHubStore((state) => state.errorMessage);
-  const browserStatus = useHostedHubStore((state) => state.browserStatus);
-  const { switchNode, returnToAllNodes } = useHostedConnectionActions();
+  const { returnToAllNodes } = useHostedConnectionActions();
   const disclosureRef = useRef<HTMLDetailsElement>(null);
-  if (!chip) {
-    if (!readCache.accountId || !canShowHostedReadPreview()) return null;
-    return (
-      <details className="relative text-xs">
-        <summary className="cursor-pointer rounded-lg px-3 py-2 text-muted-foreground">
-          Saved view · Reconnecting
-        </summary>
-        <div className="absolute right-0 z-50 mt-2 grid w-64 gap-2 rounded-lg border bg-popover p-3 shadow-md">
-          <p>Reading saved text. Sending work waits for a fresh connection.</p>
-          <Button variant="ghost" size="sm" onClick={() => void hostedHubController.bootstrap()}>
-            Retry connection
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void setHostedReadCacheEnabled(false)}>
-            Forget saved conversations
-          </Button>
-        </div>
-      </details>
-    );
-  }
+  if (!chip) return <HostedSavedViewMenu />;
 
   const { node, role, statusText, indicator } = chip;
+  const quiet = hostedConnectionChipQuiet(indicator);
 
   return (
     <div className="relative max-w-full">
       <details ref={disclosureRef} className="group relative">
-        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          {/* The glyph follows the derived state and the §2.2 claim, not the
-              transport. Read off `transportStatus` alone it drew the connected
-              green wifi beside `Delivery unknown`, beside `Authorization
-              removed`, and — once this tier ran a §4 channel — beside a §12.2
-              plaintext fallback. */}
-          <HostedConnectionStatusIcon indicator={indicator} className="size-4" />
+        <summary
+          data-quiet={String(quiet)}
+          className={cn(
+            "flex cursor-pointer list-none items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            quiet
+              ? "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              : "border border-border bg-card/95 text-foreground",
+          )}
+        >
+          <DeviceIcon
+            environmentId={node.environmentId}
+            label={node.label}
+            platformOs={node.platformOs}
+            className="size-3.5 shrink-0"
+          />
           <span className="max-w-32 truncate font-medium">{node.label}</span>
-          <span className="max-w-24 truncate text-xs text-muted-foreground">{statusText}</span>
+          <span aria-hidden className="text-muted-foreground">
+            ·
+          </span>
+          {/* The glyph follows the derived state and the §2.2 claim, not the
+              transport: read off `transportStatus` alone it drew the connected
+              green wifi beside `Delivery unknown`, beside `Authorization
+              removed`, and beside a §12.2 plaintext fallback. */}
+          <HostedConnectionStatusIcon indicator={indicator} className="size-3.5 shrink-0" />
+          <span className="whitespace-nowrap">{statusText}</span>
           <ChevronDownIcon
             aria-hidden
-            className="size-3.5 transition-transform group-open:rotate-180"
+            className="size-3.5 shrink-0 transition-transform group-open:rotate-180"
           />
         </summary>
         <div className="absolute right-0 z-50 mt-2 w-72 rounded-xl border border-border bg-popover p-3 shadow-xl">
@@ -253,80 +374,35 @@ export function HostedNodeMenu() {
           <p className="sr-only" aria-live="polite">
             {hostedConnectionAnnouncement(node.label, statusText)}
           </p>
-          {error ? (
+          {/* The shared error describes the selected node only. */}
+          {selected && error ? (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
               {error}
             </p>
           ) : null}
-          <DeliveryUnknownAcknowledgement />
-          <div className="mt-3 max-h-48 space-y-1 overflow-auto border-t border-border pt-3">
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => void returnToAllNodes()}
-            >
-              <LayoutGridIcon aria-hidden className="size-4" /> All nodes
-            </button>
-            {nodes
-              .filter((candidate) => candidate.id !== node.id)
-              .map((candidate) => (
-                <button
-                  key={candidate.id}
-                  type="button"
-                  disabled={
-                    directory !== "ready" ||
-                    browserStatus !== "current" ||
-                    candidate.revokedAt !== null ||
-                    candidate.capabilities?.nativeClientRequired === true
-                  }
-                  title={
-                    candidate.capabilities?.nativeClientRequired === true
-                      ? "Open in Desktop/Mobile"
-                      : undefined
-                  }
-                  className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => void switchNode(candidate)}
-                >
-                  <span className="truncate">{candidate.label}</span>
-                  <NodePresence node={candidate} />
-                </button>
-              ))}
+          <EnvironmentDeliveryUnknownAcknowledgement environmentId={environmentId} />
+          <div className="mt-3 space-y-3 border-t border-border pt-3 empty:hidden">
+            {/* §13.5's surface duty: "Shown in the web UI for the active
+                session … the owner compares the two out of band." The code is
+                this thread's node's own session code, for every role. It
+                renders itself only on a locked `e2ee` channel and returns null
+                in every other state, so this mount site carries no condition of
+                its own that could disagree with the projection. */}
+            <HostedE2eeVerification environmentId={environmentId} />
           </div>
-          <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void hostedHubController.refreshDirectory()}
-            >
-              <RefreshCwIcon aria-hidden /> Refresh
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => void hostedHubController.signOut()}>
-              <LogOutIcon aria-hidden /> Sign out
-            </Button>
+          <div className="mt-3 border-t border-border pt-3">
             <Button
               size="sm"
               variant="ghost"
               onClick={() => {
-                // Close first, exactly as the phone sheet twin does: the
-                // settings surface is modal and takes focus, and a disclosure
-                // left open underneath it makes two owners of one dismissal —
-                // Escape closes the dialog and returns focus into a popover the
-                // user believes they already left.
+                // Close first: the directory replaces the workspace, and a
+                // disclosure left open would come back open with it.
                 if (disclosureRef.current) disclosureRef.current.open = false;
-                navigateHub({ kind: "account", section: "security" });
+                void returnToAllNodes();
               }}
             >
-              <UserRoundIcon aria-hidden /> Security details
+              <LayoutGridIcon aria-hidden /> Manage devices
             </Button>
-          </div>
-          <div className="mt-3 space-y-3 border-t border-border pt-3">
-            {/* §13.5's surface duty: "Shown in the web UI for the active
-                session … the owner compares the two out of band." It renders
-                itself only on a locked `e2ee` channel and returns null in every
-                other state, so this mount site carries no condition of its own
-                that could disagree with the projection. */}
-            <HostedE2eeVerification />
-            <HostedPwaControls compact />
           </div>
         </div>
       </details>
@@ -537,11 +613,13 @@ export function HostedConnectionPill() {
 }
 
 /**
- * Tier-aware hosted connection control: the phone pill (opening the bottom
- * sheet) on the phone tier, the inline desktop menu otherwise. Renders
- * nothing while no hosted node is selected.
+ * The connection control for page chrome that belongs to no thread: the phone
+ * pill (opening the bottom sheet) on the phone tier, and nothing on desktop,
+ * where nodes stay connected in the background and the open thread's header
+ * names its own node (`HostedThreadConnectionBadge`). Renders nothing while no
+ * hosted node is selected.
  */
 export function HostedConnectionControl() {
   const tier = usePresentationTier();
-  return tier === "phone" ? <HostedConnectionPill /> : <HostedNodeMenu />;
+  return tier === "phone" ? <HostedConnectionPill /> : null;
 }
