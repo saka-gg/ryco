@@ -9,6 +9,8 @@ import {
 /**
  * Declare, for as long as this thread surface is mounted, that its environment
  * should be the hosted selection — and read back the reason when it cannot be.
+ * An environment whose session is already live or on its way is selected
+ * without waiting; any other waits out the engine's short debounce first.
  *
  * Deliberately the only React surface of the retarget engine, and deliberately
  * thin: all of the decision and timing logic lives in
