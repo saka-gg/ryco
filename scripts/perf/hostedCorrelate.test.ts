@@ -121,6 +121,86 @@ describe("hosted switch correlation", () => {
     assert.isNull(rows[2]?.offsets["node.shell"]);
   });
 
+  it("credits an event between the press and the click to that switch, before the click", () => {
+    const nodes = new Map([
+      ["env_a", { label: "node0", spanStarts: new Map([[THREAD_SPAN, [CLICK - 1]]]) }],
+      ["env_b", { label: "node1", spanStarts: new Map([[SHELL_SPAN, [CLICK + 1_499]]]) }],
+    ]);
+    const rows = correlateRuns({
+      runs: [
+        {
+          kind: "same-node",
+          rowKey: "env_a:thread-1",
+          pressEpochMs: CLICK - 3,
+          clickEpochMs: CLICK,
+        },
+        {
+          kind: "cross-node",
+          rowKey: "env_b:thread-2",
+          pressEpochMs: CLICK + 1_497,
+          clickEpochMs: CLICK + 1_500,
+        },
+      ],
+      nodes,
+      hubEvents: [CLICK - 2, CLICK + 1_498],
+    });
+
+    assert.equal(rows[0]?.offsets["hub.stream"], -2);
+    assert.equal(rows[0]?.offsets["node.thread"], -1);
+    // The next switch's press-time stream belongs to it, so it still reads as cold.
+    assert.equal(rows[1]?.offsets["hub.stream"], -2);
+    assert.equal(rows[1]?.offsets["node.shell"], -1);
+  });
+
+  it("does not credit the next switch's press-time event to this one", () => {
+    const rows = correlateRuns({
+      runs: [
+        {
+          kind: "cross-node",
+          rowKey: "env_a:thread-1",
+          pressEpochMs: CLICK - 3,
+          clickEpochMs: CLICK,
+        },
+        {
+          kind: "cross-node",
+          rowKey: "env_b:thread-2",
+          pressEpochMs: CLICK + 1_490,
+          clickEpochMs: CLICK + 1_500,
+        },
+      ],
+      nodes: new Map(),
+      hubEvents: [CLICK + 1_495],
+    });
+
+    assert.isNull(rows[0]?.offsets["hub.stream"]);
+    assert.equal(rows[1]?.offsets["hub.stream"], -5);
+  });
+
+  it("joins from the click when the probe recorded no press", () => {
+    const nodes = new Map([
+      ["env_a", { label: "node0", spanStarts: new Map([[THREAD_SPAN, [CLICK - 1, CLICK + 30]]]) }],
+    ]);
+    const runsWith = (press: { readonly pressEpochMs?: null }) => [
+      { kind: "same-node", rowKey: "env_a:thread-1", clickEpochMs: CLICK, ...press },
+      { kind: "same-node", rowKey: "env_a:thread-2", clickEpochMs: CLICK + 1_500, ...press },
+    ];
+    const hubEvents = [CLICK - 2, CLICK + 12, CLICK + 1_498, CLICK + 1_512];
+    const rows = correlateRuns({ runs: runsWith({}), nodes, hubEvents });
+
+    // Nothing before a click counts, and a window ends at the next click.
+    assert.deepStrictEqual(
+      rows.map((row) => [row.offsets["hub.stream"], row.offsets["node.thread"]]),
+      [
+        [12, 30],
+        [12, null],
+      ],
+    );
+    assert.deepStrictEqual(
+      correlateRuns({ runs: runsWith({ pressEpochMs: null }), nodes, hubEvents }),
+      rows,
+    );
+  });
+
   it("reads the rotated backups of a trace file and nothing else", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "ryco-correlate-rotated-"));
     try {

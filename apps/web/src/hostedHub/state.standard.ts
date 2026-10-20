@@ -186,6 +186,10 @@ export const getHostedEnvironmentSessions: () => HostedEnvironmentSessions = () 
 /** A standard build keeps no hosted environment sessions at all. */
 export const hostedEnvironmentSessionsMode: () => HostedEnvironmentSessionsMode = () => "single";
 
+/** A build without hosted sessions has none that selecting a node could adopt. */
+export const isHostedEnvironmentSessionAdoptable: (environmentId: EnvironmentId) => boolean = () =>
+  false;
+
 /** Standard builds have no hosted runtime to configure. */
 export const ensureWebHostedRuntimeConfigured: () => void = ignore;
 

@@ -6,6 +6,7 @@ import {
   createNodePreconnect,
   createThreadNavigationIntents,
   isNavigationPress,
+  mayPrefetchThreadWindow,
   NODE_PRECONNECT_COOLDOWN_MS,
   NODE_PRECONNECT_INTERVAL_MS,
   type NavigationPressEvent,
@@ -18,6 +19,10 @@ const wiring = vi.hoisted(() => ({
   tier: "phone" as "phone" | "desktop",
   retainHostedIntentScope: vi.fn((_environmentId: string) => () => undefined),
   markNodeSwitchIntent: vi.fn(),
+  retainThreadDetailSubscription: vi.fn(
+    (_environmentId: string, _threadId: string, _options?: unknown) => () => undefined,
+  ),
+  sessions: new Map<string, unknown>(),
 }));
 vi.mock("../../env", () => ({ isHostedHubMode: () => true }));
 vi.mock("../../lib/presentationTier", () => ({ getPresentationTier: () => wiring.tier }));
@@ -30,11 +35,25 @@ vi.mock("../../perf/nodeSwitchInstrumentation", () => ({
 vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
   canPreconnectHostedEnvironment: () => true,
 }));
-vi.mock("../../hostedHub/state", () => ({
-  getHostedEnvironmentSessions: () => ({ read: () => undefined }),
-}));
+// The hosted state seam answers readiness with the real adoption rule over
+// this test's session records.
+vi.mock("../../hostedHub/state", async () => {
+  const { canAdoptHostedEnvironmentSession } =
+    await import("@ryco/client-runtime/authorization/hostedEnvironmentSessions");
+  return {
+    isHostedEnvironmentSessionAdoptable: (environmentId: string) => {
+      const record = wiring.sessions.get(environmentId);
+      return (
+        record !== undefined &&
+        canAdoptHostedEnvironmentSession(
+          record as Parameters<typeof canAdoptHostedEnvironmentSession>[0],
+        )
+      );
+    },
+  };
+});
 vi.mock("../../environments/runtime/service", () => ({
-  retainThreadDetailSubscription: () => () => undefined,
+  retainThreadDetailSubscription: wiring.retainThreadDetailSubscription,
 }));
 vi.mock("../../lib/routeChunkPreload", () => ({ preloadRouteChunk: async () => undefined }));
 vi.mock("../../store", () => ({
@@ -51,7 +70,7 @@ function setup(
   options: {
     readonly maxRetains?: number;
     readonly loaded?: ReadonlySet<string>;
-    readonly canRetainOnHover?: (threadRef: ScopedThreadRef) => boolean;
+    readonly canRetain?: (threadRef: ScopedThreadRef) => boolean;
   } = {},
 ) {
   const releases = new Map<string, ReturnType<typeof vi.fn>>();
@@ -67,7 +86,7 @@ function setup(
     preloadThreadRoute,
     keyOf: (threadRef) => `${threadRef.environmentId}:${threadRef.threadId}`,
     ...(options.maxRetains === undefined ? {} : { maxRetains: options.maxRetains }),
-    ...(options.canRetainOnHover ? { canRetainOnHover: options.canRetainOnHover } : {}),
+    ...(options.canRetain ? { canRetain: options.canRetain } : {}),
   });
   return { intents, retain, releases, preloadThreadRoute };
 }
@@ -171,12 +190,34 @@ describe("thread navigation intents", () => {
     expect(retain.mock.calls.map(([threadRef]) => threadRef.threadId)).toEqual(["b"]);
   });
 
-  it("retains on hover only where the hover may, and always on press", () => {
-    const { intents, retain, preloadThreadRoute } = setup({ canRetainOnHover: () => false });
+  it("retains on hover and on press only where the intent may", () => {
+    const { intents, retain, preloadThreadRoute } = setup({ canRetain: () => false });
     intents.hover(ref("a"));
     vi.advanceTimersByTime(THREAD_NAVIGATION_HOVER_DELAY_MS * 2);
     expect(preloadThreadRoute).toHaveBeenCalledOnce();
     expect(retain).not.toHaveBeenCalled();
+    intents.press(ref("a"));
+    expect(retain).not.toHaveBeenCalled();
+    // The route chunk is still warmed, and a pending hover on another row is
+    // still cancelled.
+    expect(preloadThreadRoute).toHaveBeenCalledTimes(2);
+    const canRetain = vi.fn((_threadRef: ScopedThreadRef) => false);
+    const other = setup({ canRetain });
+    other.intents.hover(ref("b"));
+    other.intents.press(ref("c"));
+    vi.advanceTimersByTime(THREAD_NAVIGATION_HOVER_DELAY_MS * 2);
+    expect(canRetain.mock.calls.map(([threadRef]) => threadRef.threadId)).toEqual(["c"]);
+    expect(other.retain).not.toHaveBeenCalled();
+  });
+
+  it("asks at press time", () => {
+    let ready = false;
+    const { intents, retain } = setup({ canRetain: () => ready });
+    intents.hover(ref("a"));
+    vi.advanceTimersByTime(THREAD_NAVIGATION_HOVER_DELAY_MS);
+    expect(retain).not.toHaveBeenCalled();
+    ready = true;
+    intents.press(ref("a"));
     intents.press(ref("a"));
     expect(retain).toHaveBeenCalledExactlyOnceWith(ref("a"));
   });
@@ -189,6 +230,25 @@ describe("thread navigation intents", () => {
     vi.advanceTimersByTime(THREAD_NAVIGATION_HOVER_DELAY_MS + THREAD_NAVIGATION_INTENT_RETAIN_MS);
     expect(retain).toHaveBeenCalledOnce();
     expect(releases.get("a")).toHaveBeenCalledOnce();
+  });
+});
+
+describe("mayPrefetchThreadWindow", () => {
+  it("always may outside hosted Web, and on hosted Web only from a ready session off the phone tier", () => {
+    for (const phoneTier of [false, true]) {
+      for (const sessionReady of [false, true]) {
+        expect(mayPrefetchThreadWindow({ hosted: false, phoneTier, sessionReady })).toBe(true);
+      }
+    }
+    expect(mayPrefetchThreadWindow({ hosted: true, phoneTier: true, sessionReady: true })).toBe(
+      false,
+    );
+    expect(mayPrefetchThreadWindow({ hosted: true, phoneTier: false, sessionReady: false })).toBe(
+      false,
+    );
+    expect(mayPrefetchThreadWindow({ hosted: true, phoneTier: false, sessionReady: true })).toBe(
+      true,
+    );
   });
 });
 
@@ -380,6 +440,40 @@ describe("row press intents on hosted Web", () => {
     expect(wiring.markNodeSwitchIntent).toHaveBeenCalledExactlyOnceWith(
       threadRef.environmentId,
       "press",
+    );
+  });
+
+  it("reads a pressed thread's window only from a ready session, off the phone tier", () => {
+    const onNode = (environment: string): ScopedThreadRef => ({
+      environmentId: EnvironmentId.make(environment),
+      threadId: ThreadId.make(`thread-${environment}`),
+    });
+    const readySession = {
+      transportStatus: "online",
+      sessionEstablished: true,
+      suspended: false,
+      relayGap: false,
+      snapshotAcceptedAt: 1,
+      sessionStatus: "ready",
+      sessionRecoveredAfterUnknown: false,
+    };
+    wiring.sessions.set("environment-ready", readySession);
+    // Online, but its shell snapshot is not accepted yet.
+    wiring.sessions.set("environment-online", { ...readySession, snapshotAcceptedAt: null });
+    wiring.retainThreadDetailSubscription.mockClear();
+
+    wiring.tier = "phone";
+    noteThreadPressIntent(onNode("environment-ready"));
+    wiring.tier = "desktop";
+    noteThreadPressIntent(onNode("environment-online"));
+    noteThreadPressIntent(onNode("environment-unknown"));
+    expect(wiring.retainThreadDetailSubscription).not.toHaveBeenCalled();
+
+    noteThreadPressIntent(onNode("environment-ready"));
+    expect(wiring.retainThreadDetailSubscription).toHaveBeenCalledExactlyOnceWith(
+      "environment-ready",
+      "thread-environment-ready",
+      { speculative: true },
     );
   });
 });

@@ -175,6 +175,34 @@ describe("WsTransport subscriptions refused before sending", () => {
   });
 });
 
+describe("WsTransport request dispatch", () => {
+  it("writes a subscription's request within the task that starts it, before any timer runs", async () => {
+    const transport = connect(() => "allowed");
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0]!.open();
+    // The first subscription waits for the session's client; later ones find it ready.
+    const stopFirst = transport.subscribe(
+      (client) => client[WS_METHODS.subscribeTerminalEvents]({}),
+      () => undefined,
+      { tag: WS_METHODS.subscribeTerminalEvents },
+    );
+    await vi.waitFor(() =>
+      expect(
+        sockets[0]!
+          .requests()
+          .filter((request) => request.tag === WS_METHODS.subscribeTerminalEvents),
+      ).toHaveLength(1),
+    );
+
+    const stop = subscribeProposals(transport, vi.fn());
+    // Only microtasks run here: no timer fires and no later task starts.
+    for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
+    expect(proposalRequests(sockets[0]!)).toHaveLength(1);
+    stop();
+    stopFirst();
+  });
+});
+
 describe("WsTransport resync failures", () => {
   it("grows the retry delay for back-to-back resyncs up to a cap", () => {
     expect(

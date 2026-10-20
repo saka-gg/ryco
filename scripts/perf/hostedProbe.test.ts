@@ -24,6 +24,7 @@ import {
   type HostedRoute,
   type RecordedRequest,
   type SwitchRun,
+  SWITCH_PROBE_SCRIPT,
 } from "./hostedProbe.ts";
 
 function request(
@@ -49,6 +50,7 @@ function switchRun(overrides: Partial<SwitchRun> = {}): SwitchRun {
     kind: "cross-node",
     side: null,
     rowKey: "env_a:thread-1",
+    pressEpochMs: null,
     clickEpochMs: 1,
     firstFrame: 10,
     route: 20,
@@ -671,5 +673,62 @@ describe("hosted probe workspace helpers", () => {
       newTimelineEntries([{ phases: {} }], [{ phases: {} }, { phases: { a: 1 } }]),
       [{ phases: { a: 1 } }],
     );
+  });
+});
+
+describe("hosted probe page script", () => {
+  it("presses a row in one task and releases and clicks it in a later one", async () => {
+    const dispatched: string[] = [];
+    const row = {
+      dispatchEvent: (event: { readonly type: string }) => {
+        dispatched.push(event.type);
+        return true;
+      },
+      click: () => {
+        dispatched.push("click");
+      },
+    };
+    class FakeEvent {
+      readonly type: string;
+      constructor(type: string) {
+        this.type = type;
+      }
+    }
+    const window: {
+      __rycoHostedProbe?: { switchTo(rowKey: string, timeoutMs: number): Promise<unknown> };
+    } = {};
+    const document = {
+      querySelector: (selector: string) => (selector.includes("data-inbox-row-key") ? row : null),
+      querySelectorAll: () => [],
+    };
+    // The probe is page source: run it as the page would, against stubs.
+    const install = new Function(
+      "window",
+      "document",
+      "PointerEvent",
+      "MouseEvent",
+      "PerformanceObserver",
+      "requestAnimationFrame",
+      "performance",
+      "location",
+      "return " + SWITCH_PROBE_SCRIPT,
+    );
+    install(window, document, FakeEvent, FakeEvent, undefined, () => 0, performance, {
+      pathname: "/",
+    });
+
+    void window.__rycoHostedProbe!.switchTo("env:thread", 50);
+    assert.deepStrictEqual(dispatched, ["pointerdown", "mousedown"]);
+    // Microtasks alone never reach the click: it waits for a later task.
+    for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
+    assert.deepStrictEqual(dispatched, ["pointerdown", "mousedown"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepStrictEqual(dispatched, [
+      "pointerdown",
+      "mousedown",
+      "pointerup",
+      "mouseup",
+      "click",
+    ]);
   });
 });
