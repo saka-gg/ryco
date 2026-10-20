@@ -129,7 +129,7 @@ async function patchHosted(patch: Partial<HostedHubState>) {
 
 describe("useHostedRpcCapability", () => {
   it("does not re-render on hosted changes it does not read", async () => {
-    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch));
+    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch, null));
     try {
       expect(probe.latest()).toMatchObject({ allowed: true, kind: "ready" });
       const commits = probe.commits();
@@ -151,7 +151,7 @@ describe("useHostedRpcCapability", () => {
   });
 
   it("re-renders once when a field it reads changes, and answers from it", async () => {
-    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch));
+    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch, null));
     try {
       const commits = probe.commits();
       await patchHosted({ effectiveRole: "viewer" });
@@ -171,7 +171,7 @@ describe("useHostedRpcCapability", () => {
       sessionEstablished: false,
       browserStatus: "synchronizing",
     });
-    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch));
+    const { probe, unmount } = await mountProbe(() => useHostedRpcCapability(dispatch, null));
     try {
       expect(probe.latest()).toMatchObject({ allowed: false, kind: "establishing" });
       await patchHosted({
@@ -218,7 +218,7 @@ describe("useHostedRpcCapability", () => {
     await patchHosted({ transportStatus: "connecting", sessionStatus: "synchronizing" });
     const { probe, unmount } = await mountProbe(() => ({
       x: useHostedRpcCapability(dispatch, ENV_X),
-      selected: useHostedRpcCapability(dispatch),
+      selected: useHostedRpcCapability(dispatch, null),
     }));
     try {
       expect(probe.latest().x).toMatchObject({ allowed: true, kind: "ready" });
@@ -297,7 +297,7 @@ describe("useHostedSwitchTarget", () => {
     await patchHosted({ transportStatus: "connecting", sessionStatus: "synchronizing" });
     const { probe, unmount } = await mountProbe(
       (): { selected: HostedSwitchTarget; other: HostedSwitchTarget } => ({
-        selected: useHostedSwitchTarget(),
+        selected: useHostedSwitchTarget(null),
         other: useHostedSwitchTarget(ENV_X),
       }),
     );

@@ -128,7 +128,7 @@ vi.mock("../hostedHub/capabilities", async (importOriginal) => {
     ...actual,
     useHostedRpcCapability: (
       method: string,
-      environmentId?: Parameters<typeof actual.useHostedRpcCapability>[1],
+      environmentId: Parameters<typeof actual.useHostedRpcCapability>[1],
     ) => {
       const establishing = useSyncExternalStore(
         hostedEstablishing.subscribe,

@@ -59,10 +59,10 @@ export function hostedSwitchTargetQueued(
  * disabled action: the node's name, whether its connection is merely being
  * established, and whether it is waiting for a free connection slot.
  *
- * `environmentId` names the environment; leaving it out (or `null`) means the
+ * `environmentId` names the environment and is always stated; `null` means the
  * selected one.
  */
-export function useHostedSwitchTarget(environmentId?: EnvironmentId | null): HostedSwitchTarget {
+export function useHostedSwitchTarget(environmentId: EnvironmentId | null): HostedSwitchTarget {
   const label = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
   const selectedEnvironmentId = useHostedHubStore(
     (state) => state.selectedNode?.environmentId ?? null,
