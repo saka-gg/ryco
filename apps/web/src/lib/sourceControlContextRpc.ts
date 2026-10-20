@@ -167,37 +167,6 @@ export const sourceControlContextQueryKeys = {
   ) => ["sourceControl", "workflows", environmentId ?? null, cwd, "logs", runId, jobId] as const,
 };
 
-export function issueListQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  state: "open" | "closed" | "all";
-  limit?: number;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.issueList(
-      input.environmentId,
-      input.cwd,
-      input.state,
-      input.limit,
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId) {
-        throw new Error("Issue list is unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.listIssues({
-        cwd: input.cwd,
-        state: input.state,
-        ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      });
-    },
-    enabled: (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
-    staleTime: 60_000,
-  });
-}
-
 export function issueDetailQueryOptions(input: {
   environmentId: EnvironmentId | null;
   cwd: string | null;
@@ -231,72 +200,6 @@ export function issueDetailQueryOptions(input: {
       input.cwd !== null &&
       input.reference !== null,
     staleTime: 300_000,
-  });
-}
-
-export function searchIssuesQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  query: string;
-  limit?: number;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.issueSearch(
-      input.environmentId,
-      input.cwd,
-      input.query,
-      input.limit,
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId) {
-        throw new Error("Issue search is unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.searchIssues({
-        cwd: input.cwd,
-        query: input.query,
-        ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      });
-    },
-    enabled:
-      (input.enabled ?? true) &&
-      input.environmentId !== null &&
-      input.cwd !== null &&
-      input.query.length > 0,
-    staleTime: 30_000,
-  });
-}
-
-export function changeRequestListQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  state: "open" | "closed" | "merged" | "all";
-  limit?: number;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.changeRequestList(
-      input.environmentId,
-      input.cwd,
-      input.state,
-      input.limit,
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId) {
-        throw new Error("Change request list is unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.listChangeRequests({
-        cwd: input.cwd,
-        state: input.state,
-        ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      });
-    },
-    enabled: (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
-    staleTime: 60_000,
   });
 }
 
@@ -335,38 +238,6 @@ export function searchChangeRequestsQueryOptions(input: {
   });
 }
 
-export function changeRequestDiffQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  reference: string | null;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.changeRequestDiff(
-      input.environmentId,
-      input.cwd,
-      input.reference ?? "",
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId || !input.reference) {
-        throw new Error("Change request diff is unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.getChangeRequestDiff({
-        cwd: input.cwd,
-        reference: input.reference,
-      });
-    },
-    enabled:
-      (input.enabled ?? true) &&
-      input.environmentId !== null &&
-      input.cwd !== null &&
-      input.reference !== null,
-    staleTime: 300_000,
-  });
-}
-
 export function changeRequestDetailQueryOptions(input: {
   environmentId: EnvironmentId | null;
   cwd: string | null;
@@ -399,109 +270,6 @@ export function changeRequestDetailQueryOptions(input: {
       input.environmentId !== null &&
       input.cwd !== null &&
       input.reference !== null,
-    staleTime: 300_000,
-  });
-}
-
-export function workflowRunsQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  pullRequestNumber?: number | null;
-  commitSha?: string | null;
-  limit?: number;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.workflowRuns(
-      input.environmentId,
-      input.cwd,
-      input.pullRequestNumber,
-      input.commitSha,
-      input.limit,
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId) {
-        throw new Error("Workflow runs are unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.listWorkflowRuns({
-        cwd: input.cwd,
-        ...(input.pullRequestNumber !== undefined && input.pullRequestNumber !== null
-          ? { pullRequestNumber: input.pullRequestNumber }
-          : {}),
-        ...(input.commitSha !== undefined && input.commitSha !== null
-          ? { commitSha: input.commitSha }
-          : {}),
-        ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      });
-    },
-    enabled: (input.enabled ?? true) && input.environmentId !== null && input.cwd !== null,
-    staleTime: 60_000,
-  });
-}
-
-export function workflowRunJobsQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  runId: string | null;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.workflowRunJobs(
-      input.environmentId,
-      input.cwd,
-      input.runId ?? "",
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId || !input.runId) {
-        throw new Error("Workflow jobs are unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.getWorkflowRunJobs({ cwd: input.cwd, runId: input.runId });
-    },
-    enabled:
-      (input.enabled ?? true) &&
-      input.environmentId !== null &&
-      input.cwd !== null &&
-      input.runId !== null,
-    staleTime: 60_000,
-  });
-}
-
-export function workflowJobLogQueryOptions(input: {
-  environmentId: EnvironmentId | null;
-  cwd: string | null;
-  runId: string | null;
-  jobId: string | null;
-  enabled?: boolean;
-}) {
-  return queryOptions({
-    queryKey: sourceControlContextQueryKeys.workflowJobLog(
-      input.environmentId,
-      input.cwd,
-      input.runId ?? "",
-      input.jobId ?? "",
-    ),
-    environmentId: input.environmentId,
-    queryFn: async () => {
-      if (!input.cwd || !input.environmentId || !input.runId || !input.jobId) {
-        throw new Error("Workflow logs are unavailable.");
-      }
-      const client = requireEnvironmentConnection(input.environmentId).client;
-      return client.sourceControl.getWorkflowJobLog({
-        cwd: input.cwd,
-        runId: input.runId,
-        jobId: input.jobId,
-      });
-    },
-    enabled:
-      (input.enabled ?? false) &&
-      input.environmentId !== null &&
-      input.cwd !== null &&
-      input.runId !== null &&
-      input.jobId !== null,
     staleTime: 300_000,
   });
 }

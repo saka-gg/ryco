@@ -2,21 +2,16 @@ import { RegistryContext, useAtomSubscribe, useAtomValue } from "@effect/atom-re
 import type { Atom } from "effect/reactivity";
 import {
   selectAvailableEditors,
-  selectKeybindingsConfigPath,
   selectObservability,
   selectProviders,
-  selectSettings,
   serverConfigAtom,
-  serverConfigUpdatedAtom,
   welcomeAtom,
-  type ServerConfigUpdatedNotification,
 } from "@ryco/client-runtime/rpc";
 import type {
   EditorId,
   ServerConfig,
   ServerLifecycleWelcomePayload,
   ServerProvider,
-  ServerSettings,
 } from "@ryco/contracts";
 import { useCallback, useContext, useRef } from "react";
 
@@ -98,20 +93,12 @@ function useConfigSelector<T>(
   return useSyncExternalStoreSelector(subscribe, getSnapshot, selector, isEqual);
 }
 
-export function useServerSettings(): ServerSettings {
-  return useServerConfigSelector(selectSettings);
-}
-
 export function useServerProviders(): ReadonlyArray<ServerProvider> {
   return useServerConfigSelector(selectProviders);
 }
 
 export function useServerAvailableEditors(): ReadonlyArray<EditorId> {
   return useServerConfigSelector(selectAvailableEditors);
-}
-
-export function useServerKeybindingsConfigPath(): string | null {
-  return useServerConfigSelector(selectKeybindingsConfigPath);
 }
 
 export function useServerObservability(): ServerConfig["observability"] | null {
@@ -122,10 +109,4 @@ export function useServerWelcomeSubscription(
   listener: (payload: ServerLifecycleWelcomePayload) => void,
 ): void {
   useLatestAtomSubscription(welcomeAtom, listener);
-}
-
-export function useServerConfigUpdatedSubscription(
-  listener: (notification: ServerConfigUpdatedNotification) => void,
-): void {
-  useLatestAtomSubscription(serverConfigUpdatedAtom, listener);
 }

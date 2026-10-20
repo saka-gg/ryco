@@ -14,7 +14,7 @@ import { webAppLifecycle } from "../platform/appLifecycle";
 /**
  * Minimal, self-contained replacement for the slice of `@tanstack/react-query`
  * that the web app still relies on. It preserves the observable surface of
- * `useQuery`, `useQueries`, `useMutation`, `useQueryClient`, and `queryOptions`
+ * `useQuery`, `useMutation`, `useQueryClient`, and `queryOptions`
  * (loading/error/data state, stale-time gating, `refetchInterval` polling,
  * prefix-scoped invalidation, optimistic mutations, and imperative
  * `fetchQuery`/`setQueryData`) without pulling in the external dependency.
@@ -707,99 +707,6 @@ export function useQuery<TQueryFnData = unknown, TData = TQueryFnData>(
   );
 
   return deriveResult(client, options, state, selected);
-}
-
-// ---------------------------------------------------------------------------
-// useQueries (homogeneous query arrays)
-// ---------------------------------------------------------------------------
-
-export function useQueries<TQueryFnData = unknown, TData = TQueryFnData>(config: {
-  readonly queries: ReadonlyArray<UseQueryOptions<TQueryFnData, TData>>;
-}): Array<UseQueryResult<TData>> {
-  const client = useQueryClient();
-  const { queries } = config;
-  const queriesRef = useRef(queries);
-  queriesRef.current = queries;
-
-  const hashes = queries.map((query) => hashQueryKey(query.queryKey));
-  for (const query of queries) client.setGcTime(query.queryKey, query.gcTime);
-  const combinedHash = hashes.join("|");
-
-  const [, forceRender] = useReducer((tick: number) => tick + 1, 0);
-
-  useEffect(() => {
-    const onChange = () => forceRender();
-    const unsubscribes = queriesRef.current.map((query) =>
-      client.subscribe(query.queryKey, onChange),
-    );
-    return () => {
-      for (const unsubscribe of unsubscribes) unsubscribe();
-    };
-  }, [client, combinedHash]);
-
-  useEffect(() => {
-    const removeObservers = queriesRef.current.map((query) => {
-      const observer: QueryObserver = {
-        ...(query.environmentId ? { environmentId: query.environmentId } : {}),
-        staleTime: query.staleTime ?? 0,
-        refetch: () =>
-          (query.enabled ?? true)
-            ? client.fetch(query.queryKey, query.queryFn, { retry: query.retry, force: true })
-            : Promise.resolve(undefined),
-      };
-      return client.addObserver(query.queryKey, observer);
-    });
-
-    for (const query of queriesRef.current) {
-      if ((query.enabled ?? true) && client.isStale(query.queryKey, query.staleTime ?? 0)) {
-        client.fetch(query.queryKey, query.queryFn, { retry: query.retry }).catch(() => undefined);
-      }
-    }
-
-    return () => {
-      for (const removeObserver of removeObservers) removeObserver();
-    };
-  }, [client, combinedHash]);
-
-  // refetchInterval polling for each query.
-  const states = queries.map((query) => client.getState(query.queryKey));
-  const stateSignature = states.map((state) => state.dataUpdatedAt).join("|");
-
-  useEffect(() => {
-    const stops: Array<() => void> = [];
-    for (const query of queriesRef.current) {
-      if (!(query.enabled ?? true)) continue;
-      const interval = query.refetchInterval;
-      if (interval === undefined || interval === false) continue;
-      const ms =
-        typeof interval === "function"
-          ? interval({ state: { data: client.getQueryData<TData>(query.queryKey) } })
-          : interval;
-      if (ms === false || ms === undefined || ms <= 0) continue;
-      const poller = createVisibilityAwarePoller({
-        lifecycle: webAppLifecycle,
-        run: () => client.fetch(query.queryKey, query.queryFn, { retry: query.retry, force: true }),
-        resolveDelayMs: () => ms,
-        runImmediately: false,
-        jitterRatio: 0.05,
-      });
-      stops.push(poller.stop);
-    }
-    return () => {
-      for (const stop of stops) stop();
-    };
-  }, [client, combinedHash, stateSignature]);
-
-  return queries.map((query, index) => {
-    const state = states[index] ?? INITIAL_QUERY_STATE;
-    const selected =
-      state.status === "success"
-        ? query.select
-          ? query.select(state.data as TQueryFnData)
-          : (state.data as unknown as TData)
-        : undefined;
-    return deriveResult(client, query, state, selected);
-  });
 }
 
 // ---------------------------------------------------------------------------

@@ -29,11 +29,3 @@ export function useConnectionRegistry(): MobileConnectionRegistry {
   }
   return registry;
 }
-
-export function useSavedEnvironmentCatalog() {
-  return useConnectionRegistry().catalog;
-}
-
-export function useEnvironmentDriver() {
-  return useConnectionRegistry().driver;
-}

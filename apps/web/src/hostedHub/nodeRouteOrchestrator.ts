@@ -1,5 +1,5 @@
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@ryco/contracts";
-import { useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 import {
   adoptRoutedHostedNode,
@@ -461,10 +461,6 @@ export function startHostedNodeRouteOrchestrator(): () => void {
     // Without an orchestrator nothing follows the route, so it holds no demand.
     if (activeOrchestratorCount === 0) replaceRouteScope(null);
   };
-}
-
-export function useHostedNodeRouteOrchestrator(): void {
-  useEffect(() => startHostedNodeRouteOrchestrator(), []);
 }
 
 export function resetHostedNodeRouteOrchestratorForTests(): void {

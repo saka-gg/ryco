@@ -6,7 +6,6 @@ import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentApi } from "@ryco/contracts";
 import {
   type ApprovalRequestId,
-  type ModelSelection,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
   type RuntimeMode,
@@ -74,23 +73,6 @@ export async function setThreadInteractionMode(
     threadId,
     interactionMode,
     createdAt: new Date().toISOString(),
-  });
-}
-
-/**
- * Model changes ride `thread.meta.update` — there is no `thread.model.set`.
- * Note it takes no `createdAt`, unlike the two mode commands above.
- */
-export async function setThreadModelSelection(
-  api: EnvironmentApi,
-  threadId: ThreadId,
-  modelSelection: ModelSelection,
-): Promise<void> {
-  await api.orchestration.dispatchCommand({
-    type: "thread.meta.update",
-    commandId: newCommandId(),
-    threadId,
-    modelSelection,
   });
 }
 
