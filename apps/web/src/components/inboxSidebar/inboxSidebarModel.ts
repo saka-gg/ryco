@@ -1,3 +1,4 @@
+import { isLocalHubAlias } from "../../deviceName.logic";
 import { inboxModelName } from "./inboxContextHandoff";
 import { getModelDisplayName } from "@ryco/shared/model";
 import {
@@ -9,7 +10,14 @@ import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
-import type { WsConnectionUiState } from "@ryco/client-runtime/rpc";
+import {
+  resolveEnvironmentThreadCapabilities,
+  type EnvironmentThreadCapabilities,
+  type ReportedThreadCapabilities,
+  type ThreadCapabilitySupport,
+  type WsConnectionUiState,
+} from "@ryco/client-runtime/rpc";
+import type { WorkspaceMachineCatalogEntry } from "@ryco/client-runtime/state/workspace";
 import { PROVIDER_OPTIONS } from "@ryco/client-runtime/state/session";
 import type {
   Project,
@@ -35,7 +43,9 @@ import {
 } from "@ryco/shared/threadPriority";
 import {
   defaultInstanceIdForDriver,
+  type DesktopWorkspaceMachineProjection,
   type EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
   type ModelSelection,
   type ServerProvider,
   type ServerConfig,
@@ -87,8 +97,9 @@ export interface InboxSidebarEnvironment {
     | "verified"
     | "identity-conflict";
   readonly deliveryUnknown: boolean;
-  readonly threadSettlementSupported: boolean;
-  readonly threadSnoozeSupported?: boolean | undefined;
+  /** The environment's own answer; see `resolveEnvironmentThreadCapabilities`. */
+  readonly threadSettlementSupported: ThreadCapabilitySupport;
+  readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
   readonly mutationReady: boolean;
   readonly shellCurrent: boolean;
 }
@@ -291,13 +302,95 @@ export function describeInboxFocus(focus: ThreadPriorityFocusMetadata): InboxFoc
   return describeThreadPriorityFocus(focus);
 }
 
+function capabilityFields(
+  capabilities: EnvironmentThreadCapabilities,
+): Pick<InboxSidebarEnvironment, "threadSettlementSupported" | "threadSnoozeSupported"> {
+  return {
+    threadSettlementSupported: capabilities.threadSettlement,
+    threadSnoozeSupported: capabilities.threadSnooze,
+  };
+}
+
+/**
+ * The connection state a workspace machine row shows: offline from directory
+ * presence, waiting while queued for a free connection slot.
+ */
+function workspaceMachineConnectionState(input: {
+  readonly online: boolean;
+  readonly connectionState:
+    | WorkspaceMachineCatalogEntry["connectionState"]
+    | DesktopWorkspaceMachineProjection["connectionState"];
+  readonly queued: boolean;
+}): InboxSidebarEnvironment["connectionState"] {
+  if (!input.online) return "offline";
+  if (input.connectionState === "connected") return "connected";
+  if (input.queued) return "reconnecting";
+  return input.connectionState === "connecting" ? "connecting" : "idle";
+}
+
+/** The inbox's view of a Hub node in a hosted session. */
+function buildHostedInboxSidebarEnvironment(input: {
+  readonly machine: WorkspaceMachineCatalogEntry;
+  readonly queued: boolean;
+  readonly capabilities: EnvironmentThreadCapabilities;
+}): InboxSidebarEnvironment {
+  const { machine, queued } = input;
+  const stale = !machine.presence.online || machine.cacheDisposition !== "available";
+  return {
+    environmentId: machine.environmentId,
+    label: machine.label,
+    connectionState: workspaceMachineConnectionState({
+      online: machine.presence.online,
+      connectionState: machine.connectionState,
+      queued,
+    }),
+    ...(queued ? { queued: true } : {}),
+    stale,
+    ...(stale ? { staleDetail: "Offline · last known" } : {}),
+    role: machine.effectiveRole,
+    trust: machine.nativeTrust,
+    deliveryUnknown: machine.deliveryUnknown,
+    ...capabilityFields(input.capabilities),
+    mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
+    shellCurrent: !stale,
+  };
+}
+
+/** The inbox's view of a remote machine of the Desktop workspace. */
+function buildDesktopWorkspaceInboxSidebarEnvironment(input: {
+  readonly machine: DesktopWorkspaceMachineProjection;
+  readonly queued: boolean;
+  readonly hydratedFromCache: boolean;
+  readonly capabilities: EnvironmentThreadCapabilities;
+}): InboxSidebarEnvironment {
+  const { machine, queued } = input;
+  const stale = !machine.online || input.hydratedFromCache;
+  return {
+    environmentId: machine.environmentId,
+    label: machine.label,
+    connectionState: workspaceMachineConnectionState({
+      online: machine.online,
+      connectionState: machine.connectionState,
+      queued,
+    }),
+    ...(queued ? { queued: true } : {}),
+    stale,
+    ...(stale ? { staleDetail: "Offline · last known" } : {}),
+    role: null,
+    trust: machine.nativeTrust,
+    deliveryUnknown: false,
+    ...capabilityFields(input.capabilities),
+    mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
+    shellCurrent: !stale,
+  };
+}
+
 export function buildPrimaryInboxSidebarEnvironment(input: {
   readonly label: string;
   readonly environmentId: EnvironmentId;
   readonly connectionState: WsConnectionUiState;
   readonly hydratedFromCache: boolean;
-  readonly threadSettlementSupported: boolean;
-  readonly threadSnoozeSupported?: boolean | undefined;
+  readonly capabilities: EnvironmentThreadCapabilities;
 }): InboxSidebarEnvironment {
   const connectionState =
     input.connectionState === "error" ? "reconnecting" : input.connectionState;
@@ -311,8 +404,7 @@ export function buildPrimaryInboxSidebarEnvironment(input: {
     role: "owner",
     trust: "not-required",
     deliveryUnknown: false,
-    threadSettlementSupported: input.threadSettlementSupported,
-    threadSnoozeSupported: input.threadSnoozeSupported,
+    ...capabilityFields(input.capabilities),
     mutationReady: connectionState === "connected" && !stale,
     shellCurrent: !stale,
   };
@@ -324,6 +416,7 @@ export function buildSavedInboxSidebarEnvironment(input: {
   readonly label: string;
   readonly runtime: SavedEnvironmentRuntimeState | null | undefined;
   readonly hydratedFromCache: boolean;
+  readonly capabilities: EnvironmentThreadCapabilities;
 }): InboxSidebarEnvironment {
   const runtime = input.runtime;
   // A rejected pairing is not an outage: no reconnect will fix it, so the row
@@ -353,14 +446,147 @@ export function buildSavedInboxSidebarEnvironment(input: {
     role: runtime?.role ?? null,
     trust: "unknown",
     deliveryUnknown: false,
-    threadSnoozeSupported: runtime?.descriptor?.capabilities.threadSnooze ?? false,
-    threadSettlementSupported: runtime?.descriptor?.capabilities.threadSettlement ?? false,
+    ...capabilityFields(input.capabilities),
     mutationReady:
       connectionState === "connected" &&
       (runtime?.role === "owner" || runtime?.role === "client") &&
       !stale,
     shellCurrent: !stale,
   };
+}
+
+export interface InboxSidebarEnvironmentSources {
+  /** Every environment the inbox has projects, threads or a saved record for. */
+  readonly knownEnvironmentIds: Iterable<EnvironmentId>;
+  readonly primary: {
+    readonly environmentId: EnvironmentId | null;
+    readonly label: string;
+    readonly connectionState: WsConnectionUiState;
+    readonly descriptor: Pick<ExecutionEnvironmentDescriptor, "capabilities"> | null;
+    /** The shown server config; it labels the primary environment's models. */
+    readonly serverConfig: Pick<ServerConfig, "providers"> | null;
+  };
+  /** The hosted session's machines; null without a hosted session. */
+  readonly hosted: {
+    readonly machines: ReadonlyArray<WorkspaceMachineCatalogEntry>;
+    readonly queuedEnvironmentIds: ReadonlyArray<EnvironmentId>;
+  } | null;
+  /** The Desktop workspace's remote machines; null when it is signed out. */
+  readonly desktopWorkspace: {
+    readonly machines: ReadonlyArray<DesktopWorkspaceMachineProjection>;
+    readonly queuedEnvironmentIds: ReadonlyArray<EnvironmentId>;
+    readonly localEnvironmentId: EnvironmentId | null;
+  } | null;
+  readonly savedEnvironmentRegistry: Readonly<
+    Record<string, { readonly label: string } | undefined>
+  >;
+  readonly savedEnvironmentRuntimeById: Readonly<
+    Record<string, SavedEnvironmentRuntimeState | undefined>
+  >;
+  readonly cacheHydratedEnvironmentIds: ReadonlySet<string>;
+  /** What each node reported to this client; see `getReportedThreadCapabilitiesSnapshot`. */
+  readonly reportedThreadCapabilities: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
+}
+
+/**
+ * Every environment the inbox lists, sorted by label. Each one's thread
+ * capabilities are its own node's (`resolveEnvironmentThreadCapabilities`),
+ * the same whether or not it is the selected one, so moving the selection
+ * never reclassifies another machine's threads.
+ */
+export function buildInboxSidebarEnvironments(
+  input: InboxSidebarEnvironmentSources,
+): ReadonlyArray<InboxSidebarEnvironment> {
+  const primaryEnvironmentId = input.primary.environmentId;
+  const localEnvironmentId = input.desktopWorkspace?.localEnvironmentId ?? null;
+  const reported = input.reportedThreadCapabilities;
+  const knownEnvironmentIds = new Set<EnvironmentId>(input.knownEnvironmentIds);
+  const byEnvironmentId = new Map<EnvironmentId, InboxSidebarEnvironment>();
+
+  if (input.hosted !== null) {
+    for (const machine of input.hosted.machines) {
+      knownEnvironmentIds.add(machine.environmentId);
+      byEnvironmentId.set(
+        machine.environmentId,
+        buildHostedInboxSidebarEnvironment({
+          machine,
+          queued: input.hosted.queuedEnvironmentIds.includes(machine.environmentId),
+          capabilities: resolveEnvironmentThreadCapabilities(machine.environmentId, {
+            reported,
+            directory: machine.capabilities,
+          }),
+        }),
+      );
+    }
+  } else if (input.desktopWorkspace !== null) {
+    for (const machine of input.desktopWorkspace.machines) {
+      if (isLocalHubAlias(machine.environmentId, primaryEnvironmentId, localEnvironmentId)) {
+        continue;
+      }
+      knownEnvironmentIds.add(machine.environmentId);
+      byEnvironmentId.set(
+        machine.environmentId,
+        buildDesktopWorkspaceInboxSidebarEnvironment({
+          machine,
+          queued: input.desktopWorkspace.queuedEnvironmentIds.includes(machine.environmentId),
+          hydratedFromCache: input.cacheHydratedEnvironmentIds.has(machine.environmentId),
+          capabilities: resolveEnvironmentThreadCapabilities(machine.environmentId, {
+            reported,
+            directory: { threadSettlement: machine.threadSettlementSupported },
+          }),
+        }),
+      );
+    }
+  }
+
+  for (const environmentId of knownEnvironmentIds) {
+    if (isLocalHubAlias(environmentId, primaryEnvironmentId, localEnvironmentId)) continue;
+    if (byEnvironmentId.has(environmentId)) continue;
+    const hydratedFromCache = input.cacheHydratedEnvironmentIds.has(environmentId);
+    if (primaryEnvironmentId !== null && environmentId === primaryEnvironmentId) {
+      byEnvironmentId.set(
+        environmentId,
+        buildPrimaryInboxSidebarEnvironment({
+          label: input.primary.label,
+          environmentId,
+          connectionState: input.primary.connectionState,
+          hydratedFromCache,
+          capabilities: resolveEnvironmentThreadCapabilities(environmentId, {
+            reported,
+            // A hosted session's primary descriptor is a placeholder built
+            // from the directory, not the node's own.
+            descriptor: input.hosted === null ? input.primary.descriptor?.capabilities : null,
+          }),
+        }),
+      );
+      continue;
+    }
+    const runtime = input.savedEnvironmentRuntimeById[environmentId];
+    const saved = input.savedEnvironmentRegistry[environmentId];
+    byEnvironmentId.set(
+      environmentId,
+      buildSavedInboxSidebarEnvironment({
+        environmentId,
+        label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
+        runtime,
+        hydratedFromCache,
+        capabilities: resolveEnvironmentThreadCapabilities(environmentId, {
+          reported,
+          descriptor: runtime?.descriptor?.capabilities,
+        }),
+      }),
+    );
+  }
+  return [...byEnvironmentId.values()]
+    .map((environment) =>
+      applyInboxServerConfig(
+        environment,
+        environment.environmentId === primaryEnvironmentId
+          ? input.primary.serverConfig
+          : input.savedEnvironmentRuntimeById[environment.environmentId]?.serverConfig,
+      ),
+    )
+    .toSorted((left, right) => left.label.localeCompare(right.label));
 }
 
 const ACTIVE_PRIORITY: Readonly<
@@ -1052,16 +1278,15 @@ export function sameInboxProviderCatalogs(
   });
 }
 
-/** Live config is node-owned; hosted directory descriptors intentionally start without capabilities. */
+/**
+ * The node's provider catalog, for model labels. Thread capabilities are not
+ * taken from here: each builder above gets them from
+ * `resolveEnvironmentThreadCapabilities`, keyed by the environment itself.
+ */
 export function applyInboxServerConfig(
   environment: InboxSidebarEnvironment,
-  config: Pick<ServerConfig, "environment" | "providers"> | null | undefined,
+  config: Pick<ServerConfig, "providers"> | null | undefined,
 ): InboxSidebarEnvironment {
   if (!config) return environment;
-  return {
-    ...environment,
-    threadSnoozeSupported: config.environment.capabilities.threadSnooze ?? false,
-    threadSettlementSupported: config.environment.capabilities.threadSettlement,
-    providers: config.providers,
-  };
+  return { ...environment, providers: config.providers };
 }

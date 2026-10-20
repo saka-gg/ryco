@@ -8,6 +8,13 @@ import {
 } from "./runtime.ts";
 import type { HostedHubNode } from "./types.ts";
 
+/**
+ * A placeholder for the selected node, built from its directory entry until
+ * the node's own config arrives. Its thread settlement flag is only what the
+ * directory states; the inbox never reads it, since each environment's thread
+ * capabilities come from `resolveEnvironmentThreadCapabilities`, which treats
+ * an environment the node has not answered for as unknown.
+ */
 function descriptorForNode(node: HostedHubNode): ExecutionEnvironmentDescriptor {
   return {
     environmentId: node.environmentId,
@@ -16,7 +23,7 @@ function descriptorForNode(node: HostedHubNode): ExecutionEnvironmentDescriptor 
     serverVersion: node.clientVersion,
     capabilities: {
       repositoryIdentity: false,
-      threadSettlement: false,
+      threadSettlement: node.capabilities?.threadSettlement === true,
       threadPriorityRanking: false,
     },
   };

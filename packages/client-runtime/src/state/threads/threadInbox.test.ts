@@ -189,6 +189,75 @@ describe("thread inbox", () => {
     expect(inbox.settled).toEqual([]);
   });
 
+  describe("an environment whose capabilities are unknown", () => {
+    const settledByHand = makeThread(environmentB, "thread-settled-by-hand", {
+      settledOverride: "settled",
+      settledAt: "2026-07-31T10:00:00.000Z",
+      latestUserMessageAt: "2026-07-31T09:00:00.000Z",
+    });
+    const idle = makeThread(environmentB, "thread-idle", {
+      latestUserMessageAt: "2026-07-20T12:00:00.000Z",
+      updatedAt: "2026-07-20T12:00:00.000Z",
+    });
+    const recent = makeThread(environmentB, "thread-recent", {
+      latestUserMessageAt: "2026-07-31T11:00:00.000Z",
+      snoozedUntil: "2026-08-01T12:00:00.000Z",
+      snoozedAt: "2026-07-31T11:30:00.000Z",
+    });
+    const unknownInbox = (overrides: Partial<ThreadInboxEnvironment> = {}) =>
+      buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          environments: [
+            makeEnvironment(environmentB, {
+              threadSettlementSupported: "unknown",
+              threadSnoozeSupported: "unknown",
+              ...overrides,
+            }),
+          ],
+          threads: [settledByHand, idle, recent],
+        }),
+      );
+
+    it("classifies by what the node recorded", () => {
+      const inbox = unknownInbox({ connected: false, mutationReady: false, shellCurrent: false });
+
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([settledByHand.id, idle.id]);
+      expect(inbox.snoozed.map((entry) => entry.thread?.id)).toEqual([recent.id]);
+      expect(inbox.active).toEqual([]);
+    });
+
+    it("allows no settlement or snooze change, even while connected", () => {
+      for (const inbox of [
+        unknownInbox({ connected: false, mutationReady: false, shellCurrent: false }),
+        unknownInbox(),
+        unknownInbox({ threadSnoozeSupported: true }),
+      ]) {
+        for (const entry of [...inbox.settled, ...inbox.snoozed]) {
+          expect(entry.mutationEnabled).toBe(false);
+          expect(entry.canSnooze).toBe(false);
+        }
+      }
+      expect(unknownInbox().settled[0]?.mutationBlocker).toBe("shell-stale");
+      expect(
+        unknownInbox({ connected: false, mutationReady: false, shellCurrent: false }).settled[0]
+          ?.mutationBlocker,
+      ).toBe("disconnected");
+    });
+
+    it("is how a thread of an environment missing from the list is classified", () => {
+      const inbox = buildThreadInbox(
+        baseInput({ autoSettleAfterDays: 7, environments: [], threads: [settledByHand] }),
+      );
+
+      expect(inbox.settled[0]).toMatchObject({
+        environment: { threadSettlementSupported: "unknown" },
+        mutationEnabled: false,
+        mutationBlocker: "disconnected",
+      });
+    });
+  });
+
   it("automatically settles merged and closed PRs, then reopens them with the PR", () => {
     const thread = makeThread(environmentA, "thread-pr", {
       worktreeId,
@@ -749,5 +818,19 @@ describe("deriveThreadSnoozeEligibility", () => {
     expect(
       deriveThreadSnoozeEligibility({ thread, environment, hasLocalQueuedMessage: true, nowMs }),
     ).toEqual({ canSnooze: false, blocker: "local-queue" });
+  });
+
+  it("allows snoozing only on a node that stated settlement support", () => {
+    const thread = makeThread(environmentA, "thread-snooze", {
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+    });
+    expect(
+      deriveThreadSnoozeEligibility({
+        thread,
+        environment: { threadSettlementSupported: "unknown" },
+        hasLocalQueuedMessage: false,
+        nowMs,
+      }),
+    ).toEqual({ canSnooze: false, blocker: "unsupported" });
   });
 });

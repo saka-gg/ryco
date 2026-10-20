@@ -1,6 +1,13 @@
 import { Schema } from "effect";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
-import { ServerProvider } from "@ryco/contracts";
+import {
+  forgetEnvironmentServerConfig,
+  getReportedThreadCapabilitiesSnapshot,
+  resetEnvironmentServerConfigsForTests,
+  writeEnvironmentServerConfig,
+} from "@ryco/client-runtime/rpc";
+import type { WorkspaceMachineCatalogEntry } from "@ryco/client-runtime/state/workspace";
+import { ServerProvider, type ServerConfig } from "@ryco/contracts";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
 import type {
   Project,
@@ -17,10 +24,11 @@ import {
   WorktreeId,
   TurnId,
 } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   applyInboxServerConfig,
+  buildInboxSidebarEnvironments,
   buildInboxSidebarModel,
   buildInboxSidebarSections,
   buildPrimaryInboxSidebarEnvironment,
@@ -88,6 +96,8 @@ function environment(
   };
 }
 
+const SUPPORTED = { threadSettlement: true, threadSnooze: true } as const;
+
 const ALL_FILTERS: InboxSidebarFilters = {
   query: "",
   environmentId: null,
@@ -102,7 +112,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
         environmentId: ENV_A,
         connectionState: "connected",
         hydratedFromCache: false,
-        threadSettlementSupported: true,
+        capabilities: SUPPORTED,
       }),
     ).toEqual({
       environmentId: ENV_A,
@@ -113,6 +123,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
       trust: "not-required",
       deliveryUnknown: false,
       threadSettlementSupported: true,
+      threadSnoozeSupported: true,
       mutationReady: true,
       shellCurrent: true,
     });
@@ -125,7 +136,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
         environmentId: ENV_A,
         connectionState: "offline",
         hydratedFromCache: true,
-        threadSettlementSupported: true,
+        capabilities: SUPPORTED,
       }),
     ).toMatchObject({
       label: "Studio Mac",
@@ -158,6 +169,7 @@ describe("buildSavedInboxSidebarEnvironment", () => {
       label: "Studio Mac",
       runtime: runtime({ connectionState: "error", authState: "requires-auth", role: null }),
       hydratedFromCache: true,
+      capabilities: SUPPORTED,
     });
 
     expect(environment).toMatchObject({
@@ -177,6 +189,7 @@ describe("buildSavedInboxSidebarEnvironment", () => {
         label: "Studio Mac",
         runtime: runtime({ connectionState: "error" }),
         hydratedFromCache: false,
+        capabilities: SUPPORTED,
       }),
     ).toMatchObject({ connectionState: "reconnecting", staleDetail: "Offline · last known" });
   });
@@ -188,6 +201,7 @@ describe("buildSavedInboxSidebarEnvironment", () => {
         label: "Studio Mac",
         runtime: runtime({}),
         hydratedFromCache: false,
+        capabilities: SUPPORTED,
       }),
     ).toMatchObject({ connectionState: "connected", stale: false, mutationReady: true });
   });
@@ -825,31 +839,96 @@ describe("inbox PR badges", () => {
 });
 
 describe("hosted inbox capability resolution", () => {
-  const liveConfig = {
-    environment: {
-      environmentId: ENV_A,
-      label: "Node name",
-      platform: { os: "darwin" as const, arch: "arm64" as const },
-      serverVersion: "1.0.0",
-      capabilities: {
-        repositoryIdentity: true,
-        threadSettlement: true,
-        threadSnooze: true,
-        threadPriorityRanking: false,
+  beforeEach(resetEnvironmentServerConfigsForTests);
+  afterEach(resetEnvironmentServerConfigsForTests);
+
+  function liveConfig(environmentId: EnvironmentId): ServerConfig {
+    return {
+      environment: {
+        environmentId,
+        label: environmentId,
+        platform: { os: "darwin", arch: "arm64" },
+        serverVersion: "1.0.0",
+        capabilities: {
+          repositoryIdentity: true,
+          threadSettlement: true,
+          threadSnooze: true,
+          threadPriorityRanking: false,
+        },
       },
-    },
-    providers: [],
-  };
-  const inactive = thread("old", { latestUserMessageAt: "2026-08-23T10:00:00.000Z" });
-  it("enables snooze and auto-settlement after a live node replaces directory capability defaults", () => {
-    const initial = environment(ENV_A, {
-      threadSettlementSupported: false,
-      threadSnoozeSupported: false,
+      providers: [],
+    } as unknown as ServerConfig;
+  }
+
+  function machine(
+    environmentId: EnvironmentId,
+    overrides: Partial<WorkspaceMachineCatalogEntry> = {},
+  ): WorkspaceMachineCatalogEntry {
+    return {
+      environmentId,
+      nodeId: `node-${environmentId}`,
+      label: environmentId,
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "1.0.0",
+      // The Hub directory publishes no thread capabilities.
+      capabilities: { repositoryIdentity: true, nativeClientRequired: false },
+      clientTier: "hosted-web",
+      nativeTrust: "not-required",
+      effectiveRole: "owner",
+      presence: { online: true, lastSeenAt: 1, observedAt: 1 },
+      connectionState: "connected",
+      deliveryUnknown: false,
+      revokedAt: null,
+      removed: false,
+      canReadMetadata: true,
+      canConnect: true,
+      canMutate: true,
+      cacheDisposition: "available",
+      accessReasons: [],
+      ...overrides,
+    };
+  }
+
+  /** The hosted inbox's environments with `selected` as the selected node. */
+  function hostedEnvironments(
+    selected: EnvironmentId,
+    machines: ReadonlyArray<WorkspaceMachineCatalogEntry>,
+  ) {
+    return buildInboxSidebarEnvironments({
+      knownEnvironmentIds: [],
+      primary: {
+        environmentId: selected,
+        label: selected,
+        connectionState: "connected",
+        // The selected node's placeholder, built from the directory.
+        descriptor: {
+          capabilities: {
+            repositoryIdentity: false,
+            threadSettlement: false,
+            threadPriorityRanking: false,
+          },
+        },
+        serverConfig: null,
+      },
+      hosted: { machines, queuedEnvironmentIds: [] },
+      desktopWorkspace: null,
+      savedEnvironmentRegistry: {},
+      savedEnvironmentRuntimeById: {},
+      cacheHydratedEnvironmentIds: new Set(),
+      reportedThreadCapabilities: getReportedThreadCapabilitiesSnapshot(),
     });
-    const live = applyInboxServerConfig(initial, liveConfig);
+  }
+
+  const byId = (environments: ReadonlyArray<InboxSidebarEnvironment>, id: EnvironmentId) =>
+    environments.find((environment) => environment.environmentId === id);
+
+  const inactive = thread("old", { latestUserMessageAt: "2026-08-23T10:00:00.000Z" });
+
+  it("enables snooze and auto-settlement once the node reports its capabilities", () => {
+    writeEnvironmentServerConfig(ENV_A, liveConfig(ENV_A));
     const sections = build({
       threads: [inactive],
-      environments: [live],
+      environments: hostedEnvironments(ENV_A, [machine(ENV_A)]),
       autoSettleAfterDays: 3,
       nowMs: Date.parse("2026-09-11T10:00:00Z"),
     });
@@ -859,18 +938,136 @@ describe("hosted inbox capability resolution", () => {
       settlementActionEnabled: true,
     });
   });
+
+  it("takes a non-selected node's capabilities from its own config", () => {
+    writeEnvironmentServerConfig(ENV_B, liveConfig(ENV_B));
+    const environments = hostedEnvironments(ENV_A, [machine(ENV_A), machine(ENV_B)]);
+    expect(byId(environments, ENV_B)).toMatchObject({
+      threadSettlementSupported: true,
+      threadSnoozeSupported: true,
+    });
+    // The selected node's placeholder is no answer: it stays unknown.
+    expect(byId(environments, ENV_A)).toMatchObject({
+      threadSettlementSupported: "unknown",
+      threadSnoozeSupported: "unknown",
+    });
+  });
+
+  it("honors a settlement flag the directory states", () => {
+    const environments = hostedEnvironments(ENV_A, [
+      machine(ENV_B, {
+        capabilities: {
+          repositoryIdentity: true,
+          nativeClientRequired: false,
+          threadSettlement: false,
+        },
+      }),
+    ]);
+    expect(byId(environments, ENV_B)?.threadSettlementSupported).toBe(false);
+  });
+
+  it("keeps a node's settled threads Settled when the selection moves to another node", () => {
+    const nowMs = Date.parse("2026-09-11T10:00:00Z");
+    const failedSession = {
+      session: {
+        provider: ProviderDriverKind.make("codex"),
+        status: "error" as const,
+        orchestrationStatus: "error" as const,
+        lastError: "Provider exited (code 1)",
+        createdAt: "2026-08-23T10:00:00.000Z",
+        updatedAt: "2026-08-23T10:00:00.000Z",
+      },
+    };
+    const threads = [
+      thread("a-settled-error", {
+        ...failedSession,
+        settledOverride: "settled",
+        settledAt: "2026-08-24T10:00:00.000Z",
+      }),
+      thread("a-old-error", { ...failedSession, latestUserMessageAt: "2026-08-23T10:00:00.000Z" }),
+      thread("b-old", { environmentId: ENV_B, latestUserMessageAt: "2026-08-23T10:00:00.000Z" }),
+    ];
+    const sectionOf = (
+      environments: ReadonlyArray<InboxSidebarEnvironment>,
+      selected: EnvironmentId,
+    ) =>
+      buildInboxSidebarSections({
+        projects: [project(ENV_A), project(ENV_B)],
+        worktrees: [],
+        threads,
+        environments,
+        filters: ALL_FILTERS,
+        autoSettleAfterDays: 7,
+        primaryEnvironmentId: selected,
+        nowMs,
+      });
+    const settledKeys = (sections: ReturnType<typeof buildInboxSidebarSections>) =>
+      sections
+        .find((section) => section.key === "settled")
+        ?.rows.map((row) => row.key)
+        .toSorted();
+    const nodeA = ["machine-a:a-old-error", "machine-a:a-settled-error"];
+
+    // Node A is selected and connected.
+    writeEnvironmentServerConfig(ENV_A, liveConfig(ENV_A));
+    const selectedA = hostedEnvironments(ENV_A, [
+      machine(ENV_A),
+      machine(ENV_B, { connectionState: "disconnected" }),
+    ]);
+    expect(settledKeys(sectionOf(selectedA, ENV_A))).toEqual([...nodeA, "machine-b:b-old"]);
+
+    // Opening a thread on node B selects it before its config arrives.
+    const switching = hostedEnvironments(ENV_B, [
+      machine(ENV_A),
+      machine(ENV_B, { connectionState: "connecting" }),
+    ]);
+    expect(settledKeys(sectionOf(switching, ENV_B))).toEqual([...nodeA, "machine-b:b-old"]);
+    expect(sectionOf(switching, ENV_B).find((section) => section.key === "active")).toBeUndefined();
+
+    // Node B's config arrives, and node A is later released from the warm set.
+    writeEnvironmentServerConfig(ENV_B, liveConfig(ENV_B));
+    forgetEnvironmentServerConfig(ENV_A);
+    const selectedB = hostedEnvironments(ENV_B, [
+      machine(ENV_A, { connectionState: "disconnected" }),
+      machine(ENV_B),
+    ]);
+    expect(settledKeys(sectionOf(selectedB, ENV_B))).toEqual([...nodeA, "machine-b:b-old"]);
+    expect(byId(selectedB, ENV_A)?.threadSettlementSupported).toBe(true);
+  });
+
   it.each([
     { mutationReady: false },
     { shellCurrent: false },
     { connectionState: "offline" as const, stale: true },
   ])("keeps mutations blocked with live capabilities and %o", (blocker) => {
-    const live = applyInboxServerConfig(environment(ENV_A, blocker), liveConfig);
+    const live = environment(ENV_A, { ...blocker, threadSnoozeSupported: true });
     const rows = build({ threads: [inactive], environments: [live] }).flatMap(
       (section) => section.rows,
     );
     expect(rows[0]).toMatchObject({ canSnooze: false, settlementActionEnabled: false });
   });
-  it("does not borrow capabilities when no node config has arrived", () => {
+
+  it("allows no settlement or snooze change on a node that has not answered", () => {
+    const rows = build({
+      threads: [inactive],
+      environments: [
+        environment(ENV_A, {
+          threadSettlementSupported: "unknown",
+          threadSnoozeSupported: "unknown",
+        }),
+      ],
+      autoSettleAfterDays: 3,
+      nowMs: Date.parse("2026-09-11T10:00:00Z"),
+    }).flatMap((section) => section.rows);
+    expect(rows[0]).toMatchObject({
+      settled: true,
+      canSnooze: false,
+      canUnsnooze: false,
+      settlementActionEnabled: false,
+    });
+  });
+
+  it("leaves an environment as it is when no node config has arrived", () => {
     const initial = environment(ENV_A, { threadSettlementSupported: false });
     expect(applyInboxServerConfig(initial, null)).toBe(initial);
   });
@@ -1428,24 +1625,9 @@ describe("queued environments", () => {
     });
   });
 
-  it("keeps the queued flag when a live config replaces capabilities", () => {
+  it("keeps the queued flag when a node config supplies its providers", () => {
     const queued = environment(ENV_A, { connectionState: "reconnecting", queued: true });
-    expect(
-      applyInboxServerConfig(queued, {
-        environment: {
-          environmentId: ENV_A,
-          label: "Node name",
-          platform: { os: "darwin" as const, arch: "arm64" as const },
-          serverVersion: "1.0.0",
-          capabilities: {
-            repositoryIdentity: true,
-            threadSettlement: true,
-            threadPriorityRanking: false,
-          },
-        },
-        providers: [],
-      }),
-    ).toMatchObject({ queued: true });
+    expect(applyInboxServerConfig(queued, { providers: [] })).toMatchObject({ queued: true });
   });
 });
 

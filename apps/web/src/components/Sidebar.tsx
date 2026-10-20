@@ -1,6 +1,5 @@
 import { useAppKeybindings } from "../appKeybindings";
 import { useDeviceName } from "../deviceName";
-import { isLocalHubAlias } from "../deviceName.logic";
 import { useServerConfigSelector } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
 import React, {
@@ -12,6 +11,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -40,7 +40,11 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@ryco/client-runtime/scoped";
-import { getWsConnectionUiState } from "@ryco/client-runtime/rpc";
+import {
+  getReportedThreadCapabilitiesSnapshot,
+  getWsConnectionUiState,
+  subscribeReportedThreadCapabilities,
+} from "@ryco/client-runtime/rpc";
 import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
 import {
   selectCacheHydratedEnvironmentIds,
@@ -125,9 +129,7 @@ import { SidebarPrimaryActions } from "./sidebar/SidebarPrimaryActions";
 import { resolveNewThreadProjectKey } from "./sidebar/sidebarNewThreadTarget";
 import { ConnectedInboxSidebar } from "./inboxSidebar/ConnectedInboxSidebar";
 import {
-  applyInboxServerConfig,
-  buildPrimaryInboxSidebarEnvironment,
-  buildSavedInboxSidebarEnvironment,
+  buildInboxSidebarEnvironments,
   sameInboxProviderCatalogs,
   type InboxSidebarEnvironment,
 } from "./inboxSidebar/inboxSidebarModel";
@@ -247,7 +249,6 @@ const selectSidebarProjectSortOrder = (settings: UnifiedSettings) =>
 const selectAiFocusEnabled = (settings: UnifiedSettings) => settings.aiFocusEnabled;
 const selectSidebarAutoSettleAfterDays = (settings: UnifiedSettings) =>
   settings.sidebarAutoSettleAfterDays;
-const selectServerEnvironment = (config: ServerConfig | null) => config?.environment ?? null;
 const selectServerProviders = (config: ServerConfig | null) => config?.providers ?? null;
 
 // Non-reactive store reads for event handlers and memoized shortcut contexts.
@@ -534,20 +535,22 @@ export default function Sidebar() {
     },
     [clearSelection, setOpen, setSidebarMode, sidebarMode],
   );
-  // Only the parts the inbox reads: settings-only and provider-status config
-  // pushes do not rebuild the inbox environments (and with them the inbox
-  // model); the provider list only matters for its model catalogs.
-  const inboxServerEnvironment = useServerConfigSelector(selectServerEnvironment);
+  // Only the provider catalogs, for model labels: settings-only and
+  // provider-status config pushes do not rebuild the inbox environments (and
+  // with them the inbox model).
   const inboxServerProviders = useServerConfigSelector(
     selectServerProviders,
     sameInboxProviderCatalogs,
   );
   const inboxServerConfig = useMemo(
-    () =>
-      inboxServerEnvironment && inboxServerProviders
-        ? { environment: inboxServerEnvironment, providers: inboxServerProviders }
-        : null,
-    [inboxServerEnvironment, inboxServerProviders],
+    () => (inboxServerProviders ? { providers: inboxServerProviders } : null),
+    [inboxServerProviders],
+  );
+  // Changes only when a node's thread capabilities do, not on config pushes.
+  const reportedThreadCapabilities = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getReportedThreadCapabilitiesSnapshot,
+    getReportedThreadCapabilitiesSnapshot,
   );
   const inboxEnvironments = useMemo<ReadonlyArray<InboxSidebarEnvironment>>(() => {
     const knownEnvironmentIds = new Set<EnvironmentId>();
@@ -556,125 +559,32 @@ export default function Sidebar() {
     for (const environmentId of Object.keys(savedEnvironmentRegistry) as EnvironmentId[]) {
       knownEnvironmentIds.add(environmentId);
     }
-    const byEnvironmentId = new Map<EnvironmentId, InboxSidebarEnvironment>();
-
-    if (hostedStatus !== "signed-out") {
-      for (const machine of hostedMachines) {
-        knownEnvironmentIds.add(machine.environmentId);
-        const queued = hostedQueuedEnvironmentIds.includes(machine.environmentId);
-        const stale = !machine.presence.online || machine.cacheDisposition !== "available";
-        byEnvironmentId.set(machine.environmentId, {
-          environmentId: machine.environmentId,
-          label: machine.label,
-          connectionState: !machine.presence.online
-            ? "offline"
-            : machine.connectionState === "connected"
-              ? "connected"
-              : queued
-                ? "reconnecting"
-                : machine.connectionState === "connecting"
-                  ? "connecting"
-                  : "idle",
-          ...(queued ? { queued: true } : {}),
-          stale,
-          ...(stale ? { staleDetail: "Offline · last known" } : {}),
-          role: machine.effectiveRole,
-          trust: machine.nativeTrust,
-          deliveryUnknown: machine.deliveryUnknown,
-          threadSnoozeSupported:
-            (machine.environmentId === primaryEnvironmentId
-              ? primaryEnvironmentDescriptor?.capabilities.threadSnooze
-              : undefined) ??
-            machine.capabilities.threadSnooze ??
-            false,
-          threadSettlementSupported:
-            machine.environmentId === primaryEnvironmentId
-              ? (primaryEnvironmentDescriptor?.capabilities.threadSettlement ??
-                machine.capabilities.threadSettlement)
-              : machine.capabilities.threadSettlement,
-          mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
-          shellCurrent: !stale,
-        });
-      }
-    } else if (desktopWorkspace.status !== "signed-out") {
-      for (const machine of desktopWorkspace.machines) {
-        if (
-          isLocalHubAlias(
-            machine.environmentId,
-            primaryEnvironmentId,
-            desktopWorkspace.localEnvironmentId,
-          )
-        )
-          continue;
-        knownEnvironmentIds.add(machine.environmentId);
-        const queued = desktopWorkspace.queuedEnvironmentIds.includes(machine.environmentId);
-        const stale = !machine.online || cacheHydratedEnvironmentIds.has(machine.environmentId);
-        byEnvironmentId.set(machine.environmentId, {
-          environmentId: machine.environmentId,
-          label: machine.label,
-          connectionState: !machine.online
-            ? "offline"
-            : machine.connectionState === "connected"
-              ? "connected"
-              : queued
-                ? "reconnecting"
-                : machine.connectionState === "connecting"
-                  ? "connecting"
-                  : "idle",
-          ...(queued ? { queued: true } : {}),
-          stale,
-          ...(stale ? { staleDetail: "Offline · last known" } : {}),
-          role: null,
-          trust: machine.nativeTrust,
-          deliveryUnknown: false,
-          threadSettlementSupported: machine.threadSettlementSupported,
-          mutationReady: machine.canMutate && machine.connectionState === "connected" && !stale,
-          shellCurrent: !stale,
-        });
-      }
-    }
-
-    for (const environmentId of knownEnvironmentIds) {
-      if (isLocalHubAlias(environmentId, primaryEnvironmentId, desktopWorkspace.localEnvironmentId))
-        continue;
-      if (byEnvironmentId.has(environmentId)) continue;
-      if (primaryEnvironmentId !== null && environmentId === primaryEnvironmentId) {
-        byEnvironmentId.set(
-          environmentId,
-          buildPrimaryInboxSidebarEnvironment({
-            label: primaryDeviceName,
-            environmentId,
-            connectionState: primaryConnectionState,
-            hydratedFromCache: cacheHydratedEnvironmentIds.has(environmentId),
-            threadSnoozeSupported: primaryEnvironmentDescriptor?.capabilities.threadSnooze ?? false,
-            threadSettlementSupported:
-              primaryEnvironmentDescriptor?.capabilities.threadSettlement ?? false,
-          }),
-        );
-        continue;
-      }
-      const runtime = savedEnvironmentRuntimeById[environmentId];
-      const saved = savedEnvironmentRegistry[environmentId];
-      byEnvironmentId.set(
-        environmentId,
-        buildSavedInboxSidebarEnvironment({
-          environmentId,
-          label: runtime?.descriptor?.label ?? saved?.label ?? environmentId,
-          runtime,
-          hydratedFromCache: cacheHydratedEnvironmentIds.has(environmentId),
-        }),
-      );
-    }
-    return [...byEnvironmentId.values()]
-      .map((environment) =>
-        applyInboxServerConfig(
-          environment,
-          environment.environmentId === primaryEnvironmentId
-            ? inboxServerConfig
-            : savedEnvironmentRuntimeById[environment.environmentId]?.serverConfig,
-        ),
-      )
-      .toSorted((left, right) => left.label.localeCompare(right.label));
+    return buildInboxSidebarEnvironments({
+      knownEnvironmentIds,
+      primary: {
+        environmentId: primaryEnvironmentId,
+        label: primaryDeviceName,
+        connectionState: primaryConnectionState,
+        descriptor: primaryEnvironmentDescriptor,
+        serverConfig: inboxServerConfig,
+      },
+      hosted:
+        hostedStatus !== "signed-out"
+          ? { machines: hostedMachines, queuedEnvironmentIds: hostedQueuedEnvironmentIds }
+          : null,
+      desktopWorkspace:
+        desktopWorkspace.status !== "signed-out"
+          ? {
+              machines: desktopWorkspace.machines,
+              queuedEnvironmentIds: desktopWorkspace.queuedEnvironmentIds,
+              localEnvironmentId: desktopWorkspace.localEnvironmentId,
+            }
+          : null,
+      savedEnvironmentRegistry,
+      savedEnvironmentRuntimeById,
+      cacheHydratedEnvironmentIds,
+      reportedThreadCapabilities,
+    });
   }, [
     inboxServerConfig,
     cacheHydratedEnvironmentIds,
@@ -687,6 +597,7 @@ export default function Sidebar() {
     primaryDeviceName,
     primaryEnvironmentId,
     projects,
+    reportedThreadCapabilities,
     savedEnvironmentRegistry,
     savedEnvironmentRuntimeById,
     sidebarThreads,

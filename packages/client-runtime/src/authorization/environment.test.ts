@@ -444,6 +444,22 @@ describe("retained hosted environment transitions", () => {
     expect(nodeLifecycle.disconnectPrimaryEnvironment).not.toHaveBeenCalled();
   });
 
+  it("states thread settlement in the selected node's placeholder only as its directory does", () => {
+    setActiveHostedEnvironment({
+      ...nodeFor("node_a", environmentA),
+      capabilities: {
+        repositoryIdentity: true,
+        nativeClientRequired: false,
+        threadSettlement: true,
+      },
+    });
+    expect(nodeLifecycle.writePrimaryEnvironmentDescriptor).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        capabilities: expect.objectContaining({ threadSettlement: true }),
+      }),
+    );
+  });
+
   it("requires every retained lifecycle port at first use", () => {
     const { suspendEnvironment: _suspend, ...partial } = retainedLifecycle;
     configureHostedRuntime(

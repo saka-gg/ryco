@@ -190,6 +190,16 @@ one; until then no config is shown. Sign-out purges all entries. `welcome` is no
 state: it comes from the primary connection's lifecycle stream only, and leaving the primary node
 drops it.
 
+The Inbox classifies each environment's threads with that environment's own thread capabilities
+(settlement and snooze), never with the shown config or the selected node's descriptor, so moving
+the selection does not reclassify another node's threads. The store keeps what each node reported in
+memory, past the entry itself: an environment released from the warm set keeps classifying by its
+node's last answer until sign-out. A node this tab has not heard from, and whose Hub directory entry
+does not state the capability, is unknown: its threads are classified by what the node recorded
+(manual settlement, snooze and the automatic rule), and settlement and snooze changes stay disabled
+until the node answers. Only a node's explicit `false` keeps every thread Active, as on nodes that
+predate settlement.
+
 Hosted Web keeps a warm set of up to three environments per tab, the shared absolute ceiling,
 qualified for browsers in the "Hosted Web warm set qualification (measured)" section of
 [relay-capacity-assessment-3b.md](relay-capacity-assessment-3b.md); a tab samples at most one device

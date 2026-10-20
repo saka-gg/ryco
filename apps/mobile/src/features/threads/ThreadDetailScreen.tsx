@@ -569,7 +569,7 @@ export function ThreadDetailScreen(props: {
           {
             environmentId,
             label: environmentRow.label,
-            threadSettlementSupported: environmentRow.threadSettlementSupported ?? false,
+            threadSettlementSupported: environmentRow.threadSettlementSupported ?? "unknown",
             connected: environmentRow.connectionState === "connected",
             mutationReady: environmentRow.mutationReady ?? false,
             shellCurrent: environmentRow.shellCurrent ?? false,

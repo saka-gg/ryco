@@ -95,6 +95,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
@@ -366,7 +367,13 @@ import {
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
-import { useServerAvailableEditors, useServerConfig } from "~/rpc/serverState";
+import {
+  getReportedThreadCapabilitiesSnapshot,
+  resolveEnvironmentThreadCapabilities,
+  subscribeReportedThreadCapabilities,
+  useServerAvailableEditors,
+  useServerConfig,
+} from "~/rpc/serverState";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { createTurnCompletionTracker } from "../lib/turnCompletion.logic";
 import { sanitizeThreadErrorMessage } from "@ryco/client-runtime/errors";
@@ -2647,22 +2654,35 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   // Provider status joins the composer banner stack (lowest priority) instead
   // of floating over the transcript, so it stays opaque and dismissible.
-  // Usage limits: snooze eligibility matches the inbox (a local queue blocks it).
+  // Usage limits: snooze eligibility matches the inbox (a local queue blocks it),
+  // with the capability of the thread's own node, as the inbox reads it.
+  const reportedThreadCapabilities = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getReportedThreadCapabilitiesSnapshot,
+    getReportedThreadCapabilitiesSnapshot,
+  );
+  const activeThreadSettlementSupported = activeThreadSummary
+    ? resolveEnvironmentThreadCapabilities(activeThreadSummary.environmentId, {
+        reported: reportedThreadCapabilities,
+      }).threadSettlement
+    : "unknown";
   const usageLimitSnoozeEligibility = useMemo(
     () =>
       activeThreadSummary
         ? deriveThreadSnoozeEligibility({
             thread: activeThreadSummary,
             worktree: activeWorktreeSummary,
-            environment: {
-              threadSettlementSupported:
-                serverConfig?.environment.capabilities.threadSettlement === true,
-            },
+            environment: { threadSettlementSupported: activeThreadSettlementSupported },
             hasLocalQueuedMessage: queuedMessages.length > 0,
             nowMs: Date.now(),
           })
         : { canSnooze: false },
-    [activeThreadSummary, activeWorktreeSummary, queuedMessages.length, serverConfig],
+    [
+      activeThreadSettlementSupported,
+      activeThreadSummary,
+      activeWorktreeSummary,
+      queuedMessages.length,
+    ],
   );
   const usageLimitBannerItem = useUsageLimitBannerItem({
     // The web phone tier is frozen: no new banners there.

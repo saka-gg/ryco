@@ -90,7 +90,9 @@ export function projectDesktopWorkspaceSummary(
       canConnect: machine.canConnect,
       canMutate: machine.canMutate,
       effectiveRole: machine.canConnect ? machine.effectiveRole : null,
-      threadSettlementSupported: machine.capabilities.threadSettlement,
+      ...(machine.capabilities.threadSettlement !== undefined
+        ? { threadSettlementSupported: machine.capabilities.threadSettlement }
+        : {}),
       accessReasons: machine.accessReasons,
     })),
     queuedEnvironmentIds: state.queuedEnvironmentIds,

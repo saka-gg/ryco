@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
+import type { ReportedThreadCapabilities } from "@ryco/client-runtime/rpc";
+import type { EnvironmentId } from "@ryco/contracts";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import {
@@ -410,35 +411,98 @@ describe("Home environment provenance (wave 4)", () => {
   });
 });
 
-it("uses live node capabilities over stale Hub directory defaults without granting mutation readiness", () => {
-  const environmentId = "hosted" as EnvironmentId;
-  const hosted = [
-    {
-      environmentId,
-      label: "Mac",
-      transportStatus: "online" as const,
-      sessionStatus: "ready" as const,
-      role: "viewer" as const,
-      threadSettlementSupported: false,
-      threadSnoozeSupported: false,
-      shellCurrent: true,
-      apiAvailable: true,
-    },
-  ];
-  const serverConfigs = new Map([
-    [
-      environmentId,
+describe("Home environment thread capabilities", () => {
+  const reported = (
+    entries: ReadonlyArray<readonly [EnvironmentId, ReportedThreadCapabilities]>,
+  ): ReadonlyMap<EnvironmentId, ReportedThreadCapabilities> => new Map(entries);
+  const supported: ReportedThreadCapabilities = { threadSettlement: true, threadSnooze: true };
+
+  it("uses a node's own capabilities without granting mutation readiness", () => {
+    const environmentId = "hosted" as EnvironmentId;
+    const hosted = [
       {
-        environment: { capabilities: { threadSettlement: true, threadSnooze: true } },
-      } as ServerConfig,
-    ],
-  ]);
-  expect(buildHomeEnvironments({ direct: [], hosted })[0]?.threadSettlementSupported).toBe(false);
-  expect(buildHomeEnvironments({ direct: [], hosted, serverConfigs })[0]).toMatchObject({
-    threadSettlementSupported: true,
-    threadSnoozeSupported: true,
-    mutationReady: false,
-    connectionState: "read-only",
+        environmentId,
+        label: "Mac",
+        transportStatus: "online" as const,
+        sessionStatus: "ready" as const,
+        role: "viewer" as const,
+        shellCurrent: true,
+        apiAvailable: true,
+      },
+    ];
+    expect(buildHomeEnvironments({ direct: [], hosted })[0]).toMatchObject({
+      threadSettlementSupported: "unknown",
+      threadSnoozeSupported: "unknown",
+    });
+    expect(
+      buildHomeEnvironments({
+        direct: [],
+        hosted,
+        reportedThreadCapabilities: reported([[environmentId, supported]]),
+      })[0],
+    ).toMatchObject({
+      threadSettlementSupported: true,
+      threadSnoozeSupported: true,
+      mutationReady: false,
+      connectionState: "read-only",
+    });
+  });
+
+  it("leaves a cached Hub node unknown until its node has answered", () => {
+    const environmentId = "cached" as EnvironmentId;
+    const cachedHubNodes = [
+      {
+        environmentId,
+        label: "Build node",
+        role: "owner" as const,
+        revokedAt: null,
+        presenceOnline: false,
+        lastHeartbeatAt: null,
+        lastAuthenticatedAt: null,
+      },
+    ];
+    expect(buildHomeEnvironments({ direct: [], hosted: [], cachedHubNodes })[0]).toMatchObject({
+      threadSettlementSupported: "unknown",
+      threadSnoozeSupported: "unknown",
+      mutationReady: false,
+    });
+    // A node released earlier in this session keeps its last answer.
+    expect(
+      buildHomeEnvironments({
+        direct: [],
+        hosted: [],
+        cachedHubNodes,
+        reportedThreadCapabilities: reported([
+          [environmentId, { threadSettlement: false, threadSnooze: false }],
+        ]),
+      })[0],
+    ).toMatchObject({ threadSettlementSupported: false, threadSnoozeSupported: false });
+  });
+
+  it("reads a direct node's descriptor until its config has arrived", () => {
+    const environmentId = "direct" as EnvironmentId;
+    const direct = (descriptorCapabilities: { threadSettlement: boolean } | null) => [
+      {
+        environmentId,
+        label: "LAN Mac",
+        connectionState: "connected" as const,
+        role: "owner" as const,
+        descriptorCapabilities,
+      },
+    ];
+    expect(buildHomeEnvironments({ direct: direct(null), hosted: [] })[0]).toMatchObject({
+      threadSettlementSupported: "unknown",
+    });
+    expect(
+      buildHomeEnvironments({ direct: direct({ threadSettlement: false }), hosted: [] })[0],
+    ).toMatchObject({ threadSettlementSupported: false, threadSnoozeSupported: false });
+    expect(
+      buildHomeEnvironments({
+        direct: direct({ threadSettlement: false }),
+        hosted: [],
+        reportedThreadCapabilities: reported([[environmentId, supported]]),
+      })[0],
+    ).toMatchObject({ threadSettlementSupported: true, threadSnoozeSupported: true });
   });
 });
 

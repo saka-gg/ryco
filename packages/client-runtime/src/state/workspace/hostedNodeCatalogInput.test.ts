@@ -99,9 +99,9 @@ describe("hosted node catalog input", () => {
       label: "Studio",
       platform: { os: "darwin", arch: "arm64" },
       serverVersion: "1.2.3",
+      // A directory without the settlement flag leaves it unknown, not off.
       capabilities: {
         repositoryIdentity: true,
-        threadSettlement: false,
         nativeClientRequired: false,
       },
       clientTier: "hosted-web",
@@ -193,7 +193,6 @@ describe("hosted node catalog input", () => {
       capabilities: {
         repositoryIdentity: false,
         nativeClientRequired: false,
-        threadSettlement: false,
       },
       canReadMetadata: true,
       canConnect: false,
