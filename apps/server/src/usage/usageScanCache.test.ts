@@ -221,6 +221,8 @@ it("compacts identifiers of version 4 caches instead of rescanning them", () => 
   expect(decoded?.keys[0]).toHaveLength(16);
 });
 
+// Encoding and decoding 270k records is CPU-bound; in CI it runs next to every other package's
+// tests and can take ten times its local time.
 it("decodes every file of a large cache and evicts the least recently modified first", () => {
   // One quarter hour apart: one slot per record, the worst case for the decoder.
   const rows = (count: number) =>
@@ -237,7 +239,7 @@ it("decodes every file of a large cache and evicts the least recently modified f
   expect(capUsageScanCache(decoded, 200_000)).toBe(1);
   expect([...decoded.keys()].toSorted()).toEqual(["file-2", "file-3"]);
   expect(capUsageScanCache(decoded, 200_000)).toBe(0);
-});
+}, 30_000);
 
 it("caps the cache by the rows it keeps resident, not by the responses it folded", () => {
   // Keyless (Codex) responses of one quarter hour fold into a single slot.
