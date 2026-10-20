@@ -95,6 +95,8 @@ function makeThreadShellSnapshot(params: {
   readonly hasPendingApprovals?: boolean;
   readonly hasPendingUserInput?: boolean;
   readonly hasActionableProposedPlan?: boolean;
+  /** The latest turn finished before the snapshot; a running session's turn runs. */
+  readonly latestTurnCompleted?: boolean;
 }): OrchestrationShellSnapshot {
   const projectId = ProjectId.make("project-1");
   const turnId = TurnId.make("turn-1");
@@ -126,7 +128,16 @@ function makeThreadShellSnapshot(params: {
                 completedAt: null,
                 assistantMessageId: null,
               }
-            : null,
+            : params.latestTurnCompleted
+              ? {
+                  turnId,
+                  state: "completed",
+                  requestedAt: "2026-04-13T00:00:00.000Z",
+                  startedAt: "2026-04-13T00:00:01.000Z",
+                  completedAt: "2026-04-13T00:00:02.000Z",
+                  assistantMessageId: null,
+                }
+              : null,
         createdAt: "2026-04-13T00:00:00.000Z",
         updatedAt: "2026-04-13T00:00:00.000Z",
         archivedAt: null,
@@ -621,6 +632,67 @@ describe("retainThreadDetailSubscription", () => {
 
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
     expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("idle-evicts a thread whose session stays ready after its turn completed", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-completed");
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toBeDefined();
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId, sessionStatus: "ready", latestTurnCompleted: true }),
+      environmentId,
+    );
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1 * 60 * 1000);
+    expect(mockThreadUnsubscribe).toHaveBeenCalledTimes(1);
+
+    stop();
+    await resetEnvironmentServiceForTests();
+  });
+
+  it("keeps a running thread's subscription attached however long it stays released", async () => {
+    const {
+      retainThreadDetailSubscription,
+      startEnvironmentConnectionService,
+      resetEnvironmentServiceForTests,
+    } = await import("./service");
+
+    const stop = startEnvironmentConnectionService();
+    const environmentId = EnvironmentId.make("env-1");
+    const threadId = ThreadId.make("thread-running");
+    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
+    expect(connectionInput).toBeDefined();
+
+    connectionInput.syncShellSnapshot(
+      makeThreadShellSnapshot({ threadId, sessionStatus: "running" }),
+      environmentId,
+    );
+
+    const release = retainThreadDetailSubscription(environmentId, threadId);
+    expect(mockSubscribeThread).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    expect(mockThreadUnsubscribe).not.toHaveBeenCalled();
 
     stop();
     await resetEnvironmentServiceForTests();

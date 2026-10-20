@@ -1,4 +1,9 @@
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@ryco/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationSessionStatus,
+  ScopedThreadRef,
+  ThreadId,
+} from "@ryco/contracts";
 
 import { planEvictionsToCapacity } from "../../connection/evictionPolicy.ts";
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
@@ -21,11 +26,16 @@ export const THREAD_BODY_MAX_BYTES = 48 * 1024 * 1024;
 /**
  * A thread of the active environment accessed this recently keeps its body, so
  * switching away from an environment and back renders its latest threads at once.
- * The window is only checked when a pass runs (after a subscription is disposed
- * or a snapshot lands), so a burst of threads opened inside it can leave the
- * store over budget until the idle sweep disposes their subscriptions.
+ * A store left over budget only by bodies inside this window is checked again
+ * when the earliest of them leaves it.
  */
 export const THREAD_BODY_RECENT_ACCESS_MS = 5 * 60 * 1000;
+/**
+ * The longest a store left over budget goes without another check. Bodies also
+ * enter the store without a subscription (read-cache hydration and refills),
+ * and protection can lapse without anything the residency pass hears about.
+ */
+export const THREAD_BODY_RESIDENCY_BACKSTOP_MS = 60 * 1000;
 /** Fixed per-message overhead (ids, timestamps, envelope) on top of its text. */
 const MESSAGE_ROW_OVERHEAD_BYTES = 256;
 
@@ -36,16 +46,29 @@ function ownEntry<K extends string, V>(
   return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
-function isLiveSessionStatus(status: string | undefined): boolean {
-  return Boolean(status) && status !== "idle" && status !== "stopped";
+/**
+ * The session statuses of a turn in progress. Every other status, `ready`
+ * included (a node leaves its sessions ready after a completed turn), is a
+ * session at rest.
+ */
+export const THREAD_WORKING_SESSION_STATUSES: ReadonlySet<OrchestrationSessionStatus> = new Set([
+  "starting",
+  "running",
+]);
+
+function isWorkingSessionStatus(status: OrchestrationSessionStatus | undefined): boolean {
+  return status !== undefined && THREAD_WORKING_SESSION_STATUSES.has(status);
 }
 
 /**
- * Whether a thread has work that must not lose its body or its subscription:
- * pending approvals or user input, an actionable proposed plan, a session that
- * is not idle or stopped, a running latest turn, or a pending source proposed
- * plan. Reads the shell, summary, session and turn records directly, never
- * composing the thread's content.
+ * Whether a thread has work in progress that must not lose its body or its
+ * subscription: pending approvals or user input, a working (`starting` or
+ * `running`) session, or a running latest turn. A thread whose turn completed
+ * is idle whatever its session says (`ready`, `interrupted`, `error`, `idle` or
+ * `stopped`), and so is one waiting on the user's decision about a proposed
+ * plan: that wait outlives the turn, and the thread loads its window again when
+ * it is opened. Reads the shell, summary, session and turn records directly,
+ * never composing the thread's content.
  */
 export function isThreadNonIdle(state: AppState, ref: ScopedThreadRef): boolean {
   const environmentState = ownEntry(state.environmentStateById, ref.environmentId);
@@ -56,26 +79,17 @@ export function isThreadNonIdle(state: AppState, ref: ScopedThreadRef): boolean 
   const summary = fullThreadEntry(ownEntry(environmentState.sidebarThreadSummaryById, threadId));
   // The summary carries the coarse readiness flags used throughout the UI.
   if (summary) {
-    if (
-      summary.hasPendingApprovals ||
-      summary.hasPendingUserInput ||
-      summary.hasActionableProposedPlan
-    ) {
-      return true;
-    }
-    if (isLiveSessionStatus(summary.session?.orchestrationStatus)) return true;
+    if (summary.hasPendingApprovals || summary.hasPendingUserInput) return true;
+    if (isWorkingSessionStatus(summary.session?.orchestrationStatus)) return true;
     if (summary.latestTurn?.state === "running") return true;
   }
 
   const shell = ownEntry(environmentState.threadShellById, threadId);
   if (shell === undefined || isArchivedThreadStub(shell)) return false;
-  const turnState = ownEntry(environmentState.threadTurnStateById, threadId);
   return (
-    isLiveSessionStatus(
+    isWorkingSessionStatus(
       ownEntry(environmentState.threadSessionById, threadId)?.orchestrationStatus,
-    ) ||
-    turnState?.latestTurn?.state === "running" ||
-    turnState?.pendingSourceProposedPlan !== undefined
+    ) || ownEntry(environmentState.threadTurnStateById, threadId)?.latestTurn?.state === "running"
   );
 }
 
@@ -131,6 +145,8 @@ export interface ThreadBodyUsage {
   readonly environmentActive: boolean;
   /** When the thread last saw activity (epoch ms), 0 when its summary says nothing. */
   readonly lastActivityAt: number;
+  /** Whether the body holds messages that arrived before the thread's shell. */
+  readonly hasPendingMessages: boolean;
 }
 
 function parseTimestamp(value: string | null | undefined): number {
@@ -190,6 +206,8 @@ export function selectThreadBodyUsage(state: AppState): ThreadBodyUsage[] {
         bytes: messages === undefined ? 0 : messageSliceBytes(messages),
         environmentActive,
         lastActivityAt: selectThreadActivityAt(environmentState, threadId),
+        hasPendingMessages:
+          (ownEntry(environmentState.pendingMessagesByThreadId, threadId)?.length ?? 0) > 0,
       });
     }
   }
@@ -205,38 +223,75 @@ export interface ThreadBodyResidencyEntry {
   readonly lastActivityAt?: number;
   /** Retained, visible, busy, or holding unsent work: never planned away. */
   readonly protected: boolean;
+  /** Kept until then (epoch ms) when not protected otherwise: a recently accessed body. */
+  readonly protectedUntil?: number | undefined;
+}
+
+export interface ThreadBodyResidencyPlan {
+  /** The bodies to drop now, least recently accessed first. */
+  readonly evict: ScopedThreadRef[];
+  /** Whether the store stays over a limit once `evict` is dropped. */
+  readonly overBudget: boolean;
+  /**
+   * When the earliest body kept only by `protectedUntil` loses that protection,
+   * if the store stays over a limit; null otherwise. A pass then can drop it.
+   */
+  readonly recheckAt: number | null;
 }
 
 /**
  * The bodies to drop so the store stays within `maxThreads` bodies and
  * `maxBytes`: the least recently accessed unprotected threads first, the less
- * recently active first among equal access times. Protected threads count
- * toward both limits but are never returned, so the limits can stay exceeded
- * while everything left is protected. They count toward the byte limit too, so
- * a few large busy bodies can leave no room for idle ones: the budget bounds
- * the store's memory, not only its idle part.
+ * recently active first among equal access times. An entry is protected while
+ * `protected` holds or `now` is before its `protectedUntil`. Protected threads
+ * count toward both limits but are never returned, so the limits can stay
+ * exceeded while everything left is protected. They count toward the byte limit
+ * too, so a few large busy bodies can leave no room for idle ones: the budget
+ * bounds the store's memory, not only its idle part.
  */
-export function planThreadBodyEvictions(input: {
+export function planThreadBodyResidency(input: {
   readonly entries: ReadonlyArray<ThreadBodyResidencyEntry>;
+  readonly now: number;
   readonly maxThreads?: number;
   readonly maxBytes?: number;
-}): ScopedThreadRef[] {
+}): ThreadBodyResidencyPlan {
+  const maxThreads = input.maxThreads ?? THREAD_BODY_MAX_THREADS;
+  const maxBytes = input.maxBytes ?? THREAD_BODY_MAX_BYTES;
+  const keptUntil = (entry: ThreadBodyResidencyEntry) =>
+    !entry.protected && entry.protectedUntil !== undefined && input.now < entry.protectedUntil
+      ? entry.protectedUntil
+      : null;
   // The shared policy keeps the order of entries it ranks equal.
   const ranked = input.entries.toSorted(
     (left, right) =>
       left.lastAccessedAt - right.lastAccessedAt ||
       (left.lastActivityAt ?? 0) - (right.lastActivityAt ?? 0),
   );
-  return planEvictionsToCapacity(
+  const evict = planEvictionsToCapacity(
     ranked.map((entry) => ({
-      key: entry.ref,
+      key: entry,
       lastAccessedAt: entry.lastAccessedAt,
       retainedBytes: entry.bytes,
-      evictable: !entry.protected,
+      evictable: !entry.protected && keptUntil(entry) === null,
     })),
-    {
-      maxEntries: input.maxThreads ?? THREAD_BODY_MAX_THREADS,
-      maxBytes: input.maxBytes ?? THREAD_BODY_MAX_BYTES,
-    },
+    { maxEntries: maxThreads, maxBytes },
   );
+
+  const evicted = new Set(evict);
+  let count = 0;
+  let bytes = 0;
+  let recheckAt: number | null = null;
+  for (const entry of input.entries) {
+    if (evicted.has(entry)) continue;
+    count += 1;
+    bytes += entry.bytes;
+    const until = keptUntil(entry);
+    if (until !== null && (recheckAt === null || until < recheckAt)) recheckAt = until;
+  }
+  const overBudget = count > maxThreads || bytes > maxBytes;
+  return {
+    evict: evict.map((entry) => entry.ref),
+    overBudget,
+    recheckAt: overBudget ? recheckAt : null,
+  };
 }

@@ -66,6 +66,7 @@ import {
 } from "./types.ts";
 import { sanitizeThreadErrorMessage } from "../../errors/transportError.ts";
 import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
+import { forgetDerivedThread } from "./threadDerivationMemo.ts";
 import {
   MAX_THREAD_ACTIVITIES,
   MAX_THREAD_CHECKPOINTS,
@@ -1545,6 +1546,10 @@ function evictThreadBodiesFromEnvironment(
  * thread's shell, session, turn state and sidebar summary stay, as does every
  * other thread's body (by identity), so the thread still lists and a later
  * open loads its window again as for a thread never opened.
+ *
+ * The thread composed from the dropped body is forgotten too (a cache-only
+ * side effect): it is memoized under the shell, which stays, and would keep
+ * the body reachable until the thread was composed again.
  */
 export function evictThreadBodies(
   state: AppState,
@@ -1560,6 +1565,10 @@ export function evictThreadBodies(
   for (const [environmentId, threadIds] of threadIdsByEnvironmentId) {
     const environmentState = state.environmentStateById[environmentId];
     if (!environmentState) continue;
+    for (const threadId of threadIds) {
+      const shell = ownValue(environmentState.threadShellById, threadId);
+      if (shell !== undefined) forgetDerivedThread(shell);
+    }
     nextState = commitEnvironmentState(
       nextState,
       environmentId,
