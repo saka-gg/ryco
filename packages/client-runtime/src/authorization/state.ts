@@ -509,7 +509,7 @@ function prefetchHostedDirectory(signal: AbortSignal): HostedDirectoryPrefetch {
   return { nodes, abandon };
 }
 
-const DIRECTORY_REFRESH_MS = 20_000;
+export const DIRECTORY_REFRESH_MS = 20_000;
 export const DIRECTORY_SUBSCRIBED_REFRESH_MS = 120_000;
 /** Directory cadence while a surface waits for an offline node to come back. */
 export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
@@ -520,6 +520,34 @@ export const DIRECTORY_PRESENCE_REFRESH_MS = 5_000;
  */
 export const DIRECTORY_PRESENCE_WINDOW_MS = 5 * 60_000;
 const DIRECTORY_RETRY_MAX_MS = 60_000;
+
+/** One token per surface showing node presence; see {@link retainHostedDirectoryPresenceDemand}. */
+const directoryPresenceDemand = new Set<symbol>();
+/** Set by the controller; called when presence demand starts or ends. */
+let directoryPresenceDemandChanged: () => void = () => undefined;
+
+/**
+ * Hold directory presence demand until the returned release is called.
+ *
+ * For a client that opts into `demandDrivenDirectoryRefresh`: without a live
+ * account subscription the directory is polled at {@link DIRECTORY_REFRESH_MS}
+ * only while a surface showing node presence holds demand, and at
+ * {@link DIRECTORY_SUBSCRIBED_REFRESH_MS} otherwise. Demand is a token per
+ * caller and the release is idempotent. When demand starts, a pending poll is
+ * moved to the normal cadence after the last read (or runs now when that read
+ * is already older); when it ends, the poll moves to the backstop after the
+ * last read. A client that did not opt in keeps the normal cadence regardless.
+ */
+export function retainHostedDirectoryPresenceDemand(): () => void {
+  const token = Symbol("hosted-directory-presence-demand");
+  directoryPresenceDemand.add(token);
+  if (directoryPresenceDemand.size === 1) directoryPresenceDemandChanged();
+  return () => {
+    if (!directoryPresenceDemand.delete(token)) return;
+    if (directoryPresenceDemand.size === 0) directoryPresenceDemandChanged();
+  };
+}
+
 /** The selected session's synchronization deadline; every environment session has the same one. */
 export const HOSTED_SESSION_SYNC_DEADLINE_MS = HOSTED_ENVIRONMENT_SESSION_SYNC_DEADLINE_MS;
 /**
@@ -645,6 +673,8 @@ class HostedHubController {
    * see `watchDirectoryPresence`.
    */
   #directoryPresenceWatches = new Map<symbol, number>();
+  /** When the last directory read succeeded, on the runtime clock. */
+  #directoryRefreshedAt: number | null = null;
   #directoryOperation: AbortController | null = null;
   #directoryPromise: Promise<void> | null = null;
   #bootstrapPromise: Promise<void> | null = null;
@@ -749,6 +779,11 @@ class HostedHubController {
     EnvironmentId,
     { readonly generation: number; readonly ready: boolean }
   >();
+
+  constructor() {
+    // The application's one controller hears presence demand edges.
+    directoryPresenceDemandChanged = () => this.#directoryDemandChanged();
+  }
 
   bootstrap(): Promise<void> {
     if (this.#bootstrapPromise) return this.#bootstrapPromise;
@@ -2110,6 +2145,10 @@ class HostedHubController {
     this.#clearDirectoryTimer();
     this.#directoryRetry = 0;
     this.#directoryPresenceWatches.clear();
+    // Demand lives at module scope beside the one controller: a test's leftover
+    // token must not change the next test's cadence.
+    directoryPresenceDemand.clear();
+    this.#directoryRefreshedAt = null;
     this.#directoryOperation?.abort();
     this.#directoryOperation = null;
     this.#directoryPromise = null;
@@ -2564,6 +2603,43 @@ class HostedHubController {
     return false;
   }
 
+  /** How long after a successful read the next poll runs. */
+  #directoryCadence(): number {
+    const runtime = getHostedRuntimeConfiguration();
+    if (runtime.hasLiveHubSubscription?.()) return DIRECTORY_SUBSCRIBED_REFRESH_MS;
+    if (this.#directoryPresenceCadenceActive()) return DIRECTORY_PRESENCE_REFRESH_MS;
+    if (runtime.demandDrivenDirectoryRefresh && directoryPresenceDemand.size === 0) {
+      return DIRECTORY_SUBSCRIBED_REFRESH_MS;
+    }
+    return DIRECTORY_REFRESH_MS;
+  }
+
+  /**
+   * Presence demand started or ended: move the pending poll to the cadence that
+   * now applies, counted from the last successful read, or read now when that
+   * read is already older.
+   *
+   * Only a pending normal-cadence timer moves. In the background the foreground
+   * listener already refreshes on return, a read in flight schedules the next
+   * one when it ends, a failure backoff is never shortened, and a signed-out
+   * controller has no timer.
+   */
+  #directoryDemandChanged(): void {
+    if (this.#directoryTimer === null || this.#directoryRetry !== 0) return;
+    const runtime = getHostedRuntimeConfiguration();
+    if (!runtime.demandDrivenDirectoryRefresh) return;
+    const elapsed =
+      this.#directoryRefreshedAt === null
+        ? Number.POSITIVE_INFINITY
+        : runtime.timers.now() - this.#directoryRefreshedAt;
+    const remaining = this.#directoryCadence() - elapsed;
+    if (remaining <= 0) {
+      void this.refreshDirectory();
+      return;
+    }
+    this.#scheduleDirectory(remaining);
+  }
+
   async #refreshDirectory(
     operation: AbortController,
     prefetch: HostedDirectoryPrefetch | null,
@@ -2602,6 +2678,7 @@ class HostedHubController {
         return;
       }
       this.#directoryRetry = 0;
+      this.#directoryRefreshedAt = getHostedRuntimeConfiguration().timers.now();
       const current = hostedHubStore.getState();
       const resumeStaleBrowser = current.browserStatus === "stale";
       const selected = current.selectedNode;
@@ -2653,13 +2730,7 @@ class HostedHubController {
           patchState(patch);
         }
       }
-      this.#scheduleDirectory(
-        getHostedRuntimeConfiguration().hasLiveHubSubscription?.()
-          ? DIRECTORY_SUBSCRIBED_REFRESH_MS
-          : this.#directoryPresenceCadenceActive()
-            ? DIRECTORY_PRESENCE_REFRESH_MS
-            : DIRECTORY_REFRESH_MS,
-      );
+      this.#scheduleDirectory(this.#directoryCadence());
       if (resumeStaleBrowser) {
         getHostedRuntimeConfiguration().timers.queueMicrotask(() => {
           const recovered = hostedHubStore.getState();

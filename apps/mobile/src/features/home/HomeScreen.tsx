@@ -20,6 +20,7 @@ import { HomeModeControl } from "../../components/HomeModeControl";
 import { HomeBottomToolbar } from "../../components/HomeBottomToolbar";
 import { RycoWordmark } from "../../components/RycoWordmark";
 import { SymbolView } from "../../components/AppSymbol";
+import { useDirectoryPresenceDemand } from "../../hostedHub/directoryDemand";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
@@ -56,6 +57,7 @@ export function HomeScreen() {
   const [stabilizeInboxSections] = useState(createInboxSectionStabilizer);
   const iconColor = useThemeColor("--color-icon");
   const isFocused = useIsFocused();
+  useDirectoryPresenceDemand(isFocused);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const clockStaleRef = useRef(false);
   // The clock only runs while Home is the focused screen: a covered Home would

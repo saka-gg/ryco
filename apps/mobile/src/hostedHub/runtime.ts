@@ -251,6 +251,9 @@ export async function configureMobileHostedRuntime(
     isForeground: () => mobileAppLifecycle.isForeground(),
     subscribeForeground,
     hasPendingRelayRequests: hasHostedRelayPendingRequests,
+    // No account subscription here, and every directory read is device-key
+    // signed: poll quickly only while a screen shows node presence.
+    demandDrivenDirectoryRefresh: true,
     resetRelayAttemptFactory: resetHostedRelayAttemptFactory,
     relayUrl: mobileHostedRelayUrl,
     // Each environment's relay binding prepares its E2EE context and issues its

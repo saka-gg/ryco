@@ -1,3 +1,6 @@
+import { useIsFocused } from "@react-navigation/native";
+
+import { useDirectoryPresenceDemand } from "../../hostedHub/directoryDemand";
 import { NodesScreen } from "../nodes/NodesScreen";
 
 /**
@@ -6,8 +9,10 @@ import { NodesScreen } from "../nodes/NodesScreen";
  * route is now the surface itself, not a compatibility shim for it.
  *
  * It stays the target of the `connections` deep link and of native pushes, so
- * the route id and linking path keep their old spelling.
+ * the route id and linking path keep their old spelling. While focused, it
+ * keeps the node list's presence fresh.
  */
 export function ConnectionsRouteScreen() {
+  useDirectoryPresenceDemand(useIsFocused());
   return <NodesScreen />;
 }

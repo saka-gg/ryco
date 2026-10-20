@@ -51,6 +51,7 @@ import {
   DIRECTORY_PRESENCE_REFRESH_MS,
   HOSTED_ACCESS_CHECK_DEADLINE_MS,
   DIRECTORY_PRESENCE_WINDOW_MS,
+  DIRECTORY_REFRESH_MS,
   DIRECTORY_SUBSCRIBED_REFRESH_MS,
   HOSTED_ACCOUNT_BUSY_MESSAGE,
   HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE,
@@ -65,6 +66,7 @@ import {
   HOSTED_SESSION_REVALIDATION_INTERVAL_MS,
   HOSTED_SESSION_SYNC_DEADLINE_MS,
   markHostedSessionReady,
+  retainHostedDirectoryPresenceDemand,
 } from "./state.ts";
 
 const hasHostedRelayPendingRequests = vi.fn(() => false);
@@ -1458,6 +1460,232 @@ describe("hosted registration and directory state", () => {
     expect(listNodes).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(listNodes).toHaveBeenCalledTimes(3);
+  });
+
+  describe("presence demand", () => {
+    function authenticate(): void {
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        account: sessionResponse.account,
+        session: sessionResponse.session,
+        directoryStatus: "ready",
+      });
+    }
+
+    function configureDemandDriven(overrides: Partial<HostedRuntimeConfiguration> = {}): void {
+      configureHostedRuntime(
+        { ...fakeRuntime(), demandDrivenDirectoryRefresh: true, ...overrides },
+        hostedHubApi,
+      );
+    }
+
+    it("polls at the two-minute backstop while no surface shows presence", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS - DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it("polls at the normal cadence while a surface shows presence", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+      const release = retainHostedDirectoryPresenceDemand();
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("reads at once when demand starts after the last read went stale", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("moves the pending poll once per demand edge, counted from the last read", async () => {
+      vi.useFakeTimers();
+      const setTimer = vi.fn((callback: () => void, delayMs: number) =>
+        globalThis.setTimeout(callback, delayMs),
+      );
+      configureDemandDriven({ timers: { ...fakeRuntime().timers, setTimeout: setTimer } });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+      const delays = () => setTimer.mock.calls.map(([, delayMs]) => delayMs);
+
+      await hostedHubController.refreshDirectory();
+      expect(delays()).toEqual([DIRECTORY_SUBSCRIBED_REFRESH_MS]);
+
+      // A fresh read is not repeated: the poll moves to 20s after it.
+      await vi.advanceTimersByTimeAsync(5_000);
+      const first = retainHostedDirectoryPresenceDemand();
+      const second = retainHostedDirectoryPresenceDemand();
+      expect(delays()).toEqual([DIRECTORY_SUBSCRIBED_REFRESH_MS, DIRECTORY_REFRESH_MS - 5_000]);
+
+      // Releases are per token and idempotent: one held token keeps the cadence.
+      first();
+      first();
+      expect(delays()).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS - 5_000 - 1);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      expect(delays()).toHaveLength(3);
+      expect(delays()[2]).toBe(DIRECTORY_REFRESH_MS);
+
+      // The last release moves the poll to the backstop after the last read.
+      await vi.advanceTimersByTimeAsync(4_000);
+      second();
+      second();
+      expect(delays()).toHaveLength(4);
+      expect(delays()[3]).toBe(DIRECTORY_SUBSCRIBED_REFRESH_MS - 4_000);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS - 4_000 - 1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps the presence watch cadence without demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      const release = hostedHubController.watchDirectoryPresence();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_PRESENCE_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("keeps the live subscription backstop with demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven({ hasLiveHubSubscription: () => true });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS + 10_000);
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(
+        DIRECTORY_SUBSCRIBED_REFRESH_MS - DIRECTORY_REFRESH_MS - 10_000 - 1,
+      );
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+    });
+
+    it("never shortens a directory failure backoff for demand", async () => {
+      vi.useFakeTimers();
+      configureDemandDriven();
+      authenticate();
+      const listNodes = vi
+        .spyOn(hostedHubApi, "listNodes")
+        .mockRejectedValueOnce(new HostedHubApiError("unavailable", 503))
+        .mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      expect(hostedHubStore.getState().directoryStatus).toBe("stale");
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(listNodes).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      release();
+    });
+
+    it("arms no timer for demand while in the background", async () => {
+      vi.useFakeTimers();
+      const listeners = new Set<() => void>();
+      configureDemandDriven({
+        isForeground: () => false,
+        subscribeForeground: (listener) => {
+          listeners.add(listener);
+          return () => {
+            listeners.delete(listener);
+          };
+        },
+      });
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      expect(listeners.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      const release = retainHostedDirectoryPresenceDemand();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_SUBSCRIBED_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledOnce();
+      expect(listeners.size).toBe(1);
+      release();
+    });
+
+    it("ignores demand for a client that did not opt in", async () => {
+      vi.useFakeTimers();
+      authenticate();
+      const listNodes = vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([]);
+
+      await hostedHubController.refreshDirectory();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+
+      const release = retainHostedDirectoryPresenceDemand();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listNodes).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(3);
+      release();
+      await vi.advanceTimersByTimeAsync(DIRECTORY_REFRESH_MS);
+      expect(listNodes).toHaveBeenCalledTimes(4);
+    });
+
+    it("accepts demand before the runtime is configured", async () => {
+      vi.resetModules();
+      const runtime = await import("./runtime.ts");
+      const fresh = await import("./state.ts");
+      expect(() => runtime.getHostedRuntimeConfiguration()).toThrow();
+
+      let release = () => {};
+      expect(() => {
+        release = fresh.retainHostedDirectoryPresenceDemand();
+      }).not.toThrow();
+      expect(release).not.toThrow();
+    });
   });
 
   it("keeps mutations stale until browser resume revalidates access and node state", async () => {
