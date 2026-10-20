@@ -44,6 +44,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { makeGitManager } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { configureTestGitCommitIdentity } from "../vcs/testing/GitTestRepo.ts";
 import {
@@ -93,6 +94,7 @@ interface FakeGitTextGeneration {
     stagedPatch: string;
     includeBranch?: boolean;
     modelSelection: ModelSelection;
+    policy?: TextGenerationPolicy | undefined;
   }) => Effect.Effect<
     { subject: string; body: string; branch?: string | undefined },
     TextGenerationError
@@ -105,6 +107,7 @@ interface FakeGitTextGeneration {
     diffSummary: string;
     diffPatch: string;
     modelSelection: ModelSelection;
+    policy?: TextGenerationPolicy | undefined;
   }) => Effect.Effect<{ title: string; body: string }, TextGenerationError>;
   generateBranchName: (input: {
     cwd: string;
@@ -3201,6 +3204,52 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         }),
     );
   }
+
+  it.effect("passes the configured writing instructions to commit and PR generation", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/instructions"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/instructions"]);
+      yield* runGit(repoDir, ["config", "branch.feature/instructions.gh-merge-base", "main"]);
+      fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+
+      const commitPolicies: Array<TextGenerationPolicy | undefined> = [];
+      const prPolicies: Array<TextGenerationPolicy | undefined> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+        settingsPatch: {
+          commitMessageInstructions: "  Use Conventional Commits.  ",
+          pullRequestInstructions: "Add a Before / After section when the UI changed.",
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            commitPolicies.push(input.policy);
+            return Effect.succeed({ subject: "feat: add feature", body: "" });
+          },
+          generatePrContent: (input) => {
+            prPolicies.push(input.policy);
+            return Effect.succeed({ title: "Add feature", body: "Feature body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit_push_pr",
+      });
+
+      expect(result.commit.status).toBe("created");
+      expect(result.pr.status).toBe("created");
+      expect(commitPolicies.map((policy) => policy?.commitInstructions)).toEqual([
+        "Use Conventional Commits.",
+      ]);
+      expect(prPolicies.map((policy) => policy?.changeRequestInstructions)).toEqual([
+        "Add a Before / After section when the UI changed.",
+      ]);
+    }),
+  );
 
   for (const scenario of [
     "stale",

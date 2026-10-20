@@ -525,6 +525,9 @@ export const WorktreeBranchPrefix = TrimmedString.check(
 /** Server-local filesystem input; platform and filesystem validation belongs to the server. */
 export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
 
+/** Free-form guidance appended to a generated Git text prompt. Empty adds nothing. */
+export const GitWritingInstructions = TrimmedString.check(Schema.isMaxLength(4_000));
+
 /** Initialization applies only to newly created Git worktree checkouts. */
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
@@ -680,6 +683,13 @@ export const ServerSettings = Schema.Struct({
         options: DEFAULT_GIT_TEXT_GENERATION_OPTIONS,
       }),
     ),
+  ),
+  // Applied to every generated commit message, and to generated pull request titles and bodies.
+  commitMessageInstructions: GitWritingInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
+  pullRequestInstructions: GitWritingInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
   ),
   inboxPriorityModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -843,6 +853,8 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultAgentTokenMode: Schema.optionalKey(AgentTokenMode),
   addProjectBaseDirectory: Schema.optionalKey(Schema.String),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
+  commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
+  pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
   inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
   providerEventLogs: Schema.optionalKey(Schema.NullOr(ProviderEventLogMode)),
   observability: Schema.optionalKey(

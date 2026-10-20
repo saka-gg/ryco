@@ -1,3 +1,5 @@
+import type { ServerSettings } from "@ryco/contracts";
+
 import type { TextGenerationPolicy, TextGenerationPolicyKind } from "./TextGenerationPolicy.ts";
 
 export const defaultTextGenerationPolicy: TextGenerationPolicy = {
@@ -38,4 +40,17 @@ export const textGenerationPresets: Record<
   default: defaultTextGenerationPolicy,
   conventional_commits: conventionalCommitsTextGenerationPolicy,
   repo_conventions: repositoryConventionsTextGenerationPolicy,
+};
+
+/** The user's Git writing instructions from settings, or nothing when none are set. */
+export const gitWritingPolicyFromSettings = (
+  settings: Pick<ServerSettings, "commitMessageInstructions" | "pullRequestInstructions">,
+): TextGenerationPolicy | undefined => {
+  const commitInstructions = settings.commitMessageInstructions.trim();
+  const changeRequestInstructions = settings.pullRequestInstructions.trim();
+  if (!commitInstructions && !changeRequestInstructions) return undefined;
+  return customTextGenerationPolicy({
+    ...(commitInstructions ? { commitInstructions } : {}),
+    ...(changeRequestInstructions ? { changeRequestInstructions } : {}),
+  });
 };

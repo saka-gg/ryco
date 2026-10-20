@@ -49,6 +49,8 @@ import {
 
 import { GitManagerError } from "@ryco/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
+import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
+import { gitWritingPolicyFromSettings } from "../textGeneration/TextGenerationPresets.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
@@ -516,6 +518,12 @@ function sanitizeProgressText(value: string): string | null {
     return trimmed;
   }
   return trimmed.slice(0, MAX_PROGRESS_TEXT_LENGTH).trimEnd();
+}
+
+/** The model and the user's instructions for generated commit and pull request text. */
+interface GitWriting {
+  readonly modelSelection: ModelSelection;
+  readonly policy: TextGenerationPolicy | undefined;
 }
 
 interface CommitAndBranchSuggestion {
@@ -1473,7 +1481,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       /** When true, also produce a semantic feature branch name. */
       includeBranch?: boolean;
       filePaths?: readonly string[];
-      modelSelection: ModelSelection;
+      writing: GitWriting;
     }) {
       const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths);
       if (!context) {
@@ -1499,7 +1507,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           stagedSummary: limitContext(context.stagedSummary, 8_000),
           stagedPatch: limitContext(context.stagedPatch, 50_000),
           ...(input.includeBranch ? { includeBranch: true } : {}),
-          modelSelection: input.modelSelection,
+          modelSelection: input.writing.modelSelection,
+          policy: input.writing.policy,
         })
         .pipe(Effect.map((result) => sanitizeCommitMessage(result)));
 
@@ -1513,7 +1522,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   );
 
   const runCommitStep = Effect.fn("runCommitStep")(function* (
-    modelSelection: ModelSelection,
+    writing: GitWriting,
     cwd: string,
     action: "commit" | "commit_push" | "commit_push_pr",
     branch: string | null,
@@ -1548,7 +1557,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         branch,
         ...(commitMessage ? { commitMessage } : {}),
         ...(filePaths ? { filePaths } : {}),
-        modelSelection,
+        writing,
       });
     }
     if (!suggestion) {
@@ -1626,7 +1635,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
 
   const runPrStep = Effect.fn("runPrStep")(function* (
-    modelSelection: ModelSelection,
+    writing: GitWriting,
     cwd: string,
     fallbackBranch: string | null,
     linkedIssueNumbers: ReadonlyArray<number> | undefined,
@@ -1684,7 +1693,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       commitSummary: limitContext(rangeContext.commitSummary, 20_000),
       diffSummary: limitContext(rangeContext.diffSummary, 20_000),
       diffPatch: limitContext(rangeContext.diffPatch, 60_000),
-      modelSelection,
+      modelSelection: writing.modelSelection,
+      policy: writing.policy,
     });
     const body = appendClosingIssueReferences(generated.body, linkedIssueNumbers);
 
@@ -2207,7 +2217,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
   });
 
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (
-    modelSelection: ModelSelection,
+    writing: GitWriting,
     cwd: string,
     branch: string | null,
     commitMessage?: string,
@@ -2219,7 +2229,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       ...(commitMessage ? { commitMessage } : {}),
       ...(filePaths ? { filePaths } : {}),
       includeBranch: true,
-      modelSelection,
+      writing,
     });
     if (!suggestion) {
       return yield* gitManagerError(
@@ -2300,8 +2310,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         let commitMessageForStep = input.commitMessage;
         let preResolvedCommitSuggestion: CommitAndBranchSuggestion | undefined = undefined;
 
-        const modelSelection = yield* serverSettingsService.getSettings.pipe(
-          Effect.map((settings) => settings.textGenerationModelSelection),
+        const writing: GitWriting = yield* serverSettingsService.getSettings.pipe(
+          Effect.map((settings) => ({
+            modelSelection: settings.textGenerationModelSelection,
+            policy: gitWritingPolicyFromSettings(settings),
+          })),
           Effect.mapError((cause) =>
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
@@ -2315,7 +2328,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
             label: "Preparing feature branch...",
           });
           const result = yield* runFeatureBranchStep(
-            modelSelection,
+            writing,
             input.cwd,
             initialStatus.branch,
             input.commitMessage,
@@ -2341,7 +2354,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           ? yield* Ref.set(currentPhase, Option.some("commit")).pipe(
               Effect.flatMap(() =>
                 runCommitStep(
-                  modelSelection,
+                  writing,
                   input.cwd,
                   commitAction,
                   currentBranch,
@@ -2400,7 +2413,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
                 Effect.tap(() => Ref.set(currentPhase, Option.some("pr"))),
                 Effect.flatMap(() =>
                   runPrStep(
-                    modelSelection,
+                    writing,
                     input.cwd,
                     currentBranch,
                     input.linkedIssueNumbers,
