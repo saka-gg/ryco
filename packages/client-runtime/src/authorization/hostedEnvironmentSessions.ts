@@ -104,6 +104,14 @@ export interface HostedEnvironmentSessions {
   readonly getSnapshot: () => HostedEnvironmentSessionsSnapshot;
   readonly subscribe: (listener: () => void) => () => void;
   readonly isCurrentGeneration: (environmentId: EnvironmentId, generation: number) => boolean;
+  /**
+   * How many times the directory has reported the environment's node online
+   * again after reporting it offline, counted from when its record was created
+   * and visible to the listeners of the publish that carried the change. The
+   * registry only counts: what an edge means for a connection is the
+   * connection's business.
+   */
+  readonly presenceOnlineEdges: (environmentId: EnvironmentId) => number;
 
   /**
    * The environment's record, created with a fresh generation when it has none.
@@ -368,6 +376,8 @@ export function createHostedEnvironmentSessions(
     EnvironmentId,
     { readonly generation: number; readonly read: () => boolean }
   >();
+  /** The node presence each record's directory entry last reported, and its online edges. */
+  const presence = new Map<EnvironmentId, { readonly online: boolean; readonly edges: number }>();
   const listeners = new Set<() => void>();
   let lastGeneration = 0;
   let snapshot = freezeSnapshot(0, records, deliveryUnknown);
@@ -554,11 +564,19 @@ export function createHostedEnvironmentSessions(
     },
     isCurrentGeneration: (environmentId, generation) =>
       records.get(environmentId)?.generation === generation,
+    presenceOnlineEdges: (environmentId) => presence.get(environmentId)?.edges ?? 0,
 
     ensureRecord(node, options) {
       const nodeKey = hostedNodeEntryKey(node);
       const current = records.get(node.environmentId);
       if (current !== undefined) {
+        const seen = presence.get(node.environmentId);
+        const edges = seen?.edges ?? 0;
+        // Counted before the publish below, which the changed entry key makes.
+        presence.set(node.environmentId, {
+          online: node.presence.online,
+          edges: seen?.online === false && node.presence.online ? edges + 1 : edges,
+        });
         const refreshed: HostedEnvironmentSessionRecord = {
           ...current,
           nodeId: node.id,
@@ -606,6 +624,7 @@ export function createHostedEnvironmentSessions(
         relayGap: false,
       };
       records.set(node.environmentId, created);
+      presence.set(node.environmentId, { online: node.presence.online, edges: 0 });
       publish();
       return created;
     },
@@ -635,6 +654,7 @@ export function createHostedEnvironmentSessions(
     release(environmentId) {
       const current = records.get(environmentId);
       clearDeadline(environmentId);
+      presence.delete(environmentId);
       if (current === undefined) {
         pendingRequestReaders.delete(environmentId);
         return;
@@ -658,6 +678,7 @@ export function createHostedEnvironmentSessions(
     clear() {
       for (const environmentId of Array.from(deadlines.keys())) clearDeadline(environmentId);
       pendingRequestReaders.clear();
+      presence.clear();
       if (records.size === 0 && deliveryUnknown.size === 0) return;
       records.clear();
       deliveryUnknown.clear();
