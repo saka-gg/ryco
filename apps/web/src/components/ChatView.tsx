@@ -3478,7 +3478,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [dispatchCapability.allowed, environmentId, serverThread]);
 
   // Scroll helpers — LegendList handles auto-scroll via maintainScrollAtEnd.
-  // Explicit pins (the pill, the composer resizing) are verified against the
+  // Explicit pins (the pill, the composer resizing, a send) are verified against the
   // live scroller: a composer that grows while a just-opened thread is still
   // laying out would otherwise leave the transcript short of its end, behind
   // the scroll-to-bottom pill (see `pinTimelineToEnd`).
@@ -3506,13 +3506,16 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, []);
 
+  // A send does not wait for the list to reach its end, so its row can land
+  // while the transcript is away from the end or still moving there: pin the
+  // end once the row has rendered and measured.
   const scrollToEndAfterOptimistic = useCallback(() => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
-        void legendListRef.current?.scrollToEnd?.({ animated: false });
+        scrollToEnd(false);
       });
     });
-  }, []);
+  }, [scrollToEnd]);
 
   const stopTimelineLiveFollow = useCallback(() => {
     setTimelineLiveFollowEnabled(false);
@@ -3537,6 +3540,14 @@ export default function ChatView(props: ChatViewProps) {
     } else {
       showScrollDebouncer.current.maybeExecute();
     }
+  }, []);
+  // A send follows the transcript's end; its optimistic message does not wait
+  // for the list to get there.
+  const armTimelineEndFollow = useCallback(() => {
+    isAtEndRef.current = true;
+    setTimelineLiveFollowEnabled(true);
+    showScrollDebouncer.current.cancel();
+    setShowScrollToBottom(false);
   }, []);
 
   useEffect(() => {
@@ -4559,13 +4570,9 @@ export default function ChatView(props: ChatViewProps) {
         ...(pendingWorktreeSource ? { prepareForDispatch: prepareWorktreeSourceForDispatch } : {}),
         ...(localTask ? { localTask } : {}),
         scroll: {
-          scrollToEndBeforeOptimistic: async () => {
+          armEndFollowBeforeOptimistic: () => {
             captureFirstSendLayout();
-            isAtEndRef.current = true;
-            setTimelineLiveFollowEnabled(true);
-            showScrollDebouncer.current.cancel();
-            setShowScrollToBottom(false);
-            await legendListRef.current?.scrollToEnd?.({ animated: false });
+            armTimelineEndFollow();
           },
           scrollToEndAfterOptimistic,
         },
@@ -5174,12 +5181,9 @@ export default function ChatView(props: ChatViewProps) {
       sendLocalDispatch.beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
-      // Scroll to the current end *before* adding the optimistic message.
-      isAtEndRef.current = true;
-      setTimelineLiveFollowEnabled(true);
-      showScrollDebouncer.current.cancel();
-      setShowScrollToBottom(false);
-      await legendListRef.current?.scrollToEnd?.({ animated: false });
+      // Follow the transcript's end; the optimistic message does not wait for
+      // the list to get there.
+      armTimelineEndFollow();
 
       // The timeline is the view's: once it shows another thread, it is not this one's.
       if (showsSendThread()) {
@@ -5266,6 +5270,7 @@ export default function ChatView(props: ChatViewProps) {
     [
       activeThread,
       activeProposedPlan,
+      armTimelineEndFollow,
       bindLocalDispatch,
       bindToShownThread,
       canSendModelSelection,

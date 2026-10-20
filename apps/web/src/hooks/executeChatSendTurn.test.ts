@@ -472,17 +472,22 @@ describe("buildSendTurnBootstrap", () => {
 // ---------------------------------------------------------------------------
 
 describe("executeChatSendTurn", () => {
-  it("scrolls to the bottom before and after appending the optimistic message", async () => {
-    // The first scroll arms live-follow; the second reaches the newly rendered row.
+  it("arms the end follow, shows the message and clears the composer before anything else runs", async () => {
+    // Nothing waits for the list: the message and the clear land in the same
+    // task as the arm, and the follow-up scroll is never awaited.
     const order: string[] = [];
-    const scrollToEndBeforeOptimistic = vi.fn(async () => {
-      order.push("scroll");
+    const armEndFollowBeforeOptimistic = vi.fn(() => {
+      order.push("arm");
+      queueMicrotask(() => order.push("microtask"));
     });
     const scrollToEndAfterOptimistic = vi.fn(() => {
       order.push("scroll-after");
     });
     const setOptimisticUserMessages = vi.fn(() => {
       order.push("optimistic");
+    });
+    const clearComposerDraftContent = vi.fn(() => {
+      order.push("clear");
     });
     const dispatchCommand = vi.fn(async () => {
       order.push("dispatch");
@@ -530,11 +535,11 @@ describe("executeChatSendTurn", () => {
         projectCwd: "/tmp/project",
         defaultModelSelection: null,
       },
-      scroll: { scrollToEndBeforeOptimistic, scrollToEndAfterOptimistic },
+      scroll: { armEndFollowBeforeOptimistic, scrollToEndAfterOptimistic },
       draft: {
         composerDraftTarget: DraftId.make("draft-1"),
         environmentId: EnvironmentId.make("env-1"),
-        clearComposerDraftContent: vi.fn(),
+        clearComposerDraftContent,
         setComposerDraftTokenMode: vi.fn(),
         setComposerDraftPrompt: vi.fn(),
         addComposerDraftImages: vi.fn(),
@@ -564,14 +569,86 @@ describe("executeChatSendTurn", () => {
       formatOutgoingPrompt: ({ text }) => text,
     });
 
-    expect(scrollToEndBeforeOptimistic).toHaveBeenCalledTimes(1);
+    expect(armEndFollowBeforeOptimistic).toHaveBeenCalledTimes(1);
     expect(scrollToEndAfterOptimistic).toHaveBeenCalledTimes(1);
     expect(setOptimisticUserMessages).toHaveBeenCalledTimes(1);
+    expect(clearComposerDraftContent).toHaveBeenCalledTimes(1);
     expect(dispatchCommand).toHaveBeenCalledTimes(1);
-    expect(order).toEqual(["scroll", "optimistic", "scroll-after", "dispatch"]);
+    expect(order.slice(0, 4)).toEqual(["arm", "optimistic", "scroll-after", "clear"]);
+    expect(order.indexOf("microtask")).toBeGreaterThan(order.indexOf("clear"));
+    expect(order.at(-1)).toBe("dispatch");
     expect(dispatchCommand).toHaveBeenCalledWith(
       expect.objectContaining({ type: "thread.turn.start" }),
     );
+  });
+
+  it("does not wait for the list before the optimistic message", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.claudeCacheReview = null;
+    input.scroll.armEndFollowBeforeOptimistic = vi.fn(() => {});
+    // Stands in for a scroll that has not got anywhere yet.
+    input.scroll.scrollToEndAfterOptimistic = vi.fn();
+    let releaseDispatch!: () => void;
+    const dispatchHeld = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    dispatchCommand.mockImplementation(async () => {
+      await dispatchHeld;
+      return { sequence: 1 };
+    });
+
+    let settled = false;
+    const sending = executeChatSendTurn(input).finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(input.dispatch.setOptimisticUserMessages).toHaveBeenCalledOnce();
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalledWith(
+      input.draft.composerDraftTarget,
+    );
+    expect(settled).toBe(false);
+
+    releaseDispatch();
+    expect(await sending).toBe(true);
+    expect(dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "thread.turn.start" }),
+    );
+  });
+
+  it("a failed send after the immediate clear still restores the draft", async () => {
+    const { input, dispatchCommand } = makeSendInput();
+    input.claudeCacheReview = null;
+    dispatchCommand.mockImplementation(async (command) => {
+      if ((command as { type: string }).type === "thread.turn.start") {
+        throw new Error("The node went away.");
+      }
+      return { sequence: 1 };
+    });
+
+    expect(await executeChatSendTurn(input)).toBe(false);
+
+    expect(input.draft.clearComposerDraftContent).toHaveBeenCalledWith(
+      input.draft.composerDraftTarget,
+    );
+    expect(input.draft.setComposerDraftPrompt).toHaveBeenLastCalledWith(
+      input.draft.composerDraftTarget,
+      "Continue with Claude",
+    );
+    const updaters = vi
+      .mocked(input.dispatch.setOptimisticUserMessages)
+      .mock.calls.map(([updater]) => updater);
+    const [optimistic] = updaters[0]!([]);
+    expect(optimistic?.text).toBe("Continue with Claude");
+    expect(updaters[1]!([optimistic!])).toEqual([]);
+    expect(input.dispatch.setThreadError).toHaveBeenLastCalledWith(
+      input.thread.threadId,
+      "The node went away.",
+    );
+    expect(input.refs.sendInFlightRef.current).toBe(false);
+    expect(input.dispatch.resetLocalDispatch).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -637,7 +714,7 @@ describe("executeChatSendTurn", () => {
         defaultModelSelection: null,
       },
       scroll: {
-        scrollToEndBeforeOptimistic: vi.fn(async () => {}),
+        armEndFollowBeforeOptimistic: vi.fn(() => {}),
         scrollToEndAfterOptimistic: vi.fn(() => {}),
       },
       draft: {
@@ -752,7 +829,7 @@ function makeSendInput() {
       defaultModelSelection: null,
     },
     scroll: {
-      scrollToEndBeforeOptimistic: vi.fn(async () => {}),
+      armEndFollowBeforeOptimistic: vi.fn(() => {}),
       scrollToEndAfterOptimistic: vi.fn(() => {}),
     },
     draft: {
@@ -832,7 +909,7 @@ describe("a send whose view moved on to another thread", () => {
       images: [],
       terminalContexts: [],
     });
-    input.scroll.scrollToEndBeforeOptimistic = vi.fn(async () => {
+    input.scroll.armEndFollowBeforeOptimistic = vi.fn(() => {
       switchThread("typed in the other thread");
     });
 
@@ -994,9 +1071,9 @@ describe("queued send draft ownership", () => {
     },
   );
 
-  it("releases send ownership when pre-send scrolling rejects without consuming the draft", async () => {
+  it("releases send ownership when arming the end follow throws without consuming the draft", async () => {
     const { input, dispatchCommand } = makeSendInput();
-    input.scroll.scrollToEndBeforeOptimistic = async () => {
+    input.scroll.armEndFollowBeforeOptimistic = () => {
       throw new Error("unmounted list");
     };
     expect(await executeChatSendTurn(input)).toBe(false);
@@ -1010,7 +1087,7 @@ describe("queued send draft ownership", () => {
   it("preserves edits made while a direct send is preparing", async () => {
     const { input } = makeSendInput();
     input.refs.promptRef.current = input.composer.prompt;
-    input.scroll.scrollToEndBeforeOptimistic = async () => {
+    input.scroll.armEndFollowBeforeOptimistic = () => {
       input.refs.promptRef.current = "Typed during preparation";
     };
     expect(await executeChatSendTurn(input)).toBe(true);
@@ -1048,7 +1125,7 @@ describe("queued send draft ownership", () => {
         }
       return { sequence: 1 };
     });
-    input.scroll.scrollToEndBeforeOptimistic = async () => {
+    input.scroll.armEndFollowBeforeOptimistic = () => {
       input.refs.promptRef.current = "Next prompt";
     };
     expect(await executeChatSendTurn(input)).toBe(true);
@@ -1065,7 +1142,7 @@ describe("queued send draft ownership", () => {
         trimmedPrompt: "Next prompt",
         images: input.refs.composerImagesRef.current,
       },
-      scroll: { ...input.scroll, scrollToEndBeforeOptimistic: async () => {} },
+      scroll: { ...input.scroll, armEndFollowBeforeOptimistic: () => {} },
     };
     expect(await executeChatSendTurn(next)).toBe(true);
     expect(input.refs.composerImagesRef.current).toEqual([]);
@@ -1091,7 +1168,7 @@ describe("queued send draft ownership", () => {
       const added = { ...sent, id: "new", uploadToken: "new" };
       input.composer.images = [sent, replaced];
       input.refs.composerImagesRef.current = input.composer.images;
-      input.scroll.scrollToEndBeforeOptimistic = async () => {
+      input.scroll.armEndFollowBeforeOptimistic = () => {
         input.refs.promptRef.current = "Edited";
         input.refs.composerImagesRef.current = [sent, renewed, added];
       };
