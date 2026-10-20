@@ -6,15 +6,20 @@ import type {
 import { WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import { useMemo } from "react";
 
-import { useHostedRpcCapability } from "./capabilities";
+import { type HostedRpcCapabilityOptions, useHostedRpcCapability } from "./capabilities";
 import { useHostedWorkspaceState } from "./hostedConnectionCoordinator";
 import { useHostedHubStore } from "./state";
 
 /**
  * A read every role may run, used only to ask what phase the connection is in
- * (its kind), never whether a particular action is allowed.
+ * (its kind), never whether a particular action is allowed. The probe asks for
+ * the snapshot-gated phase, so "establishing" lasts until the session has
+ * accepted its snapshot even though reads are admitted before that.
  */
 const CONNECTION_PHASE_PROBE_METHOD = WS_METHODS.projectsList;
+const CONNECTION_PHASE_PROBE_OPTIONS: HostedRpcCapabilityOptions = Object.freeze({
+  requireSnapshot: true,
+});
 
 const UNNAMED_NODE = "this node";
 
@@ -67,7 +72,11 @@ export function useHostedSwitchTarget(environmentId: EnvironmentId | null): Host
   const selectedEnvironmentId = useHostedHubStore(
     (state) => state.selectedNode?.environmentId ?? null,
   );
-  const capability = useHostedRpcCapability(CONNECTION_PHASE_PROBE_METHOD, environmentId);
+  const capability = useHostedRpcCapability(
+    CONNECTION_PHASE_PROBE_METHOD,
+    environmentId,
+    CONNECTION_PHASE_PROBE_OPTIONS,
+  );
   const queuedEnvironmentIds = useHostedWorkspaceState().demand.queuedEnvironmentIds;
   const queued = hostedSwitchTargetQueued(
     environmentId,

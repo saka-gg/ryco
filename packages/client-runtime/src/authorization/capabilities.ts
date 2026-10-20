@@ -1,5 +1,7 @@
 import type { EnvironmentId } from "@ryco/contracts";
+import { ORCHESTRATION_WS_METHODS } from "@ryco/contracts/orchestration";
 import type { RelayEffectiveRole } from "@ryco/contracts/relay";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPolicy";
 
 import type { HostedEnvironmentSessionRecord } from "./hostedEnvironmentSessions.ts";
@@ -55,6 +57,60 @@ export function hostedSessionAdmits(state: HostedSessionAdmissionState, method: 
     state.sessionStatus === "delivery-unknown" &&
     state.sessionRecoveredAfterUnknown &&
     rpcDeliveryEffectFor(method) === "read"
+  );
+}
+
+/**
+ * Observe-only unary reads a channel answers before its session has accepted
+ * the shell snapshot: project lists and files, local changes, thread history
+ * and diffs, and the node's config and settings. Never derive this from the
+ * delivery effect: its reads also cover requests that refresh derived state or
+ * reach out — issuing a credential, starting a provider, calling a model,
+ * fetching from a remote.
+ */
+const HOSTED_EARLY_READ_METHODS: ReadonlySet<string> = new Set([
+  WS_METHODS.projectsList,
+  WS_METHODS.projectsListEntries,
+  WS_METHODS.projectsSearchEntries,
+  WS_METHODS.projectsReadFile,
+  WS_METHODS.projectsReadIcon,
+  WS_METHODS.vcsReadLocalChanges,
+  WS_METHODS.vcsReadComparison,
+  WS_METHODS.vcsReadLineBlame,
+  ORCHESTRATION_WS_METHODS.getThreadWindow,
+  ORCHESTRATION_WS_METHODS.getThreadHistoryPage,
+  ORCHESTRATION_WS_METHODS.getTurnDiff,
+  ORCHESTRATION_WS_METHODS.getFullThreadDiff,
+  WS_METHODS.serverGetConfig,
+  WS_METHODS.serverGetSettings,
+]);
+
+export interface HostedEarlyReadState {
+  readonly transportStatus: HostedRelayTransportStatus;
+  readonly browserStatus: HostedBrowserStatus;
+  readonly sessionStatus: HostedRycoSessionStatus;
+}
+
+/**
+ * A read on a channel that is up and mode-locked, while its session catches up.
+ *
+ * A transport turns `online` only once its channel's mode is locked — end-to-end
+ * encrypted, or a labeled legacy channel — so nothing admitted here travels on
+ * a channel that is still negotiating. The session is then synchronizing (a new
+ * channel) or replaying (a reconnect reconciling its subscriptions); a stale,
+ * closed, or unconfirmed session admits nothing early, and a ready one needs no
+ * exception. Only the observe-only reads listed above qualify. Mutations never
+ * take this path: they wait for the session to accept its snapshot.
+ */
+export function hostedAdmitsReadBeforeSnapshot(
+  state: HostedEarlyReadState,
+  method: string,
+): boolean {
+  return (
+    HOSTED_EARLY_READ_METHODS.has(method) &&
+    state.transportStatus === "online" &&
+    browserRevalidated(state.browserStatus) &&
+    (state.sessionStatus === "synchronizing" || state.sessionStatus === "replaying")
   );
 }
 
@@ -246,6 +302,10 @@ export function selectHostedSharedCapabilityState(
  * for everything, so a browser that is still synchronizing the selection counts
  * as current for an environment whose own session already established. An
  * environment without a record has no connection yet and is never allowed.
+ *
+ * An observe-only read is answered as the transport admits it: allowed once
+ * the environment's channel is online, before its session has accepted the
+ * snapshot.
  */
 export function resolveHostedEnvironmentRpcCapability(input: {
   readonly hosted: boolean;
@@ -253,19 +313,26 @@ export function resolveHostedEnvironmentRpcCapability(input: {
   readonly shared: HostedSharedCapabilityState;
   readonly record: HostedEnvironmentSessionRecord | null | undefined;
   readonly environmentId?: EnvironmentId | null | undefined;
+  /**
+   * Answer as if reads still waited for the accepted snapshot — for callers
+   * that must not change before it, such as a connection-phase probe.
+   */
+  readonly requireSnapshot?: boolean;
 }): HostedRpcCapability {
   const { hosted, method, shared, record, environmentId } = input;
   if (!hosted) return NOT_HOSTED;
   const accountAuthenticated = shared.accountStatus === "authenticated";
   const directoryReady = shared.directoryStatus === "ready";
+  const readsEarly = input.requireSnapshot !== true;
   if (environmentId == null || environmentId === shared.selectedEnvironmentId) {
+    const early = readsEarly && hostedAdmitsReadBeforeSnapshot(shared, method);
     return evaluate(
       {
         hosted,
         role: shared.effectiveRole,
         fresh: directoryReady && shared.transportStatus === "online",
-        browserCurrent: shared.browserStatus === "current",
-        sessionReady: hostedSessionAdmits(shared, method),
+        browserCurrent: early || shared.browserStatus === "current",
+        sessionReady: early || hostedSessionAdmits(shared, method),
         method,
         phase: {
           accountAuthenticated,
@@ -295,13 +362,23 @@ export function resolveHostedEnvironmentRpcCapability(input: {
       ? ESTABLISHING
       : STALE;
   }
+  const early =
+    readsEarly &&
+    hostedAdmitsReadBeforeSnapshot(
+      {
+        transportStatus: record.transportStatus,
+        browserStatus: shared.browserStatus,
+        sessionStatus: record.sessionStatus,
+      },
+      method,
+    );
   return evaluate(
     {
       hosted,
       role: record.effectiveRole,
       fresh: directoryReady && record.transportStatus === "online",
       browserCurrent: browserRevalidated(shared.browserStatus),
-      sessionReady: hostedSessionAdmits(record, method),
+      sessionReady: early || hostedSessionAdmits(record, method),
       method,
       phase: {
         accountAuthenticated,

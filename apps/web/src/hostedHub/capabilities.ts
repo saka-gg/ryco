@@ -52,6 +52,10 @@ export function readHostedRpcCapability(
   });
 }
 
+export interface HostedRpcCapabilityOptions {
+  readonly requireSnapshot?: boolean;
+}
+
 const subscribeToNothing = () => () => undefined;
 const readNothing = () => undefined;
 
@@ -81,19 +85,34 @@ function useHostedEnvironmentRecord(
  *
  * `environmentId` is required, with the same meaning as for
  * `readHostedRpcCapability`: an id, or `null` for the routed node.
+ *
+ * `requireSnapshot` answers as if reads still waited for the session's
+ * accepted snapshot. Only a caller that must not change before the snapshot
+ * asks for it: a probe of the connection phase, or chrome whose layout would
+ * otherwise shift once for the early reads and again at the snapshot.
  */
 export function useHostedRpcCapability(
   method: string,
   environmentId: EnvironmentId | null,
+  options?: HostedRpcCapabilityOptions,
 ): HostedRpcCapability {
   const shared = useHostedHubStore(
     useShallow((state) => selectHostedSharedCapabilityState(state, environmentId)),
   );
   const record = useHostedEnvironmentRecord(environmentId);
   const hosted = isHostedHubMode();
+  const requireSnapshot = options?.requireSnapshot === true;
   return useMemo(
-    () => resolveHostedEnvironmentRpcCapability({ hosted, method, shared, record, environmentId }),
-    [environmentId, hosted, method, record, shared],
+    () =>
+      resolveHostedEnvironmentRpcCapability({
+        hosted,
+        method,
+        shared,
+        record,
+        environmentId,
+        requireSnapshot,
+      }),
+    [environmentId, hosted, method, record, requireSnapshot, shared],
   );
 }
 

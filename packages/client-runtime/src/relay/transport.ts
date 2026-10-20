@@ -6,7 +6,10 @@ import { hostedRoleAllows, rpcDeliveryEffectFor } from "@ryco/shared/rpcAccessPo
 
 import type { RpcRequestAdmission, WsProtocolLifecycleHandlers } from "@ryco/client-runtime/rpc";
 import { HostedHubApiError } from "../authorization/api.ts";
-import { hostedSessionAdmits } from "../authorization/capabilities.ts";
+import {
+  hostedAdmitsReadBeforeSnapshot,
+  hostedSessionAdmits,
+} from "../authorization/capabilities.ts";
 import {
   getHostedHubApi,
   getHostedRuntimeConfiguration,
@@ -85,7 +88,10 @@ type HostedRequestAuthorizationState = Pick<
  * could not confirm an earlier action, for the user's acknowledgement — and a
  * subscription retries it rather than giving up: the client is rebuilt while
  * its session synchronizes, and a long-lived read stream started then must
- * survive that.
+ * survive that. An observe-only unary read does not wait for the snapshot: it
+ * is admitted while its session catches up, as soon as the channel is online
+ * and mode-locked (`hostedAdmitsReadBeforeSnapshot`); a stale, closed or
+ * delivery-unknown session still holds it.
  */
 export function admitHostedRequestForState(
   state: HostedRequestAuthorizationState,
@@ -107,6 +113,7 @@ export function admitHostedRequestForState(
     ) {
       return "allowed";
     }
+    if (!info.stream && hostedAdmitsReadBeforeSnapshot(state, info.tag)) return "allowed";
     // Current, but holding mutations until the user has continued past an
     // unconfirmed action: waiting will not help, the inline notice will.
     if (live && state.sessionStatus === "delivery-unknown" && state.sessionRecoveredAfterUnknown) {
@@ -116,13 +123,6 @@ export function admitHostedRequestForState(
     return "forbidden";
   }
   return state.transportStatus === "terminal-failure" ? "forbidden" : "awaiting-session";
-}
-
-export function authorizeHostedRequestForState(
-  state: HostedRequestAuthorizationState,
-  info: { readonly tag: string; readonly stream: boolean },
-): boolean {
-  return admitHostedRequestForState(state, info) === "allowed";
 }
 
 function admitHostedRequest(info: {

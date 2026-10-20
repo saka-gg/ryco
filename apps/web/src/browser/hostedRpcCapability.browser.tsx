@@ -3,7 +3,7 @@ import {
   getHostedEnvironmentSessions,
   resetHostedEnvironmentSessionsForTests,
 } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
-import { EnvironmentId, ORCHESTRATION_WS_METHODS } from "@ryco/contracts";
+import { EnvironmentId, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contracts";
 import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -13,6 +13,7 @@ import {
   useHostedRpcCapability,
   type HostedDeliveryNoticeBinding,
   type HostedRpcCapability,
+  type HostedRpcCapabilityOptions,
 } from "../hostedHub/capabilities";
 import { hostedHubStore } from "../hostedHub/state";
 import { useHostedSwitchTarget, type HostedSwitchTarget } from "../hostedHub/switchTarget";
@@ -22,6 +23,7 @@ const ENV_X = EnvironmentId.make("env_xxxxxxxxxxxxxxxxxxxxxx");
 const ENV_Y = EnvironmentId.make("env_yyyyyyyyyyyyyyyyyyyyyy");
 
 const dispatch = ORCHESTRATION_WS_METHODS.dispatchCommand;
+const SNAPSHOT_GATED: HostedRpcCapabilityOptions = { requireSnapshot: true };
 
 function hubNode(
   environmentId: EnvironmentId,
@@ -313,6 +315,41 @@ describe("useHostedSwitchTarget", () => {
         kind: "establishing",
         queued: false,
       });
+    } finally {
+      await unmount();
+    }
+  });
+
+  it("stays establishing until the snapshot, though reads are admitted before it", async () => {
+    // Both channels are online and their sessions are still synchronizing.
+    connectRecord(ENV_X, { ready: false });
+    await patchHosted({
+      transportStatus: "online",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+      browserStatus: "synchronizing",
+    });
+    const { probe, unmount } = await mountProbe(() => ({
+      selected: {
+        target: useHostedSwitchTarget(null),
+        read: useHostedRpcCapability(WS_METHODS.projectsList, null),
+        gatedRead: useHostedRpcCapability(WS_METHODS.projectsList, null, SNAPSHOT_GATED),
+        dispatch: useHostedRpcCapability(dispatch, null),
+      },
+      other: {
+        target: useHostedSwitchTarget(ENV_X),
+        read: useHostedRpcCapability(WS_METHODS.projectsList, ENV_X),
+        gatedRead: useHostedRpcCapability(WS_METHODS.projectsList, ENV_X, SNAPSHOT_GATED),
+        dispatch: useHostedRpcCapability(dispatch, ENV_X),
+      },
+    }));
+    try {
+      for (const environment of [probe.latest().selected, probe.latest().other]) {
+        expect(environment.target.kind).toBe("establishing");
+        expect(environment.read).toMatchObject({ allowed: true, kind: "ready" });
+        expect(environment.gatedRead).toMatchObject({ allowed: false, kind: "establishing" });
+        expect(environment.dispatch).toMatchObject({ allowed: false, kind: "establishing" });
+      }
     } finally {
       await unmount();
     }
