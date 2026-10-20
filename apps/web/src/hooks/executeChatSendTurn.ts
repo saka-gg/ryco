@@ -147,7 +147,15 @@ export interface SendTurnProjectContext {
 }
 
 export interface SendTurnScrollDeps {
-  scrollToEndBeforeOptimistic: () => Promise<void>;
+  /**
+   * Prepares the view for the optimistic message, synchronously: live follow,
+   * the at-end state, and anything that has to see the view before the message
+   * commits. It must not wait for the list: the message and the composer clear
+   * never wait for scrolling, and `scrollToEndAfterOptimistic` brings the end
+   * into view afterwards.
+   */
+  armEndFollowBeforeOptimistic: () => void;
+  /** Starts following the new end once the optimistic message is in; never awaited. */
   scrollToEndAfterOptimistic: () => void;
 }
 
@@ -565,8 +573,9 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
     rejectRetiredProjectMemory(composer);
     const turnAttachments = await buildOutgoingTurnAttachments(imagesSnapshot);
 
-    // Scroll to end before optimistic message for auto-pin.
-    if (showsSendThread()) await scroll.scrollToEndBeforeOptimistic();
+    // Arm the end follow; the message and the composer clear do not wait for
+    // the list to scroll.
+    if (showsSendThread()) scroll.armEndFollowBeforeOptimistic();
 
     const optimisticAttachments = imagesSnapshot.map(cloneComposerImageForRetry).map((image) => ({
       type: image.type,

@@ -181,7 +181,7 @@ export async function sendQueuedMessageInBackground(
     worktree,
     settings: buildMode.settings,
     project: { projectId: project.id, projectCwd: project.cwd },
-    scroll: { scrollToEndBeforeOptimistic: async () => {}, scrollToEndAfterOptimistic: noop },
+    scroll: { armEndFollowBeforeOptimistic: noop, scrollToEndAfterOptimistic: noop },
     draft: {
       composerDraftTarget: ref,
       environmentId: ref.environmentId,
