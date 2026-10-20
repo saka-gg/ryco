@@ -25,6 +25,7 @@ import {
   type RecordedRequest,
   type SwitchRun,
   SWITCH_PROBE_SCRIPT,
+  SWITCH_ROW_REPLACED_ERROR,
 } from "./hostedProbe.ts";
 
 function request(
@@ -677,10 +678,18 @@ describe("hosted probe workspace helpers", () => {
 });
 
 describe("hosted probe page script", () => {
-  it("presses a row in one task and releases and clicks it in a later one", async () => {
-    const dispatched: string[] = [];
-    const row = {
+  class FakeEvent {
+    readonly type: string;
+    constructor(type: string) {
+      this.type = type;
+    }
+  }
+
+  /** A row stub that records what it receives; `onEvent` sees each event first. */
+  function stubRow(dispatched: string[], onEvent: (type: string) => void = () => undefined) {
+    return {
       dispatchEvent: (event: { readonly type: string }) => {
+        onEvent(event.type);
         dispatched.push(event.type);
         return true;
       },
@@ -688,20 +697,19 @@ describe("hosted probe page script", () => {
         dispatched.push("click");
       },
     };
-    class FakeEvent {
-      readonly type: string;
-      constructor(type: string) {
-        this.type = type;
-      }
-    }
+  }
+
+  /** The probe is page source: run it as the page would, against stubs. */
+  function installSwitchProbe(currentRow: () => unknown) {
     const window: {
       __rycoHostedProbe?: { switchTo(rowKey: string, timeoutMs: number): Promise<unknown> };
     } = {};
     const document = {
-      querySelector: (selector: string) => (selector.includes("data-inbox-row-key") ? row : null),
+      querySelector: (selector: string) =>
+        selector.includes("data-inbox-row-key") ? currentRow() : null,
       querySelectorAll: () => [],
     };
-    // The probe is page source: run it as the page would, against stubs.
+    // requestAnimationFrame never ticks: a run that waits for frames stays pending.
     const install = new Function(
       "window",
       "document",
@@ -716,8 +724,15 @@ describe("hosted probe page script", () => {
     install(window, document, FakeEvent, FakeEvent, undefined, () => 0, performance, {
       pathname: "/",
     });
+    return window.__rycoHostedProbe!;
+  }
 
-    void window.__rycoHostedProbe!.switchTo("env:thread", 50);
+  it("presses a row in one task and releases and clicks it in a later one", async () => {
+    const dispatched: string[] = [];
+    const row = stubRow(dispatched);
+    const probe = installSwitchProbe(() => row);
+
+    void probe.switchTo("env:thread", 50);
     assert.deepStrictEqual(dispatched, ["pointerdown", "mousedown"]);
     // Microtasks alone never reach the click: it waits for a later task.
     for (let turn = 0; turn < 1_000; turn += 1) await Promise.resolve();
@@ -730,5 +745,29 @@ describe("hosted probe page script", () => {
       "mouseup",
       "click",
     ]);
+  });
+
+  it("reports a row the press replaced instead of clicking it or waiting for the timeout", async () => {
+    const dispatched: string[] = [];
+    const replacementDispatched: string[] = [];
+    const replacement = stubRow(replacementDispatched);
+    let current: unknown = null;
+    // The press re-renders the inbox: the pressed row is replaced by a new element.
+    const row = stubRow(dispatched, (type) => {
+      if (type === "mousedown") current = replacement;
+    });
+    current = row;
+    const probe = installSwitchProbe(() => current);
+
+    const result = probe.switchTo("env:thread", 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const outcome = await Promise.race([
+      result,
+      new Promise((resolve) => setTimeout(() => resolve("pending"), 50)),
+    ]);
+    assert.deepStrictEqual(outcome, { error: SWITCH_ROW_REPLACED_ERROR });
+    // Released, never clicked; the replacement received nothing.
+    assert.deepStrictEqual(dispatched, ["pointerdown", "mousedown", "pointerup", "mouseup"]);
+    assert.deepStrictEqual(replacementDispatched, []);
   });
 });

@@ -31,6 +31,42 @@ export async function parkPointer(x: number, y: number): Promise<void> {
   await cdpSession().send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
 }
 
+/** Moves the input pointer to CDP coordinates and resolves with where the page saw it. */
+async function probeClientPosition(x: number, y: number): Promise<{ x: number; y: number }> {
+  const position = new Promise<{ x: number; y: number }>((resolve) => {
+    const onMove = (event: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove, true);
+      resolve({ x: event.clientX, y: event.clientY });
+    };
+    window.addEventListener("pointermove", onMove, true);
+  });
+  await cdpSession().send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, buttons: 0 });
+  return position;
+}
+
+/**
+ * Maps client coordinates of the test page to CDP input coordinates. The
+ * browser runner scales the emulated viewport, so the two do not coincide;
+ * probing two points recovers the affine mapping instead of assuming one.
+ */
+export async function calibratePointerInput(): Promise<
+  (clientX: number, clientY: number) => { x: number; y: number }
+> {
+  const first = await probeClientPosition(60, 60);
+  const second = await probeClientPosition(240, 240);
+  const scaleX = (second.x - first.x) / 180;
+  const scaleY = (second.y - first.y) / 180;
+  if (!(scaleX > 0) || !(scaleY > 0)) {
+    throw new Error(`Pointer calibration failed: scale ${scaleX} × ${scaleY}.`);
+  }
+  const offsetX = first.x - 60 * scaleX;
+  const offsetY = first.y - 60 * scaleY;
+  return (clientX, clientY) => ({
+    x: (clientX - offsetX) / scaleX,
+    y: (clientY - offsetY) / scaleY,
+  });
+}
+
 /**
  * Defensive per-test reset: reverts any touch emulation left by an earlier
  * test or file and waits until `(pointer: coarse)` no longer matches. Note
