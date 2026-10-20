@@ -2461,6 +2461,12 @@ const ThreadSessionSetCommand = Schema.Struct({
   expectedRuntime: Schema.optional(ThreadSessionSetExpectedRuntime),
   /** Internal hint: how the turn this session-set releases ended, when the caller knows. */
   turnOutcome: Schema.optional(OrchestrationTurnOutcome),
+  /**
+   * Internal: whether an `error` session wakes a snoozed thread (absent: it does). False for
+   * a release the server decides on its own (startup reconciliation, a context handoff
+   * rollback), which is not new thread activity.
+   */
+  wakesSnoozed: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

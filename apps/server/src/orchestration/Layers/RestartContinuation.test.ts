@@ -46,10 +46,7 @@ import {
   restartContinuationIds,
   restartContinuationPrompt,
 } from "../restartContinuationPolicy.ts";
-import {
-  ORPHANED_PROVIDER_SESSION_ERROR,
-  ORPHANED_TURN_TERMINAL_STATE,
-} from "../restartReconciliation.ts";
+import { ORPHANED_TURN_TERMINAL_STATE, orphanedSessionRelease } from "../restartReconciliation.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -270,27 +267,14 @@ async function createSystem(options: SystemOptions = {}) {
   async function reconcile(threadId: ThreadId) {
     const model = await run(snapshots.getCommandReadModel());
     const thread = model.threads.find((entry) => entry.id === threadId)!;
-    const session = thread.session!;
-    const at = new Date().toISOString();
-    await dispatch({
-      type: "thread.session.set",
-      commandId: CommandId.make(`server:startup-reconciliation:${threadId}`),
-      threadId,
-      session: {
-        ...session,
-        status: "error",
-        activeTurnId: null,
-        lastError: ORPHANED_PROVIDER_SESSION_ERROR,
-        updatedAt: at,
-      },
-      turnOutcome: {
-        ...(session.activeTurnId !== null ? { turnId: session.activeTurnId } : {}),
-        state: ORPHANED_TURN_TERMINAL_STATE,
-        reason: "startup-orphaned-session",
-        completedAt: at,
-      },
-      createdAt: at,
-    });
+    await dispatch(
+      orphanedSessionRelease({
+        thread,
+        session: thread.session!,
+        commandId: CommandId.make(`server:startup-reconciliation:${threadId}`),
+        reconciledAt: new Date().toISOString(),
+      }),
+    );
   }
 
   async function capture(liveThreadIds: ReadonlyArray<ThreadId> = []) {
@@ -536,7 +520,7 @@ describe("RestartContinuation", () => {
     ).toBe(true);
   });
 
-  it("skips silently when the setting is turned off before dispatch", async () => {
+  it("explains the interruption when the setting is turned off before dispatch", async () => {
     const system = await createSystem();
     const seeded = await system.seedThread({ id: "disabled" });
     await system.startup([seeded.threadId]);
@@ -547,7 +531,80 @@ describe("RestartContinuation", () => {
       reason: "disabled",
     });
     expect(system.turnStarts()).toEqual([]);
-    expect(await system.activities(seeded.threadId, RESTART_CONTINUATION_SKIPPED_KIND)).toEqual([]);
+    expect(
+      (await system.activities(seeded.threadId, RESTART_CONTINUATION_SKIPPED_KIND)).map(
+        (row) => row.summary,
+      ),
+    ).toEqual(["Interrupted by a server restart. Send a message to continue."]);
+  });
+
+  it("with continuation off, explains each interrupted thread once across boots", async () => {
+    const system = await createSystem();
+    system.state.enabled = false;
+    const first = await system.seedThread({ id: "off-first" });
+    const second = await system.seedThread({ id: "off-second", completedMidTurn: true });
+    const stopped = await system.seedThread({ id: "off-stopped" });
+    // The user's Stop reached the projection before the process died.
+    await system.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("off-user-stop"),
+      threadId: stopped.threadId,
+      turnId: stopped.turnId,
+      createdAt: new Date().toISOString(),
+    });
+    const settled = await system.seedThread({ id: "off-settled", settled: true });
+    await system.dispatch(
+      backgroundTask({
+        threadId: settled.threadId,
+        runtimeSessionId: settled.runtimeSessionId,
+        taskId: "watch",
+        title: "Watch the build",
+        createdAt: system.ago(1),
+      }),
+    );
+    await system.run(
+      system.repository.recordShutdownHints({
+        liveSessionThreadIds: [settled.threadId],
+        liveBackgroundThreadIds: [settled.threadId],
+        recordedAt: system.ago(0.5),
+      }),
+    );
+    const interrupted = [first.threadId, second.threadId, stopped.threadId];
+
+    const captured = await system.startup(interrupted);
+    expect(captured.map((row) => [row.threadId, row.kind, row.reason])).toEqual(
+      expect.arrayContaining([
+        [first.threadId, "in-flight", "disabled"],
+        [second.threadId, "in-flight", "disabled"],
+        [stopped.threadId, "in-flight", "user-interrupted"],
+        [settled.threadId, "background-only", "disabled"],
+      ]),
+    );
+    // A second boot finds no orphan; re-publishing an earlier capture dedupes on its ids.
+    await system.run(system.restart.publishCaptureEffects(await system.capture()));
+    await system.run(system.restart.publishCaptureEffects(captured));
+    await system.run(system.restart.dispatchPending());
+
+    const notices = async (threadId: ThreadId) =>
+      (await system.activities(threadId, RESTART_CONTINUATION_SKIPPED_KIND)).map((row) => ({
+        summary: row.summary,
+        payload: JSON.parse(row.payload),
+      }));
+    for (const seeded of [first, second]) {
+      expect(await notices(seeded.threadId)).toEqual([
+        {
+          summary: "Interrupted by a server restart. Send a message to continue.",
+          payload: { schemaVersion: 1, reason: "disabled" },
+        },
+      ]);
+    }
+    expect(await notices(stopped.threadId)).toEqual([]);
+    // The settled thread gets the stopped-work note, not an interruption notice.
+    expect(await notices(settled.threadId)).toEqual([]);
+    expect(
+      await system.activities(settled.threadId, RESTART_BACKGROUND_WORK_STOPPED_KIND),
+    ).toHaveLength(1);
+    expect(system.turnStarts()).toEqual([]);
   });
 
   it("expires work last observed more than 30 minutes ago, with a notice", async () => {

@@ -308,12 +308,14 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
     readonly createdAt: string;
+    readonly wakesSnoozed?: boolean;
   }) =>
     orchestrationEngine.dispatch({
       type: "thread.session.set",
       commandId: serverCommandId("context-handoff-session"),
       threadId: input.threadId,
       session: input.session,
+      ...(input.wakesSnoozed === undefined ? {} : { wakesSnoozed: input.wakesSnoozed }),
       createdAt: input.createdAt,
     });
 
@@ -484,6 +486,8 @@ export const makeContextHandoffCoordinator = Effect.gen(function* () {
         createdAt: nowIso(),
       }),
       createdAt: nowIso(),
+      // Putting the source back is not new thread activity, even when it failed.
+      wakesSnoozed: false,
     }).pipe(Effect.catch(() => Effect.void));
   });
 
