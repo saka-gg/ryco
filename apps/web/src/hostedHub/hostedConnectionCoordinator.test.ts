@@ -1,29 +1,45 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import {
+  UNIFIED_WORKSPACE_MAX_CONNECTIONS,
   workspaceMetadataPayloadBytes,
   type WorkspaceMetadataCache,
+  type WorkspaceMetadataSnapshot,
 } from "@ryco/client-runtime/state/workspace";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  canAdoptHostedEnvironmentSession,
+  isHostedEnvironmentConnectBlocked,
   isHostedEnvironmentSessionLive,
+  isJoinableHostedEnvironmentSession,
   resetHostedEnvironmentSessionsForTests,
   type HostedBrowserStatus,
+  type HostedEnvironmentSessions,
   type HostedHubNode,
-  type HostedHubState,
 } from "@ryco/client-runtime/authorization";
 
+import { useMessageQueueStore, type WebQueuedMessage } from "../messageQueueStore";
+import { useStore } from "../store";
+import { workspaceMetadataToCachedShellSnapshot } from "../workspaceMetadataProjection";
 import {
   MAX_HOSTED_WEB_CONNECTIONS,
+  canPreconnectHostedEnvironment,
   createHostedConnectionCoordinator,
   hostedDemandUnblocked,
+  isHostedEnvironmentDemanded,
   readHostedDemandReadiness,
   readHostedNodeMutationLease,
   readHostedWorkspaceState,
+  setHostedWorkspaceBackgrounded,
   startHostedWorkspaceCoordinator,
 } from "./hostedConnectionCoordinator";
-import { createHostedWebScopeStore, hostedWebConnectionScopes } from "./hostedConnectionScopes";
-import { HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS } from "./runtime";
+import {
+  HOSTED_WEB_INTENT_SCOPE_TTL_MS,
+  createHostedWebScopeStore,
+  hostedWebConnectionScopes,
+  retainHostedIntentScope,
+  startQueuedSendScopeRetention,
+} from "./hostedConnectionScopes";
 import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
 
 const environment = (index: number) => EnvironmentId.make(`env_${String(index).padStart(22, "0")}`);
@@ -34,6 +50,7 @@ function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
   const connected = new Set<EnvironmentId>();
   const connects: Array<{ environmentId: EnvironmentId }> = [];
   const releases: EnvironmentId[] = [];
+  let mostConnected = 0;
   const scopes = createHostedWebScopeStore();
   const coordinator = createHostedConnectionCoordinator({
     scopes,
@@ -42,6 +59,7 @@ function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
     connect: async (environmentId) => {
       connects.push({ environmentId });
       connected.add(environmentId);
+      mostConnected = Math.max(mostConnected, connected.size);
       return "connected";
     },
     release: async (environmentId) => {
@@ -57,6 +75,7 @@ function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
     connected,
     connects,
     releases,
+    mostConnected: () => mostConnected,
     tick: () => {
       now += 1;
     },
@@ -64,7 +83,12 @@ function harness(foregroundEnvironmentId?: () => EnvironmentId | null) {
 }
 
 describe("hosted Web connection coordinator", () => {
-  it("holds the named one-connection ceiling under a five-node fixture", async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("holds the named ceiling of three connections under a five-node fixture", async () => {
+    vi.useFakeTimers();
     const test = harness();
     const releases = Array.from({ length: 5 }, (_, index) => {
       test.tick();
@@ -74,15 +98,21 @@ describe("hosted Web connection coordinator", () => {
       });
     });
 
-    await test.coordinator.reconcile();
+    await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(MAX_HOSTED_WEB_CONNECTIONS).toBe(1);
-    expect(test.connected.size).toBe(1);
-    expect(test.coordinator.snapshot().activeConnectionCount).toBe(1);
-    expect(test.coordinator.snapshot().queuedEnvironmentIds).toHaveLength(4);
-    expect(test.connects).toHaveLength(1);
+    expect(MAX_HOSTED_WEB_CONNECTIONS).toBe(3);
+    expect(MAX_HOSTED_WEB_CONNECTIONS).toBeLessThanOrEqual(UNIFIED_WORKSPACE_MAX_CONNECTIONS);
+    expect(test.mostConnected()).toBe(3);
+    expect(test.connected.size).toBe(3);
+    expect(test.coordinator.snapshot().activeConnectionCount).toBe(3);
+    expect(test.coordinator.snapshot().queuedEnvironmentIds).toHaveLength(2);
+    expect(test.connects).toHaveLength(3);
     releases.forEach((release) => release());
     test.coordinator.dispose();
+  });
+
+  it("refuses a connection ceiling above the unified one", () => {
+    expect(() => harnessWithMax(UNIFIED_WORKSPACE_MAX_CONNECTIONS + 1)).toThrow(RangeError);
   });
 
   it("keeps LRU state on route release, releases it in background, and restores retained demand once", async () => {
@@ -122,12 +152,12 @@ describe("hosted Web connection coordinator", () => {
       threadId: thread(2),
     });
     await test.coordinator.reconcile();
-    expect(test.connected).toEqual(new Set([environment(1)]));
-    expect(test.coordinator.snapshot().queuedEnvironmentIds).toEqual([environment(2)]);
+    expect(test.connected).toEqual(new Set([environment(1), environment(2)]));
 
     releaseRoute();
     await test.coordinator.reconcile();
-    expect(test.connected).toEqual(new Set([environment(1)]));
+    // The route's environment stays warm, and the retained thread is untouched.
+    expect(test.connected).toEqual(new Set([environment(1), environment(2)]));
     expect(test.releases).toEqual([]);
     releaseRetained();
     test.coordinator.dispose();
@@ -144,34 +174,38 @@ describe("hosted Web connection coordinator", () => {
     expect(scopes.list()).toEqual([]);
   });
 
-  it("switches to the routed device while the outgoing shell still retains its scopes", async () => {
+  it("keeps A warm through a switch to B and back: no release, no connect on the switch back", async () => {
     let foreground = environment(1);
     const test = harness(() => foreground);
     const releaseA = test.scopes.retain(environment(1), {
       type: "thread-detail",
       threadId: thread(1),
     });
-    const releaseProvider = test.scopes.retain(environment(1), { type: "provider-status" });
     await test.coordinator.reconcile();
 
+    // The route moves to B; A's thread scope goes with the outgoing view.
     foreground = environment(2);
+    releaseA();
     const releaseB = test.scopes.retain(environment(2), {
       type: "thread-detail",
       threadId: thread(2),
     });
     await test.coordinator.reconcile();
+    expect(test.connected).toEqual(new Set([environment(1), environment(2)]));
 
-    expect(test.connected).toEqual(new Set([environment(2)]));
-    expect(test.releases).toEqual([environment(1)]);
-    expect(test.coordinator.snapshot().queuedEnvironmentIds).toEqual([]);
-    // Scope ownership is preserved for the mounted views. Switching Back can
-    // reactivate A without waiting for a React cleanup or the renewal timer.
-    expect(test.scopes.list()).toHaveLength(3);
     foreground = environment(1);
+    const releaseAgain = test.scopes.retain(environment(1), {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
     await test.coordinator.reconcile();
-    expect(test.connected).toEqual(new Set([environment(1)]));
-    releaseA();
-    releaseProvider();
+
+    expect(test.releases).toEqual([]);
+    expect(test.connects.map((entry) => entry.environmentId)).toEqual([
+      environment(1),
+      environment(2),
+    ]);
+    releaseAgain();
     releaseB();
     test.coordinator.dispose();
   });
@@ -242,7 +276,7 @@ describe("hosted Web connection coordinator", () => {
         },
       ],
     });
-    const stop = startHostedWorkspaceCoordinator({
+    const stop = startCoordinator({
       cache,
       hubOrigin: "https://hub.example.test",
       setInterval: () => 1,
@@ -261,6 +295,18 @@ describe("hosted Web connection coordinator", () => {
     hostedHubController.resetForTests();
   });
 });
+
+function harnessWithMax(maxConnections: number) {
+  return createHostedConnectionCoordinator({
+    scopes: createHostedWebScopeStore(),
+    maxConnections,
+    now: () => 1,
+    connect: async () => "connected",
+    release: async () => undefined,
+    setInterval: () => 1,
+    clearInterval: () => undefined,
+  });
+}
 
 function hubNode(environmentId: EnvironmentId, online: boolean): HostedHubNode {
   return {
@@ -281,6 +327,14 @@ function hubNode(environmentId: EnvironmentId, online: boolean): HostedHubNode {
   };
 }
 
+function retainedNode(index: number, online = true): HostedHubNode {
+  return {
+    ...hubNode(environment(index), online),
+    id: `node_${String(index).padStart(22, "0")}`,
+    label: `Node ${index}`,
+  };
+}
+
 const emptyCache: WorkspaceMetadataCache = {
   load: async () => null,
   list: async () => [],
@@ -295,6 +349,7 @@ function signedInDirectory(
 ) {
   hostedHubController.resetForTests();
   hostedWebConnectionScopes.reset();
+  resetHostedEnvironmentSessionsForTests();
   hostedHubStore.setState({
     accountStatus: "authenticated",
     account: { id: "account-a", displayName: "Ada", role: "owner", createdAt: 1, disabledAt: null },
@@ -304,15 +359,76 @@ function signedInDirectory(
   });
 }
 
+/** Workspace coordinators a test started; each is stopped after the test, failed or not. */
+const runningCoordinators = new Set<() => void>();
+
+function startCoordinator(
+  input: Parameters<typeof startHostedWorkspaceCoordinator>[0],
+): () => void {
+  const stop = startHostedWorkspaceCoordinator(input);
+  const tracked = () => {
+    runningCoordinators.delete(tracked);
+    stop();
+  };
+  runningCoordinators.add(tracked);
+  return tracked;
+}
+
+afterEach(() => {
+  for (const stop of Array.from(runningCoordinators)) stop();
+});
+
 /** Let the coordinator finish the connect attempt the retained scope queued. */
 async function settleCoordinator(): Promise<void> {
   await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
 }
 
+/**
+ * The lifecycle owner's acquire, as the controller decides it over the real
+ * session registry: adopt a session that is live, join one on its way, refuse
+ * one a terminal failure blocks, and otherwise start a fresh generation. The
+ * directory entry is refreshed first, as a directory load does.
+ */
+function modelAcquire(sessions: HostedEnvironmentSessions) {
+  const acquired: EnvironmentId[] = [];
+  const spy = vi
+    .spyOn(hostedHubController, "acquireEnvironment")
+    .mockImplementation(async (nodeId) => {
+      const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId)!;
+      const existing = sessions.read(node.environmentId);
+      let generation: number;
+      if (existing === undefined) {
+        generation = sessions.ensureRecord(node).generation;
+      } else {
+        const record = sessions.ensureRecord(node, { access: false });
+        if (canAdoptHostedEnvironmentSession(record)) return "adopted";
+        if (isJoinableHostedEnvironmentSession(record)) return "joined";
+        if (isHostedEnvironmentConnectBlocked(record)) return "refused";
+        generation = sessions.renew(node.environmentId)!.generation;
+      }
+      sessions.markConnectRequested(node.environmentId, generation);
+      acquired.push(node.environmentId);
+      return "connecting";
+    });
+  const released: EnvironmentId[] = [];
+  vi.spyOn(hostedHubController, "releaseEnvironment").mockImplementation(async (environmentId) => {
+    released.push(environmentId);
+    sessions.release(environmentId);
+  });
+  return { acquired, released, spy };
+}
+
+/** The environment's own relay attempt came online and accepted its shell snapshot. */
+function establishRecord(sessions: HostedEnvironmentSessions, environmentId: EnvironmentId): void {
+  const { generation } = sessions.read(environmentId)!;
+  sessions.transportStatus(environmentId, generation, "online");
+  sessions.markSessionReady(environmentId, generation);
+}
+
 function startWithoutRenewalTick() {
   // The renewal tick is what used to rescue refused demand ~25s later; with it
   // stubbed out, anything that connects did so because the state changed.
-  return startHostedWorkspaceCoordinator({
+  return startCoordinator({
     cache: emptyCache,
     hubOrigin: "https://hub.example.test",
     setInterval: () => 1,
@@ -325,6 +441,7 @@ describe("hosted Web demand follows directory state", () => {
     vi.restoreAllMocks();
     hostedWebConnectionScopes.reset();
     hostedHubController.resetForTests();
+    resetHostedEnvironmentSessionsForTests();
   });
 
   it("only unblocks demand on a directory or browser edge for a demanded node", () => {
@@ -383,12 +500,7 @@ describe("hosted Web demand follows directory state", () => {
   it("connects held demand as soon as the directory sees its node come online", async () => {
     const env = environment(5);
     signedInDirectory([hubNode(env, false)]);
-    const selectNode = vi
-      .spyOn(hostedHubController, "selectNode")
-      .mockImplementation(async (nodeId) => {
-        const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId);
-        hostedHubStore.setState({ selectedNode: node ?? null });
-      });
+    const { acquired } = modelAcquire(getHostedEnvironmentSessions());
     const releaseWatch = vi.fn();
     const watch = vi
       .spyOn(hostedHubController, "watchDirectoryPresence")
@@ -399,15 +511,15 @@ describe("hosted Web demand follows directory state", () => {
       threadId: thread(5),
     });
 
-    // Demand for an offline node is refused, and the directory is asked to
-    // watch presence at its faster cadence meanwhile.
+    // Demand for an offline node holds no lease, and the directory is asked
+    // to watch presence at its faster cadence meanwhile.
     await settleCoordinator();
     expect(watch).toHaveBeenCalledOnce();
-    expect(selectNode).not.toHaveBeenCalled();
+    expect(acquired).toEqual([]);
 
     hostedHubStore.setState({ nodes: [hubNode(env, true)] });
 
-    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith("node_bbbbbbbbbbbbbbbbbbbbbb"));
+    await vi.waitFor(() => expect(acquired).toEqual([env]));
     expect(releaseWatch).toHaveBeenCalledOnce();
     releaseScope();
     stop();
@@ -416,11 +528,18 @@ describe("hosted Web demand follows directory state", () => {
   it("connects held demand as soon as a stale browser becomes current again", async () => {
     const env = environment(6);
     signedInDirectory([hubNode(env, true)], "stale");
-    const selectNode = vi
-      .spyOn(hostedHubController, "selectNode")
+    const sessions = getHostedEnvironmentSessions();
+    const acquire = vi
+      .spyOn(hostedHubController, "acquireEnvironment")
       .mockImplementation(async (nodeId) => {
-        const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId);
-        hostedHubStore.setState({ selectedNode: node ?? null });
+        // A transient failure while the browser revalidates, which only a
+        // planned reconcile retries.
+        if (hostedHubStore.getState().browserStatus !== "current") {
+          throw new Error("Hosted Web directory is not current.");
+        }
+        const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId)!;
+        sessions.markConnectRequested(node.environmentId, sessions.ensureRecord(node).generation);
+        return "connecting";
       });
     const stop = startWithoutRenewalTick();
     const releaseScope = hostedWebConnectionScopes.retain(env, {
@@ -428,11 +547,12 @@ describe("hosted Web demand follows directory state", () => {
       threadId: thread(6),
     });
     await settleCoordinator();
-    expect(selectNode).not.toHaveBeenCalled();
+    expect(sessions.read(env)).toBeUndefined();
 
     hostedHubStore.setState({ browserStatus: "current" });
 
-    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(sessions.read(env)?.connectRequested).toBe(true));
+    expect(acquire.mock.calls.length).toBeGreaterThanOrEqual(2);
     releaseScope();
     stop();
   });
@@ -440,8 +560,8 @@ describe("hosted Web demand follows directory state", () => {
   it.each([
     [
       "an E2EE-fatal handshake close",
-      (generation: number) =>
-        hostedHubController.failure(generation, {
+      (sessions: HostedEnvironmentSessions, environmentId: EnvironmentId) =>
+        sessions.failure(environmentId, sessions.read(environmentId)!.generation, {
           kind: "protocol",
           retryable: false,
           closeReason: "channel_rejected",
@@ -449,82 +569,75 @@ describe("hosted Web demand follows directory state", () => {
     ],
     [
       "a revoked grant",
-      (generation: number) =>
-        hostedHubController.failure(generation, { kind: "revoked", retryable: false }),
+      (sessions: HostedEnvironmentSessions, environmentId: EnvironmentId) =>
+        sessions.failure(environmentId, sessions.read(environmentId)!.generation, {
+          kind: "revoked",
+          retryable: false,
+        }),
     ],
     [
-      // The session-sync deadline hands a `synchronizing` browser back the same
-      // way: terminal transport and `current` browser in one patch.
       "the session-sync deadline",
-      () =>
-        hostedHubStore.setState({ transportStatus: "terminal-failure", browserStatus: "current" }),
+      (sessions: HostedEnvironmentSessions, environmentId: EnvironmentId) =>
+        sessions.reportShellSnapshotFailure(
+          environmentId,
+          sessions.read(environmentId)!.generation,
+        ),
     ],
-  ])("never hot-retries a relay channel after %s hands the browser back", async (_label, fail) => {
+  ])("never opens a fresh relay attempt after %s", async (_label, fail) => {
     const env = environment(8);
-    const node = hubNode(env, true);
-    signedInDirectory([node], "synchronizing");
-    hostedHubStore.setState({
-      selectedNode: node,
-      selectionStatus: "online",
-      transportStatus: "connecting",
-      generation: 3,
-    });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
-    const retrySelectedNode = vi
-      .spyOn(hostedHubController, "retrySelectedNode")
-      .mockResolvedValue();
+    signedInDirectory([hubNode(env, true)]);
+    const sessions = getHostedEnvironmentSessions();
+    const { acquired } = modelAcquire(sessions);
     const stop = startWithoutRenewalTick();
     const releaseScope = hostedWebConnectionScopes.retain(env, {
       type: "thread-detail",
       threadId: thread(8),
     });
+    await vi.waitFor(() => expect(acquired).toEqual([env]));
+    const generation = sessions.read(env)!.generation;
+
+    fail(sessions, env);
+    expect(sessions.read(env)?.transportStatus).toBe("terminal-failure");
+    hostedHubStore.setState({ browserStatus: "current" });
+    await settleCoordinator();
     await settleCoordinator();
 
-    fail(3);
-    expect(hostedHubStore.getState()).toMatchObject({
-      transportStatus: "terminal-failure",
-      browserStatus: "current",
-    });
-    await settleCoordinator();
-    await settleCoordinator();
-
-    // The browser turning `current` here is the failure itself, not a new
-    // reason the node could be served; only the renewal tick may retry it.
-    expect(retrySelectedNode).not.toHaveBeenCalled();
-    expect(selectNode).not.toHaveBeenCalled();
+    // The failed record frees its slot, and the re-plan that follows is
+    // refused: the failure blocks reconnecting until its directory entry
+    // changes or the user retries.
+    expect(acquired).toEqual([env]);
+    expect(sessions.read(env)?.generation).toBe(generation);
     releaseScope();
     stop();
   });
 
   it("still reconnects a terminally failed node once the directory sees it come back", async () => {
     const env = environment(9);
-    signedInDirectory([hubNode(env, false)]);
-    hostedHubStore.setState({
-      selectedNode: hubNode(env, false),
-      selectionStatus: "offline",
-      transportStatus: "terminal-failure",
-      generation: 3,
-    });
+    signedInDirectory([hubNode(env, true)]);
+    const sessions = getHostedEnvironmentSessions();
+    const { acquired } = modelAcquire(sessions);
     vi.spyOn(hostedHubController, "watchDirectoryPresence").mockReturnValue(() => undefined);
-    const retrySelectedNode = vi
-      .spyOn(hostedHubController, "retrySelectedNode")
-      .mockImplementation(async () => {
-        // A retry opens a fresh relay attempt for the same selection.
-        hostedHubStore.setState({ transportStatus: "connecting" });
-      });
     const stop = startWithoutRenewalTick();
     const releaseScope = hostedWebConnectionScopes.retain(env, {
       type: "thread-detail",
       threadId: thread(9),
     });
+    await vi.waitFor(() => expect(acquired).toEqual([env]));
+    sessions.failure(env, sessions.read(env)!.generation, { kind: "offline", retryable: false });
+    // The lifecycle owner refreshes each record from the directory it loads.
+    const loadDirectory = (online: boolean) => {
+      hostedHubStore.setState({ nodes: [hubNode(env, online)] });
+      sessions.ensureRecord(hubNode(env, online), { access: false });
+    };
+    loadDirectory(false);
     await settleCoordinator();
-    expect(retrySelectedNode).not.toHaveBeenCalled();
+    expect(acquired).toEqual([env]);
 
     // A presence edge is a new signal from the directory, not the failure
     // echoing back, so it re-plans at once.
-    hostedHubStore.setState({ nodes: [hubNode(env, true)] });
+    loadDirectory(true);
 
-    await vi.waitFor(() => expect(retrySelectedNode).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(acquired).toEqual([env, env]));
     releaseScope();
     stop();
   });
@@ -547,11 +660,12 @@ describe("hosted Web demand follows directory state", () => {
   });
 });
 
-describe("hosted Web single-session machine catalog", () => {
+describe("hosted Web machine catalog", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     hostedWebConnectionScopes.reset();
     hostedHubController.resetForTests();
+    resetHostedEnvironmentSessionsForTests();
   });
 
   const ownerNode = (environmentId: EnvironmentId): HostedHubNode => ({
@@ -560,8 +674,8 @@ describe("hosted Web single-session machine catalog", () => {
     effectiveRole: "owner",
   });
 
-  /** The selected node with a cached shell, so its lease only waits on the session. */
-  function startSelected(node: HostedHubNode, session: Partial<HostedHubState>) {
+  /** A node with a cached shell, so its lease only waits on its own session. */
+  function startWithCachedShell(node: HostedHubNode) {
     const environmentId = node.environmentId;
     const snapshot = {
       schemaVersion: 1 as const,
@@ -578,9 +692,7 @@ describe("hosted Web single-session machine catalog", () => {
       updatedAt: 1,
     };
     signedInDirectory([node]);
-    hostedHubStore.setState({ selectedNode: node, selectionStatus: "online", ...session });
-    vi.spyOn(hostedHubController, "returnToDirectory").mockResolvedValue();
-    return startHostedWorkspaceCoordinator({
+    return startCoordinator({
       cache: { ...emptyCache, list: async () => [record] },
       hubOrigin: "https://hub.example.test",
       setInterval: () => 1,
@@ -588,50 +700,124 @@ describe("hosted Web single-session machine catalog", () => {
     });
   }
 
-  it.each(["ready", "replaying", "delivery-unknown"] as const)(
-    "shows an online, established selected session that is %s as connected and leases it",
-    async (sessionStatus) => {
-      const env = environment(11);
-      const stop = startSelected(ownerNode(env), {
-        transportStatus: "online",
-        sessionEstablished: true,
-        sessionStatus,
-        effectiveRole: "owner",
-      });
-
-      await vi.waitFor(() =>
-        expect(readHostedWorkspaceState().machines).toMatchObject([
-          {
-            environmentId: env,
-            connectionState: "connected",
-            deliveryUnknown: sessionStatus === "delivery-unknown",
-            canMutate: true,
-          },
-        ]),
-      );
-      await vi.waitFor(() => expect(readHostedNodeMutationLease(env)).not.toBeNull());
-      stop();
-    },
-  );
-
-  it("shows a selected session that is still being established as disconnected", async () => {
-    const env = environment(12);
-    const stop = startSelected(ownerNode(env), {
-      transportStatus: "connecting",
-      sessionEstablished: false,
-      sessionStatus: "synchronizing",
-      // The directory's role stands while one session is being established.
-      effectiveRole: "viewer",
-    });
+  it("shows an environment whose own session is online and ready as connected and leases it", async () => {
+    const env = environment(11);
+    const node = ownerNode(env);
+    const stop = startWithCachedShell(node);
+    const sessions = getHostedEnvironmentSessions();
+    const { generation } = sessions.ensureRecord(node);
+    sessions.markConnectRequested(env, generation);
+    sessions.role(env, generation, "owner");
+    establishRecord(sessions, env);
 
     await vi.waitFor(() =>
       expect(readHostedWorkspaceState().machines).toMatchObject([
         {
           environmentId: env,
-          connectionState: "disconnected",
+          connectionState: "connected",
           deliveryUnknown: false,
-          effectiveRole: "owner",
+          canMutate: true,
         },
+      ]),
+    );
+    await vi.waitFor(() =>
+      expect(readHostedNodeMutationLease(env)).toMatchObject({ environmentId: env }),
+    );
+    expect(readHostedNodeMutationLease(env)?.snapshotGeneration).toBe(generation);
+    stop();
+  });
+
+  it.each([
+    ["suspended", (sessions: HostedEnvironmentSessions) => void sessions.suspendAll()],
+    [
+      "interrupted",
+      (sessions: HostedEnvironmentSessions, env: EnvironmentId) =>
+        sessions.transportStatus(env, sessions.read(env)!.generation, "reconnecting"),
+    ],
+    [
+      "downgraded",
+      (sessions: HostedEnvironmentSessions, env: EnvironmentId) =>
+        sessions.role(env, sessions.read(env)!.generation, "viewer"),
+    ],
+    [
+      "released",
+      (sessions: HostedEnvironmentSessions, env: EnvironmentId) => sessions.release(env),
+    ],
+    [
+      "replaying",
+      (sessions: HostedEnvironmentSessions, env: EnvironmentId) =>
+        sessions.markSessionReplaying(env, sessions.read(env)!.generation),
+    ],
+    [
+      "unsure of its delivery",
+      (sessions: HostedEnvironmentSessions, env: EnvironmentId) =>
+        sessions.markDeliveryUnknown(env, sessions.read(env)!.generation),
+    ],
+  ] as const)("revokes the lease in the same turn its record is %s", async (_change, change) => {
+    const env = environment(13);
+    const node = ownerNode(env);
+    const stop = startWithCachedShell(node);
+    const sessions = getHostedEnvironmentSessions();
+    const { generation } = sessions.ensureRecord(node);
+    sessions.markConnectRequested(env, generation);
+    sessions.role(env, generation, "owner");
+    establishRecord(sessions, env);
+    await vi.waitFor(() =>
+      expect(readHostedNodeMutationLease(env)).toMatchObject({ environmentId: env }),
+    );
+
+    change(sessions, env);
+
+    expect(readHostedNodeMutationLease(env)).toBeNull();
+    stop();
+  });
+
+  it.each([
+    ["its directory turns stale", () => hostedHubStore.setState({ directoryStatus: "stale" })],
+    ["the browser is suspended", () => hostedHubStore.setState({ browserStatus: "suspended" })],
+    [
+      "its node goes offline",
+      (node: HostedHubNode) =>
+        hostedHubStore.setState({
+          nodes: [{ ...node, presence: { ...node.presence, online: false } }],
+        }),
+    ],
+    ["its node leaves the directory", () => hostedHubStore.setState({ nodes: [] })],
+    [
+      "its node is revoked",
+      (node: HostedHubNode) => hostedHubStore.setState({ nodes: [{ ...node, revokedAt: 1 }] }),
+    ],
+  ] as const)("revokes the lease in the same turn %s", async (_change, change) => {
+    const env = environment(14);
+    const node = ownerNode(env);
+    const stop = startWithCachedShell(node);
+    const sessions = getHostedEnvironmentSessions();
+    const { generation } = sessions.ensureRecord(node);
+    sessions.markConnectRequested(env, generation);
+    sessions.role(env, generation, "owner");
+    establishRecord(sessions, env);
+    await vi.waitFor(() =>
+      expect(readHostedNodeMutationLease(env)).toMatchObject({ environmentId: env }),
+    );
+
+    change(node);
+
+    expect(readHostedNodeMutationLease(env)).toBeNull();
+    stop();
+  });
+
+  it("shows a session that is still being established as connecting and grants no lease", async () => {
+    const env = environment(12);
+    const node = ownerNode(env);
+    const stop = startWithCachedShell(node);
+    const sessions = getHostedEnvironmentSessions();
+    const { generation } = sessions.ensureRecord(node);
+    sessions.markConnectRequested(env, generation);
+    sessions.transportStatus(env, generation, "connecting");
+
+    await vi.waitFor(() =>
+      expect(readHostedWorkspaceState().machines).toMatchObject([
+        { environmentId: env, connectionState: "connecting", deliveryUnknown: false },
       ]),
     );
     expect(readHostedNodeMutationLease(env)).toBeNull();
@@ -646,10 +832,8 @@ describe("hosted Web retained environment sessions", () => {
     hostedWebConnectionScopes.reset();
     hostedHubController.resetForTests();
     resetHostedEnvironmentSessionsForTests();
-  });
-
-  it("keeps retained sessions off until more than one connection is allowed", () => {
-    expect(HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS).toBe(MAX_HOSTED_WEB_CONNECTIONS > 1);
+    useMessageQueueStore.getState().reset();
+    useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   });
 
   function retainedHarness(input: { readonly foreground: () => EnvironmentId | null }) {
@@ -660,8 +844,6 @@ describe("hosted Web retained environment sessions", () => {
     let mostLive = 0;
     const coordinator = createHostedConnectionCoordinator({
       scopes,
-      mode: "retained",
-      maxConnections: 3,
       foregroundEnvironmentId: input.foreground,
       now: () => Date.now(),
       connect: async (environmentId) => {
@@ -718,28 +900,20 @@ describe("hosted Web retained environment sessions", () => {
     test.coordinator.dispose();
   });
 
-  function retainedNode(index: number, online = true): HostedHubNode {
-    return {
-      ...hubNode(environment(index), online),
-      id: `node_${String(index).padStart(22, "0")}`,
-      label: `Node ${index}`,
-    };
-  }
-
   /**
-   * The workspace coordinator in retained mode over the real session registry;
-   * the lifecycle owner's acquire and release are recorded and write the
-   * registry as the controller would.
+   * The workspace coordinator over the real session registry; the lifecycle
+   * owner's acquire and release are modelled on the registry as the controller
+   * runs them.
    */
   function startRetained(
     nodes: ReadonlyArray<HostedHubNode>,
     options?: {
       /** Nodes whose records are live before the coordinator starts. */
       readonly warm?: ReadonlyArray<HostedHubNode>;
+      readonly cache?: WorkspaceMetadataCache;
     },
   ) {
     signedInDirectory(nodes);
-    resetHostedEnvironmentSessionsForTests();
     const sessions = getHostedEnvironmentSessions();
     for (const node of options?.warm ?? []) {
       sessions.markConnectRequested(node.environmentId, sessions.ensureRecord(node).generation);
@@ -749,30 +923,15 @@ describe("hosted Web retained environment sessions", () => {
       const live = sessions.list().filter((record) => isHostedEnvironmentSessionLive(record));
       mostLive = Math.max(mostLive, live.length);
     });
-    const acquired: EnvironmentId[] = [];
-    const released: EnvironmentId[] = [];
-    vi.spyOn(hostedHubController, "acquireEnvironment").mockImplementation(async (nodeId) => {
-      const node = hostedHubStore.getState().nodes.find((candidate) => candidate.id === nodeId)!;
-      const record = sessions.ensureRecord(node);
-      sessions.markConnectRequested(node.environmentId, record.generation);
-      acquired.push(node.environmentId);
-      return "connecting";
-    });
-    vi.spyOn(hostedHubController, "releaseEnvironment").mockImplementation(
-      async (environmentId) => {
-        released.push(environmentId);
-        sessions.release(environmentId);
-      },
-    );
+    const { acquired, released } = modelAcquire(sessions);
     const watchPresence = vi
       .spyOn(hostedHubController, "watchDirectoryPresence")
       .mockReturnValue(() => undefined);
+    const returnToDirectory = vi.spyOn(hostedHubController, "returnToDirectory");
     const ticks: Array<() => void> = [];
-    const stop = startHostedWorkspaceCoordinator({
-      cache: emptyCache,
+    const stop = startCoordinator({
+      cache: options?.cache ?? emptyCache,
       hubOrigin: "https://hub.example.test",
-      mode: "retained",
-      maxConnections: 3,
       setInterval: (callback) => ticks.push(callback),
       clearInterval: () => undefined,
     });
@@ -781,6 +940,7 @@ describe("hosted Web retained environment sessions", () => {
       acquired,
       released,
       watchPresence,
+      returnToDirectory,
       mostLive: () => mostLive,
       tick: () => ticks.forEach((callback) => callback()),
       stop,
@@ -804,6 +964,228 @@ describe("hosted Web retained environment sessions", () => {
       test.sessions.list().filter((record) => isHostedEnvironmentSessionLive(record)),
     ).toHaveLength(3);
     releaseView();
+    test.stop();
+  });
+
+  it("swaps between three environments without leaving for the directory or releasing", async () => {
+    const nodes = [1, 2, 3].map((index) => retainedNode(index));
+    const test = startRetained(nodes);
+    let releaseRoute = hostedWebConnectionScopes.retain(environment(1), {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(1)]));
+    establishRecord(test.sessions, environment(1));
+
+    // What a route swap does to demand: the outgoing route's scope goes, the
+    // incoming one's arrives.
+    for (const index of [2, 3, 1]) {
+      releaseRoute();
+      releaseRoute = hostedWebConnectionScopes.retain(environment(index), {
+        type: "thread-detail",
+        threadId: thread(index),
+      });
+      await settleCoordinator();
+      const record = test.sessions.read(environment(index))!;
+      if (!canAdoptHostedEnvironmentSession(record))
+        establishRecord(test.sessions, record.environmentId);
+    }
+
+    expect(test.acquired).toEqual([environment(1), environment(2), environment(3)]);
+    expect(test.released).toEqual([]);
+    expect(test.returnToDirectory).not.toHaveBeenCalled();
+    expect(test.mostLive()).toBe(3);
+    releaseRoute();
+    test.stop();
+  });
+
+  it("releases warm environments nothing demands once the workspace is backgrounded", async () => {
+    const nodes = [retainedNode(1), retainedNode(2)];
+    const test = startRetained(nodes);
+    const releaseView = hostedWebConnectionScopes.retain(environment(1), {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
+    const releaseWarm = hostedWebConnectionScopes.retain(environment(2), {
+      type: "thread-detail",
+      threadId: thread(2),
+    });
+    await vi.waitFor(() =>
+      expect(test.acquired.toSorted()).toEqual([environment(1), environment(2)]),
+    );
+    releaseWarm();
+    await settleCoordinator();
+    expect(test.released).toEqual([]);
+
+    await setHostedWorkspaceBackgrounded(true);
+
+    expect(test.released).toEqual([environment(2)]);
+    expect(test.sessions.read(environment(1))).toBeDefined();
+    await setHostedWorkspaceBackgrounded(false);
+    releaseView();
+    test.stop();
+  });
+
+  it("connects a pressed environment for three seconds of intent demand", async () => {
+    const nodes = [retainedNode(1)];
+    const test = startRetained(nodes);
+    expect(HOSTED_WEB_INTENT_SCOPE_TTL_MS).toBe(3_000);
+    expect(canPreconnectHostedEnvironment(environment(1))).toBe(true);
+
+    retainHostedIntentScope(environment(1), 300);
+
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(1)]));
+    expect(hostedWebConnectionScopes.list()).toMatchObject([
+      { environmentId: environment(1), scope: { type: "interactive" } },
+    ]);
+    expect(isHostedEnvironmentDemanded(environment(1))).toBe(true);
+    // A session on its way is joined by the navigation, not pre-connected again.
+    expect(canPreconnectHostedEnvironment(environment(1))).toBe(false);
+
+    await vi.waitFor(() => expect(hostedWebConnectionScopes.list()).toEqual([]));
+    expect(isHostedEnvironmentDemanded(environment(1))).toBe(false);
+    // The environment stays warm until its slot is needed.
+    expect(test.released).toEqual([]);
+    test.stop();
+  });
+
+  it("never displaces a mounted view for intent demand", async () => {
+    const nodes = [1, 2, 3, 4].map((index) => retainedNode(index));
+    const test = startRetained(nodes);
+    const releases = [1, 2, 3].map((index) =>
+      hostedWebConnectionScopes.retain(environment(index), {
+        type: "thread-detail",
+        threadId: thread(index),
+      }),
+    );
+    await vi.waitFor(() => expect(test.acquired).toHaveLength(3), { timeout: 5_000 });
+
+    const releaseIntent = retainHostedIntentScope(environment(4));
+    await settleCoordinator();
+
+    expect(test.released).toEqual([]);
+    expect(test.acquired).not.toContain(environment(4));
+    expect(readHostedWorkspaceState().demand.queuedEnvironmentIds).toContain(environment(4));
+    releaseIntent();
+    releases.forEach((release) => release());
+    test.stop();
+  });
+
+  it("does not pre-connect an environment whose session is live or whose node is offline", async () => {
+    const nodes = [retainedNode(1), retainedNode(2, false)];
+    const test = startRetained(nodes);
+    const release = hostedWebConnectionScopes.retain(environment(1), {
+      type: "thread-detail",
+      threadId: thread(1),
+    });
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(1)]));
+    establishRecord(test.sessions, environment(1));
+
+    expect(canPreconnectHostedEnvironment(environment(1))).toBe(false);
+    expect(canPreconnectHostedEnvironment(environment(2))).toBe(false);
+    expect(canPreconnectHostedEnvironment(environment(9))).toBe(false);
+    release();
+    test.stop();
+    expect(canPreconnectHostedEnvironment(environment(1))).toBe(false);
+  });
+
+  it("holds demand while a server thread has queued sends, and none for a draft-only queue", async () => {
+    const nodes = [retainedNode(1), retainedNode(2)];
+    const test = startRetained(nodes);
+    useStore
+      .getState()
+      .hydrateEnvironmentStateFromCache(
+        workspaceMetadataToCachedShellSnapshot(metadataWithThread(environment(1))),
+        environment(1),
+      );
+    const serverKey = `${environment(1)}:${thread(1)}`;
+    const draftKey = `${environment(2)}:draft-thread`;
+
+    useMessageQueueStore.getState().enqueue(draftKey, queuedMessage("draft"));
+    await settleCoordinator();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    expect(test.acquired).toEqual([]);
+
+    useMessageQueueStore.getState().enqueue(serverKey, queuedMessage("first"));
+    useMessageQueueStore.getState().enqueue(serverKey, queuedMessage("second"));
+    await vi.waitFor(() => expect(test.acquired).toEqual([environment(1)]));
+    expect(hostedWebConnectionScopes.list()).toMatchObject([
+      { environmentId: environment(1), scope: { type: "interactive" }, refCount: 1 },
+    ]);
+
+    useMessageQueueStore.getState().remove(serverKey, "first");
+    expect(hostedWebConnectionScopes.list()).toHaveLength(1);
+    useMessageQueueStore.getState().remove(serverKey, "second");
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+
+    // An account reset clears every queue, and with it the demand.
+    useMessageQueueStore.getState().enqueue(serverKey, queuedMessage("third"));
+    expect(hostedWebConnectionScopes.list()).toHaveLength(1);
+    useMessageQueueStore.getState().reset();
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+    test.stop();
+  });
+
+  it("publishes a live snapshot only when its environment's slices change", async () => {
+    const replace = vi.fn(async () => undefined);
+    const nodes = [retainedNode(1)];
+    const test = startRetained(nodes, { cache: { ...emptyCache, replace } });
+    const env = environment(1);
+    useStore
+      .getState()
+      .hydrateEnvironmentStateFromCache(
+        workspaceMetadataToCachedShellSnapshot(metadataWithThread(env)),
+        env,
+      );
+    useStore.setState((state) => ({
+      environmentStateById: {
+        ...state.environmentStateById,
+        [env]: { ...state.environmentStateById[env]!, bootstrapComplete: true },
+      },
+    }));
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(readHostedWorkspaceState().workspace.threads).toHaveLength(1));
+    const published = readHostedWorkspaceState();
+
+    // A store change that leaves every slice of the environment as it was.
+    for (let index = 0; index < 3; index += 1) {
+      useStore.setState((state) => ({ environmentStateById: { ...state.environmentStateById } }));
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 120));
+    }
+    expect(replace).toHaveBeenCalledOnce();
+    expect(readHostedWorkspaceState()).toBe(published);
+
+    useStore.setState((state) => ({
+      environmentStateById: {
+        ...state.environmentStateById,
+        [env]: { ...state.environmentStateById[env]!, threadIds: [] },
+      },
+    }));
+    await vi.waitFor(() => expect(replace).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(readHostedWorkspaceState().workspace.threads).toHaveLength(0));
+    test.stop();
+  });
+
+  it("synchronizes once per burst of hosted patches and skips patches it does not read", async () => {
+    const nodes = [retainedNode(1)];
+    const test = startRetained(nodes);
+    await settleCoordinator();
+    const read = vi.spyOn(test.sessions, "read");
+
+    // Fields the workspace never reads from the hosted store.
+    hostedHubStore.setState({ errorMessage: "transient" });
+    hostedHubStore.setState({ errorMessage: null });
+    await settleCoordinator();
+    expect(read).not.toHaveBeenCalled();
+
+    // Three directory refreshes in one turn are one pass.
+    hostedHubStore.setState({ nodes: [retainedNode(1)] });
+    hostedHubStore.setState({ nodes: [retainedNode(1)] });
+    hostedHubStore.setState({ nodes: [retainedNode(1)] });
+    await settleCoordinator();
+    expect(
+      read.mock.calls.filter(([environmentId]) => environmentId === environment(1)),
+    ).toHaveLength(1);
     test.stop();
   });
 
@@ -882,3 +1264,83 @@ describe("hosted Web retained environment sessions", () => {
     test.stop();
   });
 });
+
+describe("queued-send scope retention", () => {
+  it("retains one scope per environment with a queued server thread", () => {
+    const scopes = createHostedWebScopeStore();
+    let queued: ReadonlyArray<string> = [];
+    const servers = new Set([`${environment(1)}:${thread(1)}`, `${environment(1)}:${thread(2)}`]);
+    const listeners = new Set<() => void>();
+    const stop = startQueuedSendScopeRetention(
+      {
+        queuedThreadKeys: () => queued,
+        isServerThread: (ref) => servers.has(`${ref.environmentId}:${ref.threadId}`),
+        subscribe: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      },
+      scopes,
+    );
+    const update = (next: ReadonlyArray<string>) => {
+      queued = next;
+      listeners.forEach((listener) => listener());
+    };
+
+    update([`${environment(1)}:${thread(1)}`, `${environment(1)}:${thread(2)}`]);
+    expect(scopes.list()).toMatchObject([
+      { environmentId: environment(1), scope: { type: "interactive" }, refCount: 1 },
+    ]);
+    // A local draft's queue, and a key that names no thread, hold nothing.
+    update([`${environment(2)}:draft`, "malformed"]);
+    expect(scopes.list()).toEqual([]);
+
+    update([`${environment(1)}:${thread(2)}`]);
+    stop();
+    expect(scopes.list()).toEqual([]);
+    expect(listeners.size).toBe(0);
+  });
+});
+
+function metadataWithThread(environmentId: EnvironmentId): WorkspaceMetadataSnapshot {
+  return {
+    schemaVersion: 1,
+    environmentId,
+    capturedAt: 1,
+    projects: [
+      {
+        environmentId,
+        id: ProjectId.make("project"),
+        name: "Project",
+        cwd: "/project",
+        repositoryIdentity: null,
+        createdAt: null,
+        updatedAt: null,
+      },
+    ],
+    worktrees: [],
+    threads: [
+      {
+        environmentId,
+        id: thread(1),
+        projectId: ProjectId.make("project"),
+        worktreeId: null,
+        title: "Thread",
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt: null,
+        archivedAt: null,
+        modelSelection: null,
+        providerDriver: null,
+        branch: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        deliveryUnknown: false,
+      },
+    ],
+  };
+}
+
+function queuedMessage(id: string): WebQueuedMessage {
+  return { id } as unknown as WebQueuedMessage;
+}

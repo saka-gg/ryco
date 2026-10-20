@@ -33,6 +33,7 @@ vi.mock("../../env", async (importOriginal) => ({
 }));
 
 import {
+  getHostedEnvironmentSessions,
   hostedHubController,
   useHostedAccountStore,
   useHostedHubStore,
@@ -106,6 +107,24 @@ function node(id: string, online: boolean, role: "viewer" | "operator" | "owner"
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
+/**
+ * The environment's own session, as its connection reports it: requested and,
+ * unless `transportStatus` says otherwise, online. The shared session fields
+ * show the selected environment's record, so a case seeds the record rather
+ * than those fields.
+ */
+function seedSession(
+  target: HostedHubNode,
+  options: { readonly established?: boolean } = {},
+): { readonly generation: number } {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(target);
+  sessions.markConnectRequested(target.environmentId, generation);
+  sessions.transportStatus(target.environmentId, generation, "online");
+  if (options.established) sessions.markSessionReady(target.environmentId, generation);
+  return { generation };
+}
+
 // The boot gate preloads the workspace shell before the hosted root renders an
 // authenticated account; do the same, so a case asserting the workspace sees it
 // on the root's first pass rather than racing a cold chunk load.
@@ -117,6 +136,7 @@ beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
   hostedHubController.resetForTests();
+  getHostedEnvironmentSessions().clear();
   resetHostedNodeRoutesForTests();
   resetHubRoutesForTests();
   // The §13 projection is module scope, so a channel left standing by another
@@ -137,6 +157,7 @@ afterEach(async () => {
   await page.viewport(1_280, 720);
   mounted = null;
   hostedHubController.resetForTests();
+  getHostedEnvironmentSessions().clear();
   resetHostedNodeRoutesForTests();
   resetHubRoutesForTests();
   resetWebE2eeSession();
@@ -170,13 +191,17 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       directoryStatus: "ready",
       nodes: [selectable],
     });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
-      useHostedHubStore.setState({
-        selectedNode: selectable,
-        transportStatus: "connecting",
-        sessionEstablished: false,
+    // Discovery connects the device through the lifecycle owner; it never
+    // selects it.
+    const acquire = vi
+      .spyOn(hostedHubController, "acquireEnvironment")
+      .mockImplementation(async () => {
+        const sessions = getHostedEnvironmentSessions();
+        const { generation } = sessions.ensureRecord(selectable);
+        sessions.markConnectRequested(selectable.environmentId, generation);
+        return "connecting";
       });
-    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode");
 
     mounted = await render(<HostedHubRoot />);
 
@@ -186,7 +211,8 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await expect
       .element(page.getByRole("heading", { name: /^Your nodes?$/ }))
       .not.toBeInTheDocument();
-    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(selectable.id));
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledWith(selectable.id));
+    expect(selectNode).not.toHaveBeenCalled();
     expect(window.location.pathname).toBe("/");
     await expect
       .element(page.getByRole("heading", { name: /Connecting to/ }))
@@ -822,15 +848,16 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
     installHostedNodeHistory();
+    // Its relay channel is online; its shell snapshot has not arrived.
+    seedSession(selectedNode);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "online",
-      sessionEstablished: false,
     });
     mounted = await render(<HostedHubRoot />);
     await expect
@@ -856,11 +883,15 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
         },
       },
     });
+    seedSession(current, { established: true });
+    // The target's connection is on its way; selecting it joins that.
+    const { generation: targetGeneration } = seedSession(target);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [current, target],
       selectedNode: current,
       selectionStatus: "online",
@@ -868,13 +899,7 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
       sessionStatus: "ready",
       sessionEstablished: true,
     });
-    const selectNode = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async () => {
-      useHostedHubStore.setState({
-        selectedNode: target,
-        sessionStatus: "synchronizing",
-        sessionEstablished: false,
-      });
-    });
+    const selectNode = vi.spyOn(hostedHubController, "selectNode");
 
     mounted = await render(<HostedHubRoot />);
 
@@ -882,11 +907,8 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     await vi.waitFor(() => expect(sidebar()).not.toBeNull());
     const mountedSidebar = sidebar();
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(target.id));
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
+    getHostedEnvironmentSessions().markSessionReady(target.environmentId, targetGeneration);
     await vi.waitFor(() => expect(useHostedHubStore.getState().sessionEstablished).toBe(true));
 
     // Never a full-page surface, and the very same workspace throughout.
@@ -900,15 +922,19 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
     window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
     installHostedNodeHistory();
+    const { generation } = seedSession(selectedNode);
+    getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
+      kind: "authentication",
+      retryable: false,
+    });
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "terminal-failure",
-      errorMessage: "The relay authentication attempt expired or was rejected.",
     });
     mounted = await render(<HostedHubRoot />);
     await expect
@@ -925,15 +951,20 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
     installHostedNodeHistory();
     const retry = vi.spyOn(hostedHubController, "retrySelectedNode").mockResolvedValue();
+    // The session-sync deadline ran out before the shell snapshot arrived.
+    const { generation } = seedSession(selectedNode);
+    getHostedEnvironmentSessions().reportShellSnapshotFailure(
+      selectedNode.environmentId,
+      generation,
+    );
     useHostedHubStore.setState({
       accountStatus: "authenticated",
       account,
       session,
       directoryStatus: "ready",
+      browserStatus: "current",
       nodes: [selectedNode],
       selectedNode,
-      transportStatus: "terminal-failure",
-      errorMessage: "Ryco state could not be synchronized.",
     });
 
     mounted = await render(<HostedHubRoot />);

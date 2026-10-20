@@ -162,10 +162,32 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+/** Signed in with the node in a current directory, nothing selected or connected yet. */
+function signedIn(store: { setState: (patch: Record<string, unknown>) => void }): void {
+  store.setState({
+    accountStatus: "authenticated",
+    account: sessionResponse.account,
+    session: sessionResponse.session,
+    directoryStatus: "ready",
+    nodes: [selectedNode],
+    browserStatus: "current",
+  });
+}
+
+/**
+ * What the workspace coordinator does for a demanded environment: acquire it
+ * through the lifecycle owner, then let its connection open.
+ */
+async function acquire(controller: {
+  acquireEnvironment: (nodeId: string) => Promise<unknown>;
+}): Promise<void> {
+  expect(await controller.acquireEnvironment(selectedNode.id)).toBe("connecting");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("hosted browser lifecycle integration", () => {
   it("keeps generic local API access on the lifecycle-owned current client", async () => {
     const { hostedHubApi } = await import("./api");
-    const { activateHostedNode } = await import("./environment");
     const { writePrimaryEnvironmentDescriptor } = await import("../environments/primary");
     const { listEnvironmentConnections } = await import("../environments/runtime/service");
     const { readLocalApi } = await import("../localApi");
@@ -179,21 +201,7 @@ describe("hosted browser lifecycle integration", () => {
     });
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selectedNode]);
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account: sessionResponse.account,
-      session: sessionResponse.session,
-      directoryStatus: "ready",
-      nodes: [selectedNode],
-      selectedNode,
-      selectionStatus: "online",
-      effectiveRole: "operator",
-      transportStatus: "online",
-      sessionStatus: "synchronizing",
-      sessionEstablished: false,
-      browserStatus: "current",
-      generation: 4,
-    });
+    signedIn(useHostedHubStore);
 
     writePrimaryEnvironmentDescriptor({
       environmentId,
@@ -214,7 +222,7 @@ describe("hosted browser lifecycle integration", () => {
       "Local backend API is unavailable before a backend is paired.",
     );
 
-    await activateHostedNode(selectedNode, null);
+    await acquire(hostedHubController);
     expect(capturedClients).toHaveLength(1);
     expect(listEnvironmentConnections()).toHaveLength(1);
     await localApi!.server.discoverSourceControl();
@@ -223,6 +231,7 @@ describe("hosted browser lifecycle integration", () => {
     hostedHubController.suspendBrowser("offline");
     await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
     await hostedHubController.resumeBrowser();
+    await acquire(hostedHubController);
     expect(capturedClients).toHaveLength(2);
     expect(listEnvironmentConnections()).toHaveLength(1);
 
@@ -233,9 +242,9 @@ describe("hosted browser lifecycle integration", () => {
 
   it("disposes the stale transport before same-node recovery and accepts only a fresh snapshot", async () => {
     const { hostedHubApi } = await import("./api");
-    const { activateHostedNode } = await import("./environment");
     const { listEnvironmentConnections } = await import("../environments/runtime/service");
-    const { hostedHubController, useHostedHubStore } = await import("./state");
+    const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
+      await import("./state");
     const issueRelayTicket = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
       expiresAt: Date.now() + 60_000,
@@ -244,35 +253,21 @@ describe("hosted browser lifecycle integration", () => {
     });
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selectedNode]);
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account: sessionResponse.account,
-      session: sessionResponse.session,
-      directoryStatus: "ready",
-      nodes: [selectedNode],
-      selectedNode,
-      selectionStatus: "online",
-      effectiveRole: "operator",
-      transportStatus: "online",
-      sessionStatus: "synchronizing",
-      sessionEstablished: false,
-      browserStatus: "current",
-      generation: 4,
-    });
+    signedIn(useHostedHubStore);
+    const sessions = getHostedEnvironmentSessions();
+    const record = () => sessions.read(environmentId)!;
+    const transportOnline = () =>
+      sessions.transportStatus(environmentId, record().generation, "online");
 
-    await activateHostedNode(selectedNode, null);
+    await acquire(hostedHubController);
     expect(capturedClients).toHaveLength(1);
     expect(capturedTransports).toHaveLength(1);
     expect(listEnvironmentConnections()).toHaveLength(1);
     await capturedTransports[0]!.resolveUrl();
     capturedTransports[0]!.options.onOpen?.();
-    hostedHubController.transportStatus(4, "online");
+    transportOnline();
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
-    expect(useHostedHubStore.getState()).toMatchObject({
-      browserStatus: "current",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    expect(record()).toMatchObject({ sessionStatus: "ready", sessionEstablished: true });
     expect(
       capturedTransports[0]!.options.authorizeRequest?.({
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -290,16 +285,14 @@ describe("hosted browser lifecycle integration", () => {
     await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
 
     await hostedHubController.resumeBrowser();
+    await acquire(hostedHubController);
     expect(capturedClients).toHaveLength(2);
     expect(capturedTransports).toHaveLength(2);
     expect(listEnvironmentConnections()).toHaveLength(1);
     await capturedTransports[1]!.resolveUrl();
     capturedTransports[1]!.options.onOpen?.();
-    hostedHubController.transportStatus(6, "online");
-    expect(useHostedHubStore.getState()).toMatchObject({
-      browserStatus: "synchronizing",
-      sessionEstablished: false,
-    });
+    transportOnline();
+    expect(record().sessionEstablished).toBe(false);
     expect(
       capturedTransports[1]!.options.authorizeRequest?.({
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -308,14 +301,10 @@ describe("hosted browser lifecycle integration", () => {
     ).not.toBe("allowed");
 
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(2));
-    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
+    expect(record().sessionEstablished).toBe(false);
 
     capturedClients[1]!.emitShellSnapshot(shellSnapshot(2));
-    expect(useHostedHubStore.getState()).toMatchObject({
-      browserStatus: "current",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    expect(record()).toMatchObject({ sessionStatus: "ready", sessionEstablished: true });
     expect(
       capturedTransports[1]!.options.authorizeRequest?.({
         tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -325,10 +314,8 @@ describe("hosted browser lifecycle integration", () => {
     expect(issueRelayTicket).toHaveBeenCalledTimes(2);
   });
 
-  it("accepts only a fresh snapshot for each retained environment after a suspension", async () => {
+  it("accepts only a fresh snapshot for each environment after a suspension", async () => {
     const { hostedHubApi } = await import("./api");
-    const { configureWebHostedRuntime } = await import("./runtime");
-    configureWebHostedRuntime(hostedHubApi, { environmentSessions: "retained" });
     const { listEnvironmentConnections } = await import("../environments/runtime/service");
     const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
       await import("./state");
@@ -403,9 +390,9 @@ describe("hosted browser lifecycle integration", () => {
 
   it("replays a command whose client a suspend disposed, on the resumed session only", async () => {
     const { hostedHubApi } = await import("./api");
-    const { activateHostedNode } = await import("./environment");
     const { listEnvironmentConnections } = await import("../environments/runtime/service");
-    const { hostedHubController, useHostedHubStore } = await import("./state");
+    const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
+      await import("./state");
     vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
       ticket: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
       expiresAt: Date.now() + 60_000,
@@ -418,24 +405,13 @@ describe("hosted browser lifecycle integration", () => {
       session: { ...sessionResponse.session, id: "sess_bbbbbbbbbbbbbbbbbbbbbb" },
     });
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([selectedNode]);
-    useHostedHubStore.setState({
-      accountStatus: "authenticated",
-      account: sessionResponse.account,
-      session: sessionResponse.session,
-      directoryStatus: "ready",
-      nodes: [selectedNode],
-      selectedNode,
-      selectionStatus: "online",
-      effectiveRole: "operator",
-      transportStatus: "online",
-      sessionStatus: "synchronizing",
-      sessionEstablished: false,
-      browserStatus: "current",
-      generation: 4,
-    });
-    await activateHostedNode(selectedNode, null);
+    signedIn(useHostedHubStore);
+    const sessions = getHostedEnvironmentSessions();
+    const record = () => sessions.read(environmentId)!;
+    await acquire(hostedHubController);
+    sessions.transportStatus(environmentId, record().generation, "online");
     capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
-    expect(useHostedHubStore.getState().sessionStatus).toBe("ready");
+    expect(record().sessionStatus).toBe("ready");
 
     const command = {
       type: "thread.meta.update",
@@ -462,8 +438,10 @@ describe("hosted browser lifecycle integration", () => {
     hostedHubController.suspendBrowser("offline");
     await vi.waitFor(() => expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce());
     await hostedHubController.resumeBrowser();
+    await acquire(hostedHubController);
     expect(capturedClients).toHaveLength(2);
     capturedClients[1]!.orchestration.dispatchCommand.mockResolvedValue({ sequence: 9 });
+    sessions.transportStatus(environmentId, record().generation, "online");
 
     // Ticket and handshake alone are not enough: the replacement must accept
     // a current snapshot first.
@@ -479,6 +457,6 @@ describe("hosted browser lifecycle integration", () => {
       command,
     );
     // Replayed and confirmed, so nothing is left uncertain.
-    expect(useHostedHubStore.getState().sessionStatus).toBe("ready");
+    expect(record().sessionStatus).toBe("ready");
   });
 });

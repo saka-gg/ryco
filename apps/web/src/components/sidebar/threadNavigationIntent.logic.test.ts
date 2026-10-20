@@ -1,13 +1,45 @@
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { isNavigationPress as readRowPress, noteThreadPressIntent } from "./threadNavigationIntent";
 import {
+  createNodePreconnect,
   createThreadNavigationIntents,
   isNavigationPress,
+  NODE_PRECONNECT_COOLDOWN_MS,
+  NODE_PRECONNECT_INTERVAL_MS,
   type NavigationPressEvent,
   THREAD_NAVIGATION_HOVER_DELAY_MS,
   THREAD_NAVIGATION_INTENT_RETAIN_MS,
 } from "./threadNavigationIntent.logic";
+
+// The app wiring of the row intents. The logic module imports none of these.
+const wiring = vi.hoisted(() => ({
+  tier: "phone" as "phone" | "desktop",
+  retainHostedIntentScope: vi.fn((_environmentId: string) => () => undefined),
+  markNodeSwitchIntent: vi.fn(),
+}));
+vi.mock("../../env", () => ({ isHostedHubMode: () => true }));
+vi.mock("../../lib/presentationTier", () => ({ getPresentationTier: () => wiring.tier }));
+vi.mock("../../hostedHub/hostedConnectionScopes", () => ({
+  retainHostedIntentScope: wiring.retainHostedIntentScope,
+}));
+vi.mock("../../perf/nodeSwitchInstrumentation", () => ({
+  markNodeSwitchIntent: wiring.markNodeSwitchIntent,
+}));
+vi.mock("../../hostedHub/hostedConnectionCoordinator", () => ({
+  canPreconnectHostedEnvironment: () => true,
+}));
+vi.mock("../../hostedHub/state", () => ({
+  getHostedEnvironmentSessions: () => ({ read: () => undefined }),
+}));
+vi.mock("../../environments/runtime/service", () => ({
+  retainThreadDetailSubscription: () => () => undefined,
+}));
+vi.mock("../../lib/routeChunkPreload", () => ({ preloadRouteChunk: async () => undefined }));
+vi.mock("../../store", () => ({
+  useStore: { getState: () => ({ environmentStateById: {} }) },
+}));
 
 const environmentId = EnvironmentId.make("environment");
 const ref = (threadId: string): ScopedThreadRef => ({
@@ -16,7 +48,11 @@ const ref = (threadId: string): ScopedThreadRef => ({
 });
 
 function setup(
-  options: { readonly maxRetains?: number; readonly loaded?: ReadonlySet<string> } = {},
+  options: {
+    readonly maxRetains?: number;
+    readonly loaded?: ReadonlySet<string>;
+    readonly canRetainOnHover?: (threadRef: ScopedThreadRef) => boolean;
+  } = {},
 ) {
   const releases = new Map<string, ReturnType<typeof vi.fn>>();
   const retain = vi.fn((threadRef: ScopedThreadRef) => {
@@ -31,6 +67,7 @@ function setup(
     preloadThreadRoute,
     keyOf: (threadRef) => `${threadRef.environmentId}:${threadRef.threadId}`,
     ...(options.maxRetains === undefined ? {} : { maxRetains: options.maxRetains }),
+    ...(options.canRetainOnHover ? { canRetainOnHover: options.canRetainOnHover } : {}),
   });
   return { intents, retain, releases, preloadThreadRoute };
 }
@@ -134,6 +171,16 @@ describe("thread navigation intents", () => {
     expect(retain.mock.calls.map(([threadRef]) => threadRef.threadId)).toEqual(["b"]);
   });
 
+  it("retains on hover only where the hover may, and always on press", () => {
+    const { intents, retain, preloadThreadRoute } = setup({ canRetainOnHover: () => false });
+    intents.hover(ref("a"));
+    vi.advanceTimersByTime(THREAD_NAVIGATION_HOVER_DELAY_MS * 2);
+    expect(preloadThreadRoute).toHaveBeenCalledOnce();
+    expect(retain).not.toHaveBeenCalled();
+    intents.press(ref("a"));
+    expect(retain).toHaveBeenCalledExactlyOnceWith(ref("a"));
+  });
+
   it("reset releases everything and drops a pending hover", () => {
     const { intents, retain, releases } = setup();
     intents.press(ref("a"));
@@ -177,5 +224,162 @@ describe("isNavigationPress", () => {
   it("rejects a press on a control nested in the row", () => {
     const badge = { closest: () => badge };
     expect(isNavigationPress(press({ target: badge }))).toBe(false);
+  });
+});
+
+describe("node pre-connect on a navigation press", () => {
+  const row = { closest: () => row };
+  const press = (overrides: Partial<NavigationPressEvent> = {}): NavigationPressEvent => ({
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    pointerType: "mouse",
+    target: row,
+    currentTarget: row,
+    ...overrides,
+  });
+  const onNode = (environment: string): ScopedThreadRef => ({
+    environmentId: EnvironmentId.make(environment),
+    threadId: ThreadId.make(`thread-${environment}`),
+  });
+
+  function preconnectSetup(
+    options: { readonly enabled?: boolean; readonly connected?: ReadonlySet<string> } = {},
+  ) {
+    let now = 1_000_000;
+    const preconnect = vi.fn();
+    const nodePreconnect = createNodePreconnect({
+      enabled: () => options.enabled ?? true,
+      needsConnection: (environment) => !(options.connected?.has(environment) ?? false),
+      preconnect,
+      now: () => now,
+    });
+    /** A row press as rows report it: read the pointer press, then the row's thread. */
+    const pressRow = (threadRef: ScopedThreadRef, event = press()) => {
+      if (nodePreconnect.notePress(event)) nodePreconnect.press(threadRef);
+    };
+    return {
+      nodePreconnect,
+      preconnect,
+      pressRow,
+      advance: (ms: number) => {
+        now += ms;
+      },
+    };
+  }
+
+  it("pre-connects the pressed row's node and reads the press like isNavigationPress", () => {
+    const test = preconnectSetup();
+    expect(test.nodePreconnect.notePress(press())).toBe(true);
+    test.nodePreconnect.press(onNode("env-a"));
+    expect(test.preconnect).toHaveBeenCalledExactlyOnceWith("env-a");
+    expect(test.nodePreconnect.notePress(press({ ctrlKey: true }))).toBe(false);
+    expect(test.nodePreconnect.notePress(press({ button: 2 }))).toBe(false);
+  });
+
+  it("only follows navigation presses, never a touch that may be a scroll", () => {
+    const test = preconnectSetup();
+    // A press without a navigation press read before it.
+    test.nodePreconnect.press(onNode("env-a"));
+    // A modified press: the row does not report it as a navigation.
+    test.nodePreconnect.notePress(press({ metaKey: true }));
+    test.nodePreconnect.press(onNode("env-a"));
+    // A touch press navigates, but connects nothing ahead of it.
+    expect(test.nodePreconnect.notePress(press({ pointerType: "touch" }))).toBe(true);
+    test.nodePreconnect.press(onNode("env-a"));
+    expect(test.preconnect).not.toHaveBeenCalled();
+
+    test.pressRow(onNode("env-a"), press({ pointerType: "pen" }));
+    expect(test.preconnect).toHaveBeenCalledExactlyOnceWith("env-a");
+  });
+
+  it("connects at most one node per interval and each node once per cooldown", () => {
+    const test = preconnectSetup();
+    test.pressRow(onNode("env-a"));
+    test.advance(NODE_PRECONNECT_INTERVAL_MS - 1);
+    test.pressRow(onNode("env-b"));
+    expect(test.preconnect.mock.calls).toEqual([["env-a"]]);
+
+    test.advance(1);
+    test.pressRow(onNode("env-b"));
+    expect(test.preconnect.mock.calls).toEqual([["env-a"], ["env-b"]]);
+
+    // Node A again: past the interval, but inside its own cooldown.
+    test.advance(NODE_PRECONNECT_INTERVAL_MS);
+    test.pressRow(onNode("env-a"));
+    expect(test.preconnect).toHaveBeenCalledTimes(2);
+
+    test.advance(NODE_PRECONNECT_COOLDOWN_MS);
+    test.pressRow(onNode("env-a"));
+    expect(test.preconnect.mock.calls.at(-1)).toEqual(["env-a"]);
+  });
+
+  it("leaves a node with a live session to the navigation, without spending the interval", () => {
+    const test = preconnectSetup({ connected: new Set(["env-a"]) });
+    test.pressRow(onNode("env-a"));
+    test.pressRow(onNode("env-b"));
+    expect(test.preconnect.mock.calls).toEqual([["env-b"]]);
+  });
+
+  it("does nothing where pre-connect is off, as on the phone tier", () => {
+    const test = preconnectSetup({ enabled: false });
+    test.pressRow(onNode("env-a"));
+    expect(test.preconnect).not.toHaveBeenCalled();
+  });
+
+  it("forgets the pending press once it is used", () => {
+    const test = preconnectSetup();
+    test.pressRow(onNode("env-a"));
+    test.advance(NODE_PRECONNECT_COOLDOWN_MS);
+    // The row press above was consumed; this press was never read.
+    test.nodePreconnect.press(onNode("env-b"));
+    expect(test.preconnect).toHaveBeenCalledOnce();
+  });
+
+  it("never lets a press read in an earlier task arm a later one", async () => {
+    const test = preconnectSetup();
+    expect(test.nodePreconnect.notePress(press())).toBe(true);
+    await Promise.resolve();
+    test.nodePreconnect.press(onNode("env-a"));
+    expect(test.preconnect).not.toHaveBeenCalled();
+  });
+});
+
+describe("row press intents on hosted Web", () => {
+  const row = { closest: () => row };
+  const navigationPress: NavigationPressEvent = {
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    pointerType: "mouse",
+    target: row,
+    currentTarget: row,
+  };
+  const threadRef: ScopedThreadRef = {
+    environmentId: EnvironmentId.make("environment-wired"),
+    threadId: ThreadId.make("thread-wired"),
+  };
+
+  it("connects no node ahead of a navigation press on the phone tier", () => {
+    wiring.tier = "phone";
+    expect(readRowPress(navigationPress)).toBe(true);
+    noteThreadPressIntent(threadRef);
+    expect(wiring.retainHostedIntentScope).not.toHaveBeenCalled();
+    expect(wiring.markNodeSwitchIntent).not.toHaveBeenCalled();
+
+    // The same press elsewhere connects ahead: only the tier held it back,
+    // and the phone press spent none of the pre-connect bounds.
+    wiring.tier = "desktop";
+    expect(readRowPress(navigationPress)).toBe(true);
+    noteThreadPressIntent(threadRef);
+    expect(wiring.retainHostedIntentScope).toHaveBeenCalledExactlyOnceWith(threadRef.environmentId);
+    expect(wiring.markNodeSwitchIntent).toHaveBeenCalledExactlyOnceWith(
+      threadRef.environmentId,
+      "press",
+    );
   });
 });

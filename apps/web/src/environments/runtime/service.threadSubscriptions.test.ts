@@ -447,33 +447,6 @@ describe("retainThreadDetailSubscription", () => {
     await resetEnvironmentServiceForTests();
   });
 
-  it("drops shell snapshots after browser suspension invalidates the hosted generation", async () => {
-    vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
-    const { hostedHubController, useHostedHubStore } = await import("~/hostedHub/state");
-    const { useStore } = await import("~/store");
-    useHostedHubStore.setState({ accountStatus: "authenticated", generation: 7 });
-    const syncServerShellSnapshot = vi.spyOn(useStore.getState(), "syncServerShellSnapshot");
-    const { resetEnvironmentServiceForTests, startEnvironmentConnectionService } =
-      await import("./service");
-    const stop = startEnvironmentConnectionService();
-    const connectionInput = mockCreateEnvironmentConnection.mock.calls[0]?.[0];
-    const environmentId = EnvironmentId.make("env-1");
-    const currentSnapshot = makeThreadShellSnapshot({ threadId: ThreadId.make("thread-current") });
-    const staleSnapshot = makeThreadShellSnapshot({ threadId: ThreadId.make("thread-stale") });
-    expect(connectionInput).toBeDefined();
-
-    connectionInput.syncShellSnapshot(currentSnapshot, environmentId);
-    expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
-
-    hostedHubController.suspendBrowser("hidden");
-    expect(useHostedHubStore.getState().generation).toBe(8);
-    connectionInput.syncShellSnapshot(staleSnapshot, environmentId);
-    expect(syncServerShellSnapshot).toHaveBeenCalledOnce();
-
-    stop();
-    await resetEnvironmentServiceForTests();
-  });
-
   it("fences a retained environment connection by its record generation", async () => {
     vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
     vi.stubGlobal("window", {
@@ -811,15 +784,18 @@ describe("retainThreadDetailSubscription", () => {
       await import("./service");
 
     const stop = startEnvironmentConnectionService();
-    expect(mockConnectionReconnects).toHaveLength(1);
+    // Hosted mode never builds a connection on the primary path.
+    expect(mockConnectionReconnects).toHaveLength(0);
 
     visibilityState = "hidden";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
     visibilityState = "visible";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
     windowTarget.dispatchEvent(new Event("pageshow"));
+    documentTarget.dispatchEvent(new Event("resume"));
 
-    expect(mockConnectionReconnects[0]).not.toHaveBeenCalled();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockConnectionReconnects).toHaveLength(0);
 
     stop();
     await resetEnvironmentServiceForTests();

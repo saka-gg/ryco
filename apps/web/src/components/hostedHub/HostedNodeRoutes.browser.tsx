@@ -143,6 +143,12 @@ beforeEach(() => {
   vi.spyOn(hostedHubApi, "readThreadCacheThread").mockRejectedValue(
     new HostedHubApiError("not_found", 404),
   );
+  // These cases fake the lifecycle owner: `selectNode` and the session fields
+  // are stubbed per case, and so are the ports the workspace coordinator
+  // connects and releases a route's environment through, so no case opens a
+  // relay channel of its own.
+  vi.spyOn(hostedHubController, "acquireEnvironment").mockResolvedValue("connecting");
+  vi.spyOn(hostedHubController, "releaseEnvironment").mockResolvedValue();
 });
 
 afterEach(async () => {
@@ -705,8 +711,10 @@ describe("hosted node route surfaces", () => {
 
     fakeWindow!.history.back();
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
-    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
-    expect(useHostedHubStore.getState().selectionStatus).toBe("online");
+    // Leaving the node moves only the selection: its session is not released,
+    // so going back to it is a cursor move.
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
+    expect(hostedHubController.releaseEnvironment).not.toHaveBeenCalled();
     expect(fakeWindow!.location.pathname).toBe("/nodes");
   });
 

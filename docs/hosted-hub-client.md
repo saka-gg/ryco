@@ -168,7 +168,7 @@ never available through Hub relay sessions.
 
 Opening mounted work creates an exact-environment scope. Releasing that work removes only its own
 scope; it does not globally tear down another retained environment. When capacity requires an
-environment to close, teardown is ordered:
+environment to close, teardown releases that one environment and no other, in order:
 
 1. cancel ticket/reconnect work and close the previous relay channel;
 2. unsubscribe shell, thread-detail, lifecycle, config, and terminal listeners;
@@ -187,20 +187,43 @@ one; until then no config is shown. Sign-out purges all entries. `welcome` is no
 state: it comes from the primary connection's lifecycle stream only, and leaving the primary node
 drops it.
 
-Hosted Web keeps the shared absolute ceiling of three but uses a qualified platform ceiling of one.
-Cached directory, Inbox, Projects, and search hydration acquire no relay connection. A mounted
-thread detail, VCS status, or provider status scope acquires its owner automatically. Excess demand
-waits without evicting retained work or exceeding the bound. This ceiling counts logical node
-channels; the account-owned Hub socket remains open across selections. Ordinary tab hiding
-preserves live channels. Offline, freeze, and page history suspension invalidate readiness;
-restoration uses the authoritative hosted recovery path.
+Hosted Web keeps a warm set of up to three environments per tab, the shared absolute ceiling,
+qualified for browsers in the "Hosted Web warm set qualification (measured)" section of
+[relay-capacity-assessment-3b.md](relay-capacity-assessment-3b.md); a tab samples at most one device
+preview at a time, which bounds the full-PNG fallback. Cached directory, Inbox, Projects, and search
+hydration acquire no relay connection. A mounted thread detail, VCS status, or provider status scope
+acquires its owner automatically. Excess demand waits without evicting retained work or exceeding
+the bound; when a slot is needed, the least recently used environment that nothing demands is
+released. Releasing an environment from the warm set — a demotion — keeps its cached rows visible as
+cached until it is demanded again. This ceiling counts logical node channels; the account-owned Hub
+socket remains open across selections.
+
+Two more kinds of demand hold an environment while they last. An environment with queued messages
+for one of its server threads stays demanded until its queue drains or is cleared, so it connects,
+or stays warm, to send them; a draft's queued first send holds nothing (it is sent only from the
+open draft). A navigation press on a thread row of an environment without a live session holds that
+environment for three seconds, so its relay attempt overlaps the click; it follows only primary
+mouse or pen presses, never touch, connects at most one environment per five seconds and each
+environment at most once per 30 seconds, never displaces mounted work, and does nothing on the phone
+presentation. Hovering a row only warms its route and, while that environment's session is online,
+its thread detail.
+
+Ordinary tab hiding preserves live channels for a grace period: a tab hidden for 90 seconds plans as
+backgrounded and releases every environment nothing demands. Offline, freeze, and page history
+suspension invalidate readiness; restoration uses the authoritative hosted recovery path, and
+foreground or visibility recovery restores retained demand only.
+
+Hosted connections are created only through the lifecycle owner's connect port, for one session
+record generation. The generic primary-connection path never builds one: in hosted mode it returns
+the connection already registered for the active environment, or nothing (a caller that requires a
+connection gets an error), so no second constructor can bypass the ceiling or the record fencing.
 
 Tabs do not share tickets, sockets, queues, reconnect timers, or store instances. Closing a hosted
 channel cannot close direct clients or another tab.
 
 ### Retained environment sessions
 
-A client can keep several node sessions alive side by side instead of one session for the selected
+Hosted Web keeps several node sessions alive side by side instead of one session for the selected
 node. The hosted lifecycle owner stays the same single owner; the session state moves into one
 record per environment.
 
@@ -220,8 +243,10 @@ record per environment.
 - **Adopt, join, restart.** Acquiring an environment adopts its session when that session completed
   its own fresh relay attempt and accepted its own current shell snapshot and has not been
   suspended or interrupted since; selecting it then shows it ready at once, without a network
-  request. An acquisition joins a connection already requested for the record's generation, so a
-  press followed by a click buys one attempt. A terminal failure refuses it until the node's
+  request. Switching back to an environment of the warm set is therefore a cursor move: no Hub
+  stream is opened and the node is not asked for its shell again. An acquisition joins a
+  connection already requested for the record's generation, so a press followed by a click buys
+  one attempt. A terminal failure refuses it until the node's
   directory entry changes or the user retries. Anything else starts over with a fresh generation, a
   fresh relay attempt, and a fresh snapshot. Selecting an environment whose session can be neither
   adopted nor joined starts it over in the same way. A connect that waited behind the
@@ -252,8 +277,12 @@ record per environment.
   `synchronizing`, which never holds back another environment whose own session is ready; a slow or
   offline selection does not trigger a fresh access check on every foreground signal either.
 - **Release.** The demand executor releases environments; returning to the node directory releases
-  nothing. A directory refresh releases every environment whose node is gone, revoked, or (in the
-  browser) requires a native client, without waiting for those releases, and leaves the selection
+  nothing. A relay drop of a live environment that nothing demands releases it instead of
+  reconnecting it; it reconnects when it is demanded again. A rate limit hit by background demand
+  (drafts, home discovery, queued sends, a press) stands that demand down instead of retrying it,
+  while a mounted view keeps its transport's backoff. A directory refresh releases every
+  environment whose node is gone, revoked, or (in the browser) requires a native client, without
+  waiting for those releases, and leaves the selection
   when it is one of them. Releasing an environment ends the commands waiting to replay there and
   clears only that environment's node-scoped state — its queries, project, git, and checkpoint-diff
   caches, its encryption projection, and its config entry — unless a newer session of the same
@@ -262,8 +291,8 @@ record per environment.
   waits for those releases, and an expired session's explanation is never published onto a session
   that signed in meanwhile.
 
-No client enables retained environment sessions yet: every client still runs one session for the
-selected node.
+Hosted Web runs retained environment sessions. Clients that do not opt in still run one session
+for the selected node.
 
 ## Stable node routes
 
@@ -307,10 +336,11 @@ session shows the normal passkey surface; the routed node resumes only after re-
 revalidation. Back and Forward navigate between the directory and selected-node views: returning
 to the directory releases exactly that route's scope. A non-retained connection may remain warm as
 LRU state until backgrounding or capacity requires its slot; unrelated retained work is unchanged.
-Forward re-enters through the restore pipeline with a fresh ticket when acquisition is required. Legacy hosted URLs
-without the node segment redirect to the node-scoped shape when the directory can identify the
-node, otherwise to the directory. No session, ticket, credential, challenge, or signature material
-appears in URLs, history state, or browser storage.
+Forward adopts a session that stayed live; it re-enters through the restore pipeline with a fresh
+ticket when acquisition is required. Legacy hosted URLs without the node segment redirect to the
+node-scoped shape when the directory can identify the node, otherwise to the directory. No session,
+ticket, credential, challenge, or signature material appears in URLs, history state, or browser
+storage.
 
 ## Sending while a node connects
 
@@ -623,7 +653,10 @@ it cannot show; on a phone, use the Ryco mobile app.
 ## Reconnect, replay, and delivery uncertainty
 
 Each demanded environment has at most one active connection attempt in a tab, and the hosted Web
-platform ceiling permits only one active environment. Reconnect uses exponential
+platform ceiling permits at most three connected environments. Only demanded environments
+reconnect after a relay drop or a Hub session loss (a deploy, a restart, a proxy interruption): a
+warm environment nothing demands is released and reconnects on demand, so a Hub restart does not
+spend a reconnect, and a ticket, per warm environment of every tab. Reconnect uses exponential
 backoff from one second to 60 seconds with bounded ±20% jitter and bounded Hub `retryAfterMs` input.
 The delay resets only after a session remains stable for 60 seconds. Every retry obtains a fresh
 ticket.

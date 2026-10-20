@@ -46,15 +46,26 @@ Cached lists do not connect to machines. Mounted work retains only the live stre
 - VCS status; and
 - provider status.
 
-Those scopes are refcounted and released on unmount. Mobile and Desktop use the assessed absolute
-limit of three concurrent environments. Hosted Web uses a lower qualified limit of one because a
-browser can also carry the sustained full-PNG simulator fallback. Demand beyond the platform limit
-waits; retained work is not evicted and the limit is never exceeded.
+Those scopes are refcounted and released on unmount. Mobile, Desktop and hosted Web use the
+assessed absolute limit of three concurrent environments per client (per tab on hosted Web). Hosted
+Web reached it with its own qualification (see the "Hosted Web warm set qualification (measured)"
+section of [relay-capacity-assessment-3b.md](relay-capacity-assessment-3b.md)); the sustained
+full-PNG simulator fallback stays bounded because a tab samples at most one device preview at a
+time. Demand beyond the platform limit waits; retained work is not evicted and the limit is never
+exceeded.
 
-LRU recency may keep an unretained connection warm until capacity is needed. Backgrounding a native
-client, or hiding hosted Web, releases non-retained connections. Foreground or visibility recovery
-restores retained demand only and staggers reconnects; there is no reconnect-all-cached-machines
-path.
+The connected environments form a warm set ordered by recency. LRU recency keeps an unretained
+connection warm until capacity is needed, so switching among up to three recently used machines
+selects a session that is already live instead of opening a new one. Hosted Web also holds demand
+for an environment while one of its server threads has queued messages, and for a few seconds after
+a navigation press on one of its thread rows.
+
+Only demanded environments (the one in view, or one holding a scope) reconnect after a relay or Hub
+drop; a warm environment nothing demands is released instead and reconnects when it is demanded
+again, so a Hub restart costs one reconnect per demanded environment rather than one per warm one.
+Backgrounding a native client releases non-retained connections; hosted Web does so once a tab has
+been hidden for 90 seconds. Foreground or visibility recovery restores retained demand only and
+staggers reconnects; there is no reconnect-all-cached-machines path.
 
 On Desktop, switching to another app or window does not background the client, so warm connections
 survive it. Minimizing or hiding the window, or locking the screen, backgrounds it after a

@@ -13,9 +13,9 @@ import { createFakeHistoryWindow } from "../../test/fakeHistoryWindow";
 /**
  * Retained environment sessions end to end: the real lifecycle owner, session
  * registry, demand executor, workspace coordinator, route orchestrator and
- * environment service, with retained mode forced through the runtime's test
- * seam. Only the relay is fake: a transport records its options and never opens
- * a socket, and each RPC client lets a test deliver a shell snapshot.
+ * environment service, configured as production configures them. Only the
+ * relay is fake: a transport records its options and never opens a socket, and
+ * each RPC client lets a test deliver a shell snapshot.
  */
 
 interface CapturedTransport {
@@ -39,6 +39,7 @@ interface CapturedClient {
   readonly orchestration: {
     readonly dispatchCommand: ReturnType<typeof vi.fn>;
     readonly subscribeShell: ReturnType<typeof vi.fn>;
+    readonly subscribeThread: ReturnType<typeof vi.fn>;
   };
   emitShellSnapshot(snapshot: OrchestrationShellSnapshot): void;
 }
@@ -95,6 +96,7 @@ import { hostedHubApi } from "./api";
 import { readHostedRpcCapability } from "./capabilities";
 import {
   HOSTED_WEB_WAKE_STAGGER_MS,
+  MAX_HOSTED_WEB_CONNECTIONS,
   readHostedWorkspaceState,
   setHostedWorkspaceBackgrounded,
   startHostedWorkspaceCoordinator,
@@ -107,7 +109,16 @@ import {
 } from "./nodeRouteOrchestrator";
 import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "./nodeRoutes";
 import { configureWebHostedRuntime } from "./runtime";
-import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
+import {
+  getHostedEnvironmentSessions,
+  hostedEnvironmentSessionsMode,
+  hostedHubController,
+  hostedHubStore,
+} from "./state";
+import {
+  isNavigationPress,
+  noteThreadPressIntent,
+} from "../components/sidebar/threadNavigationIntent";
 import {
   listEnvironmentConnections,
   readEnvironmentConnection,
@@ -187,6 +198,7 @@ function makeClient(environmentId: EnvironmentId | null): CapturedClient & Recor
           shellListener = null;
         };
       }),
+      subscribeThread: vi.fn(() => () => undefined),
     },
     terminal: { onEvent: vi.fn(() => () => undefined) },
     emitShellSnapshot(snapshot) {
@@ -218,7 +230,8 @@ async function flush(ms = 0): Promise<void> {
   for (let turn = 0; turn < 5; turn += 1) await vi.advanceTimersByTimeAsync(0);
 }
 
-async function signIn(nodes: ReadonlyArray<HostedHubNode>, maxConnections: number) {
+/** `maxConnections` overrides the production ceiling. */
+async function signIn(nodes: ReadonlyArray<HostedHubNode>, maxConnections?: number) {
   directory = nodes;
   await hostedHubController.bootstrap();
   expect(hostedHubStore.getState()).toMatchObject({
@@ -230,7 +243,7 @@ async function signIn(nodes: ReadonlyArray<HostedHubNode>, maxConnections: numbe
   stopCoordinator = startHostedWorkspaceCoordinator({
     cache: emptyCache,
     hubOrigin: "https://hub.example.test",
-    maxConnections,
+    ...(maxConnections === undefined ? {} : { maxConnections }),
     // The renewal tick runs only when a test says so.
     setInterval: (callback) => renewalTicks.push(callback),
     clearInterval: () => undefined,
@@ -289,7 +302,7 @@ function liveEnvironmentIds(): ReadonlyArray<EnvironmentId> {
 
 beforeAll(() => {
   vi.stubEnv("VITE_RYCO_CLIENT_MODE", "hosted-hub");
-  configureWebHostedRuntime(hostedHubApi, { environmentSessions: "retained" });
+  configureWebHostedRuntime(hostedHubApi);
 });
 
 beforeEach(() => {
@@ -337,7 +350,26 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
+function ticketCount(): number {
+  return vi.mocked(hostedHubApi.issueRelayTicket).mock.calls.length;
+}
+
 describe("hosted Web retained environment sessions", () => {
+  it("runs retained sessions with the production configuration and ceiling", async () => {
+    const nodes = [hubNode(1), hubNode(2), hubNode(3), hubNode(4)];
+    await signIn(nodes);
+    expect(hostedEnvironmentSessionsMode()).toBe("retained");
+    expect(readHostedWorkspaceState().demand.demand.platformMaxConnections).toBe(
+      MAX_HOSTED_WEB_CONNECTIONS,
+    );
+    const releases = nodes.map(retainView);
+    await flush(4 * HOSTED_WEB_WAKE_STAGGER_MS);
+
+    expect(listEnvironmentConnections()).toHaveLength(3);
+    expect(readHostedWorkspaceState().demand.queuedEnvironmentIds).toHaveLength(1);
+    releases.forEach((release) => release());
+  });
+
   it("never holds two connections at one allowed connection, and swaps without leaving for the directory", async () => {
     const [a, b] = [hubNode(1), hubNode(2)];
     await signIn([a, b], 1);
@@ -362,7 +394,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("queues a routed fourth node behind three views and selecting it connects nothing", async () => {
     const nodes = [hubNode(1), hubNode(2), hubNode(3), hubNode(4)];
-    await signIn(nodes, 3);
+    await signIn(nodes);
     const releases = nodes.slice(0, 3).map(retainView);
     await flush(3 * HOSTED_WEB_WAKE_STAGGER_MS);
     expect(liveEnvironmentIds().toSorted()).toEqual(
@@ -384,16 +416,21 @@ describe("hosted Web retained environment sessions", () => {
 
   it("adopts a live session on the switch back without a new attempt or shell subscription", async () => {
     const [a, b] = [hubNode(1), hubNode(2)];
-    await signIn([a, b], 3);
+    await signIn([a, b]);
     await route(a);
     establish(a);
     await route(b);
     establish(b);
+    const tickets = ticketCount();
+    const releaseEnvironment = vi.spyOn(hostedHubController, "releaseEnvironment");
 
     await route(a);
 
+    // No Hub stream is opened and the node is not asked for a shell again.
+    expect(ticketCount()).toBe(tickets);
     expect(transportsFor(a)).toHaveLength(1);
     expect(latestClient(a).orchestration.subscribeShell).toHaveBeenCalledOnce();
+    expect(releaseEnvironment).not.toHaveBeenCalled();
     expect(hostedHubStore.getState()).toMatchObject({
       selectedNode: a,
       sessionStatus: "ready",
@@ -404,7 +441,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("refuses commands on an environment still synchronizing while another is ready", async () => {
     const [x, y] = [hubNode(1), hubNode(2)];
-    await signIn([x, y], 3);
+    await signIn([x, y]);
     await route(y);
     establish(y);
     const releaseX = retainView(x);
@@ -437,7 +474,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("reconnects a warm environment that holds a lease while the directory is shown", async () => {
     const a = hubNode(1);
-    await signIn([a], 3);
+    await signIn([a]);
     const release = retainView(a);
     await flush();
     establish(a);
@@ -455,7 +492,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("joins a requested connection when the route follows within 100 ms", async () => {
     const a = hubNode(1);
-    await signIn([a], 3);
+    await signIn([a]);
     await expect(hostedHubController.acquireEnvironment(a.id)).resolves.toBe("connecting");
     await flush(50);
     await route(a);
@@ -465,9 +502,43 @@ describe("hosted Web retained environment sessions", () => {
     expect(readEnvironmentConnection(a.environmentId)).not.toBeNull();
   });
 
+  it("opens one attempt for a press followed by its click", async () => {
+    const [a, b] = [hubNode(1), hubNode(2)];
+    await signIn([a, b]);
+    await route(b);
+    establish(b);
+    const press = {
+      button: 0,
+      metaKey: false,
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      pointerType: "mouse",
+      target: null,
+      currentTarget: null,
+    };
+
+    expect(isNavigationPress(press)).toBe(true);
+    noteThreadPressIntent({ environmentId: a.environmentId, threadId: ThreadId.make("thread-a") });
+    await flush();
+    // The press alone connects the node, ahead of the navigation.
+    expect(transportsFor(a)).toHaveLength(1);
+    expect(hostedHubStore.getState().selectedNode?.id).toBe(b.id);
+
+    await route(a);
+    await flush(HOSTED_WEB_WAKE_STAGGER_MS);
+    await transportsFor(a)[0]!.resolveUrl();
+
+    expect(transportsFor(a)).toHaveLength(1);
+    expect(
+      vi.mocked(hostedHubApi.issueRelayTicket).mock.calls.filter(([nodeId]) => nodeId === a.id),
+    ).toHaveLength(1);
+    expect(hostedHubStore.getState().selectedNode?.id).toBe(a.id);
+  });
+
   it("re-acquires every retained record after a resume, the routed one first", async () => {
     const [a, b] = [hubNode(1), hubNode(2)];
-    await signIn([a, b], 3);
+    await signIn([a, b]);
     await route(a);
     establish(a);
     const releaseB = retainView(b);
@@ -499,7 +570,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("releases a leaseless warm environment whose relay drops and reconnects a leased one", async () => {
     const [a, b] = [hubNode(1), hubNode(2)];
-    await signIn([a, b], 3);
+    await signIn([a, b]);
     await route(a);
     establish(a);
     await route(b);
@@ -521,7 +592,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("does not reconnect a terminally failed record until its directory entry changes", async () => {
     const [a, b] = [hubNode(1), hubNode(2)];
-    await signIn([a, b], 3);
+    await signIn([a, b]);
     await route(a);
     const releaseB = retainView(b);
     await flush(HOSTED_WEB_WAKE_STAGGER_MS);
@@ -546,7 +617,7 @@ describe("hosted Web retained environment sessions", () => {
 
   it("keeps the routed environment through six hidden minutes of throttled ticks", async () => {
     const a = hubNode(1);
-    await signIn([a], 3);
+    await signIn([a]);
     await route(a);
     establish(a);
     const releaseEnvironment = vi.spyOn(hostedHubController, "releaseEnvironment");
