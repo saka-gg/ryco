@@ -1017,6 +1017,7 @@ export class HubConnector {
       scheduler: this.#scheduler,
       now: this.#scheduler.now,
       proofFirst: this.#proofFirst,
+      clientVersion: this.#enrollmentMetadata.clientVersion,
       onFrame: (frame) => {
         if (!this.#state.isCurrent(generation) || this.#stopping) return;
         // Heartbeats describe this socket, not a channel. Key custody during

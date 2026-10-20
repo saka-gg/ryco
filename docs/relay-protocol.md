@@ -97,9 +97,16 @@ Node authentication:
   protocolMinor,
   nodeId,
   nonce,
-  signature
+  signature,
+  clientVersion? // optional
 }
 ```
+
+`clientVersion` is the node's software version (non-empty, trimmed, at most 64 characters). It lets
+the Hub keep its record of the node current after the node updates. It is display metadata: it is
+not part of the signed transcript and grants nothing. A node leaves it out rather than send a value
+outside those bounds, and a relay that predates the field ignores it, like any unknown optional
+field.
 
 Client authentication:
 
