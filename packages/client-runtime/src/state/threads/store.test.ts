@@ -52,6 +52,7 @@ import {
 } from "./store.ts";
 import { selectThreadDetailLoaded } from "./storeSelectors.ts";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { getThreadFromEnvironmentState } from "./threadDerivation.ts";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -3649,6 +3650,28 @@ describe("evicting thread bodies", () => {
     expect(after.cachedMessageThreadIds).toEqual({});
     expect(after.messageByThreadId).toEqual({});
     expect(after.threadShellById[first]).toBeDefined();
+  });
+
+  it("forgets the thread composed from a dropped body", () => {
+    const loaded = loadedState();
+    const environment = localEnvironmentStateOf(loaded);
+    const composed = getThreadFromEnvironmentState(environment, first);
+    const untouched = getThreadFromEnvironmentState(environment, second);
+    expect(composed?.messages).toHaveLength(2);
+    expect(getThreadFromEnvironmentState(environment, first)).toBe(composed);
+
+    const after = localEnvironmentStateOf(evictThreadBodies(loaded, [firstRef]));
+
+    // Composing from the state before the eviction builds the thread anew: the
+    // memo under its shell, and the body it held, are gone.
+    const recomposed = getThreadFromEnvironmentState(environment, first);
+    expect(recomposed).not.toBe(composed);
+    expect(recomposed).toEqual(composed);
+    expect(getThreadFromEnvironmentState(environment, second)).toBe(untouched);
+    expect(after.threadShellById[first]).toBe(environment.threadShellById[first]);
+    expect(after.threadSessionById[first]).toBe(environment.threadSessionById[first]);
+    expect(after.threadTurnStateById[first]).toBe(environment.threadTurnStateById[first]);
+    expect(after.sidebarThreadSummaryById[first]).toBe(environment.sidebarThreadSummaryById[first]);
   });
 
   it("loads the thread again as if it had never been opened", () => {

@@ -22,8 +22,10 @@ import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
 import {
-  planThreadBodyEvictions,
+  planThreadBodyResidency,
   THREAD_BODY_RECENT_ACCESS_MS,
+  THREAD_BODY_RESIDENCY_BACKSTOP_MS,
+  type ThreadBodyResidencyEntry,
   type ThreadBodyUsage,
 } from "../state/threads/threadBodyResidency.ts";
 import type { EnvironmentConnection } from "./connection.ts";
@@ -118,12 +120,15 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   ) => boolean;
   /**
    * Bounded retention of the thread bodies the store holds. Once a thread
-   * subscription is disposed or a thread snapshot lands, bodies past the thread
-   * and byte budgets are dropped, least recently accessed first.
+   * subscription is disposed, a thread snapshot or history page lands, or the
+   * idle sweep runs, bodies past the thread and byte budgets are dropped, least
+   * recently accessed first. A store left over budget is checked again when the
+   * recency of a body it keeps lapses, and at least once a minute.
    * `listThreadBodies` names the bodies the store holds and `evictThreadBodies`
-   * drops them; without both nothing is dropped. A retained, visible or busy
-   * thread, and one for which `isThreadBodyProtected` answers true (queued
-   * sends, an unsent draft), keeps its body.
+   * drops them; without both nothing is dropped. A retained or busy thread, one
+   * holding messages that arrived before its shell, and one for which
+   * `isThreadBodyProtected` answers true (queued sends, an unsent draft), keeps
+   * its body.
    */
   readonly listThreadBodies?: () => ReadonlyArray<ThreadBodyUsage>;
   readonly evictThreadBodies?: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void;
@@ -451,6 +456,8 @@ export function createEnvironmentConnectionSupervisor<
   const recordRetainedHistoryPage = (entry: ThreadDetailSubscriptionEntry, page: unknown) => {
     entry.retainedRows.recordHistoryPage(page);
     setRetainedBytes(entry, entry.retainedRows.bytes());
+    // A page grows the thread's body in the store.
+    scheduleResidencyPass();
   };
   const shouldEvict = (entry: ThreadDetailSubscriptionEntry) =>
     entry.refCount === 0 &&
@@ -493,6 +500,9 @@ export function createEnvironmentConnectionSupervisor<
       sweeping = false;
     }
     armEvictionSweep();
+    // Bodies can enter the store without a subscription (read-cache hydration),
+    // so the sweep checks the store's budget whether or not it disposed anything.
+    scheduleResidencyPass();
   };
   /** The entry is retained again (or gone): it is no longer an eviction candidate. */
   const clearEviction = (entry: ThreadDetailSubscriptionEntry) => {
@@ -828,12 +838,64 @@ export function createEnvironmentConnectionSupervisor<
     });
   };
   // The store keeps the bodies of threads whose subscription is gone. After
-  // disposals and snapshots (once per chunk, however many) the bodies past the
-  // store's thread and byte budgets are dropped, least recently accessed first.
+  // disposals, snapshots and history pages (once per chunk, however many) and
+  // after each idle sweep, the bodies past the store's thread and byte budgets
+  // are dropped, least recently accessed first.
   let residencyPassScheduled = false;
   let residencyPassRunning = false;
   // Bumped by a reset: a pass scheduled before it must not run after it.
   let residencyEpoch = 0;
+  // One timer re-checks a store a pass left over budget: when the recency of a
+  // body it kept lapses, or after the backstop, whichever comes first.
+  let residencyTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  const armResidencyTimer = (deadline: number | null) => {
+    if (residencyTimeoutId !== null) input.clearTimeout(residencyTimeoutId);
+    residencyTimeoutId = null;
+    if (deadline === null) return;
+    residencyTimeoutId = input.setTimeout(
+      () => {
+        residencyTimeoutId = null;
+        scheduleResidencyPass();
+      },
+      Math.max(0, deadline - input.now()),
+    );
+  };
+  /** How the residency pass ranks and protects one body the store holds. */
+  const residencyEntryOf = ({
+    ref,
+    bytes,
+    environmentActive,
+    lastActivityAt,
+    hasPendingMessages,
+  }: ThreadBodyUsage): ThreadBodyResidencyEntry => {
+    const key = scopedThreadKey(ref);
+    const subscription = threadDetailSubscriptions.get(key);
+    const access = subscription ?? departedThreadBodies.get(key);
+    // A body no subscription ever delivered (cached content) has no access
+    // time, and so no recency: such bodies go first, the least recently active
+    // among them first.
+    const lastAccessedAt = access?.lastAccessedAt ?? 0;
+    return {
+      ref,
+      lastActivityAt,
+      bytes:
+        access !== undefined && access.estimatedRetainedBytes > 0
+          ? access.estimatedRetainedBytes
+          : bytes,
+      lastAccessedAt,
+      protected:
+        (subscription !== undefined && subscription.refCount > 0) ||
+        input.isThreadDetailSubscriptionNonIdle(ref.environmentId, ref.threadId) ||
+        input.isThreadBodyProtected?.(ref) === true ||
+        hasPendingMessages,
+      // A thread of the active environment keeps its body for a while after
+      // its last access, so returning to it renders at once.
+      protectedUntil:
+        environmentActive && lastAccessedAt > 0
+          ? lastAccessedAt + THREAD_BODY_RECENT_ACCESS_MS
+          : undefined,
+    };
+  };
   const runResidencyPass = () => {
     const { listThreadBodies, evictThreadBodies } = input;
     if (listThreadBodies === undefined || evictThreadBodies === undefined) return;
@@ -843,31 +905,20 @@ export function createEnvironmentConnectionSupervisor<
     for (const key of departedThreadBodies.keys()) {
       if (!heldKeys.has(key)) departedThreadBodies.delete(key);
     }
-    const planned = planThreadBodyEvictions({
-      entries: usage.map(({ ref, bytes, environmentActive, lastActivityAt }) => {
-        const key = scopedThreadKey(ref);
-        const subscription = threadDetailSubscriptions.get(key);
-        const access = subscription ?? departedThreadBodies.get(key);
-        // A body no subscription ever delivered (cached content) has no access
-        // time yet: such bodies go first, the least recently active among them
-        // first.
-        const lastAccessedAt = access?.lastAccessedAt ?? 0;
-        return {
-          ref,
-          lastActivityAt,
-          bytes:
-            access !== undefined && access.estimatedRetainedBytes > 0
-              ? access.estimatedRetainedBytes
-              : bytes,
-          lastAccessedAt,
-          protected:
-            (subscription !== undefined && subscription.refCount > 0) ||
-            input.isThreadDetailSubscriptionNonIdle(ref.environmentId, ref.threadId) ||
-            input.isThreadBodyProtected?.(ref) === true ||
-            (environmentActive && now - lastAccessedAt < THREAD_BODY_RECENT_ACCESS_MS),
-        };
-      }),
-    });
+    const plan = planThreadBodyResidency({ now, entries: usage.map(residencyEntryOf) });
+    // A store left over budget is checked again, whatever kept it there: a
+    // body whose recency lapses, protection that ends unseen, or bodies the
+    // read cache restored without a subscription. One within budget arms
+    // nothing and waits for the next disposal, snapshot, page or sweep.
+    armResidencyTimer(
+      plan.overBudget
+        ? Math.min(
+            plan.recheckAt ?? Number.POSITIVE_INFINITY,
+            now + THREAD_BODY_RESIDENCY_BACKSTOP_MS,
+          )
+        : null,
+    );
+    const planned = plan.evict;
     if (planned.length === 0) return;
     // An idle cached subscription would write events into a body that is gone.
     residencyPassRunning = true;
@@ -1444,6 +1495,7 @@ export function createEnvironmentConnectionSupervisor<
     // would rank every body in the shared store as never accessed.
     residencyEpoch += 1;
     residencyPassScheduled = false;
+    armResidencyTimer(null);
     await Promise.all([...connections.keys()].map((environmentId) => remove(environmentId)));
     // Deleting the visited entry while iterating a Map is well defined.
     for (const environmentId of pendingSavedEnvironmentConnections.keys()) {

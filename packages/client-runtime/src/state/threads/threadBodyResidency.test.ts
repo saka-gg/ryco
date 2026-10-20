@@ -8,24 +8,19 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import { scopeThreadRef } from "../../scoped.ts";
-import {
-  selectSidebarThreadSummaryByRef,
-  selectThreadByRef,
-  type AppState,
-  type EnvironmentState,
-} from "./store.ts";
+import type { AppState, EnvironmentState } from "./store.ts";
 import {
   hasComposerDraftContent,
   hasUnsentThreadWork,
   isThreadNonIdle,
-  planThreadBodyEvictions,
+  planThreadBodyResidency,
   selectThreadBodyUsage,
   THREAD_BODY_MAX_BYTES,
   THREAD_BODY_MAX_THREADS,
+  THREAD_WORKING_SESSION_STATUSES,
   type ComposerDraftContent,
   type ThreadBodyResidencyEntry,
 } from "./threadBodyResidency.ts";
-import { fullThreadEntry } from "./types.ts";
 
 const environmentId = EnvironmentId.make("environment-residency");
 const otherEnvironmentId = EnvironmentId.make("environment-other");
@@ -91,69 +86,79 @@ describe("isThreadNonIdle", () => {
     expect(isThreadNonIdle(appState(), scopeThreadRef(otherEnvironmentId, threadId))).toBe(false);
   });
 
+  it("counts only a starting or running session as working", () => {
+    expect([...THREAD_WORKING_SESSION_STATUSES].toSorted()).toEqual(["running", "starting"]);
+  });
+
   it.each([
     ["pending approvals", { hasPendingApprovals: true }],
     ["pending user input", { hasPendingUserInput: true }],
-    ["an actionable proposed plan", { hasActionableProposedPlan: true }],
     ["a running latest turn", { latestTurn: turn("running") }],
     ["a starting session", { session: session("starting") }],
     ["a running session", { session: session("running") }],
-    ["a ready session", { session: session("ready") }],
-    ["an interrupted session", { session: session("interrupted") }],
-    ["an errored session", { session: session("error") }],
   ])("is true for a summary with %s", (_name, overrides) => {
     const state = appState({ sidebarThreadSummaryById: { [threadId]: summary(overrides) } });
     expect(isThreadNonIdle(state, ref)).toBe(true);
   });
 
   it.each([
+    ["a ready session", { session: session("ready") }],
+    ["an interrupted session", { session: session("interrupted") }],
+    ["an errored session", { session: session("error") }],
     ["an idle session", { session: session("idle") }],
     ["a stopped session", { session: session("stopped") }],
     ["a completed latest turn", { latestTurn: turn("completed") }],
+    [
+      "a ready session after a completed turn",
+      { session: session("ready"), latestTurn: turn("completed") },
+    ],
+    ["an actionable proposed plan", { hasActionableProposedPlan: true }],
     ["nothing pending", {}],
   ])("is false for a summary with %s", (_name, overrides) => {
     const state = appState({ sidebarThreadSummaryById: { [threadId]: summary(overrides) } });
     expect(isThreadNonIdle(state, ref)).toBe(false);
   });
 
-  it("reads the session and turn records when the summary shows nothing", () => {
-    const base = { threadShellById: { [threadId]: fullShell } };
-    expect(
-      isThreadNonIdle(
-        appState({ ...base, threadSessionById: { [threadId]: session("running") } as never }),
-        ref,
-      ),
-    ).toBe(true);
-    expect(
-      isThreadNonIdle(
-        appState({
-          ...base,
-          threadTurnStateById: { [threadId]: { latestTurn: turn("running") } } as never,
-        }),
-        ref,
-      ),
-    ).toBe(true);
-    expect(
-      isThreadNonIdle(
-        appState({
-          ...base,
-          threadTurnStateById: {
-            [threadId]: { latestTurn: null, pendingSourceProposedPlan: { planId: "plan-1" } },
-          } as never,
-        }),
-        ref,
-      ),
-    ).toBe(true);
-    expect(
-      isThreadNonIdle(
-        appState({
-          ...base,
-          threadSessionById: { [threadId]: session("idle") } as never,
-          threadTurnStateById: { [threadId]: { latestTurn: turn("completed") } } as never,
-        }),
-        ref,
-      ),
-    ).toBe(false);
+  it.each([
+    ["a starting session", { threadSessionById: { [threadId]: session("starting") } }],
+    ["a running session", { threadSessionById: { [threadId]: session("running") } }],
+    [
+      "a running latest turn",
+      { threadTurnStateById: { [threadId]: { latestTurn: turn("running") } } },
+    ],
+  ])("is true for a shell whose records hold %s", (_name, records) => {
+    const state = appState({
+      threadShellById: { [threadId]: fullShell },
+      ...(records as Partial<EnvironmentState>),
+    });
+    expect(isThreadNonIdle(state, ref)).toBe(true);
+  });
+
+  it.each([
+    ["a ready session", { threadSessionById: { [threadId]: session("ready") } }],
+    ["an interrupted session", { threadSessionById: { [threadId]: session("interrupted") } }],
+    ["an errored session", { threadSessionById: { [threadId]: session("error") } }],
+    ["an idle session", { threadSessionById: { [threadId]: session("idle") } }],
+    ["a stopped session", { threadSessionById: { [threadId]: session("stopped") } }],
+    [
+      "a completed latest turn",
+      { threadTurnStateById: { [threadId]: { latestTurn: turn("completed") } } },
+    ],
+    [
+      "a pending source proposed plan",
+      {
+        threadTurnStateById: {
+          [threadId]: { latestTurn: null, pendingSourceProposedPlan: { planId: "plan-1" } },
+        },
+      },
+    ],
+    ["nothing", {}],
+  ])("is false for a shell whose records hold %s", (_name, records) => {
+    const state = appState({
+      threadShellById: { [threadId]: fullShell },
+      ...(records as Partial<EnvironmentState>),
+    });
+    expect(isThreadNonIdle(state, ref)).toBe(false);
   });
 
   it("ignores session and turn records of a thread with no full shell", () => {
@@ -175,32 +180,53 @@ describe("isThreadNonIdle", () => {
     expect(isThreadNonIdle(state, ref)).toBe(false);
   });
 
-  it("answers as the predicate over a composed thread did, for every combination of its records", () => {
-    // The previous predicate composed the whole thread to read three records.
-    const composedThreadPredicate = (state: AppState) => {
-      const sidebarThread = fullThreadEntry(selectSidebarThreadSummaryByRef(state, ref));
-      const live = (status: string | undefined) =>
-        Boolean(status && status !== "idle" && status !== "stopped");
-      if (sidebarThread) {
-        if (
-          sidebarThread.hasPendingApprovals ||
-          sidebarThread.hasPendingUserInput ||
-          sidebarThread.hasActionableProposedPlan
-        ) {
-          return true;
+  it("answers the rule for every combination of its records", () => {
+    // Work is in progress while the user is asked something mid-turn, a
+    // session works, or the latest turn runs; nothing else keeps a thread busy.
+    type Entry =
+      | {
+          readonly shellDetail?: string;
+          readonly hasPendingApprovals?: boolean;
+          readonly hasPendingUserInput?: boolean;
+          readonly session?: { readonly orchestrationStatus: OrchestrationSessionStatus } | null;
+          readonly orchestrationStatus?: OrchestrationSessionStatus;
+          readonly latestTurn?: { readonly state: string } | null;
         }
-        if (live(sidebarThread.session?.orchestrationStatus)) return true;
-        if (sidebarThread.latestTurn?.state === "running") return true;
+      | null
+      | undefined;
+    const isFull = (entry: Entry) => entry != null && entry.shellDetail !== "archived-stub";
+    const working = (status: OrchestrationSessionStatus | undefined) =>
+      status === "starting" || status === "running";
+    const referencePredicate = (
+      summaryEntry: Entry,
+      shellEntry: Entry,
+      sessionRecord: Entry,
+      turnState: Entry,
+    ) => {
+      if (
+        isFull(summaryEntry) &&
+        (summaryEntry?.hasPendingApprovals === true ||
+          summaryEntry?.hasPendingUserInput === true ||
+          working(summaryEntry?.session?.orchestrationStatus) ||
+          summaryEntry?.latestTurn?.state === "running")
+      ) {
+        return true;
       }
-      const thread = selectThreadByRef(state, ref);
-      if (!thread) return false;
+      if (!isFull(shellEntry)) return false;
       return (
-        live(thread.session?.orchestrationStatus) ||
-        thread.latestTurn?.state === "running" ||
-        thread.pendingSourceProposedPlan !== undefined
+        working(sessionRecord?.orchestrationStatus) || turnState?.latestTurn?.state === "running"
       );
     };
 
+    const statuses: OrchestrationSessionStatus[] = [
+      "idle",
+      "starting",
+      "running",
+      "ready",
+      "interrupted",
+      "stopped",
+      "error",
+    ];
     const summaries = [
       undefined,
       stub,
@@ -208,15 +234,13 @@ describe("isThreadNonIdle", () => {
       summary({ hasPendingApprovals: true }),
       summary({ hasPendingUserInput: true }),
       summary({ hasActionableProposedPlan: true }),
-      summary({ session: session("running") }),
-      summary({ session: session("idle") }),
-      summary({ session: session("stopped") }),
-      summary({ session: session("ready") }),
+      ...statuses.map((status) => summary({ session: session(status) })),
+      summary({ session: session("ready"), latestTurn: turn("completed") }),
       summary({ latestTurn: turn("running") }),
       summary({ latestTurn: turn("completed") }),
     ];
     const shells = [undefined, stub, fullShell];
-    const sessions = [undefined, null, session("idle"), session("running"), session("stopped")];
+    const sessions = [undefined, null, ...statuses.map((status) => session(status))];
     const turnStates = [
       undefined,
       { latestTurn: null },
@@ -243,7 +267,7 @@ describe("isThreadNonIdle", () => {
                 ? {}
                 : { threadTurnStateById: { [threadId]: turnState } as never }),
             });
-            const expected = composedThreadPredicate(state);
+            const expected = referencePredicate(sidebarSummary, shell, sessionRecord, turnState);
             expect(isThreadNonIdle(state, ref)).toBe(expected);
             combinations += 1;
             if (expected) nonIdle += 1;
@@ -251,7 +275,7 @@ describe("isThreadNonIdle", () => {
         }
       }
     }
-    expect(combinations).toBe(12 * 3 * 5 * 5);
+    expect(combinations).toBe(16 * 3 * 9 * 5);
     // The matrix reaches both answers.
     expect(nonIdle).toBeGreaterThan(0);
     expect(nonIdle).toBeLessThan(combinations);
@@ -397,6 +421,25 @@ describe("selectThreadBodyUsage", () => {
     ).toEqual([otherEnvironmentId]);
   });
 
+  it("reports which bodies hold messages that arrived before their shell", () => {
+    const pending = slice({ "pending-message": "early" })["pending-message" as MessageId]!;
+    const usage = selectThreadBodyUsage(
+      appState({
+        messageByThreadId: { [ThreadId.make("loaded")]: slice({ "message-1": "x" }) },
+        pendingMessagesByThreadId: {
+          [ThreadId.make("pending")]: [pending],
+          [ThreadId.make("drained")]: [],
+        },
+      }),
+    );
+    const pendingOf = (id: string) =>
+      usage.find((entry) => entry.ref.threadId === id)?.hasPendingMessages;
+
+    expect(pendingOf("pending")).toBe(true);
+    expect(pendingOf("drained")).toBe(false);
+    expect(pendingOf("loaded")).toBe(false);
+  });
+
   it("measures a message slice again once the store replaces it", () => {
     const small = slice({ "message-1": "x" });
     const first = selectThreadBodyUsage(appState({ messageByThreadId: { [threadId]: small } }));
@@ -458,7 +501,8 @@ describe("selectThreadBodyUsage", () => {
   });
 });
 
-describe("planThreadBodyEvictions", () => {
+describe("planThreadBodyResidency", () => {
+  const now = Date.UTC(2026, 9, 1);
   const refOf = (id: string) => scopeThreadRef(environmentId, ThreadId.make(id));
   const entry = (
     id: string,
@@ -473,28 +517,28 @@ describe("planThreadBodyEvictions", () => {
   });
   const idsOf = (refs: ReadonlyArray<{ readonly threadId: string }>) =>
     refs.map((planned) => planned.threadId);
+  const plan = (input: Omit<Parameters<typeof planThreadBodyResidency>[0], "now">) =>
+    planThreadBodyResidency({ now, ...input });
 
   it("plans nothing within both limits", () => {
-    expect(
-      planThreadBodyEvictions({
-        entries: [entry("a", 1), entry("b", 2)],
-        maxThreads: 2,
-        maxBytes: 2,
-      }),
-    ).toEqual([]);
+    expect(plan({ entries: [entry("a", 1), entry("b", 2)], maxThreads: 2, maxBytes: 2 })).toEqual({
+      evict: [],
+      overBudget: false,
+      recheckAt: null,
+    });
   });
 
   it("drops the least recently accessed threads past the thread limit, oldest first", () => {
-    const planned = planThreadBodyEvictions({
+    const { evict } = plan({
       entries: [entry("c", 30), entry("a", 10), entry("e", 50), entry("b", 20), entry("d", 40)],
       maxThreads: 3,
       maxBytes: 100,
     });
-    expect(idsOf(planned)).toEqual(["a", "b"]);
+    expect(idsOf(evict)).toEqual(["a", "b"]);
   });
 
   it("never plans a protected thread, but counts it toward the limits", () => {
-    const planned = planThreadBodyEvictions({
+    const { evict } = plan({
       entries: [
         entry("oldest-protected", 1, { protected: true }),
         entry("a", 2),
@@ -504,11 +548,11 @@ describe("planThreadBodyEvictions", () => {
       maxThreads: 2,
       maxBytes: 100,
     });
-    expect(idsOf(planned)).toEqual(["a", "b"]);
+    expect(idsOf(evict)).toEqual(["a", "b"]);
   });
 
   it("leaves the limits exceeded while everything left is protected", () => {
-    const planned = planThreadBodyEvictions({
+    const result = plan({
       entries: [
         entry("a", 1, { protected: true }),
         entry("b", 2, { protected: true }),
@@ -517,11 +561,71 @@ describe("planThreadBodyEvictions", () => {
       maxThreads: 1,
       maxBytes: 100,
     });
-    expect(idsOf(planned)).toEqual(["c"]);
+    expect(idsOf(result.evict)).toEqual(["c"]);
+    expect(result.overBudget).toBe(true);
+    // Nothing kept is waiting for its recency to lapse.
+    expect(result.recheckAt).toBeNull();
+  });
+
+  it("keeps a thread until its protection expires, and plans it once it has", () => {
+    const entries = [
+      entry("recent", 1, { protectedUntil: now + 10 }),
+      entry("a", 2),
+      entry("b", 3),
+    ];
+    expect(idsOf(plan({ entries, maxThreads: 2, maxBytes: 100 }).evict)).toEqual(["a"]);
+    // Protection ends at the instant it names.
+    expect(
+      idsOf(
+        planThreadBodyResidency({ entries, now: now + 10, maxThreads: 2, maxBytes: 100 }).evict,
+      ),
+    ).toEqual(["recent"]);
+    // `protected` holds whatever the expiry says.
+    expect(
+      idsOf(
+        planThreadBodyResidency({
+          entries: [
+            entry("pinned", 1, { protected: true, protectedUntil: now - 1 }),
+            entry("a", 2),
+          ],
+          now,
+          maxThreads: 1,
+          maxBytes: 100,
+        }).evict,
+      ),
+    ).toEqual(["a"]);
+  });
+
+  it("re-checks at the earliest expiry while the store stays over a limit", () => {
+    const result = plan({
+      entries: [
+        entry("later", 1, { protectedUntil: now + 30 }),
+        entry("sooner", 2, { protectedUntil: now + 20 }),
+        entry("expired", 3, { protectedUntil: now }),
+        entry("pinned", 4, { protected: true, protectedUntil: now + 5 }),
+      ],
+      maxThreads: 1,
+      maxBytes: 100,
+    });
+    expect(idsOf(result.evict)).toEqual(["expired"]);
+    expect(result.overBudget).toBe(true);
+    // A protected thread's expiry frees nothing, so it schedules nothing.
+    expect(result.recheckAt).toBe(now + 20);
+  });
+
+  it("schedules no re-check once the plan brings the store within its limits", () => {
+    const result = plan({
+      entries: [entry("recent", 5, { protectedUntil: now + 20 }), entry("a", 1), entry("b", 2)],
+      maxThreads: 2,
+      maxBytes: 100,
+    });
+    expect(idsOf(result.evict)).toEqual(["a"]);
+    expect(result.overBudget).toBe(false);
+    expect(result.recheckAt).toBeNull();
   });
 
   it("drops threads past the byte limit even within the thread limit, and stops once both hold", () => {
-    const planned = planThreadBodyEvictions({
+    const { evict } = plan({
       entries: [
         entry("a", 1, { bytes: 40 }),
         entry("b", 2, { bytes: 40 }),
@@ -530,11 +634,11 @@ describe("planThreadBodyEvictions", () => {
       maxThreads: 10,
       maxBytes: 100,
     });
-    expect(idsOf(planned)).toEqual(["a"]);
+    expect(idsOf(evict)).toEqual(["a"]);
   });
 
   it("counts a protected thread's bytes toward the byte limit", () => {
-    const planned = planThreadBodyEvictions({
+    const { evict } = plan({
       entries: [
         entry("hot", 9, { bytes: 90, protected: true }),
         entry("a", 1, { bytes: 8 }),
@@ -543,11 +647,25 @@ describe("planThreadBodyEvictions", () => {
       maxThreads: 10,
       maxBytes: 100,
     });
-    expect(idsOf(planned)).toEqual(["a"]);
+    expect(idsOf(evict)).toEqual(["a"]);
+  });
+
+  it("re-checks a store over its byte limit only because of recent bodies", () => {
+    const result = plan({
+      entries: [
+        entry("recent-a", 1, { bytes: 60, protectedUntil: now + 40 }),
+        entry("recent-b", 2, { bytes: 60, protectedUntil: now + 50 }),
+      ],
+      maxThreads: 10,
+      maxBytes: 100,
+    });
+    expect(result.evict).toEqual([]);
+    expect(result.overBudget).toBe(true);
+    expect(result.recheckAt).toBe(now + 40);
   });
 
   it("drops the less recently active thread first among equal access times", () => {
-    const planned = planThreadBodyEvictions({
+    const { evict } = plan({
       entries: [
         entry("quiet-a", 0, { lastActivityAt: 30 }),
         entry("busy", 0, { lastActivityAt: 90 }),
@@ -559,7 +677,7 @@ describe("planThreadBodyEvictions", () => {
       maxBytes: 100,
     });
     // Access time ranks first; activity only orders what is accessed equally.
-    expect(idsOf(planned)).toEqual(["unknown", "quiet-b", "quiet-a"]);
+    expect(idsOf(evict)).toEqual(["unknown", "quiet-b", "quiet-a"]);
   });
 
   it("defaults to 64 threads and 48 MiB", () => {
@@ -567,7 +685,7 @@ describe("planThreadBodyEvictions", () => {
     expect(THREAD_BODY_MAX_BYTES).toBe(48 * 1024 * 1024);
 
     const seventy = Array.from({ length: 70 }, (_, index) => entry(`thread-${index}`, index));
-    expect(idsOf(planThreadBodyEvictions({ entries: seventy }))).toEqual(
+    expect(idsOf(plan({ entries: seventy }).evict)).toEqual(
       Array.from({ length: 6 }, (_, index) => `thread-${index}`),
     );
 
@@ -575,6 +693,6 @@ describe("planThreadBodyEvictions", () => {
       entry("old", 1, { bytes: 30 * 1024 * 1024 }),
       entry("new", 2, { bytes: 30 * 1024 * 1024 }),
     ];
-    expect(idsOf(planThreadBodyEvictions({ entries: heavy }))).toEqual(["old"]);
+    expect(idsOf(plan({ entries: heavy }).evict)).toEqual(["old"]);
   });
 });
