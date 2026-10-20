@@ -1,8 +1,8 @@
 diff --git a/dist/NodeHttpServer.js b/dist/NodeHttpServer.js
-index 0a1f105e245dcb4325e6965df7d794853ec76d98..1d8bad04321662b594123c6b6623579d7ff874cf 100644
+index 566aee016af50c8c6d8f1286495ee615ed2c61d6..0c854914d94c3c25380bd2335786a239d08efcdc 100644
 --- a/dist/NodeHttpServer.js
 +++ b/dist/NodeHttpServer.js
-@@ -69,10 +69,6 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+@@ -70,10 +70,6 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
        }
      });
    }).pipe(Effect.cached);
@@ -13,7 +13,7 @@ index 0a1f105e245dcb4325e6965df7d794853ec76d98..1d8bad04321662b594123c6b6623579d
    yield* Scope.addFinalizer(scope, shutdown);
    yield* Effect.callback(resume => {
      function onError(cause) {
-@@ -95,8 +91,34 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
+@@ -96,8 +92,34 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (evaluate, options)
      ...options.websocket,
      noServer: true
    })), wss => Effect.callback(resume => {
@@ -49,10 +49,10 @@ index 0a1f105e245dcb4325e6965df7d794853ec76d98..1d8bad04321662b594123c6b6623579d
      address: boundAddress,
      serve: Effect.fnUntraced(function* (httpApp, middleware) {
 diff --git a/src/NodeHttpServer.ts b/src/NodeHttpServer.ts
-index 56d6b8291be3e1e1e63380e74dacf2edd2da61be..477603e7ee1bf05811ae08bfdb7d7be902c89710 100644
+index ade58dcbdf89f7bc9339deac321d560fca88ea61..5d3d752e7a68668349913d50079aac20472d0939 100644
 --- a/src/NodeHttpServer.ts
 +++ b/src/NodeHttpServer.ts
-@@ -118,13 +118,6 @@ export const make = Effect.fnUntraced(function*(
+@@ -119,13 +119,6 @@ export const make = Effect.fnUntraced(function*(
      })
    }).pipe(Effect.cached)
  
@@ -66,7 +66,7 @@ index 56d6b8291be3e1e1e63380e74dacf2edd2da61be..477603e7ee1bf05811ae08bfdb7d7be9
    yield* Scope.addFinalizer(scope, shutdown)
  
    yield* Effect.callback<void, ServeError>((resume) => {
-@@ -150,6 +143,11 @@ export const make = Effect.fnUntraced(function*(
+@@ -151,6 +144,11 @@ export const make = Effect.fnUntraced(function*(
      Effect.sync(() => new NodeWS.WebSocketServer({ ...options.websocket, noServer: true })),
      (wss) =>
        Effect.callback<void>((resume) => {
@@ -78,7 +78,7 @@ index 56d6b8291be3e1e1e63380e74dacf2edd2da61be..477603e7ee1bf05811ae08bfdb7d7be9
          wss.close(() => resume(Effect.void))
        })
    ).pipe(
-@@ -157,6 +155,35 @@ export const make = Effect.fnUntraced(function*(
+@@ -158,6 +156,35 @@ export const make = Effect.fnUntraced(function*(
      Effect.cached
    )
  
