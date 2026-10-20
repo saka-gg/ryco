@@ -70,6 +70,7 @@ describe("ApprovalCard", () => {
     const respond = vi.fn(async () => undefined);
     mounted = await render(
       <ApprovalCard
+        environmentId={null}
         approval={approval({ approvalIdentity: identity })}
         pendingCount={1}
         isResponding={false}
@@ -80,6 +81,7 @@ describe("ApprovalCard", () => {
     expect(respond).toHaveBeenCalledWith("req-approval-card", "accept", identity);
     await mounted.rerender(
       <ApprovalCard
+        environmentId={null}
         approval={approval({ approvalIdentity: identity, responseState: "uncertain" })}
         pendingCount={1}
         isResponding={false}
@@ -92,6 +94,7 @@ describe("ApprovalCard", () => {
       .toMatchTextContent("Delivery outcome is unknown");
     await mounted.rerender(
       <ApprovalCard
+        environmentId={null}
         approval={approval({ approvalIdentity: identity, responseState: "retryable" })}
         pendingCount={1}
         isResponding={false}
@@ -122,6 +125,7 @@ describe("ApprovalCard", () => {
       mounted = await render(
         <div className="fixed inset-x-0 bottom-[var(--app-keyboard-inset,0px)]">
           <ApprovalCard
+            environmentId={null}
             approval={approval()}
             pendingCount={2}
             isResponding={false}
@@ -161,6 +165,7 @@ describe("ApprovalCard", () => {
     const onRespondToApproval = vi.fn(async () => undefined);
     mounted = await render(
       <ApprovalCard
+        environmentId={null}
         approval={approval()}
         pendingCount={1}
         isResponding={false}
@@ -190,6 +195,7 @@ describe("ApprovalCard", () => {
     await page.viewport(1_280, 720);
     mounted = await render(
       <ApprovalCard
+        environmentId={null}
         approval={approval()}
         pendingCount={1}
         isResponding={false}

@@ -27,14 +27,16 @@ export type { HostedDeliveryNotice, HostedRpcCapability };
  * Non-React read of the hosted capability policy; the input mapping is shared
  * in the client runtime, this only supplies the current stores.
  *
- * `environmentId` picks the environment the action runs on: `undefined` and
- * `null` both mean the selected one, an id answers from that environment's own
- * session. The selected environment is the only one the hub state mirrors, so
- * a capability for any other environment must name it.
+ * `environmentId` picks the environment the action runs on and is always
+ * stated: an id answers from that environment's own session, `null` means the
+ * routed (selected) one. The selected environment is the only one the hub state
+ * mirrors, so a capability for any other environment must name it. A literal
+ * `null` at a call site is deliberate and carries a
+ * `// hosted-capability: routed node` comment, which a source scan enforces.
  */
 export function readHostedRpcCapability(
   method: string,
-  environmentId?: EnvironmentId | null,
+  environmentId: EnvironmentId | null,
   state: HostedHubState = useHostedHubStore.getState(),
   sessions?: HostedEnvironmentSessionsSnapshot,
 ): HostedRpcCapability {
@@ -76,10 +78,13 @@ function useHostedEnvironmentRecord(
  * named environment's own record, so a directory refresh or another
  * environment's progress never re-renders the caller. The result is a shared
  * object per outcome, so it keeps its identity while nothing relevant changes.
+ *
+ * `environmentId` is required, with the same meaning as for
+ * `readHostedRpcCapability`: an id, or `null` for the routed node.
  */
 export function useHostedRpcCapability(
   method: string,
-  environmentId?: EnvironmentId | null,
+  environmentId: EnvironmentId | null,
 ): HostedRpcCapability {
   const shared = useHostedHubStore(
     useShallow((state) => selectHostedSharedCapabilityState(state, environmentId)),

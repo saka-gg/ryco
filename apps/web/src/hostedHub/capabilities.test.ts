@@ -8,7 +8,11 @@ import { EnvironmentId, ORCHESTRATION_WS_METHODS, WS_METHODS } from "@ryco/contr
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { shallow } from "zustand/vanilla/shallow";
 
-import { readHostedRpcCapability, readHostedSessionGeneration } from "./capabilities";
+import {
+  readHostedRpcCapability,
+  readHostedSessionGeneration,
+  useHostedRpcCapability,
+} from "./capabilities";
 import { hostedHubStore } from "./state";
 import type { HostedHubNode, HostedHubState } from "./types";
 
@@ -102,15 +106,12 @@ describe("readHostedRpcCapability", () => {
     });
   });
 
-  it("answers the selected environment when none is named, or null is", () => {
+  it("answers the selected environment for the routed null", () => {
     const state = hostedState();
-    expect(readHostedRpcCapability(dispatch, undefined, state)).toMatchObject({
+    expect(readHostedRpcCapability(dispatch, null, state)).toMatchObject({
       allowed: true,
       kind: "ready",
     });
-    expect(readHostedRpcCapability(dispatch, null, state)).toBe(
-      readHostedRpcCapability(dispatch, undefined, state),
-    );
     const viewer = hostedState({ effectiveRole: "viewer" });
     expect(readHostedRpcCapability(dispatch, null, viewer)).toEqual({
       hosted: true,
@@ -122,10 +123,10 @@ describe("readHostedRpcCapability", () => {
 
   it("keeps the reasons existing callers see", () => {
     expect(
-      readHostedRpcCapability(dispatch, undefined, hostedState({ directoryStatus: "stale" })),
+      readHostedRpcCapability(dispatch, null, hostedState({ directoryStatus: "stale" })),
     ).toMatchObject({ allowed: false, reason: STALE_REASON });
     expect(
-      readHostedRpcCapability(dispatch, undefined, hostedState({ browserStatus: "offline" })),
+      readHostedRpcCapability(dispatch, null, hostedState({ browserStatus: "offline" })),
     ).toMatchObject({ allowed: false, reason: STALE_REASON, kind: "stale" });
   });
 
@@ -136,7 +137,7 @@ describe("readHostedRpcCapability", () => {
       sessionEstablished: false,
       browserStatus: "synchronizing",
     });
-    expect(readHostedRpcCapability(dispatch, undefined, connecting)).toMatchObject({
+    expect(readHostedRpcCapability(dispatch, null, connecting)).toMatchObject({
       allowed: false,
       reason: STALE_REASON,
       kind: "establishing",
@@ -144,7 +145,7 @@ describe("readHostedRpcCapability", () => {
     expect(
       readHostedRpcCapability(
         dispatch,
-        undefined,
+        null,
         hostedState({ ...connecting, errorMessage: "The relay closed the connection." }),
       ),
     ).toMatchObject({ allowed: false, kind: "stale" });
@@ -165,7 +166,7 @@ describe("readHostedRpcCapability", () => {
     expect(
       readHostedRpcCapability(WS_METHODS.projectsList, ENV_X, state, sessions.getSnapshot()),
     ).toMatchObject({ allowed: true, kind: "ready" });
-    expect(readHostedRpcCapability(dispatch, undefined, state)).toMatchObject({
+    expect(readHostedRpcCapability(dispatch, null, state)).toMatchObject({
       allowed: false,
       kind: "establishing",
     });
@@ -202,12 +203,27 @@ describe("readHostedRpcCapability", () => {
 
   it("returns the identical object for identical inputs", () => {
     const state = hostedState();
-    expect(readHostedRpcCapability(dispatch, undefined, state)).toBe(
-      readHostedRpcCapability(dispatch, undefined, hostedState()),
+    expect(readHostedRpcCapability(dispatch, null, state)).toBe(
+      readHostedRpcCapability(dispatch, null, hostedState()),
     );
     expect(readHostedRpcCapability(dispatch, ENV_X, state)).toBe(
       readHostedRpcCapability(dispatch, ENV_X, hostedState({ generation: 9 })),
     );
+  });
+});
+
+describe("the environment argument", () => {
+  it("is required by both readers", () => {
+    // Never called: each `@ts-expect-error` fails the typecheck if the call
+    // above it compiles, so naming no environment cannot silently mean the
+    // routed node.
+    const neverCalled = () => {
+      // @ts-expect-error the environment must be named; `null` is the routed node
+      useHostedRpcCapability(dispatch);
+      // @ts-expect-error the environment must be named; `null` is the routed node
+      readHostedRpcCapability(dispatch);
+    };
+    expect(neverCalled).toBeTypeOf("function");
   });
 });
 

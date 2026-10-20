@@ -94,7 +94,7 @@ vi.mock("../hostedHub/capabilities", async (importOriginal) => {
     ...actual,
     useHostedRpcCapability: (
       method: string,
-      environmentId?: Parameters<typeof actual.useHostedRpcCapability>[1],
+      environmentId: Parameters<typeof actual.useHostedRpcCapability>[1],
     ) => {
       const phase = useSyncExternalStore(hostedPhase.subscribe, hostedPhase.read);
       const capability = actual.useHostedRpcCapability(method, environmentId);
@@ -114,7 +114,7 @@ vi.mock("../hostedHub/switchTarget", async (importOriginal) => {
     ...actual,
     hostedSwitchTargetLabel: (...args: Parameters<typeof actual.hostedSwitchTargetLabel>) =>
       hostedPhase.read()?.label ?? actual.hostedSwitchTargetLabel(...args),
-    useHostedSwitchTarget: (environmentId?: Parameters<typeof actual.useHostedSwitchTarget>[0]) => {
+    useHostedSwitchTarget: (environmentId: Parameters<typeof actual.useHostedSwitchTarget>[0]) => {
       const phase = useSyncExternalStore(hostedPhase.subscribe, hostedPhase.read);
       const target = actual.useHostedSwitchTarget(environmentId);
       return useMemo(

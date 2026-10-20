@@ -20,8 +20,8 @@ import {
 } from "./ComposerPendingApprovalPanel";
 
 interface ApprovalCardProps {
-  /** The environment the approval belongs to; without one, the routed node's. */
-  environmentId?: EnvironmentId | null | undefined;
+  /** The environment the approval belongs to; `null` for the routed node. */
+  environmentId: EnvironmentId | null;
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
@@ -42,7 +42,7 @@ interface ApprovalCardProps {
  * the existing panel and actions.
  */
 export const ApprovalCard = memo(function ApprovalCard({
-  environmentId = null,
+  environmentId,
   approval,
   pendingCount,
   isResponding,

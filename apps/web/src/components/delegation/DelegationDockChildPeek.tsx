@@ -139,6 +139,7 @@ export function DelegationDockChildPeek(props: {
         />
       ) : approval ? (
         <ApprovalCard
+          environmentId={environmentId}
           approval={approval}
           pendingCount={pending.approvals.length}
           isResponding={actions.respondingRequestIds.includes(approval.requestId)}
