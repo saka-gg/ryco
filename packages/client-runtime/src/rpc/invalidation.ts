@@ -70,9 +70,9 @@ let sharedMemoMap: Layer.MemoMap | null = null;
 
 /**
  * Resolve the single {@link Reactivity} instance shared by all atoms created
- * through `Atom.runtime` (including {@link AtomRpcClient}). The instance is
- * memoized against `Atom.defaultMemoMap`, so this returns the same service the
- * atoms register their refresh handlers against.
+ * through `Atom.runtime`. The instance is memoized against
+ * `Atom.defaultMemoMap`, so this returns the same service the atoms register
+ * their refresh handlers against.
  */
 function getSharedReactivity(): ReactivityService {
   const memoMap = appAtomRegistry.get(Atom.runtime.memoMap);
@@ -93,34 +93,6 @@ function getSharedReactivity(): ReactivityService {
  */
 export function invalidateKeys(keys: ReactivityKeys): void {
   getSharedReactivity().invalidateUnsafe(keys);
-}
-
-/**
- * Invalidate git/source-control state for a working directory.
- */
-export function invalidateGit(cwd: string): void {
-  invalidateKeys(InvalidationKeys.git(cwd));
-}
-
-/**
- * Invalidate project (file tree / search) state for a working directory.
- */
-export function invalidateProject(cwd: string): void {
-  invalidateKeys(InvalidationKeys.project(cwd));
-}
-
-/**
- * Invalidate checkpoint/diff state for a thread.
- */
-export function invalidateCheckpoint(threadId: string): void {
-  invalidateKeys(InvalidationKeys.checkpoint(threadId));
-}
-
-/**
- * Invalidate server configuration/settings/providers state.
- */
-export function invalidateServerConfig(): void {
-  invalidateKeys(InvalidationKeys.serverConfig());
 }
 
 /**

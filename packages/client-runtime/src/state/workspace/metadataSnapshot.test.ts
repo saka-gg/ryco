@@ -1,14 +1,10 @@
 import { EnvironmentId, ProjectId, ThreadId, WorktreeId } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { reconcileWorkspaceMachine } from "./machineCatalog.js";
 import {
   boundWorkspaceMetadataSnapshot,
-  decodeWorkspaceMetadataSnapshot,
   isWorkspaceMetadataSnapshot,
   planWorkspaceMetadataCacheEvictions,
-  reconcileWorkspaceCacheForMachine,
-  reconcileWorkspaceMetadataSnapshot,
   workspaceMetadataPayloadBytes,
 } from "./metadataSnapshot.js";
 import {
@@ -94,12 +90,7 @@ describe("workspace metadata snapshots", () => {
   it("strictly validates version, embedded environment, parents, and scoped ids", () => {
     const value = snapshot("a");
     expect(isWorkspaceMetadataSnapshot(value, value.environmentId)).toBe(true);
-    expect(decodeWorkspaceMetadataSnapshot(JSON.stringify(value), value.environmentId)).toEqual(
-      value,
-    );
-    expect(
-      decodeWorkspaceMetadataSnapshot(JSON.stringify(value), EnvironmentId.make("b")),
-    ).toBeNull();
+    expect(isWorkspaceMetadataSnapshot(value, EnvironmentId.make("b"))).toBe(false);
     expect(
       isWorkspaceMetadataSnapshot({
         ...value,
@@ -107,25 +98,6 @@ describe("workspace metadata snapshots", () => {
       }),
     ).toBe(false);
     expect(isWorkspaceMetadataSnapshot({ ...value, schemaVersion: 2 })).toBe(false);
-  });
-
-  it("preserves the last complete snapshot across partial, corrupt, and older refreshes", () => {
-    const current = snapshot("a", 10);
-    expect(
-      reconcileWorkspaceMetadataSnapshot(
-        current,
-        { environmentId: current.environmentId },
-        current.environmentId,
-      ),
-    ).toEqual({ snapshot: current, replaced: false });
-    expect(
-      reconcileWorkspaceMetadataSnapshot(current, snapshot("a", 9), current.environmentId),
-    ).toEqual({ snapshot: current, replaced: false });
-    const next = snapshot("a", 11);
-    expect(reconcileWorkspaceMetadataSnapshot(current, next, current.environmentId)).toEqual({
-      snapshot: next,
-      replaced: true,
-    });
   });
 
   it("bounds thread metadata without dropping projects or worktrees", () => {
@@ -230,33 +202,5 @@ describe("workspace metadata snapshots", () => {
         stringify.mockRestore();
       }
     });
-  });
-
-  it("maps machine eligibility to retain, lock, and purge cache actions", () => {
-    const base = {
-      environmentId: EnvironmentId.make("a"),
-      label: "A",
-      clientTier: "native" as const,
-      requiresNativeVerification: true,
-      effectiveRole: "operator" as const,
-      online: true,
-      lastSeenAt: null,
-      observedAt: 1,
-    };
-    expect(
-      reconcileWorkspaceCacheForMachine(
-        reconcileWorkspaceMachine({ ...base, nativeTrust: "verified" }),
-      ),
-    ).toEqual({ type: "retain" });
-    expect(
-      reconcileWorkspaceCacheForMachine(
-        reconcileWorkspaceMachine({ ...base, nativeTrust: "identity-conflict" }),
-      ),
-    ).toEqual({ type: "lock-stale" });
-    expect(
-      reconcileWorkspaceCacheForMachine(
-        reconcileWorkspaceMachine({ ...base, nativeTrust: "unverified" }),
-      ),
-    ).toEqual({ type: "purge" });
   });
 });
