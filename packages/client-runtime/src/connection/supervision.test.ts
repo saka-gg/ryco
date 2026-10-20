@@ -1510,6 +1510,128 @@ describe("thread body residency", () => {
     expect(evictions.flat()).toEqual(numbered("thread-", 0, 36));
   });
 
+  it("drops a body only a navigation intent fetched before bodies a view showed", async () => {
+    const { supervisor, listeners, load, open, evictions, bodyIds } = setup({
+      activeEnvironmentId: remote,
+    });
+    for (const id of numbered("opened-", 0, 64)) await open(id);
+
+    const release = supervisor.retainThreadDetailSubscription(remote, thread("hovered"), {
+      speculative: true,
+    });
+    listeners.get("hovered")?.(emptySnapshot);
+    load("hovered");
+    release({ immediately: true });
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Every opened body is still within its recent-access window; the hovered
+    // one has no recency of its own.
+    expect(evictions.flat()).toEqual(["hovered"]);
+    expect(bodyIds().toSorted()).toEqual(numbered("opened-", 0, 64).toSorted());
+  });
+
+  it("keeps a pressed body that a view then showed", async () => {
+    const { supervisor, listeners, load, open, evictions, bodies } = setup({
+      activeEnvironmentId: remote,
+    });
+    for (const id of numbered("opened-", 0, 64)) await open(id);
+
+    const releasePress = supervisor.retainThreadDetailSubscription(remote, thread("pressed"), {
+      speculative: true,
+    });
+    const releaseView = supervisor.retainThreadDetailSubscription(remote, thread("pressed"), {
+      view: true,
+    });
+    listeners.get("pressed")?.(emptySnapshot);
+    load("pressed");
+    releaseView();
+    releasePress({ immediately: true });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(evictions).toEqual([]);
+    expect(bodies.size).toBe(65);
+
+    // Once every body's recency lapses, the pressed one ranks by its access.
+    await vi.advanceTimersByTimeAsync(6 * minute);
+    expect(bodies.size).toBe(64);
+    expect(evictions.flat()).toEqual(["opened-0"]);
+  });
+
+  it("protects a body an intent still holds", async () => {
+    const { supervisor, listeners, load, open, evictions, bodies } = setup({
+      activeEnvironmentId: remote,
+    });
+    for (const id of numbered("opened-", 0, 64)) await open(id);
+
+    supervisor.retainThreadDetailSubscription(remote, thread("hovered"), { speculative: true });
+    listeners.get("hovered")?.(emptySnapshot);
+    load("hovered");
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(evictions).toEqual([]);
+    expect(bodies.size).toBe(65);
+  });
+
+  it("ranks intent-only bodies with bodies no subscription delivered, by activity", async () => {
+    const { supervisor, listeners, load, open, evictions } = setup({
+      activeEnvironmentId: remote,
+    });
+    for (const id of numbered("opened-", 0, 63)) await open(id);
+    load("cached", remote, 20);
+
+    const release = supervisor.retainThreadDetailSubscription(remote, thread("hovered"), {
+      speculative: true,
+    });
+    listeners.get("hovered")?.(emptySnapshot);
+    load("hovered", remote, 10);
+    release({ immediately: true });
+    await vi.advanceTimersByTimeAsync(1);
+
+    // Neither was accessed: the less recently active of the two goes.
+    expect(evictions.flat()).toEqual(["hovered"]);
+  });
+
+  it("changes nothing for a speculative retain of a thread a view already holds", async () => {
+    const { supervisor, listeners, load, open, evictions, bodies } = setup({
+      activeEnvironmentId: remote,
+    });
+    for (const id of numbered("opened-", 0, 64)) await open(id);
+
+    const releaseView = supervisor.retainThreadDetailSubscription(remote, thread("viewed"), {
+      view: true,
+    });
+    listeners.get("viewed")?.(emptySnapshot);
+    load("viewed");
+    const releaseHover = supervisor.retainThreadDetailSubscription(remote, thread("viewed"), {
+      speculative: true,
+    });
+    releaseHover({ immediately: true });
+    releaseView();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(evictions).toEqual([]);
+    expect(bodies.size).toBe(65);
+  });
+
+  it("keeps the standing of a body a view showed when an intent fetches it again", async () => {
+    const { supervisor, listeners, open, evictions, bodies } = setup({
+      activeEnvironmentId: remote,
+    });
+    await open("revisited");
+    supervisor.disposeThreadDetailSubscription(remote, thread("revisited"));
+    for (const id of numbered("opened-", 0, 64)) await open(id);
+
+    const release = supervisor.retainThreadDetailSubscription(remote, thread("revisited"), {
+      speculative: true,
+    });
+    listeners.get("revisited")?.(emptySnapshot);
+    release({ immediately: true });
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The hover renewed a body the user had read: it keeps its recency.
+    expect(evictions).toEqual([]);
+    expect(bodies.size).toBe(65);
+  });
+
   it("disposes an idle cached subscription before dropping its body", async () => {
     const protectedThreads = new Set(numbered("pinned-", 0, 64));
     const { load, open, log, evictions, bodyIds } = setup({ protectedThreads });

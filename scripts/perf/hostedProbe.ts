@@ -379,6 +379,12 @@ export interface SwitchRun {
   readonly kind: SwitchKind;
   readonly side: ProbeSide | null;
   readonly rowKey: string | null;
+  /**
+   * Epoch ms of the primary-button press that precedes the click by one task;
+   * server-side evidence of what the press starts is joined from here
+   * (`hosted-correlate`).
+   */
+  readonly pressEpochMs: number | null;
   /** Epoch ms of the click, for joining with server-side evidence (`hosted-correlate`). */
   readonly clickEpochMs: number | null;
   readonly firstFrame: number | null;
@@ -620,7 +626,7 @@ const COLD_LOAD_SCRIPT = `(() => {
 })()`;
 
 /** Installs the switch probe (`window.__rycoHostedProbe`) and its long-task observer. */
-const SWITCH_PROBE_SCRIPT = `(() => {
+export const SWITCH_PROBE_SCRIPT = `(() => {
   ${PAGE_SHARED_SOURCE}
   const longTasks = [];
   try {
@@ -628,24 +634,26 @@ const SWITCH_PROBE_SCRIPT = `(() => {
       for (const entry of list.getEntries()) longTasks.push([entry.startTime, entry.duration]);
     }).observe({ type: "longtask" });
   } catch (error) {}
-  // A primary-button mouse press and release, as a pointer produces before a click.
-  const pressPointer = (target) => {
-    const init = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, buttons: 1, pointerId: 1, pointerType: "mouse", isPrimary: true };
-    target.dispatchEvent(new PointerEvent("pointerdown", init));
-    target.dispatchEvent(new MouseEvent("mousedown", init));
-    const release = { ...init, buttons: 0 };
-    target.dispatchEvent(new PointerEvent("pointerup", release));
-    target.dispatchEvent(new MouseEvent("mouseup", release));
+  // A primary-button mouse press and its release, as a pointer produces before a click.
+  const pointerInit = { bubbles: true, cancelable: true, composed: true, view: window, button: 0, buttons: 1, pointerId: 1, pointerType: "mouse", isPrimary: true };
+  const pressDown = (target) => {
+    target.dispatchEvent(new PointerEvent("pointerdown", pointerInit));
+    target.dispatchEvent(new MouseEvent("mousedown", pointerInit));
+  };
+  const release = (target) => {
+    const init = { ...pointerInit, buttons: 0 };
+    target.dispatchEvent(new PointerEvent("pointerup", init));
+    target.dispatchEvent(new MouseEvent("mouseup", init));
   };
   window.__rycoHostedProbe = {
-    // Starts in the click's own task and polls once per frame.
+    // Presses the row, clicks it in a later task, and polls once per frame.
     switchTo(rowKey, timeoutMs) {
       return new Promise((resolve) => {
         const threadId = rowKey.slice(rowKey.indexOf(":") + 1);
         const row = document.querySelector("[data-inbox-row-key=" + JSON.stringify(rowKey) + "] [data-testid='inbox-thread-row']");
         if (!row) { resolve({ error: "row-missing" }); return; }
         const before = new Set(Array.from(document.querySelectorAll("[data-message-id]"), (element) => element.getAttribute("data-message-id")));
-        const start = performance.now();
+        let start = 0;
         const marks = {};
         const tick = () => {
           const now = performance.now() - start;
@@ -664,6 +672,7 @@ const SWITCH_PROBE_SCRIPT = `(() => {
               ...marks,
               timedOut: marks.writable === undefined,
               detailState: detail ? detail.getAttribute("data-thread-detail-state") : null,
+              pressEpochMs: performance.timeOrigin + pressStart,
               clickEpochMs: performance.timeOrigin + start,
               longTasks: longTasks
                 .filter(([startTime, duration]) => startTime + duration > start)
@@ -674,10 +683,18 @@ const SWITCH_PROBE_SCRIPT = `(() => {
           requestAnimationFrame(tick);
         };
         // A user presses before the click completes, and the row's press handler
-        // is where the thread's detail starts loading: run that path too.
-        pressPointer(row);
-        row.click();
-        requestAnimationFrame(tick);
+        // is where the thread's detail starts loading: run that path too. A pointer
+        // delivers the press in one task and the release and click in a later one,
+        // so the press's handlers (and the microtasks they queue) are done before
+        // the click; the timer models the shortest such gap, a tap without a hold.
+        const pressStart = performance.now();
+        pressDown(row);
+        setTimeout(() => {
+          start = performance.now();
+          release(row);
+          row.click();
+          requestAnimationFrame(tick);
+        }, 0);
       });
     },
     // Resolves with ms from the next Enter key press until the composer cleared
@@ -968,6 +985,7 @@ function failedSwitchRun(kind: SwitchKind, side: ProbeSide | null, error: string
     kind,
     side,
     rowKey: null,
+    pressEpochMs: null,
     clickEpochMs: null,
     firstFrame: null,
     route: null,
@@ -1092,6 +1110,7 @@ async function measureSwitch(input: SwitchInput): Promise<SwitchRun> {
     kind,
     side: session.side,
     rowKey,
+    pressEpochMs: result.pressEpochMs ?? null,
     clickEpochMs: result.clickEpochMs ?? null,
     firstFrame: result.firstFrame ?? null,
     route: result.route ?? null,

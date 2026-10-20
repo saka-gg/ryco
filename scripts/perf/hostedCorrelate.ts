@@ -4,8 +4,9 @@ import readline from "node:readline";
 
 /**
  * Joins hosted switch probe results with server-side evidence from the same
- * machine clock: each switch's click time against the start of the target
- * node's trace spans and, optionally, against events in a JSON-lines Hub log.
+ * machine clock: the start of the target node's trace spans and, optionally,
+ * events in a JSON-lines Hub log, counted from each switch's press and reported
+ * relative to its click (negative before it).
  *
  * Streaming RPC spans measure the lifetime of a subscription, so only their
  * start times are used. Both sides are read from files the processes already
@@ -29,6 +30,11 @@ export interface CorrelatedProbeRun {
   readonly kind: string;
   /** `<environmentId>:<threadId>` of the clicked inbox row. */
   readonly rowKey: string;
+  /**
+   * The primary-button press before the click; absent in result files of older
+   * probes, where the switch's window opens at the click.
+   */
+  readonly pressEpochMs?: number | null;
   readonly clickEpochMs: number;
   readonly firstFrame?: number | null;
   readonly route?: number | null;
@@ -45,7 +51,10 @@ export interface CorrelatedNode {
 export interface CorrelatedRun {
   readonly kind: string;
   readonly node: string | null;
-  /** Milliseconds from the click; null when the event did not occur before the next click. */
+  /**
+   * Milliseconds from the click (negative before it); null when the event did
+   * not occur between this switch's press and the next switch's press.
+   */
   readonly offsets: Readonly<Record<string, number | null>>;
 }
 
@@ -148,46 +157,62 @@ export async function readHubEventTimes(
   return times.toSorted((left, right) => left - right);
 }
 
-/** Rounded offset of the first time in `[click, before)`, or null. */
+/**
+ * Rounded offset from `origin` (the click) of the first time in
+ * `[from, before)`, or null. A negative offset means the event happened
+ * between the press and the click.
+ */
 export function firstOffsetWithin(
   times: readonly number[],
-  click: number,
+  from: number,
   before: number,
+  origin: number,
 ): number | null {
-  const match = times.find((time) => time >= click && time < before);
-  return match === undefined ? null : Math.round(match - click);
+  const match = times.find((time) => time >= from && time < before);
+  return match === undefined ? null : Math.round(match - origin);
 }
 
 function roundOrNull(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : null;
 }
 
+/** Where a switch's evidence window opens: its press, or its click when no press was recorded. */
+function windowStartOf(run: CorrelatedProbeRun): number {
+  return typeof run.pressEpochMs === "number" && run.pressEpochMs <= run.clickEpochMs
+    ? run.pressEpochMs
+    : run.clickEpochMs;
+}
+
 /**
- * For every run, the offsets from its click to the browser-side marks, to the
- * first matching Hub event and to the first span start per name on the node
- * that owns the clicked thread. An event only counts when it happens before
- * the next click, so a late event of one switch is not credited to the next.
+ * For every run, the browser-side marks, the first matching Hub event and the
+ * first span start per name on the node that owns the clicked thread, all in
+ * milliseconds from its click. Server-side events count from the switch's press,
+ * so what the press started shows as a negative offset, and only until the next
+ * switch's press, so a late event of one switch is not credited to the next and
+ * the next switch's press-time events are not credited to this one.
  */
 export function correlateRuns(input: {
   readonly runs: readonly CorrelatedProbeRun[];
   readonly nodes: ReadonlyMap<string, CorrelatedNode>;
   readonly hubEvents: readonly number[];
 }): CorrelatedRun[] {
-  const clicks = input.runs.map((run) => run.clickEpochMs).toSorted((left, right) => left - right);
+  const starts = input.runs.map(windowStartOf).toSorted((left, right) => left - right);
   return input.runs.map((run) => {
     const environmentId = run.rowKey.split(":")[0] ?? "";
     const node = input.nodes.get(environmentId) ?? null;
-    const before = clicks.find((click) => click > run.clickEpochMs) ?? Number.POSITIVE_INFINITY;
+    const from = windowStartOf(run);
+    const before = starts.find((start) => start > from) ?? Number.POSITIVE_INFINITY;
     const offsets: Record<string, number | null> = {
       firstFrame: roundOrNull(run.firstFrame),
       route: roundOrNull(run.route),
-      "hub.stream": firstOffsetWithin(input.hubEvents, run.clickEpochMs, before),
+      "hub.stream": firstOffsetWithin(input.hubEvents, from, before, run.clickEpochMs),
     };
     for (const [spanName, label] of Object.entries(NODE_SPAN_LABELS)) {
       offsets[label] = firstOffsetWithin(
         node?.spanStarts.get(spanName) ?? [],
-        run.clickEpochMs,
+        from,
         before,
+        run.clickEpochMs,
       );
     }
     offsets.content = roundOrNull(run.content);

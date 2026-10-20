@@ -1,4 +1,5 @@
 import {
+  canAdoptHostedEnvironmentSession,
   getHostedEnvironmentSessions,
   hostedAccountStore,
   hostedEnvironmentSessionsMode,
@@ -15,6 +16,7 @@ import {
   type HostedHubState,
   type HostedRecoveryCodeDisplayState,
 } from "@ryco/client-runtime/authorization";
+import type { EnvironmentId } from "@ryco/contracts";
 import { useStore } from "zustand";
 
 import { configureWebHostedRuntime } from "./runtime";
@@ -50,6 +52,16 @@ export {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,
 };
 export type { HostedAccountState, HostedHubState, HostedRecoveryCodeDisplayState };
+
+/**
+ * Whether the environment's hosted session is one that selecting it would adopt
+ * as it is: live, its own shell snapshot accepted, and not suspended or
+ * interrupted since.
+ */
+export function isHostedEnvironmentSessionAdoptable(environmentId: EnvironmentId): boolean {
+  const record = getHostedEnvironmentSessions().read(environmentId);
+  return record !== undefined && canAdoptHostedEnvironmentSession(record);
+}
 
 type HostedHubSelector<T> = (state: HostedHubState) => T;
 

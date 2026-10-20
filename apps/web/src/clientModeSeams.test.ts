@@ -104,7 +104,8 @@ describe("client-mode seams", () => {
     expect(snapshot.deliveryUnknown.size).toBe(0);
     expect(registry.getSnapshot()).toBe(snapshot);
     expect(registry.list()).toEqual([]);
-    expect(registry.read("env-1" as Parameters<typeof registry.read>[0])).toBeUndefined();
+    const environmentId = "env-1" as Parameters<typeof registry.read>[0];
+    expect(registry.read(environmentId)).toBeUndefined();
     const listener = vi.fn();
     expect(registry.subscribe(listener)()).toBeUndefined();
     expect(listener).not.toHaveBeenCalled();
@@ -112,6 +113,10 @@ describe("client-mode seams", () => {
       /hosted-hub builds/u,
     );
     expect(standard.hostedEnvironmentSessionsMode()).toBe("single");
+    // No session is ever ready to adopt, so a row intent never reads a window
+    // through it.
+    expect(standard.isHostedEnvironmentSessionAdoptable(environmentId)).toBe(false);
+    expect(hosted.isHostedEnvironmentSessionAdoptable(environmentId)).toBe(false);
   });
 
   it("reports the signed-out hosted workspace and never grants a lease", async () => {

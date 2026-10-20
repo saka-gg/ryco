@@ -32,11 +32,11 @@ export interface ThreadNavigationIntentDeps {
    */
   readonly isDetailLoaded: (ref: ScopedThreadRef) => boolean;
   /**
-   * Whether a hover may retain the thread's detail once its dwell ran out
-   * (hosted: only while the environment's session is online). A press always
-   * may. Defaults to always.
+   * Whether an intent may retain the thread's detail now (hosted: only from a
+   * ready session, never on the phone tier). Asked when the dwell ends and
+   * when the row is pressed. Defaults to always.
    */
-  readonly canRetainOnHover?: (ref: ScopedThreadRef) => boolean;
+  readonly canRetain?: (ref: ScopedThreadRef) => boolean;
   /** Warms the thread route's component chunk. Idempotent and never throws. */
   readonly preloadThreadRoute: () => void;
   readonly keyOf: (ref: ScopedThreadRef) => string;
@@ -68,7 +68,10 @@ interface IntentRetain {
  * imperatively, so the router's intent preloading never sees them: a row warms
  * the thread route's chunk and starts the thread's detail subscription when
  * the pointer rests on it or presses it, so the history request overlaps the
- * navigation instead of starting from the thread view's mount.
+ * navigation instead of starting from the thread view's mount. `canRetain`
+ * gates the subscription, not the route chunk: where it refuses (on hosted Web,
+ * a session that is not ready), the route's own retain starts the thread's
+ * window once the node is connected.
  *
  * Every retain is released after `THREAD_NAVIGATION_INTENT_RETAIN_MS`, and
  * released immediately. When the intent did navigate, the thread view retained
@@ -76,7 +79,9 @@ interface IntentRetain {
  * view holds it and reaches the idle cache as usual once the view has left,
  * even if the user left the thread before the intent's deadline. When nothing
  * took over (a dwell without a click, a press that only started a scroll or a
- * drag) it is disposed at once instead of idling as a live stream.
+ * drag) it is disposed at once instead of idling as a live stream. Intent
+ * retains are speculative: a body only they fetched, which no view showed, is
+ * the first the store drops when it is over its budget.
  */
 export function createThreadNavigationIntents(
   deps: ThreadNavigationIntentDeps,
@@ -136,7 +141,7 @@ export function createThreadNavigationIntents(
         key,
         timer: schedule(() => {
           pendingHover = null;
-          if (deps.canRetainOnHover?.(ref) !== false) intend(ref);
+          if (deps.canRetain?.(ref) !== false) intend(ref);
         }, hoverDelayMs),
       };
     },
@@ -146,7 +151,7 @@ export function createThreadNavigationIntents(
     press: (ref) => {
       deps.preloadThreadRoute();
       cancelPendingHover();
-      intend(ref);
+      if (deps.canRetain?.(ref) !== false) intend(ref);
     },
     reset: () => {
       cancelPendingHover();
@@ -154,6 +159,20 @@ export function createThreadNavigationIntents(
       for (const key of retains.keys()) releaseKey(key);
     },
   };
+}
+
+/**
+ * Whether a navigation intent may fetch the thread's window. Outside hosted Web
+ * it always may. On hosted Web only from a session that is ready to adopt, so
+ * the intent never waits on, or adds to, a connection, which the press
+ * pre-connect alone starts; and never on the phone tier.
+ */
+export function mayPrefetchThreadWindow(input: {
+  readonly hosted: boolean;
+  readonly phoneTier: boolean;
+  readonly sessionReady: boolean;
+}): boolean {
+  return !input.hosted || (!input.phoneTier && input.sessionReady);
 }
 
 /** The parts of a pointer event `isNavigationPress` reads. */

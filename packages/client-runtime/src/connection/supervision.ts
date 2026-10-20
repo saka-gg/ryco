@@ -237,6 +237,11 @@ type ThreadDetailSubscriptionEntry = {
   viewRetains: number;
   lastAccessedAt: number;
   /**
+   * Every retain this entry has had was speculative (a navigation intent), so
+   * the body it fetched has no recency of its own.
+   */
+  speculativeOnly: boolean;
+  /**
    * When the entry became a candidate for idle eviction, or null while it is
    * retained or busy. The supervisor's one sweep disposes it once the idle
    * window has passed.
@@ -257,7 +262,7 @@ type ThreadDetailSubscriptionEntry = {
 /** What the residency pass knows of a thread body's use, from its subscription. */
 type ThreadBodyAccess = Pick<
   ThreadDetailSubscriptionEntry,
-  "lastAccessedAt" | "estimatedRetainedBytes"
+  "lastAccessedAt" | "speculativeOnly" | "estimatedRetainedBytes"
 >;
 
 export interface ThreadDetailSubscriptionReleaseOptions {
@@ -276,6 +281,13 @@ export interface ThreadDetailSubscriptionRetainOptions {
    * owner. Provider history recovery runs only while a view retains the thread.
    */
   readonly view?: boolean | undefined;
+  /**
+   * The retain is a navigation intent (a hover or a press) that may never lead
+   * to a view. A body only such retains fetched, and no other retain held,
+   * ranks for eviction like one no subscription delivered once the intents let
+   * go.
+   */
+  readonly speculative?: boolean | undefined;
 }
 
 export type ReleaseThreadDetailSubscription = (
@@ -803,6 +815,7 @@ export function createEnvironmentConnectionSupervisor<
     if (residencyConfigured) {
       departedThreadBodies.set(key, {
         lastAccessedAt: entry.lastAccessedAt,
+        speculativeOnly: entry.speculativeOnly,
         estimatedRetainedBytes: entry.estimatedRetainedBytes,
       });
     }
@@ -873,8 +886,11 @@ export function createEnvironmentConnectionSupervisor<
     const access = subscription ?? departedThreadBodies.get(key);
     // A body no subscription ever delivered (cached content) has no access
     // time, and so no recency: such bodies go first, the least recently active
-    // among them first.
-    const lastAccessedAt = access?.lastAccessedAt ?? 0;
+    // among them first. Neither has a body only a navigation intent fetched: it
+    // carries no recent-access protection and goes before any body a view or
+    // another owner used.
+    const lastAccessedAt =
+      access === undefined || access.speculativeOnly ? 0 : access.lastAccessedAt;
     return {
       ref,
       lastActivityAt,
@@ -1052,6 +1068,10 @@ export function createEnvironmentConnectionSupervisor<
       viewCount: 0,
       viewRetains: 0,
       lastAccessedAt: input.now(),
+      // A body another owner used before keeps that standing when an intent
+      // fetches it again.
+      speculativeOnly:
+        options?.speculative === true && departedThreadBodies.get(key)?.speculativeOnly !== false,
       idleSince: null,
       protocol: "bounded" as const,
       windowLimits: THREAD_WINDOW_LIMITS,
@@ -1071,6 +1091,8 @@ export function createEnvironmentConnectionSupervisor<
     // user has looked at the thread: its release then goes to the idle cache.
     const viewedAtRetain = entry.viewCount > (view ? 1 : 0);
     const viewRetainsAtRetain = entry.viewRetains;
+    // Any other owner gives the body a use of its own, for the entry's life.
+    if (options?.speculative !== true) entry.speculativeOnly = false;
     entry.lastAccessedAt = input.now();
     if (!attach(entry)) watch(entry);
     if (!existing) evictToCapacity();

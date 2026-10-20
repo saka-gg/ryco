@@ -208,8 +208,9 @@ open draft). A navigation press on a thread row of an environment without a live
 environment for three seconds, so its relay attempt overlaps the click; it follows only primary
 mouse or pen presses, never touch, connects at most one environment per five seconds and each
 environment at most once per 30 seconds, never displaces mounted work, and does nothing on the phone
-presentation. Hovering a row only warms its route and, while that environment's session is online,
-its thread detail.
+presentation. Hovering a row warms its route. A hover (after its dwell) or a press reads the
+thread's window only from a session that is ready to adopt, and never on the phone presentation;
+for any other environment only the press pre-connect acts.
 
 Ordinary tab hiding preserves live channels for a grace period: a tab hidden for 90 seconds plans as
 backgrounded and releases every environment nothing demands. Offline, freeze, and page history

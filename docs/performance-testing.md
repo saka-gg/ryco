@@ -175,10 +175,13 @@ other `.perf-results/` output.
 
 ### What is recorded
 
-Each switch starts with a click on an inbox row, preceded by the primary-button press and release
-a pointer produces (so the row's press handling runs), all in one task, and a per-frame loop
-records, in milliseconds from the click. The pointer never rests on the row beforehand, so hover
-intent and its dwell are not exercised: the switch has no hover head start.
+Each switch starts with a click on an inbox row, preceded by the primary-button press a pointer
+produces. The press is delivered in its own task, as a pointer delivers it, so the row's press
+handling, and whatever it starts, runs before the click; the release and the click follow in the
+next task, with no hold time. A per-frame loop then records, in milliseconds from the click. The
+pointer never rests on the row beforehand, so hover intent and its dwell are not exercised: the
+switch has no hover head start. Each switch also records the press's epoch time, so the window
+from the press to the click (one task) is visible to the server-side join below.
 
 - `firstFrame`: the first animation frame after the click (main-thread time the click itself costs);
 - `route`: the URL carries the target thread;
@@ -243,7 +246,7 @@ bun scripts/perf/cli.ts hosted-fixture \
   --hub-url http://localhost:3100 --base-dir "$FIXTURE_DIR" --nodes 2 --threads 120 \
   --approve-command "<command that approves one enrollment file>"
 
-# Join switch clicks with node trace spans and Hub log events
+# Join each switch, from its press, with node trace spans and Hub log events
 bun scripts/perf/cli.ts hosted-correlate \
   --probe results/switch/hosted-switch.json --base-dir "$FIXTURE_DIR" --hub-log hub.log
 
@@ -270,10 +273,13 @@ Ctrl+C.
 
 `hosted-correlate` reads the node home's `userdata/logs/server.trace.ndjson` (and its rotated
 `server.trace.ndjson.<n>` backups) for the start of `ws.rpc.orchestration.subscribeShell` and
-`subscribeThreadWindow` (and the relay channel spans when present) and, with `--hub-log`, the first matching event of a JSON-lines Hub log after each click
-(`--hub-event`, default `relay.connection.authenticated`, restricted to `--hub-route`, default
-`client`). Streaming RPC spans measure the lifetime of a subscription, so only their start times are
-used.
+`subscribeThreadWindow` (and the relay channel spans when present) and, with `--hub-log`, the first
+matching event of a JSON-lines Hub log (`--hub-event`, default `relay.connection.authenticated`,
+restricted to `--hub-route`, default `client`). It counts these events from each switch's press, not
+its click, up to the next switch's press, and reports them in milliseconds from the click, so an
+event the press started shows as a negative offset. Result files without the press time are joined
+from each click up to the next click. Streaming RPC spans measure the lifetime of a
+subscription, so only their start times are used.
 
 ### Topology
 
