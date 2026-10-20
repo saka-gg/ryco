@@ -10,14 +10,15 @@ import {
 import { assert, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
 
+import { sha256Hex } from "../../canonicalJson.ts";
 import {
   ContextHandoffRepository,
+  type ContextHandoffRecord,
   makeRequestedContextHandoffRecord,
 } from "../../persistence/Services/ContextHandoffs.ts";
 import { ContextHandoffInspection } from "../Services/ContextHandoffInspection.ts";
 import {
   countContextHandoffEntries,
-  digestContextHandoffDocument,
   stableStringifyContextHandoff,
   type ContextHandoffDocument,
 } from "../contextHandoff/ContextHandoffBuilder.ts";
@@ -91,20 +92,44 @@ const record = {
   status: "consumed" as const,
   contextVersion: 1,
   structuredContext: document,
-  contextDigest: digestContextHandoffDocument(document),
+  contextDigest: sha256Hex(canonicalJson),
   deliveryArtifact,
   targetRuntimeSessionId: RuntimeSessionId.make("runtime-target"),
   acceptedProviderTurnId: TurnId.make("turn-target"),
 };
 
-const layer = ContextHandoffInspectionLive.pipe(
-  Layer.provide(
-    Layer.mock(ContextHandoffRepository)({
-      getById: ({ handoffId: requestedId }) =>
-        Effect.succeed(requestedId === record.handoffId ? Option.some(record) : Option.none()),
-    }),
-  ),
-);
+function layerFor(stored: ContextHandoffRecord) {
+  return ContextHandoffInspectionLive.pipe(
+    Layer.provide(
+      Layer.mock(ContextHandoffRepository)({
+        getById: ({ handoffId: requestedId }) =>
+          Effect.succeed(requestedId === stored.handoffId ? Option.some(stored) : Option.none()),
+      }),
+    ),
+  );
+}
+
+const layer = layerFor(record);
+
+/** A stored document as written before cut values were trimmed: the tool output keeps its space. */
+const untrimmedDocument = {
+  ...document,
+  tools: [
+    {
+      id: "tool-1",
+      createdAt,
+      turnId: null,
+      lifecycle: "completed",
+      itemType: "command_execution",
+      summary: "Ran command",
+      output: `${"x".repeat(15_999)} `,
+      paths: [],
+      fileChanges: [],
+      truncated: true,
+    },
+  ],
+};
+const untrimmedJson = stableStringifyContextHandoff(untrimmedDocument);
 
 it.effect("ContextHandoffInspection serves bounded exact and complete artifacts", () =>
   Effect.gen(function* () {
@@ -162,6 +187,64 @@ it.effect("ContextHandoffInspection hides cross-thread handoff ids as not found"
       .pipe(Effect.flip);
     assert.strictEqual(error.reason, "not-found");
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "ContextHandoffInspection serves a stored document written before cut values were trimmed",
+  () =>
+    Effect.gen(function* () {
+      const inspection = yield* ContextHandoffInspection;
+      const summary = yield* inspection.getSummary({ threadId, handoffId });
+      const raw = yield* inspection.readRawChunk({
+        threadId,
+        handoffId,
+        scope: "complete",
+        offset: 0,
+      });
+      const tools = yield* inspection.listEntries({
+        threadId,
+        handoffId,
+        scope: "complete",
+        section: "tools",
+      });
+
+      assert.strictEqual(summary.complete.digest, sha256Hex(untrimmedJson));
+      assert.strictEqual(summary.complete.entryCount, 1);
+      assert.strictEqual(raw.chunk, untrimmedJson);
+      assert.strictEqual(
+        (tools.entries[0]!.value as { readonly output: string }).output,
+        "x".repeat(15_999),
+      );
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          ...record,
+          deliveryArtifact: null,
+          structuredContext: JSON.parse(untrimmedJson),
+          contextDigest: sha256Hex(untrimmedJson),
+        }),
+      ),
+    ),
+);
+
+it.effect("ContextHandoffInspection reports edited stored artifacts as invalid", () =>
+  Effect.gen(function* () {
+    const edited = {
+      ...untrimmedDocument,
+      tools: [{ ...untrimmedDocument.tools[0]!, output: `z${untrimmedDocument.tools[0]!.output}` }],
+    };
+    for (const stored of [
+      { ...record, structuredContext: edited, contextDigest: sha256Hex(untrimmedJson) },
+      { ...record, deliveryArtifact: { ...deliveryArtifact, providerInput: "edited payload" } },
+    ]) {
+      const error = yield* ContextHandoffInspection.pipe(
+        Effect.flatMap((inspection) => inspection.getSummary({ threadId, handoffId })),
+        Effect.flip,
+        Effect.provide(layerFor(stored)),
+      );
+      assert.strictEqual(error.reason, "invalid-artifact");
+    }
+  }),
 );
 
 it.effect(

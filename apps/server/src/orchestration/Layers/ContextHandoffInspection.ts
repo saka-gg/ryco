@@ -18,18 +18,16 @@ import {
   type ContextHandoffRecord,
 } from "../../persistence/Services/ContextHandoffs.ts";
 import { ContextHandoffInspection } from "../Services/ContextHandoffInspection.ts";
-import {
-  ContextHandoffDocument,
-  countContextHandoffEntries,
-  digestContextHandoffDocument,
-  stableStringifyContextHandoff,
+import type {
+  ContextHandoffArtifact,
+  ContextHandoffDocument as ContextHandoffDocumentType,
 } from "../contextHandoff/ContextHandoffBuilder.ts";
-import type { ContextHandoffDocument as ContextHandoffDocumentType } from "../contextHandoff/ContextHandoffBuilder.ts";
 import {
   ContextHandoffDeliveryArtifact,
   type ContextHandoffDeliveryArtifact as ContextHandoffDeliveryArtifactType,
   hasValidContextHandoffDeliveryDigests,
 } from "../contextHandoff/ContextHandoffArtifacts.ts";
+import { verifyStoredContextHandoffDocument } from "../contextHandoff/ContextHandoffIntegrity.ts";
 import {
   contextHandoffDeliveryLabel,
   contextHandoffEntryId,
@@ -42,16 +40,9 @@ import {
 } from "../contextHandoff/ContextHandoffInspection.ts";
 import { formatContextHandoffMarkdown } from "../contextHandoff/ContextHandoffMarkdown.ts";
 
-interface CompleteContextHandoffArtifact {
-  readonly document: ContextHandoffDocumentType;
-  readonly canonicalJson: string;
-  readonly digest: string;
-  readonly entryCount: number;
-}
-
 interface LoadedInspection {
   readonly record: ContextHandoffRecord;
-  readonly complete: CompleteContextHandoffArtifact | null;
+  readonly complete: ContextHandoffArtifact | null;
   readonly delivery: ContextHandoffDeliveryArtifactType | null;
   readonly sources: ReadonlyArray<ContextHandoffEndpointSnapshot>;
   readonly target: ContextHandoffEndpointSnapshot;
@@ -92,17 +83,14 @@ function unavailableScope(
   } as const;
 }
 
-function assertDeliveryArtifact(
+function isIntactDeliveryArtifact(
   record: ContextHandoffRecord,
   artifact: ContextHandoffDeliveryArtifactType,
-): ContextHandoffDeliveryArtifactType {
-  if (
-    artifact.triggeringMessage.messageId !== record.firstMessageId ||
-    !hasValidContextHandoffDeliveryDigests(artifact)
-  ) {
-    throw inspectionError("invalid-artifact", "The stored context handoff artifact is invalid.");
-  }
-  return artifact;
+): boolean {
+  return (
+    artifact.triggeringMessage.messageId === record.firstMessageId &&
+    hasValidContextHandoffDeliveryDigests(artifact)
+  );
 }
 
 export const makeContextHandoffInspection = Effect.gen(function* () {
@@ -130,24 +118,10 @@ export const makeContextHandoffInspection = Effect.gen(function* () {
     const complete =
       record.structuredContext === null || record.contextDigest === null
         ? null
-        : yield* Schema.decodeUnknownEffect(ContextHandoffDocument)(record.structuredContext).pipe(
-            Effect.flatMap((document) => {
-              const canonicalJson = stableStringifyContextHandoff(document);
-              const digest = digestContextHandoffDocument(document);
-              return digest === record.contextDigest
-                ? Effect.succeed({
-                    document,
-                    canonicalJson,
-                    digest,
-                    entryCount: countContextHandoffEntries(document),
-                  })
-                : Effect.fail(
-                    inspectionError(
-                      "invalid-artifact",
-                      "The stored context handoff artifact is invalid.",
-                    ),
-                  );
-            }),
+        : yield* verifyStoredContextHandoffDocument(
+            record.structuredContext,
+            record.contextDigest,
+          ).pipe(
             Effect.mapError(() =>
               inspectionError(
                 "invalid-artifact",
@@ -161,7 +135,7 @@ export const makeContextHandoffInspection = Effect.gen(function* () {
         : yield* Schema.decodeUnknownEffect(ContextHandoffDeliveryArtifact)(
             record.deliveryArtifact,
           ).pipe(
-            Effect.map(assertDeliveryArtifact.bind(null, record)),
+            Effect.filterOrFail((artifact) => isIntactDeliveryArtifact(record, artifact)),
             Effect.mapError(() =>
               inspectionError(
                 "invalid-artifact",

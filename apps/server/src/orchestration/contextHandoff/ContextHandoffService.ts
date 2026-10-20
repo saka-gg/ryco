@@ -15,12 +15,8 @@ import {
   type ContextHandoffRecord,
 } from "../../persistence/Services/ContextHandoffs.ts";
 import {
-  ContextHandoffDocument,
   type ContextHandoffArtifact,
   buildContextHandoffDocument,
-  countContextHandoffEntries,
-  digestContextHandoffDocument,
-  stableStringifyContextHandoff,
 } from "./ContextHandoffBuilder.ts";
 import {
   type ContextHandoffDeliveryArtifact,
@@ -28,6 +24,7 @@ import {
   makeContextHandoffDeliveryArtifact,
   hasValidContextHandoffDeliveryDigests,
 } from "./ContextHandoffArtifacts.ts";
+import { verifyStoredContextHandoffDocument } from "./ContextHandoffIntegrity.ts";
 import {
   ContextHandoffRenderError,
   type ContextHandoffRenderResult,
@@ -39,6 +36,7 @@ export class ContextHandoffArtifactError extends Data.TaggedError("ContextHandof
     | "record-not-found"
     | "record-mismatch"
     | "missing-stored-context"
+    | "invalid-context"
     | "invalid-stored-context"
     | "digest-mismatch"
     | "invalid-delivery-artifact"
@@ -151,33 +149,25 @@ const makeContextHandoffService = Effect.gen(function* () {
         "Context handoff artifact has not been stored",
       );
     }
-    const document = yield* Schema.decodeUnknownEffect(ContextHandoffDocument)(
+    const artifact = yield* verifyStoredContextHandoffDocument(
       record.structuredContext,
+      record.contextDigest,
     ).pipe(
-      Effect.mapError(() =>
-        artifactError(
-          record.handoffId,
-          "invalid-stored-context",
-          "Stored context handoff artifact failed validation",
-        ),
+      Effect.mapError((error) =>
+        error.reason === "digest-mismatch"
+          ? artifactError(
+              record.handoffId,
+              "digest-mismatch",
+              "Stored context handoff artifact digest does not match",
+            )
+          : artifactError(
+              record.handoffId,
+              "invalid-stored-context",
+              "Stored context handoff artifact failed validation",
+            ),
       ),
     );
-    const canonicalJson = stableStringifyContextHandoff(document);
-    const digest = digestContextHandoffDocument(document);
-    if (digest !== record.contextDigest) {
-      return yield* artifactError(
-        record.handoffId,
-        "digest-mismatch",
-        "Stored context handoff artifact digest does not match",
-      );
-    }
-    return {
-      document,
-      canonicalJson,
-      digest,
-      entryCount: countContextHandoffEntries(document),
-      origin: "stored" as const,
-    };
+    return { ...artifact, origin: "stored" as const };
   });
 
   const loadStoredContext: ContextHandoffServiceShape["loadStoredContext"] = ({ handoffId }) =>
@@ -197,7 +187,16 @@ const makeContextHandoffService = Effect.gen(function* () {
         return yield* decodeStoredArtifact(record);
       }
 
-      const artifact = buildContextHandoffDocument(input);
+      const artifact = yield* Effect.try({
+        try: () => buildContextHandoffDocument(input),
+        // The cause can quote history; the error keeps it out of activities and logs.
+        catch: () =>
+          artifactError(
+            input.handoffId,
+            "invalid-context",
+            "Context handoff artifact failed validation",
+          ),
+      });
       const stored = yield* repository.storeContextIfEmpty({
         handoffId: input.handoffId,
         contextVersion: CONTEXT_HANDOFF_CONTEXT_VERSION,

@@ -3,17 +3,17 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@ryco/contracts";
 import { truncateUnicodeSafe } from "@ryco/shared/String";
-import { Data } from "effect";
+import { Data, Schema } from "effect";
 
 import {
-  type ContextHandoffBoundaryEntry,
-  type ContextHandoffCheckpointEntry,
+  ContextHandoffBoundaryEntry,
+  ContextHandoffCheckpointEntry,
   type ContextHandoffDocument,
-  type ContextHandoffMessageEntry,
-  type ContextHandoffNoticeEntry,
-  type ContextHandoffPlanEntry,
-  type ContextHandoffSubagentEntry,
-  type ContextHandoffToolEntry,
+  ContextHandoffMessageEntry,
+  ContextHandoffNoticeEntry,
+  ContextHandoffPlanEntry,
+  ContextHandoffSubagentEntry,
+  ContextHandoffToolEntry,
   contextHandoffEntryOrder,
   countContextHandoffEntries,
   stableStringifyContextHandoff,
@@ -91,6 +91,19 @@ export interface ContextHandoffRenderResult {
   readonly totalEntryCount: number;
   readonly truncated: boolean;
 }
+
+const SECTION_ENTRY_SCHEMA = {
+  messages: ContextHandoffMessageEntry,
+  plans: ContextHandoffPlanEntry,
+  tools: ContextHandoffToolEntry,
+  checkpoints: ContextHandoffCheckpointEntry,
+  notices: ContextHandoffNoticeEntry,
+  subagents: ContextHandoffSubagentEntry,
+  priorHandoffs: ContextHandoffBoundaryEntry,
+} as const satisfies Record<SectionName, unknown>;
+
+/** String budgets an entry is compacted to, largest first, when it does not fit whole. */
+const COMPACTED_STRING_MAX_CHARS: ReadonlyArray<number> = [4_096, 1_024, 256, 64];
 
 const SECTION_PRIORITY: Record<SectionName, number> = {
   notices: 100,
@@ -207,19 +220,27 @@ function compactKnownValue(value: unknown, maxStringChars: number, key?: string)
     for (const [entryKey, entryValue] of Object.entries(value)) {
       compacted[entryKey] = compactKnownValue(entryValue, maxStringChars, entryKey);
     }
-    compacted.truncated = true;
     return compacted;
   }
   return value;
 }
 
+/**
+ * Shortens an entry's content strings and marks it `truncated` where its schema has that flag.
+ * The result is decoded through the entry schema, which trims strings cut after whitespace, so
+ * the rendered JSON is exactly what decoding a stored delivery artifact reproduces.
+ */
 function compactEntry<K extends SectionName>(
   candidate: Candidate<K>,
   maxStringChars: number,
 ): Candidate<K> {
+  const schema = SECTION_ENTRY_SCHEMA[candidate.section];
+  const compacted = compactKnownValue(candidate.entry, maxStringChars) as Record<string, unknown>;
   return {
     ...candidate,
-    entry: compactKnownValue(candidate.entry, maxStringChars) as SectionEntryByName[K],
+    entry: Schema.decodeUnknownSync(schema)(
+      "truncated" in schema.fields ? { ...compacted, truncated: true } : compacted,
+    ) as SectionEntryByName[K],
   };
 }
 
@@ -286,16 +307,13 @@ function tryIncludeCandidate(input: {
   readonly includeFullProvenance: boolean;
   readonly order: EntryOrder;
 }): { readonly included: boolean; readonly compacted: boolean } {
-  const variants = [
-    input.candidate,
-    compactEntry(input.candidate, 4_096),
-    compactEntry(input.candidate, 1_024),
-    compactEntry(input.candidate, 256),
-    compactEntry(input.candidate, 64),
-  ];
   const seen = new Set<string>();
-  for (let index = 0; index < variants.length; index += 1) {
-    const variant = variants[index]!;
+  for (let index = 0; index <= COMPACTED_STRING_MAX_CHARS.length; index += 1) {
+    // Compacted variants are built only once the larger ones did not fit.
+    const variant =
+      index === 0
+        ? input.candidate
+        : compactEntry(input.candidate, COMPACTED_STRING_MAX_CHARS[index - 1]!);
     const serializedEntry = stableStringifyContextHandoff(variant.entry);
     if (seen.has(serializedEntry)) {
       continue;
@@ -323,6 +341,25 @@ function envelope(input: {
   readonly currentMessage: string;
 }): string {
   return `${CONTEXT_OPEN}${input.contextJson}${CONTEXT_CLOSE}${input.currentMessage}${MESSAGE_CLOSE}`;
+}
+
+/**
+ * The context JSON a provider input carries, read back from the envelope this renderer wraps
+ * around `currentMessage`; `undefined` when the input is not such an envelope.
+ */
+export function contextJsonFromContextHandoffInput(
+  providerInput: string,
+  currentMessage: string,
+): string | undefined {
+  const suffix = `${CONTEXT_CLOSE}${currentMessage}${MESSAGE_CLOSE}`;
+  if (
+    providerInput.length < CONTEXT_OPEN.length + suffix.length ||
+    !providerInput.startsWith(CONTEXT_OPEN) ||
+    !providerInput.endsWith(suffix)
+  ) {
+    return undefined;
+  }
+  return providerInput.slice(CONTEXT_OPEN.length, providerInput.length - suffix.length);
 }
 
 export function renderContextHandoffInput(
