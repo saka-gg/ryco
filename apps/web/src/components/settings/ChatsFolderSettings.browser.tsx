@@ -14,7 +14,7 @@ import { render } from "vitest-browser-react";
 
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { SettingsTargetProvider } from "../../settingsTarget";
-import { ChatsFolderEditor } from "./ChatsFolderSettings";
+import { ChatFolderCleanupEditor, ChatsFolderEditor } from "./ChatsFolderSettings";
 
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn());
 
@@ -113,6 +113,7 @@ function ChatsFolderHarness(props: { readonly chats: ServerChatsCapability | und
         }}
       >
         <ChatsFolderEditor disabled={false} />
+        <ChatFolderCleanupEditor disabled={false} />
       </SettingsTargetProvider>
     </AppAtomRegistryProvider>
   );
@@ -176,6 +177,32 @@ describe("ChatsFolderSettings", () => {
       .toMatchTextContent("does not support chats");
     await expect
       .element(page.getByRole("textbox", { name: "Chats folder directory" }))
+      .toBeDisabled();
+  });
+
+  it("removes empty chat folders after 3 idle days by default and saves another choice", async () => {
+    mounted = await render(<ChatsFolderHarness chats={{ available: true }} />);
+    const select = page.getByRole("combobox", { name: "Remove empty chat folders" });
+    await expect.element(select).toMatchTextContent("After 3 idle days");
+    await expect
+      .element(page.getByText("comes back as soon as it is needed again", { exact: false }))
+      .toBeVisible();
+    await select.click();
+    await page.getByRole("option", { name: "Never" }).click();
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-remote", { chatFolderCleanupAfterDays: null }]);
+    await expect.element(select).toMatchTextContent("Never");
+    await page.getByRole("button", { name: "Reset empty chat folder cleanup to default" }).click();
+    await expect
+      .poll(() => mockUpdateEnvironmentServerSettings.mock.calls.at(-1))
+      .toEqual(["environment-remote", { chatFolderCleanupAfterDays: 3 }]);
+  });
+
+  it("disables empty chat folder cleanup on a node without chat support", async () => {
+    mounted = await render(<ChatsFolderHarness chats={undefined} />);
+    await expect
+      .element(page.getByRole("combobox", { name: "Remove empty chat folders" }))
       .toBeDisabled();
   });
 });

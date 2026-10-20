@@ -2,6 +2,7 @@ import { Effect, Option, Schema } from "effect";
 import {
   FilesystemBrowseError,
   ProjectListEntriesError,
+  type ProjectListEntriesResult,
   ProjectReadIconError,
   ProjectReadFileBinaryError,
   ProjectReadFileError,
@@ -24,6 +25,28 @@ import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
 export const makeProjectHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, workspaceEntries, workspaceFileSystem, open } = ctx;
+  /**
+   * A chat folder empty-folder cleanup removed lists as empty: looking at an old chat's files
+   * does not bring its folder back (`project/chatFolderRestore.ts`). Checked only on failure.
+   */
+  const emptyListing: ProjectListEntriesResult = { entries: [], truncated: false };
+  const emptyForRemovedChatFolder = <A, E>(
+    cwd: string,
+    listing: Effect.Effect<A, E>,
+  ): Effect.Effect<A | ProjectListEntriesResult, E> =>
+    listing.pipe(
+      Effect.catch((cause) =>
+        Option.match(ctx.removedChatFolders, {
+          onNone: () => Effect.fail(cause),
+          onSome: ({ isRemoved }) =>
+            isRemoved(cwd).pipe(
+              Effect.flatMap((removed) =>
+                removed ? Effect.succeed(emptyListing) : Effect.fail(cause),
+              ),
+            ),
+        }),
+      ),
+    );
 
   return defineWsHandlers({
     [WS_METHODS.projectsReadIcon]: (input) =>
@@ -54,7 +77,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsSearchEntries,
         ownerEffect(
           WS_METHODS.projectsSearchEntries,
-          workspaceEntries.search(input).pipe(
+          emptyForRemovedChatFolder(input.cwd, workspaceEntries.search(input)).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectSearchEntriesError({
@@ -71,7 +94,7 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsListEntries,
         ownerEffect(
           WS_METHODS.projectsListEntries,
-          workspaceEntries.listEntries(input).pipe(
+          emptyForRemovedChatFolder(input.cwd, workspaceEntries.listEntries(input)).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectListEntriesError({

@@ -43,6 +43,8 @@ import {
   Metric,
 } from "effect";
 
+import * as SqlClient from "effect/sql/SqlClient";
+
 import { ServerConfig } from "./config.ts";
 import { flushCompileCacheBestEffort } from "./compileCache.ts";
 import {
@@ -56,6 +58,11 @@ import { ThreadForkRepository } from "./persistence/Services/ThreadForks.ts";
 import { ChatFolders } from "./project/chatFolders.ts";
 import { recoverProjectRelocations } from "./project/chatPromotion.ts";
 import { removeOrphanChatProjects } from "./project/orphanChatProjects.ts";
+import {
+  CHAT_FOLDER_CLEANUP_INTERVAL,
+  removeIdleChatFolders,
+} from "./project/chatFolderCleanup.ts";
+import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { resolveProjectPreferences } from "./project/projectPreferences.ts";
 import { runRepositoryIdentitySync } from "./project/repositoryIdentitySync.ts";
 import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
@@ -849,6 +856,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
   const threadForks = yield* Effect.serviceOption(ThreadForkRepository);
   const repositoryIdentityResolver = yield* Effect.serviceOption(RepositoryIdentityResolver);
   const providerInstanceBootGate = yield* Effect.serviceOption(ProviderInstanceBootGate);
+  const storageSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const sessionDirectory = yield* Effect.serviceOption(ProviderSessionDirectory);
+  const terminalManager = yield* Effect.serviceOption(TerminalManager);
 
   const commandGate = yield* makeCommandGate();
   const httpServing = yield* Deferred.make<void>();
@@ -1069,6 +1079,29 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
             dispatch: orchestrationEngine.dispatch,
           }),
         ).pipe(Effect.ignoreCause({ log: true }), Effect.forkScoped);
+      }
+
+      if (
+        Option.isSome(storageSql) &&
+        Option.isSome(chatFolders) &&
+        Option.isSome(sessionDirectory) &&
+        Option.isSome(terminalManager)
+      ) {
+        // Empty chat folders of chats idle past `chatFolderCleanupAfterDays` go away; they come
+        // back on use. One sweep now, then hourly; a failed sweep is logged and retried.
+        const sweep = removeIdleChatFolders({
+          sql: storageSql.value,
+          settings: serverSettings,
+          chatFolders: chatFolders.value,
+          sessionDirectory: sessionDirectory.value,
+          terminals: terminalManager.value,
+        }).pipe(Effect.ignoreCause({ log: true }));
+        yield* runStartupPhase("chat-folders.remove-idle", sweep).pipe(
+          Effect.andThen(
+            Effect.repeat(Effect.delay(sweep, CHAT_FOLDER_CLEANUP_INTERVAL), Schedule.forever),
+          ),
+          Effect.forkScoped,
+        );
       }
 
       if (Option.isSome(projectionProjects) && Option.isSome(repositoryIdentityResolver)) {

@@ -49,6 +49,17 @@ export const SidebarAutoSettleAfterDays = Schema.NullOr(
 export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
 export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 7;
 
+/**
+ * How long a chat without a project stays idle before its folder is removed while still empty.
+ * Null keeps empty chat folders. The folder comes back whenever the chat needs it again.
+ */
+export const CHAT_FOLDER_CLEANUP_DAY_OPTIONS = [1, 3, 7, 14, 30] as const;
+export const ChatFolderCleanupAfterDays = Schema.NullOr(
+  Schema.Literals(CHAT_FOLDER_CLEANUP_DAY_OPTIONS),
+);
+export type ChatFolderCleanupAfterDays = typeof ChatFolderCleanupAfterDays.Type;
+export const DEFAULT_CHAT_FOLDER_CLEANUP_AFTER_DAYS: ChatFolderCleanupAfterDays = 3;
+
 export const SidebarProjectGroupingMode = Schema.Literals([
   "repository",
   "repository_path",
@@ -652,6 +663,9 @@ export const ServerSettings = Schema.Struct({
   worktreeRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   // Node-only root (no per-project overrides). Empty selects the Ryco-managed chats directory.
   chatsRoot: WorktreeRoot.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  chatFolderCleanupAfterDays: ChatFolderCleanupAfterDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_FOLDER_CLEANUP_AFTER_DAYS)),
+  ),
   worktreeSubmodules: WorktreeSubmodules.pipe(
     Schema.withDecodingDefault(Effect.succeed("recursive" as const)),
   ),
@@ -840,6 +854,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   worktreeRoot: Schema.optionalKey(WorktreeRoot),
   chatsRoot: Schema.optionalKey(WorktreeRoot),
+  chatFolderCleanupAfterDays: Schema.optionalKey(ChatFolderCleanupAfterDays),
   worktreeSubmodules: Schema.optionalKey(WorktreeSubmodules),
   projectWorktreeSubmodules: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(WorktreeSubmodules)),

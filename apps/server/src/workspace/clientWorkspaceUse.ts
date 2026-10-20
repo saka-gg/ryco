@@ -2,6 +2,7 @@ import path from "node:path";
 import { Effect, Option, Schema, Semaphore } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { OpenError } from "../open.ts";
+import { restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { acquireStoragePathUseLease, canonicalStoragePath } from "../storage/lifecycle.ts";
 import { WorkspaceFileSystemError } from "./Services/WorkspaceFileSystem.ts";
 
@@ -29,6 +30,8 @@ export const makeClientWorkspaceUse = Effect.gen(function* () {
             ),
           );
           releases.set(cwd, release);
+          // Held now: a chat folder empty-folder cleanup removed comes back for its first read.
+          yield* restoreChatFolder(storage.value, cwd);
         }),
       )
       .pipe(Effect.andThen(effect));

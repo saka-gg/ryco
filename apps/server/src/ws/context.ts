@@ -1,4 +1,5 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
+import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
@@ -291,6 +292,14 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const storageAdmission = Option.map(
       yield* Effect.serviceOption(SqlClient.SqlClient),
       (sql) => (canonicalPath: string) => storagePathBlocker(sql, canonicalPath),
+    );
+    // A chat folder empty-folder cleanup removed: it lists as empty and comes back when used.
+    const removedChatFolders = Option.map(
+      yield* Effect.serviceOption(SqlClient.SqlClient),
+      (sql) => ({
+        isRemoved: (folder: string) => isRemovedChatFolder(sql, folder),
+        restore: (folder: string) => restoreChatFolder(sql, folder),
+      }),
     );
     const gitDriver = Option.getOrUndefined(yield* Effect.serviceOption(GitVcsDriver));
     const projectFaviconResolver = yield* Effect.serviceOption(ProjectFaviconResolver);
@@ -1405,6 +1414,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       chatFolders,
       projectRelocations,
       storageAdmission,
+      removedChatFolders,
       gitDriver,
       projectFaviconResolver,
       projectAvatarStore,

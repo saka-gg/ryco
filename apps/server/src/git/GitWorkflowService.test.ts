@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect";
 import os from "node:os";
 import path from "node:path";
 
-import { GitCommandError, GitManagerError } from "@ryco/contracts";
+import { GitCommandError, GitManagerError, VcsProcessSpawnError } from "@ryco/contracts";
 import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -43,6 +43,52 @@ describe("GitWorkflowService", () => {
       Effect.provide(
         makeLayer({
           detect: () => Effect.succeed(null),
+        }),
+      ),
+    ),
+  );
+
+  it.effect("reads a folder that no longer exists as no repository", () =>
+    Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      const gone = path.join(os.tmpdir(), `ryco-missing-${crypto.randomUUID()}`);
+      const status = yield* workflow.localStatus({ cwd: gone });
+      assert.strictEqual(status.isRepo, false);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          // Git cannot start in a missing working directory.
+          detect: ({ cwd }) =>
+            Effect.fail(
+              new VcsProcessSpawnError({
+                operation: "GitVcsDriver.detectRepository",
+                command: "git rev-parse",
+                cwd,
+                cause: new Error("spawn git ENOENT"),
+              }),
+            ),
+        }),
+      ),
+    ),
+  );
+
+  it.effect("still fails status when detection fails in a folder that exists", () =>
+    Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      const result = yield* Effect.flip(workflow.localStatus({ cwd: os.tmpdir() }));
+      assert.instanceOf(result, GitManagerError);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          detect: ({ cwd }) =>
+            Effect.fail(
+              new VcsProcessSpawnError({
+                operation: "GitVcsDriver.detectRepository",
+                command: "git rev-parse",
+                cwd,
+                cause: new Error("spawn git EACCES"),
+              }),
+            ),
         }),
       ),
     ),
