@@ -11,7 +11,6 @@ import {
   setWorkspaceEnvironmentConnected,
   UNIFIED_WORKSPACE_MAX_CONNECTIONS,
   workspaceMetadataPayloadBytes,
-  type UnifiedWorkspaceIndex,
   type WorkspaceConnectionDemandPlan,
   type WorkspaceConnectionDemandState,
   type WorkspaceConnectionScope,
@@ -103,15 +102,6 @@ export interface DesktopWorkspaceClientSnapshot {
    */
   readonly snapshotsUnchanged?: true;
 }
-
-const EMPTY_WORKSPACE: UnifiedWorkspaceIndex = {
-  machines: [],
-  snapshots: [],
-  projects: [],
-  worktrees: [],
-  threads: [],
-  logicalProjects: [],
-};
 
 /**
  * What a subscriber can observe of the state, apart from its snapshots. The
@@ -673,5 +663,3 @@ export class DesktopWorkspaceClient {
     return published;
   }
 }
-
-export { EMPTY_WORKSPACE as EMPTY_DESKTOP_WORKSPACE };
