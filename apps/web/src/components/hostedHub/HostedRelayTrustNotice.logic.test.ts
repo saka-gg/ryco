@@ -556,6 +556,8 @@ describe("no public file still carries the retired claim", () => {
     }
   });
 
+  // Reads every text file in the repository, which on a loaded CI runner takes longer than the
+  // default five seconds.
   it("finds it in no file outside the two deliberate sites", () => {
     const offenders: string[] = [];
     for (const path of collectScanTargets()) {
@@ -566,7 +568,7 @@ describe("no public file still carries the retired claim", () => {
       }
     }
     expect(offenders).toEqual([]);
-  });
+  }, 30_000);
 
   it("keeps the allowlist honest: each allowed site still carries the sentence", () => {
     // An allowlist entry for a file that no longer states the claim is a hole
