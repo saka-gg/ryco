@@ -523,6 +523,202 @@ channel open and one shell subscription on the node; after wave 0 the page did n
 
 ## After wave 2
 
+Revision: the wave-1 tip plus the third set of changes. On the switch path: hosted web runs one
+connection per environment on the shared demand executor, still with one allowed connection (so
+every cross-node switch below is still a cold open); queued sends drain per environment session;
+the chat stays quiet while a node connects and queues sends until the node is ready; the hosted
+shell stays mounted when a switch opens a node route that is not a cached thread; capability checks
+name the environment they act on. Outside it: mobile runs on the shared session registry and demand
+executor, the mobile and desktop apps keep recent conversation text on the device (on by default,
+behind a device setting), and server and clients share the activity and revert helpers.
+
+Setup, as under "After wave 1" except:
+
+- The wave-1 tip is measured again in the same session, interleaved: blocks in the order wave-1
+  tip, wave-2 tip, three times. Both revisions run against the same Hub revision, each with its own
+  bundle, Hub data and node homes (copies of the same generated homes).
+- The two nodes with 120 and 80 threads only, at D = 0 and 40. Nodes record their default spans.
+- The probes send messages, so the nodes run with every provider runtime disabled and without
+  provider credentials; a turn start then fails on the node before any provider would run.
+- Per block and delay: one `hosted-switch --send` run with 8 cross-node switches and 3 same-node
+  controls (no CPU profiles), which types and sends a message once each switch is writable; then
+  one run of a send-during-switch probe with 8 cross-node switches, which clicks the composer as
+  soon as the URL shows the target thread, types a message and presses Enter (and presses it again
+  once the thread is writable if the first press was refused); then 4 switches from a writable
+  thread onto the other node's projects route, with one of its projects open, each observed for
+  5 s. Medians pool the three blocks: 24 cross-node switches, 9 same-node controls, 24 sends during
+  a switch and 12 projects-route switches per delay and revision. No switch, send or navigation
+  timed out or failed, and the pages logged no errors.
+- "Writable" follows the dispatch capability in both revisions: the wave-2 build marks it on the
+  chat (`data-mutation-ready`); the wave-1 build has no marker and is measured by the absence of
+  the read-only banner and an editable composer.
+- 1-minute load average 4.9–11.9; the third wave-2 block at D = 0 ran at 11–12, the session's
+  highest.
+
+### Against the targets
+
+Send accepted: ms from pressing Enter until the composer clears or a queued row shows, median
+(min–max). Target: at most 100.
+
+| Send                                    | D   | After wave 1          | After wave 2            | Result                               |
+| --------------------------------------- | --- | --------------------- | ----------------------- | ------------------------------------ |
+| During a cross-node switch, queued      | 0   | refused (5 of 5)      | 7.5 (5–17), n = 20      | met                                  |
+| During a cross-node switch, queued      | 40  | refused (24 of 24)    | 7 (5–21), n = 24        | met                                  |
+| To a writable thread (`--send`), direct | 0   | 116 (26–141), n = 24  | 118.5 (111–141), n = 24 | missed: waits for the list to scroll |
+| To a writable thread (`--send`), direct | 40  | 116 (113–128), n = 24 | 117 (114–125), n = 24   | missed: waits for the list to scroll |
+
+- During a switch, wave 2 queues the send at once: the queued row shows 5–21 ms after Enter and
+  184–303 ms after the switch's click, which includes the click's own task (the first frame comes
+  at 144.5–157 ms, median) and the probe finding and typing into the composer. After wave 1 the
+  first press is refused while the node connects: the text stays in the composer, the send button
+  shows its busy spinner, and the message only goes out when it is sent again after the thread is
+  writable. At D = 0, 4 of the 24 wave-2 sends (19 of 24 after wave 1) came after the switch was
+  already writable and took the direct path.
+- A queued send never left before its thread was writable (0 of 44). It shows as a sent message
+  113.5 (98–147) ms after writable at D = 0 and 115 (104–126) ms at D = 40, through the same direct
+  send path as below; its queued row clears when the node acknowledges the turn, 130 and 285.5 ms
+  after writable (one more browser-node round trip, 4·D, at D = 40).
+- A send to a thread that is already writable takes the direct path in both revisions. It waits
+  for the message list to finish scrolling to its end before it shows the message and clears the
+  composer, which takes 110–141 ms; when the list does not move it takes 26–27 ms (8 of 132 such
+  sends, 7 of them in same-node controls). The miss is this wait, not the network: the times do
+  not grow with D.
+
+The quiet chat during a switch, counted over both probes (48 cross-node switches per delay and
+revision):
+
+| Seen before the thread is writable                        | D   | After wave 1                   | After wave 2                   |
+| --------------------------------------------------------- | --- | ------------------------------ | ------------------------------ |
+| "Read-only hosted session" warning                        | 0   | 48 of 48, from the first frame | 0 of 48                        |
+| "Read-only hosted session" warning                        | 40  | 48 of 48, from the first frame | 0 of 48                        |
+| Busy send button (send-during-switch probe, 24 per delay) | 0   | 24 of 24                       | 0 of 24                        |
+| Busy send button (send-during-switch probe, 24 per delay) | 40  | 24 of 24                       | 0 of 24                        |
+| "Syncing with <node>…" note (send-during-switch probe)    | 0   | not in this build              | 24 of 24, from the first frame |
+| "Syncing with <node>…" note (send-during-switch probe)    | 40  | not in this build              | 24 of 24, from the first frame |
+
+No same-node control showed the warning in either revision.
+
+Cold cross-node switch, ms after the click, median (min–max), n = 24 (the `hosted-switch` runs).
+Target: writable at most 12·D + 600.
+
+| D   | Content, after wave 1 → 2 | Writable, after wave 1 | Writable, after wave 2 | Delta | Target | Result |
+| --- | ------------------------- | ---------------------- | ---------------------- | ----- | ------ | ------ |
+| 0   | 289 → 286.5               | 298.5 (278–328)        | 306 (267–428)          | +7.5  | 600    | met    |
+| 40  | 760.5 → 750               | 762.5 (747–836)        | 760.5 (741–802)        | -2    | 1,080  | met    |
+
+- Block medians of one revision and delay differ by up to 110 ms at D = 0 (the third wave-2 block,
+  at the session's highest load) and 15 ms at D = 40, so neither delta is a change: wave 2 leaves
+  the cold open where wave 1 put it. The earlier session measured the wave-1 tip at 316 and 777 ms.
+- The click's long task is shorter after wave 2: the first frame after the click comes at 157 ms
+  (D = 0) and 144.5 ms (D = 40), against 170.5 and 178 ms after wave 1. Five of the six wave-2
+  block medians are 144.5–149.5 ms, against 164.5–183.5 ms for all six wave-1 blocks; the outlier
+  is the loaded block (205 ms). These switches were not CPU-profiled, so the cause is not
+  attributed. The click task stays within its target (at most 250 ms) in both revisions.
+- Same-node content: 58 → 39 ms at D = 0 and 178 → 178 ms at D = 40, where a window that is not in
+  memory costs one browser-node round trip, as in the earlier rounds.
+
+### Hosted shell during a switch
+
+From a writable thread, an in-app navigation to the other node's projects route with one of its
+projects open. ms after the navigation, median (min–max), n = 12:
+
+| What the page shows                         | D   | After wave 1                    | After wave 2                   | Delta  |
+| ------------------------------------------- | --- | ------------------------------- | ------------------------------ | ------ |
+| First frame after the navigation            | 0   | 15 (12–28), the surface         | 153.5 (113–177)                | +138.5 |
+| First frame after the navigation            | 40  | 16 (12–25), the surface         | 142 (104–197)                  | +126   |
+| Full-page "Connecting to <node>" surface    | 0   | 12 of 12, until 169.5 (155–181) | 0 of 12                        |        |
+| Full-page "Connecting to <node>" surface    | 40  | 12 of 12, until 652 (642–675)   | 0 of 12                        |        |
+| Sidebar unmounted                           | 0   | 12 of 12                        | 0 of 12                        |        |
+| Sidebar unmounted                           | 40  | 12 of 12                        | 0 of 12                        |        |
+| Projects page painted, with the sidebar     | 0   | 169.5 (155–181)                 | 161.5 (138–177)                | -8     |
+| Projects page painted, with the sidebar     | 40  | 652 (642–675)                   | 168 (128–217)                  | -484   |
+| Target node shown as connecting on the page | 0   | not shown                       | 161.5 (138–177), 12 of 12      |        |
+| Target node shown as connecting on the page | 40  | not shown                       | 168 (128–217), 12 of 12        |        |
+| Target node usable (session ready)          | 0   | 169.5 (155–181), surface ends   | 282 (266–292), shown as online | +112.5 |
+| Target node usable (session ready)          | 40  | 652 (642–675), surface ends     | 742 (713–785), shown as online | +90    |
+
+- After wave 1 the whole app gives way to "Connecting to <node>" from the first frame (12–28 ms)
+  until the session is established (its shell snapshot accepted), and the shell then mounts
+  again. The projects page paints in the frame the surface ends, so that time includes the
+  shell's mount render, and the session was ready at or before it.
+- After wave 2 the shell and the sidebar stay mounted throughout. The first frame after the
+  navigation comes at 142–153.5 ms (median), after the navigation's own render; the projects page
+  paints at 161.5 and 168 ms and shows the target node's device as connecting from its first
+  frame. That section-level state turns to online when the node's capability is ready, which
+  needs the same accepted snapshot.
+- Wave 2 paints the projects page about as soon at D = 0 and 484 ms sooner at D = 40, but on this
+  route the node is usable about 90–110 ms later: +112.5 ms at D = 0 and +90 ms at D = 40, a
+  regression. The ranges of the two revisions do not overlap at either delay (12 runs each).
+- Counted from the first frame after the navigation, the node is ready 134.5 (108–159) ms later at
+  D = 0 and 600 (587–623) ms at D = 40 after wave 2, against 154 (140–167) and 637 (621–659) ms
+  after wave 1, so the time is lost before that frame. The likely cause is the navigation's render
+  of the mounted shell, a main-thread task of about 140–150 ms that runs before the connection
+  makes progress, where wave 1 paints its light surface in 15–16 ms. These navigations were not
+  CPU-profiled, so the cause is not confirmed.
+- A thread route pays a click task of a similar size in both revisions (see the cold cross-node
+  switch above). That is why the readiness here after wave 2 is close to the cross-node writable
+  times (282 against 306 ms at D = 0, 742 against 760.5 ms at D = 40), while wave 1 was ready
+  sooner on this route than on a thread route.
+
+### Retained mode
+
+Hosted web still allows one connection in production, so the fixture measures single mode only.
+The evidence for the retained mode is the integration test of the hosted web retained environment
+sessions, which forces it through the runtime test seam with the real controller, registry,
+executor and coordinator over a fake relay. All 10 cases pass (with the connection coordinator's
+24):
+
+- One allowed connection: switching A → B → A never holds more than one live hosted connection and
+  never returns to the directory for the swap.
+- Three allowed connections: with three nodes held by open views, a routed fourth node gets no
+  connection and waits in the queue; selecting it creates no connection or transport.
+- Three allowed connections: switching back to a live session adopts it, with one transport and
+  one shell subscription for that node in total and the session ready at once.
+- Freeze and resume with two retained records: both are acquired again after revalidation, the
+  routed one at the resume and the other at least 750 ms later, and neither keeps authority from
+  its old session.
+- Also: commands stay refused on an environment that is still synchronizing while another is
+  ready; a route that follows an acquire within 100 ms joins it (one attempt); a leased warm
+  record reconnects after a relay drop while the directory is shown, with no node selected; a
+  warm record without a lease is released when its relay drops while a leased one reconnects; a
+  terminally failed record is not retried until its directory entry changes; and the routed
+  environment is kept through six hidden minutes of throttled ticks.
+
+The full-app test of the quiet chat passes too (10 cases), including a send queued less than
+100 ms after the send click while the node connects, and a draft's first send queued the same way.
+
+### Mobile
+
+Not measured on a device. The local fixture cannot sign in a native client, and a run against the
+production Hub needs the owner's interactive sign-in and enrolls a device on a real account, so the
+device rows are manual production checks. The evidence here is the mobile unit tests: 148 pass in
+the node lifecycle, connection coordinator, primary connection, retained wake, snapshot
+persistence, snapshot codec, snapshot database and preferences suites.
+
+| Row                                               | Target                                  | Evidence                                                          |
+| ------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------- |
+| Re-selecting a warm node                          | 0 network calls, mutation-ready at once | met in the test; time to writable on a device not measured        |
+| Opening a node cold                               |                                         | not measured                                                      |
+| Cold app start to the first cached thread content |                                         | not measured; the tests show cached messages before any live data |
+| Native cipher decrypt time per MiB                |                                         | not applicable: the native cipher change was not taken            |
+
+- Warm re-select: with two nodes established, selecting B and then A leaves the session online,
+  ready and current synchronously after each selection, with no lifecycle call, no Hub session or
+  directory request, both connections kept and none disposed.
+- Recent conversation text: with the setting at its default (on), a cold start shows the last
+  messages of a cached thread before any live data; a live window replaces them; turning the
+  setting off, signing out or a revoked node removes the stored text.
+
+### Desktop
+
+Not measured on a native client, for the same reason as mobile. The desktop content cache and the
+renderer that captures and hydrates it pass their tests: 50 in the cache and workspace IPC suites
+and 28 in the renderer's workspace suite. They show the cache kept across restarts, encrypted, in
+a private file, and served only to the account and environment it was saved for; the renderer
+paints the cached conversations of the threads the cached shell lists, lets live data win over a
+late answer, and keeps nothing while the setting is off. Cold app start to the first cached thread
+content is a manual production check.
+
 ## After wave 3 (final)
 
 ## Node
