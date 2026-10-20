@@ -1,32 +1,37 @@
+import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import {
+  hostedNodeCatalogInput,
   reconcileWorkspaceMachineCatalog,
   type WorkspaceMachineCatalogEntry,
   type WorkspaceNativeTrustState,
 } from "@ryco/client-runtime/state/workspace";
-import type { EnvironmentConnectionState, EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId } from "@ryco/contracts";
 
 import type { CachedHubNodeRecord } from "../../hostedHub/nodeRoster";
 import type { MobileHostedConnectionState } from "../../connection/hostedConnectionCoordinator";
 
-function connectionState(
-  connection: MobileHostedConnectionState | undefined,
-): EnvironmentConnectionState {
-  if (connection?.transportStatus === "online" && connection.sessionStatus === "ready") {
-    return "connected";
-  }
-  if (
-    connection &&
-    (connection.transportStatus === "requesting-ticket" ||
-      connection.transportStatus === "connecting" ||
-      connection.transportStatus === "authenticating" ||
-      connection.transportStatus === "opening-channel" ||
-      connection.transportStatus === "reconnecting" ||
-      connection.sessionStatus === "synchronizing" ||
-      connection.sessionStatus === "replaying")
-  ) {
-    return "connecting";
-  }
-  return "disconnected";
+/**
+ * A cached roster record as the directory node the shared catalog input reads.
+ * The roster persists what a machine row shows, not what the machine reports
+ * about itself, so those fields stay neutral and capabilities stay absent.
+ */
+function rosterDirectoryNode(node: CachedHubNodeRecord): HostedHubNode {
+  return {
+    id: node.nodeId,
+    environmentId: node.environmentId,
+    label: node.label,
+    platformOs: "unknown",
+    platformArch: "other",
+    clientVersion: "",
+    createdAt: node.observedAt,
+    updatedAt: node.observedAt,
+    lastAuthenticatedAt: node.lastAuthenticatedAt,
+    revokedAt: node.revokedAt,
+    revocationReasonCode: null,
+    grant: { id: node.nodeId, role: node.effectiveRole },
+    effectiveRole: node.effectiveRole,
+    presence: { online: node.presenceOnline, lastHeartbeatAt: node.lastHeartbeatAt },
+  };
 }
 
 /** Mobile adapter into the shared machine-catalog policy. */
@@ -44,23 +49,18 @@ export function buildMobileNativeWorkspaceCatalog(input: {
     input.nodes.map((node) => {
       const connection = connections.get(node.environmentId);
       return {
-        environmentId: node.environmentId,
-        nodeId: node.nodeId,
-        label: node.label,
-        clientTier: "native" as const,
-        nativeTrust: input.trustByEnvironmentId.get(node.environmentId) ?? "unknown",
-        requiresNativeVerification: true,
-        effectiveRole: connection?.effectiveRole ?? node.effectiveRole,
-        // Directory presence is independent of relay connection state.
-        online: node.presenceOnline,
-        lastSeenAt: node.lastHeartbeatAt ?? node.lastAuthenticatedAt,
-        observedAt: node.observedAt,
-        connectionState: connectionState(connection),
-        deliveryUnknown:
-          connection?.sessionStatus === "delivery-unknown" ||
-          deliveryUnknown.has(node.environmentId),
-        revokedAt: node.revokedAt,
-        removed: false,
+        ...hostedNodeCatalogInput(rosterDirectoryNode(node), {
+          clientTier: "native",
+          nativeTrust: input.trustByEnvironmentId.get(node.environmentId) ?? "unknown",
+          requiresNativeVerification: true,
+          session: connection ?? null,
+          deliveryUnknown:
+            connection?.sessionStatus === "delivery-unknown" ||
+            deliveryUnknown.has(node.environmentId),
+          observedAt: node.observedAt,
+        }),
+        // The roster does not record the machine's server version.
+        serverVersion: null,
       };
     }),
   );

@@ -1,4 +1,8 @@
-import type { HostedHubNode, HostedHubState } from "@ryco/client-runtime/authorization";
+import {
+  createHostedEnvironmentSessions,
+  type HostedHubNode,
+  type HostedHubState,
+} from "@ryco/client-runtime/authorization";
 import type { EnvironmentId } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -33,6 +37,7 @@ import type { CachedHubNodeRecord } from "../hostedHub/nodeRoster";
 import {
   createThreadConnectionRetargetEngine,
   deriveThreadConnectionRetarget,
+  isWarmHostedEnvironmentSession,
   resetMobileThreadConnectionRetargetEngineForTests,
   THREAD_CONNECTION_RETARGET_DEBOUNCE_MS,
   type ThreadConnectionRetargetEngine,
@@ -851,5 +856,220 @@ describe("thread connection retarget engine", () => {
 
     expect(selectNode).not.toHaveBeenCalled();
     expect(engine.readDegradedReason(ENV_A)).toBeNull();
+  });
+
+  describe("with a warm session", () => {
+    const warmOnly = (...warm: ReadonlyArray<EnvironmentId>) => ({
+      hasWarmSession: (environmentId: EnvironmentId) => warm.includes(environmentId),
+    });
+
+    /**
+     * Selecting a session that can be adopted or joined buys no relay ticket,
+     * so the window that collapses an A→B tap-through only adds latency.
+     */
+    it("dispatches an open at once instead of waiting out the debounce", async () => {
+      const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({ store, selectNode, ...warmOnly(ENV_A) });
+
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-a");
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4);
+      expect(selectNode).toHaveBeenCalledOnce();
+    });
+
+    it("dispatches at once under the default window too", async () => {
+      const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({
+        store,
+        selectNode,
+        debounceMs: undefined,
+        ...warmOnly(ENV_A),
+      });
+
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-a");
+    });
+
+    it("keeps the trailing debounce for a target without a warm session", async () => {
+      const store = createFakeStore(
+        hubState({ nodes: [node("node-a", ENV_A), node("node-b", ENV_B)] }),
+      );
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({ store, selectNode, ...warmOnly(ENV_A) });
+
+      engine.open(ENV_B);
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 1);
+      expect(selectNode).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-b");
+    });
+
+    it("lets a warm open supersede a pending debounced one without dispatching the older target", async () => {
+      const store = createFakeStore(
+        hubState({ nodes: [node("node-a", ENV_A), node("node-b", ENV_B)] }),
+      );
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({ store, selectNode, ...warmOnly(ENV_A) });
+
+      engine.open(ENV_B);
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 20);
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-a");
+
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4);
+      expect(selectNode).toHaveBeenCalledOnce();
+    });
+
+    it("lets a debounced open supersede a warm one that has not dispatched yet", async () => {
+      const store = createFakeStore(
+        hubState({ nodes: [node("node-a", ENV_A), node("node-b", ENV_B)] }),
+      );
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({ store, selectNode, ...warmOnly(ENV_A) });
+
+      engine.open(ENV_A);
+      engine.open(ENV_B);
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 1);
+      expect(selectNode).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-b");
+    });
+
+    it("drops a warm open released before it dispatched", async () => {
+      const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({ store, selectNode, ...warmOnly(ENV_A) });
+
+      engine.open(ENV_A)();
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4);
+
+      expect(selectNode).not.toHaveBeenCalled();
+    });
+
+    it("still waits for an authoritative directory before dispatching a warm open", async () => {
+      const store = createFakeStore(hubState({ directoryStatus: "loading", nodes: [] }));
+      const selectNode = vi.fn(async () => undefined);
+      const engine = createEngine({
+        store,
+        selectNode,
+        getRosterEntry: () => rosterRecord("node-a", ENV_A),
+        ...warmOnly(ENV_A),
+      });
+
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(selectNode).not.toHaveBeenCalled();
+
+      store.patch({ directoryStatus: "ready", nodes: [node("node-a", ENV_A)] });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(selectNode).toHaveBeenCalledExactlyOnceWith("node-a");
+    });
+
+    it("never runs two selectNode dispatches at once across warm opens", async () => {
+      const store = createFakeStore(
+        hubState({ nodes: [node("node-a", ENV_A), node("node-b", ENV_B)] }),
+      );
+      const deferred = createDeferredSelectNode();
+      const engine = createEngine({
+        store,
+        selectNode: deferred.selectNode,
+        ...warmOnly(ENV_A, ENV_B),
+      });
+
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+      engine.open(ENV_B);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deferred.calls).toEqual(["node-a"]);
+
+      deferred.resolveNext();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(deferred.calls).toEqual(["node-a", "node-b"]);
+      expect(deferred.maxConcurrent).toBe(1);
+    });
+
+    it("does not dispatch again for a target that was already dispatched", async () => {
+      const store = createFakeStore(hubState({ nodes: [node("node-a", ENV_A)] }));
+      const deferred = createDeferredSelectNode();
+      const engine = createEngine({
+        store,
+        selectNode: deferred.selectNode,
+        ...warmOnly(ENV_A),
+      });
+
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+      // The same environment mounted a second time (a replace, or iPad's
+      // second thread surface) re-decides at once but finds it dispatched.
+      engine.open(ENV_A);
+      await vi.advanceTimersByTimeAsync(0);
+      deferred.resolveNext();
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 4);
+
+      expect(deferred.calls).toEqual(["node-a"]);
+    });
+  });
+});
+
+describe("warm hosted environment session", () => {
+  const sessionPorts = {
+    now: () => Date.now(),
+    setTimeout: (callback: () => void, delayMs: number) => globalThis.setTimeout(callback, delayMs),
+    clearTimeout: (timer: unknown) =>
+      globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  };
+
+  it("has no warm session without a record", () => {
+    expect(isWarmHostedEnvironmentSession(undefined)).toBe(false);
+  });
+
+  it("is warm while its connection is on its way, adoptable once established, cold otherwise", () => {
+    const sessions = createHostedEnvironmentSessions(sessionPorts);
+    try {
+      const { generation } = sessions.ensureRecord(node("node-a", ENV_A));
+      const warm = () => isWarmHostedEnvironmentSession(sessions.read(ENV_A));
+
+      // A record nobody asked to connect is not on its way anywhere.
+      expect(warm()).toBe(false);
+
+      sessions.markConnectRequested(ENV_A, generation);
+      expect(warm()).toBe(true);
+
+      sessions.transportStatus(ENV_A, generation, "online");
+      sessions.sessionStatus(ENV_A, generation, "synchronizing");
+      expect(warm()).toBe(true);
+
+      sessions.markSessionReady(ENV_A, generation);
+      expect(warm()).toBe(true);
+
+      sessions.suspendAll();
+      expect(warm()).toBe(false);
+    } finally {
+      sessions.clear();
+    }
+  });
+
+  it("is cold after a terminal failure", () => {
+    const sessions = createHostedEnvironmentSessions(sessionPorts);
+    try {
+      const { generation } = sessions.ensureRecord(node("node-a", ENV_A));
+      sessions.markConnectRequested(ENV_A, generation);
+      sessions.transportStatus(ENV_A, generation, "terminal-failure");
+
+      expect(isWarmHostedEnvironmentSession(sessions.read(ENV_A))).toBe(false);
+    } finally {
+      sessions.clear();
+    }
   });
 });
