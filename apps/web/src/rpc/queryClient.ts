@@ -58,6 +58,11 @@ interface QueryEntry {
   /** A forced fetch joined the in-flight attempt after it was issued. */
   forcedWhileFetching: boolean;
   fetchId: number;
+  /**
+   * Issue order of the fetch attempt whose result is the current data; 0 when
+   * the data did not come from a fetch, was invalidated, or there is none.
+   */
+  dataReadSequence: number;
   gcTime: number;
   lastAccessedAt: number;
   gcTimer: ReturnType<typeof setTimeout> | null;
@@ -133,6 +138,13 @@ export class QueryClient {
   private readonly prefixIndex = new Map<string, Set<string>>();
   private readonly maxEntries: number;
   private readonly defaultGcTime: number;
+  /** Issue order of fetch attempts. */
+  private readSequence = 0;
+  /**
+   * Per environment, the last attempt issued before its latest fence; reads
+   * issued after it belong to the environment's current session.
+   */
+  private readonly readEpochs = new Map<EnvironmentId, number>();
 
   constructor(options?: { readonly maxEntries?: number; readonly defaultGcTime?: number }) {
     this.maxEntries = Math.max(1, Math.floor(options?.maxEntries ?? 512));
@@ -178,6 +190,7 @@ export class QueryClient {
     this.clearGcTimer(entry);
     entry.fetchId += 1;
     entry.state = INITIAL_QUERY_STATE;
+    entry.dataReadSequence = 0;
     this.cache.delete(entry.hash);
     this.unindexEntry(entry);
     return true;
@@ -225,6 +238,7 @@ export class QueryClient {
         promise: null,
         forcedWhileFetching: false,
         fetchId: 0,
+        dataReadSequence: 0,
         gcTime: this.defaultGcTime,
         lastAccessedAt: Date.now(),
         gcTimer: null,
@@ -312,6 +326,7 @@ export class QueryClient {
     if (next === undefined) {
       return previous;
     }
+    entry.dataReadSequence = 0;
     this.setState(entry, {
       data: next,
       error: null,
@@ -346,6 +361,7 @@ export class QueryClient {
       : [...this.cache.values()];
     for (const entry of entries) {
       // Mark stale so the next mount/fetch refetches even without observers.
+      entry.dataReadSequence = 0;
       if (entry.state.status === "success") {
         this.setState(entry, { ...entry.state, dataUpdatedAt: 0 });
       }
@@ -358,7 +374,12 @@ export class QueryClient {
     return Promise.resolve();
   }
 
+  /**
+   * Fences the environment's observed queries in flight and starts a new read
+   * epoch for it: reads issued from now on belong to its current session.
+   */
   fenceActiveQueriesForEnvironment(environmentId: EnvironmentId): void {
+    this.readEpochs.set(environmentId, this.readSequence);
     for (const entry of this.cache.values()) {
       if (![...entry.observers].some((observer) => observer.environmentId === environmentId)) {
         continue;
@@ -371,7 +392,13 @@ export class QueryClient {
     }
   }
 
+  /**
+   * Re-runs the environment's observed queries that failed or are stale, except
+   * a query whose current data was fetched after the environment's latest
+   * fence: that read already answered from the current session.
+   */
   async refreshActiveQueriesForEnvironment(environmentId: EnvironmentId): Promise<void> {
+    const epoch = this.readEpochs.get(environmentId);
     const refreshes: Array<Promise<unknown>> = [];
     for (const entry of this.cache.values()) {
       const observers = [...entry.observers].filter(
@@ -379,6 +406,13 @@ export class QueryClient {
       );
       const observer = observers[0];
       if (!observer) continue;
+      if (
+        epoch !== undefined &&
+        entry.state.status === "success" &&
+        entry.dataReadSequence > epoch
+      ) {
+        continue;
+      }
       if (
         entry.state.status !== "error" &&
         !observers.some((candidate) => this.isStale(entry.key, candidate.staleTime ?? 0))
@@ -412,10 +446,12 @@ export class QueryClient {
     const run = async (): Promise<TData | undefined> => {
       for (let attempt = 0; attempt <= retries; attempt += 1) {
         try {
+          const readSequence = ++this.readSequence;
           const data = await queryFn();
           if (entry.fetchId !== fetchId) {
             return entry.state.status === "success" ? (entry.state.data as TData) : undefined;
           }
+          entry.dataReadSequence = readSequence;
           this.setState(entry, {
             data,
             error: null,
@@ -498,9 +534,11 @@ export class QueryClient {
       this.clearGcTimer(entry);
       entry.fetchId += 1;
       entry.state = INITIAL_QUERY_STATE;
+      entry.dataReadSequence = 0;
     }
     this.cache.clear();
     this.prefixIndex.clear();
+    this.readEpochs.clear();
   }
 }
 
