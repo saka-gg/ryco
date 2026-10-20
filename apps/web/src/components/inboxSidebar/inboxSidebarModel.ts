@@ -190,6 +190,13 @@ export interface InboxSidebarRow {
   readonly contextLabel: string;
   readonly state: InboxSidebarThreadState;
   readonly statusLabel: string;
+  /**
+   * The state the row is filed and ordered by: `state` without its machine's
+   * connection progress (connecting, waiting for a slot, reconnecting). A row
+   * keeps its section and place while its machine connects, so a press that
+   * starts that connection never moves the row it pressed.
+   */
+  readonly placementState: InboxSidebarThreadState;
   /** Set only while `state` is "needs-input". */
   readonly attention: InboxSidebarAttention | null;
   /** Provider error text, set only while `state` is "error". */
@@ -407,6 +414,29 @@ function resolveThreadState(
   return "idle";
 }
 
+/** The machine is connecting, waiting for a connection slot, or reconnecting. */
+function isMachineConnecting(
+  environment: InboxSidebarEnvironment | undefined,
+): environment is InboxSidebarEnvironment {
+  return (
+    environment?.connectionState === "connecting" || environment?.connectionState === "reconnecting"
+  );
+}
+
+/** `resolveThreadState` as if the machine's connection were settled (see `placementState`). */
+function resolvePlacementState(
+  thread: SidebarThreadSummary,
+  environment: InboxSidebarEnvironment | undefined,
+  deliveryUnknownThreadKeys: ReadonlySet<string>,
+  nowMs: number,
+): InboxSidebarThreadState {
+  // "idle" is an online machine the tab holds no connection for, which no row state reflects.
+  const settled = isMachineConnecting(environment)
+    ? { ...environment, connectionState: "idle" as const }
+    : environment;
+  return resolveThreadState(thread, settled, deliveryUnknownThreadKeys, nowMs);
+}
+
 function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
   const activity = deriveThreadActivityStatus(thread);
   if (activity === "approval") return "approval";
@@ -484,7 +514,8 @@ const STATE_PRECEDENCE: Readonly<Record<InboxSidebarThreadState, number>> = {
 };
 
 /**
- * State-derived section. It also ranks delegated nesting: a child more urgent
+ * The section of a row's placement state (`placementState`, never the machine's
+ * connection progress). It also ranks delegated nesting: a child more urgent
  * than a snoozed or settled host stays top-level instead of folding out of sight.
  */
 function sectionKey(
@@ -520,6 +551,7 @@ function withDelegatedState(host: InboxSidebarRow): InboxSidebarRow {
     ...host,
     state: inherited,
     statusLabel: statusLabel(inherited, undefined, null),
+    placementState: inherited,
     attention: asking?.attention ?? null,
     errorDetail: null,
     usageLimit: null,
@@ -550,7 +582,11 @@ function nestDelegatedRows(
     lineage: row.lineage,
     pinned: row.pinned,
     focused: row.focus !== null,
-    urgency: row.snoozedUntil ? "snoozed" : row.settled ? "settled" : sectionKey(row.state),
+    urgency: row.snoozedUntil
+      ? "snoozed"
+      : row.settled
+        ? "settled"
+        : sectionKey(row.placementState),
   }));
   const plan = planDelegatedNesting(items, { lineageByKey });
   if (plan.hostByChildKey.size === 0) return [...rows];
@@ -594,8 +630,8 @@ function compareRecent(left: InboxSidebarRow, right: InboxSidebarRow): number {
 
 function compareActive(left: InboxSidebarRow, right: InboxSidebarRow): number {
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
-  const leftPriority = ACTIVE_PRIORITY[left.state as keyof typeof ACTIVE_PRIORITY] ?? 0;
-  const rightPriority = ACTIVE_PRIORITY[right.state as keyof typeof ACTIVE_PRIORITY] ?? 0;
+  const leftPriority = ACTIVE_PRIORITY[left.placementState as keyof typeof ACTIVE_PRIORITY] ?? 0;
+  const rightPriority = ACTIVE_PRIORITY[right.placementState as keyof typeof ACTIVE_PRIORITY] ?? 0;
   return leftPriority - rightPriority || compareRecent(left, right);
 }
 
@@ -716,6 +752,9 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       : (worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace");
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
     const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
+    const placementState = isMachineConnecting(environment)
+      ? resolvePlacementState(thread, environment, deliveryUnknownThreadKeys, nowMs)
+      : state;
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
@@ -752,6 +791,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       contextLabel,
       state,
       statusLabel: statusLabel(state, environment, usageLimit),
+      placementState,
       attention: state === "needs-input" ? resolveAttention(thread) : null,
       errorDetail: state === "error" ? thread.session?.lastError?.trim() || null : null,
       usageLimit: usageLimit ? { phase: usageLimit.phase, resetAt: usageLimit.resetAt } : null,
@@ -821,13 +861,16 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
   const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.state) === "active")
+    .filter((row) => row.focus === null && sectionKey(row.placementState) === "active")
     .toSorted(compareActive);
   const needsInput = unsettledRows
-    .filter((row) => row.focus === null && !row.settled && sectionKey(row.state) === "needs-input")
+    .filter(
+      (row) =>
+        row.focus === null && !row.settled && sectionKey(row.placementState) === "needs-input",
+    )
     .toSorted(compareRecent);
   const recent = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.state) === "recent")
+    .filter((row) => row.focus === null && sectionKey(row.placementState) === "recent")
     .toSorted(compareRecent);
   const settled = unpinnedRows
     .filter((row) => row.settled)

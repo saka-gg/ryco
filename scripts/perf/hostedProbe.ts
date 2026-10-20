@@ -36,6 +36,12 @@ const FIXTURE_THREAD_ID = "fixture-thread-1";
 /** Local processes share per-peer Hub rate buckets, so switches stay this far apart. */
 const SWITCH_SETTLE_MS = 1_500;
 const SWITCH_TIMEOUT_MS = 15_000;
+/**
+ * The press re-rendered the inbox and replaced the row it pressed before the
+ * click. A pointer would have clicked whatever is under it now, so the switch
+ * is reported as failed instead of timing out.
+ */
+export const SWITCH_ROW_REPLACED_ERROR = "row-replaced";
 const SEND_TIMEOUT_MS = 10_000;
 const SAME_NODE_CONTROLS = 3;
 const CROSS_NODE_ROW_OFFSET = 3;
@@ -650,7 +656,8 @@ export const SWITCH_PROBE_SCRIPT = `(() => {
     switchTo(rowKey, timeoutMs) {
       return new Promise((resolve) => {
         const threadId = rowKey.slice(rowKey.indexOf(":") + 1);
-        const row = document.querySelector("[data-inbox-row-key=" + JSON.stringify(rowKey) + "] [data-testid='inbox-thread-row']");
+        const selector = "[data-inbox-row-key=" + JSON.stringify(rowKey) + "] [data-testid='inbox-thread-row']";
+        const row = document.querySelector(selector);
         if (!row) { resolve({ error: "row-missing" }); return; }
         const before = new Set(Array.from(document.querySelectorAll("[data-message-id]"), (element) => element.getAttribute("data-message-id")));
         let start = 0;
@@ -687,9 +694,15 @@ export const SWITCH_PROBE_SCRIPT = `(() => {
         // delivers the press in one task and the release and click in a later one,
         // so the press's handlers (and the microtasks they queue) are done before
         // the click; the timer models the shortest such gap, a tap without a hold.
+        // A press that replaced the row is reported, never clicked.
         const pressStart = performance.now();
         pressDown(row);
         setTimeout(() => {
+          if (document.querySelector(selector) !== row) {
+            release(row);
+            resolve({ error: ${JSON.stringify(SWITCH_ROW_REPLACED_ERROR)} });
+            return;
+          }
           start = performance.now();
           release(row);
           row.click();

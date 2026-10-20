@@ -1598,10 +1598,11 @@ own Hub; nothing needs to be built or deployed for it:
    holds: a warm switch is writable within about 200 ms plus the delay, so read the slower switches
    as the cold ones. `hosted-correlate` can tell them apart exactly, but it needs the home
    directories of the target nodes (it reads their trace files, `--node-dir`) and, for the Hub
-   side, a JSON-lines Hub log (`--hub-log`); use it only where both are at hand. A cold switch can
-   also time out: the press on a row of a node the tab is not connected to can replace that row
-   before the click (see "Pressing a row of a node that is not connected"). Such a timeout is a
-   cold switch that a pointer's click would have missed as well, not a slow one.
+   side, a JSON-lines Hub log (`--hub-log`); use it only where both are at hand. A switch whose
+   press replaced the row before the click is reported as failed with `row-replaced` (see
+   "Pressing a row of a node that is not connected"): it is a click a pointer would have missed,
+   not a slow switch. The inbox keeps a row in place while its node connects, so a `row-replaced`
+   failure is a regression to report.
 4. Cold load: `bun scripts/perf/cli.ts hosted-cold-load --hub-url <hub> --cookie-file <file> --iterations 10 --output <dir>/load`,
    once more with `--visited`.
 5. Check each result with `hosted-compare --baseline <file> --candidate <file> --targets <targets>`,

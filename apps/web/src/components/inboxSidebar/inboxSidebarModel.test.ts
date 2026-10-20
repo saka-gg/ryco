@@ -1449,6 +1449,141 @@ describe("queued environments", () => {
   });
 });
 
+describe("placement while a machine connects", () => {
+  const rowsOf = (sections: ReturnType<typeof build>) =>
+    sections.flatMap((section) => section.rows);
+  const failedSession = {
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "error" as const,
+      orchestrationStatus: "error" as const,
+      lastError: "Provider exited (code 1)",
+      createdAt: "2026-08-23T10:00:00.000Z",
+      updatedAt: "2026-08-23T10:00:00.000Z",
+    },
+  };
+  const runningTurn = {
+    latestTurn: {
+      turnId: TurnId.make("turn-running"),
+      state: "running" as const,
+      requestedAt: "2026-08-23T10:00:00.000Z",
+      startedAt: "2026-08-23T10:00:01.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  };
+
+  it("keeps a released machine's rows in Recent and in place while it connects or waits", () => {
+    const threads = [
+      thread("a-new", { createdAt: "2026-08-23T10:06:00.000Z" }),
+      thread("b-mid", { environmentId: ENV_B, createdAt: "2026-08-23T10:05:00.000Z" }),
+      thread("a-old", { createdAt: "2026-08-23T10:04:00.000Z" }),
+      thread("b-old", { environmentId: ENV_B, createdAt: "2026-08-23T10:03:00.000Z" }),
+    ];
+    const layout = (machineB: Partial<InboxSidebarEnvironment>) =>
+      build({ threads, environments: [environment(ENV_A), environment(ENV_B, machineB)] });
+    const released = layout({ connectionState: "idle" });
+    const releasedKeys = rowsOf(released).map((row) => row.key);
+    expect(releasedKeys).toEqual([
+      "machine-a:a-new",
+      "machine-b:b-mid",
+      "machine-a:a-old",
+      "machine-b:b-old",
+    ]);
+
+    const progress = [
+      [{ connectionState: "idle" }, "idle", "Idle"],
+      [{ connectionState: "connecting" }, "connecting", "Connecting"],
+      [{ connectionState: "reconnecting", queued: true }, "reconnecting", "Waiting"],
+      [{ connectionState: "reconnecting" }, "reconnecting", "Reconnecting"],
+      [{ connectionState: "connected" }, "idle", "Idle"],
+    ] as const;
+    for (const [machineB, state, statusLabel] of progress) {
+      const sections = layout(machineB);
+      expect(sections.map((section) => section.key)).toEqual(["recent"]);
+      expect(rowsOf(sections).map((row) => row.key)).toEqual(releasedKeys);
+      expect(
+        rowsOf(sections)
+          .filter((row) => row.environmentId === ENV_B)
+          .map((row) => [row.state, row.statusLabel, row.placementState]),
+      ).toEqual([
+        [state, statusLabel, "idle"],
+        [state, statusLabel, "idle"],
+      ]);
+    }
+  });
+
+  it("ranks an errored row by its own state while its machine connects", () => {
+    const threads = [
+      thread("a-working", runningTurn),
+      thread("b-error", { environmentId: ENV_B, ...failedSession }),
+    ];
+    const active = (machineB: Partial<InboxSidebarEnvironment>) =>
+      build({
+        threads,
+        environments: [environment(ENV_A), environment(ENV_B, machineB)],
+      }).find((section) => section.key === "active")?.rows;
+
+    expect(active({ connectionState: "connected" })?.map((row) => row.threadId)).toEqual([
+      "b-error",
+      "a-working",
+    ]);
+    const connecting = active({ connectionState: "connecting" });
+    expect(connecting?.map((row) => row.threadId)).toEqual(["b-error", "a-working"]);
+    expect(connecting?.[0]).toMatchObject({
+      state: "connecting",
+      statusLabel: "Connecting",
+      placementState: "error",
+    });
+  });
+
+  it("still files a thread whose own session is connecting under Active now", () => {
+    const sections = build({
+      threads: [
+        thread("starting", {
+          session: {
+            provider: ProviderDriverKind.make("codex"),
+            status: "connecting",
+            orchestrationStatus: "starting",
+            createdAt: "2026-08-23T10:00:00.000Z",
+            updatedAt: "2026-08-23T10:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["active"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      state: "connecting",
+      placementState: "connecting",
+    });
+  });
+
+  it("files a folded host by the inherited state while its machine connects", () => {
+    const sections = build({
+      threads: [
+        thread("parent", { environmentId: ENV_B }),
+        thread("child", {
+          environmentId: ENV_B,
+          backgroundLiveness: "working",
+          lineage: {
+            parentThreadId: ThreadId.make("parent"),
+            rootThreadId: ThreadId.make("parent"),
+            relationship: "delegated",
+          },
+        }),
+      ],
+      environments: [environment(ENV_A), environment(ENV_B, { connectionState: "connecting" })],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["active"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      threadId: "parent",
+      state: "working",
+      placementState: "working",
+      delegatedState: true,
+    });
+  });
+});
+
 describe("createInboxSidebarModelSharing", () => {
   const NOW_MS = Date.parse("2026-08-24T00:00:00Z");
   const pullRequestWorktree: SidebarWorktreeSummary = {
