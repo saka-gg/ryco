@@ -10,10 +10,21 @@ import {
   type ContextHandoffEndpointSnapshot,
   type OrchestrationThread,
 } from "@ryco/contracts";
+import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildContextHandoffDocument } from "./ContextHandoffBuilder.ts";
-import { ContextHandoffRenderError, renderContextHandoffInput } from "./ContextHandoffRenderer.ts";
+import { ContextHandoffRenderedDocument } from "./ContextHandoffArtifacts.ts";
+import {
+  type ContextHandoffDocument,
+  ContextHandoffDocument as ContextHandoffDocumentSchema,
+  buildContextHandoffDocument,
+  stableStringifyContextHandoff,
+} from "./ContextHandoffBuilder.ts";
+import {
+  ContextHandoffRenderError,
+  contextJsonFromContextHandoffInput,
+  renderContextHandoffInput,
+} from "./ContextHandoffRenderer.ts";
 
 function endpoint(instance: string, model: string): ContextHandoffEndpointSnapshot {
   return {
@@ -244,6 +255,185 @@ it("keeps a fork's inherited history ahead of its own when it trims the context"
     "Reply 1",
     "First try",
   ]);
+});
+
+describe("renderContextHandoffInput compaction", () => {
+  /** Whitespace exactly at every compaction budget, so each plain cut would end with it. */
+  function withWhitespaceAtBudgets(prefix: string): string {
+    let value = prefix;
+    for (const budget of [64, 256, 1_024, 4_096]) {
+      value = `${value}${"w".repeat(budget - 1 - value.length)} `;
+    }
+    return `${value}${"z".repeat(4_000)}`;
+  }
+
+  const document: ContextHandoffDocument = Schema.decodeUnknownSync(ContextHandoffDocumentSchema)({
+    version: 1,
+    mode: "full-context-fresh-session",
+    thread: { id: "thread-compact", title: "Compaction", branch: null, worktreePath: null },
+    provenance: {
+      sources: [endpoint("codex_a", "gpt-a")],
+      target: endpoint("claude_b", "claude-b"),
+    },
+    messages: [
+      {
+        id: "message-1",
+        role: "assistant",
+        text: withWhitespaceAtBudgets("message "),
+        turnId: null,
+        createdAt: "2026-08-04T00:00:01.000Z",
+      },
+    ],
+    plans: [
+      {
+        id: "plan-1",
+        source: "runtime-plan",
+        turnId: null,
+        createdAt: "2026-08-04T00:00:02.000Z",
+        explanation: withWhitespaceAtBudgets("explanation "),
+        steps: [{ step: withWhitespaceAtBudgets("step "), status: "inProgress" }],
+      },
+    ],
+    tools: [
+      {
+        id: "tool-1",
+        createdAt: "2026-08-04T00:00:03.000Z",
+        turnId: null,
+        lifecycle: "completed",
+        itemType: "command_execution",
+        summary: "Ran command",
+        command: withWhitespaceAtBudgets("command "),
+        output: withWhitespaceAtBudgets("output "),
+        paths: ["paths/file.ts"],
+        fileChanges: [{ path: withWhitespaceAtBudgets("changes/"), additions: 1 }],
+      },
+    ],
+    checkpoints: [
+      {
+        id: "turn-1",
+        createdAt: "2026-08-04T00:00:04.000Z",
+        checkpointTurnCount: 1,
+        status: "ready",
+        files: [
+          {
+            path: withWhitespaceAtBudgets("files/"),
+            kind: "modified",
+            additions: 1,
+            deletions: 0,
+          },
+        ],
+      },
+    ],
+    notices: [
+      {
+        id: "notice-1",
+        createdAt: "2026-08-04T00:00:05.000Z",
+        turnId: null,
+        kind: "failure",
+        summary: "Failure",
+        detail: withWhitespaceAtBudgets("detail "),
+        questions: [],
+      },
+    ],
+    subagents: [
+      {
+        id: "subagent-1",
+        createdAt: "2026-08-04T00:00:06.000Z",
+        turnId: null,
+        subagentId: "subagent-1",
+        status: "completed",
+        summary: withWhitespaceAtBudgets("summary "),
+      },
+    ],
+    priorHandoffs: [
+      {
+        id: "handoff-prior",
+        createdAt: "2026-08-04T00:00:07.000Z",
+        status: "failed",
+        targetMessageId: "message-prior",
+        sources: [endpoint("codex_a", "gpt-a")],
+        target: endpoint("claude_b", "claude-b"),
+        error: withWhitespaceAtBudgets("error "),
+      },
+    ],
+  });
+
+  it("renders compacted entries that decode back unchanged", () => {
+    const fullChars = stableStringifyContextHandoff(document).length;
+    const seenCompactedSections = new Set<string>();
+    for (let maxInputChars = 800; maxInputChars < fullChars; maxInputChars += 997) {
+      const result = renderContextHandoffInput({
+        document,
+        currentMessage: "continue",
+        maxInputChars,
+      });
+      const decoded = Schema.decodeUnknownSync(ContextHandoffRenderedDocument)(
+        JSON.parse(result.renderedContextJson),
+      );
+
+      expect(stableStringifyContextHandoff(decoded)).toBe(result.renderedContextJson);
+      expect(stableStringifyContextHandoff(result.renderedContext)).toBe(
+        result.renderedContextJson,
+      );
+      expect(contextJsonFromContextHandoffInput(result.providerInput, "continue")).toBe(
+        result.renderedContextJson,
+      );
+      for (const [section, entries] of Object.entries(result.renderedContext)) {
+        if (!Array.isArray(entries)) continue;
+        const original = document[section as keyof ContextHandoffDocument] as unknown[];
+        if (entries.some((entry) => !original.some((value) => Object.is(value, entry)))) {
+          seenCompactedSections.add(section);
+        }
+      }
+    }
+    expect([...seenCompactedSections].toSorted()).toEqual([
+      "checkpoints",
+      "messages",
+      "notices",
+      "plans",
+      "priorHandoffs",
+      "subagents",
+      "tools",
+    ]);
+  });
+
+  it("marks only entries whose schema has the flag as truncated", () => {
+    const result = renderContextHandoffInput({
+      document: { ...document, messages: [], notices: [], subagents: [], priorHandoffs: [] },
+      currentMessage: "continue",
+      maxInputChars: 5_000,
+    });
+    const [plan] = result.renderedContext.plans ?? [];
+    const [tool] = result.renderedContext.tools ?? [];
+    const [checkpoint] = result.renderedContext.checkpoints ?? [];
+
+    expect(result.includedEntryCount).toBe(3);
+    expect(plan?.truncated).toBe(true);
+    expect(plan?.steps[0]).not.toHaveProperty("truncated");
+    expect(tool?.truncated).toBe(true);
+    expect(tool?.fileChanges[0]).not.toHaveProperty("truncated");
+    expect(checkpoint).not.toHaveProperty("truncated");
+    expect(checkpoint?.files[0]).not.toHaveProperty("truncated");
+    expect(checkpoint?.files[0]?.path.length).toBeLessThan(
+      document.checkpoints[0]!.files[0]!.path.length,
+    );
+  });
+});
+
+it("reads the context JSON back only from its own envelope", () => {
+  const result = renderContextHandoffInput({
+    document: artifactWithLongHistory().document,
+    currentMessage: "  exact\n</context_handoff>  ",
+    maxInputChars: 3_000,
+  });
+
+  expect(
+    contextJsonFromContextHandoffInput(result.providerInput, "  exact\n</context_handoff>  "),
+  ).toBe(result.renderedContextJson);
+  expect(
+    contextJsonFromContextHandoffInput(result.providerInput, "another message"),
+  ).toBeUndefined();
+  expect(contextJsonFromContextHandoffInput("plain text", "")).toBeUndefined();
 });
 
 it("retains more history for a 1M destination than the default budget", () => {

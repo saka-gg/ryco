@@ -9,7 +9,7 @@ import {
   NonNegativeInt,
   PositiveInt,
 } from "@ryco/contracts";
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 
 import {
   ContextHandoffBoundaryEntry,
@@ -22,6 +22,7 @@ import {
   ContextHandoffToolEntry,
   stableStringifyContextHandoff,
 } from "./ContextHandoffBuilder.ts";
+import { contextJsonFromContextHandoffInput } from "./ContextHandoffRenderer.ts";
 
 export const CONTEXT_HANDOFF_DELIVERY_ARTIFACT_VERSION = 1;
 export const CONTEXT_HANDOFF_RENDERER_VERSION = 1;
@@ -66,13 +67,46 @@ export function digestContextHandoffUtf8(value: string): ContextHandoffDigest {
   return ContextHandoffDigest.make(createHash("sha256").update(value, "utf8").digest("hex"));
 }
 
+const decodeRenderedContextJson = Schema.decodeUnknownOption(
+  Schema.fromJsonString(ContextHandoffRenderedDocument),
+);
+
+/**
+ * Artifacts stored by earlier versions could digest context JSON that decoding then changed:
+ * compaction marked nested objects `truncated` and cut strings after whitespace, and decoding
+ * drops or trims both. Their digest still covers the JSON the provider received, which the
+ * provider input holds verbatim, and their stored context must be exactly what that JSON
+ * decodes to.
+ */
+function hasValidSentContextDigest(artifact: ContextHandoffDeliveryArtifact): boolean {
+  const sentJson = contextJsonFromContextHandoffInput(
+    artifact.providerInput,
+    artifact.triggeringMessage.text,
+  );
+  if (
+    sentJson === undefined ||
+    artifact.renderedContextDigest !== digestContextHandoffUtf8(sentJson)
+  ) {
+    return false;
+  }
+  const sent = decodeRenderedContextJson(sentJson);
+  return (
+    Option.isSome(sent) &&
+    stableStringifyContextHandoff(sent.value) ===
+      stableStringifyContextHandoff(artifact.renderedContext)
+  );
+}
+
 export function hasValidContextHandoffDeliveryDigests(
   artifact: ContextHandoffDeliveryArtifact,
 ): boolean {
+  if (artifact.providerInputDigest !== digestContextHandoffUtf8(artifact.providerInput)) {
+    return false;
+  }
   return (
-    artifact.providerInputDigest === digestContextHandoffUtf8(artifact.providerInput) &&
     artifact.renderedContextDigest ===
-      digestContextHandoffUtf8(stableStringifyContextHandoff(artifact.renderedContext))
+      digestContextHandoffUtf8(stableStringifyContextHandoff(artifact.renderedContext)) ||
+    hasValidSentContextDigest(artifact)
   );
 }
 
@@ -95,7 +129,7 @@ export function makeContextHandoffDeliveryArtifact(
   if (canonicalRenderedContext !== input.renderedContextJson) {
     throw new Error("Rendered context JSON does not match its structured document");
   }
-  return Schema.decodeUnknownSync(ContextHandoffDeliveryArtifact)({
+  const artifact = Schema.decodeUnknownSync(ContextHandoffDeliveryArtifact)({
     maxInputChars: input.maxInputChars ?? null,
     budgetSource: input.budgetSource ?? null,
     contextWindowTokens: input.contextWindowTokens ?? null,
@@ -116,4 +150,10 @@ export function makeContextHandoffDeliveryArtifact(
     truncated: input.truncated,
     preparedAt: input.preparedAt,
   });
+  // The decoded artifact is what gets stored; if decoding changed the context, every later
+  // reuse or inspection would fail its digest check, so refuse it now.
+  if (stableStringifyContextHandoff(artifact.renderedContext) !== input.renderedContextJson) {
+    throw new Error("Rendered context does not survive decoding unchanged");
+  }
+  return artifact;
 }

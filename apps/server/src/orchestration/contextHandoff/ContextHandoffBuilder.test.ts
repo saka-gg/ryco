@@ -14,9 +14,13 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
+import { sha256Hex } from "../../canonicalJson.ts";
 import {
+  type ContextHandoffArtifact,
+  ContextHandoffDocument,
   buildContextHandoffDocument,
   stableStringifyContextHandoff,
 } from "./ContextHandoffBuilder.ts";
@@ -582,6 +586,250 @@ describe("buildContextHandoffDocument", () => {
     expect(artifact.digest).toBe(
       "709738eda61fae94bf69ea632e191fb1415db8329e86a6f4d053d6ec9b915ba3",
     );
+  });
+});
+
+/** What loading the stored copy reads back: the JSON parsed again, then decoded. */
+function expectStoredCopyToReadBackUnchanged(artifact: ContextHandoffArtifact) {
+  const reloaded = Schema.decodeUnknownSync(ContextHandoffDocument)(
+    JSON.parse(artifact.canonicalJson),
+  );
+  expect(reloaded).toEqual(artifact.document);
+  expect(sha256Hex(stableStringifyContextHandoff(reloaded))).toBe(artifact.digest);
+}
+
+describe("buildContextHandoffDocument cut values", () => {
+  const targetMessageId = MessageId.make("message-target");
+  const targetMessage: OrchestrationThread["messages"][number] = {
+    id: targetMessageId,
+    role: "user",
+    text: "continue",
+    turnId: TurnId.make("turn-2"),
+    streaming: false,
+    createdAt: "2026-08-04T00:01:00.000Z",
+    updatedAt: "2026-08-04T00:01:00.000Z",
+  };
+
+  for (const separator of [" ", "\n", "\t"]) {
+    it(`never stores a value that ends in whitespace at its cut (${JSON.stringify(separator)})`, () => {
+      // Whitespace lands exactly at the limit, so the plain cut would end with it.
+      const cutAt = (maxChars: number) => `${"x".repeat(maxChars - 1)}${separator}tail`;
+      const endpointCutAt = (instance: string): ContextHandoffEndpointSnapshot => ({
+        providerInstanceId: ProviderInstanceId.make(instance),
+        driverKind: ProviderDriverKind.make("codex"),
+        providerDisplayName: cutAt(512),
+        providerAccentColor: cutAt(512),
+        modelSlug: cutAt(512),
+        modelDisplayName: cutAt(512),
+      });
+      const thread = makeThread({
+        title: cutAt(512),
+        branch: cutAt(2_000),
+        worktreePath: cutAt(2_000),
+        messages: [
+          {
+            id: MessageId.make("message-long"),
+            role: "assistant",
+            text: cutAt(32_000),
+            turnId: TurnId.make("turn-1"),
+            streaming: false,
+            createdAt: "2026-08-04T00:00:01.000Z",
+            updatedAt: "2026-08-04T00:00:01.000Z",
+          },
+          targetMessage,
+        ],
+        proposedPlans: [
+          {
+            id: "plan-long",
+            turnId: TurnId.make("turn-1"),
+            planMarkdown: cutAt(16_000),
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: "2026-08-04T00:00:02.000Z",
+            updatedAt: "2026-08-04T00:00:02.000Z",
+          },
+        ],
+        activities: [
+          activity({
+            id: "runtime-plan",
+            kind: "turn.plan.updated",
+            createdAt: "2026-08-04T00:00:03.000Z",
+            payload: {
+              explanation: cutAt(2_000),
+              plan: [{ step: cutAt(2_000), status: "inProgress" }],
+            },
+          }),
+          activity({
+            id: "tool-long",
+            kind: "tool.completed",
+            tone: "tool",
+            summary: cutAt(512),
+            createdAt: "2026-08-04T00:00:04.000Z",
+            payload: {
+              itemType: "command_execution",
+              status: cutAt(512),
+              detail: cutAt(2_000),
+              data: {
+                item: {
+                  type: "commandExecution",
+                  command: cutAt(4_000),
+                  aggregatedOutput: cutAt(16_000),
+                  changes: [{ path: cutAt(2_000), additions: 1, deletions: 1 }],
+                },
+              },
+            },
+          }),
+          activity({
+            id: "runtime-error",
+            kind: "runtime.error",
+            tone: "error",
+            summary: cutAt(512),
+            createdAt: "2026-08-04T00:00:05.000Z",
+            payload: { message: cutAt(2_000) },
+          }),
+          activity({
+            id: "question",
+            kind: "user-input.requested",
+            createdAt: "2026-08-04T00:00:06.000Z",
+            payload: {
+              requestId: "request-1",
+              questions: [
+                {
+                  id: cutAt(512),
+                  header: cutAt(512),
+                  question: cutAt(4_000),
+                  options: [{ label: cutAt(512) }],
+                },
+              ],
+            },
+          }),
+          activity({
+            id: "subagent-long",
+            kind: "subagent.completed",
+            tone: "tool",
+            createdAt: "2026-08-04T00:00:07.000Z",
+            payload: {
+              status: "completed",
+              detail: cutAt(2_000),
+              subagent: {
+                subagentId: cutAt(512),
+                label: cutAt(512),
+                description: cutAt(2_000),
+              },
+            },
+          }),
+        ],
+        checkpoints: [
+          {
+            turnId: TurnId.make("turn-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("checkpoint-1"),
+            status: "ready",
+            files: [{ path: cutAt(2_000), kind: cutAt(512), additions: 1, deletions: 0 }],
+            assistantMessageId: null,
+            completedAt: "2026-08-04T00:00:08.000Z",
+          },
+        ],
+      });
+
+      const artifact = buildContextHandoffDocument({
+        thread,
+        targetMessageId,
+        source: endpointCutAt("codex_a"),
+        target: endpointCutAt("claude_b"),
+      });
+      const { document } = artifact;
+
+      expectStoredCopyToReadBackUnchanged(artifact);
+      const cutValues = [
+        document.thread.title,
+        document.thread.branch,
+        document.thread.worktreePath,
+        ...[document.provenance.target, ...document.provenance.sources].flatMap((endpoint) => [
+          endpoint.providerDisplayName,
+          endpoint.providerAccentColor,
+          endpoint.modelSlug,
+          endpoint.modelDisplayName,
+        ]),
+        ...document.plans.flatMap((plan) => [
+          plan.planMarkdown,
+          plan.explanation,
+          ...plan.steps.map((step) => step.step),
+        ]),
+        ...document.tools.flatMap((tool) => [
+          tool.summary,
+          tool.status,
+          tool.detail,
+          tool.command,
+          tool.output,
+          ...tool.paths,
+          ...tool.fileChanges.map((change) => change.path),
+        ]),
+        ...document.notices.flatMap((notice) => [
+          ...(notice.kind === "failure" ? [notice.summary, notice.detail] : []),
+          ...notice.questions.flatMap((question) => [
+            question.id,
+            question.header,
+            question.question,
+            ...question.options,
+          ]),
+        ]),
+        ...document.subagents.flatMap((subagent) => [
+          subagent.subagentId,
+          subagent.label,
+          subagent.description,
+          subagent.summary,
+        ]),
+        ...document.checkpoints.flatMap((checkpoint) =>
+          checkpoint.files.flatMap((file) => [file.path, file.kind]),
+        ),
+      ].filter((value) => value !== undefined);
+      expect(cutValues).toHaveLength(33);
+      for (const value of cutValues) {
+        expect(value).toMatch(/^x+$/u);
+      }
+      expect(
+        [...document.plans, ...document.tools, ...document.notices, ...document.subagents].map(
+          (entry) => entry.truncated,
+        ),
+      ).toEqual([true, true, true, true, true, true]);
+    });
+  }
+
+  it("reads a cut multi-line output back unchanged wherever the cut lands", () => {
+    const lines = Array.from(
+      { length: 600 },
+      (_, index) => `  const value${index} = compute(${index}, "some text");\n`,
+    ).join("");
+    let cutsAfterWhitespace = 0;
+    for (let shift = 0; shift < 64; shift += 1) {
+      const output = `${"y".repeat(shift)}${lines}`;
+      const stored = output.trim().slice(0, 16_000);
+      if (/\s$/u.test(stored)) cutsAfterWhitespace += 1;
+      const artifact = buildContextHandoffDocument({
+        thread: makeThread({
+          messages: [targetMessage],
+          activities: [
+            activity({
+              id: "tool-output",
+              kind: "tool.completed",
+              tone: "tool",
+              summary: "Ran command",
+              payload: {
+                itemType: "command_execution",
+                data: { item: { type: "commandExecution", aggregatedOutput: output } },
+              },
+            }),
+          ],
+        }),
+        targetMessageId,
+        source: endpoint("codex_a", "gpt-a"),
+        target: endpoint("claude_b", "claude-b"),
+      });
+      expectStoredCopyToReadBackUnchanged(artifact);
+      expect(artifact.document.tools[0]?.output).toBe(stored.trimEnd());
+    }
+    expect(cutsAfterWhitespace).toBeGreaterThan(5);
   });
 });
 

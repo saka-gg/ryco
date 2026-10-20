@@ -30,6 +30,14 @@ The large structured document lives only in the server-local `provider_context_h
 It is not copied into orchestration events, snapshots, RPC responses, activities, logs, or
 analytics. Timeline activities contain only small boundary metadata and a digest.
 
+The document and the prepared delivery payload each carry a sha-256 digest of their canonical JSON.
+Every load checks the digest against the JSON as stored, before validating it, and refuses a
+document that was changed afterwards. Values are stored in the form validation reads back: a value
+cut to its length limit drops any whitespace left at the cut, and a shortened entry is marked
+`truncated` only where its format has that flag. Rows written by earlier versions, which could keep
+such whitespace, still verify, and so does a stored payload whose digest covers the context exactly
+as the provider received it.
+
 ## Durability and failure behavior
 
 The operation records `requested`, `preparing`, and `dispatching` before provider delivery. Target
