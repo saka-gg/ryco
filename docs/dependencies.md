@@ -12,7 +12,8 @@ older Bun release. The standalone `marketing` app has its own manifest and lockf
   `oxlint` before the bundled copies, so the root versions must match Vite Plus's
   bundled tools (Oxfmt 0.72.0, Oxlint 1.87.0 for 1.1.0). Older pins fail to load nested
   `vite.config.ts` files such as `marketing/`.
-- Keep TypeScript and `@effect/tsgo` compatible; tsgo 0.51.1 supports TypeScript 7.0.2.
+- TypeScript and `@effect/tsgo` must stay compatible; tsgo 0.53.4 supports TypeScript
+  7.0.2.
 - Upgrade Expo using its `bundledNativeModules.json` and `expo install --check`.
   Expo 57.0.21 expects React 19.2.3, React Native 0.86.3, keyboard-controller 1.21.9,
   gesture-handler 2.32.x, screens 4.26.x, Reanimated 4.5.1, and Worklets 0.10.1.
@@ -20,10 +21,15 @@ older Bun release. The standalone `marketing` app has its own manifest and lockf
 - Nitro Markdown 0.10.0 requires Nitro Modules `>=0.36.5 <0.37.0`. Retain the patched
   0.36.5 until the markdown integration is migrated as a unit.
 - `effect` and every `@effect/*` package release together and must share one
-  version; they are pinned to 4.0.2 because the 4.0.3 `@effect/*` packages require
-  an unpublished `effect` 4.0.3. An Effect upgrade must port both local patches
-  (the RPC client's request and heartbeat hooks, and the child-process stdin error
-  listener) and check every consumer.
+  version. They are pinned to 4.0.5, the release that stops RPC clients dropping
+  healthy connections when a ping tick runs late, stops atoms rebuilding forever on
+  late reads of uninitialized dependencies, and makes synchronously re-entered
+  `Effect.cached` effects safe. An Effect upgrade must port the two remaining local
+  patches (the RPC client's request and heartbeat hooks, with the 8 s ping interval
+  and a timeout of twice the interval layered on upstream's check that a ping went
+  unanswered, and `@effect/platform-node`'s WebSocket-aware graceful shutdown) and
+  check every consumer. The child-process stdin error listener patch is no longer
+  needed: upstream handles input errors itself.
 - Noble remains at the exact 2.3.0 versions recorded in the
   [protocol's dependency policy](relay-e2ee-protocol.md#142-primitive-dependencies-and-audit-lineage).
   A cryptographic dependency upgrade is a separate protocol change. CBOR upgrades
