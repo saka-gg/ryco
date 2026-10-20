@@ -32,7 +32,11 @@ import {
   readHostedReadCache,
   setHostedReadCacheEnabled,
 } from "../hostedHub/readCache";
-import { hostedHubController, hostedHubStore } from "../hostedHub/state";
+import {
+  getHostedEnvironmentSessions,
+  hostedHubController,
+  hostedHubStore,
+} from "../hostedHub/state";
 import { useStore, selectThreadByRef } from "../store";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useUiStateStore } from "../uiStateStore";
@@ -750,6 +754,13 @@ describe("hosted conversation cold start", () => {
       effectiveRole: "operator" as const,
       presence: { online: true, lastHeartbeatAt: 1 },
     };
+    // The node's own session completed its relay attempt and accepted a
+    // current shell snapshot; the shared session fields show it once selected.
+    const sessions = getHostedEnvironmentSessions();
+    const { generation } = sessions.ensureRecord(node);
+    sessions.markConnectRequested(environmentId, generation);
+    sessions.transportStatus(environmentId, generation, "online");
+    sessions.markSessionReady(environmentId, generation);
     hostedHubStore.setState({
       accountStatus: "authenticated",
       account: {
@@ -762,9 +773,7 @@ describe("hosted conversation cold start", () => {
       nodes: [node],
       selectedNode: node,
       directoryStatus: "ready",
-      sessionEstablished: true,
-      sessionStatus: "ready",
-      transportStatus: "online",
+      browserStatus: "current",
     });
     await vi.waitFor(() =>
       expect(document.querySelector('[data-testid="read-shell"]')?.getAttribute("data-mode")).toBe(
@@ -800,5 +809,6 @@ describe("hosted conversation cold start", () => {
     resetHostedNodeRoutesForTests();
     window.history.replaceState(null, "", "/");
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
   });
 });

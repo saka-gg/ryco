@@ -12,7 +12,7 @@ import { hostedOnly } from "./hostedOnly";
  */
 type Hosted = typeof import("./hostedConnectionCoordinator");
 
-export const MAX_HOSTED_WEB_CONNECTIONS: Hosted["MAX_HOSTED_WEB_CONNECTIONS"] = 1;
+export const MAX_HOSTED_WEB_CONNECTIONS: Hosted["MAX_HOSTED_WEB_CONNECTIONS"] = 3;
 export const HOSTED_WEB_WAKE_STAGGER_MS: Hosted["HOSTED_WEB_WAKE_STAGGER_MS"] = 750;
 export const HOME_DISCOVERY_CACHE_WAIT_MS: Hosted["HOME_DISCOVERY_CACHE_WAIT_MS"] = 1_500;
 
@@ -49,13 +49,12 @@ export const waitForHostedNodeMutationLease: Hosted["waitForHostedNodeMutationLe
 
 export const nodeIdForHostedEnvironment: Hosted["nodeIdForHostedEnvironment"] = () => null;
 
-export const hasActiveHostedWorkspaceCoordinator: Hosted["hasActiveHostedWorkspaceCoordinator"] =
-  () => false;
-
 export const setHostedWorkspaceBackgrounded: Hosted["setHostedWorkspaceBackgrounded"] = () =>
   Promise.resolve();
 
 export const isHostedEnvironmentDemanded: Hosted["isHostedEnvironmentDemanded"] = () => false;
+
+export const canPreconnectHostedEnvironment: Hosted["canPreconnectHostedEnvironment"] = () => false;
 
 export const requestHostedWorkspaceReconcile: Hosted["requestHostedWorkspaceReconcile"] = () =>
   undefined;

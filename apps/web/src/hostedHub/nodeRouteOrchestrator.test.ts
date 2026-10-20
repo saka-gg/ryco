@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { EnvironmentId } from "@ryco/contracts";
 import {
   configureHostedRuntime,
+  isHostedEnvironmentSessionLive,
   resetHostedEnvironmentSessionsForTests,
+  type HostedRelayFailure,
 } from "@ryco/client-runtime/authorization";
 import * as threadStore from "../store";
 
@@ -34,6 +36,7 @@ vi.mock("./transport", () => ({ hasHostedRelayPendingRequests, resetHostedRelayA
 import { hostedHubApi, HostedHubApiError } from "./api";
 import {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,
+  getHostedEnvironmentSessions,
   hostedHubController,
   useHostedHubStore,
 } from "./state";
@@ -95,8 +98,39 @@ function node(
 }
 
 let stopOrchestrator: (() => void) | null = null;
+let stopRouteDemand: (() => void) | null = null;
 
-function setup(initialUrl: string): {
+/**
+ * The workspace coordinator's part, reduced to what these routes need: every
+ * environment a route scope demands is acquired through the lifecycle owner
+ * while it has no live session, as the demand executor does with free slots.
+ * Selecting a node only moves the cursor; this is what connects it.
+ */
+function startRouteDemand(): () => void {
+  const acquireDemanded = () => {
+    const state = useHostedHubStore.getState();
+    const sessions = getHostedEnvironmentSessions();
+    for (const entry of hostedWebConnectionScopes.list()) {
+      const target = state.nodes.find(
+        (candidate) => candidate.environmentId === entry.environmentId,
+      );
+      if (!target || isHostedEnvironmentSessionLive(sessions.read(target.environmentId))) continue;
+      void hostedHubController.acquireEnvironment(target.id);
+    }
+  };
+  retainedPorts.requestEnvironmentReconcile.mockImplementation(acquireDemanded);
+  const unsubscribeScopes = hostedWebConnectionScopes.subscribe(acquireDemanded);
+  const unsubscribeStore = useHostedHubStore.subscribe(acquireDemanded);
+  return () => {
+    unsubscribeScopes();
+    unsubscribeStore();
+  };
+}
+
+function setup(
+  initialUrl: string,
+  options: { readonly demand?: boolean } = {},
+): {
   win: FakeHistoryWindow;
   history: ReturnType<typeof installHostedNodeHistory>;
   flush: () => void;
@@ -104,7 +138,25 @@ function setup(initialUrl: string): {
   const win = createFakeHistoryWindow(initialUrl);
   const history = installHostedNodeHistory(win as unknown as Window & typeof globalThis);
   stopOrchestrator = startHostedNodeRouteOrchestrator();
+  if (options.demand !== false) stopRouteDemand = startRouteDemand();
   return { win, history, flush: () => history.flush() };
+}
+
+function recordGeneration(environmentId: EnvironmentId): number {
+  return getHostedEnvironmentSessions().read(environmentId)!.generation;
+}
+
+/** The environment's own relay attempt came online and accepted its shell snapshot. */
+function establish(environmentId: EnvironmentId): void {
+  const sessions = getHostedEnvironmentSessions();
+  const generation = recordGeneration(environmentId);
+  sessions.transportStatus(environmentId, generation, "online");
+  sessions.markSessionReady(environmentId, generation);
+}
+
+/** The environment's own relay attempt failed. */
+function fail(environmentId: EnvironmentId, failure: HostedRelayFailure): void {
+  getHostedEnvironmentSessions().failure(environmentId, recordGeneration(environmentId), failure);
 }
 
 /** Let queued reconcile microtasks and history flushes settle. */
@@ -121,16 +173,17 @@ const unusedPlatformService = new Proxy(
   },
 );
 
-// The hosted controller now reads an injected runtime. Configure it with a
-// node lifecycle that routes the package transition-queue effects to this
-// suite's existing observable fakes — a node activation is one primary
-// connect, a teardown clears node-scoped state — so the historical route
-// assertions keep their meaning without touching the controller internals.
-// The teardown effects also record their order so a Back-driven deactivation
-// can assert the documented reset → disconnect → clear → descriptor sequence.
+// The hosted controller reads an injected runtime. Configure it, as hosted Web
+// runs, with retained environment sessions and a node lifecycle that routes
+// the package's effects to this suite's observable fakes — a node activation
+// is one environment connect, clearing node-scoped state is a deactivation —
+// so the route assertions keep their meaning without touching the controller
+// internals. The teardown effects also record their order.
 const teardownOrder: string[] = [];
 const retainedPorts = {
-  connectEnvironment: vi.fn((_node: HostedHubNode, _generation: number) => undefined),
+  connectEnvironment: vi.fn((node: HostedHubNode, _generation: number) => {
+    void activateHostedNode(node);
+  }),
   releaseEnvironment: vi.fn(
     async (_environmentId: EnvironmentId, _generation: number) => undefined,
   ),
@@ -140,14 +193,14 @@ const retainedPorts = {
   requestEnvironmentReconcile: vi.fn(),
 };
 
-function configureRouteRuntime(environmentSessions: "single" | "retained" = "single"): void {
+function configureRouteRuntime(): void {
   configureHostedRuntime(
     {
       endpoint: unusedPlatformService as never,
       httpClient: unusedPlatformService as never,
       passkeyCeremony: unusedPlatformService as never,
       sessionCredentials: unusedPlatformService as never,
-      environmentSessions,
+      environmentSessions: "retained",
       nodeLifecycle: {
         activate: async () => undefined,
         suspend: async () => undefined,
@@ -159,14 +212,12 @@ function configureRouteRuntime(environmentSessions: "single" | "retained" = "sin
         writePrimaryEnvironmentDescriptor: (descriptor) => {
           if (descriptor === null) teardownOrder.push("descriptor:null");
         },
-        connectPrimaryEnvironment: () => {
-          void activateHostedNode();
-        },
+        connectPrimaryEnvironment: () => undefined,
         disconnectPrimaryEnvironment: async () => {
           teardownOrder.push("disconnect");
         },
         setActiveEnvironmentId: () => undefined,
-        ...(environmentSessions === "retained" ? retainedPorts : {}),
+        ...retainedPorts,
       },
       timers: {
         now: () => Date.now(),
@@ -209,6 +260,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stopRouteDemand?.();
+  stopRouteDemand = null;
   stopOrchestrator?.();
   stopOrchestrator = null;
   resetHostedNodeRouteOrchestratorForTests();
@@ -222,6 +275,7 @@ afterEach(() => {
   hasHostedRelayPendingRequests.mockClear();
   resetHostedRelayAttemptFactory.mockClear();
   for (const port of Object.values(retainedPorts)) port.mockClear();
+  retainedPorts.requestEnvironmentReconcile.mockReset();
   resetHostedEnvironmentSessionsForTests();
 });
 
@@ -334,7 +388,7 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe(`/node/${offline.id}`);
     expect(getHostedNodeRouteNotice()).toBeNull();
 
-    hostedHubController.markSessionReady(offline.environmentId);
+    establish(offline.environmentId);
     await settle();
     flush();
 
@@ -361,7 +415,6 @@ describe("hosted node route restore pipeline", () => {
     flush();
     await settle();
 
-    expect(deactivateHostedNode).toHaveBeenCalledWith(offline.environmentId);
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(win.location.pathname).toBe("/");
     expect(getHostedNodeRouteNotice()).toMatch(/is offline/);
@@ -404,10 +457,7 @@ describe("hosted node route restore pipeline", () => {
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "authentication",
-      retryable: false,
-    });
+    fail(offline.environmentId, { kind: "authentication", retryable: false });
     await settle();
     flush();
 
@@ -420,7 +470,7 @@ describe("hosted node route restore pipeline", () => {
     expect(getHostedNodeRouteNotice()).toBeNull();
   });
 
-  it("tears down a pending offline URL restore on Back and fences late readiness", async () => {
+  it("leaves a pending offline URL restore on Back, and its late readiness selects nothing", async () => {
     const offline = node("node_aaaaaaaaaaaaaaaaaaaaaa", {
       presence: { online: false, lastHeartbeatAt: null },
     });
@@ -435,17 +485,16 @@ describe("hosted node route restore pipeline", () => {
     const generation = useHostedHubStore.getState().generation;
 
     win.history.back();
-    await vi.waitFor(() =>
-      expect(deactivateHostedNode).toHaveBeenCalledWith(offline.environmentId),
-    );
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     await settle();
     flush();
 
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(useHostedHubStore.getState().generation).toBeGreaterThan(generation);
     expect(win.location.pathname).toBe("/");
 
-    hostedHubController.markSessionReady(offline.environmentId);
+    // The environment's own session may still come up; it is not selected.
+    establish(offline.environmentId);
+    await settle();
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
   });
@@ -576,7 +625,7 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
   });
 
-  it("tears the selection down on Back and re-runs the pipeline on Forward", async () => {
+  it("leaves the selection on Back with the session kept warm, and adopts it on Forward", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
@@ -587,21 +636,19 @@ describe("hosted node route restore pipeline", () => {
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
     expect(win.location.pathname).toBe(`/node/${target.id}`);
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    establish(target.environmentId);
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     const generationBefore = useHostedHubStore.getState().generation;
 
     teardownOrder.length = 0;
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     await settle();
-    // The Back-driven deactivation drives the transition queue in the documented
-    // order: reset the relay attempt, disconnect, clear node-scoped state, then
-    // write a null primary descriptor.
-    expect(teardownOrder).toEqual(["reset", "disconnect", "clear", "descriptor:null"]);
+    // Leaving the node moves the cursor only: no relay reset, disconnect or
+    // clearing of the environment's state, just the shown environment.
+    expect(teardownOrder).toEqual(["descriptor:null"]);
+    expect(deactivateHostedNode).not.toHaveBeenCalled();
+    expect(retainedPorts.releaseEnvironment).not.toHaveBeenCalled();
     flush();
     const afterBack = useHostedHubStore.getState();
     expect(afterBack.selectedNode).toBeNull();
@@ -612,10 +659,12 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe("/");
 
     win.history.forward();
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
+    await settle();
     flush();
-    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
-    expect(useHostedHubStore.getState().sessionEstablished).toBe(false);
+    // The continuously live session is adopted as it is: no new connection.
+    expect(activateHostedNode).toHaveBeenCalledOnce();
+    expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     expect(win.location.pathname).toBe(`/node/${target.id}`);
   });
 
@@ -628,11 +677,8 @@ describe("hosted node route restore pipeline", () => {
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
 
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    fail(target.environmentId, { kind: "incompatible", retryable: false });
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     flush();
 
     const state = useHostedHubStore.getState();
@@ -653,10 +699,8 @@ describe("hosted node route restore pipeline", () => {
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
 
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
+    fail(target.environmentId, { kind: "incompatible", retryable: false });
+    await settle();
     flush();
 
     const state = useHostedHubStore.getState();
@@ -694,11 +738,7 @@ describe("hosted node route restore pipeline", () => {
 
     await hostedHubController.bootstrap();
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    establish(target.environmentId);
 
     listNodes.mockResolvedValue([node(target.id, { revokedAt: 5 })]);
     await hostedHubController.refreshDirectory();
@@ -727,23 +767,21 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
 
     win.history.go(-2);
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     await settle();
     flush();
+    await settle();
 
     // The stale pre-pop thread pathname must not be readopted: the directory
-    // entry survives un-replaced, the node is not re-activated, and the
-    // teardown is the final lifecycle transition.
+    // entry survives un-replaced and the node is neither selected nor
+    // connected again.
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(activateHostedNode).toHaveBeenCalledOnce();
     expect(win.location.pathname).toBe("/");
     expect(win.entries()[0]).toMatchObject({ url: "/" });
-    expect(deactivateHostedNode.mock.invocationCallOrder.at(-1)!).toBeGreaterThan(
-      activateHostedNode.mock.invocationCallOrder.at(-1)!,
-    );
   });
 
-  it("tears down cleanly on a single Back when the thread entry was replace-created", async () => {
+  it("leaves cleanly on a single Back when the thread entry was replace-created", async () => {
     const target = node();
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([target]);
@@ -760,17 +798,15 @@ describe("hosted node route restore pipeline", () => {
     expect(win.location.pathname).toBe(`/node/${target.id}/${target.environmentId}/t_1`);
 
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     await settle();
     flush();
+    await settle();
 
     expect(useHostedHubStore.getState().selectedNode).toBeNull();
     expect(activateHostedNode).toHaveBeenCalledOnce();
     expect(win.location.pathname).toBe("/");
     expect(win.entries()[0]).toMatchObject({ url: "/" });
-    expect(deactivateHostedNode.mock.invocationCallOrder.at(-1)!).toBeGreaterThan(
-      activateHostedNode.mock.invocationCallOrder.at(-1)!,
-    );
   });
 
   it("recovers selection after Back interrupts an in-flight browser resume", async () => {
@@ -785,11 +821,7 @@ describe("hosted node route restore pipeline", () => {
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
-    useHostedHubStore.setState({
-      transportStatus: "online",
-      sessionStatus: "ready",
-      sessionEstablished: true,
-    });
+    establish(target.environmentId);
 
     // A browser resume that never completes parks browserStatus in a
     // node-scoped phase.
@@ -807,8 +839,7 @@ describe("hosted node route restore pipeline", () => {
     );
 
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
-    expect(useHostedHubStore.getState().selectedNode).toBeNull();
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     // Back does not stand in for the access check the abandoned resume never
     // finished: an account-scoped one re-runs before the directory is current.
     expect(useHostedHubStore.getState().browserStatus).toBe("checking-access");
@@ -817,8 +848,7 @@ describe("hosted node route restore pipeline", () => {
 
     // The abandoned resume no longer gates a subsequent selection.
     expect(selectHostedNodeRoute(target.id)).toBe(true);
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
-    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
   });
 
   it("drops a pending interactive selection when history returns to the directory", async () => {
@@ -873,10 +903,7 @@ describe("hosted node route restore pipeline", () => {
     expect(selectHostedNodeRoute(target.id)).toBe(true);
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
-    hostedHubController.failure(useHostedHubStore.getState().generation, {
-      kind: "incompatible",
-      retryable: false,
-    });
+    fail(target.environmentId, { kind: "incompatible", retryable: false });
     await settle();
     expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
 
@@ -900,9 +927,9 @@ describe("hosted node route restore pipeline", () => {
     await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledOnce());
     flush();
     win.history.back();
-    await vi.waitFor(() => expect(deactivateHostedNode).toHaveBeenCalledWith(target.environmentId));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
     win.history.forward();
-    await vi.waitFor(() => expect(activateHostedNode).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id));
     flush();
 
     const serializedEntries = JSON.stringify(win.entries());
@@ -923,14 +950,14 @@ describe("hosted node route restore pipeline", () => {
   });
 });
 
-describe("hosted node routes with retained environment sessions", () => {
+describe("hosted node routes move only the cursor", () => {
   it("moves only the cursor on a route swap and holds the routed environment's demand", async () => {
-    configureRouteRuntime("retained");
     const first = node();
     const second = node("node_bbbbbbbbbbbbbbbbbbbbbb");
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([first, second]);
-    const { history, flush } = setup(`/node/${first.id}`);
+    // No demand driver: what selecting alone does.
+    const { history, flush } = setup(`/node/${first.id}`, { demand: false });
     await hostedHubController.bootstrap();
     flush();
     await settle();

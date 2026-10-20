@@ -140,6 +140,7 @@ function makeClient(): CapturedClient & Record<string, unknown> {
 
 let fakeWindow: FakeHistoryWindow | null = null;
 let stopOrchestrator: (() => void) | null = null;
+let stopCoordinator: (() => void) | null = null;
 
 beforeEach(() => {
   vi.resetModules();
@@ -157,6 +158,8 @@ beforeEach(() => {
 afterEach(async () => {
   stopOrchestrator?.();
   stopOrchestrator = null;
+  stopCoordinator?.();
+  stopCoordinator = null;
   const { resetHostedNodeRouteOrchestratorForTests } = await import("./nodeRouteOrchestrator");
   const { resetHostedNodeRoutesForTests } = await import("./nodeRoutes");
   const { resetEnvironmentServiceForTests } = await import("../environments/runtime/service");
@@ -182,14 +185,28 @@ async function setup(initialUrl: string) {
   const history = installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
   const { startHostedNodeRouteOrchestrator } = await import("./nodeRouteOrchestrator");
   stopOrchestrator = startHostedNodeRouteOrchestrator();
+  // The workspace coordinator connects what the routes demand, as it does
+  // alongside the orchestrator in the app.
+  const { startHostedWorkspaceCoordinator } = await import("./hostedConnectionCoordinator");
+  stopCoordinator = startHostedWorkspaceCoordinator({
+    hubOrigin: "https://hub.example.test",
+    cache: {
+      load: async () => null,
+      list: async () => [],
+      replace: async () => undefined,
+      purgeEnvironment: async () => undefined,
+      purgeAccount: async () => undefined,
+    },
+  });
   return { win: fakeWindow, history };
 }
 
 describe("user-facing return to the node directory (All nodes)", () => {
-  it("closes exactly the browser relay session; the saved connection and node connector survive", async () => {
+  it("leaves the node with its session kept warm; the saved connection and node connector survive", async () => {
     const { win, history } = await setup("/");
     const { hostedHubApi } = await import("./api");
-    const { hostedHubController, useHostedHubStore } = await import("./state");
+    const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
+      await import("./state");
     const { listEnvironmentConnections, reconnectSavedEnvironment } =
       await import("../environments/runtime/service");
     const { useSavedEnvironmentRegistryStore, writeSavedEnvironmentBearerToken } =
@@ -230,20 +247,22 @@ describe("user-facing return to the node directory (All nodes)", () => {
     await hostedTransport.resolveUrl();
     expect(issueRelayTicket).toHaveBeenCalledTimes(1);
     hostedTransport.options.onOpen?.();
-    hostedHubController.transportStatus(useHostedHubStore.getState().generation, "online");
+    const sessions = getHostedEnvironmentSessions();
+    sessions.transportStatus(environmentId, sessions.read(environmentId)!.generation, "online");
     hostedClient.emitShellSnapshot(shellSnapshot(1));
     expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     expect(listEnvironmentConnections()).toHaveLength(2);
     history.flush();
     expect(win.location.pathname).toBe(`/node/${routedNode.id}`);
 
-    // The user-facing "All nodes" action drives the same deterministic
-    // teardown as history Back: exactly the browser relay session closes
-    // (hosted client disposed, hosted connection removed) and the directory
-    // renders again.
+    // The user-facing "All nodes" action does what history Back does: it
+    // moves the cursor to the directory, and the node's session stays warm
+    // until the workspace needs its slot (or the tab stays hidden), so going
+    // back to it is immediate.
     expect(leaveHostedNodeRouteToDirectory()).toBe(true);
-    await vi.waitFor(() => expect(hostedClient.dispose).toHaveBeenCalled());
-    await vi.waitFor(() => expect(listEnvironmentConnections()).toHaveLength(1));
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
+    expect(hostedClient.dispose).not.toHaveBeenCalled();
+    expect(listEnvironmentConnections()).toHaveLength(2);
     expect(
       listEnvironmentConnections().some(
         (connection) => connection.knownEnvironment.environmentId === secondEnvironmentId,

@@ -4,7 +4,10 @@ import {
 } from "../../hooks/useHostedDraftExecutionTarget";
 import { DeviceIcon } from "../DeviceIcon";
 import { useNavigate } from "@tanstack/react-router";
-import { hostedHubFailureExplanation } from "@ryco/client-runtime/authorization";
+import {
+  hostedBrowserRevalidated,
+  hostedHubFailureExplanation,
+} from "@ryco/client-runtime/authorization";
 import type { EnvironmentId } from "@ryco/contracts";
 import type { ExternalIdentityPendingResponse } from "@ryco/contracts/hosted-identity";
 import {
@@ -302,11 +305,14 @@ export function HostedHubRoot() {
         )));
   const canReadCachedRoute = hasCachedRoutedThread && cachedNodeMatchesRoute;
   // An in-app switch: access was already checked for this browser lifecycle
-  // (`current`), so any route of a listed node can open on the shell the store
-  // already holds for its environment while the relay session is established.
+  // (`current`, or `synchronizing`, which the lifecycle owner publishes only
+  // after the access check, while the selected node's own session is still
+  // being established), so any route of a listed node can open on the shell
+  // the store already holds for its environment meanwhile. That opens the
+  // cached shell only: mutation still waits for the node's own session lease.
   // Cold boot and resume never qualify before that check completes.
-  const canOpenRoutedNodeInShell =
-    routedNodeOpenable && browserStatus === "current" && routedEnvironmentHasShell;
+  const accessChecked = hostedBrowserRevalidated(browserStatus);
+  const canOpenRoutedNodeInShell = routedNodeOpenable && accessChecked && routedEnvironmentHasShell;
   const canReadPendingDraft =
     draftTarget !== null &&
     routedNode.logicalPathname === `/draft/${encodeURIComponent(draftTarget.draftId)}` &&
@@ -371,7 +377,7 @@ export function HostedHubRoot() {
     // session: name it instead of repeating the access-check copy.
     return (
       <HostedNodeRestoringSurface
-        opening={browserStatus === "current" && routedNodeOpenable ? routedDirectoryNode : null}
+        opening={accessChecked && routedNodeOpenable ? routedDirectoryNode : null}
       />
     );
   }

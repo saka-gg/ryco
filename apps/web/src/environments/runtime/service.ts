@@ -93,10 +93,7 @@ import {
   createDirectDeviceRpcTransport,
   WS_URL_PROVIDER_TIMEOUT_MS,
 } from "@ryco/client-runtime/rpc";
-import {
-  environmentQueryRefresh,
-  isHostedEnvironmentQueryRefreshReady,
-} from "../../rpc/environmentQueryRefresh";
+import { environmentQueryRefresh } from "../../rpc/environmentQueryRefresh";
 import {
   applySettingsUpdated,
   clearEnvironmentServerConfigs,
@@ -115,20 +112,7 @@ import {
 import { isHostedHubMode } from "~/env";
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import { isHostedEnvironmentDemanded } from "~/hostedHub/hostedConnectionCoordinator";
-import {
-  getHostedEnvironmentSessions,
-  hostedEnvironmentSessionsMode,
-  hostedHubController,
-  markHostedSessionReady,
-  markHostedSessionReplaying,
-  reportHostedShellSnapshotFailure,
-  useHostedHubStore,
-} from "~/hostedHub/state";
-import {
-  bindHostedDispatchReplay,
-  getHostedRelayAttemptFactory,
-  hostedDispatchLineage,
-} from "~/hostedHub/transport";
+import { getHostedEnvironmentSessions } from "~/hostedHub/state";
 import { createWebEnvironmentStateSink } from "./environmentStateSink";
 import {
   createHostedEnvironmentConnection,
@@ -195,12 +179,15 @@ function getEnvironmentSupervisor() {
       needsProviderInvalidation = false;
       projectSearchInvalidations.reset();
     },
-    // Retained hosted sessions open their connections only through the
-    // lifecycle owner's connect port (`connectHostedEnvironment`).
+    // Hosted connections are opened only through the lifecycle owner's
+    // connect port (`connectHostedEnvironment`); the primary path only ever
+    // finds the one already registered for the active environment.
     createPrimaryConnection: () =>
-      getPrimaryKnownEnvironment()?.environmentId && !hostsRetainedEnvironmentSessions()
-        ? createPrimaryEnvironmentConnection()
-        : null,
+      isHostedHubMode()
+        ? readRegisteredHostedPrimaryConnection()
+        : getPrimaryKnownEnvironment()?.environmentId
+          ? createPrimaryEnvironmentConnection()
+          : null,
     listSavedEnvironmentRecords,
     hasSavedEnvironmentRegistryHydrated,
     waitForSavedEnvironmentRegistryHydration,
@@ -777,33 +764,10 @@ export function flushEnvironmentThreadDetailEvents(): void {
   threadDetailEventBatcher.flush();
 }
 
-/** Whether hosted Web keeps one session, and one connection, per environment. */
-function hostsRetainedEnvironmentSessions(): boolean {
-  return isHostedHubMode() && hostedEnvironmentSessionsMode() === "retained";
-}
-
-/**
- * A single-session hosted connection's fence: the shared lifecycle generation,
- * which the owner advances on every switch, suspension and teardown, and the
- * selected session's readiness.
- */
-function sharedGenerationFence(generation: number): HostedConnectionFence {
-  return {
-    accepts: () => useHostedHubStore.getState().generation === generation,
-    markReady: (environmentId) => markHostedSessionReady(environmentId, generation),
-    markReplaying: (environmentId) => markHostedSessionReplaying(environmentId, generation),
-    reportShellError: (environmentId) =>
-      reportHostedShellSnapshotFailure(environmentId, generation),
-    isQueryRefreshReady: (environmentId) =>
-      isHostedEnvironmentQueryRefreshReady(useHostedHubStore.getState(), environmentId, generation),
-  };
-}
-
 /**
  * A connection's stream handlers. `fence` is the hosted lifecycle owner's for
- * the connection — the shared generation in single-session mode, the
- * environment's record generation with retained sessions — and `null` for a
- * direct connection, which nothing fences.
+ * the connection — the environment's session record generation — and `null`
+ * for a direct connection, which nothing fences.
  */
 function createEnvironmentConnectionHandlers(
   fence: HostedConnectionFence | null = null,
@@ -914,32 +878,6 @@ function createPrimaryEnvironmentClient(
     );
   }
   const connectionLabel = knownEnvironment?.label ?? null;
-
-  if (isHostedHubMode()) {
-    const attemptFactory = getHostedRelayAttemptFactory();
-    const environmentId = knownEnvironment?.environmentId ?? null;
-    const dispatchReplay = bindHostedDispatchReplay({
-      environmentId,
-      lineage: hostedDispatchLineage(useHostedHubStore.getState()),
-      markUncertain: () => {
-        if (environmentId) hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
-      },
-    });
-    const hostedHandlers = attemptFactory.lifecycleHandlers(dispatchReplay);
-    const transport = new HostedWsTransport(() => attemptFactory.nextUrl(), {
-      ...hostedHandlers,
-      getConnectionLabel: () => connectionLabel,
-      getEnvironmentId: () => knownEnvironment?.environmentId ?? null,
-      onOpen: () => {
-        hostedHandlers.onOpen?.();
-        markStartupPhase("primary-ws-open");
-      },
-    });
-    return dispatchReplay.wrap(
-      createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
-    );
-  }
-
   const authenticatedSocketUrl = async (
     pathname: "/ws" | "/ws/device" | "/ws/device-frames",
     signal?: AbortSignal,
@@ -1253,7 +1191,23 @@ async function removeConnection(environmentId: EnvironmentId): Promise<boolean> 
   return await getEnvironmentSupervisor().remove(environmentId);
 }
 
+/**
+ * The hosted connection registered for the active environment, if any. Hosted
+ * mode never builds a connection on the primary path: a second constructor
+ * would be a second lifecycle owner, outside the connection cap and the
+ * record generations that fence every hosted connection.
+ */
+function readRegisteredHostedPrimaryConnection(): EnvironmentConnection | null {
+  const environmentId = getPrimaryKnownEnvironment()?.environmentId;
+  return environmentId ? getEnvironmentSupervisor().read(environmentId) : null;
+}
+
 function createPrimaryEnvironmentConnection(): EnvironmentConnection {
+  if (isHostedHubMode()) {
+    const registered = readRegisteredHostedPrimaryConnection();
+    if (registered) return registered;
+    throw new Error("No hosted connection is registered for the active environment.");
+  }
   const knownEnvironment = getPrimaryKnownEnvironment();
   if (!knownEnvironment?.environmentId) {
     throw new Error("Unable to resolve the primary environment.");
@@ -1264,34 +1218,16 @@ function createPrimaryEnvironmentConnection(): EnvironmentConnection {
   if (existing) {
     return existing;
   }
-  if (hostsRetainedEnvironmentSessions()) {
-    throw new Error("No hosted connection is registered for the active environment.");
-  }
 
-  const hostedGeneration = isHostedHubMode() ? useHostedHubStore.getState().generation : null;
   return registerConnection(
     createEnvironmentConnection({
       kind: "primary",
       knownEnvironment,
       client: createPrimaryEnvironmentClient(knownEnvironment),
-      // The hosted lifecycle owner's generation: once it moves on, this
-      // connection's config is neither published nor read.
-      ...(hostedGeneration === null
-        ? {}
-        : {
-            lifecycleGeneration: {
-              generation: hostedGeneration,
-              readCurrent: () => useHostedHubStore.getState().generation,
-            },
-          }),
       // The config stream starts with the connection and feeds the
       // per-environment config store, ahead of any shell that shows it.
       onConfigUpdated: (config, type) => writeEnvironmentServerConfig(environmentId, config, type),
-      ...createEnvironmentConnectionHandlers(
-        hostedGeneration === null ? null : sharedGenerationFence(hostedGeneration),
-        hostedGeneration !== null ? environmentId : undefined,
-        { resumeShell: hostedGeneration === null },
-      ),
+      ...createEnvironmentConnectionHandlers(null, undefined, { resumeShell: true }),
     }),
   );
 }

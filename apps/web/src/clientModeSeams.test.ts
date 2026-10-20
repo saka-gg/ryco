@@ -120,11 +120,14 @@ describe("client-mode seams", () => {
       import("./hostedHub/hostedConnectionCoordinator.standard"),
     ]);
     expect(standard.readHostedWorkspaceState()).toEqual(hosted.readHostedWorkspaceState());
+    expect(standard.MAX_HOSTED_WEB_CONNECTIONS).toBe(hosted.MAX_HOSTED_WEB_CONNECTIONS);
     const environmentId = "env-1" as Parameters<typeof standard.readHostedNodeMutationLease>[0];
     expect(standard.readHostedNodeMutationLease(environmentId)).toBeNull();
     await expect(standard.waitForHostedNodeMutationLease(environmentId)).resolves.toBeNull();
     expect(standard.nodeIdForHostedEnvironment(environmentId)).toBeNull();
     expect(standard.isHostedEnvironmentDemanded(environmentId)).toBe(false);
+    // A row press never connects anything ahead of a navigation in a standard build.
+    expect(standard.canPreconnectHostedEnvironment(environmentId)).toBe(false);
     expect(standard.requestHostedWorkspaceReconcile({ reason: "resume" })).toBeUndefined();
     expect(() => standard.startHostedWorkspaceCoordinator()).toThrow(/hosted-hub builds/u);
   });

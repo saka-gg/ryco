@@ -47,12 +47,35 @@ interface HostedWebTestModules {
   readonly useHostedHubStore: {
     readonly setState: (state: Record<string, unknown>) => void;
     readonly getState: () => Record<string, unknown>;
+    readonly subscribe: (listener: () => void) => () => void;
   };
-  readonly getHostedRelayAttemptFactory: () => {
-    readonly nextUrl: () => Promise<string>;
-    readonly lifecycleHandlers: () => unknown;
+  /** The registry of environment sessions, one per environment. */
+  readonly getHostedEnvironmentSessions: () => {
+    readonly ensureRecord: (node: unknown) => { readonly generation: number };
+    readonly markConnectRequested: (environmentId: EnvironmentId, generation: number) => void;
+    readonly read: (environmentId: EnvironmentId) => Record<string, unknown> | undefined;
+    readonly clear: () => void;
   };
-  readonly resetHostedRelayAttemptFactory: () => void;
+  /** A relay attempt bound to one environment's session record, as each hosted connection has. */
+  readonly createHostedEnvironmentAttemptFactory: (options: {
+    readonly sessions: unknown;
+    readonly environmentId: EnvironmentId;
+    readonly nodeId: string;
+    readonly generation: number;
+    readonly readShared: () => unknown;
+    readonly subscribeShared: (listener: () => void) => () => void;
+    readonly ports: unknown;
+    readonly isDemanded: () => boolean;
+  }) => {
+    readonly factory: {
+      readonly nextUrl: () => Promise<string>;
+      readonly lifecycleHandlers: () => unknown;
+    };
+  };
+  readonly webHostedEnvironmentAttemptPorts: (target: {
+    readonly nodeId: string;
+    readonly environmentId: EnvironmentId;
+  }) => unknown;
 }
 
 async function loadHostedWebTestModules(): Promise<HostedWebTestModules> {
@@ -66,13 +89,16 @@ async function loadHostedWebTestModules(): Promise<HostedWebTestModules> {
       load<{ WsTransport: HostedWebTestModules["WsTransport"] }>("rpc/wsTransport.ts"),
       load<{ encodeBase64Url: HostedWebTestModules["encodeBase64Url"] }>("hostedHub/base64url.ts"),
       load<{ hostedHubApi: HostedWebTestModules["hostedHubApi"] }>("hostedHub/api.ts"),
-      load<Pick<HostedWebTestModules, "hostedHubController" | "useHostedHubStore">>(
-        "hostedHub/state.ts",
-      ),
       load<
         Pick<
           HostedWebTestModules,
-          "getHostedRelayAttemptFactory" | "resetHostedRelayAttemptFactory"
+          "getHostedEnvironmentSessions" | "hostedHubController" | "useHostedHubStore"
+        >
+      >("hostedHub/state.ts"),
+      load<
+        Pick<
+          HostedWebTestModules,
+          "createHostedEnvironmentAttemptFactory" | "webHostedEnvironmentAttemptPorts"
         >
       >("hostedHub/transport.ts"),
       load<Pick<HostedWebTestModules, "watchWebHostedHubSession">>("hostedHub/hubSession.ts"),
@@ -96,8 +122,9 @@ const {
   hostedHubApi,
   hostedHubController,
   useHostedHubStore,
-  getHostedRelayAttemptFactory,
-  resetHostedRelayAttemptFactory,
+  getHostedEnvironmentSessions,
+  createHostedEnvironmentAttemptFactory,
+  webHostedEnvironmentAttemptPorts,
   watchWebHostedHubSession,
 } = await loadHostedWebTestModules();
 
@@ -259,7 +286,7 @@ beforeEach(() => {
 afterEach(() => {
   stopWatchingSession?.();
   stopWatchingSession = undefined;
-  resetHostedRelayAttemptFactory();
+  getHostedEnvironmentSessions().clear();
   hostedHubController.resetForTests();
   Object.defineProperty(testGlobals, "window", { configurable: true, value: originalWindow });
   testGlobals.WebSocket = originalWebSocket;
@@ -388,20 +415,34 @@ async function openHostedShellSession(options: {
       revocationReasonCode: null,
     },
     directoryStatus: "ready",
+    browserStatus: "current",
     // Channels resolve their E2EE attempt for their own node, which must be in
     // the directory: a selected node always comes from it.
     nodes: [selectedNode],
-    selectedNode,
-    selectionStatus: "online",
-    effectiveRole: "operator",
-    generation: 1,
   });
   stopWatchingSession = watchWebHostedHubSession();
   const issueRelayTicket = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
     ticket: encodeBase64Url(new Uint8Array(32).fill(7)),
     expiresAt: Date.now() + 60_000,
   });
-  const attemptFactory = getHostedRelayAttemptFactory();
+  // The hosted connection belongs to the environment's session record, and its
+  // relay attempt reads and writes that record only.
+  const sessions = getHostedEnvironmentSessions();
+  const generation = sessions.ensureRecord(selectedNode).generation;
+  sessions.markConnectRequested(selectedNode.environmentId, generation);
+  const { factory: attemptFactory } = createHostedEnvironmentAttemptFactory({
+    sessions,
+    environmentId: selectedNode.environmentId,
+    nodeId: selectedNode.id,
+    generation,
+    readShared: () => useHostedHubStore.getState(),
+    subscribeShared: (listener) => useHostedHubStore.subscribe(listener),
+    ports: webHostedEnvironmentAttemptPorts({
+      nodeId: selectedNode.id,
+      environmentId: selectedNode.environmentId,
+    }),
+    isDemanded: () => true,
+  });
   const transport = new WsTransport(
     () => attemptFactory.nextUrl(),
     attemptFactory.lifecycleHandlers(),
@@ -532,7 +573,9 @@ describe("hosted relay session integration", () => {
 
       await vi.waitFor(() => expect(session.received).toEqual([snapshot, laterEvent]));
 
-      expect(useHostedHubStore.getState()).toMatchObject({
+      expect(
+        getHostedEnvironmentSessions().read(EnvironmentId.make("env_aaaaaaaaaaaaaaaaaaaaaa")),
+      ).toMatchObject({
         transportStatus: "online",
         sessionStatus: "synchronizing",
         effectiveRole: "operator",

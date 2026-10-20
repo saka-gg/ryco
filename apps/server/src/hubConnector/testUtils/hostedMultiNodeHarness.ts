@@ -1194,12 +1194,37 @@ interface HostedWebModules {
   readonly useHostedHubStore: {
     readonly setState: (state: Record<string, unknown>) => void;
     readonly getState: () => Record<string, unknown>;
+    readonly subscribe: (listener: () => void) => () => void;
   };
-  readonly getHostedRelayAttemptFactory: () => {
-    readonly nextUrl: () => Promise<string>;
-    readonly lifecycleHandlers: () => unknown;
+  /** The registry of environment sessions, one per environment. */
+  readonly getHostedEnvironmentSessions: () => {
+    readonly ensureRecord: (node: ReturnType<typeof selectedNodeRecord>) => {
+      readonly generation: number;
+    };
+    readonly markConnectRequested: (environmentId: EnvironmentId, generation: number) => void;
+    readonly release: (environmentId: EnvironmentId) => void;
+    readonly clear: () => void;
   };
-  readonly resetHostedRelayAttemptFactory: () => void;
+  /** A relay attempt bound to one environment's session record, as each hosted connection has. */
+  readonly createHostedEnvironmentAttemptFactory: (options: {
+    readonly sessions: unknown;
+    readonly environmentId: EnvironmentId;
+    readonly nodeId: string;
+    readonly generation: number;
+    readonly readShared: () => unknown;
+    readonly subscribeShared: (listener: () => void) => () => void;
+    readonly ports: unknown;
+    readonly isDemanded: () => boolean;
+  }) => {
+    readonly factory: {
+      readonly nextUrl: () => Promise<string>;
+      readonly lifecycleHandlers: () => unknown;
+    };
+  };
+  readonly webHostedEnvironmentAttemptPorts: (target: {
+    readonly nodeId: string;
+    readonly environmentId: EnvironmentId;
+  }) => unknown;
   readonly loadWebRelayE2ee: () => Promise<{ readonly warmE2eePrimitives: () => void }>;
 }
 
@@ -1218,11 +1243,17 @@ async function loadHostedWebModules(): Promise<HostedWebModules> {
       load<
         Pick<
           HostedWebModules,
-          "hostedHubController" | "markHostedSessionReady" | "useHostedHubStore"
+          | "getHostedEnvironmentSessions"
+          | "hostedHubController"
+          | "markHostedSessionReady"
+          | "useHostedHubStore"
         >
       >("hostedHub/state.ts"),
       load<
-        Pick<HostedWebModules, "getHostedRelayAttemptFactory" | "resetHostedRelayAttemptFactory">
+        Pick<
+          HostedWebModules,
+          "createHostedEnvironmentAttemptFactory" | "webHostedEnvironmentAttemptPorts"
+        >
       >("hostedHub/transport.ts"),
       load<Pick<HostedWebModules, "watchWebHostedHubSession" | "isWebHubSessionOnline">>(
         "hostedHub/hubSession.ts",
@@ -1319,6 +1350,7 @@ function selectedNodeRecord(index: number) {
 
 interface ClientSession {
   readonly nodeIndex: number;
+  readonly environmentId: EnvironmentId;
   readonly client: { readonly dispose: () => Promise<void> };
   readonly unsubscribe: () => void;
   /** The first shell the browser accepted, per channel. */
@@ -1427,8 +1459,9 @@ export async function createHostedMultiNodeHarness(
     cleanups.push(() => directoryInvalidated.mockRestore());
 
     let generation = 1;
+    const sessions = web.getHostedEnvironmentSessions();
     cleanups.push(() => {
-      web.resetHostedRelayAttemptFactory();
+      sessions.clear();
       web.hostedHubController.resetForTests();
     });
     web.useHostedHubStore.setState({
@@ -1450,6 +1483,7 @@ export async function createHostedMultiNodeHarness(
         revocationReasonCode: null,
       },
       directoryStatus: "ready",
+      browserStatus: "current",
       // Channels resolve their E2EE attempt for their own node, which must be
       // in the directory: a selected node always comes from it.
       nodes: nodes.map((_, index) => selectedNodeRecord(index)),
@@ -1519,6 +1553,10 @@ export async function createHostedMultiNodeHarness(
       // delivers after a newer one has started are stale and publish nothing.
       const sessionGeneration = generation;
       const isCurrent = (): boolean => generation === sessionGeneration;
+      // Each hosted connection belongs to its environment's session record,
+      // and its relay attempt reads and writes that record only.
+      const recordGeneration = sessions.ensureRecord(node).generation;
+      sessions.markConnectRequested(node.environmentId, recordGeneration);
       web.useHostedHubStore.setState({
         selectedNode: node,
         selectionStatus: "online",
@@ -1530,7 +1568,19 @@ export async function createHostedMultiNodeHarness(
         errorMessage: null,
         generation,
       });
-      const attemptFactory = web.getHostedRelayAttemptFactory();
+      const { factory: attemptFactory } = web.createHostedEnvironmentAttemptFactory({
+        sessions,
+        environmentId: node.environmentId,
+        nodeId: node.id,
+        generation: recordGeneration,
+        readShared: () => web.useHostedHubStore.getState(),
+        subscribeShared: (listener) => web.useHostedHubStore.subscribe(listener),
+        ports: web.webHostedEnvironmentAttemptPorts({
+          nodeId: node.id,
+          environmentId: node.environmentId,
+        }),
+        isDemanded: () => true,
+      });
       const transport = new web.WsTransport(
         () => attemptFactory.nextUrl(),
         attemptFactory.lifecycleHandlers(),
@@ -1555,7 +1605,7 @@ export async function createHostedMultiNodeHarness(
           threadCount: accepted.snapshot.threads.length,
         });
         // The app marks the session ready when it accepts the shell snapshot.
-        web.markHostedSessionReady(node.environmentId, sessionGeneration);
+        web.markHostedSessionReady(node.environmentId, recordGeneration);
       });
       // Opening a thread subscribes to its window beside the shell.
       const unsubscribeWindow = client.orchestration.subscribeThreadWindow?.(
@@ -1569,6 +1619,7 @@ export async function createHostedMultiNodeHarness(
       );
       return {
         nodeIndex,
+        environmentId: node.environmentId,
         client,
         unsubscribe: () => {
           unsubscribeShell();
@@ -1593,7 +1644,9 @@ export async function createHostedMultiNodeHarness(
       await clock.drive(() => finished, describeState);
       await settled;
       await disposal;
-      web.resetHostedRelayAttemptFactory();
+      // The harness holds one session at a time: the next open of this node
+      // starts a fresh one.
+      sessions.release(session.environmentId);
     };
 
     /**

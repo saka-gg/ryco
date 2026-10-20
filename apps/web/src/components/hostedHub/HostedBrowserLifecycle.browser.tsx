@@ -1,7 +1,11 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
-import { hostedHubController, useHostedHubStore } from "../../hostedHub/state";
+import {
+  getHostedEnvironmentSessions,
+  hostedHubController,
+  useHostedHubStore,
+} from "../../hostedHub/state";
 import { useHostedBrowserLifecycle } from "../../hostedHub/useHostedBrowserLifecycle";
 import type { HostedHubNode } from "../../hostedHub/types";
 
@@ -14,6 +18,7 @@ afterEach(async () => {
   await mounted?.unmount();
   mounted = null;
   hostedHubController.resetForTests();
+  getHostedEnvironmentSessions().clear();
   vi.restoreAllMocks();
 });
 
@@ -28,15 +33,20 @@ describe("persistent hosted browser lifecycle", () => {
         effectiveRole: "owner",
       } as HostedHubNode;
       hostedHubController.resetForTests();
+      // The shared session fields show the selected environment's own record:
+      // online, and established unless its session is still synchronizing.
+      const sessions = getHostedEnvironmentSessions();
+      const { generation } = sessions.ensureRecord(node);
+      sessions.markConnectRequested(node.environmentId, generation);
+      sessions.transportStatus(node.environmentId, generation, "online");
+      if (browserStatus === "current") sessions.markSessionReady(node.environmentId, generation);
       useHostedHubStore.setState({
         accountStatus: "authenticated",
         directoryStatus: "ready",
         browserStatus,
         selectedNode: node,
         nodes: [node],
-        transportStatus: "online",
         generation: 42,
-        sessionStatus: browserStatus === "current" ? "ready" : "synchronizing",
       });
       const resume = vi.spyOn(hostedHubController, "resumeBrowser");
       const suspend = vi.spyOn(hostedHubController, "suspendBrowser");
@@ -51,6 +61,7 @@ describe("persistent hosted browser lifecycle", () => {
       await expect.poll(() => recover.mock.calls.length).toBe(1);
       expect(resume).not.toHaveBeenCalled();
       expect(useHostedHubStore.getState().generation).toBe(42);
+      expect(sessions.read(node.environmentId)?.generation).toBe(generation);
       expect(useHostedHubStore.getState().transportStatus).toBe("online");
       expect(useHostedHubStore.getState().browserStatus).toBe(browserStatus);
     },

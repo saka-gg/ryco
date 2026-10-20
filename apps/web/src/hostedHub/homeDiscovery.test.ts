@@ -84,6 +84,7 @@ const metadata = (environmentId: EnvironmentId): WorkspaceMetadataSnapshot => ({
 let stop: (() => void) | undefined;
 let cached: Awaited<ReturnType<WorkspaceMetadataCache["list"]>>;
 let list: ReturnType<typeof vi.fn<WorkspaceMetadataCache["list"]>>;
+let acquire: MockInstance<typeof hostedHubController.acquireEnvironment>;
 let select: MockInstance<typeof hostedHubController.selectNode>;
 let history: ReturnType<typeof installHostedNodeHistory>;
 const settle = async () => {
@@ -94,6 +95,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   hostedHubController.resetForTests();
   resetHostedNodeRoutesForTests();
+  resetHostedEnvironmentSessionsForTests();
   hostedWebConnectionScopes.reset();
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   history = installHostedNodeHistory(
@@ -108,29 +110,27 @@ beforeEach(() => {
     browserStatus: "current",
     nodes,
   });
-  select = vi.spyOn(hostedHubController, "selectNode").mockImplementation(async (id) => {
-    hostedHubStore.setState({
-      selectedNode: nodes.find((entry) => entry.id === id) ?? node(3),
-      transportStatus: "connecting",
-      sessionEstablished: false,
-    });
+  // The lifecycle owner's acquire opens the environment's own session; the
+  // coordinator never moves the selection.
+  acquire = vi.spyOn(hostedHubController, "acquireEnvironment").mockImplementation(async (id) => {
+    const target = hostedHubStore.getState().nodes.find((entry) => entry.id === id)!;
+    const sessions = getHostedEnvironmentSessions();
+    const record = sessions.ensureRecord(target);
+    sessions.markConnectRequested(target.environmentId, record.generation);
+    return "connecting";
   });
-  vi.spyOn(hostedHubController, "returnToDirectory").mockImplementation(async () => {
-    const environmentId = hostedHubStore.getState().selectedNode?.environmentId;
-    if (environmentId)
-      useStore.getState().demoteEnvironmentStateToCachedSnapshot(environmentId, Date.now());
-    hostedHubStore.setState({
-      selectedNode: null,
-      transportStatus: "idle",
-      sessionEstablished: false,
-    });
-  });
+  vi.spyOn(hostedHubController, "releaseEnvironment").mockImplementation(async (environmentId) =>
+    getHostedEnvironmentSessions().release(environmentId),
+  );
+  select = vi.spyOn(hostedHubController, "selectNode");
 });
 afterEach(() => {
   stop?.();
   stop = undefined;
+  expect(select).not.toHaveBeenCalled();
   resetHostedNodeRoutesForTests();
   hostedHubController.resetForTests();
+  resetHostedEnvironmentSessionsForTests();
   hostedWebConnectionScopes.reset();
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   vi.restoreAllMocks();
@@ -155,6 +155,13 @@ function start(
     },
   });
 }
+/** The environment's own relay attempt came online and accepted its shell snapshot. */
+function establish(environmentId: EnvironmentId) {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.read(environmentId)!;
+  sessions.transportStatus(environmentId, generation, "online");
+  sessions.markSessionReady(environmentId, generation);
+}
 async function complete(environmentId: EnvironmentId, empty = false) {
   const snapshot = metadata(environmentId);
   useStore
@@ -175,7 +182,7 @@ async function complete(environmentId: EnvironmentId, empty = false) {
       },
     },
   }));
-  hostedHubStore.setState({ transportStatus: "online", sessionEstablished: true });
+  establish(environmentId);
   await vi.advanceTimersByTimeAsync(110);
   await settle();
 }
@@ -330,17 +337,17 @@ describe("hosted home discovery", () => {
   it("fills an empty home from two devices in sequence without changing its URL", async () => {
     start();
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[0]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id]]);
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBe(nodes[0]!.environmentId);
     await complete(nodes[0]!.environmentId);
-    expect(select.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
     await complete(nodes[1]!.environmentId);
     expect(selectSidebarThreadsAcrossEnvironments(useStore.getState())).toHaveLength(2);
     expect(readHostedWorkspaceState().workspace.threads).toHaveLength(2);
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBeNull();
     expect(history.location.pathname).toBe("/");
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(select).toHaveBeenCalledTimes(2);
+    expect(acquire).toHaveBeenCalledTimes(2);
   });
 
   it("waits, bounded, for Hub cache shells in flight instead of waking those devices", async () => {
@@ -353,16 +360,16 @@ describe("hosted home discovery", () => {
     });
     reportShellReads(new Set([nodes[0]!.id, nodes[1]!.id]));
     await settle();
-    expect(select).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
     // The first device's cached shell lands: it never needs a relay wake-up.
     deliver(metadata(nodes[0]!.environmentId));
     reportShellReads(new Set([nodes[1]!.id]));
     await settle();
-    expect(select).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
     // The second device's read is still pending at the bound: wake it anyway.
     await vi.advanceTimersByTimeAsync(1_500);
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[1]!.id]]);
   });
 
   it("passes over a device whose Hub cache read is in flight and wakes the next", async () => {
@@ -373,7 +380,7 @@ describe("hosted home discovery", () => {
     });
     reportShellReads(new Set([nodes[0]!.id]));
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[1]!.id]]);
   });
 
   it("treats an empty current shell as complete and skips cached, offline, revoked and native-only devices", async () => {
@@ -400,10 +407,10 @@ describe("hosted home discovery", () => {
     });
     start();
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[1]!.id]]);
     await complete(nodes[1]!.environmentId, true);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(select).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBeNull();
   });
 
@@ -427,7 +434,7 @@ describe("hosted home discovery", () => {
         },
       },
     }));
-    hostedHubStore.setState({ transportStatus: "online", sessionEstablished: true });
+    establish(environmentId);
 
     for (let index = 0; index < 10; index++) {
       await vi.advanceTimersByTimeAsync(20);
@@ -435,23 +442,27 @@ describe("hosted home discovery", () => {
     }
     await settle();
 
-    expect(select.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
     expect(readHostedWorkspaceState().workspace.threads).toHaveLength(1);
   });
 
   it("moves past a failed device and supports an explicit retry", async () => {
     start();
     await settle();
-    hostedHubStore.setState({ transportStatus: "terminal-failure" });
+    const sessions = getHostedEnvironmentSessions();
+    sessions.failure(nodes[0]!.environmentId, sessions.read(nodes[0]!.environmentId)!.generation, {
+      kind: "incompatible",
+      retryable: false,
+    });
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
     expect(readHostedWorkspaceState().homeDiscovery.failedEnvironmentIds).toEqual([
       nodes[0]!.environmentId,
     ]);
     await complete(nodes[1]!.environmentId);
     retryHostedHomeDiscovery();
     await settle();
-    expect(select.mock.calls.at(-1)).toEqual([nodes[0]!.id]);
+    expect(acquire.mock.calls.at(-1)).toEqual([nodes[0]!.id]);
   });
 
   it("stops discovery for navigation and gives a retained thread the next connection", async () => {
@@ -465,7 +476,7 @@ describe("hosted home discovery", () => {
       threadId: ThreadId.make("thread"),
     });
     await settle();
-    expect(select.mock.calls).toEqual([[nodes[0]!.id], [node(3).id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [node(3).id]]);
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBeNull();
     release();
   });
@@ -479,7 +490,7 @@ describe("hosted home discovery", () => {
     hostedHubStore.setState({ directoryStatus: "stale", browserStatus: "checking-access" });
     await setHostedWorkspaceBackgrounded(false);
     await settle();
-    expect(select).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(1);
     hostedHubStore.setState({ directoryStatus: "ready", browserStatus: "current" });
     await settle();
     expect(readHostedWorkspaceState().homeDiscovery.environmentId).toBe(nodes[0]!.environmentId);
@@ -508,32 +519,19 @@ describe("hosted home discovery", () => {
     ];
     start();
     await settle();
-    expect(select).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
     hostedHubStore.setState({ nodes: [...nodes] });
     await settle();
     resolve?.(cached);
     await settle();
     expect(readHostedWorkspaceState().workspace.threads).toHaveLength(1);
-    expect(select.mock.calls).toEqual([[nodes[1]!.id]]);
+    expect(acquire.mock.calls).toEqual([[nodes[1]!.id]]);
   });
 
-  it("discovers through acquire with retained sessions and never moves the selection", async () => {
-    resetHostedEnvironmentSessionsForTests();
-    const sessions = getHostedEnvironmentSessions();
-    const acquire = vi
-      .spyOn(hostedHubController, "acquireEnvironment")
-      .mockImplementation(async (nodeId) => {
-        const target = nodes.find((entry) => entry.id === nodeId)!;
-        const record = sessions.ensureRecord(target);
-        sessions.markConnectRequested(target.environmentId, record.generation);
-        return "connecting";
-      });
-    const release = vi
-      .spyOn(hostedHubController, "releaseEnvironment")
-      .mockImplementation(async (environmentId) => sessions.release(environmentId));
+  it("hands a single slot from one discovered device to the next and never moves the selection", async () => {
+    const release = vi.mocked(hostedHubController.releaseEnvironment);
     stop = startHostedWorkspaceCoordinator({
       hubOrigin: "https://hub.example.test",
-      mode: "retained",
       maxConnections: 1,
       cache: {
         list,
@@ -551,9 +549,7 @@ describe("hosted home discovery", () => {
     // The discovered device leaves its one slot to the next.
     expect(release).toHaveBeenCalledWith(nodes[0]!.environmentId);
     expect(acquire.mock.calls).toEqual([[nodes[0]!.id], [nodes[1]!.id]]);
-    expect(select).not.toHaveBeenCalled();
     expect(hostedHubStore.getState().selectedNode).toBeNull();
-    resetHostedEnvironmentSessionsForTests();
   });
 
   it("does not discover on account pages or after sign-out", async () => {
@@ -561,11 +557,11 @@ describe("hosted home discovery", () => {
     history.flush();
     start();
     await settle();
-    expect(select).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
     hostedHubStore.setState({ accountStatus: "signed-out", account: null });
     history.push("/");
     history.flush();
     await settle();
-    expect(select).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
   });
 });

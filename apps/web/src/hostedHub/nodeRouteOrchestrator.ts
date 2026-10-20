@@ -14,11 +14,9 @@ import {
 import { HUB_ROUTE_TOP_SEGMENTS } from "./hubRoutes";
 import {
   HOSTED_SESSION_SYNC_FAILURE_MESSAGE,
-  hostedEnvironmentSessionsMode,
   hostedHubController,
   useHostedHubStore,
 } from "./state";
-import { hasActiveHostedWorkspaceCoordinator } from "./hostedConnectionCoordinator";
 import {
   hostedWebConnectionScopes,
   retainHostedWorkspaceThreadScope,
@@ -33,10 +31,12 @@ import { canShowHostedReadPreview, readHostedReadCache } from "./readCache";
  * *when* to invoke the existing controller primitives. A routed node is
  * restored strictly through the ordered fail-closed pipeline — restore Hub
  * session and refresh the authorized directory (existing bootstrap), validate
- * the routed id against the directory, then `selectNode`, which runs the
- * existing activation path (fresh one-use ticket → relay channel → canonical
- * state sync → mutation readiness gates). Routes that cannot be validated
- * fail closed to the node directory with a bounded notice.
+ * the routed id against the directory, then `selectNode`, which moves the
+ * selection onto the environment's own session: adopted as it is when it is
+ * continuously live, otherwise connected by the workspace coordinator for the
+ * route's demand (fresh one-use ticket → relay channel → canonical state sync
+ * → mutation readiness gates). Routes that cannot be validated fail closed to
+ * the node directory with a bounded notice.
  */
 
 export type HostedNodeRouteNoticeKind = "unavailable" | "revoked" | "offline" | "invalid-link";
@@ -142,18 +142,13 @@ let routeScopeKey: string | null = null;
 let releaseRouteScope: (() => void) | null = null;
 
 /**
- * The connection demand a route holds: its thread's detail, and with retained
- * environment sessions the routed environment itself on a route without a
- * thread, since there selecting a node only moves the cursor and connects
- * nothing.
+ * The connection demand a route holds: its thread's detail, or the routed
+ * environment itself on a route without a thread, since selecting a node only
+ * moves the cursor and connects nothing.
  */
 interface RouteScope {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId | null;
-}
-
-function retainsEnvironmentSessions(): boolean {
-  return hostedEnvironmentSessionsMode() === "retained";
 }
 
 function routeScopeFor(
@@ -161,9 +156,7 @@ function routeScopeFor(
   scopedThread: ReturnType<typeof parseHostedScopedThreadPath>,
 ): RouteScope | null {
   if (scopedThread) return scopedThread;
-  return environmentId !== null && retainsEnvironmentSessions()
-    ? { environmentId, threadId: null }
-    : null;
+  return environmentId !== null ? { environmentId, threadId: null } : null;
 }
 
 function routeScopeKeyFor(scope: RouteScope | null): string | null {
@@ -262,13 +255,10 @@ function reconcile(): void {
     replaceRouteScope(null);
     restoreRequestedNodeId = null;
     restoreOriginNodeId = null;
-    // With one session the workspace coordinator releases the selection along
-    // with its demand. With retained sessions releases never move the cursor,
-    // so the directory route clears it here, and that releases nothing.
-    if (
-      state.selectedNode &&
-      (retainsEnvironmentSessions() || !hasActiveHostedWorkspaceCoordinator())
-    ) {
+    // Releases never move the cursor, so the directory route clears it here,
+    // and that releases nothing: the environment stays warm until the
+    // coordinator needs its slot.
+    if (state.selectedNode) {
       const terminalSelection =
         state.selectionStatus === "revoked" ||
         state.selectionStatus === "authorization-removed" ||
@@ -380,22 +370,10 @@ function reconcile(): void {
   }
   const interactive = interactiveNodeId === nodeId;
   replaceRouteScope(routeScopeFor(node.environmentId, scopedThread));
-  // Scoped thread demand is acquired above. The environment-keyed
-  // coordinator owns normal activation and eviction. Its catalog eligibility
-  // intentionally excludes offline nodes, so a URL-originated offline restore
-  // enters the same singular controller lifecycle here instead of being
-  // stranded on the pre-selection surface. With retained sessions selecting
-  // only moves the cursor: the route scope is the demand the coordinator
-  // connects, so the swap never waits for, or releases, another environment.
-  const urlOfflineRestore = scopedThread !== null && !node.presence.online && !interactive;
-  if (
-    scopedThread &&
-    !retainsEnvironmentSessions() &&
-    hasActiveHostedWorkspaceCoordinator() &&
-    !urlOfflineRestore
-  ) {
-    return;
-  }
+  // Selecting only moves the cursor: the route scope retained above is the
+  // demand the environment-keyed coordinator connects, so a swap never waits
+  // for, or releases, another environment, and never returns to the
+  // directory. A continuously live session is adopted as it is.
   if (restoreRequestedNodeId === nodeId) return;
   restoreRequestedNodeId = nodeId;
   restoreOriginNodeId = interactive ? null : nodeId;
@@ -480,6 +458,8 @@ export function startHostedNodeRouteOrchestrator(): () => void {
     unsubscribeRouted();
     unsubscribeStore();
     unsubscribeHistory?.();
+    // Without an orchestrator nothing follows the route, so it holds no demand.
+    if (activeOrchestratorCount === 0) replaceRouteScope(null);
   };
 }
 

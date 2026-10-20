@@ -1,4 +1,4 @@
-import type { ScopedThreadRef } from "@ryco/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
 
 import { THREAD_DETAIL_NAVIGATION_RETAIN_MS } from "../../lib/threadDetailRetain";
 
@@ -14,6 +14,10 @@ export const THREAD_NAVIGATION_INTENT_RETAIN_MS = THREAD_DETAIL_NAVIGATION_RETAI
 export const THREAD_NAVIGATION_HOVER_DELAY_MS = 120;
 /** Upper bound on concurrent intent retains; the oldest is released first. */
 export const MAX_THREAD_NAVIGATION_INTENT_RETAINS = 4;
+/** At most one environment is connected ahead of a press in this window. */
+export const NODE_PRECONNECT_INTERVAL_MS = 5_000;
+/** A press connects the same environment ahead of its navigation at most once in this window. */
+export const NODE_PRECONNECT_COOLDOWN_MS = 30_000;
 
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -27,6 +31,12 @@ export interface ThreadNavigationIntentDeps {
    * the idle cache, which an intent's immediate release must not drop.
    */
   readonly isDetailLoaded: (ref: ScopedThreadRef) => boolean;
+  /**
+   * Whether a hover may retain the thread's detail once its dwell ran out
+   * (hosted: only while the environment's session is online). A press always
+   * may. Defaults to always.
+   */
+  readonly canRetainOnHover?: (ref: ScopedThreadRef) => boolean;
   /** Warms the thread route's component chunk. Idempotent and never throws. */
   readonly preloadThreadRoute: () => void;
   readonly keyOf: (ref: ScopedThreadRef) => string;
@@ -126,7 +136,7 @@ export function createThreadNavigationIntents(
         key,
         timer: schedule(() => {
           pendingHover = null;
-          intend(ref);
+          if (deps.canRetainOnHover?.(ref) !== false) intend(ref);
         }, hoverDelayMs),
       };
     },
@@ -155,6 +165,8 @@ export interface NavigationPressEvent {
   readonly altKey: boolean;
   readonly target: unknown;
   readonly currentTarget: unknown;
+  /** A `touch` press may only be the start of a scroll. */
+  readonly pointerType?: string;
 }
 
 /** Controls inside a row that do their own thing instead of opening the thread. */
@@ -174,4 +186,79 @@ export function isNavigationPress(event: NavigationPressEvent): boolean {
   const control =
     typeof target?.closest === "function" ? target.closest(NESTED_CONTROL_SELECTOR) : null;
   return control === null || control === event.currentTarget;
+}
+
+export interface NodePreconnectDeps {
+  /** Presses may connect ahead of navigation at all: hosted, and not on the phone tier. */
+  readonly enabled: () => boolean;
+  /** The environment has no session that is live or on its way. */
+  readonly needsConnection: (environmentId: EnvironmentId) => boolean;
+  /** Holds short-lived demand for the environment and marks the switch it starts. */
+  readonly preconnect: (environmentId: EnvironmentId) => void;
+  readonly now?: () => number;
+  readonly intervalMs?: number;
+  readonly cooldownMs?: number;
+}
+
+export interface NodePreconnect {
+  /**
+   * Reads a row's pointer press: `isNavigationPress`, and whether the press may
+   * connect its environment ahead of the navigation. Rows call it, then
+   * {@link NodePreconnect.press} for the row they pressed, in the same handler:
+   * the reading lasts until the current task ends.
+   */
+  readonly notePress: (event: NavigationPressEvent) => boolean;
+  /** The row whose press was just read is about to open its thread. */
+  readonly press: (ref: ScopedThreadRef) => void;
+}
+
+/**
+ * Pre-connect on a navigation press: a mouse or pen press on a row of a hosted
+ * node without a live session holds that node's demand for a few seconds, so
+ * its relay attempt and snapshot overlap the click instead of starting at the
+ * route. It is bounded: only navigation presses (never a touch, which may be a
+ * scroll), at most one environment per {@link NODE_PRECONNECT_INTERVAL_MS} and
+ * each environment at most once per {@link NODE_PRECONNECT_COOLDOWN_MS}. The
+ * demand is preemptible, so it never displaces a mounted view; the planner
+ * makes room only by releasing the least recently used environment that
+ * nothing demands.
+ */
+export function createNodePreconnect(deps: NodePreconnectDeps): NodePreconnect {
+  const now = deps.now ?? Date.now;
+  const intervalMs = deps.intervalMs ?? NODE_PRECONNECT_INTERVAL_MS;
+  const cooldownMs = deps.cooldownMs ?? NODE_PRECONNECT_COOLDOWN_MS;
+  let armed = false;
+  let pressSequence = 0;
+  let lastPreconnectAt: number | null = null;
+  const lastPreconnectByEnvironment = new Map<EnvironmentId, number>();
+
+  return {
+    notePress: (event) => {
+      const navigates = isNavigationPress(event);
+      armed = navigates && event.pointerType !== "touch";
+      if (armed) {
+        const press = ++pressSequence;
+        queueMicrotask(() => {
+          if (pressSequence === press) armed = false;
+        });
+      }
+      return navigates;
+    },
+    press: (ref) => {
+      if (!armed) return;
+      armed = false;
+      if (!deps.enabled()) return;
+      const at = now();
+      if (lastPreconnectAt !== null && at - lastPreconnectAt < intervalMs) return;
+      const previous = lastPreconnectByEnvironment.get(ref.environmentId);
+      if (previous !== undefined && at - previous < cooldownMs) return;
+      if (!deps.needsConnection(ref.environmentId)) return;
+      lastPreconnectAt = at;
+      lastPreconnectByEnvironment.set(ref.environmentId, at);
+      for (const [environmentId, startedAt] of lastPreconnectByEnvironment) {
+        if (at - startedAt >= cooldownMs) lastPreconnectByEnvironment.delete(environmentId);
+      }
+      deps.preconnect(ref.environmentId);
+    },
+  };
 }

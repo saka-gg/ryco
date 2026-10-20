@@ -16,39 +16,25 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "./environments/runtime";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
-import {
-  getHostedEnvironmentSessions,
-  hostedEnvironmentSessionsMode,
-  useHostedHubStore,
-} from "./hostedHub/state";
+import { getHostedEnvironmentSessions, useHostedHubStore } from "./hostedHub/state";
 import { selectEnvironmentShellLive, type AppState } from "@ryco/client-runtime/state/threads";
 import { useStore } from "./store";
 
-/** Whether each hosted environment keeps a session of its own. */
-function hostedSessionsRetained(): boolean {
-  return isHostedHubMode() && hostedEnvironmentSessionsMode() === "retained";
-}
-
 /**
- * Whether a hosted environment admits queued sends. With retained sessions the
- * environment's own session record decides, selected or not. Otherwise only the
- * selected node has a session to judge.
+ * Whether a hosted environment admits queued sends: the environment's own
+ * session record decides, selected or not.
  */
 function hostedMutationReady(environmentId: EnvironmentId): boolean {
-  const method = ORCHESTRATION_WS_METHODS.dispatchCommand;
-  if (hostedSessionsRetained()) return readHostedRpcCapability(method, environmentId).allowed;
-  return (
-    useHostedHubStore.getState().selectedNode?.environmentId === environmentId &&
-    readHostedRpcCapability(method).allowed
-  );
+  return readHostedRpcCapability(ORCHESTRATION_WS_METHODS.dispatchCommand, environmentId).allowed;
 }
 
 /**
  * Whether the queue drain may trust and mutate an environment. It only READS
  * readiness: it never creates hosted connection demand or selects a node, so a
- * queue on a hosted node whose session is not ready waits until it is (and,
- * without retained sessions, until that node is selected).
- * A dropped socket makes the queue wait; it never fails the head.
+ * queue on a hosted node whose session is not ready waits until it is. The
+ * demand that connects such a node is the workspace coordinator's queued-send
+ * scope, held while the queue has messages for one of the node's server
+ * threads. A dropped socket makes the queue wait; it never fails the head.
  */
 export function readWebQueueEnvironment(
   environmentId: EnvironmentId,
@@ -67,11 +53,11 @@ export function readWebQueueEnvironment(
 }
 
 /**
- * Readiness inputs that live outside the threads store. With retained hosted
- * sessions each environment's readiness changes in the session registry, not in
- * the hosted store, so the registry wakes the drain too. Per-environment socket
- * closes without a global status change are covered by the coordinator's
- * periodic environment re-check.
+ * Readiness inputs that live outside the threads store. Each hosted
+ * environment's readiness changes in the session registry, not in the hosted
+ * store, so the registry wakes the drain too. Per-environment socket closes
+ * without a global status change are covered by the coordinator's periodic
+ * environment re-check.
  */
 export function subscribeWebQueueEnvironmentReadiness(listener: () => void): () => void {
   const unsubscribers = [
@@ -81,9 +67,7 @@ export function subscribeWebQueueEnvironmentReadiness(listener: () => void): () 
     appAtomRegistry.subscribe(wsConnectionOpenedCountAtom, listener),
     appAtomRegistry.subscribe(wsConnectionStatusAtom, listener),
   ];
-  if (hostedSessionsRetained()) {
-    unsubscribers.push(getHostedEnvironmentSessions().subscribe(listener));
-  }
+  if (isHostedHubMode()) unsubscribers.push(getHostedEnvironmentSessions().subscribe(listener));
   return () => {
     for (const unsubscribe of unsubscribers) unsubscribe();
   };

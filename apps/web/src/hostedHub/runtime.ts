@@ -2,7 +2,6 @@ import {
   configureHostedEnvironmentSessions,
   configureHostedRuntime,
   hostedHubStore,
-  type HostedEnvironmentSessionsMode,
   type HostedHubApi,
   type HostedNodeLifecycle,
   type HostedRuntimeTimers,
@@ -11,8 +10,6 @@ import {
 import { writePrimaryEnvironmentDescriptor } from "../environments/primary";
 import {
   connectHostedEnvironment,
-  connectPrimaryEnvironment,
-  disconnectPrimaryEnvironment,
   removeHostedEnvironment,
   suspendHostedEnvironment,
 } from "../environments/runtime/service";
@@ -45,13 +42,6 @@ import {
 } from "./hubSession";
 import { subscribeWebForeground } from "./foreground";
 
-/**
- * Whether hosted Web keeps one session, and one connection, per environment.
- * Turns on together with MAX_HOSTED_WEB_CONNECTIONS > 1, in the change that
- * records the warm-set qualification.
- */
-export const HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS = false;
-
 let configured = false;
 
 /**
@@ -82,60 +72,54 @@ const webHostedTimers: HostedRuntimeTimers = {
 };
 
 /**
- * `environmentSessions` is a test seam; production follows
- * {@link HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS}.
+ * Hosted Web keeps one session, and one connection, per environment: a warm
+ * set of up to MAX_HOSTED_WEB_CONNECTIONS environments, each with its own
+ * relay attempt and accepted snapshot. There is no other mode to select;
+ * `environmentSessions` only lets a caller name this one.
  */
 export function configureWebHostedRuntime(
   api: HostedHubApi,
-  options?: { readonly environmentSessions?: HostedEnvironmentSessionsMode },
+  options?: { readonly environmentSessions?: "retained" },
 ): void {
   if (configured) return;
   configured = true;
-  const environmentSessions =
-    options?.environmentSessions ??
-    (HOSTED_WEB_RETAINED_ENVIRONMENT_SESSIONS ? "retained" : "single");
+  const environmentSessions = options?.environmentSessions ?? "retained";
   // docs/relay-e2ee-protocol.md §12.1: the in-memory latch ends with the
   // application session, and a sign-out is where this tier's session ends.
   watchWebHostedSessionForE2ee();
   displayWebE2eeForSelectedNode();
+  // Every environment's connection belongs to the lifecycle owner's ports for
+  // one record generation (`connectEnvironment`, `releaseEnvironment`,
+  // `suspendEnvironment`), and the workspace coordinator alone decides when to
+  // acquire and release. Nothing connects on the primary path: it would be a
+  // second hosted connection constructor outside the cap and those fences.
   const nodeLifecycle: HostedNodeLifecycle = {
     activate: async () => undefined,
     suspend: async () => undefined,
     deactivate: async () => undefined,
     clearNodeScopedState: clearWebHostedNodeScopedState,
     writePrimaryEnvironmentDescriptor,
-    connectPrimaryEnvironment,
-    disconnectPrimaryEnvironment,
+    connectPrimaryEnvironment: () => undefined,
+    disconnectPrimaryEnvironment: async () => undefined,
     setActiveEnvironmentId: (environmentId) =>
       useStore.getState().setActiveEnvironmentId(environmentId),
+    connectEnvironment: connectHostedEnvironment,
+    releaseEnvironment: removeHostedEnvironment,
+    suspendEnvironment: suspendHostedEnvironment,
+    requestEnvironmentReconcile: requestHostedWorkspaceReconcile,
   };
-  if (environmentSessions === "retained") {
-    configureHostedEnvironmentSessions({
-      now: webHostedTimers.now,
-      setTimeout: webHostedTimers.setTimeout,
-      clearTimeout: (timer) => webHostedTimers.clearTimeout(timer as ReturnType<typeof setTimeout>),
-    });
-  }
+  configureHostedEnvironmentSessions({
+    now: webHostedTimers.now,
+    setTimeout: webHostedTimers.setTimeout,
+    clearTimeout: (timer) => webHostedTimers.clearTimeout(timer as ReturnType<typeof setTimeout>),
+  });
   configureHostedRuntime(
     {
       endpoint: webEndpoint,
       httpClient: webHttpClient,
       passkeyCeremony: webPasskeyCeremony,
       sessionCredentials: webSessionCredentials,
-      // With retained sessions every environment's connection belongs to the
-      // lifecycle owner's ports below, each for one record generation, and the
-      // workspace coordinator alone decides when to acquire and release.
-      nodeLifecycle:
-        environmentSessions === "retained"
-          ? {
-              ...nodeLifecycle,
-              disconnectPrimaryEnvironment: async () => undefined,
-              connectEnvironment: connectHostedEnvironment,
-              releaseEnvironment: removeHostedEnvironment,
-              suspendEnvironment: suspendHostedEnvironment,
-              requestEnvironmentReconcile: requestHostedWorkspaceReconcile,
-            }
-          : nodeLifecycle,
+      nodeLifecycle,
       environmentSessions,
       timers: webHostedTimers,
       isForeground: () => globalThis.document?.visibilityState !== "hidden",

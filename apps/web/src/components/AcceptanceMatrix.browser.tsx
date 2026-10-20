@@ -42,7 +42,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useParams: () => undefined,
 }));
 
-import { hostedHubController, useHostedHubStore } from "../hostedHub/state";
+import {
+  getHostedEnvironmentSessions,
+  hostedHubController,
+  useHostedHubStore,
+} from "../hostedHub/state";
 import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "../hostedHub/nodeRoutes";
 import { navigateHub, resetHubRoutesForTests } from "../hostedHub/hubRoutes";
 import type { HostedHubNode } from "../hostedHub/types";
@@ -192,15 +196,17 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
     seed: () => {
       window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
       installHostedNodeHistory();
+      // The shared session fields show the selected node's own session: its
+      // relay channel is online and its shell snapshot has not arrived.
+      seedSelectedSession();
       useHostedHubStore.setState({
         accountStatus: "authenticated",
         account,
         session,
         directoryStatus: "ready",
+        browserStatus: "current",
         nodes: [selectedNode],
         selectedNode,
-        transportStatus: "online",
-        sessionEstablished: false,
       });
     },
     marker: () => waitForVisibleByText(/Connecting to Studio node/),
@@ -210,20 +216,33 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
     seed: () => {
       window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
       installHostedNodeHistory();
+      const generation = seedSelectedSession();
+      getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
+        kind: "authentication",
+        retryable: false,
+      });
       useHostedHubStore.setState({
         accountStatus: "authenticated",
         account,
         session,
         directoryStatus: "ready",
+        browserStatus: "current",
         nodes: [selectedNode],
         selectedNode,
-        transportStatus: "terminal-failure",
-        errorMessage: "The hosted authentication attempt expired or was rejected.",
       });
     },
     marker: () => waitForVisibleByText(/Unable to connect to Studio node/),
   },
 ];
+
+/** The selected node's own session, requested and with its relay channel online. */
+function seedSelectedSession(): number {
+  const sessions = getHostedEnvironmentSessions();
+  const { generation } = sessions.ensureRecord(selectedNode);
+  sessions.markConnectRequested(selectedNode.environmentId, generation);
+  sessions.transportStatus(selectedNode.environmentId, generation, "online");
+  return generation;
+}
 
 function expectNoDocumentHorizontalOverflow(width: number): void {
   expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(width);
@@ -249,6 +268,7 @@ async function sweepEntrySurfaces(options: {
   expect(surfaces.length).toBeGreaterThan(0);
   for (const surface of surfaces) {
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     surface.seed();
@@ -305,6 +325,7 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
     localStorage.clear();
     sessionStorage.clear();
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     navigate.mockClear();
@@ -314,6 +335,7 @@ describe("acceptance matrix — hosted entry surfaces and connection controls", 
     await mounted?.unmount();
     mounted = null;
     hostedHubController.resetForTests();
+    getHostedEnvironmentSessions().clear();
     resetHostedNodeRoutesForTests();
     resetHubRoutesForTests();
     vi.restoreAllMocks();
