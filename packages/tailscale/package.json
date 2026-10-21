@@ -14,7 +14,8 @@
     }
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo",
     "test": "vp test run"
   },
   "dependencies": {

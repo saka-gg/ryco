@@ -8,17 +8,27 @@
     "tsconfig.node.json",
     // Shared test configuration and build helpers are imported across workspace
     // boundaries that Turbo cannot infer from package dependencies.
+    // The Vitest helpers stay at the root, outside every workspace: `--affected`
+    // selects every package for a changed root global dependency, but attributes
+    // a file inside a workspace (such as scripts/) to that workspace alone, so PR
+    // runs would skip the suites the helper configures.
     "vitest.config.ts",
-    "scripts/lib/vitestReporting.ts",
+    "vitest.reporting.ts",
+    "vitest.pure-projects.ts",
+    "vitest.workers.ts",
     "scripts/lib/brand-assets.ts",
     "scripts/lib/resolve-catalog.ts",
     "scripts/lib/build-timing.ts",
+    "scripts/lib/native-build-cache.ts",
     "native/resource-monitor/Cargo.toml",
     "native/resource-monitor/Cargo.lock",
     "native/resource-monitor/rust-toolchain.toml",
     "native/resource-monitor/src/**",
     "scripts/build-resource-monitor.ts",
-    "scripts/resource-monitor-target.ts"
+    "scripts/resource-monitor-target.ts",
+    // bun.lock records only patch paths, not their content; a patch edit changes
+    // installed types and code without changing any other hashed input.
+    "patches/**"
   ],
   "globalEnv": [
     "HOST",
@@ -46,6 +56,12 @@
     "RYCO_OTLP_SERVICE_NAME"
   ],
   "globalPassThroughEnv": ["PATHEXT"],
+  // Bound the local cache, which git worktrees share and which otherwise only
+  // grows. Turbo evicts in the background when a run starts. Age counts from
+  // when an entry was written (a hit does not renew it), so at worst a
+  // long-lived entry is recomputed once a week.
+  "cacheMaxAge": "7d",
+  "cacheMaxSize": "2GB",
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -60,7 +76,10 @@
       "dependsOn": ["^build"],
       // CI builds with hidden sourcemaps so the bundle budget check
       // (`bun run perf:bundle-budget`) can attribute every chunk to its modules.
-      "env": ["RYCO_WEB_SOURCEMAP"],
+      // Hashing the React Compiler cache switch keeps a build that turns the
+      // cache off (every release) from being served one that read it.
+      "env": ["RYCO_WEB_SOURCEMAP", "RYCO_REACT_COMPILER_CACHE"],
+      "passThroughEnv": ["RYCO_REACT_COMPILER_CACHE_DIR"],
       "outputs": ["dist/**"],
       // Tailwind scans test fixtures too. Keep them in this package's hash so
       // a utility added in a test cannot change CSS behind a stale cache hit.
@@ -81,12 +100,28 @@
       "cache": false,
       "persistent": true
     },
+    // Transit node: no package defines a "typecheck:deps" script, so it never
+    // runs. Every package's checker reads workspace dependencies from source,
+    // so no check waits on another; this only threads each dependency's file
+    // hash into the typecheck hashes below, so a dependency edit still busts
+    // the cache while all packages check in parallel.
+    "typecheck:deps": {
+      "dependsOn": ["^typecheck:deps"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
+    },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
+      "dependsOn": ["typecheck:deps"],
       "outputs": [],
       // Cacheable: tsc is deterministic, so an unchanged package's pass/fail can
       // be memoized by input hash and skipped on reruns. Keep test files in the
       // input set (they're type-checked); only docs are irrelevant.
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
+    },
+    // tsc-rs pre-check; same cache rules as typecheck. Its incremental build
+    // info lives in each package's gitignored .turbo/, outside the inputs.
+    "typecheck:fast": {
+      "dependsOn": ["typecheck:deps"],
+      "outputs": [],
       "inputs": ["$TURBO_DEFAULT$", "!**/*.md"]
     },
     "test": {
@@ -96,7 +131,10 @@
       // resolve from source, so tests never wait on an upstream build.
       "dependsOn": [],
       "cache": false,
-      "outputs": []
+      "outputs": [],
+      // The shared Vitest worker override (vitest.workers.ts).
+      // Strict env mode would strip it from every suite Turbo starts.
+      "passThroughEnv": ["RYCO_TEST_MAX_WORKERS"]
     }
   }
 }

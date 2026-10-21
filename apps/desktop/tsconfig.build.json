@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  // tsdown's declaration pass needs every file under this package (rootDir);
+  // tsconfig.json also typechecks the root vitest helpers its test config imports.
+  "include": ["src", "tsdown.config.ts"]
+}

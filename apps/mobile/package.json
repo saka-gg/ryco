@@ -4,8 +4,11 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "dev": "expo start --clear",
-    "dev:client": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --clear --lan",
+    "dev": "expo start",
+    "dev:clean": "expo start --clear",
+    "dev:client": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --lan",
+    "dev:client:clean": "APP_VARIANT=development expo start --dev-client --scheme ryco-dev --clear --lan",
+    "bundle:check": "CI=1 EXPO_OFFLINE=1 EXPO_NO_TELEMETRY=1 APP_VARIANT=production expo export --platform all --output-dir dist/bundle-check",
     "start": "expo start",
     "start:dev": "APP_VARIANT=development expo start",
     "start:preview": "APP_VARIANT=preview expo start",
@@ -21,7 +24,8 @@
     "config:preview": "APP_VARIANT=preview expo config",
     "config:prod": "APP_VARIANT=production expo config",
     "test": "vp test run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit --incremental",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo"
   },
   "dependencies": {
     "@callstack/liquid-glass": "^0.8.1",

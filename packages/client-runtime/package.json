@@ -202,7 +202,8 @@
     "./state/lifecycle": "./src/state/lifecycle/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit --incremental && tsc --noEmit --incremental -p tsconfig.test.json",
+    "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo && tsc-rs --noEmit -p tsconfig.test.json --incremental --tsBuildInfoFile .turbo/tsc-rs.test.tsbuildinfo",
     "test": "vp test run"
   },
   "dependencies": {
