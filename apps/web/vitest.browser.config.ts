@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig, mergeConfig, type Plugin } from "vitest/config";
 
+import { BrowserShardSequencer } from "./test/browserShardSequencer";
 import viteConfig from "./vite.config";
 
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
@@ -51,6 +52,11 @@ export default mergeConfig(
       // them avoids scheduler-driven timing failures in interaction tests.
       fileParallelism: false,
       maxWorkers: 1,
+      // `--shard` balances CI shards by measured file duration instead of
+      // splitting them by file count.
+      sequence: {
+        sequencer: BrowserShardSequencer,
+      },
       // Vitest 5 serves browser mode from the single top-level API server.
       api: {
         strictPort: false,
