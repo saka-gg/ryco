@@ -13,17 +13,11 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine.ts";
 
-const runtimeInfo = {
-  hostArch: "x64",
-  appArch: "x64",
-  runningUnderArm64Translation: false,
-} as const;
-
 describe("updateMachine", () => {
   it("clears transient errors when a check starts", () => {
     const state = reduceDesktopUpdateStateOnCheckStart(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "error",
         message: "network",
@@ -42,7 +36,7 @@ describe("updateMachine", () => {
   it("records a check failure without exposing an action", () => {
     const state = reduceDesktopUpdateStateOnCheckFailure(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "checking",
       },
@@ -58,7 +52,7 @@ describe("updateMachine", () => {
   it("preserves available version on download failure for retry", () => {
     const state = reduceDesktopUpdateStateOnDownloadFailure(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "downloading",
         availableVersion: "1.1.0",
@@ -76,7 +70,7 @@ describe("updateMachine", () => {
   it("transitions to downloaded and then preserves install retry state", () => {
     const downloaded = reduceDesktopUpdateStateOnDownloadComplete(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "downloading",
         availableVersion: "1.1.0",
@@ -98,7 +92,7 @@ describe("updateMachine", () => {
   it("clears stale download state when no update is available", () => {
     const state = reduceDesktopUpdateStateOnNoUpdate(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "error",
         availableVersion: "1.1.0",
@@ -120,7 +114,7 @@ describe("updateMachine", () => {
   it("tracks available, download start, and progress cleanly", () => {
     const available = reduceDesktopUpdateStateOnUpdateAvailable(
       {
-        ...createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest"),
+        ...createInitialDesktopUpdateState("1.0.0", "latest"),
         enabled: true,
         status: "checking",
       },
@@ -136,5 +130,33 @@ describe("updateMachine", () => {
     expect(downloading.downloadPercent).toBe(0);
     expect(progress.downloadPercent).toBe(55.5);
     expect(progress.errorContext).toBeNull();
+  });
+
+  it("starts without a remote install and keeps one through every transition", () => {
+    const initial = createInitialDesktopUpdateState("1.0.0", "latest");
+    expect(initial.remoteInstall).toBeNull();
+
+    const remoteInstall = {
+      requestId: "req-1",
+      targetVersion: "1.1.0",
+      phase: "downloading",
+      restartAt: null,
+      message: null,
+    } as const;
+    const state = { ...initial, enabled: true, status: "idle" as const, remoteInstall };
+    const at = "2026-03-04T00:00:00.000Z";
+    for (const next of [
+      reduceDesktopUpdateStateOnCheckStart(state, at),
+      reduceDesktopUpdateStateOnCheckFailure(state, "network", at),
+      reduceDesktopUpdateStateOnUpdateAvailable(state, "1.1.0", at),
+      reduceDesktopUpdateStateOnNoUpdate(state, at),
+      reduceDesktopUpdateStateOnDownloadStart(state),
+      reduceDesktopUpdateStateOnDownloadProgress(state, 10),
+      reduceDesktopUpdateStateOnDownloadFailure(state, "disk full"),
+      reduceDesktopUpdateStateOnDownloadComplete(state, "1.1.0"),
+      reduceDesktopUpdateStateOnInstallFailure(state, "denied"),
+    ]) {
+      expect(next.remoteInstall).toBe(remoteInstall);
+    }
   });
 });

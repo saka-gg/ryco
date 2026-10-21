@@ -407,6 +407,9 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverAuthenticateAcpRegistry
     >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
+    readonly subscribeNodeUpdate: RpcStreamMethod<typeof WS_METHODS.serverSubscribeNodeUpdate>;
+    readonly checkNodeUpdate: RpcUnaryNoArgMethod<typeof WS_METHODS.serverCheckNodeUpdate>;
+    readonly updateNode: RpcUnaryMethod<typeof WS_METHODS.serverUpdateNode>;
     readonly upsertKeybinding: RpcUnaryMethod<typeof WS_METHODS.serverUpsertKeybinding>;
     readonly getProjectPreferences: RpcUnaryMethod<typeof WS_METHODS.serverGetProjectPreferences>;
     readonly getSettings: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetSettings>;
@@ -978,6 +981,16 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.serverAuthenticateAcpRegistry](input)),
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
+      subscribeNodeUpdate: (listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.serverSubscribeNodeUpdate]({}),
+          listener,
+          { ...options, tag: WS_METHODS.serverSubscribeNodeUpdate },
+        ),
+      checkNodeUpdate: () =>
+        transport.request((client) => client[WS_METHODS.serverCheckNodeUpdate]({})),
+      updateNode: (input) =>
+        transport.request((client) => client[WS_METHODS.serverUpdateNode](input)),
       upsertKeybinding: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpsertKeybinding](input)),
       getProjectPreferences: (input) =>

@@ -11,6 +11,7 @@ import {
   nodeServiceUser,
   parseLaunchctlPrint,
   parseSystemctlShow,
+  pnpmLinkedEntryScript,
   renderLaunchAgentPlist,
   renderSystemdUserUnit,
   systemdUnitName,
@@ -100,6 +101,22 @@ describe("node service definitions", () => {
     expect(
       isEphemeralCliInstall("/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs", "/tmp"),
     ).toBe(false);
+  });
+
+  it("keeps pnpm's package link instead of one release folder", () => {
+    expect(
+      pnpmLinkedEntryScript(
+        "/Users/me/Library/pnpm/global/5/node_modules/.pnpm/ryco-cli@0.1.35/node_modules/ryco-cli/dist/bin.mjs",
+      ),
+    ).toBe("/Users/me/Library/pnpm/global/5/node_modules/ryco-cli/dist/bin.mjs");
+    expect(
+      pnpmLinkedEntryScript(
+        "C:\\pnpm\\global\\5\\node_modules\\.pnpm\\ryco-cli@0.1.35\\node_modules\\ryco-cli\\dist\\bin.mjs",
+      ),
+    ).toBe("C:\\pnpm\\global\\5\\node_modules\\ryco-cli\\dist\\bin.mjs");
+    expect(
+      pnpmLinkedEntryScript("/opt/homebrew/lib/node_modules/ryco-cli/dist/bin.mjs"),
+    ).toBeNull();
   });
 
   it("reads launchctl and systemctl state", () => {

@@ -2,6 +2,7 @@ import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
+import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
 import { StorageService } from "../storage/StorageService.ts";
@@ -262,6 +263,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const workspaceChangeSummary = yield* Effect.serviceOption(WorkspaceChangeSummary);
     const localTaskService = yield* Effect.serviceOption(LocalTaskService);
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
+    // Optional for the route-test reason above; production provides it with the runtime.
+    const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
     const sessionPrewarm = yield* Effect.serviceOption(ProviderSessionPrewarm);
@@ -1405,6 +1408,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       sessionPrewarm,
       localTaskService,
       worktreeNotesService,
+      nodeUpdate,
       config,
       lifecycleEvents,
       serverSettings,

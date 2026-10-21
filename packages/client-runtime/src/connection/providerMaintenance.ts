@@ -3,6 +3,7 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   ServerProvider,
+  ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
 import {
   deriveNodeMutationLease,
@@ -10,6 +11,7 @@ import {
   type NodeMutationLease,
   type NodeMutationReadiness,
 } from "../authorization/nodeMutationLease.ts";
+import { forEachWithConcurrency } from "../concurrency.ts";
 import type { WsRpcClient } from "../rpc/wsRpcClient.ts";
 
 export interface ProviderMaintenanceEnvironment {
@@ -48,7 +50,15 @@ type Plan = {
   execution?: Promise<ReadonlyArray<ProviderMaintenanceOutcome>>;
 };
 
-function eligible(provider: ServerProvider, environment: ProviderMaintenanceEnvironment): boolean {
+/**
+ * Whether one click may update this provider now: it is set up, behind its
+ * latest release, the node can install that release itself, no update of it is
+ * already queued or running, and it has no running turn (`busyInstanceIds`).
+ */
+export function isProviderUpdateEligible(
+  provider: ServerProvider,
+  busyInstanceIds: ReadonlyArray<ProviderInstanceId>,
+): boolean {
   return (
     provider.enabled &&
     provider.installed &&
@@ -58,8 +68,61 @@ function eligible(provider: ServerProvider, environment: ProviderMaintenanceEnvi
     provider.versionAdvisory.canUpdate &&
     provider.updateState?.status !== "queued" &&
     provider.updateState?.status !== "running" &&
-    !environment.activeInstanceIds.includes(provider.instanceId)
+    !busyInstanceIds.includes(provider.instanceId)
   );
+}
+
+/**
+ * Whether this set-up provider is behind its latest release but the node cannot
+ * install it by itself, so someone at that machine has to
+ * (`versionAdvisory.updateCommand` says how, when known).
+ */
+export function isProviderUpdateManual(provider: ServerProvider): boolean {
+  return (
+    provider.enabled &&
+    provider.installed &&
+    provider.availability !== "unavailable" &&
+    provider.versionAdvisory?.status === "behind_latest" &&
+    !provider.versionAdvisory.canUpdate
+  );
+}
+
+/** The provider's installed and latest release as its version advisory reports them. */
+export function providerUpdateVersions(provider: ServerProvider): {
+  readonly fromVersion: string | null;
+  readonly toVersion: string | null;
+} {
+  return {
+    fromVersion: provider.versionAdvisory?.currentVersion ?? provider.version,
+    toVersion: provider.versionAdvisory?.latestVersion ?? null,
+  };
+}
+
+export type ProviderUpdateResultStatus = "succeeded" | "unchanged" | "failed" | "unknown";
+
+/**
+ * Reads one instance's result out of a `server.updateProvider` answer. Anything
+ * but a terminal `updateState` is `unknown`: the install may still have run.
+ */
+export function readProviderUpdateResult(
+  response: ServerProviderUpdatedPayload,
+  target: { readonly instanceId: ProviderInstanceId; readonly driver: ProviderDriverKind },
+): { readonly status: ProviderUpdateResultStatus; readonly message: string | null } {
+  const updated = response.providers.find(
+    (candidate) => candidate.instanceId === target.instanceId && candidate.driver === target.driver,
+  );
+  const status = updated?.updateState?.status;
+  if (status === "succeeded" || status === "unchanged" || status === "failed") {
+    return { status, message: updated?.updateState?.message ?? null };
+  }
+  return {
+    status: "unknown",
+    message: "Server did not return a terminal update result. Check provider status.",
+  };
+}
+
+function eligible(provider: ServerProvider, environment: ProviderMaintenanceEnvironment): boolean {
+  return isProviderUpdateEligible(provider, environment.activeInstanceIds);
 }
 
 /**
@@ -103,12 +166,13 @@ export function createProviderMaintenanceController(input: {
         const identity = JSON.stringify([environmentId, provider.instanceId, provider.driver]);
         if (seen.has(identity) || !eligible(provider, environment)) continue;
         seen.add(identity);
+        const versions = providerUpdateVersions(provider);
         const target = Object.freeze({
           environmentId,
           instanceId: provider.instanceId,
           driver: provider.driver,
-          currentVersion: provider.versionAdvisory?.currentVersion ?? provider.version,
-          latestVersion: provider.versionAdvisory?.latestVersion ?? null,
+          currentVersion: versions.fromVersion,
+          latestVersion: versions.toVersion,
         });
         captured.push({ target, client: environment.client, lease });
       }
@@ -132,12 +196,13 @@ export function createProviderMaintenanceController(input: {
         candidate.instanceId === captured.target.instanceId &&
         candidate.driver === captured.target.driver,
     );
+    const versions = provider ? providerUpdateVersions(provider) : null;
     if (
       !provider ||
+      !versions ||
       !eligible(provider, environment) ||
-      (provider.versionAdvisory?.currentVersion ?? provider.version) !==
-        captured.target.currentVersion ||
-      (provider.versionAdvisory?.latestVersion ?? null) !== captured.target.latestVersion
+      versions.fromVersion !== captured.target.currentVersion ||
+      versions.toVersion !== captured.target.latestVersion
     ) {
       return outcome("skipped", "Provider changed or is no longer eligible. Preview again.");
     }
@@ -152,19 +217,8 @@ export function createProviderMaintenanceController(input: {
           "Connection authority changed after dispatch. Check provider status.",
         );
       }
-      const updated = response.providers.find(
-        (candidate) =>
-          candidate.instanceId === captured.target.instanceId &&
-          candidate.driver === captured.target.driver,
-      );
-      const status = updated?.updateState?.status;
-      if (status === "succeeded" || status === "unchanged" || status === "failed") {
-        return outcome(status, updated?.updateState?.message ?? null);
-      }
-      return outcome(
-        "unknown",
-        "Server did not return a terminal update result. Check provider status.",
-      );
+      const result = readProviderUpdateResult(response, captured.target);
+      return outcome(result.status, result.message);
     } catch {
       // Even a lost response may follow a successful install. Do not silently retry.
       return outcome(
@@ -185,22 +239,16 @@ export function createProviderMaintenanceController(input: {
     // Defer dispatch until single-flight ownership is installed, including synchronous RPC mocks.
     const execution = Promise.resolve().then(async () => {
       const outcomes: ProviderMaintenanceOutcome[] = [];
-      let next = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, plan.captured.length) }, async () => {
-          while (next < plan.captured.length) {
-            const index = next++;
-            const captured = plan.captured[index]!;
-            outcomes[index] = await executeTarget(captured, signal).catch(() =>
-              Object.freeze({
-                target: captured.target,
-                status: "skipped" as const,
-                message: "Could not verify current connection authority. Preview again.",
-              }),
-            );
-          }
-        }),
-      );
+      await forEachWithConcurrency(plan.captured.length, concurrency, async (index) => {
+        const captured = plan.captured[index]!;
+        outcomes[index] = await executeTarget(captured, signal).catch(() =>
+          Object.freeze({
+            target: captured.target,
+            status: "skipped" as const,
+            message: "Could not verify current connection authority. Preview again.",
+          }),
+        );
+      });
       return Object.freeze(outcomes);
     });
     const result = execution.finally(() => {

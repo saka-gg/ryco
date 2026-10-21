@@ -21,7 +21,7 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
@@ -38,6 +38,7 @@ import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { setModelPickerOpen } from "../modelPickerOpenState";
 import Sidebar from "./Sidebar";
+import { preloadSidebarUpdateEverythingPill } from "./sidebar/SidebarChrome";
 import { CommandDialog } from "./ui/command";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -217,6 +218,10 @@ function makeServerConfig(providers: ReadonlyArray<ServerProvider>): ServerConfi
 }
 
 describe("Sidebar render cost", () => {
+  // The footer's update pill arrives in an idle slot after the first mount; loaded up
+  // front it mounts with the sidebar, so its one-time arrival is not counted as a re-render.
+  beforeAll(() => preloadSidebarUpdateEverythingPill());
+
   afterEach(() => {
     renderCounts.clear();
     traversalCalls.collect = 0;

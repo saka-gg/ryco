@@ -1,13 +1,7 @@
-import {
-  WS_METHODS,
-  type AuthSessionRole,
-  type EnvironmentId,
-  type ServerConfig,
-} from "@ryco/contracts";
+import { WS_METHODS, type AuthSessionRole, type EnvironmentId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import {
   getWsConnectionStatusForEnvironment,
-  readEnvironmentServerConfig,
   subscribeEnvironmentServerConfigs,
 } from "@ryco/client-runtime/rpc";
 import {
@@ -27,6 +21,7 @@ import {
 import { useEffect, useMemo } from "react";
 
 import { isElectron, isHostedHubMode } from "./env";
+import { readNodeServerConfig } from "./environments/nodeServerConfig";
 import { fetchSessionState, getPrimaryKnownEnvironment } from "./environments/primary";
 import {
   readEnvironmentConnection,
@@ -37,7 +32,6 @@ import { updateClientAutoSettleAfterDays } from "./hooks/useSettings";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
 import { useHostedHubStore } from "./hostedHub/state";
 import { readDesktopWorkspaceState } from "./platform/desktopWorkspace";
-import { getServerConfig } from "./rpc/serverState";
 
 /**
  * The web side of node-owned automatic settlement: which nodes a rule can be
@@ -124,15 +118,6 @@ function canWriteNodeSettings(environmentId: EnvironmentId): boolean {
   );
 }
 
-function readNodeConfig(environmentId: EnvironmentId): ServerConfig | null {
-  return (
-    readEnvironmentServerConfig(environmentId) ??
-    (environmentId === getPrimaryKnownEnvironment()?.environmentId ? getServerConfig() : null) ??
-    useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.serverConfig ??
-    null
-  );
-}
-
 /** A node as "Apply to all connected nodes" finds it: writable now, or why not. */
 export function readAutoSettleRuleTarget(node: AutoSettleRuleNode): AutoSettleRuleTarget {
   const connected =
@@ -142,7 +127,7 @@ export function readAutoSettleRuleTarget(node: AutoSettleRuleNode): AutoSettleRu
     ...node,
     blocker: autoSettleRuleTargetBlocker({
       connected,
-      config: readNodeConfig(node.environmentId),
+      config: readNodeServerConfig(node.environmentId),
       canWrite: canWriteNodeSettings(node.environmentId),
     }),
     write: (patch) => updateEnvironmentServerSettings(node.environmentId, patch),
@@ -185,7 +170,7 @@ export function handOverAutoSettleRule(
 ): ReadonlyArray<EnvironmentId> {
   return handOver.run(
     environments.map((environment) => {
-      const config = readNodeConfig(environment.environmentId);
+      const config = readNodeServerConfig(environment.environmentId);
       const awaitsRule = environment.mutationReady && nodeAwaitsAutoSettleRule(config);
       return {
         environmentId: environment.environmentId,

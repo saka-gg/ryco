@@ -92,6 +92,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   providerSessionPrewarm: Schema.optionalKey(Schema.Boolean),
   /** `provider.readProjectCommands` (per-directory skills and slash commands); absent on older servers. */
   providerProjectCommands: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `server.subscribeNodeUpdate` / `server.checkNodeUpdate` / `server.updateNode`: the node
+   * reports its Ryco release and installation and can update itself; absent on older servers.
+   */
+  nodeSelfUpdate: Schema.optionalKey(Schema.Boolean),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

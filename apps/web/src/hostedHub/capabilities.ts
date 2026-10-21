@@ -52,6 +52,21 @@ export function readHostedRpcCapability(
   });
 }
 
+/**
+ * Notifies when a {@link readHostedRpcCapability} answer may have changed: the
+ * hosted state or any environment's session record moved. Outside hosted mode
+ * every answer is fixed, so nothing is subscribed.
+ */
+export function subscribeHostedRpcCapabilities(listener: () => void): () => void {
+  if (!isHostedHubMode()) return () => undefined;
+  const unsubscribeState = useHostedHubStore.subscribe(() => listener());
+  const unsubscribeSessions = getHostedEnvironmentSessions().subscribe(listener);
+  return () => {
+    unsubscribeState();
+    unsubscribeSessions();
+  };
+}
+
 export interface HostedRpcCapabilityOptions {
   readonly requireSnapshot?: boolean;
 }

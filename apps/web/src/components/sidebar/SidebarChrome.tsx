@@ -6,7 +6,7 @@ import {
   SettingsIcon,
   UserRoundIcon,
 } from "lucide-react";
-import React, { memo, useCallback } from "react";
+import React, { memo, useCallback, useEffect, useState } from "react";
 import { Link, useLocation } from "@tanstack/react-router";
 import { WS_METHODS } from "@ryco/contracts";
 import { APP_BASE_NAME, APP_STAGE_LABEL, APP_VERSION } from "../../branding";
@@ -24,9 +24,9 @@ import {
 } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { RycoLetterMark } from "../RycoLetterMark";
-import { SidebarUpdatePill } from "./SidebarUpdatePill";
-import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
+import { scheduleIdleTask } from "../../lib/idleTask";
+import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import type { SidebarMode } from "../../uiStateStore";
 
@@ -215,11 +215,29 @@ function SidebarHubAccountEntry() {
   );
 }
 
+// The pill shows only once something can be updated, so its planning, runner
+// and dialog load in an idle slot after the shell instead of with it.
+const LazySidebarUpdateEverythingPill = preloadableLazy(() =>
+  import("./SidebarUpdateEverythingPill").then((module) => module.SidebarUpdateEverythingPill),
+);
+
+/** Loads the pill's chunk now; once it has, the footer mounts the pill on its first render. */
+export const preloadSidebarUpdateEverythingPill = LazySidebarUpdateEverythingPill.preload;
+
+function DeferredSidebarUpdateEverythingPill() {
+  const [wanted, setWanted] = useState(LazySidebarUpdateEverythingPill.isLoaded);
+  useEffect(() => (wanted ? undefined : scheduleIdleTask(() => setWanted(true))), [wanted]);
+  // A failed load leaves the pill out; it is optional and must not take the sidebar down.
+  const ready = useLazyComponentReady(LazySidebarUpdateEverythingPill, wanted, {
+    onLoadError: (error) => console.warn("Update pill failed to load.", error),
+  });
+  return ready ? <LazySidebarUpdateEverythingPill /> : null;
+}
+
 export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   return (
     <SidebarFooter className="p-2">
-      <SidebarProviderUpdatePill />
-      <SidebarUpdatePill />
+      <DeferredSidebarUpdateEverythingPill />
       {isHostedHubMode() ? <SidebarHubAccountEntry /> : null}
     </SidebarFooter>
   );

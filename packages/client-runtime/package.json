@@ -126,6 +126,14 @@
       "types": "./src/state/tasks/index.ts",
       "import": "./src/state/tasks/index.ts"
     },
+    "./state/nodeUpdate": {
+      "types": "./src/state/nodeUpdate/index.ts",
+      "import": "./src/state/nodeUpdate/index.ts"
+    },
+    "./updates": {
+      "types": "./src/updates/index.ts",
+      "import": "./src/updates/index.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
       "import": "./src/state/orchestration/index.ts"
