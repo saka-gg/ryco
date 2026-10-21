@@ -50,6 +50,10 @@ export type ContextHandoffServiceError =
   | ContextHandoffRenderError
   | ContextHandoffRepositoryError;
 
+/** Why a stored context document was refused: its stored digest does not match it. */
+export const CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR =
+  "Stored context handoff artifact digest does not match";
+
 export interface BuildAndStoreContextHandoffInput {
   readonly handoffId: ContextHandoffId;
   readonly thread: OrchestrationThread;
@@ -158,7 +162,7 @@ const makeContextHandoffService = Effect.gen(function* () {
           ? artifactError(
               record.handoffId,
               "digest-mismatch",
-              "Stored context handoff artifact digest does not match",
+              CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
             )
           : artifactError(
               record.handoffId,

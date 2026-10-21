@@ -3,6 +3,7 @@ import { ProjectionThreadUserInputRequestRepository } from "./persistence/Servic
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  ContextHandoffId,
   DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
@@ -39,6 +40,7 @@ import {
 } from "effect";
 import { TestClock } from "effect/testing";
 
+import { canonicalJson, sha256Hex } from "./canonicalJson.ts";
 import { ServerConfig } from "./config.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
@@ -49,6 +51,13 @@ import { HttpServer } from "effect/http";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { WorkspaceAccessPolicy } from "./workspace/Services/WorkspaceAccessPolicy.ts";
 import { CompletionReturnRepository } from "./persistence/Layers/AgentControlCompletionReturns.ts";
+import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandoffs.ts";
+import {
+  ContextHandoffRepository,
+  type ContextHandoffRecord,
+  type ContextHandoffRepositoryShape,
+  makeRequestedContextHandoffRecord,
+} from "./persistence/Services/ContextHandoffs.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { ProviderEffectIntentRepositoryLive } from "./persistence/Layers/ProviderEffectIntents.ts";
@@ -63,6 +72,13 @@ import { OrchestrationEngineLive } from "./orchestration/Layers/OrchestrationEng
 import { OrchestrationProjectionPipelineLive } from "./orchestration/Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuation.ts";
+import {
+  CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+  ContextHandoffArtifactError,
+  ContextHandoffService,
+  ContextHandoffServiceLive,
+  type ContextHandoffServiceShape,
+} from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { ORPHANED_TURN_TERMINAL_STATE } from "./orchestration/restartReconciliation.ts";
 import { threadShellSettlementInput } from "./orchestration/threadSettlementInput.ts";
 import * as ThreadBackgroundLiveness from "./orchestration/ThreadBackgroundLiveness.ts";
@@ -158,6 +174,7 @@ const orphanedSessionThread = (input: {
   readonly runningLatestTurnId?: TurnId;
   readonly sessionUpdatedAt?: string;
   readonly threadUpdatedAt?: string;
+  readonly lastError?: string;
 }) => ({
   id: ThreadId.make(input.id),
   updatedAt: input.threadUpdatedAt ?? "2026-01-01T00:00:00.000Z",
@@ -182,7 +199,7 @@ const orphanedSessionThread = (input: {
     providerInstanceId: ProviderInstanceId.make("codex"),
     runtimeMode: "full-access" as const,
     activeTurnId: input.activeTurnId ?? null,
-    lastError: null,
+    lastError: input.lastError ?? null,
     updatedAt: input.sessionUpdatedAt ?? "2026-01-01T00:00:00.000Z",
   },
 });
@@ -195,6 +212,32 @@ const restartContinuationOff: RestartContinuationShape = {
   dispatchPending: () => Effect.void,
 };
 
+/** Context handoff stand-ins for startups whose threads never handed off. */
+const noContextHandoffs = {
+  repository: {
+    listByThread: () => Effect.succeed([]),
+  } as unknown as ContextHandoffRepositoryShape,
+  service: {} as unknown as ContextHandoffServiceShape,
+};
+
+/** A handoff of `threadId` that failed with the digest error, as earlier versions recorded it. */
+const digestFailedHandoff = (threadId: ThreadId, structuredContext: unknown = null) => ({
+  ...makeRequestedContextHandoffRecord({
+    handoffId: ContextHandoffId.make(`handoff-${threadId}`),
+    threadId,
+    sourceSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+    targetSelection: { instanceId: ProviderInstanceId.make("claude"), model: "claude-fable-5" },
+    sourceRuntimeSessionId: RuntimeSessionId.make(`${threadId}-runtime`),
+    firstMessageId: MessageId.make(`${threadId}-message`),
+    createdAt: "2026-01-01T00:03:00.000Z",
+    updatedAt: "2026-01-01T00:03:00.000Z",
+  }),
+  status: "failed" as const,
+  structuredContext,
+  contextDigest: structuredContext === null ? null : sha256Hex(canonicalJson(structuredContext)),
+  error: CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+});
+
 const runOrphanedSessionReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof orphanedSessionThread>>;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
@@ -205,8 +248,29 @@ const runOrphanedSessionReconciliation = (input: {
   readonly directory: Pick<ProviderSessionDirectoryShape, "getBinding" | "upsert">;
   readonly stopSessionBinding?: ProviderServiceShape["stopSessionBinding"];
   readonly dispatch: OrchestrationEngineShape["dispatch"];
+  /** The threads' context handoffs; only `verifiedHandoffIds` pass the stored-context check. */
+  readonly handoffs?: ReadonlyArray<ContextHandoffRecord>;
+  readonly verifiedHandoffIds?: ReadonlyArray<ContextHandoffId>;
 }) =>
   reconcileOrphanedProviderSessions.pipe(
+    Effect.provideService(ContextHandoffRepository, {
+      ...noContextHandoffs.repository,
+      listByThread: ({ threadId }) =>
+        Effect.succeed((input.handoffs ?? []).filter((record) => record.threadId === threadId)),
+    }),
+    Effect.provideService(ContextHandoffService, {
+      ...noContextHandoffs.service,
+      loadStoredContext: ({ handoffId }) =>
+        input.verifiedHandoffIds?.includes(handoffId)
+          ? Effect.succeed({} as never)
+          : Effect.fail(
+              new ContextHandoffArtifactError({
+                handoffId,
+                reason: "digest-mismatch",
+                message: CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+              }),
+            ),
+    }),
     Effect.provideService(ProjectionPendingApprovalRepository, {
       upsert: () => Effect.void,
       listByThreadId: () => Effect.succeed([]),
@@ -671,6 +735,75 @@ it.effect("retries a failed orphan projection and continues after a persistent f
   );
 });
 
+it.effect(
+  "puts a session a handoff left in the digest error back to rest when its context verifies",
+  () => {
+    const sessionUpdatedAt = "2026-01-01T00:04:00.000Z";
+    const digestError = (id: string) =>
+      orphanedSessionThread({
+        id,
+        status: "error",
+        lastError: CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR,
+        sessionUpdatedAt,
+        threadUpdatedAt: "2026-01-01T00:05:00.000Z",
+      });
+    const repaired = digestError("thread-handoff-digest");
+    // Its stored document still fails the check: the error stands.
+    const unverified = digestError("thread-handoff-digest-unverified");
+    const live = digestError("thread-handoff-digest-live");
+    const providerError = orphanedSessionThread({
+      id: "thread-provider-error",
+      status: "error",
+      lastError: "The provider crashed.",
+    });
+    const handoffs = [repaired, unverified, live, providerError].map((thread) =>
+      digestFailedHandoff(thread.id),
+    );
+    const verifiedHandoffIds = [repaired, live, providerError].map((thread) =>
+      ContextHandoffId.make(`handoff-${thread.id}`),
+    );
+    const boot = () => {
+      const dispatches: OrchestrationCommand[] = [];
+      return runOrphanedSessionReconciliation({
+        threads: [repaired, unverified, live, providerError],
+        liveThreadIds: [live.id],
+        directory: {
+          getBinding: () => Effect.succeed(Option.none()),
+          upsert: () => Effect.void,
+        },
+        handoffs,
+        verifiedHandoffIds,
+        dispatch: (command) =>
+          Effect.sync(() => dispatches.push(command)).pipe(
+            Effect.as({ sequence: dispatches.length }),
+          ),
+      }).pipe(Effect.as(dispatches));
+    };
+
+    return Effect.gen(function* () {
+      const first = yield* boot();
+      assert.deepStrictEqual(first, [
+        {
+          type: "thread.session.set",
+          commandId: CommandId.make(
+            `server:startup-handoff-digest-repair:${repaired.id}:${sessionUpdatedAt}`,
+          ),
+          threadId: repaired.id,
+          // Stopped without the error, still dated at its own last update: no new activity.
+          session: { ...repaired.session, status: "stopped", lastError: null },
+          wakesSnoozed: false,
+          createdAt: (first[0] as { readonly createdAt: string }).createdAt,
+        },
+      ]);
+      // A retried boot sends the same command, which the engine answers from its receipt.
+      assert.deepStrictEqual(
+        (yield* boot()).map((command) => command.commandId),
+        [first[0]!.commandId],
+      );
+    });
+  },
+);
+
 it.effect("restricted startup rejects active project roots outside the workspace", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -1131,6 +1264,8 @@ it.effect(
           dispatch: () => Effect.die("unused"),
         } as unknown as OrchestrationEngineShape),
         Effect.provideService(RestartContinuation, restartContinuationOff),
+        Effect.provideService(ContextHandoffRepository, noContextHandoffs.repository),
+        Effect.provideService(ContextHandoffService, noContextHandoffs.service),
       );
       yield* Scope.close(reactorScope, Exit.void);
       assert.strictEqual(result, summary);
@@ -1208,8 +1343,9 @@ const waitUntil = <A, E, R>(read: Effect.Effect<A, E, R>, done: (value: A) => bo
   });
 
 /**
- * The real orchestration, restart ledger and restart continuation behind a real startup,
- * with provider, settings and shell stubs. Records every command the continuation sends.
+ * The real orchestration, restart ledger, restart continuation and context handoff store behind
+ * a real startup, with provider, settings and shell stubs. Records every command the continuation
+ * sends.
  */
 const restartStartupLayer = (input: {
   readonly continueThreadsAfterRestart: boolean;
@@ -1230,6 +1366,7 @@ const restartStartupLayer = (input: {
       Layer.provide(OrchestrationProjectionPipelineLive),
     ),
     OrchestrationProjectionSnapshotQueryLive,
+    ContextHandoffServiceLive.pipe(Layer.provideMerge(ContextHandoffRepositoryLive)),
   ).pipe(
     Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provide(
@@ -1596,6 +1733,144 @@ it.live(
 );
 
 it.live(
+  "puts a snoozed thread a handoff left in the digest error back to rest, once and quietly",
+  () => {
+    const repairedId = ThreadId.make("handoff-digest-repaired");
+    const providerErrorId = ThreadId.make("handoff-provider-error");
+    const instanceId = ProviderInstanceId.make("codex");
+    const layer = restartStartupLayer({
+      continueThreadsAfterRestart: false,
+      bindings: new Map(),
+      commands: [],
+    });
+    // Stored as earlier versions wrote it: the title keeps whitespace that decoding trims, which
+    // the old check digested after decoding and refused.
+    const storedDocument = {
+      version: 1,
+      mode: "full-context-fresh-session",
+      thread: { id: repairedId, title: "Digest repair ", branch: null, worktreePath: null },
+      provenance: {
+        sources: [{ providerInstanceId: instanceId, driverKind: "codex", modelSlug: "gpt-5" }],
+        target: { providerInstanceId: "claude", driverKind: "claudeAgent", modelSlug: "fable" },
+      },
+      messages: [],
+      plans: [],
+      tools: [],
+      checkpoints: [],
+      notices: [],
+      subagents: [],
+      priorHandoffs: [],
+    };
+
+    return Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const handoffs = yield* ContextHandoffRepository;
+      const at = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1_000).toISOString();
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("handoff-digest-project"),
+        projectId: ProjectId.make("handoff-digest-project"),
+        title: "Handoff digest",
+        workspaceRoot: "/projects/handoff-digest",
+        defaultModelSelection: { instanceId, model: "gpt-5" },
+        createdAt: at(900),
+      });
+      const failedSessionAt = at(600);
+      for (const [threadId, lastError] of [
+        [repairedId, CONTEXT_HANDOFF_DIGEST_MISMATCH_ERROR],
+        [providerErrorId, "The provider crashed."],
+      ] as const) {
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${threadId}-create`),
+          threadId,
+          projectId: ProjectId.make("handoff-digest-project"),
+          title: threadId,
+          modelSelection: { instanceId, model: "gpt-5" },
+          interactionMode: "default",
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: at(900),
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`${threadId}-failed`),
+          threadId,
+          session: {
+            threadId,
+            status: "error",
+            providerName: "codex",
+            providerInstanceId: instanceId,
+            runtimeSessionId: RuntimeSessionId.make(`${threadId}-runtime`),
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError,
+            updatedAt: failedSessionAt,
+          },
+          wakesSnoozed: false,
+          createdAt: failedSessionAt,
+        });
+      }
+      assert.isTrue(yield* handoffs.create(digestFailedHandoff(repairedId, storedDocument)));
+      // The user snoozed the failed thread before the node was updated.
+      const snoozedUntil = at(-3_600);
+      yield* engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("handoff-digest-snooze"),
+        threadId: repairedId,
+        snoozedUntil,
+      });
+
+      const boot = Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* makeServerRuntimeStartup;
+          yield* startup.awaitCommandReady;
+        }),
+      );
+      yield* boot;
+      yield* boot;
+
+      const shellOf = (threadId: ThreadId) =>
+        snapshots.getThreadShellById(threadId).pipe(Effect.map(Option.getOrThrow));
+      const repaired = yield* shellOf(repairedId);
+      assert.deepInclude(repaired.session, {
+        status: "stopped",
+        lastError: null,
+        runtimeSessionId: RuntimeSessionId.make(`${repairedId}-runtime`),
+        updatedAt: failedSessionAt,
+      });
+      assert.strictEqual(repaired.snoozedUntil, snoozedUntil);
+      assert.isTrue(isThreadSnoozed(repaired, Date.now()));
+      // A genuine provider error is the thread's own and stays.
+      assert.deepInclude((yield* shellOf(providerErrorId)).session, {
+        status: "error",
+        lastError: "The provider crashed.",
+      });
+      // The failed handoff stays failed; the next model change prepares a new one.
+      assert.deepInclude(
+        Option.getOrThrow(
+          yield* handoffs.getById({ handoffId: ContextHandoffId.make(`handoff-${repairedId}`) }),
+        ),
+        { status: "failed" },
+      );
+
+      const events = Array.from(yield* Stream.runCollect(engine.readEvents(0)));
+      assert.isFalse(events.some((event) => event.type === "thread.unsnoozed"));
+      // The second boot found nothing left to repair.
+      assert.deepStrictEqual(
+        events
+          .filter((event) => event.commandId?.startsWith("server:startup-handoff-digest-repair:"))
+          .map((event) => [event.type, event.aggregateId]),
+        [["thread.session-set", repairedId]],
+      );
+    }).pipe(Effect.provide(layer));
+  },
+  30_000,
+);
+
+it.live(
   "hints only the sessions it runs at a graceful shutdown, never an orphan it did not reconcile",
   () => {
     const orphanId = ThreadId.make("restart-unreconciled");
@@ -1698,6 +1973,8 @@ const shutdownOrderLayer = (input: {
     } as unknown as ProjectionSnapshotQueryShape),
     Layer.succeed(ProviderSessionDirectory, {} as ProviderSessionDirectoryShape),
     Layer.succeed(OrchestrationEngineService, {} as unknown as OrchestrationEngineShape),
+    Layer.succeed(ContextHandoffRepository, noContextHandoffs.repository),
+    Layer.succeed(ContextHandoffService, noContextHandoffs.service),
   ).pipe(
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-startup-order-" })),

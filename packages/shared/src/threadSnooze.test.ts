@@ -18,25 +18,34 @@ describe("snooze visibility", () => {
     { hasPendingUserInput: true },
     { latestUserMessageAt: "2026-09-06T11:00:00.000Z" },
     { latestTurn: { completedAt: "2026-09-06T11:00:00.000Z" } },
-    { session: { status: "error", updatedAt: "2026-09-06T11:00:00.000Z" } },
   ])("wakes for new actionable activity: %j", (activity) => {
     expect(isThreadSnoozed({ ...snoozed, ...activity }, now)).toBe(false);
   });
-  it("allows running work and previously seen errors to stay deferred", () => {
-    expect(
-      isThreadSnoozed({ ...snoozed, session: { status: "running", updatedAt: since } }, now),
-    ).toBe(true);
-    expect(
-      isThreadSnoozed({ ...snoozed, session: { status: "error", updatedAt: since } }, now),
-    ).toBe(true);
-  });
-  it("stays deferred when a server restart releases the session", () => {
-    const released = {
+
+  describe("follows the node on session errors", () => {
+    const failedAfterSnooze = (lastError: string) => ({
       status: "error",
-      lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+      lastError,
       updatedAt: "2026-09-06T11:00:00.000Z",
-    };
-    expect(isThreadSnoozed({ ...snoozed, session: released }, now)).toBe(true);
+    });
+    it.each([
+      ORPHANED_PROVIDER_SESSION_ERROR,
+      "The target provider did not accept the context handoff.",
+    ])("stays snoozed while the node keeps the snooze through %j", (lastError) => {
+      // Current nodes keep a thread snoozed through a restart release or a handoff rollback.
+      const thread = { ...snoozed, session: failedAfterSnooze(lastError) };
+      expect(isThreadSnoozed(thread, now)).toBe(true);
+    });
+    it("wakes once the node clears the snooze for an error", () => {
+      // Every node clears the snooze for a provider error, and older nodes also for a
+      // restart release or a handoff rollback.
+      const thread = {
+        snoozedAt: null,
+        snoozedUntil: null,
+        session: failedAfterSnooze("The provider crashed."),
+      };
+      expect(isThreadSnoozed(thread, now)).toBe(false);
+    });
   });
   it.each([
     {},
