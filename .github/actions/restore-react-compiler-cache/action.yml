@@ -1,0 +1,43 @@
+name: Restore React Compiler cache
+description: >
+  Restore the web app's React Compiler transform cache
+  (apps/web/src/viteBuild/reactCompilerCache.ts) and mark what was restored,
+  so save-react-compiler-cache keeps only the entries this job used.
+
+inputs:
+  scope:
+    description: >
+      Discriminator for this job's entries. A production build and the browser
+      suite's dev server compile the same modules to different output, so each
+      kind of job keeps its own cache.
+    required: true
+
+outputs:
+  key:
+    description: Primary key to pass to `./.github/actions/save-react-compiler-cache`.
+    value: ${{ steps.restore.outputs['cache-primary-key'] }}
+
+runs:
+  using: composite
+  steps:
+    # Entries are keyed by everything that shapes the compiler's output, so a
+    # restored entry is only ever used for byte-identical input; the lockfile
+    # and plugin sources in this key just start a new lineage when they change.
+    - name: Restore React Compiler cache
+      id: restore
+      uses: actions/cache/restore@v5
+      with:
+        path: apps/web/node_modules/.cache/ryco-react-compiler
+        key: ${{ runner.os }}-react-compiler-${{ inputs.scope }}-${{ hashFiles('bun.lock', 'apps/web/src/viteBuild/**') }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-react-compiler-${{ inputs.scope }}-${{ hashFiles('bun.lock', 'apps/web/src/viteBuild/**') }}-
+
+    # Restored entries keep their saved mtimes, and the plugin touches every
+    # entry it reads, so anything newer than this marker was used here. The
+    # marker also records how many entries were restored.
+    - name: Mark restored React Compiler cache
+      shell: bash
+      run: |
+        dir=apps/web/node_modules/.cache/ryco-react-compiler
+        mkdir -p "$dir"
+        find "$dir" -type f -name '*.json' | wc -l > "$RUNNER_TEMP/react-compiler-cache-restored"

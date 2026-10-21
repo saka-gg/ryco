@@ -23,6 +23,10 @@ concurrency:
 jobs:
   validate:
     name: Branch
+    # Usually dispatched from main to validate another ref, so without the cap
+    # that ref's code would write caches into main's scope, which main CI and
+    # releases restore.
+    cache-mode: read
     uses: ./.github/workflows/_validation.yml
     with:
       checkout-ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}

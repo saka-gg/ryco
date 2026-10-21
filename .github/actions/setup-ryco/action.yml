@@ -6,6 +6,13 @@ inputs:
     description: Run bun install --frozen-lockfile after toolchain setup.
     required: false
     default: "true"
+  install-args:
+    description: >
+      Extra arguments appended to `bun install --frozen-lockfile`, split on
+      spaces and newlines, e.g. `--filter=./ --filter=@ryco/desktop` for a job
+      that only needs some workspaces installed.
+    required: false
+    default: ""
   registry-url:
     description: Optional npm registry URL for publish jobs.
     required: false
@@ -20,25 +27,78 @@ inputs:
     default: "true"
   cache-scope:
     description: >
-      Discriminator for this job's Turbo cache entry. Every job in a workflow
-      run restores and saves concurrently, and GitHub's cache backend only lets
-      one writer reserve a given key, so a shared key means exactly one job's
-      artifacts survive and the other writers are dropped. Give each job a
-      distinct scope (matrix legs included) so every job keeps its own slice.
-    required: true
+      Discriminator for this job's Turbo cache entry; required unless
+      restore-turbo-cache is "false". Every job in a workflow run restores and
+      saves concurrently, and GitHub's cache backend only lets one writer
+      reserve a given key, so a shared key means exactly one job's artifacts
+      survive and the other writers are dropped. Give each job a distinct scope
+      (matrix legs included) so every job keeps its own slice.
+    required: false
+    default: ""
+  restore-turbo-cache:
+    description: >
+      Restore `.turbo/cache`. Pass "false" in jobs that run no cacheable Turbo
+      task (tests, browser shards, release publishing): otherwise the
+      cross-scope fallback downloads another job's cache for nothing. The
+      turbo-cache-key output is then empty, so the job saves nothing either.
+    required: false
+    default: "true"
+  bun-cache:
+    description: >
+      Bun install cache mode. "read" restores it. "write" also saves it after a
+      successful job that missed the lockfile's key; give exactly one job per
+      workflow run "write", because concurrent writers each compress about a
+      gigabyte and all but one then fail to reserve the key. "none" neither
+      restores nor saves it, nor setup-bun's binary cache: release jobs use it
+      because main-scope caches can be written by validation runs of unmerged
+      code, and a release must not install from them.
+    required: false
+    default: "read"
 
 outputs:
   turbo-cache-key:
     description: >
-      Primary key the Turbo cache was restored under. Pass it to
-      `actions/cache/save` in an `if: always()` step at the end of the job;
-      `actions/cache` skips its own save when the job fails, which is precisely
-      when re-running the same expensive tasks costs the most.
+      Primary key the Turbo cache was restored under, or empty when
+      restore-turbo-cache is "false". Pass it to
+      `./.github/actions/save-turbo-cache` at the end of the job, guarded by
+      `if: !cancelled() && steps.<id>.outputs['turbo-cache-key'] != ''`.
+      That saves failed jobs too (`actions/cache` skips its own save when the
+      job fails, which is precisely when re-running the same expensive tasks
+      costs the most), but not cancelled ones, which are usually superseded and
+      would claim the per-commit key with a partial cache.
     value: ${{ steps.turbo-cache-key.outputs.key }}
 
 runs:
   using: composite
   steps:
+    - name: Check cache inputs
+      shell: bash
+      env:
+        BUN_CACHE: ${{ inputs['bun-cache'] }}
+        RESTORE_TURBO_CACHE: ${{ inputs['restore-turbo-cache'] }}
+        CACHE_SCOPE: ${{ inputs['cache-scope'] }}
+      run: |
+        case "$BUN_CACHE" in
+          read | write | none) ;;
+          *)
+            echo "::error::setup-ryco: bun-cache must be read, write, or none, not '$BUN_CACHE'."
+            exit 1
+            ;;
+        esac
+        case "$RESTORE_TURBO_CACHE" in
+          false) ;;
+          true)
+            if [ -z "$CACHE_SCOPE" ]; then
+              echo "::error::setup-ryco: cache-scope is required when restore-turbo-cache is true."
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::error::setup-ryco: restore-turbo-cache must be true or false, not '$RESTORE_TURBO_CACHE'."
+            exit 1
+            ;;
+        esac
+
     # Playwright installs its pinned Chromium and uses Ubuntu for system
     # dependencies. The runner's unrelated Chrome feed can publish mismatched
     # indexes and make that dependency installation fail before tests start.
@@ -53,8 +113,9 @@ runs:
       with:
         version: ${{ inputs['vite-plus-version'] }}
         node-version-file: package.json
-        cache: true
-        cache-dependency-path: bun.lock
+        # The Bun install cache is restored below instead, so every OS shares
+        # one key scheme and bun-cache decides who may write it.
+        cache: false
         registry-url: ${{ inputs['registry-url'] }}
         run-install: false
 
@@ -71,6 +132,44 @@ runs:
       uses: oven-sh/setup-bun@v2
       with:
         bun-version-file: package.json
+        no-cache: ${{ inputs['bun-cache'] == 'none' }}
+
+    # Bun links packages from its cache with hardlinks, which cannot cross
+    # volumes. The default cache under the home directory is on C:, but
+    # windows-2025 checkouts live on D:, so Bun copied every file there;
+    # runner.temp shares the workspace volume on every runner. The cache steps
+    # below repeat this path verbatim because actions/cache versions entries by
+    # their path string.
+    - name: Configure Bun install cache
+      id: bun-cache
+      shell: bash
+      env:
+        CACHE_DIR: ${{ runner.temp }}/bun-install-cache
+        LOCK_HASH: ${{ hashFiles('bun.lock') }}
+      run: |
+        echo "BUN_INSTALL_CACHE_DIR=${CACHE_DIR}" >> "$GITHUB_ENV"
+        {
+          echo "key=bun-install-${RUNNER_OS}-${RUNNER_ARCH}-${LOCK_HASH}"
+          echo "restore-prefix=bun-install-${RUNNER_OS}-${RUNNER_ARCH}-"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore Bun install cache
+      if: ${{ inputs['bun-cache'] == 'read' }}
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ runner.temp }}/bun-install-cache
+        key: ${{ steps.bun-cache.outputs.key }}
+        restore-keys: ${{ steps.bun-cache.outputs['restore-prefix'] }}
+
+    # Same restore, plus a post-job save when the job succeeds and the exact
+    # key was missed (a lockfile change).
+    - name: Restore and save Bun install cache
+      if: ${{ inputs['bun-cache'] == 'write' }}
+      uses: actions/cache@v5
+      with:
+        path: ${{ runner.temp }}/bun-install-cache
+        key: ${{ steps.bun-cache.outputs.key }}
+        restore-keys: ${{ steps.bun-cache.outputs['restore-prefix'] }}
 
     - name: Setup pinned resource monitor toolchain
       if: ${{ inputs['install-resource-monitor-toolchain'] == 'true' }}
@@ -79,6 +178,7 @@ runs:
 
     - name: Compute Turbo cache key
       id: turbo-cache-key
+      if: ${{ inputs['restore-turbo-cache'] == 'true' }}
       shell: bash
       env:
         SCOPE: ${{ inputs['cache-scope'] }}
@@ -96,8 +196,13 @@ runs:
           echo "scope-prefix=${RUNNER_OS}-turbo-${scope}-"
           echo "shared-prefix=${RUNNER_OS}-turbo-"
         } >> "$GITHUB_OUTPUT"
+        # save-turbo-cache keeps only the entries named in the job's run
+        # summaries. Callers pass --summarize too; the variable also covers a
+        # Turbo run that omits it. It does not change task hashes.
+        echo "TURBO_RUN_SUMMARY=true" >> "$GITHUB_ENV"
 
     - name: Restore Turbo cache
+      if: ${{ inputs['restore-turbo-cache'] == 'true' }}
       uses: actions/cache/restore@v5
       with:
         # Only the artifact store. `.turbo` also holds the daemon socket, run
@@ -107,7 +212,9 @@ runs:
         # Per-commit key so every run writes a fresh entry (GitHub never
         # overwrites an existing key — a lockfile-stable key froze the cache at
         # its first run and never re-saved). restore-keys seed each run from the
-        # most recent prefix match, so the cache accumulates commit-to-commit.
+        # most recent prefix match, and save-turbo-cache prunes each save to the
+        # entries its run used, so the cache stays small instead of
+        # accumulating commit-to-commit.
         key: ${{ steps.turbo-cache-key.outputs.key }}
         # Narrowest match first: this job's own history, then this job's history
         # across dependency/config changes, then any job's cache. Turbo entries
@@ -124,13 +231,21 @@ runs:
     # missing path as a hard error. Materialize it so the save step is always
     # safe to run.
     - name: Ensure Turbo cache directory exists
+      if: ${{ inputs['restore-turbo-cache'] == 'true' }}
       shell: bash
       run: mkdir -p .turbo/cache
 
     - name: Install dependencies
       if: ${{ inputs['install-dependencies'] == 'true' }}
       shell: bash
-      run: bun install --frozen-lockfile
+      env:
+        INSTALL_ARGS: ${{ inputs['install-args'] }}
+      run: |
+        # Split on spaces and newlines (a `|` block input has one per line)
+        # without glob expansion of patterns like @ryco/*. `read -d ''` reads
+        # to end of input and then returns 1, which must not trip `-e`.
+        read -r -d '' -a args <<< "$INSTALL_ARGS" || true
+        bun install --frozen-lockfile "${args[@]}"
 
     - name: Expose local Vite+ CLI on Windows
       if: ${{ runner.os == 'Windows' }}

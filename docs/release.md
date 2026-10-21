@@ -5,24 +5,24 @@ This document covers the unified release workflow for stable and nightly desktop
 ## What the workflow does
 
 - Workflow: `.github/workflows/release.yml`
-- Triggers:
-  - push tag matching `v*.*.*` for stable releases
-  - scheduled nightly at `09:00 UTC`
-  - manual `workflow_dispatch` for either channel
-- Runs quality gates first: lint, typecheck, test.
+- Trigger: manual `workflow_dispatch` with a channel (`stable` or `nightly`); stable releases also take the version.
+- Resolves the version first. Builds and Verify wait for it, so an invalid version, a stable release without one, or a version already on npm stops the run before they start.
+- Verify runs alongside the builds: `.github/workflows/_validation.yml` at the release commit (format, lint, typecheck, unit tests, the build, the mobile bundle and release smoke). It skips the desktop build, because the build legs produce the real artifacts, and it skips browser tests, as the release preflight did before.
+  - Verify is skipped when a successful `ci.yml` run on `main` exists for the same SHA: that run covered a superset of these checks. Releases from any other branch always run Verify.
+  - Nothing is published unless Verify passed or was skipped for that reason.
 - Builds five artifacts in parallel for both channels:
   - macOS `arm64` DMG
   - Linux `x64` AppImage
   - Linux `arm64` AppImage
   - Windows `x64` NSIS installer
   - Windows `arm64` NSIS installer
-- Publishes one GitHub Release with all produced files.
+- Uploads one GitHub Release with all produced files as a draft while the CLI is published to npm, replacing any stale draft from an earlier attempt. The draft is published, which creates the tag, only after npm publish succeeds.
   - Stable tags with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Publishes the CLI package (`apps/server`, npm package `ryco`) with OIDC trusted publishing from the same workflow file:
+- Publishes the CLI package (`apps/server`, npm package `ryco-cli`) with OIDC trusted publishing from the same workflow file:
   - stable releases publish npm dist-tag `latest`
   - nightly releases publish npm dist-tag `nightly`
 - Signing is optional and auto-detected per platform from secrets.
@@ -37,17 +37,15 @@ and npm trusted publishing retain their existing runners.
 ## Nightly builds
 
 - Workflow: `.github/workflows/release.yml`
-- Triggers:
-  - scheduled every day at `09:00 UTC`
-  - manual `workflow_dispatch` with `channel=nightly`
-- Runs the same desktop quality gates and artifact matrix as the tagged release flow.
+- Trigger: manual `workflow_dispatch` with `channel=nightly` (there is no schedule).
+- Runs the same Verify gate (including CI reuse) and artifact matrix as the stable release flow.
 - Publishes a GitHub prerelease only:
   - tag format: `nightly-vX.Y.Z-nightly.YYYYMMDD.<run_number>`
   - release name includes the short commit SHA
   - `make_latest` is always `false`
 - Uses the next stable patch version as the nightly base. For example, `0.0.17` produces nightlies on `0.0.18-nightly.*`.
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
-- Publishes the CLI package (`apps/server`, npm package `ryco`) to the `nightly` npm dist-tag using the same nightly version.
+- Publishes the CLI package (`apps/server`, npm package `ryco-cli`) to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
 ## Desktop auto-update notes
@@ -78,7 +76,7 @@ the package version to the release tag version.
 
 Checklist:
 
-1. Confirm npm org/user owns package `ryco` (or rename package first if needed).
+1. Confirm npm org/user owns package `ryco-cli`.
 2. In npm package settings, configure Trusted Publisher:
    - Provider: GitHub Actions
    - Repository: this repo
@@ -180,12 +178,14 @@ Checklist:
 
 1. Ensure `main` is green in CI.
 2. Bump app version as needed.
-3. Create release tag: `vX.Y.Z`.
-4. Push tag.
+3. Run the Release workflow on `main` with channel `stable` and version `X.Y.Z`.
+4. The tag `vX.Y.Z` is created when the draft release is published; a stable release then pushes the version bump to `main`.
 5. Verify workflow steps:
-   - preflight passes
+   - Resolve release passes
+   - Verify passes, or is skipped because CI status found a green CI run for the same commit
    - all matrix builds pass
-   - release job uploads expected files
+   - Draft GitHub Release uploads the expected files
+   - Publish CLI to npm passes, then Publish GitHub Release makes the draft public
 6. Smoke test downloaded artifacts.
 
 ## 5) Troubleshooting
