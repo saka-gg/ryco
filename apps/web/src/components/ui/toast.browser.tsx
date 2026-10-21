@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { ToastProvider, toastManager } from "./toast";
 
 vi.mock("@tanstack/react-router", () => ({
+  // Imported through the hosted node routes; never called by these tests.
+  createBrowserHistory: vi.fn(),
   useParams: (options?: { select?: (params: Record<string, string>) => unknown }) => {
     const params = {};
     return options?.select ? options.select(params) : params;

@@ -34,6 +34,10 @@ vi.mock("../../hostedHub/capabilities", () => ({
   // The phone sheets load in one chunk with the thread dock, whose thread
   // actions read the policy outside React.
   readHostedRpcCapability: () => mockedCapability(),
+  // The phone pill in the same chunk reads the open thread's own session.
+  useHostedDeliveryNotice: () => null,
+  useHostedEnvironmentDeliveryUnknown: () => false,
+  useHostedEnvironmentRecord: () => undefined,
 }));
 
 vi.mock("../../environments/runtime", () => {
