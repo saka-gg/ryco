@@ -5,14 +5,17 @@ import { createFakeHistoryWindow } from "../../test/fakeHistoryWindow";
 import {
   buildHostedNodeHref,
   clearHostedNodeRoute,
-  enterHostedNodeRoute,
+  dropHostedNodeRouteSegment,
+  enterHostedHomeRoute,
   adoptRoutedHostedNode,
   getRoutedHostedNode,
   installHostedNodeHistory,
+  isHostedNodeScopedPathname,
   isValidHostedNodeRouteSegment,
   parseHostedNodeHref,
   resetHostedNodeRoutesForTests,
   subscribeRoutedHostedNode,
+  setHostedNodeRouteDraftResolver,
   setHostedNodeRouteEnvironmentResolver,
 } from "./nodeRoutes";
 
@@ -85,13 +88,49 @@ describe("hosted node route segment parsing", () => {
   });
 
   it("builds node-scoped hrefs without altering search or hash", () => {
-    expect(buildHostedNodeHref("/", "node_a")).toBe("/node/node_a");
-    expect(buildHostedNodeHref("/?x=1#y", "node_a")).toBe("/node/node_a?x=1#y");
-    expect(buildHostedNodeHref("/env_a/t_1?workspaceTab=diff", "node_a")).toBe(
-      "/node/node_a/env_a/t_1?workspaceTab=diff",
+    expect(buildHostedNodeHref("/env_a/t_1?workspaceTab=diff#m", "node_a")).toBe(
+      "/node/node_a/env_a/t_1?workspaceTab=diff#m",
     );
+    expect(buildHostedNodeHref("/draft/d_1?x=1", "node_a")).toBe("/node/node_a/draft/d_1?x=1");
     expect(buildHostedNodeHref("/env_a/t_1", null)).toBe("/env_a/t_1");
     expect(buildHostedNodeHref("/env_a/t_1", "not valid!")).toBe("/env_a/t_1");
+  });
+
+  it("names a node only on a thread or a draft, never on the pages no node owns", () => {
+    for (const href of [
+      "/",
+      "/?x=1#y",
+      "/settings",
+      "/projects",
+      "/tasks",
+      "/statistics?environmentIds=env_a",
+      "/pull-requests",
+      "/diagnostics",
+      "/pair",
+      "/native/authorize/handoff_1",
+    ]) {
+      expect(buildHostedNodeHref(href, "node_a"), href).toBe(href);
+    }
+    expect(isHostedNodeScopedPathname("/env_a/t_1")).toBe(true);
+    expect(isHostedNodeScopedPathname("/draft/d_1")).toBe(true);
+    expect(isHostedNodeScopedPathname("/")).toBe(false);
+    expect(isHostedNodeScopedPathname("/settings")).toBe(false);
+    expect(isHostedNodeScopedPathname("/account/security")).toBe(false);
+  });
+
+  it("routes a draft through the environment it belongs to", () => {
+    setHostedNodeRouteEnvironmentResolver((environmentId) =>
+      environmentId === EnvironmentId.make("env_b") ? "node_b" : null,
+    );
+    setHostedNodeRouteDraftResolver((draftId) =>
+      draftId === "d_b" ? EnvironmentId.make("env_b") : null,
+    );
+    // From a page that names no node, and from another node's thread.
+    expect(buildHostedNodeHref("/draft/d_b", null)).toBe("/node/node_b/draft/d_b");
+    expect(buildHostedNodeHref("/draft/d_b", "node_a")).toBe("/node/node_b/draft/d_b");
+    // A draft no resolver places keeps the routed node, and without one names none.
+    expect(buildHostedNodeHref("/draft/d_unknown", "node_a")).toBe("/node/node_a/draft/d_unknown");
+    expect(buildHostedNodeHref("/draft/d_unknown", null)).toBe("/draft/d_unknown");
   });
 
   it("routes a logical environment through its own authorized node, not the current node", () => {
@@ -169,31 +208,119 @@ describe("hosted node history", () => {
     });
   });
 
-  it("enters a node route with a new history entry and clears it fail-closed", () => {
-    const { win, history } = install("/");
+  it("leaves a thread for the pages no node owns without carrying its node along", () => {
+    const { win, history } = install("/node/node_a/env_a/t_1");
+    for (const pathname of ["/", "/settings", "/tasks"]) {
+      history.push(pathname);
+      history.flush();
+      expect(win.location.pathname, pathname).toBe(pathname);
+      expect(getRoutedHostedNode(), pathname).toEqual({
+        nodeId: null,
+        malformed: false,
+        logicalPathname: pathname,
+      });
+    }
+  });
+
+  it("enters home with a new history entry and clears a node route fail-closed", () => {
+    const { win, history } = install("/node/node_a/env_a/t_1");
     const seen: Array<string | null> = [];
     const unsubscribe = subscribeRoutedHostedNode(() => {
       seen.push(getRoutedHostedNode().nodeId);
     });
-    expect(enterHostedNodeRoute("node_a")).toBe(true);
-    history.flush();
-    expect(win.location.pathname).toBe("/node/node_a");
-    expect(win.entries()).toHaveLength(2);
-
-    clearHostedNodeRoute();
+    expect(enterHostedHomeRoute()).toBe(true);
     history.flush();
     expect(win.location.pathname).toBe("/");
     expect(win.entries()).toHaveLength(2);
-    expect(seen).toEqual(["node_a", null]);
+    // Already home: no second entry.
+    expect(enterHostedHomeRoute()).toBe(true);
+    history.flush();
+    expect(win.entries()).toHaveLength(2);
+    expect(seen).toEqual([null]);
     unsubscribe();
+
+    history.back();
+    history.flush();
+    expect(getRoutedHostedNode().nodeId).toBe("node_a");
+    clearHostedNodeRoute();
+    history.flush();
+    expect(win.location.pathname).toBe("/");
+    expect(getRoutedHostedNode().nodeId).toBeNull();
   });
 
   it("rejects invalid segments for programmatic navigation", () => {
-    const { win } = install("/");
-    expect(enterHostedNodeRoute("not valid!")).toBe(false);
+    const { win } = install("/env_a/t_1");
+    expect(adoptRoutedHostedNode("not valid!")).toBe(false);
     expect(adoptRoutedHostedNode("..")).toBe(false);
     expect(win.entries()).toHaveLength(1);
     expect(getRoutedHostedNode().nodeId).toBeNull();
+  });
+
+  it("adopts nothing on a page no node owns", () => {
+    const { win, history } = install("/settings?section=general");
+    const seen: Array<string | null> = [];
+    const unsubscribe = subscribeRoutedHostedNode(() => {
+      seen.push(getRoutedHostedNode().nodeId);
+    });
+    expect(adoptRoutedHostedNode("node_a")).toBe(false);
+    history.flush();
+    expect(win.location.pathname).toBe("/settings");
+    expect(win.entries()).toHaveLength(1);
+    expect(seen).toEqual([]);
+    unsubscribe();
+  });
+
+  it("adopts nothing on another node's thread", () => {
+    setHostedNodeRouteEnvironmentResolver((environmentId) =>
+      environmentId === EnvironmentId.make("env_a") ? "node_a" : null,
+    );
+    const { win, history } = install("/node/node_a/env_a/t_1");
+    expect(adoptRoutedHostedNode("node_b")).toBe(false);
+    history.flush();
+    expect(win.location.pathname).toBe("/node/node_a/env_a/t_1");
+    expect(getRoutedHostedNode().nodeId).toBe("node_a");
+  });
+
+  it("routes the open draft in place to the device it is moving to, and back", () => {
+    setHostedNodeRouteEnvironmentResolver((environmentId) =>
+      environmentId === EnvironmentId.make("env_a") ? "node_a" : "node_b",
+    );
+    setHostedNodeRouteDraftResolver(() => EnvironmentId.make("env_a"));
+    const { win, history } = install("/node/node_a/draft/d_1?x=1");
+
+    expect(adoptRoutedHostedNode("node_b")).toBe(true);
+    history.flush();
+    expect(win.entries()).toHaveLength(1);
+    expect(win.location.pathname).toBe("/node/node_b/draft/d_1");
+    expect(win.location.search).toBe("?x=1");
+    // A later in-place rewrite of the same draft keeps the device it moves to.
+    history.replace("/draft/d_1?x=2");
+    history.flush();
+    expect(win.location.pathname).toBe("/node/node_b/draft/d_1");
+
+    expect(adoptRoutedHostedNode("node_a")).toBe(true);
+    history.flush();
+    expect(win.location.pathname).toBe("/node/node_a/draft/d_1");
+  });
+
+  it("drops the segment of an entry whose page no node owns, in place", () => {
+    const { win, history } = install("/node/node_a/settings?section=general");
+    expect(getRoutedHostedNode()).toEqual({
+      nodeId: "node_a",
+      malformed: false,
+      logicalPathname: "/settings",
+    });
+
+    dropHostedNodeRouteSegment();
+    history.flush();
+    expect(win.entries()).toHaveLength(1);
+    expect(win.location.pathname).toBe("/settings");
+    expect(win.location.search).toBe("?section=general");
+    expect(getRoutedHostedNode()).toEqual({
+      nodeId: null,
+      malformed: false,
+      logicalPathname: "/settings",
+    });
   });
 
   it("adopts a legacy location in place without adding a history entry", () => {
@@ -209,7 +336,8 @@ describe("hosted node history", () => {
 
   it("republishes the routed node across Back and Forward", () => {
     const { win, history } = install("/");
-    enterHostedNodeRoute("node_a");
+    setHostedNodeRouteEnvironmentResolver(() => "node_a");
+    history.push("/env_a/t_1");
     history.flush();
     expect(getRoutedHostedNode().nodeId).toBe("node_a");
 
@@ -219,7 +347,7 @@ describe("hosted node history", () => {
 
     win.history.forward();
     expect(getRoutedHostedNode().nodeId).toBe("node_a");
-    expect(win.location.pathname).toBe("/node/node_a");
+    expect(win.location.pathname).toBe("/node/node_a/env_a/t_1");
   });
 
   it("marks malformed browser locations and keeps the router on the root", () => {
@@ -248,8 +376,9 @@ describe("hosted node history", () => {
   it("keeps history entry state free of application material", () => {
     const canary = "ticket-sensitive-route-canary";
     const { win, history } = install("/");
-    enterHostedNodeRoute("node_a");
+    setHostedNodeRouteEnvironmentResolver(() => "node_a");
     history.push(`/env_a/t_1`);
+    history.push("/settings");
     history.flush();
     const serialized = JSON.stringify(win.entries());
     expect(serialized).not.toContain(canary);

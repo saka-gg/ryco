@@ -42,11 +42,7 @@ import {
   retainHostedIntentScope,
   startQueuedSendScopeRetention,
 } from "./hostedConnectionScopes";
-import {
-  enterHostedNodeRoute,
-  installHostedNodeHistory,
-  resetHostedNodeRoutesForTests,
-} from "./nodeRoutes";
+import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "./nodeRoutes";
 import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
 
 /**
@@ -1432,8 +1428,11 @@ describe("hosted Web retained environment sessions", () => {
 
   it("restores the cached machines newest first at boot, once the routed machine is established", async () => {
     const nodes = [1, 2, 3, 4].map((index) => retainedNode(index));
-    installHostedNodeHistory(createFakeHistoryWindow("/") as unknown as Window & typeof globalThis);
-    enterHostedNodeRoute(nodes[3]!.id);
+    installHostedNodeHistory(
+      createFakeHistoryWindow(
+        `/node/${nodes[3]!.id}/${environment(4)}/${thread(4)}`,
+      ) as unknown as Window & typeof globalThis,
+    );
     const records = cachedMachines([1, 10], [2, 30], [3, 20]);
     const test = startRetained(nodes, { cache: { ...emptyCache, list: async () => records } });
     const releaseView = hostedWebConnectionScopes.retain(environment(4), {

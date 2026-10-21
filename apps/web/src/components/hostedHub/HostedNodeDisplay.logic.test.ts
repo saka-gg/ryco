@@ -20,6 +20,7 @@ import {
   nodeSelectionBlockedReason,
   platformLabel,
   relativeTime,
+  selectableNodes,
   sortNodes,
 } from "./HostedNodeDisplay.logic";
 
@@ -227,6 +228,16 @@ describe("count line", () => {
 });
 
 describe("selection gating", () => {
+  it("offers only nodes still authorized and open to this browser", () => {
+    const open = node();
+    const revoked = node({ id: "node_bbbbbbbbbbbbbbbbbbbbbb", revokedAt: NOW });
+    const nativeOnly = node({
+      id: "node_cccccccccccccccccccccc",
+      capabilities: { repositoryIdentity: true, nativeClientRequired: true },
+    });
+    expect(selectableNodes([revoked, open, nativeOnly])).toEqual([open]);
+  });
+
   it("blocks a revoked node, a stale directory, and a revalidating browser alike", () => {
     const ready = { directoryStatus: "ready", browserStatus: "current" };
     expect(nodeSelectionBlocked({ ...ready, node: node() })).toBe(false);

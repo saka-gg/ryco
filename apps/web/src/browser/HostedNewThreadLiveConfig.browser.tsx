@@ -86,9 +86,6 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => {
     hostedDemandAwaitsPresence: unavailable,
   };
 });
-vi.mock("../hostedHub/adoptHostedEnvironmentRoute", () => ({
-  adoptHostedEnvironmentRoute: () => undefined,
-}));
 vi.mock("../environments/runtime", { spy: true });
 
 import {

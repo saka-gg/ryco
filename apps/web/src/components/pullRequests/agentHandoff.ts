@@ -23,7 +23,6 @@ import { useComposerDraftStore, type ComposerThreadTarget } from "../../composer
 import { readEnvironmentApi } from "../../environmentApi";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
-import { adoptHostedEnvironmentRoute } from "../../hostedHub/adoptHostedEnvironmentRoute";
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { newDraftId, newThreadId, randomUUID } from "../../lib/utils";
 import { fetchSourceControlChangeRequestDetail } from "../../rpc/useSourceControl";
@@ -115,10 +114,6 @@ type Router = NonNullable<ReturnType<typeof useRouter>>;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function adoptHostedTarget(projectRef: ScopedProjectRef): void {
-  adoptHostedEnvironmentRoute(projectRef.environmentId);
 }
 
 /** Where the change request's head is (or will be) checked out. */
@@ -224,7 +219,6 @@ async function navigateToThread(
   projectRef: ScopedProjectRef,
   threadId: ThreadId,
 ): Promise<void> {
-  adoptHostedTarget(projectRef);
   await router.navigate({
     to: "/$environmentId/$threadId",
     params: buildThreadRouteParams(scopeThreadRef(projectRef.environmentId, threadId)),
@@ -262,7 +256,6 @@ async function openHandoffDraft(input: {
   store.applyStickyState(draftId);
   if (defaults.modelSelection) store.setModelSelection(draftId, defaults.modelSelection);
   seedComposer(draftId, { prompt: input.prompt, context: input.context });
-  adoptHostedTarget(target.projectRef);
   await router.navigate({ to: "/draft/$draftId", params: { draftId } });
 }
 

@@ -855,7 +855,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     // The store holds nothing for this node yet, so there is no shell to keep on
     // screen and the page says it is connecting.
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
     // Its relay channel is online; its shell snapshot has not arrived.
     seedSession(selectedNode);
@@ -929,7 +933,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
   it("shows a labelled relay failure without mounting the node session UI", async () => {
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
     const { generation } = seedSession(selectedNode);
     getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
@@ -957,7 +965,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
 
   it("retries bounded synchronization failures from the selected node", async () => {
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
     const retry = vi.spyOn(hostedHubController, "retrySelectedNode").mockResolvedValue();
     // The session-sync deadline ran out before the shell snapshot arrived.
@@ -1225,7 +1237,11 @@ describe("HostedHubRoot accessibility and responsive flows", () => {
     // Desktop has no connection menu any more, so the terminal-failure page
     // carries its own way out instead of relying on one.
     const selectedNode = node("node_aaaaaaaaaaaaaaaaaaaaaa", true, "operator");
-    window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+    );
     installHostedNodeHistory();
     const { generation } = seedSession(selectedNode);
     getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {

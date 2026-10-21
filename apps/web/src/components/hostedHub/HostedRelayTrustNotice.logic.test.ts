@@ -19,6 +19,7 @@ import {
 } from "./HostedE2eeVerification.logic";
 import {
   hostedRelayTrustDisclosure,
+  hostedRelayTrustDisclosureStatus,
   HOSTED_RELAY_TRUST_DISCLOSURE_STATES,
 } from "./HostedRelayTrustNotice.logic";
 
@@ -106,6 +107,32 @@ describe("the hosted relay trust disclosure is a function of the channel state",
     for (const { where, text } of everyDisclosure()) {
       expect(text, where).not.toContain("not application-level end-to-end encrypted");
     }
+  });
+});
+
+describe("which channel the disclosure speaks for", () => {
+  it("discloses the selected node's channel while it has one", () => {
+    for (const status of ["negotiating", "web-unsigned", "legacy"] as const) {
+      expect(hostedRelayTrustDisclosureStatus(status, ["legacy", "web-unsigned"]), status).toBe(
+        status,
+      );
+    }
+  });
+
+  it("says no channel is open only while none is open in this tab", () => {
+    expect(hostedRelayTrustDisclosureStatus("unavailable", [])).toBe("unavailable");
+    // The cursor can sit on a node with no channel while other nodes' channels
+    // stay open: "No node channel is open in this tab" would then be false.
+    expect(hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned"])).toBe("web-unsigned");
+  });
+
+  it("discloses the weakest channel open in this tab, never a stronger one", () => {
+    expect(
+      hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned", "negotiating", "legacy"]),
+    ).toBe("legacy");
+    expect(hostedRelayTrustDisclosureStatus("unavailable", ["web-unsigned", "negotiating"])).toBe(
+      "negotiating",
+    );
   });
 });
 

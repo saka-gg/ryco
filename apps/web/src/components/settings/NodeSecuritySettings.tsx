@@ -257,10 +257,10 @@ function SafetyNumber({ value }: { readonly value: string }) {
  * — its reader is already on the page a pointer would name — but written `more?:
  * string` that absence was indistinguishable from a caller who forgot the field,
  * and forgetting it on the browser end drops the sentence naming
- * `ryco e2ee sessions`: the page the node menu's pointer leads to would show a
- * value to compare and no way to obtain the thing to compare it against. `null`
- * makes "this end has no second sentence" something a view STATES, and omitting
- * it a compile error.
+ * `ryco e2ee sessions`: the page the thread connection popover's pointer leads
+ * to would show a value to compare and no way to obtain the thing to compare it
+ * against. `null` makes "this end has no second sentence" something a view
+ * STATES, and omitting it a compile error.
  */
 function VerificationCode({
   view,

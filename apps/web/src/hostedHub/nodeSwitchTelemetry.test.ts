@@ -294,6 +294,61 @@ describe("node switch telemetry", () => {
     expect(readNodeSwitchTimeline()?.n).toBe(1);
   });
 
+  it("starts no switch for a thread on the same node opened after a page that names no node", () => {
+    dispose = installNodeSwitchTelemetry();
+    fakes.route("node_a");
+    expect(readNodeSwitchTimeline()?.n).toBe(1);
+
+    // Home and settings name no node, and the cursor stays where it was.
+    fakes.route(null);
+    fakes.route("node_a");
+    expect(readNodeSwitchTimeline()?.n).toBe(1);
+
+    fakes.route(null);
+    fakes.route("node_b");
+    expect(readNodeSwitchTimeline()?.n).toBe(2);
+  });
+
+  it("records a cursor moved on a page that names no node, and a thread on the node it left", () => {
+    dispose = installNodeSwitchTelemetry();
+    fakes.route("node_a");
+    fakes.patch({ selectedNode: nodeA, ...READY_STATE });
+    expect(readNodeSwitchTimeline()).toMatchObject({ n: 1, origin: "route" });
+
+    // Settings' device switcher moves the cursor to B; the address names no node.
+    fakes.route(null);
+    fakes.patch({
+      selectedNode: nodeB,
+      transportStatus: "connecting",
+      sessionStatus: "synchronizing",
+      sessionEstablished: false,
+    });
+    expect(readNodeSwitchTimeline()).toMatchObject({ n: 2, origin: "press", warm: false });
+    expect(phasesInOrder()).toEqual(["intent", "connecting"]);
+    fakes.patch(READY_STATE);
+    expect(phasesInOrder()).toEqual([
+      "intent",
+      "connecting",
+      "online",
+      "shell-accepted",
+      "mutation-ready",
+    ]);
+
+    // A thread on A moves the cursor back from B.
+    fakes.route("node_a");
+    expect(readNodeSwitchTimeline()).toMatchObject({ n: 3, origin: "route" });
+
+    // The same node chosen again, or the cursor cleared, starts nothing.
+    fakes.route(null);
+    fakes.patch({ selectedNode: { ...nodeA } });
+    fakes.patch({ selectedNode: null });
+    expect(readNodeSwitchTimeline()?.n).toBe(3);
+    // Cleared, the cursor is on no node: a thread on A, later, is a switch again.
+    clock += 2_000;
+    fakes.route("node_a");
+    expect(readNodeSwitchTimeline()?.n).toBe(4);
+  });
+
   it("does not treat the node routed at install time as a switch", () => {
     fakes.route("node_a");
     dispose = installNodeSwitchTelemetry();

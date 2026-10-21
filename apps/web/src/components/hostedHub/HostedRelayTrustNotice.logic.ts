@@ -153,6 +153,47 @@ const HOSTED_RELAY_TRUST_DISCLOSURES = {
   },
 } as const satisfies Record<WebHostedE2eeChannelStatus, HostedRelayTrustDisclosure>;
 
+/**
+ * How much a channel state protects, weakest first. A `Record` over every
+ * state but `unavailable`, so a state added to the tier cannot be left
+ * unranked: §12.2's fallback carries plaintext, a negotiating channel has
+ * released nothing yet, and only `web-unsigned` encrypted anything.
+ */
+const HOSTED_RELAY_CHANNEL_STRENGTH = {
+  legacy: 0,
+  negotiating: 1,
+  "web-unsigned": 2,
+} as const satisfies Record<Exclude<WebHostedE2eeChannelStatus, "unavailable">, number>;
+
+/**
+ * The channel state the notice discloses: the displayed channel's — the
+ * selected node's — while it has one.
+ *
+ * Without one, `unavailable`'s sentence says no node channel is open in this
+ * tab, and that is only true while none is. The selection cursor can sit on a
+ * node with no channel while other nodes' channels stay open (a warm set, home
+ * discovery, a fresh tab before anything is selected), so the notice then
+ * discloses the weakest channel this tab holds: never a stronger claim than
+ * the weakest configuration in use (§2.2), and never "none" while one is open.
+ */
+export function hostedRelayTrustDisclosureStatus(
+  displayed: WebHostedE2eeChannelStatus,
+  openChannels: ReadonlyArray<WebHostedE2eeChannelStatus>,
+): WebHostedE2eeChannelStatus {
+  if (displayed !== "unavailable") return displayed;
+  let weakest: Exclude<WebHostedE2eeChannelStatus, "unavailable"> | null = null;
+  for (const status of openChannels) {
+    if (status === "unavailable") continue;
+    if (
+      weakest === null ||
+      HOSTED_RELAY_CHANNEL_STRENGTH[status] < HOSTED_RELAY_CHANNEL_STRENGTH[weakest]
+    ) {
+      weakest = status;
+    }
+  }
+  return weakest ?? "unavailable";
+}
+
 /** The claim this tier is entitled to make about the channel it is on. */
 export function hostedRelayTrustDisclosure(
   status: WebHostedE2eeChannelStatus,

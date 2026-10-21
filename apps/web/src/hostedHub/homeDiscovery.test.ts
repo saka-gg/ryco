@@ -17,7 +17,6 @@ import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } fro
 import { hostedWebConnectionScopes } from "./hostedConnectionScopes";
 import {
   clearHostedNodeRoute,
-  enterHostedNodeRoute,
   installHostedNodeHistory,
   leaveHostedNodeRouteToHubDirectory,
   resetHostedNodeRoutesForTests,
@@ -205,8 +204,9 @@ function startWithShells(shells: ReadonlyArray<HostedHubNode>) {
     return () => {};
   });
 }
+/** Routes a thread on the device: only a thread or a draft names a node. */
 function routeTo(target: HostedHubNode) {
-  enterHostedNodeRoute(target.id);
+  history.push(`/${target.environmentId}/thread`);
   history.flush();
 }
 /** Leaves a node route for home, or for the node directory page. */

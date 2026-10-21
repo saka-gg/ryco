@@ -165,9 +165,9 @@ export function deriveThreadConnectionRetarget(
   }
 
   // 6. Directory. "stale" means the last refresh failed: the node list cannot
-  //    be trusted to decide anything, so fail closed exactly like web does
-  //    (hostedHub/nodeRouteOrchestrator.ts:239). "idle"/"loading" are the
-  //    bootstrap transients and simply have no answer yet.
+  //    be trusted to decide anything, so fail closed exactly like web's node
+  //    route orchestrator does. "idle"/"loading" are the bootstrap transients
+  //    and simply have no answer yet.
   if (state.directoryStatus === "stale") {
     return { kind: "degraded", reason: "directory-unavailable" };
   }
@@ -175,7 +175,7 @@ export function deriveThreadConnectionRetarget(
 
   // 7. Browser status leaves "current" on every app background and comes back
   //    on resume. A retarget requested inside that window is a bounded wait,
-  //    never a failure (web's comment at nodeRouteOrchestrator.ts:244-250).
+  //    never a failure (web's node route orchestrator waits the same way).
   if (state.browserStatus !== "current") return { kind: "wait" };
 
   // 8. Directory is authoritative, so absence and revocation are now facts
@@ -184,9 +184,9 @@ export function deriveThreadConnectionRetarget(
   if (directoryNode.revokedAt !== null) return { kind: "degraded", reason: "revoked" };
 
   // 9. Retarget. Presence-offline still retargets: a thread tap is interactive
-  //    intent, matching web's `interactiveNodeId` path skipping the presence
-  //    fail-fast (nodeRouteOrchestrator.ts:261-265). Offline belongs on the row
-  //    as provenance, not as a gate on the tap.
+  //    intent, so it skips the presence fail-fast, as web's thread routes
+  //    select their node whatever its presence. Offline belongs on the row as
+  //    provenance, not as a gate on the tap.
   //
   //    One exception keeps the guard mirror intact: a terminal selection (rule
   //    2's fall-through) whose own node the directory still lists as live is a

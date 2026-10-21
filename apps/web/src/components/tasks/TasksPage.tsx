@@ -28,22 +28,26 @@ import {
 } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { useRouter } from "@tanstack/react-router";
-import { CloudOffIcon, LockIcon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CloudOffIcon, LockIcon, MonitorSmartphoneIcon, RefreshCwIcon } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { isHostedHubMode } from "~/env";
 import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
 import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
 import { prefetchWorktreeSend } from "~/hooks/worktreeSendPrefetch";
 import { preloadRouteChunk } from "~/lib/routeChunkPreload";
-import { adoptHostedEnvironmentRoute } from "~/hostedHub/adoptHostedEnvironmentRoute";
 import { useHostedRpcCapability } from "~/hostedHub/capabilities";
+import { getRoutedHostedNode, subscribeRoutedHostedNode } from "~/hostedHub/nodeRoutes";
+import { useHostedHubStore } from "~/hostedHub/state";
+import { useHostedNodePageDemand } from "~/hostedHub/useHostedNodePageDemand";
 import { getProjectOrderKey } from "~/logicalProject";
 import { selectEnvironmentState, useStore } from "~/store";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import type { Project } from "~/types";
 import { useUiStateStore } from "~/uiStateStore";
 
+import { HostedNodeChooser } from "../hostedHub/HostedNodeChooser";
 import { modelDisplayName } from "../inboxSidebar/inboxSidebarModel";
 import { StatePanel } from "../settings/statistics/parts";
 import { orderItemsByPreferredIds } from "../Sidebar.logic";
@@ -85,6 +89,10 @@ export function TasksPage(props: {
   readonly onSearchChange: (next: TasksSearch) => void;
 }) {
   const tasks = useTasksEnvironment();
+  // Hosted, the tasks are the node's under the selection cursor, and the
+  // address names no node, so the page holds that node's demand while it
+  // shows its tasks.
+  useHostedNodePageDemand(tasks.environmentId);
   if (tasks.denied) {
     return (
       <TasksPageLayout
@@ -98,6 +106,9 @@ export function TasksPage(props: {
       />
     );
   }
+  if (tasks.environmentId === null && isHostedHubMode()) {
+    return <TasksPageLayout state={<HostedChooseNodePanel />} />;
+  }
   // Hub authorization not known yet, or the node's config (which tells whether
   // it has tasks) still on its way with the connection. Once allowed, a relay
   // reconnect keeps the tasks on screen.
@@ -109,6 +120,32 @@ export function TasksPage(props: {
       environmentId={tasks.environmentId}
       search={props.search}
       onSearchChange={props.onSearchChange}
+    />
+  );
+}
+
+/**
+ * Hosted, with the selection cursor on no node: a reload or a new tab on
+ * Tasks, whose address names no node. Once the directory has answered, and no
+ * older address is moving the cursor to its node, the page offers the nodes to
+ * choose from.
+ */
+function HostedChooseNodePanel() {
+  const routedNodeId = useSyncExternalStore(
+    subscribeRoutedHostedNode,
+    () => getRoutedHostedNode().nodeId,
+    () => null,
+  );
+  const directorySettled = useHostedHubStore(
+    (state) => state.directoryStatus === "ready" || state.directoryStatus === "stale",
+  );
+  if (routedNodeId !== null || !directorySettled) return null;
+  return (
+    <StatePanel
+      icon={MonitorSmartphoneIcon}
+      title="Choose a device"
+      description="Tasks belong to one device. Open a thread on it, or choose it here."
+      action={<HostedNodeChooser label="Devices" />}
     />
   );
 }
@@ -613,7 +650,6 @@ function TasksPageContent(props: {
       onOpenChat: (_taskId, threadId) => {
         const currentRouter = latestRef.current.router;
         if (!currentRouter) return;
-        adoptHostedEnvironmentRoute(environmentId);
         void currentRouter.navigate({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
