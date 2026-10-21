@@ -688,7 +688,149 @@ describe("providerMaintenanceRunner", () => {
       ),
   );
 
+  it.effect(
+    "installs and verifies the installer's own latest version, pinned for pnpm, instead of npm's",
+    () => {
+      const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
+      let installerLookups = 0;
+      return Effect.gen(function* () {
+        const { registry } = yield* makeRegistry({ ...baseProvider, version: "1.2.3" });
+        const updater = yield* makeTestRunner({
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+            Effect.succeed(
+              makeProviderMaintenanceCapabilities({
+                provider,
+                packageName: "@openai/codex",
+                updateExecutable: "pnpm",
+                updateArgs: ["add", "-g", "--allow-build=@openai/codex", "@openai/codex@latest"],
+                updateLockKey: "pnpm-global",
+                // `pnpm outdated` honors minimumReleaseAge, so it can trail npm's latest tag.
+                lookupLatestVersion: Effect.sync(() => {
+                  installerLookups += 1;
+                  return "1.2.3";
+                }),
+              }),
+            ),
+        });
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+        assert.deepStrictEqual(calls, [
+          {
+            command: "pnpm",
+            args: ["add", "-g", "--allow-build=@openai/codex", "@openai/codex@1.2.3"],
+          },
+        ]);
+        // Verification reads the click-time installer answer, so 1.2.3 counts as current even
+        // though npm advertises 9.9.9.
+        assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+        assert.strictEqual(installerLookups, 1);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            latestVersionHttpClient("9.9.9"),
+            mockSpawnerLayer((command, args) => {
+              calls.push({ command, args });
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("runs the update with the action's environment over the server's", () => {
+    const spawned: Array<{
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly options: { readonly env?: unknown; readonly extendEnv?: unknown };
+    }> = [];
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry(baseProvider);
+      const updater = yield* makeTestRunner({
+        ...registry,
+        getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+          Effect.succeed(
+            makeProviderMaintenanceCapabilities({
+              provider,
+              packageName: "@openai/codex",
+              updateExecutable: "/home/me/.local/bin/codex",
+              updateArgs: ["update"],
+              updateLockKey: "codex-native",
+              env: { CODEX_HOME: "/home/me/.codex" },
+            }),
+          ),
+      });
+
+      const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.strictEqual(spawned.length, 1);
+      assert.strictEqual(spawned[0]?.command, "/home/me/.local/bin/codex");
+      assert.deepStrictEqual(spawned[0]?.args, ["update"]);
+      assert.deepStrictEqual(spawned[0]?.options.env, { CODEX_HOME: "/home/me/.codex" });
+      assert.strictEqual(spawned[0]?.options.extendEnv, true);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0"),
+          Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) => {
+              spawned.push(command as unknown as (typeof spawned)[number]);
+              return Effect.succeed(mockHandle({ stdout: "updated" }));
+            }),
+          ),
+        ),
+      ),
+    );
+  });
+
   describe("compatibility refusal", () => {
+    it.effect("rates the version Homebrew would install, not npm's latest", () => {
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        const { registry } = yield* makeRegistry(baseProvider);
+        const updater = yield* makeTestRunner(
+          {
+            ...registry,
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeProviderMaintenanceCapabilities({
+                  provider,
+                  packageName: "@openai/codex",
+                  updateExecutable: "/opt/homebrew/bin/brew",
+                  updateArgs: ["upgrade", "--cask", "codex"],
+                  updateLockKey: "homebrew",
+                  updateCommand: "brew upgrade --cask codex",
+                  latestVersion: null,
+                  lookupLatestVersion: Effect.succeed("0.200.1"),
+                }),
+              ),
+          },
+          staticManifestLayer(CODEX_BROKEN_RELEASE_MANIFEST),
+        );
+
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+
+        assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
+        assert.include(result.providers[0]?.updateState?.message, "v0.200.1");
+        assert.deepStrictEqual(calls, []);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            // npm's answer would pass the gate; Homebrew's own channel decides.
+            latestVersionHttpClient("0.199.0"),
+            mockSpawnerLayer((_command, args) => {
+              calls.push(args.join(" "));
+              return { stdout: "updated" };
+            }),
+          ),
+        ),
+      );
+    });
+
     it.effect("refuses to install a latest version the manifest marks broken", () => {
       const calls: Array<string> = [];
       return Effect.gen(function* () {
