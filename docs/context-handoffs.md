@@ -51,6 +51,12 @@ failed divider. If the server restarts after dispatch and acceptance cannot be p
 marks the operation `delivery-uncertain` and never blindly resends the message. Both outcomes remain
 visible after reload and can be retried with a new send.
 
+A source that cannot be put back is shown in error with the failure's message, and a failed handoff
+never blocks the next one: the next send prepares a new handoff. Earlier versions refused some
+intact stored documents with a digest error. At startup, a thread whose session still shows that
+error is put back to rest (`stopped`, no error) when the failed handoff's stored document verifies
+now. This is not new activity, so a snoozed thread stays snoozed.
+
 Every provider event is checked against both its `ProviderInstanceId` and `RuntimeSessionId` before
 any lifecycle, message, tool, request, plan, checkpoint, activity, or buffer mutation. Late events
 from earlier epochs—including `session.exited` after A1 → B → A2—are dropped. Different-instance
