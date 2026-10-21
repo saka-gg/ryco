@@ -41,7 +41,7 @@ export function usableCuaArtifact(directory, release, platform, arch) {
       provenance,
       release,
       platform,
-      architectures: arch === "universal" ? ["arm64", "x64"] : [arch],
+      architectures: [arch],
       binarySha256: createHash("sha256").update(bytes).digest("hex"),
     });
     return true;

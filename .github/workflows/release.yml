@@ -338,13 +338,6 @@ jobs:
             done
           done
 
-          if [[ "${{ matrix.platform }}" == "mac" && "${{ matrix.arch }}" != "arm64" ]]; then
-            shopt -s nullglob
-            for manifest in release-publish/*-mac.yml; do
-              mv "$manifest" "${manifest%.yml}-${{ matrix.arch }}.yml"
-            done
-          fi
-
           # Windows updater metadata is channel-specific (for example
           # "latest.yml" or "nightly.yml"). Suffix each per-arch copy so the
           # release job can merge matching arm64/x64 manifests back into one

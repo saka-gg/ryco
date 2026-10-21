@@ -44,16 +44,19 @@ describe("native security helper", () => {
       join(root, "cache/swift-modules"),
     );
   });
-  it("keeps universal normal builds distinct from development builds", () => {
+  it("shares one arm64 build between development and normal builds", () => {
     const desktop = fixture();
     buildNativeSecurityHelper(desktop, { development: true });
     buildNativeSecurityHelper(desktop);
-    expect(compilerCalls()).toHaveLength(3);
-    expect(
-      compilerCalls()
-        .slice(1)
-        .map(([, args]) => args[args.indexOf("-target") + 1]),
-    ).toEqual(["x86_64-apple-macosx11.0", "arm64-apple-macosx11.0"]);
+    expect(compilerCalls()).toHaveLength(1);
+    expect(compilerCalls()[0][1]).toContain("arm64-apple-macosx11.0");
+    expect(spawnSync.mock.calls.some(([, args]) => args.includes("lipo"))).toBe(false);
+  });
+  it.each(["x64", "universal"])("refuses a %s macOS build", (arch) => {
+    const desktop = fixture();
+    process.env.RYCO_DESKTOP_ARCH = arch;
+    expect(() => buildNativeSecurityHelper(desktop)).toThrow(/Apple Silicon \(arm64\) only/);
+    expect(compilerCalls()).toHaveLength(0);
   });
   it("invalidates the cache after a compiler change", () => {
     const desktop = fixture();
@@ -64,6 +67,6 @@ describe("native security helper", () => {
       stdout: "new toolchain",
     }));
     buildNativeSecurityHelper(desktop);
-    expect(compilerCalls()).toHaveLength(4);
+    expect(compilerCalls()).toHaveLength(2);
   });
 });

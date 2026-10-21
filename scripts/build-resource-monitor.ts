@@ -3,7 +3,7 @@ import { chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resourceMonitorBuildTargets } from "./resource-monitor-target.ts";
+import { resourceMonitorBuildTarget } from "./resource-monitor-target.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const source = path.join(root, "native/resource-monitor");
@@ -15,25 +15,19 @@ const requestedArch = process.argv[2] ?? process.arch;
 const requestedPlatform = process.argv[3] ?? process.platform;
 const binaryName =
   requestedPlatform === "win32" ? "ryco-resource-monitor.exe" : "ryco-resource-monitor";
-const binaries = resourceMonitorBuildTargets(requestedPlatform, requestedArch).map((target) => {
-  execFileSync(
-    "rustup",
-    ["run", toolchain, "cargo", "build", "--locked", "--release", "--target", target],
-    {
-      cwd: source,
-      stdio: "inherit",
-    },
-  );
-  return path.join(source, "target", target, "release", binaryName);
-});
+const target = resourceMonitorBuildTarget(requestedPlatform, requestedArch);
+execFileSync(
+  "rustup",
+  ["run", toolchain, "cargo", "build", "--locked", "--release", "--target", target],
+  {
+    cwd: source,
+    stdio: "inherit",
+  },
+);
 const destination = path.join(root, "apps/server/dist/resource-monitor");
 mkdirSync(destination, { recursive: true });
 const binary = path.join(destination, binaryName);
-if (binaries.length === 2) {
-  execFileSync("lipo", ["-create", ...binaries, "-output", binary], { stdio: "inherit" });
-} else {
-  copyFileSync(binaries[0]!, binary);
-}
+copyFileSync(path.join(source, "target", target, "release", binaryName), binary);
 chmodSync(binary, 0o755);
 copyFileSync(path.join(source, "LICENSE"), path.join(destination, "LICENSE"));
 // npm distributions carry all supported targets; desktop also keeps its local binary.

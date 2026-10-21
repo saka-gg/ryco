@@ -1,4 +1,4 @@
-import { copyFileSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -53,30 +53,23 @@ export function buildNativeSecurityHelper(
     output,
     validate: (binary) =>
       spawnSync("codesign", ["--verify", "--strict", binary], { encoding: "utf8" }).status === 0,
-    build(binary, temporary) {
-      const architectures =
-        arch === "universal" ? ["x86_64", "arm64"] : [arch === "x64" ? "x86_64" : "arm64"];
-      const binaries = architectures.map((architecture) => {
-        const thin = join(temporary, architecture);
-        run("xcrun", [
-          "--sdk",
-          "macosx",
-          "swiftc",
-          "-O",
-          "-target",
-          `${architecture}-apple-macosx11.0`,
-          "-framework",
-          "Security",
-          "-framework",
-          "CryptoKit",
-          source,
-          "-o",
-          thin,
-        ]);
-        return thin;
-      });
-      if (binaries.length === 1) copyFileSync(binaries[0], binary);
-      else run("xcrun", ["lipo", "-create", ...binaries, "-output", binary]);
+    build(binary) {
+      // desktopBuildArch only yields arm64 on macOS: the Mac app is Apple Silicon only.
+      run("xcrun", [
+        "--sdk",
+        "macosx",
+        "swiftc",
+        "-O",
+        "-target",
+        `${arch}-apple-macosx11.0`,
+        "-framework",
+        "Security",
+        "-framework",
+        "CryptoKit",
+        source,
+        "-o",
+        binary,
+      ]);
       run("codesign", ["--force", "--sign", "-", "--timestamp=none", binary]);
     },
   });

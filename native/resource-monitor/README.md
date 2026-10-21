@@ -18,7 +18,7 @@ From the repository root, `bun run build` and `bun run build:desktop` build the 
 bun scripts/build-resource-monitor.ts
 ```
 
-The helper also accepts an architecture (`arm64`, `x64`, or macOS `universal`) and platform (`darwin`, `linux`, `win32`). Cross builds require the corresponding Rust target and linker; they never silently substitute a host binary. Linux targets use GNU libc. Runtime collection fails gracefully when the binary is incompatible or unavailable.
+The helper also accepts an architecture (`arm64` or `x64`) and platform (`darwin`, `linux`, `win32`). The desktop app packages only the `arm64` macOS monitor; `x64 darwin` builds the npm CLI's Intel Mac monitor. Cross builds require the corresponding Rust target and linker; they never silently substitute a host binary. Linux targets use GNU libc. Runtime collection fails gracefully when the binary is incompatible or unavailable.
 
 Desktop packaging unpacks the executable outside Electron's ASAR archive. Release jobs collect architecture-specific binaries into the CLI package, so the runtime selects a local platform binary without downloading executable code. Native source changes invalidate build caches.
 
