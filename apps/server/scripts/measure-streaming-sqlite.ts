@@ -310,9 +310,9 @@ const program = Effect.gen(function* () {
     );
     yield* measure(
       "priority",
-      priority.listActive.pipe(
-        Effect.map((rows) => rows.map((row) => row.latestUserRequest ?? "")),
-      ),
+      priority
+        .listActive({ autoSettleAfterDays: null, nowMs: Date.now() })
+        .pipe(Effect.map((rows) => rows.map((row) => row.latestUserRequest ?? ""))),
       1,
     );
     yield* measure(

@@ -4,6 +4,7 @@ import {
   type ReportedThreadCapabilities,
 } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId, ExecutionEnvironmentCapabilities } from "@ryco/contracts";
+import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import type { NodeTrust } from "./nodeTrustModel";
@@ -133,10 +134,16 @@ export function homeLastSeenClock(
 
 function capabilityFields(
   capabilities: EnvironmentThreadCapabilities,
-): Pick<InboxEnvironment, "threadSettlementSupported" | "threadSnoozeSupported"> {
+): Pick<
+  InboxEnvironment,
+  "threadSettlementSupported" | "threadSnoozeSupported" | "autoSettleAfterDays"
+> {
   return {
     threadSettlementSupported: capabilities.threadSettlement,
     threadSnoozeSupported: capabilities.threadSnooze,
+    ...(capabilities.autoSettleAfterDays === undefined
+      ? {}
+      : { autoSettleAfterDays: capabilities.autoSettleAfterDays }),
   };
 }
 
@@ -147,6 +154,8 @@ export function buildHomeEnvironments(input: {
    * way on every client; a Hub node it has no answer for is unknown.
    */
   readonly reportedThreadCapabilities?: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
+  /** The auto-settle rules shell snapshots carried (`getShellSettlementRulesSnapshot`). */
+  readonly shellSettlementRules?: ReadonlyMap<EnvironmentId, SidebarAutoSettleAfterDays>;
   readonly direct: ReadonlyArray<DirectHomeEnvironmentInput>;
   readonly hosted: ReadonlyArray<HostedHomeEnvironmentInput>;
   readonly cachedHubNodes?: ReadonlyArray<CachedHubNodeHomeEnvironmentInput>;
@@ -188,6 +197,7 @@ export function buildHomeEnvironments(input: {
   };
 
   const reported = input.reportedThreadCapabilities ?? new Map();
+  const shellSettlementRules = input.shellSettlementRules ?? new Map();
   const environments = new Map<EnvironmentId, InboxEnvironment>();
   for (const direct of input.direct) {
     environments.set(direct.environmentId, {
@@ -197,6 +207,7 @@ export function buildHomeEnvironments(input: {
       ...capabilityFields(
         resolveEnvironmentThreadCapabilities(direct.environmentId, {
           reported,
+          shellSettlementRules,
           descriptor: direct.descriptorCapabilities,
         }),
       ),
@@ -215,7 +226,12 @@ export function buildHomeEnvironments(input: {
       environmentId: node.environmentId,
       label: node.label,
       connectionState: "offline",
-      ...capabilityFields(resolveEnvironmentThreadCapabilities(node.environmentId, { reported })),
+      ...capabilityFields(
+        resolveEnvironmentThreadCapabilities(node.environmentId, {
+          reported,
+          shellSettlementRules,
+        }),
+      ),
       mutationReady: false,
       shellCurrent: false,
       ...roleFields(node.role),
@@ -235,7 +251,12 @@ export function buildHomeEnvironments(input: {
       // The Hub directory states no thread capabilities, and the selected
       // node's descriptor is a placeholder built from it: only the node's own
       // answer counts.
-      ...capabilityFields(resolveEnvironmentThreadCapabilities(hosted.environmentId, { reported })),
+      ...capabilityFields(
+        resolveEnvironmentThreadCapabilities(hosted.environmentId, {
+          reported,
+          shellSettlementRules,
+        }),
+      ),
       mutationReady:
         hostedState(hosted) === "connected" &&
         hosted.role !== "viewer" &&

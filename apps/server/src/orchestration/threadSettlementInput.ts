@@ -1,14 +1,42 @@
-import type { OrchestrationReadModel, OrchestrationThreadShell } from "@ryco/contracts";
+import type {
+  OrchestrationReadModel,
+  OrchestrationShellSettlementPolicy,
+  OrchestrationThreadShell,
+  ServerSettings,
+  SidebarAutoSettleAfterDays,
+} from "@ryco/contracts";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
-import type { ThreadSettlementInput } from "@ryco/shared/threadSettlement";
+import {
+  resolveAutoSettleAfterDays,
+  type ThreadSettlementInput,
+} from "@ryco/shared/threadSettlement";
 import { findThreadWorktree as threadWorktree } from "./commandInvariants.ts";
 import { countsTowardUserRecency } from "./forkInheritance.ts";
 
 /**
- * Server-side settlement input. The server only checks manual settle and snooze
- * eligibility (`canSettleThread`/`canSnoozeThread`); it never auto-settles. Pins
- * are client-local and liveness is not in the read model, and neither ever gates
- * manual settlement, so both are passed as neutral values.
+ * The node's automatic settlement rule: its own `threadAutoSettleAfterDays`,
+ * else the shared default. Every client lists the node's threads by it.
+ */
+export function nodeAutoSettleAfterDays(
+  settings: Pick<ServerSettings, "threadAutoSettleAfterDays">,
+): SidebarAutoSettleAfterDays {
+  return resolveAutoSettleAfterDays(settings.threadAutoSettleAfterDays);
+}
+
+/** The node's settlement rule as its shell snapshot carries it. */
+export function shellSettlementPolicy(
+  settings: Pick<ServerSettings, "threadAutoSettleAfterDays">,
+): OrchestrationShellSettlementPolicy {
+  return { autoSettleAfterDays: nodeAutoSettleAfterDays(settings) };
+}
+
+/**
+ * Server-side settlement input for manual settle and snooze eligibility
+ * (`canSettleThread`/`canSnoozeThread`), which never depends on the automatic
+ * rule, so it is left off here; the AI Focus candidates apply the node's rule
+ * ({@link nodeAutoSettleAfterDays}) themselves. Pins are client-local and
+ * liveness is not in the read model, and neither ever gates manual settlement,
+ * so both are passed as neutral values.
  */
 export function threadSettlementInput(
   readModel: OrchestrationReadModel,

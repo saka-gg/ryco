@@ -43,6 +43,18 @@ describe("ExecutionEnvironmentCapabilities.threadSettlement", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.nodeAutoSettlement", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(Object.hasOwn(decodeDescriptor(descriptor({})).capabilities, "nodeAutoSettlement")).toBe(
+      false,
+    );
+    expect(
+      decodeDescriptor(descriptor({ nodeAutoSettlement: true })).capabilities.nodeAutoSettlement,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ nodeAutoSettlement: "yes" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.fileAttachments", () => {
   it("stays absent for older servers and decodes when advertised", () => {
     const absent = decodeDescriptor(descriptor({})).capabilities;

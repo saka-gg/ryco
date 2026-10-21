@@ -580,6 +580,7 @@ export function ThreadDetailScreen(props: {
             environmentId,
             label: environmentRow.label,
             threadSettlementSupported: environmentRow.threadSettlementSupported ?? "unknown",
+            autoSettleAfterDays: environmentRow.autoSettleAfterDays,
             connected: environmentRow.connectionState === "connected",
             mutationReady: environmentRow.mutationReady ?? false,
             shellCurrent: environmentRow.shellCurrent ?? false,

@@ -61,6 +61,9 @@ export const pageShellSnapshot = (
     ...(snapshot.worktrees === undefined ? {} : { worktrees: snapshot.worktrees }),
     threadCount: snapshot.threads.length + stubs.length,
     archivedThreadCount,
+    ...(snapshot.settlementPolicy === undefined
+      ? {}
+      : { settlementPolicy: snapshot.settlementPolicy }),
   };
 
   const messages: Array<Arr.NonEmptyArray<OrchestrationShellStreamItem>> = [];

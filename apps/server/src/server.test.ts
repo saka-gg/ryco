@@ -6257,6 +6257,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(begin.snapshotSequence, 7);
       assert.equal(begin.threadCount, 3);
       assert.equal(begin.archivedThreadCount, 1);
+      // A node that never set its rule carries the shared default.
+      assert.deepEqual(begin.settlementPolicy, { autoSettleAfterDays: 7 });
       assert.deepEqual(
         items.flatMap((item) =>
           item.kind === "snapshot-threads" ? item.threads.map((thread) => thread.id) : [],
@@ -6287,6 +6289,43 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         first.snapshot.threads.map((thread) => thread.id),
         ["archived-1", "live-1", "live-2"],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("carries the node's own settlement rule in the shell snapshot", () =>
+    Effect.gen(function* () {
+      const livePubSub = yield* PubSub.unbounded<OrchestrationEvent>();
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            readEventsPage: (fromSequenceExclusive) =>
+              Effect.succeed({ events: [], nextSequence: fromSequenceExclusive, hasMore: false }),
+            subscribeDomainEvents: PubSub.subscribe(livePubSub),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () => Effect.succeed(pagedShellSnapshot()),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              threadAutoSettleAfterDays: null,
+            }),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const first = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.map((collected) => Array.from(collected)[0]),
+          ),
+        ),
+      );
+
+      assertTrue(first?.kind === "snapshot");
+      assert.deepEqual(first.snapshot.settlementPolicy, { autoSettleAfterDays: null });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

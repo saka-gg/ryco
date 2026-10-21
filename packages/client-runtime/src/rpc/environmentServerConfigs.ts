@@ -1,10 +1,12 @@
 import type {
   EnvironmentId,
   ExecutionEnvironmentCapabilities,
+  OrchestrationShellSettlementPolicy,
   ServerConfig,
   ServerConfigStreamEvent,
 } from "@ryco/contracts";
-import type { ServerSettingsPatch } from "@ryco/contracts/settings";
+import type { ServerSettingsPatch, SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 
 import {
   clearServerConfigState,
@@ -51,11 +53,22 @@ export type ThreadCapabilitySupport = boolean | "unknown";
 export interface ReportedThreadCapabilities {
   readonly threadSettlement: boolean;
   readonly threadSnooze: boolean;
+  /**
+   * The node's own automatic settlement rule, present only when the node keeps
+   * one (`nodeAutoSettlement`). A node without it leaves the rule to each client.
+   */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
 }
 
 export interface EnvironmentThreadCapabilities {
   readonly threadSettlement: ThreadCapabilitySupport;
   readonly threadSnooze: ThreadCapabilitySupport;
+  /**
+   * The environment's automatic settlement rule, the same on every client.
+   * Undefined while this client knows none (a node that predates node-owned
+   * settlement, or one not heard from): its threads follow this client's rule.
+   */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
 }
 
 /**
@@ -64,36 +77,95 @@ export interface EnvironmentThreadCapabilities {
  * released from the warm set keeps classifying its threads by its own answer
  * until the account's state is cleared. Memory only. The map gets a new
  * identity only when a node's answer changes, never on a status or settings
- * push.
+ * push that leaves it as it was.
  */
 let reportedThreadCapabilities: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities> = new Map();
+/**
+ * The settlement rule each environment's latest shell snapshot carried, kept
+ * only while no live config of the node states one (a cached or read-only
+ * copy of a node this client is not connected to). Memory only, cleared with
+ * the account like the reported capabilities, whose listeners it shares.
+ */
+let shellSettlementRules: ReadonlyMap<EnvironmentId, SidebarAutoSettleAfterDays> = new Map();
 const threadCapabilityListeners = new Set<Listener>();
 
 function emitThreadCapabilities(): void {
   for (const listener of Array.from(threadCapabilityListeners)) listener();
 }
 
+/** The rule a node's config states: undefined from a node that leaves it to clients. */
+function configAutoSettleRule(
+  config: Pick<ServerConfig, "environment" | "settings">,
+): SidebarAutoSettleAfterDays | undefined {
+  return config.environment?.capabilities?.nodeAutoSettlement === true
+    ? resolveAutoSettleAfterDays(config.settings?.threadAutoSettleAfterDays)
+    : undefined;
+}
+
 /** Records the node's answer; returns whether it changed. */
 function recordReportedThreadCapabilities(
   environmentId: EnvironmentId,
   capabilities: Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze">,
+  autoSettleAfterDays: SidebarAutoSettleAfterDays | undefined,
 ): boolean {
   // A node's config without a flag comes from a node that predates the feature.
   const threadSettlement = capabilities.threadSettlement === true;
   const threadSnooze = capabilities.threadSnooze === true;
   const current = reportedThreadCapabilities.get(environmentId);
-  if (current?.threadSettlement === threadSettlement && current.threadSnooze === threadSnooze) {
-    return false;
+  // The node's live answer supersedes what a snapshot carried.
+  const supersededShellRule = shellSettlementRules.has(environmentId);
+  if (supersededShellRule) {
+    const nextRules = new Map(shellSettlementRules);
+    nextRules.delete(environmentId);
+    shellSettlementRules = nextRules;
+  }
+  if (
+    current?.threadSettlement === threadSettlement &&
+    current.threadSnooze === threadSnooze &&
+    current.autoSettleAfterDays === autoSettleAfterDays
+  ) {
+    return supersededShellRule;
   }
   const next = new Map(reportedThreadCapabilities);
-  next.set(environmentId, { threadSettlement, threadSnooze });
+  next.set(environmentId, {
+    threadSettlement,
+    threadSnooze,
+    ...(autoSettleAfterDays === undefined ? {} : { autoSettleAfterDays }),
+  });
   reportedThreadCapabilities = next;
   return true;
 }
 
 function forgetReportedThreadCapabilities(): void {
-  if (reportedThreadCapabilities.size === 0) return;
+  if (reportedThreadCapabilities.size === 0 && shellSettlementRules.size === 0) return;
   reportedThreadCapabilities = new Map();
+  shellSettlementRules = new Map();
+  emitThreadCapabilities();
+}
+
+/**
+ * Records the settlement rule an environment's shell snapshot carried (live,
+ * or a cached or read-only copy). A node whose live config states its rule
+ * keeps that one; otherwise the snapshot's rule is the newest this client has
+ * and replaces the last known one. A snapshot without a rule (an older node)
+ * changes nothing.
+ */
+export function recordEnvironmentShellSettlementPolicy(
+  environmentId: EnvironmentId,
+  policy: OrchestrationShellSettlementPolicy | undefined,
+): void {
+  if (policy === undefined) return;
+  const live = configs.get(environmentId);
+  if (live !== undefined && configAutoSettleRule(live) !== undefined) return;
+  if (
+    shellSettlementRules.has(environmentId) &&
+    shellSettlementRules.get(environmentId) === policy.autoSettleAfterDays
+  ) {
+    return;
+  }
+  const next = new Map(shellSettlementRules);
+  next.set(environmentId, policy.autoSettleAfterDays);
+  shellSettlementRules = next;
   emitThreadCapabilities();
 }
 
@@ -111,6 +183,17 @@ export function getReportedThreadCapabilitiesSnapshot(): ReadonlyMap<
   return reportedThreadCapabilities;
 }
 
+/**
+ * The rules shell snapshots carried; see {@link recordEnvironmentShellSettlementPolicy}.
+ * Notifies through {@link subscribeReportedThreadCapabilities}.
+ */
+export function getShellSettlementRulesSnapshot(): ReadonlyMap<
+  EnvironmentId,
+  SidebarAutoSettleAfterDays
+> {
+  return shellSettlementRules;
+}
+
 /** A capability statement that may leave either flag out. */
 export interface ThreadCapabilityStatement {
   readonly threadSettlement?: boolean | undefined;
@@ -120,6 +203,8 @@ export interface ThreadCapabilityStatement {
 export interface EnvironmentThreadCapabilitySources {
   /** What nodes reported, by environment; the current snapshot when omitted. */
   readonly reported?: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
+  /** The rules shell snapshots carried, by environment; the current snapshot when omitted. */
+  readonly shellSettlementRules?: ReadonlyMap<EnvironmentId, SidebarAutoSettleAfterDays>;
   /**
    * A descriptor the node itself sent (a saved environment's, or a standard
    * session's primary). Never a hosted placeholder built from the directory.
@@ -138,13 +223,26 @@ export interface EnvironmentThreadCapabilitySources {
  * node reported to this client (live, or last known since its connection was
  * released), else a descriptor the node sent, else the flags a directory
  * states, else unknown.
+ *
+ * Its automatic settlement rule comes from the node's live config, else the
+ * latest shell snapshot of it, else the last config it reported; undefined
+ * when none of them states one (as for rows painted from a persisted startup
+ * cache, which keeps no rule), so the client's own rule applies.
  */
 export function resolveEnvironmentThreadCapabilities(
   environmentId: EnvironmentId,
   sources: EnvironmentThreadCapabilitySources = {},
 ): EnvironmentThreadCapabilities {
   const reported = (sources.reported ?? reportedThreadCapabilities).get(environmentId);
-  if (reported !== undefined) return reported;
+  const shellRules = sources.shellSettlementRules ?? shellSettlementRules;
+  const capabilities = reported ?? resolveUnreportedThreadCapabilities(sources);
+  if (!shellRules.has(environmentId)) return capabilities;
+  return { ...capabilities, autoSettleAfterDays: shellRules.get(environmentId) ?? null };
+}
+
+function resolveUnreportedThreadCapabilities(
+  sources: EnvironmentThreadCapabilitySources,
+): EnvironmentThreadCapabilities {
   if (sources.descriptor) {
     return {
       threadSettlement: sources.descriptor.threadSettlement === true,
@@ -175,7 +273,8 @@ export function writeEnvironmentServerConfig(
   // A config without a capability block states nothing about them.
   const capabilities = config.environment?.capabilities;
   const capabilitiesChanged =
-    capabilities !== undefined && recordReportedThreadCapabilities(environmentId, capabilities);
+    capabilities !== undefined &&
+    recordReportedThreadCapabilities(environmentId, capabilities, configAutoSettleRule(config));
   emit();
   if (capabilitiesChanged) emitThreadCapabilities();
 }
@@ -219,6 +318,31 @@ export function forgetEnvironmentServerConfig(environmentId: EnvironmentId): voi
   emit();
 }
 
+/**
+ * Drops everything known about the listed environments: their configs, what
+ * their nodes reported and the rules their snapshots carried. For the nodes of
+ * an account that ended, on a client that keeps other environments connected.
+ */
+export function forgetEnvironmentsServerState(environmentIds: Iterable<EnvironmentId>): void {
+  const forgotten = new Set(environmentIds);
+  const without = <V>(map: ReadonlyMap<EnvironmentId, V>): ReadonlyMap<EnvironmentId, V> =>
+    [...forgotten].some((environmentId) => map.has(environmentId))
+      ? new Map([...map].filter(([environmentId]) => !forgotten.has(environmentId)))
+      : map;
+  const nextConfigs = without(configs);
+  const nextReported = without(reportedThreadCapabilities);
+  const nextShellRules = without(shellSettlementRules);
+  const threadStateChanged =
+    nextReported !== reportedThreadCapabilities || nextShellRules !== shellSettlementRules;
+  reportedThreadCapabilities = nextReported;
+  shellSettlementRules = nextShellRules;
+  if (nextConfigs !== configs) {
+    configs = nextConfigs;
+    emit();
+  }
+  if (threadStateChanged) emitThreadCapabilities();
+}
+
 /** Drops every entry and every reported thread capability (account teardown). */
 export function clearEnvironmentServerConfigs(): void {
   forgetReportedThreadCapabilities();
@@ -231,6 +355,7 @@ export function resetEnvironmentServerConfigsForTests(): void {
   configs = new Map();
   listeners.clear();
   reportedThreadCapabilities = new Map();
+  shellSettlementRules = new Map();
   threadCapabilityListeners.clear();
 }
 

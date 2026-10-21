@@ -51,6 +51,8 @@ vi.mock("./NeedsVerificationSection", () => ({
   NeedsVerificationSection: "NeedsVerificationSection",
 }));
 vi.mock("./useHomeEnvironments", () => ({ useHomeEnvironments: () => [] }));
+// The auto-settle hand-over writes through the connection layer; its decisions are the client runtime's.
+vi.mock("./useAutoSettleRuleHandOver", () => ({ useAutoSettleRuleHandOver: () => undefined }));
 // preferencesStore reaches expo-sqlite's KV store; it must stop at the module
 // boundary in the node test environment.
 vi.mock("../../state/preferencesStore", () => ({ usePreferences: () => ({}) }));

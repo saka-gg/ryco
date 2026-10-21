@@ -102,6 +102,8 @@ export interface InboxSidebarEnvironment {
   /** The environment's own answer; see `resolveEnvironmentThreadCapabilities`. */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /** The node's own auto-settle rule; undefined lists its threads by this client's rule. */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly mutationReady: boolean;
   readonly shellCurrent: boolean;
 }
@@ -280,6 +282,7 @@ export interface BuildInboxSidebarInput {
   readonly localQueuedThreadKeys?: ReadonlySet<string>;
   readonly activeThreadKey?: string | null;
   readonly aiFocusEnabled?: boolean;
+  /** This client's rule, for environments whose node states none. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys?: ReadonlySet<string>;
   /** The environment rows are implicitly about; other machines are labelled. */
@@ -306,10 +309,16 @@ export function describeInboxFocus(focus: ThreadPriorityFocusMetadata): InboxFoc
 
 function capabilityFields(
   capabilities: EnvironmentThreadCapabilities,
-): Pick<InboxSidebarEnvironment, "threadSettlementSupported" | "threadSnoozeSupported"> {
+): Pick<
+  InboxSidebarEnvironment,
+  "threadSettlementSupported" | "threadSnoozeSupported" | "autoSettleAfterDays"
+> {
   return {
     threadSettlementSupported: capabilities.threadSettlement,
     threadSnoozeSupported: capabilities.threadSnooze,
+    ...(capabilities.autoSettleAfterDays === undefined
+      ? {}
+      : { autoSettleAfterDays: capabilities.autoSettleAfterDays }),
   };
 }
 
@@ -488,13 +497,16 @@ export interface InboxSidebarEnvironmentSources {
   readonly cacheHydratedEnvironmentIds: ReadonlySet<string>;
   /** What each node reported to this client; see `getReportedThreadCapabilitiesSnapshot`. */
   readonly reportedThreadCapabilities: ReadonlyMap<EnvironmentId, ReportedThreadCapabilities>;
+  /** The rules shell snapshots carried; see `getShellSettlementRulesSnapshot`. */
+  readonly shellSettlementRules: ReadonlyMap<EnvironmentId, SidebarAutoSettleAfterDays>;
 }
 
 /**
  * Every environment the inbox lists, sorted by label. Each one's thread
- * capabilities are its own node's (`resolveEnvironmentThreadCapabilities`),
- * the same whether or not it is the selected one, so moving the selection
- * never reclassifies another machine's threads.
+ * capabilities and auto-settle rule are its own node's
+ * (`resolveEnvironmentThreadCapabilities`), the same whether or not it is the
+ * selected one, so moving the selection never reclassifies another machine's
+ * threads.
  */
 export function buildInboxSidebarEnvironments(
   input: InboxSidebarEnvironmentSources,
@@ -502,6 +514,7 @@ export function buildInboxSidebarEnvironments(
   const primaryEnvironmentId = input.primary.environmentId;
   const localEnvironmentId = input.desktopWorkspace?.localEnvironmentId ?? null;
   const reported = input.reportedThreadCapabilities;
+  const shellSettlementRules = input.shellSettlementRules;
   const knownEnvironmentIds = new Set<EnvironmentId>(input.knownEnvironmentIds);
   const byEnvironmentId = new Map<EnvironmentId, InboxSidebarEnvironment>();
 
@@ -515,6 +528,7 @@ export function buildInboxSidebarEnvironments(
           queued: input.hosted.queuedEnvironmentIds.includes(machine.environmentId),
           capabilities: resolveEnvironmentThreadCapabilities(machine.environmentId, {
             reported,
+            shellSettlementRules,
             directory: machine.capabilities,
           }),
         }),
@@ -534,6 +548,7 @@ export function buildInboxSidebarEnvironments(
           hydratedFromCache: input.cacheHydratedEnvironmentIds.has(machine.environmentId),
           capabilities: resolveEnvironmentThreadCapabilities(machine.environmentId, {
             reported,
+            shellSettlementRules,
             directory: { threadSettlement: machine.threadSettlementSupported },
           }),
         }),
@@ -555,6 +570,7 @@ export function buildInboxSidebarEnvironments(
           hydratedFromCache,
           capabilities: resolveEnvironmentThreadCapabilities(environmentId, {
             reported,
+            shellSettlementRules,
             // A hosted session's primary descriptor is a placeholder built
             // from the directory, not the node's own.
             descriptor: input.hosted === null ? input.primary.descriptor?.capabilities : null,
@@ -574,6 +590,7 @@ export function buildInboxSidebarEnvironments(
         hydratedFromCache,
         capabilities: resolveEnvironmentThreadCapabilities(environmentId, {
           reported,
+          shellSettlementRules,
           descriptor: runtime?.descriptor?.capabilities,
         }),
       }),
@@ -934,6 +951,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       label: environment.label,
       threadSettlementSupported: environment.threadSettlementSupported,
       threadSnoozeSupported: environment.threadSnoozeSupported,
+      autoSettleAfterDays: environment.autoSettleAfterDays,
       connected: environment.connectionState === "connected",
       mutationReady: environment.mutationReady,
       shellCurrent: environment.shellCurrent,

@@ -2059,6 +2059,47 @@ it("keeps decoding the single snapshot item older servers send", () => {
     },
   });
   assert.equal(item.kind, "snapshot");
+  assert.equal(item.kind === "snapshot" && Object.hasOwn(item.snapshot, "settlementPolicy"), false);
+});
+
+it("carries the node's settlement policy in single and paged shell snapshots", () => {
+  const item = decodeShellStreamItem({
+    kind: "snapshot",
+    snapshot: {
+      snapshotSequence: 1,
+      projects: [],
+      threads: [],
+      updatedAt: "2026-10-12T00:00:00.000Z",
+      settlementPolicy: { autoSettleAfterDays: null },
+    },
+  });
+  assert.deepEqual(item.kind === "snapshot" ? item.snapshot.settlementPolicy : undefined, {
+    autoSettleAfterDays: null,
+  });
+  const begin = decodeShellStreamItem({
+    kind: "snapshot-begin",
+    snapshotSequence: 4,
+    updatedAt: "2026-10-12T00:00:00.000Z",
+    projects: [],
+    threadCount: 0,
+    archivedThreadCount: 0,
+    settlementPolicy: { autoSettleAfterDays: 14 },
+  });
+  assert.deepEqual(begin.kind === "snapshot-begin" ? begin.settlementPolicy : undefined, {
+    autoSettleAfterDays: 14,
+  });
+  assert.throws(() =>
+    decodeShellStreamItem({
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 1,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-10-12T00:00:00.000Z",
+        settlementPolicy: { autoSettleAfterDays: 2 },
+      },
+    }),
+  );
 });
 
 it("accepts shell subscribe input with and without paged delivery", () => {

@@ -57,11 +57,12 @@ function harness(count = 1) {
     revision: snapshot.snapshotSequence,
     messages: [message(1)],
   }));
+  const readShell = vi.fn(async () => snapshot);
   const publisher = createThreadReadCachePublisher({
     nodeId: () => node,
     now: Date.now,
     readSequence: async () => snapshot.snapshotSequence,
-    readShell: async () => snapshot,
+    readShell,
     readThread,
     begin,
     upload,
@@ -71,6 +72,7 @@ function harness(count = 1) {
     upload,
     begin,
     readThread,
+    readShell,
     setShell: (next: typeof snapshot) => {
       snapshot = next;
     },
@@ -104,6 +106,52 @@ describe("cloud thread history publisher", () => {
     expect(h.upload.mock.calls[2]?.[1]).toEqual([
       { kind: "shell", revision: 2, snapshot: shell(0, 2) },
     ]);
+  });
+
+  it("uploads the shell again when its settlement rule changes at the same sequence", async () => {
+    const h = harness(0);
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(1);
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(1);
+
+    const withRule = { ...shell(0), settlementPolicy: { autoSettleAfterDays: 30 as const } };
+    h.setShell(withRule);
+    // Without an invalidation the unchanged sequence keeps the old index.
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(1);
+
+    h.publisher.invalidateShell();
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(2);
+    expect(h.upload.mock.calls[1]?.[1]).toEqual([
+      { kind: "shell", revision: 1, snapshot: withRule },
+    ]);
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a settlement rule change that lands while the shell is being read", async () => {
+    const h = harness(0);
+    await h.publisher.synchronize();
+    const thirtyDays = { ...shell(0), settlementPolicy: { autoSettleAfterDays: 30 as const } };
+    const off = { ...shell(0), settlementPolicy: { autoSettleAfterDays: null } };
+    h.setShell(thirtyDays);
+    h.publisher.invalidateShell();
+    h.readShell.mockImplementationOnce(async () => {
+      // The rule changes again after this read already has the earlier one.
+      h.setShell(off);
+      h.publisher.invalidateShell();
+      return thirtyDays;
+    });
+    await h.publisher.synchronize();
+    expect(h.upload.mock.calls[1]?.[1]).toEqual([
+      { kind: "shell", revision: 1, snapshot: thirtyDays },
+    ]);
+
+    await h.publisher.synchronize();
+    expect(h.upload).toHaveBeenCalledTimes(3);
+    expect(h.upload.mock.calls[2]?.[1]).toEqual([{ kind: "shell", revision: 1, snapshot: off }]);
   });
 
   it("serializes concurrent synchronization and never uploads a read completed after stop", async () => {

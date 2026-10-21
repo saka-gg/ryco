@@ -3,6 +3,7 @@ import type {
   ThreadReadCacheShellResponse,
   ThreadReadCacheThreadResponse,
 } from "@ryco/contracts/thread-read-cache";
+import { recordEnvironmentShellSettlementPolicy } from "../rpc/environmentServerConfigs.ts";
 import type { HostedThreadCacheVersion } from "./api.ts";
 import type { HostedHubState } from "./state.ts";
 import type { HostedHubNode } from "./types.ts";
@@ -170,6 +171,8 @@ export function startHostedThreadReadCache(ports: HostedThreadReadCachePorts): (
     for (const [threadId, detail] of details.get(node.id) ?? []) {
       if (detail.generation === response.generation) contents.set(threadId, detail);
     }
+    // A cold node's rows are listed by its own settlement rule (display only).
+    recordEnvironmentShellSettlementPolicy(node.environmentId, response.snapshot.settlementPolicy);
     ports.applySnapshot(node, response, contents);
   };
   /** Nodes with a cached shell read in flight, for discovery to wait on. */

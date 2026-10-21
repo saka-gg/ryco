@@ -504,6 +504,40 @@ describe("Home environment thread capabilities", () => {
       })[0],
     ).toMatchObject({ threadSettlementSupported: true, threadSnoozeSupported: true });
   });
+
+  it("carries each node's own auto-settle rule, from its config or a cached snapshot", () => {
+    const live = "live" as EnvironmentId;
+    const cached = "cached" as EnvironmentId;
+    const older = "older" as EnvironmentId;
+    const environments = buildHomeEnvironments({
+      direct: [
+        { environmentId: live, label: "Mac", connectionState: "connected", role: "owner" },
+        { environmentId: older, label: "Old", connectionState: "connected", role: "owner" },
+      ],
+      hosted: [],
+      cachedHubNodes: [
+        {
+          environmentId: cached,
+          label: "Build node",
+          role: "owner",
+          revokedAt: null,
+          presenceOnline: false,
+          lastHeartbeatAt: null,
+          lastAuthenticatedAt: null,
+        },
+      ],
+      reportedThreadCapabilities: reported([
+        [live, { ...supported, autoSettleAfterDays: 30 }],
+        [older, supported],
+      ]),
+      shellSettlementRules: new Map([[cached, null]]),
+    });
+    const ruleOf = (environmentId: EnvironmentId) =>
+      environments.find((environment) => environment.environmentId === environmentId);
+    expect(ruleOf(live)?.autoSettleAfterDays).toBe(30);
+    expect(ruleOf(cached)?.autoSettleAfterDays).toBeNull();
+    expect(ruleOf(older)).not.toHaveProperty("autoSettleAfterDays");
+  });
 });
 
 describe("Home shell currency selection", () => {

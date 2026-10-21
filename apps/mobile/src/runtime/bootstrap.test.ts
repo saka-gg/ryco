@@ -38,6 +38,11 @@ vi.mock("../persistence/environmentSnapshotPersistence", async (importOriginal) 
 
 import { hostedHubStore, type HostedHubAccount } from "@ryco/client-runtime/authorization";
 import { peekProjectIconSource, readProjectIconSource } from "@ryco/client-runtime/connection";
+import {
+  recordEnvironmentShellSettlementPolicy,
+  resetEnvironmentServerConfigsForTests,
+  resolveEnvironmentThreadCapabilities,
+} from "@ryco/client-runtime/rpc";
 import { EnvironmentId, ProjectId, type EnvironmentApi } from "@ryco/contracts";
 
 import {
@@ -171,6 +176,33 @@ describe("mobile runtime bootstrap", () => {
     } finally {
       persistence.release?.();
       resetMobileRuntimeInitForTests();
+      hostedHubStore.setState(initial, true);
+    }
+  });
+
+  it("forgets what the ended account's nodes reported, and only theirs", () => {
+    resetMobileRuntimeInitForTests();
+    resetEnvironmentServerConfigsForTests();
+    const initial = hostedHubStore.getState();
+    const hubNode = EnvironmentId.make("account-node");
+    const otherNode = EnvironmentId.make("unlisted-node");
+    try {
+      initializeMobileRuntime();
+      hostedHubStore.setState({
+        accountStatus: "authenticated",
+        nodes: [{ environmentId: hubNode }] as unknown as typeof initial.nodes,
+      });
+      recordEnvironmentShellSettlementPolicy(hubNode, { autoSettleAfterDays: 30 });
+      recordEnvironmentShellSettlementPolicy(otherNode, { autoSettleAfterDays: 3 });
+
+      hostedHubStore.setState({ accountStatus: "signed-out", nodes: [] });
+
+      expect(resolveEnvironmentThreadCapabilities(hubNode).autoSettleAfterDays).toBeUndefined();
+      expect(resolveEnvironmentThreadCapabilities(otherNode).autoSettleAfterDays).toBe(3);
+    } finally {
+      persistence.release?.();
+      resetMobileRuntimeInitForTests();
+      resetEnvironmentServerConfigsForTests();
       hostedHubStore.setState(initial, true);
     }
   });

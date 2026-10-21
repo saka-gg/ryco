@@ -2,6 +2,10 @@ import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { ThreadReadCacheThreadResponse } from "@ryco/contracts/thread-read-cache";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  resetEnvironmentServerConfigsForTests,
+  resolveEnvironmentThreadCapabilities,
+} from "../rpc/environmentServerConfigs.ts";
 import { hostedHubStore, type HostedHubState } from "./state.ts";
 import type { HostedHubAccount, HostedHubNode } from "./types.ts";
 import { startHostedThreadReadCache } from "./threadReadCache.ts";
@@ -11,6 +15,61 @@ const settle = async () => {
 };
 
 describe("shared hosted thread read cache", () => {
+  it("records a cold node's settlement rule from its cached shell", async () => {
+    resetEnvironmentServerConfigsForTests();
+    const environmentId = EnvironmentId.make("environment-cold");
+    const node = {
+      id: "node-cold",
+      environmentId,
+      effectiveRole: "owner",
+      revokedAt: null,
+    } as HostedHubNode;
+    const state = {
+      ...hostedHubStore.getInitialState(),
+      accountStatus: "authenticated",
+      directoryStatus: "ready",
+      browserStatus: "current",
+      account: { id: "account-a" } as HostedHubAccount,
+      nodes: [node],
+    } as HostedHubState;
+    const applySnapshot = vi.fn();
+    const stop = startHostedThreadReadCache({
+      readState: () => state,
+      subscribeState: () => () => {},
+      readRoute: () => ({ nodeId: null, environmentId: null, threadId: null }),
+      subscribeRoute: () => () => {},
+      subscribeInvalidation: () => () => {},
+      subscribeVisibility: () => () => {},
+      isSubscriptionOnline: () => true,
+      readShell: async () => ({
+        protocolVersion: 1,
+        generation: 1,
+        revision: 1,
+        storedAt: 1,
+        snapshot: {
+          snapshotSequence: 1,
+          updatedAt: "2026-10-05T00:00:00.000Z",
+          projects: [],
+          threads: [],
+          settlementPolicy: { autoSettleAfterDays: 30 },
+        },
+      }),
+      readThread: async () => null,
+      applySnapshot,
+      isVisible: () => true,
+      now: () => 1,
+      setInterval: () => 1,
+      clearInterval: () => {},
+    });
+    try {
+      await vi.waitFor(() => expect(applySnapshot).toHaveBeenCalled());
+      expect(resolveEnvironmentThreadCapabilities(environmentId).autoSettleAfterDays).toBe(30);
+    } finally {
+      stop();
+      resetEnvironmentServerConfigsForTests();
+    }
+  });
+
   it("finishes a slow detail read during repeated pushes and refreshes hidden changes on foreground", async () => {
     const environmentId = EnvironmentId.make("environment-a");
     const threadId = ThreadId.make("thread-a");

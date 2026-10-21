@@ -88,6 +88,18 @@ describe("pageShellSnapshot", () => {
     assert.equal(begin.snapshotSequence, 42);
     assert.equal(begin.threadCount, 1);
     assert.equal(begin.archivedThreadCount, 0);
+    assert.equal(Object.hasOwn(begin, "settlementPolicy"), false);
+  });
+
+  it("carries the node's settlement policy in the header", () => {
+    const [begin] = flatten(
+      pageShellSnapshot({
+        ...snapshotOf([thread("a", false)]),
+        settlementPolicy: { autoSettleAfterDays: 30 },
+      }),
+    );
+    assert(begin?.kind === "snapshot-begin");
+    assert.deepEqual(begin.settlementPolicy, { autoSettleAfterDays: 30 });
   });
 
   it("sends unarchived threads first, in one message while the shell fits the budget", () => {

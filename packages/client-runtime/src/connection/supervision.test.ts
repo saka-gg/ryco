@@ -28,6 +28,10 @@ import {
   THREAD_BODY_RESIDENCY_BACKSTOP_MS,
   type ThreadBodyUsage,
 } from "../state/threads/threadBodyResidency.ts";
+import {
+  resetEnvironmentServerConfigsForTests,
+  resolveEnvironmentThreadCapabilities,
+} from "../rpc/environmentServerConfigs.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import {
   createEnvironmentConnectionSupervisor,
@@ -530,6 +534,24 @@ describe("thread subscription before the thread exists", () => {
     );
     supervisor.flushShellEvents();
     expect(subscribed).toEqual(["thread-existing", "thread-draft"]);
+  });
+
+  it("records the node's settlement rule from each snapshot it does not discard", () => {
+    resetEnvironmentServerConfigsForTests();
+    const { supervisor } = makeSupervisor(async (record) => connectionFor(record));
+    supervisor.register(countingConnection().connection);
+    const withRule = (snapshotSequence: number, autoSettleAfterDays: 3 | 14) =>
+      ({
+        ...(shellSnapshot(snapshotSequence, []) as object),
+        settlementPolicy: { autoSettleAfterDays },
+      }) as never;
+
+    supervisor.syncShellSnapshot(withRule(2, 14), remote);
+    expect(resolveEnvironmentThreadCapabilities(remote).autoSettleAfterDays).toBe(14);
+    // An older snapshot than the one applied says nothing current.
+    supervisor.syncShellSnapshot(withRule(1, 3), remote);
+    expect(resolveEnvironmentThreadCapabilities(remote).autoSettleAfterDays).toBe(14);
+    resetEnvironmentServerConfigsForTests();
   });
 
   it("subscribes right away before any shell snapshot has been applied", () => {

@@ -360,6 +360,81 @@ describe("thread inbox", () => {
     );
   });
 
+  describe("each node's own auto-settle rule", () => {
+    // Both last active eight days before now.
+    const eightDaysIdle = { latestUserMessageAt: "2026-07-23T12:00:00.000Z" };
+
+    it("classifies each environment's threads by its own node's rule", () => {
+      const onA = makeThread(environmentA, "thread-a", eightDaysIdle);
+      const onB = makeThread(environmentB, "thread-b", eightDaysIdle);
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 30,
+          environments: [
+            makeEnvironment(environmentA, { autoSettleAfterDays: 7 }),
+            makeEnvironment(environmentB, { autoSettleAfterDays: 14 }),
+          ],
+          threads: [onA, onB],
+        }),
+      );
+
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([onA.id]);
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([onB.id]);
+    });
+
+    it("keeps a node's Off rule off, whatever this client's rule is", () => {
+      const thread = makeThread(environmentA, "thread-a", eightDaysIdle);
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 1,
+          environments: [makeEnvironment(environmentA, { autoSettleAfterDays: null })],
+          threads: [thread],
+        }),
+      );
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+      expect(inbox.nextSettlementEvaluationAtMs).toBeNull();
+    });
+
+    it("falls back to this client's rule for a node that states none", () => {
+      const thread = makeThread(environmentA, "thread-a", eightDaysIdle);
+      const settled = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 7,
+          environments: [makeEnvironment(environmentA)],
+          threads: [thread],
+        }),
+      );
+      expect(settled.settled.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+      const active = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 14,
+          environments: [makeEnvironment(environmentA, { autoSettleAfterDays: undefined })],
+          threads: [thread],
+        }),
+      );
+      expect(active.active.map((entry) => entry.thread?.id)).toEqual([thread.id]);
+    });
+
+    it("schedules the next evaluation at the earliest boundary across environments", () => {
+      const recent = { latestUserMessageAt: "2026-07-30T12:00:00.000Z" };
+      const inbox = buildThreadInbox(
+        baseInput({
+          autoSettleAfterDays: 1,
+          environments: [
+            makeEnvironment(environmentA, { autoSettleAfterDays: 14 }),
+            makeEnvironment(environmentB, { autoSettleAfterDays: 3 }),
+          ],
+          threads: [
+            makeThread(environmentA, "thread-a", recent),
+            makeThread(environmentB, "thread-b", recent),
+          ],
+        }),
+      );
+      expect(inbox.active).toHaveLength(2);
+      expect(inbox.nextSettlementEvaluationAtMs).toBe(Date.parse("2026-08-02T12:00:00.000Z"));
+    });
+  });
+
   describe("automatic settlement signals", () => {
     const staleActivity = {
       latestUserMessageAt: "2026-07-20T12:00:00.000Z",

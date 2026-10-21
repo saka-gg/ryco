@@ -20,6 +20,7 @@ import {
   type OrchestrationGetThreadHistoryPageInput,
   type OrchestrationGetThreadShellsInput,
   type OrchestrationGetThreadWindowInput,
+  type OrchestrationShellSnapshot,
   type OrchestrationThreadHistoryRecoveryMode,
   type OrchestrationThreadShell,
   type OrchestrationThreadWindowSnapshot,
@@ -33,6 +34,7 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { normalizeDispatchCommand } from "../orchestration/Normalizer.ts";
+import { shellSettlementPolicy } from "../orchestration/threadSettlementInput.ts";
 import { loadActivityPayload } from "../orchestration/activityPayloadPreview.ts";
 import { encodeThreadHistoryCursor } from "../orchestration/threadHistoryCursor.ts";
 import {
@@ -418,6 +420,19 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     );
   };
 
+  // Every shell snapshot carries the node's settlement rule, so a client that later
+  // holds only the snapshot still lists this node's threads by it. Reading the
+  // settings never fails the snapshot: without them it goes out as before.
+  const withSettlementPolicy = <A extends OrchestrationShellSnapshot>(
+    load: Effect.Effect<A, ProjectionRepositoryError>,
+  ) =>
+    Effect.zipWith(
+      load,
+      serverSettings.getSettings.pipe(Effect.map(shellSettlementPolicy), Effect.option),
+      (snapshot, policy): A =>
+        Option.isSome(policy) ? { ...snapshot, settlementPolicy: policy.value } : snapshot,
+    );
+
   const shellSnapshotLoad = <A>(load: Effect.Effect<A, ProjectionRepositoryError>) =>
     load.pipe(
       Effect.tapError((cause) =>
@@ -778,7 +793,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           Effect.forkDetach,
           Effect.as(
             makeReplayableShellStream(
-              shellSnapshotLoad(projectionSnapshotQuery.getShellSnapshot()),
+              shellSnapshotLoad(withSettlementPolicy(projectionSnapshotQuery.getShellSnapshot())),
               {
                 resumeFromSequence: input.resumeFromSequence,
                 threadPriorities: input.threadPriorities,
@@ -786,7 +801,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                 ...(input.archivedThreads === "stub"
                   ? {
                       stubbedSnapshot: shellSnapshotLoad(
-                        readStubbedShellSnapshot(projectionSnapshotQuery),
+                        withSettlementPolicy(readStubbedShellSnapshot(projectionSnapshotQuery)),
                       ),
                     }
                   : {}),

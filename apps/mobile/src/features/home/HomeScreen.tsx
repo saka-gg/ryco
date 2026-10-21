@@ -41,6 +41,7 @@ import { ProjectsScreen } from "../projects/ProjectsScreen";
 import { buildHomeChromeModel } from "./homeChromeModel";
 import { createHomeModeState, reduceHomeModeState, type HomeMode } from "./homeMode";
 import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
+import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
 import { useHomeEnvironments } from "./useHomeEnvironments";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
 
@@ -99,6 +100,7 @@ export function HomeScreen() {
     [queuesByThreadKey],
   );
   const preferences = usePreferences();
+  useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
 
   const currentQuery = home.queryByMode[home.mode];

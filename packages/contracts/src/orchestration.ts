@@ -36,6 +36,7 @@ import { ComposerSourceControlContext } from "./sourceControl.ts";
 import { WorkItemProviderKind, WorkItemState } from "./workItems.ts";
 import { ThreadGoal, ThreadGoalEventOrigin, ThreadGoalUpdate } from "./threadGoal.ts";
 import { ThreadForkedActivityPayload } from "./threadFork.ts";
+import { SidebarAutoSettleAfterDays } from "./threadAutoSettlement.ts";
 import {
   IssueState,
   PullRequestState,
@@ -1230,12 +1231,25 @@ export const OrchestrationArchivedThreadStub = Schema.Struct({
 });
 export type OrchestrationArchivedThreadStub = typeof OrchestrationArchivedThreadStub.Type;
 
+/**
+ * The node's thread settlement rule, as its shell snapshot carries it so a
+ * client that only has the snapshot (a cached or read-only copy) classifies
+ * the node's threads by the node's own rule. `autoSettleAfterDays` is the
+ * resolved rule: the shared default when the node never set one, null when off.
+ */
+export const OrchestrationShellSettlementPolicy = Schema.Struct({
+  autoSettleAfterDays: SidebarAutoSettleAfterDays,
+});
+export type OrchestrationShellSettlementPolicy = typeof OrchestrationShellSettlementPolicy.Type;
+
 export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
   worktrees: Schema.optional(Schema.Array(OrchestrationWorktreeShell)),
   threads: Schema.Array(OrchestrationThreadShell),
   updatedAt: IsoDateTime,
+  /** Absent from older servers, whose threads follow each client's own rule. */
+  settlementPolicy: Schema.optionalKey(OrchestrationShellSettlementPolicy),
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
 
@@ -1340,6 +1354,7 @@ export const OrchestrationShellSnapshotBeginItem = Schema.Struct({
   worktrees: Schema.optional(Schema.Array(OrchestrationWorktreeShell)),
   threadCount: NonNegativeInt,
   archivedThreadCount: NonNegativeInt,
+  settlementPolicy: Schema.optionalKey(OrchestrationShellSettlementPolicy),
 });
 export type OrchestrationShellSnapshotBeginItem = typeof OrchestrationShellSnapshotBeginItem.Type;
 

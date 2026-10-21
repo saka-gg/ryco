@@ -149,6 +149,16 @@ export function updateClientModelFavorites(
 }
 
 /**
+ * This client's own auto-settle rule, which applies only to nodes that keep none
+ * of their own. Client-owned in every settings scope, like the favorites above.
+ */
+export function updateClientAutoSettleAfterDays(
+  value: ClientSettings["sidebarAutoSettleAfterDays"],
+): void {
+  persistClientSettings({ ...getClientSettingsSnapshot(), sidebarAutoSettleAfterDays: value });
+}
+
+/**
  * Non-hook accessor for the current merged client settings snapshot.
  * Used by non-React code paths (e.g. runtime services) that need the latest
  * settings without subscribing.

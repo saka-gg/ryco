@@ -99,6 +99,18 @@ describe("createShellSnapshotAssembler", () => {
     ]);
   });
 
+  it("keeps the node's settlement policy from the header", () => {
+    const assembler = createShellSnapshotAssembler();
+    assembler.accept({
+      ...begin(0),
+      settlementPolicy: { autoSettleAfterDays: null },
+    } as OrchestrationShellStreamItem);
+    const delivered = assembler.accept({ kind: "snapshot-end" });
+    expect(
+      delivered?.kind === "snapshot" ? delivered.snapshot.settlementPolicy : undefined,
+    ).toEqual({ autoSettleAfterDays: null });
+  });
+
   it("passes a legacy snapshot and other items through unchanged", () => {
     const assembler = createShellSnapshotAssembler();
     const legacy: OrchestrationShellStreamItem = {

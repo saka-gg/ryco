@@ -14,7 +14,12 @@ import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import { describe, expect, it } from "vite-plus/test";
 
 import { inheritedItemId } from "./forkInheritance.ts";
-import { threadSettlementInput, threadShellSettlementInput } from "./threadSettlementInput.ts";
+import {
+  nodeAutoSettleAfterDays,
+  shellSettlementPolicy,
+  threadSettlementInput,
+  threadShellSettlementInput,
+} from "./threadSettlementInput.ts";
 
 const SOURCE = ThreadId.make("thread-source");
 const FORK = ThreadId.make("fork-settle");
@@ -103,5 +108,16 @@ describe("threadSettlementInput", () => {
     expect(input.latestUserMessageAt).toBe(ownPrompt.createdAt);
     expect(canSettleThread(input)).toEqual({ canSettle: false, blocker: "queued-turn" });
     expect(canSnoozeThread(input).canSnooze).toBe(false);
+  });
+});
+
+describe("nodeAutoSettleAfterDays", () => {
+  it("is the node's own rule, else the shared default; Off stays off", () => {
+    expect(nodeAutoSettleAfterDays({})).toBe(7);
+    expect(nodeAutoSettleAfterDays({ threadAutoSettleAfterDays: 30 })).toBe(30);
+    expect(nodeAutoSettleAfterDays({ threadAutoSettleAfterDays: null })).toBeNull();
+    expect(shellSettlementPolicy({ threadAutoSettleAfterDays: null })).toEqual({
+      autoSettleAfterDays: null,
+    });
   });
 });
