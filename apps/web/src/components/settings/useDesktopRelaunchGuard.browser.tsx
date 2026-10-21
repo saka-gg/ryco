@@ -11,6 +11,8 @@ vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({
+  // Imported through the hosted node routes; never called by these tests.
+  createBrowserHistory: vi.fn(),
   useParams: (options?: { select?: (params: Record<string, string>) => unknown }) => {
     const params = {};
     return options?.select ? options.select(params) : params;
