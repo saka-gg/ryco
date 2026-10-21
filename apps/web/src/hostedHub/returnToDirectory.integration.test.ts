@@ -202,7 +202,7 @@ async function setup(initialUrl: string) {
 }
 
 describe("user-facing return to the node directory (All nodes)", () => {
-  it("leaves the node with its session kept warm; the saved connection and node connector survive", async () => {
+  it("opens the directory with the cursor and its session kept; the saved connection and node connector survive", async () => {
     const { win, history } = await setup("/");
     const { hostedHubApi } = await import("./api");
     const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
@@ -253,14 +253,16 @@ describe("user-facing return to the node directory (All nodes)", () => {
     expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     expect(listEnvironmentConnections()).toHaveLength(2);
     history.flush();
-    expect(win.location.pathname).toBe(`/node/${routedNode.id}`);
+    // Choosing a node opens home, which names no node.
+    expect(win.location.pathname).toBe("/");
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(routedNode.id);
 
-    // The user-facing "All nodes" action does what history Back does: it
-    // moves the cursor to the directory, and the node's session stays warm
-    // until the workspace needs its slot (or the tab stays hidden), so going
-    // back to it is immediate.
+    // The user-facing "All nodes" action opens the directory, a page no node
+    // owns: the cursor stays, and the node's session stays warm until the
+    // workspace needs its slot (or the tab stays hidden), so going back to it
+    // is immediate.
     expect(leaveHostedNodeRouteToDirectory()).toBe(true);
-    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
+    await vi.waitFor(() => expect(win.location.pathname).toBe("/nodes"));
     expect(hostedClient.dispose).not.toHaveBeenCalled();
     expect(listEnvironmentConnections()).toHaveLength(2);
     expect(
@@ -277,8 +279,9 @@ describe("user-facing return to the node directory (All nodes)", () => {
     expect(signOut).not.toHaveBeenCalled();
     expect(state.accountStatus).toBe("authenticated");
     // Distinct from revocation: the node's directory entry is untouched and
-    // remains selectable (the remote node connector was never addressed).
-    expect(state.selectedNode).toBeNull();
+    // stays selected (the remote node connector was never addressed).
+    expect(state.selectedNode?.id).toBe(routedNode.id);
+    expect(state.sessionEstablished).toBe(true);
     expect(state.nodes).toHaveLength(1);
     expect(state.nodes[0]).toMatchObject({ id: routedNode.id, revokedAt: null });
     expect(state.nodes[0]!.presence.online).toBe(true);

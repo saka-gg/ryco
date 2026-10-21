@@ -88,9 +88,9 @@ const PATHNAME_BY_KIND = Object.freeze({
  * Every first path segment the Hub owns.
  *
  * Two other modules must agree with this set or a Hub address is silently
- * reinterpreted: `buildHostedNodeHref` would otherwise render `/account` as
- * `/node/<id>/account` while a node is selected, and the route orchestrator's
- * legacy-thread matcher would read `/account/security` as an
+ * reinterpreted: `buildHostedNodeHref` would otherwise read `/account/security`
+ * as a thread and render it as `/node/<id>/account/security`, and the route
+ * orchestrator's legacy-thread matcher would read it as an
  * `$environmentId/$threadId` pair. Both consume this constant, and
  * `nodeRouteOrchestrator` asserts its reserved set is a superset of it.
  */

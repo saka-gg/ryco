@@ -36,7 +36,6 @@ import {
   useHostedEnvironmentRecord,
 } from "../../hostedHub/capabilities";
 import type { HostedConnectionStatusIndicator } from "../../hostedHub/connectionStatus";
-import { adoptRoutedHostedNode } from "../../hostedHub/nodeRoutes";
 import {
   leaveHostedNodeRouteToDirectory,
   selectHostedNodeRoute,
@@ -130,24 +129,24 @@ export function NodePresence({ node }: { readonly node: HostedHubNode }) {
 export function useHostedConnectionActions() {
   const navigate = useNavigate();
 
+  // Opens home with the selection cursor on the chosen node.
   const switchNode = async (next: HostedHubNode) => {
     if (selectHostedNodeRoute(next.id)) return;
     await navigate({ to: "/", replace: true });
     await hostedHubController.selectNode(next.id);
   };
 
-  // Moves the selection cursor to another node and stays on the current page:
-  // the address takes that node's segment in place, and the route orchestrator
-  // selects it exactly as it does for a restored address. Without the hosted
-  // history there is no address to follow, so the controller selects it.
+  // Moves the selection cursor to another node and stays on the current page.
+  // Its caller is Settings, a page no node owns, so the address stays as it is
+  // and the cursor moves through the lifecycle owner's own select, which
+  // connects nothing: the page holds the demand for the node it shows.
   const switchNodeInPlace = async (next: HostedHubNode) => {
-    if (adoptRoutedHostedNode(next.id)) return;
     await hostedHubController.selectNode(next.id);
   };
 
   // "All nodes" releases this route's demand and opens the Hub catalog. The
-  // coordinator, not navigation, decides whether a retained/LRU connection
-  // remains live.
+  // selection cursor stays where it is, and the coordinator, not navigation,
+  // decides whether a retained/LRU connection remains live.
   const returnToAllNodes = async () => {
     if (leaveHostedNodeRouteToDirectory()) return;
     await navigate({ to: "/", replace: true });

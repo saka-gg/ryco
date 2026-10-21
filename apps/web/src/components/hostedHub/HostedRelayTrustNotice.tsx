@@ -1,7 +1,13 @@
 import { ShieldAlertIcon, ShieldIcon } from "lucide-react";
 
-import { useWebE2eeChannelStatus } from "../../hostedHub/useWebE2eeSession";
-import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
+import {
+  useWebE2eeChannelStatus,
+  useWebE2eeOpenChannelStatuses,
+} from "../../hostedHub/useWebE2eeSession";
+import {
+  hostedRelayTrustDisclosure,
+  hostedRelayTrustDisclosureStatus,
+} from "./HostedRelayTrustNotice.logic";
 
 /**
  * The hosted relay trust disclosure, at whatever the channel behind this tab
@@ -13,10 +19,13 @@ import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
  * the channel changed underneath them. Subscribing here leaves the five call
  * sites untouched and lets none of them pass a stale state, because none of them
  * passes a state at all. There is deliberately no override prop: that is the
- * hole this shape exists to close.
+ * hole this shape exists to close. It reads every open channel too, so that
+ * with no channel behind the selection it never says none is open while one is.
  */
 export function HostedRelayTrustNotice({ compact = false }: { readonly compact?: boolean }) {
-  const status = useWebE2eeChannelStatus();
+  const displayed = useWebE2eeChannelStatus();
+  const openChannels = useWebE2eeOpenChannelStatuses();
+  const status = hostedRelayTrustDisclosureStatus(displayed, openChannels);
   const { tone, body } = hostedRelayTrustDisclosure(status);
   // Colour and glyph only — the claim is the sentence, and the tone never adds
   // to it. `advisory` is an informational token rather than a success one: the

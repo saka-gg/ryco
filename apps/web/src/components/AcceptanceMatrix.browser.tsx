@@ -194,7 +194,11 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
   {
     name: "connecting",
     seed: () => {
-      window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+      );
       installHostedNodeHistory();
       // The shared session fields show the selected node's own session: its
       // relay channel is online and its shell snapshot has not arrived.
@@ -214,7 +218,11 @@ const ENTRY_SURFACES: readonly EntrySurface[] = [
   {
     name: "failure",
     seed: () => {
-      window.history.replaceState(window.history.state, "", `/node/${selectedNode.id}`);
+      window.history.replaceState(
+        window.history.state,
+        "",
+        `/node/${selectedNode.id}/${selectedNode.environmentId}/t_1`,
+      );
       installHostedNodeHistory();
       const generation = seedSelectedSession();
       getHostedEnvironmentSessions().failure(selectedNode.environmentId, generation, {
@@ -730,12 +738,12 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   {
     cell: "node directory desktop route",
     file: "HN",
-    test: "selects a node by navigating into its node-scoped route",
+    test: "opens home with the cursor on a node chosen from the directory",
   },
   {
     cell: "node directory route back",
     file: "HN",
-    test: "returns to the directory when history navigates back from a node route",
+    test: "keeps the cursor when history navigates back from home to the directory",
   },
   {
     cell: "node directory no-secret-in-url",
@@ -923,7 +931,7 @@ const PROVING_TESTS: readonly ProvingCell[] = [
   {
     cell: "connection desktop settings device",
     file: "SPH",
-    test: "moves the settings target to another node through the hosted route",
+    test: "moves the settings target to another node through the selection cursor",
   },
 
   // ── Cross-cutting properties ───────────────────────────────────────────

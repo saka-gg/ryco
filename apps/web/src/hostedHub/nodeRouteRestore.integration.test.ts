@@ -288,7 +288,7 @@ describe("hosted node route restore integration", () => {
     }
   });
 
-  it("keeps the node's session warm on Back and adopts it on Forward without a fresh ticket", async () => {
+  it("keeps the cursor and the node's session warm on Back, and adopts it on Forward without a fresh ticket", async () => {
     const { win, history } = await setup("/");
     const { hostedHubApi } = await import("./api");
     const { getHostedEnvironmentSessions, hostedHubController, useHostedHubStore } =
@@ -297,7 +297,6 @@ describe("hosted node route restore integration", () => {
       await import("../environments/runtime/service");
     const { useSavedEnvironmentRegistryStore, writeSavedEnvironmentBearerToken } =
       await import("../environments/runtime/catalog");
-    const { selectHostedNodeRoute } = await import("./nodeRouteOrchestrator");
     vi.spyOn(hostedHubApi, "restoreSession").mockResolvedValue(sessionResponse);
     vi.spyOn(hostedHubApi, "listNodes").mockResolvedValue([routedNode]);
     const issueRelayTicket = vi.spyOn(hostedHubApi, "issueRelayTicket").mockResolvedValue({
@@ -324,7 +323,7 @@ describe("hosted node route restore integration", () => {
     const savedClientCount = capturedClients.length;
 
     await hostedHubController.bootstrap();
-    expect(selectHostedNodeRoute(routedNode.id)).toBe(true);
+    history.push(`/${environmentId}/t_1`);
     await vi.waitFor(() => expect(capturedTransports).toHaveLength(savedClientCount + 1));
     const hostedTransport = capturedTransports[savedClientCount]!;
     const hostedClient = capturedClients[savedClientCount]!;
@@ -336,13 +335,17 @@ describe("hosted node route restore integration", () => {
     expect(useHostedHubStore.getState().sessionEstablished).toBe(true);
     expect(listEnvironmentConnections()).toHaveLength(2);
     history.flush();
-    expect(win.location.pathname).toBe(`/node/${routedNode.id}`);
+    const threadPath = `/node/${routedNode.id}/${environmentId}/t_1`;
+    expect(win.location.pathname).toBe(threadPath);
 
-    // Back returns to the directory and only moves the cursor: the node's
-    // session stays warm, as does the unrelated saved connection.
+    // Back returns home, which names no node: the cursor stays on the node
+    // and its session stays warm, as does the unrelated saved connection.
     win.history.back();
-    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
-    expect(win.location.pathname).toBe("/");
+    await vi.waitFor(() => expect(win.location.pathname).toBe("/"));
+    expect(useHostedHubStore.getState()).toMatchObject({
+      selectedNode: routedNode,
+      sessionEstablished: true,
+    });
     expect(hostedClient.dispose).not.toHaveBeenCalled();
     expect(listEnvironmentConnections()).toHaveLength(2);
     for (let index = 0; index < savedClientCount; index += 1) {
@@ -352,16 +355,14 @@ describe("hosted node route restore integration", () => {
     // Forward adopts the continuously live session: no fresh ticket, relay
     // attempt or shell snapshot.
     win.history.forward();
-    await vi.waitFor(() =>
-      expect(useHostedHubStore.getState().selectedNode?.id).toBe(routedNode.id),
-    );
+    await vi.waitFor(() => expect(win.location.pathname).toBe(threadPath));
     expect(useHostedHubStore.getState()).toMatchObject({
+      selectedNode: routedNode,
       sessionStatus: "ready",
       sessionEstablished: true,
     });
     expect(capturedTransports).toHaveLength(savedClientCount + 1);
     expect(issueRelayTicket).toHaveBeenCalledTimes(1);
-    expect(win.location.pathname).toBe(`/node/${routedNode.id}`);
     expect(listEnvironmentConnections()).toHaveLength(2);
   });
 });

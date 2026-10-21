@@ -104,10 +104,13 @@ import {
 import { hostedWebConnectionScopes } from "./hostedConnectionScopes";
 import {
   resetHostedNodeRouteOrchestratorForTests,
-  selectHostedNodeRoute,
   startHostedNodeRouteOrchestrator,
 } from "./nodeRouteOrchestrator";
-import { installHostedNodeHistory, resetHostedNodeRoutesForTests } from "./nodeRoutes";
+import {
+  getRoutedHostedNode,
+  installHostedNodeHistory,
+  resetHostedNodeRoutesForTests,
+} from "./nodeRoutes";
 import { configureWebHostedRuntime } from "./runtime";
 import {
   getHostedEnvironmentSessions,
@@ -251,8 +254,9 @@ async function signIn(nodes: ReadonlyArray<HostedHubNode>, maxConnections?: numb
   await flush();
 }
 
+/** Opens a thread on `node`, which routes the node and holds the thread's view. */
 async function route(node: HostedHubNode): Promise<void> {
-  selectHostedNodeRoute(node.id);
+  history.push(`/${node.environmentId}/thread-${node.id}`);
   history.flush();
   await flush();
 }
@@ -437,6 +441,39 @@ describe("hosted Web retained environment sessions", () => {
       sessionEstablished: true,
     });
     expect(liveEnvironmentIds().toSorted()).toEqual([a.environmentId, b.environmentId]);
+  });
+
+  it("keeps the cursor and the live session on pages no node owns, with no new attempt", async () => {
+    const [a, b] = [hubNode(1), hubNode(2)];
+    await signIn([a, b]);
+    await route(a);
+    establish(a);
+    const tickets = ticketCount();
+    const acquireEnvironment = vi.spyOn(hostedHubController, "acquireEnvironment");
+    const releaseEnvironment = vi.spyOn(hostedHubController, "releaseEnvironment");
+
+    for (const pathname of ["/settings", "/projects"]) {
+      history.push(pathname);
+      history.flush();
+      await flush(HOSTED_WEB_WAKE_STAGGER_MS);
+      expect(getRoutedHostedNode(), pathname).toMatchObject({
+        nodeId: null,
+        logicalPathname: pathname,
+      });
+      expect(hostedHubStore.getState(), pathname).toMatchObject({
+        selectedNode: a,
+        sessionEstablished: true,
+      });
+    }
+    expect(liveEnvironmentIds()).toEqual([a.environmentId]);
+    expect(acquireEnvironment).not.toHaveBeenCalled();
+    expect(releaseEnvironment).not.toHaveBeenCalled();
+
+    // Back on the node's thread: the cursor is already there, nothing reconnects.
+    await route(a);
+    expect(ticketCount()).toBe(tickets);
+    expect(transportsFor(a)).toHaveLength(1);
+    expect(releaseEnvironment).not.toHaveBeenCalled();
   });
 
   it("refuses commands on an environment still synchronizing while another is ready", async () => {

@@ -331,13 +331,32 @@ for the selected node.
 
 ## Stable node routes
 
-The owning node is a stable URL segment: hosted browser URLs take the shape
-`/node/<node id>` for the node root and `/node/<node id>/<environmentId>/<threadId>` (plus the
-existing panel search parameters) for nested views. The segment value is the bounded node
-identifier the authorized directory already renders to signed-in users — directory metadata, never
-node-owned content or authentication material. The mapping lives in the history layer of the
-hosted build only; the shared logical route tree is unchanged and direct-browser, desktop-local,
-and SSH-assisted routing keep their current URL shapes.
+Only a page a node owns names that node, as a stable URL segment: a thread takes the shape
+`/node/<node id>/<environmentId>/<threadId>` (plus the existing panel search parameters), its own
+environment's node, and a draft takes `/node/<node id>/draft/<draftId>`, the node it targets. Every
+other page — home, settings, projects, tasks, statistics, pull requests, diagnostics — belongs to
+no node and keeps its plain address whichever node a thread was last opened on. The segment value is
+the bounded node identifier the authorized directory already renders to signed-in users — directory
+metadata, never node-owned content or authentication material. The mapping lives in the history
+layer of the hosted build only; the shared logical route tree is unchanged and direct-browser,
+desktop-local, and SSH-assisted routing keep their current URL shapes.
+
+Opening a thread moves the selection cursor to its node (see **Selection is a cursor** above). The
+pages no node owns leave the cursor where the last thread put it, so the pages that act on one node —
+Settings, Tasks, Statistics, adding a project, a new thread — keep that node as their target without
+the address naming it, and Settings → **Switch device** moves the cursor in place. Opened with the
+cursor on no node, as after a reload or in a new tab, Settings and Tasks offer the nodes to choose
+from instead, and a choice moves the cursor in place the same way.
+
+An address holds no demand of its own: going to a page no node owns connects nothing and releases
+only the demand of the view that was left, and the warm set stays the demand executor's to manage. A
+mounted view holds the demand of the node it shows: a thread view its own node's, and Settings and
+Tasks that of the node under the cursor, so a reload on either connects that node once one is
+chosen. Beside them, a choice holds a short demand: choosing a node in the node directory opens home
+with the cursor on that node and holds that node's demand for a few seconds, as a press on one of
+its thread rows does for the row's node. The cursor is cleared only where it always was: sign-out,
+an account change, and a node that is revoked, removed from the directory, or ends in a terminal
+failure.
 
 Refresh, deep links, and history restore the routed node strictly through the ordered fail-closed
 pipeline: restore the Hub session → refresh the authorized directory → validate the routed node id
@@ -368,14 +387,17 @@ closed to the node directory with a bounded explanation. An offline node or temp
 directory can keep an already known cached thread visible without acquiring mutation authority.
 A signed-out or expired
 session shows the normal passkey surface; the routed node resumes only after re-authentication and
-revalidation. Back and Forward navigate between the directory and selected-node views: returning
-to the directory releases exactly that route's scope. A non-retained connection may remain warm as
-LRU state until backgrounding or capacity requires its slot; unrelated retained work is unchanged.
-Forward adopts a session that stayed live; it re-enters through the restore pipeline with a fresh
-ticket when acquisition is required. Legacy hosted URLs without the node segment redirect to the
-node-scoped shape when the directory can identify the node, otherwise to the directory. No session,
-ticket, credential, challenge, or signature material appears in URLs, history state, or browser
-storage.
+revalidation. Back and Forward navigate between threads and the pages no node owns: leaving a
+thread releases exactly that route's scope and keeps the cursor. A non-retained connection may
+remain warm as LRU state until backgrounding or capacity requires its slot; unrelated retained work
+is unchanged. Forward adopts a session that stayed live; it re-enters through the restore pipeline
+with a fresh ticket when acquisition is required. Legacy hosted thread URLs without the node segment
+redirect to the node-scoped shape when the directory can identify the node, otherwise to the
+directory. Older addresses that put a node segment on a page no node owns — `/node/<node id>` for a
+node's home, `/node/<node id>/settings` and the like — are validated the same way, then move the
+cursor to that node and drop the segment in place, opening the page itself (`/`, `/settings`). The
+address holds no demand; the page it opens holds its own, as above. No session, ticket, credential, challenge, or signature material appears in URLs,
+history state, or browser storage.
 
 ## Sending while a node connects
 
@@ -530,15 +552,18 @@ The relay-trust disclosure is a function of the channel state, and it is shown o
 authentication, node-selection, connection, and installation surfaces. It takes no state from the
 surface it mounts on: every mount site reads the live channel projection, so install help opened
 from the account page or from the phone connection sheet states the selected node's channel
-disclosure and not the no-channel one. The paragraphs below are the shipped strings, quoted verbatim
-from `apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather
+disclosure and not the no-channel one. When the selected node has no channel open — the cursor is
+on no node yet, or on one this tab is not connected to — the disclosure states the weakest channel
+this tab does hold, and says that no node channel is open only while none is. The paragraphs below
+are the shipped strings, quoted verbatim from
+`apps/web/src/components/hostedHub/HostedRelayTrustNotice.logic.ts`. They are quoted rather
 than paraphrased on purpose: a paraphrase here would be a second copy of a security claim, free to
 drift away from the one the application renders. `HostedRelayTrustNotice.logic.test.ts` reads this
 file and asserts that each quotation below is exactly the shipped copy for its state, so a
 divergence fails a test instead of surviving a review.
 
-No node channel open in this tab — the sign-in surface, the node directory, and install help reached
-from the directory:
+No node channel open in this tab — the sign-in surface, and any other surface while this tab holds
+no channel:
 
 <!-- shipped-copy:unavailable -->
 

@@ -351,9 +351,12 @@ export function HostedHubRoot() {
   if (hubRoute?.kind === "nodes" || hubRoute?.kind === "nodes-enroll") {
     return <HostedNodeDirectory />;
   }
-  // Home paints cached rows immediately. The workspace coordinator discovers
-  // missing lists in the background through ordinary, disposable demand leases.
-  // Machine administration remains the explicit `/nodes` route handled above.
+  // Every page but a thread or a draft is node-less: home, settings, projects,
+  // tasks and the rest render here whichever node the cursor is on, with no
+  // node chrome and no full-page connection surface. Home paints cached rows
+  // immediately. The workspace coordinator discovers missing lists in the
+  // background through ordinary, disposable demand leases. Machine
+  // administration remains the explicit `/nodes` route handled above.
   if (routedNode.nodeId === null) {
     if (routeNotice || routedNode.malformed) return <HostedNodeDirectory />;
     if (selectedNode && sessionEstablished) {
@@ -364,9 +367,11 @@ export function HostedHubRoot() {
   // Keep the draft and its cached project picker mounted while the target's
   // relay connects. The controller still requires a fresh lease to commit it.
   if (canReadPendingDraft) return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
-  // A routed node segment is pending fail-closed validation/acquisition. Never
-  // render another environment merely because it remains the compatibility
-  // `selectedNode` while the scoped coordinator switches targets.
+  // A routed node segment is pending fail-closed validation/acquisition: a
+  // thread's or a draft's, or one left on an older address of a page no node
+  // owns, which the route orchestrator drops once it has moved the cursor.
+  // Never render another environment merely because it remains the
+  // compatibility `selectedNode` while the scoped coordinator switches targets.
   if (!selectedNode || selectedNode.id !== routedNode.nodeId) {
     if (canReadCachedRoute || canOpenRoutedNodeInShell) {
       return <RootAppShell authGateState={{ status: "hosted-cached" }} />;
@@ -1469,8 +1474,8 @@ function HostedNodeDirectory() {
   }, []);
 
   const select = async (node: HostedHubNode) => {
-    // With the hosted node history installed, selection navigates into the
-    // node-scoped route and the route orchestrator drives `selectNode`.
+    // With the hosted node history installed, selection opens home with the
+    // cursor on the node; home names no node, so the address carries none.
     if (selectHostedNodeRoute(node.id)) return;
     await navigate({ to: "/", replace: true });
     await hostedHubController.selectNode(node.id);

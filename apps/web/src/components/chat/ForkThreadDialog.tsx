@@ -47,7 +47,6 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
-import { adoptHostedEnvironmentRoute } from "../../hostedHub/adoptHostedEnvironmentRoute";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useHostedHubStore } from "../../hostedHub/state";
 import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../../hostedHub/switchTarget";
@@ -192,7 +191,6 @@ function ForkThreadDialogBody(props: {
   const openFork = useEvent((result: ThreadForkResult, arrived: boolean) => {
     const forkRef = scopeThreadRef(environmentId, result.threadId);
     const open = () => {
-      adoptHostedEnvironmentRoute(environmentId);
       void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(forkRef) });
     };
     onBusyChange(false);

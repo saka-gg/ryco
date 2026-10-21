@@ -54,7 +54,8 @@ import {
 } from "../../../test/hostedConnectionVocabulary";
 import { hostedConnectionStatusPresentation } from "./HostedConnectionControls.logic";
 import { E2EE_WEB_SAS_DETAIL } from "./HostedE2eeVerification.logic";
-import { resetWebE2eeSession } from "../../hostedHub/e2eeSession";
+import { resetWebE2eeSession, setDisplayedWebE2eeEnvironment } from "../../hostedHub/e2eeSession";
+import { hostedRelayTrustDisclosure } from "./HostedRelayTrustNotice.logic";
 import {
   getHostedEnvironmentSessions,
   hostedHubController,
@@ -77,6 +78,7 @@ import {
 import { SidebarProvider } from "../ui/sidebar";
 import { ChatHeader } from "../chat/ChatHeader";
 import { NoActiveThreadState } from "../NoActiveThreadState";
+import { NoActiveThreadHostedStatus } from "../NoActiveThreadHostedStatus";
 import {
   HostedConnectionPill,
   HostedConnectionSheet,
@@ -409,6 +411,32 @@ describe("hosted connection controls", () => {
     expect(page.getByTestId("hosted-connection-pill").element().getAttribute("aria-label")).toBe(
       `Connection: ${selectedNode.label}, Online`,
     );
+  });
+
+  it("never tells home no node channel is open while another node's channel is", async () => {
+    // The cursor stays on a node whose channel is not open, while the tab
+    // holds another node's.
+    seedConnectedState();
+    setDisplayedWebE2eeEnvironment(selectedNode.environmentId);
+    // The hosted part of the home empty state, which the standard build omits.
+    mounted = await render(<NoActiveThreadHostedStatus />);
+    const notice = () => document.querySelector<HTMLElement>("[data-hosted-relay-trust-notice]");
+    await vi.waitFor(() => expect(notice()).not.toBeNull());
+    expect(notice()!.getAttribute("data-e2ee-status")).toBe("unavailable");
+    expect(notice()!.textContent).toContain(hostedRelayTrustDisclosure("unavailable").body);
+
+    applyWebE2eeChannelStatus("web-unsigned", otherNode.environmentId);
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("web-unsigned");
+    expect(notice()!.textContent).not.toContain("No node channel is open");
+
+    // The weakest channel open is the one disclosed.
+    applyWebE2eeChannelStatus("legacy", EnvironmentId.make("env_cccccccccccccccccccccc"));
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("legacy");
+
+    // The cursor's own channel speaks for itself once it opens.
+    applyWebE2eeChannelStatus("web-unsigned", selectedNode.environmentId);
+    await expect.poll(() => notice()!.getAttribute("data-e2ee-status")).toBe("web-unsigned");
+    setDisplayedWebE2eeEnvironment(null);
   });
 
   it("opens the phone connection sheet from the pill with the full bounded control set", async () => {

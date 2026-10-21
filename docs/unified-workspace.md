@@ -158,6 +158,15 @@ Mobile uses the cross-node Inbox and Projects views. Desktop and Web offer full-
 Projects sidebar modes over the same workspace projection. Changing modes or applying a machine
 filter changes presentation only; it does not reconnect, refetch, or retarget mutations.
 
+On hosted Web only a thread's address, or a draft's, names a machine: the machine that owns the
+thread, or the one the draft targets. Home, Settings, Projects, Tasks, Statistics and the other
+workspace pages keep one address whichever machine a thread was last opened on, and an address holds
+no connection of its own. The pages that act on one machine (Settings, Tasks, Statistics) follow the
+machine of the last opened thread, and Settings can switch it in place. While open, Settings and
+Tasks keep the machine they show connected, and opened with no machine chosen yet, as after a
+reload, they offer the machines to choose from. Older addresses that named a machine on such a page
+open the page itself on that machine.
+
 Every client sorts a machine's threads into Active and Settled with that machine's own settlement
 capability, resolved the same way everywhere: what the machine reported to this client (live, or its
 last answer this session), else a descriptor it sent, else the flag a directory states, else

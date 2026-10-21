@@ -3,8 +3,10 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import type { WebHostedE2eeChannelStatus } from "./connectionStatus";
 import {
+  subscribeWebE2eeOpenChannels,
   subscribeWebE2eeSession,
   subscribeWebE2eeSessionFor,
+  webE2eeOpenChannelStatuses,
   webE2eeSessionState,
   webE2eeSessionStateFor,
   type WebE2eeSessionState,
@@ -63,6 +65,19 @@ function useWebE2eeSessionFieldFor<T>(
  */
 export function useWebE2eeChannelStatus(): WebHostedE2eeChannelStatus {
   return useSyncExternalStore(subscribeWebE2eeSession, channelStatus, channelStatus);
+}
+
+/**
+ * The distinct states of every channel open in this tab, displayed or not, so a
+ * surface that speaks for the whole tab can tell "no channel is open" from "no
+ * channel behind the selection".
+ */
+export function useWebE2eeOpenChannelStatuses(): readonly WebHostedE2eeChannelStatus[] {
+  return useSyncExternalStore(
+    subscribeWebE2eeOpenChannels,
+    webE2eeOpenChannelStatuses,
+    webE2eeOpenChannelStatuses,
+  );
 }
 
 /**

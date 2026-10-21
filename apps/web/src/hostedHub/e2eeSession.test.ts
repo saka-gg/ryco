@@ -9,9 +9,11 @@ import {
   recordWebE2eePolicyGenerationRegression,
   resetWebE2eeSession,
   setDisplayedWebE2eeEnvironment,
+  subscribeWebE2eeOpenChannels,
   subscribeWebE2eeSession,
   subscribeWebE2eeSessionFor,
   webE2eeLocalDiagnostics,
+  webE2eeOpenChannelStatuses,
   webE2eeSessionState,
   webE2eeSessionStateFor,
 } from "./e2eeSession";
@@ -190,6 +192,34 @@ describe("§13.5 every environment's channel owns its own entry", () => {
     resetWebE2eeSession();
     expect(webE2eeSessionStateFor(ENVIRONMENT_A)).toEqual(UNAVAILABLE);
     expect(webE2eeSessionStateFor(ENVIRONMENT_B)).toEqual(UNAVAILABLE);
+  });
+});
+
+describe("§13 the channels open in this tab", () => {
+  it("lists every open channel's state, displayed or not, and none once they end", () => {
+    let notified = 0;
+    const unsubscribe = subscribeWebE2eeOpenChannels(() => (notified += 1));
+    expect(webE2eeOpenChannelStatuses()).toEqual([]);
+
+    // No environment is displayed: the selection is on no node.
+    const a = lockedChannel(ENVIRONMENT_A, CODE);
+    beginWebE2eeChannelAttempt(ENVIRONMENT_B, {});
+    expect(webE2eeSessionState()).toEqual(UNAVAILABLE);
+    expect(webE2eeOpenChannelStatuses()).toEqual(["negotiating", "web-unsigned"]);
+    const snapshot = webE2eeOpenChannelStatuses();
+    const notifiedBefore = notified;
+
+    // A change that leaves the set of states as it was keeps the snapshot.
+    publishWebE2eeVerificationCode(OTHER_CODE, ENVIRONMENT_A, a);
+    expect(webE2eeOpenChannelStatuses()).toBe(snapshot);
+    expect(notified).toBe(notifiedBefore);
+
+    resetWebE2eeSession(ENVIRONMENT_B);
+    expect(webE2eeOpenChannelStatuses()).toEqual(["web-unsigned"]);
+    resetWebE2eeSession();
+    expect(webE2eeOpenChannelStatuses()).toEqual([]);
+    expect(notified).toBe(notifiedBefore + 2);
+    unsubscribe();
   });
 });
 

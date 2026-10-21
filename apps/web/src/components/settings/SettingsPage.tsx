@@ -47,6 +47,7 @@ import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { useHostedHubStore } from "../../hostedHub/state";
+import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
 import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import {
@@ -63,7 +64,7 @@ import { useStore } from "../../store";
 import { resolveThreadRouteRef } from "../../threadRoutes";
 import { DeviceIcon } from "../DeviceIcon";
 import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
-import { nodeSelectionBlocked } from "../hostedHub/HostedNodeDisplay.logic";
+import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
 import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
@@ -716,14 +717,18 @@ export function SettingsPage() {
     if (editingScope !== "node" || !isElectron || !targetEnvironmentId || targetIsPrimary) return;
     return retainDesktopWorkspaceInteractiveScope(targetEnvironmentId);
   }, [editingScope, targetEnvironmentId, targetIsPrimary]);
+  // Hosted settings edit the node the selection cursor is on, and their address
+  // names no node, so the page holds that node's demand while it shows its
+  // settings.
+  useHostedNodePageDemand(editingScope === "node" ? targetEnvironmentId : null);
 
   const nodeChoices = new Map<EnvironmentId, string>();
   if (primaryEnvironment) nodeChoices.set(primaryEnvironment.environmentId, primaryDeviceName);
   if (hosted) {
     // Hosted settings edit the selected node, so a hosted choice moves the
-    // selection cursor (below). Every node this browser may open is a choice.
-    for (const node of hostedNodes) {
-      if (node.revokedAt !== null || node.capabilities?.nativeClientRequired === true) continue;
+    // selection cursor (below). Every node this browser may open is a choice,
+    // also before the cursor is on any node, as in a tab opened on settings.
+    for (const node of selectableNodes(hostedNodes)) {
       nodeChoices.set(node.environmentId, node.label);
     }
   } else {
@@ -739,6 +744,9 @@ export function SettingsPage() {
     }
   }
   if (targetEnvironmentId) nodeChoices.set(targetEnvironmentId, targetNodeLabel);
+  // Hosted with no node under the cursor yet, the node group still shows, as
+  // the device switcher and nothing else, so a node can be chosen here.
+  const showNodeGroup = settingsTarget !== null || (hosted && nodeChoices.size > 0);
   // The directory's own rule for opening a node: a hosted choice waits for a
   // current directory and a revalidated browser, as the directory's rows do.
   const hostedChoiceBlocked = (environmentId: EnvironmentId): boolean => {
@@ -775,7 +783,7 @@ export function SettingsPage() {
       )
     : [];
   const groups: NavGroup[] = [{ destination: "client", items: clientItems }];
-  if (settingsTarget) groups.push({ destination: "node", items: nodeItems });
+  if (showNodeGroup) groups.push({ destination: "node", items: nodeItems });
 
   const destination: SettingsDestination =
     editingScope === "node" && settingsTarget ? "node" : "client";
@@ -898,17 +906,18 @@ export function SettingsPage() {
   const destinationLabel = (value: SettingsDestination) =>
     value === "node" ? targetNodeLabel : "This app";
 
-  const nodeHeader = settingsTarget ? (
+  const nodeHeaderLabel = settingsTarget ? targetNodeLabel : "Choose a device";
+  const nodeHeader = showNodeGroup ? (
     <div className="flex h-7 items-center gap-2 pr-1 pl-2.5 text-[11px] font-medium text-muted-foreground">
       <DeviceIcon
         environmentId={targetEnvironmentId}
-        label={targetNodeLabel}
+        label={nodeHeaderLabel}
         className="size-3.5 shrink-0 opacity-70"
       />
-      <span className="min-w-0 flex-1 truncate" title={targetNodeLabel}>
-        {targetNodeLabel}
+      <span className="min-w-0 flex-1 truncate" title={nodeHeaderLabel}>
+        {nodeHeaderLabel}
       </span>
-      {nodeChoices.size > 1 ? (
+      {nodeChoices.size > (settingsTarget ? 1 : 0) ? (
         <Menu>
           <Tooltip>
             <TooltipTrigger
@@ -937,9 +946,9 @@ export function SettingsPage() {
                 const environmentId = EnvironmentId.make(String(value));
                 setTargetEnvironmentId(environmentId);
                 if (!hosted) return;
-                // Through the same route and selection the rest of the hosted
-                // app uses, staying on this page: the node header follows once
-                // the selection has moved.
+                // Through the same selection cursor the rest of the hosted app
+                // uses, staying on this page, whose address names no node: the
+                // node header follows once the selection has moved.
                 const node = hostedNodes.find(
                   (candidate) => candidate.environmentId === environmentId,
                 );

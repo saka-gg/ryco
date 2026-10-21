@@ -59,7 +59,7 @@ import {
   useHostedWorkspaceState,
   waitForHostedNodeMutationLease,
 } from "../hostedHub/hostedConnectionCoordinator";
-import { adoptHostedEnvironmentRoute } from "../hostedHub/adoptHostedEnvironmentRoute";
+import { hostedWebConnectionScopes } from "../hostedHub/hostedConnectionScopes";
 import { useHostedHubStore } from "../hostedHub/state";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 
@@ -119,9 +119,6 @@ function useNewThreadState() {
   const projects = useStore(useShallow((store) => selectProjectsAcrossEnvironments(store)));
   const projectGroupingSettings = useProjectGroupingSettings();
   const router = useRouter();
-  const adoptHostedTarget = useCallback((environmentId: ScopedProjectRef["environmentId"]) => {
-    adoptHostedEnvironmentRoute(environmentId);
-  }, []);
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
     return resolveThreadRouteTarget(currentRouteParams);
@@ -129,16 +126,20 @@ function useNewThreadState() {
 
   /**
    * Hosted nodes accept drafts only under a current mutation lease. Returns
-   * null when no wait is needed, else whether a lease arrived.
+   * null when no wait is needed, else whether a lease arrived. The wait holds
+   * the node's demand, so a node without a live session connects for it: the
+   * page a draft is started from does not route the node it is started on.
    */
   const pendingHostedLease = useCallback(
     (environmentId: EnvironmentId): Promise<boolean> | null => {
       if (nodeIdForHostedEnvironment(environmentId) === null) return null;
-      adoptHostedTarget(environmentId);
       if (readHostedNodeMutationLease(environmentId) !== null) return null;
-      return waitForHostedNodeMutationLease(environmentId).then((lease) => lease !== null);
+      const release = hostedWebConnectionScopes.retain(environmentId, { type: "interactive" });
+      return waitForHostedNodeMutationLease(environmentId)
+        .then((lease) => lease !== null)
+        .finally(release);
     },
-    [adoptHostedTarget],
+    [],
   );
 
   /**
@@ -247,7 +248,6 @@ function useNewThreadState() {
             .catch(() => undefined);
         }
 
-        adoptHostedTarget(input.environmentId);
         await router.navigate({
           to: "/draft/$draftId",
           params: { draftId: input.draftId },
@@ -260,7 +260,7 @@ function useNewThreadState() {
             cause instanceof Error ? cause.message : "Reconnect to this node and try again.",
         });
       }),
-    [adoptHostedTarget, router],
+    [router],
   );
 
   const handleNewThread = useCallback(
@@ -395,7 +395,6 @@ function useNewThreadState() {
             ) {
               return;
             }
-            adoptHostedTarget(projectRef.environmentId);
             await router.navigate({
               to: "/draft/$draftId",
               params: { draftId: storedDraftThread.draftId },
@@ -465,7 +464,6 @@ function useNewThreadState() {
       return openNewThread(projectRef, options);
     },
     [
-      adoptHostedTarget,
       createAndOpenDraft,
       getCurrentRouteTarget,
       pendingHostedLease,
@@ -495,7 +493,6 @@ function useNewThreadState() {
             currentRouteTarget.draftId === existing.draftId
           )
             return Promise.resolve();
-          adoptHostedTarget(environmentId);
           return router
             .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
             .then(() => undefined);
@@ -537,7 +534,7 @@ function useNewThreadState() {
       };
       return openNewChat(environmentId);
     },
-    [adoptHostedTarget, createAndOpenDraft, getCurrentRouteTarget, pendingHostedLease, router],
+    [createAndOpenDraft, getCurrentRouteTarget, pendingHostedLease, router],
   );
 
   /**
@@ -568,7 +565,6 @@ function useNewThreadState() {
             currentRouteTarget.draftId === existing.draftId
           )
             return Promise.resolve(opened);
-          adoptHostedTarget(projectRef.environmentId);
           return router
             .navigate({ to: "/draft/$draftId", params: { draftId: existing.draftId } })
             .then(() => opened);
@@ -625,7 +621,6 @@ function useNewThreadState() {
       return openTaskChat();
     },
     [
-      adoptHostedTarget,
       createAndOpenDraft,
       getCurrentRouteTarget,
       pendingHostedLease,

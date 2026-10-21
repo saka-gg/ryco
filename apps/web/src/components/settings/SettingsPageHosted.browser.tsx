@@ -7,9 +7,10 @@
 //
 // What is pinned here: hosted settings edit the selected node, and with the
 // global node menu gone from the header, the node header's "Switch device"
-// control is how a hosted reader chooses which node's settings they edit. It
-// moves the cursor through the hosted route the rest of the app uses, stays on
-// the settings page, and the header names the node it lands on.
+// control is how a hosted reader chooses which node's settings they edit. The
+// settings address names no node: the control moves the selection cursor, the
+// page stays where it is, and the header names the node it lands on. The
+// cursor itself follows the last opened thread across the pages no node owns.
 import "../../index.css";
 
 import { EnvironmentId } from "@ryco/contracts";
@@ -40,10 +41,12 @@ import {
   resetPrimaryEnvironmentDescriptorForTests,
   writePrimaryEnvironmentDescriptor,
 } from "../../environments/primary";
+import { hostedWebConnectionScopes } from "../../hostedHub/hostedConnectionScopes";
 import {
   getRoutedHostedNode,
   installHostedNodeHistory,
   resetHostedNodeRoutesForTests,
+  setHostedNodeRouteEnvironmentResolver,
 } from "../../hostedHub/nodeRoutes";
 import {
   resetHostedNodeRouteOrchestratorForTests,
@@ -115,6 +118,19 @@ function writePrimary(target: HostedHubNode): void {
   });
 }
 
+/**
+ * Selecting is the lifecycle owner's: as it would, the selection moves the
+ * shared node and the primary environment the settings page edits.
+ */
+function selectingNode() {
+  return vi.spyOn(hostedHubController, "selectNode").mockImplementation(async (nodeId: string) => {
+    const target = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
+    if (!target) return;
+    useHostedHubStore.setState({ selectedNode: target });
+    writePrimary(target);
+  });
+}
+
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 let fakeWindow: FakeHistoryWindow | null = null;
 let stopOrchestrator: (() => void) | null = null;
@@ -144,7 +160,7 @@ afterEach(async () => {
 });
 
 describe("hosted settings choose their device", () => {
-  it("moves the settings target to another node through the hosted route, staying on settings", async () => {
+  it("moves the settings target to another node through the selection cursor, staying on settings", async () => {
     await page.viewport(1_280, 720);
     useHostedHubStore.setState({
       accountStatus: "authenticated",
@@ -161,18 +177,9 @@ describe("hosted settings choose their device", () => {
       sessionEstablished: true,
     });
     writePrimary(studio);
-    fakeWindow = createFakeHistoryWindow(`/node/${studio.id}/settings`);
+    fakeWindow = createFakeHistoryWindow("/settings");
     installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
-    // Selecting is the lifecycle owner's: as it would, the selection moves the
-    // shared node and the primary environment the settings page edits.
-    const selectNode = vi
-      .spyOn(hostedHubController, "selectNode")
-      .mockImplementation(async (nodeId: string) => {
-        const target = useHostedHubStore.getState().nodes.find((entry) => entry.id === nodeId);
-        if (!target) return;
-        useHostedHubStore.setState({ selectedNode: target });
-        writePrimary(target);
-      });
+    const selectNode = selectingNode();
     stopOrchestrator = startHostedNodeRouteOrchestrator();
 
     mounted = await render(
@@ -192,14 +199,10 @@ describe("hosted settings choose their device", () => {
       .not.toBeInTheDocument();
     await page.getByRole("menuitemradio", { name: laptop.label }).click();
 
-    // The address takes the laptop's segment in place — still the settings
-    // page, no new history entry — and the route orchestrator selects it.
+    // The cursor moves; the address names no node and stays as it is.
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
-    expect(fakeWindow.location.pathname).toBe(`/node/${laptop.id}/settings`);
-    expect(getRoutedHostedNode()).toMatchObject({
-      nodeId: laptop.id,
-      logicalPathname: "/settings",
-    });
+    expect(fakeWindow.location.pathname).toBe("/settings");
+    expect(getRoutedHostedNode()).toMatchObject({ nodeId: null, logicalPathname: "/settings" });
     expect(fakeWindow.entries()).toHaveLength(1);
     expect(navigate).not.toHaveBeenCalled();
 
@@ -211,6 +214,100 @@ describe("hosted settings choose their device", () => {
     );
     // …and no connection chip rides along in the settings header.
     expect(document.querySelector("details > summary")).toBeNull();
+    // The page holds the demand for the node whose settings it shows.
+    await vi.waitFor(() =>
+      expect(hostedWebConnectionScopes.list()).toEqual([
+        expect.objectContaining({
+          environmentId: laptop.environmentId,
+          scope: { type: "interactive" },
+        }),
+      ]),
+    );
+  });
+
+  it("offers every node to choose from before the cursor is on any", async () => {
+    await page.viewport(1_280, 720);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [studio, laptop],
+    });
+    fakeWindow = createFakeHistoryWindow("/settings");
+    installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
+    const selectNode = selectingNode();
+    useSettingsDialogStore.setState({ editingScope: "client" });
+
+    mounted = await render(
+      <SidebarProvider>
+        <SettingsPage />
+      </SidebarProvider>,
+    );
+    const deviceHeader = () =>
+      document.querySelector<HTMLElement>('[aria-label="Device settings"]')?.textContent ?? "";
+    await vi.waitFor(() => expect(deviceHeader()).toContain("Choose a device"));
+    expect(hostedWebConnectionScopes.list()).toEqual([]);
+
+    await page.getByRole("button", { name: "Settings device" }).click();
+    await expect.element(page.getByRole("menuitemradio", { name: studio.label })).toBeVisible();
+    await page.getByRole("menuitemradio", { name: laptop.label }).click();
+
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
+    await vi.waitFor(() => expect(deviceHeader()).toContain(laptop.label));
+    expect(document.querySelector('[data-testid="settings-scope-label"]')?.textContent).toBe(
+      laptop.label,
+    );
+  });
+
+  it("targets the last opened thread's node from node-less home and settings", async () => {
+    await page.viewport(1_280, 720);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [studio, laptop],
+    });
+    setHostedNodeRouteEnvironmentResolver(
+      (environmentId) =>
+        [studio, laptop].find((entry) => entry.environmentId === environmentId)?.id ?? null,
+    );
+    fakeWindow = createFakeHistoryWindow(`/node/${studio.id}/${studio.environmentId}/t_1`);
+    const history = installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
+    selectingNode();
+    stopOrchestrator = startHostedNodeRouteOrchestrator();
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(studio.id));
+
+    // Home and settings name no node; the cursor stays on the thread's node.
+    for (const pathname of ["/", "/settings"]) {
+      history.push(pathname);
+      history.flush();
+      expect(fakeWindow.location.pathname).toBe(pathname);
+    }
+    mounted = await render(
+      <SidebarProvider>
+        <SettingsPage />
+      </SidebarProvider>,
+    );
+    const deviceHeader = () =>
+      document.querySelector<HTMLElement>('[aria-label="Device settings"]')?.textContent ?? "";
+    await vi.waitFor(() => expect(deviceHeader()).toContain(studio.label));
+    expect(document.querySelector("details > summary")).toBeNull();
+    expect(fakeWindow.location.pathname).toBe("/settings");
+
+    // A thread on another node moves the cursor, and settings follow it.
+    history.push(`/${laptop.environmentId}/t_2`);
+    history.flush();
+    expect(fakeWindow.location.pathname).toBe(`/node/${laptop.id}/${laptop.environmentId}/t_2`);
+    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode?.id).toBe(laptop.id));
+    history.push("/settings");
+    history.flush();
+    expect(fakeWindow.location.pathname).toBe("/settings");
+    await vi.waitFor(() => expect(deviceHeader()).toContain(laptop.label));
+    expect(deviceHeader()).not.toContain(studio.label);
   });
 
   it("waits for a current directory and browser before offering another node", async () => {

@@ -72,6 +72,9 @@ const entries = new Map<WebE2eeSlot, WebE2eeChannelEntry>();
 let displayedEnvironment: EnvironmentId | null = null;
 const listeners = new Set<() => void>();
 const environmentListeners = new Map<EnvironmentId, Set<() => void>>();
+/** The distinct states of every channel open in this tab, in a stable order. */
+let openChannelStatuses: readonly WebHostedE2eeChannelStatus[] = [];
+const openChannelListeners = new Set<() => void>();
 
 /** §11.4's bounded, application-session-local web diagnostic set. */
 export type WebE2eeLocalDiagnosticId = "e2ee_policy_generation_regressed";
@@ -87,7 +90,20 @@ function notifyDisplayed(): void {
   for (const listener of listeners) listener();
 }
 
+function refreshOpenChannelStatuses(): void {
+  const next = [...new Set(Array.from(entries.values(), (entry) => entry.state.status))].toSorted();
+  if (
+    next.length === openChannelStatuses.length &&
+    next.every((status, index) => status === openChannelStatuses[index])
+  ) {
+    return;
+  }
+  openChannelStatuses = next;
+  for (const listener of openChannelListeners) listener();
+}
+
 function notifySlot(slot: WebE2eeSlot): void {
+  refreshOpenChannelStatuses();
   if (slot === displayedEnvironment) notifyDisplayed();
   if (slot === null) return;
   const environment = environmentListeners.get(slot);
@@ -120,6 +136,20 @@ export function webE2eeSessionState(): WebE2eeSessionState {
 /** One environment's projection, displayed or not. A stable snapshot as above. */
 export function webE2eeSessionStateFor(environmentId: EnvironmentId): WebE2eeSessionState {
   return entries.get(environmentId)?.state ?? UNAVAILABLE;
+}
+
+/**
+ * The distinct states of every channel open in this tab, displayed or not;
+ * empty while none is. A stable snapshot, replaced only when the set changes.
+ */
+export function webE2eeOpenChannelStatuses(): readonly WebHostedE2eeChannelStatus[] {
+  return openChannelStatuses;
+}
+
+/** Notified when the set of open channel states changes. */
+export function subscribeWebE2eeOpenChannels(listener: () => void): () => void {
+  openChannelListeners.add(listener);
+  return () => void openChannelListeners.delete(listener);
 }
 
 /**

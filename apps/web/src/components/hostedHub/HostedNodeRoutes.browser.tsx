@@ -429,16 +429,16 @@ describe("hosted node route surfaces", () => {
   });
 
   it.each([
-    ["the node root", ""],
-    ["projects", "/projects"],
-    ["tasks", "/tasks"],
-    ["settings", "/settings"],
+    ["the node root", "", "/"],
+    ["projects", "/projects", "/projects"],
+    ["tasks", "/tasks", "/tasks"],
+    ["settings", "/settings", "/settings"],
   ] as const)(
-    "keeps the shell mounted on %s while an in-app switch has not selected the node yet",
-    async (_name, path) => {
+    "opens an older node address of %s on that page, node-less, with the cursor moved to the node",
+    async (_name, path, pagePathname) => {
       const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
       installRoute(`/node/${target.id}${path}`);
-      // The selection has not followed the route yet: the shell cannot wait for it.
+      // The selection has not followed yet: the shell cannot wait for it.
       const selectNode = vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
       seedCachedShell(target);
       useHostedHubStore.setState({
@@ -457,13 +457,15 @@ describe("hosted node route surfaces", () => {
         .element(page.getByRole("heading", { name: "Restoring your node" }))
         .not.toBeInTheDocument();
       expect(selectNode).toHaveBeenCalledWith(target.id);
-      expect(fakeWindow!.location.pathname).toBe(`/node/${target.id}${path}`);
+      // Only a thread or a draft names a node: the segment is dropped in place.
+      await vi.waitFor(() => expect(fakeWindow!.location.pathname).toBe(pagePathname));
+      expect(fakeWindow!.entries()).toHaveLength(1);
     },
   );
 
   it("keeps the shell mounted from the first pass to the established session", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
-    installRoute(`/node/${target.id}/projects`);
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
     selectingNode();
     seedCachedShell(target);
     useHostedHubStore.setState({
@@ -490,7 +492,7 @@ describe("hosted node route surfaces", () => {
 
   it("checks access before showing any shell on cold boot or resume", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
-    installRoute(`/node/${target.id}/projects`);
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
     const selectNode = selectingNode();
     seedCachedShell(target);
     useHostedHubStore.setState({
@@ -515,7 +517,7 @@ describe("hosted node route surfaces", () => {
 
   it("names the node it is opening when no shell can be shown for it yet", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
-    installRoute(`/node/${target.id}/projects`);
+    installRoute(`/node/${target.id}/${target.environmentId}/t_1`);
     // The selection has not followed the route and the store holds nothing for
     // the node, so the page waits, and says what for.
     vi.spyOn(hostedHubController, "selectNode").mockResolvedValue();
@@ -638,7 +640,7 @@ describe("hosted node route surfaces", () => {
     expect(fakeWindow!.location.pathname).toBe("/");
   });
 
-  it("selects a node by navigating into its node-scoped route", async () => {
+  it("opens home with the cursor on a node chosen from the directory", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
     installRoute("/nodes");
     navigateHub({ kind: "nodes" }, { replace: true });
@@ -654,11 +656,13 @@ describe("hosted node route surfaces", () => {
 
     await page.getByRole("button", { name: /^Studio online/ }).click();
     expect(selectNode).toHaveBeenCalledWith(target.id);
-    // The store holds nothing for the node yet, so there is no shell to keep.
+    // Home names no node: the workspace opens even though the store holds
+    // nothing for the node yet, and no full-page connection surface takes over.
+    await expect.element(page.getByTestId("root-app-shell")).toMatchTextContent("hosted-cached");
     await expect
       .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
-      .toBeVisible();
-    expect(fakeWindow!.location.pathname).toBe(`/node/${target.id}`);
+      .not.toBeInTheDocument();
+    expect(fakeWindow!.location.pathname).toBe("/");
     expect(fakeWindow!.entries()).toHaveLength(2);
     // Selection is never persisted outside the URL.
     expect(localStorage.length).toBe(0);
@@ -686,13 +690,13 @@ describe("hosted node route surfaces", () => {
     await expect
       .element(page.getByRole("heading", { name: `Connecting to ${target.label}` }))
       .not.toBeInTheDocument();
-    expect(fakeWindow!.location.pathname).toBe(`/node/${target.id}`);
+    expect(fakeWindow!.location.pathname).toBe("/");
     expect(fakeWindow!.entries()).toHaveLength(2);
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
   });
 
-  it("returns to the directory when history navigates back from a node route", async () => {
+  it("keeps the cursor when history navigates back from home to the directory", async () => {
     const target = node("node_aaaaaaaaaaaaaaaaaaaaaa");
     installRoute("/nodes");
     navigateHub({ kind: "nodes" }, { replace: true });
@@ -711,9 +715,9 @@ describe("hosted node route surfaces", () => {
 
     fakeWindow!.history.back();
     await expect.element(page.getByRole("heading", { name: /^Your nodes?$/ })).toBeVisible();
-    // Leaving the node moves only the selection: its session is not released,
-    // so going back to it is a cursor move.
-    await vi.waitFor(() => expect(useHostedHubStore.getState().selectedNode).toBeNull());
+    // The directory names no node either: the cursor stays and nothing is
+    // released, so going back to the node is immediate.
+    expect(useHostedHubStore.getState().selectedNode?.id).toBe(target.id);
     expect(hostedHubController.releaseEnvironment).not.toHaveBeenCalled();
     expect(fakeWindow!.location.pathname).toBe("/nodes");
   });
