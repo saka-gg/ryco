@@ -503,6 +503,14 @@ const RETIRED_CLAIM_SHAPES: ReadonlyArray<{ readonly name: string; readonly patt
 ];
 
 /**
+ * A literal every shape above requires verbatim. `normalizeForScan` only strips
+ * line leaders and collapses whitespace, so it cannot create one inside a word,
+ * and a file without either cannot match: most of the repository skips the
+ * normalization. The paraphrase test below keeps a new shape from outgrowing it.
+ */
+const SCAN_TRIGGER = /encr|forwarded/i;
+
+/**
  * The two sites that hold the retired sentence deliberately, and why each must
  * keep holding it.
  */
@@ -536,7 +544,11 @@ function normalizeForScan(text: string): string {
     .trim();
 }
 
+let scanTargets: readonly string[] | undefined;
+
+/** The repository walk, done once for the tests below. */
 function collectScanTargets(): readonly string[] {
+  if (scanTargets) return scanTargets;
   const found: string[] = [];
   const visit = (relativeDirectory: string): void => {
     let entries;
@@ -559,6 +571,7 @@ function collectScanTargets(): readonly string[] {
     }
   };
   for (const root of SCAN_ROOTS) visit(`${root}/`);
+  scanTargets = found;
   return found;
 }
 
@@ -589,7 +602,9 @@ describe("no public file still carries the retired claim", () => {
     const offenders: string[] = [];
     for (const path of collectScanTargets()) {
       if (path === SCAN_SELF_PATH || allowed.has(path)) continue;
-      const prose = normalizeForScan(readRepoFile(path));
+      const text = readRepoFile(path);
+      if (!SCAN_TRIGGER.test(text)) continue;
+      const prose = normalizeForScan(text);
       for (const { name, pattern } of RETIRED_CLAIM_SHAPES) {
         if (pattern.test(prose)) offenders.push(`${path}: ${name}`);
       }
@@ -619,6 +634,8 @@ describe("no public file still carries the retired claim", () => {
     ]) {
       const caught = RETIRED_CLAIM_SHAPES.some(({ pattern }) => pattern.test(paraphrase));
       expect(caught, paraphrase).toBe(true);
+      // The scan only normalizes files the trigger admits.
+      expect(SCAN_TRIGGER.test(paraphrase), paraphrase).toBe(true);
     }
   });
 });

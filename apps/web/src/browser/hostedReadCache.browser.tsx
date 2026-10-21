@@ -1,7 +1,7 @@
 import { EnvironmentId, MessageId, ProjectId, ThreadId, TurnId, WS_METHODS } from "@ryco/contracts";
 import type { ChatMessage } from "@ryco/client-runtime/state/threads";
 import type { WorkspaceMetadataSnapshot } from "@ryco/client-runtime/state/workspace";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { useEffect } from "react";
 import { HostedHubRoot } from "../components/hostedHub/HostedHubRoot";
@@ -31,6 +31,8 @@ import {
   canShowHostedReadPreview,
   readHostedReadCache,
   setHostedReadCacheEnabled,
+  setHostedReadCacheSaveTimingForTests,
+  settleHostedReadCacheSavesForTests,
 } from "../hostedHub/readCache";
 import {
   getHostedEnvironmentSessions,
@@ -169,6 +171,7 @@ const stableRecord = (record: unknown) => {
 };
 
 describe("hosted conversation cold start", () => {
+  afterEach(() => setHostedReadCacheSaveTimingForTests(null));
   it("purges the remembered account when fresh authentication wins the disk-read race", async () => {
     hostedHubController.resetForTests();
     await setHostedReadCacheEnabled(true);
@@ -259,6 +262,10 @@ describe("hosted conversation cold start", () => {
   });
   it("rewrites only the environment whose own inputs changed", async () => {
     hostedHubController.resetForTests();
+    // This counts writes, not their cadence: a short throttle and idle wait keep each save
+    // quick, and settling on the save queue proves "nothing else was written" without sleeping.
+    setHostedReadCacheSaveTimingForTests({ throttleMs: 20, idleTimeoutMs: 50 });
+    const settle = settleHostedReadCacheSavesForTests;
     await setHostedReadCacheEnabled(true);
     const vault = getHostedReadVault();
     const write = vi.spyOn(vault, "write");
@@ -365,7 +372,10 @@ describe("hosted conversation cold start", () => {
       },
       { timeout: 5_000 },
     );
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 3_000));
+    // The bootstrap writes each record once, and nothing is left to write.
+    await settle();
+    expect(recordWrites(first.environmentId)).toBe(1);
+    expect(recordWrites(second.environmentId)).toBe(1);
 
     // A scroll in one environment's thread rewrites that record alone.
     saveHostedThreadScroll(scopedThreadKey(first.ref), 120);

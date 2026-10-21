@@ -2,6 +2,7 @@ import { WS_METHODS, type MessageId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { browserWaitFor } from "../../test/browserWait";
 import {
   DEFAULT_VIEWPORT,
   createSnapshotForTargetUser,
@@ -53,7 +54,8 @@ describe("ChatView project skills and slash commands (full app)", () => {
       const editor = await waitForComposerEditor();
       editor.focus();
       expect(projectCommandReads()).toHaveLength(0);
-      await vi.waitFor(async () => {
+      // The first slash lazily loads the composer menu; one fill alone can outlast 1 s on CI.
+      await browserWaitFor(async () => {
         await page.getByTestId("composer-editor").fill("/");
         expect(projectCommandReads().length).toBeGreaterThan(0);
       });

@@ -95,8 +95,14 @@ let invalidatedByAnotherTab = false;
 let lastAuthenticatedSession: string | null = null;
 let authorityPurge: Promise<void> | null = null;
 let pending: Promise<void> = Promise.resolve();
-/** A save is scheduled: waiting out the throttle, or for an idle period. */
-let savePending = false;
+/** The scheduled save while it waits out the throttle, or for an idle period. */
+let scheduledSave: Promise<void> | null = null;
+interface SaveTiming {
+  readonly throttleMs: number;
+  readonly idleTimeoutMs: number;
+}
+const SAVE_TIMING: SaveTiming = { throttleMs: 750, idleTimeoutMs: 2_000 };
+let saveTiming = SAVE_TIMING;
 const environments = new Map<EnvironmentId, CachedEnvironment>();
 /** The catalog last written for `owner`, so an unchanged catalog is not re-encrypted. */
 let writtenCatalog: { readonly owner: ReadVaultAccount; readonly key: string } | null = null;
@@ -561,17 +567,36 @@ function whenIdle(callback: () => void, timeoutMs: number): void {
 }
 
 function scheduleSave() {
-  if (savePending || !account || !snapshot.enabled) return;
-  savePending = true;
+  if (scheduledSave || !account || !snapshot.enabled) return;
   // Throttle, rather than debounce: continuous token output must still reach
   // disk. The encryption and write then wait for an idle period, so a busy
   // stream is not interrupted for them; page hide still flushes at once.
-  setTimeout(() => {
-    whenIdle(() => {
-      savePending = false;
-      void queue(save);
-    }, 2_000);
-  }, 750);
+  scheduledSave = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      whenIdle(() => {
+        scheduledSave = null;
+        resolve(queue(save));
+      }, saveTiming.idleTimeoutMs);
+    }, saveTiming.throttleMs);
+  });
+}
+
+/** Shortens the save throttle and idle wait (`null` restores them), so tests need not wait them out. */
+export function setHostedReadCacheSaveTimingForTests(timing: SaveTiming | null): void {
+  saveTiming = timing ?? SAVE_TIMING;
+}
+
+/**
+ * Resolves once no save is scheduled, queued or running, including any save the
+ * finishing work schedules. A test asserting that a change wrote nothing waits
+ * on this rather than on a sleep longer than the throttle.
+ */
+export async function settleHostedReadCacheSavesForTests(): Promise<void> {
+  for (;;) {
+    const tail = pending;
+    await (scheduledSave ?? tail);
+    if (scheduledSave === null && pending === tail) return;
+  }
 }
 
 export async function setHostedReadCacheEnabled(enabled: boolean): Promise<void> {

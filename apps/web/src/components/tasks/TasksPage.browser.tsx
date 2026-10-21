@@ -296,8 +296,18 @@ function rowButton(taskId: string, name: string): HTMLButtonElement {
   return found;
 }
 
+/**
+ * Opens a row from its title, where a person clicks it. The line's middle can
+ * fall on the row's hidden Start, which then takes the click (CI's Linux font
+ * metrics put it there for a row with a linked branch).
+ */
 async function openRow(taskId: string, title: string) {
-  await userEvent.click(rowButton(taskId, title));
+  const line = rowButton(taskId, title);
+  const lineBox = line.getBoundingClientRect();
+  const titleBox = rowElement(taskId)!.querySelector(".tsk-title")!.getBoundingClientRect();
+  await userEvent.click(line, {
+    position: { x: titleBox.left + titleBox.width / 2 - lineBox.left, y: lineBox.height / 2 },
+  });
   await vi.waitFor(() => expect(rowElement(taskId)?.hasAttribute("data-open")).toBe(true));
 }
 
