@@ -7,6 +7,7 @@ export * from "./nativeHandoff.ts";
 export * from "./hostedIdentity.ts";
 export * from "./nativeE2ee.ts";
 export * from "./localIntroduction.ts";
+export * from "./nodeUpdate.ts";
 export * from "./desktopNativeNodeClaim.ts";
 export * from "./hubConnector.ts";
 export * from "./ipc.ts";

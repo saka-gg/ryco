@@ -323,7 +323,6 @@ export type DesktopUpdateStatus =
   | "downloaded"
   | "error";
 
-export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
 export type DesktopAppStageLabel = "Beta" | "Dev" | "Nightly";
@@ -334,10 +333,18 @@ export interface DesktopAppBranding {
   displayName: string;
 }
 
-export interface DesktopRuntimeInfo {
-  hostArch: DesktopRuntimeArch;
-  appArch: DesktopRuntimeArch;
-  runningUnderArm64Translation: boolean;
+/**
+ * An update another device asked this desktop app to install (Update everything on a
+ * remote client). The app downloads it, then counts down to its relaunch so someone at
+ * this machine can postpone it.
+ */
+export interface DesktopRemoteInstallState {
+  requestId: string;
+  targetVersion: string;
+  phase: "downloading" | "countdown" | "installing" | "postponed" | "failed";
+  /** `countdown` only: when the app relaunches unless it is postponed. */
+  restartAt: string | null;
+  message: string | null;
 }
 
 export interface DesktopUpdateState {
@@ -345,9 +352,6 @@ export interface DesktopUpdateState {
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
   currentVersion: string;
-  hostArch: DesktopRuntimeArch;
-  appArch: DesktopRuntimeArch;
-  runningUnderArm64Translation: boolean;
   availableVersion: string | null;
   downloadedVersion: string | null;
   downloadPercent: number | null;
@@ -355,6 +359,8 @@ export interface DesktopUpdateState {
   message: string | null;
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
+  /** Absent or `null` unless another device asked this app to update. */
+  remoteInstall?: DesktopRemoteInstallState | null;
 }
 
 export interface DesktopUpdateActionResult {
@@ -997,6 +1003,8 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  /** Answer a remote install's countdown: relaunch now, or postpone it (the download stays). */
+  respondToRemoteInstall: (action: "now" | "postpone") => Promise<DesktopUpdateState>;
   /** Show a native notification when a turn completes and the window is unfocused. */
   notifyTurnComplete: (notification: DesktopTurnCompleteNotification) => Promise<void>;
   /** Subscribe to notification clicks so the renderer can navigate to the thread. */

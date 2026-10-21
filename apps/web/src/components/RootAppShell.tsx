@@ -34,7 +34,7 @@ import {
 import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
 import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
-import { isHostedHubMode } from "../env";
+import { isElectron, isHostedHubMode } from "../env";
 import { useHostedRpcCapability } from "../hostedHub/capabilities";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -149,6 +149,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
+        {isElectron ? <DeferredRemoteInstallCountdown /> : null}
         {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
         {appShell}
@@ -308,11 +309,34 @@ function AuthenticatedTracingBootstrap() {
   return null;
 }
 
+// Only desktop apps get update requests from other devices; the web build never loads it.
+const LazyRemoteInstallCountdown = preloadableLazy(() =>
+  import("../updates/RemoteInstallCountdown").then((module) => module.RemoteInstallCountdown),
+);
+
+function DeferredRemoteInstallCountdown() {
+  const ready = useLazyComponentReady(LazyRemoteInstallCountdown, true, {
+    onLoadError: (error) => console.warn("Remote install countdown failed to load.", error),
+  });
+  return ready ? <LazyRemoteInstallCountdown /> : null;
+}
+
 function EnvironmentConnectionManagerBootstrap() {
   useEffect(() => {
     const stopEnvironmentConnections = startEnvironmentConnectionService();
     const stopDesktopWorkspace = startDesktopWorkspaceBridge();
+    // Follows the update state of the nodes those connections reach; it opens none. Loaded
+    // off the shell's critical path, like the update pill that shows it.
+    let disposed = false;
+    let stopNodeUpdates: (() => void) | null = null;
+    void import("../updates/nodeUpdateStore")
+      .then(({ startNodeUpdateWiring }) => {
+        if (!disposed) stopNodeUpdates = startNodeUpdateWiring();
+      })
+      .catch((error: unknown) => console.warn("Node update following failed to load.", error));
     return () => {
+      disposed = true;
+      stopNodeUpdates?.();
       stopDesktopWorkspace();
       stopEnvironmentConnections();
     };

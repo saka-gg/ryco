@@ -31,6 +31,8 @@ const SETTINGS_SCOPE_BY_SECTION = {
   keybindings: "browser",
   "source-control": "mixed",
   connections: "device",
+  // This app's own updater and every device it reaches, never one node's settings.
+  updates: "device",
   security: "node",
   diagnostics: "node",
   statistics: "node",
@@ -108,6 +110,9 @@ export function hostedSettingsSectionAllowed(
 ): boolean {
   if (section === "connections") return false;
   if (section === "appearance" || section === "keybindings") return true;
+  // Lists every device; whether one may be updated is each device's own owner
+  // check (the plan marks the rest skipped), not this node's role.
+  if (section === "updates") return true;
   // Account management is a Hub page now, not a tab of this dialog, so the
   // hosted client never opens the dialog on it. Kept closed rather than
   // deleted: `SettingsSectionId` still carries the id, and a stale caller
@@ -175,7 +180,7 @@ export function settingsSectionInDestination(
   desktop: boolean,
 ): boolean {
   if (scope === "node")
-    return !["account", "appearance", "computer-use", "keybindings"].includes(section);
+    return !["account", "appearance", "computer-use", "keybindings", "updates"].includes(section);
   if (section === "integrations") return desktop;
   return [
     "general",
@@ -184,6 +189,7 @@ export function settingsSectionInDestination(
     "keybindings",
     "source-control",
     "connections",
+    "updates",
     "diagnostics",
   ].includes(section);
 }

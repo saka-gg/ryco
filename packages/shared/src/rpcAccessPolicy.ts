@@ -172,6 +172,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.notesCommand]: "operator",
   [WS_METHODS.serverRefreshProviders]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
+  [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
+  [WS_METHODS.serverCheckNodeUpdate]: "owner",
+  [WS_METHODS.serverUpdateNode]: "owner",
   [WS_METHODS.serverUpdateSettings]: "owner",
   [WS_METHODS.serverUpsertKeybinding]: "owner",
   [WS_METHODS.shellOpenInEditor]: "operator",
@@ -436,6 +439,10 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   // Re-probes provider status; the result is derived state, not a setting.
   [WS_METHODS.serverRefreshProviders]: "read",
   [WS_METHODS.serverUpdateProvider]: "mutation",
+  [WS_METHODS.serverSubscribeNodeUpdate]: "read",
+  // Asks the registry (or the desktop updater) again; it changes nothing on the node.
+  [WS_METHODS.serverCheckNodeUpdate]: "read",
+  [WS_METHODS.serverUpdateNode]: "mutation",
   [WS_METHODS.serverUpdateSettings]: "mutation",
   [WS_METHODS.serverUpsertKeybinding]: "mutation",
   [WS_METHODS.shellOpenInEditor]: "mutation",

@@ -387,6 +387,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description: "Devices and sessions allowed to connect.",
     keywords: "revoke tokens",
   },
+  {
+    section: "updates",
+    title: "Update everything",
+    owner: "client",
+    description: "Update Ryco and its providers on every connected device in one click.",
+    keywords: "upgrade release version check for updates node cli provider channel",
+  },
   // The section §13.5's copy points an owner at — "Settings → Security explains
   // what else this tab cannot check" — so the terms it sends them looking for
   // have to resolve here. `SettingsPage.test.ts` asserts they do.

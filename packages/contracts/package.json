@@ -46,6 +46,11 @@
       "import": "./src/nativeE2ee.ts",
       "require": "./src/nativeE2ee.ts"
     },
+    "./node-update": {
+      "types": "./src/nodeUpdate.ts",
+      "import": "./src/nodeUpdate.ts",
+      "require": "./src/nodeUpdate.ts"
+    },
     "./local-introduction": {
       "types": "./src/localIntroduction.ts",
       "import": "./src/localIntroduction.ts",

@@ -9,6 +9,10 @@ import { Schema } from "effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   createProviderMaintenanceController,
+  isProviderUpdateEligible,
+  isProviderUpdateManual,
+  providerUpdateVersions,
+  readProviderUpdateResult,
   type ProviderMaintenanceEnvironment,
 } from "./providerMaintenance.ts";
 
@@ -265,5 +269,55 @@ describe("provider maintenance batches", () => {
   it("rejects fabricated previews", async () => {
     const controller = createProviderMaintenanceController({ readEnvironment: () => null });
     await expect(controller.execute({ targets: [] })).rejects.toThrow("preview issued");
+  });
+});
+
+describe("provider update rules", () => {
+  it("tells one-click updates from manual ones", () => {
+    const base = provider();
+    const manual = { ...base, versionAdvisory: { ...base.versionAdvisory!, canUpdate: false } };
+    expect(isProviderUpdateEligible(base, [])).toBe(true);
+    expect(isProviderUpdateEligible(base, [base.instanceId])).toBe(false);
+    expect(isProviderUpdateEligible(manual, [])).toBe(false);
+    expect(isProviderUpdateManual(manual)).toBe(true);
+    expect(isProviderUpdateManual(base)).toBe(false);
+    expect(isProviderUpdateManual({ ...manual, enabled: false })).toBe(false);
+    expect(isProviderUpdateManual({ ...manual, installed: false })).toBe(false);
+    expect(
+      isProviderUpdateManual({
+        ...manual,
+        versionAdvisory: { ...manual.versionAdvisory, status: "current" },
+      }),
+    ).toBe(false);
+    expect(providerUpdateVersions(base)).toEqual({ fromVersion: "1.0.0", toVersion: "1.1.0" });
+    const { versionAdvisory: _advisory, ...withoutAdvisory } = base;
+    expect(providerUpdateVersions(withoutAdvisory)).toEqual({
+      fromVersion: "1.0.0",
+      toVersion: null,
+    });
+  });
+
+  it("reads one instance's terminal result out of an update answer", () => {
+    const target = { instanceId: provider().instanceId, driver };
+    const answer = (status: "succeeded" | "running") => ({
+      providers: [
+        {
+          ...provider(),
+          updateState: {
+            status,
+            startedAt: null,
+            finishedAt: null,
+            message: "Installed",
+            output: null,
+          },
+        },
+      ],
+    });
+    expect(readProviderUpdateResult(answer("succeeded"), target)).toEqual({
+      status: "succeeded",
+      message: "Installed",
+    });
+    expect(readProviderUpdateResult(answer("running"), target).status).toBe("unknown");
+    expect(readProviderUpdateResult({ providers: [] }, target).status).toBe("unknown");
   });
 });

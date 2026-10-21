@@ -15,10 +15,14 @@ export type SettingsSectionId =
   | "keybindings"
   | "source-control"
   | "connections"
+  | "updates"
   | "security"
   | "diagnostics"
   | "statistics"
   | "archived";
+
+/** Sections only this app has: opening one never switches to a device's settings. */
+const CLIENT_ONLY_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["keybindings", "updates"]);
 
 interface SettingsDialogStore {
   open: boolean;
@@ -53,7 +57,7 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
       open: true,
       section: section ?? (environmentId ? "general" : state.section),
       editingScope:
-        section === "keybindings"
+        section && CLIENT_ONLY_SECTIONS.has(section)
           ? "client"
           : environmentId || (section && settingsSectionScope(section) === "node")
             ? "node"

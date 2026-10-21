@@ -3,14 +3,11 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@ryco/contra
 
 import {
   canCheckForUpdate,
-  getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateInstallConfirmationMessage,
   isDesktopUpdateButtonDisabled,
   resolveDesktopUpdateButtonAction,
-  shouldShowArm64IntelBuildWarning,
-  shouldShowDesktopUpdateButton,
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 
@@ -19,9 +16,6 @@ const baseState: DesktopUpdateState = {
   status: "idle",
   channel: "latest",
   currentVersion: "1.0.0",
-  hostArch: "x64",
-  appArch: "x64",
-  runningUnderArm64Translation: false,
   availableVersion: null,
   downloadedVersion: null,
   downloadPercent: null,
@@ -38,7 +32,6 @@ describe("desktop update button state", () => {
       status: "available",
       availableVersion: "1.1.0",
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
   });
 
@@ -51,7 +44,6 @@ describe("desktop update button state", () => {
       errorContext: "download",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("download");
     expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
   });
@@ -66,7 +58,6 @@ describe("desktop update button state", () => {
       errorContext: "install",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
     expect(getDesktopUpdateButtonTooltip(state)).toContain("Click to retry");
   });
@@ -81,7 +72,7 @@ describe("desktop update button state", () => {
     expect(resolveDesktopUpdateButtonAction(state)).toBe("install");
   });
 
-  it("hides the button for non-actionable check errors", () => {
+  it("offers no action for non-actionable check errors", () => {
     const state: DesktopUpdateState = {
       ...baseState,
       status: "error",
@@ -89,7 +80,6 @@ describe("desktop update button state", () => {
       errorContext: "check",
       canRetry: true,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(false);
     expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
   });
 
@@ -100,7 +90,6 @@ describe("desktop update button state", () => {
       availableVersion: "1.1.0",
       downloadPercent: 42.5,
     };
-    expect(shouldShowDesktopUpdateButton(state)).toBe(true);
     expect(isDesktopUpdateButtonDisabled(state)).toBe(true);
     expect(getDesktopUpdateButtonTooltip(state)).toContain("42%");
   });
@@ -179,32 +168,6 @@ describe("desktop update UI helpers", () => {
         state: { ...baseState, message: "checksum mismatch" },
       }),
     ).toBe(false);
-  });
-
-  it("shows an Apple Silicon warning for Intel builds under Rosetta", () => {
-    const state: DesktopUpdateState = {
-      ...baseState,
-      hostArch: "arm64",
-      appArch: "x64",
-      runningUnderArm64Translation: true,
-    };
-
-    expect(shouldShowArm64IntelBuildWarning(state)).toBe(true);
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Apple Silicon");
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Intel build");
-  });
-
-  it("changes the warning copy when a native build update is ready to download", () => {
-    const state: DesktopUpdateState = {
-      ...baseState,
-      hostArch: "arm64",
-      appArch: "x64",
-      runningUnderArm64Translation: true,
-      status: "available",
-      availableVersion: "1.1.0",
-    };
-
-    expect(getArm64IntelBuildWarningDescription(state)).toContain("Download the available update");
   });
 
   it("includes the downloaded version in the install confirmation copy", () => {

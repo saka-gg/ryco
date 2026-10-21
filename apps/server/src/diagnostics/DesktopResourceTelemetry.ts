@@ -1,3 +1,8 @@
+import {
+  attachDesktopAppUpdateChannel,
+  detachDesktopAppUpdateChannel,
+  receiveDesktopAppUpdateSnapshot,
+} from "../desktopAppUpdateBridge.ts";
 import { attachDesktopLifecycleChannel } from "../desktopLifecycle.ts";
 import { nativeResourceMonitor } from "./NativeResourceMonitor.ts";
 import { Socket } from "node:net";
@@ -5,6 +10,7 @@ import type { Duplex } from "node:stream";
 import {
   createTelemetryLineReader,
   DESKTOP_TELEMETRY_STALE_MS,
+  parseDesktopAppUpdateStateFrame,
   parseDesktopResourceTelemetry,
   type DesktopResourceTelemetrySnapshot,
 } from "@ryco/shared/desktopResourceTelemetry";
@@ -29,6 +35,11 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
     "data",
     createTelemetryLineReader(
       (value) => {
+        const appUpdate = parseDesktopAppUpdateStateFrame(value);
+        if (appUpdate) {
+          receiveDesktopAppUpdateSnapshot(appUpdate.state);
+          return;
+        }
         const snapshot = parseDesktopResourceTelemetry(value);
         if (!snapshot) return;
         powerReceivedAt = Date.now();
@@ -53,6 +64,7 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
   );
   connection.on("error", () => connection.destroy());
   connection.on("close", () => {
+    detachDesktopAppUpdateChannel();
     if (staleTimer) clearTimeout(staleTimer);
     nativeResourceMonitor.setHostPowerState(null);
     latest = null;
@@ -90,6 +102,7 @@ export function initializeDesktopResourceTelemetry(fd: number): void {
     connection.unref();
     receiver = makeDesktopResourceTelemetry(connection);
     attachDesktopLifecycleChannel(connection);
+    attachDesktopAppUpdateChannel(connection);
   } catch {
     // Optional diagnostics must never prevent backend startup.
   }

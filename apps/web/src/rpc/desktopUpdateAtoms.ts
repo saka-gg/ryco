@@ -23,6 +23,45 @@ export function setDesktopUpdateState(state: DesktopUpdateState | null): void {
   appAtomRegistry.set(desktopUpdateStateAtom, state);
 }
 
+/** Notifies on every write to {@link desktopUpdateStateAtom}; returns the unsubscribe. */
+export function subscribeDesktopUpdateState(listener: () => void): () => void {
+  return appAtomRegistry.subscribe(desktopUpdateStateAtom, () => listener());
+}
+
+/**
+ * Keeps {@link desktopUpdateStateAtom} current outside React: fetches a fresh
+ * snapshot now and mirrors every updater push until the returned stop runs.
+ * A no-op outside the desktop app.
+ */
+export function followDesktopUpdateState(): () => void {
+  const bridge = typeof window === "undefined" ? undefined : window.desktopBridge;
+  if (!bridge) return () => undefined;
+
+  let cancelled = false;
+  if (typeof bridge.getUpdateState === "function") {
+    void bridge
+      .getUpdateState()
+      .then((nextState) => {
+        if (!cancelled) {
+          setDesktopUpdateState(nextState);
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  const unsubscribe =
+    typeof bridge.onUpdateState === "function"
+      ? bridge.onUpdateState((nextState) => {
+          setDesktopUpdateState(nextState);
+        })
+      : undefined;
+
+  return () => {
+    cancelled = true;
+    unsubscribe?.();
+  };
+}
+
 /**
  * Subscribes to desktop updater push events and returns the latest state.
  * Re-fetches a fresh snapshot on every mount (previous `refetchOnMount: "always"`
@@ -31,34 +70,7 @@ export function setDesktopUpdateState(state: DesktopUpdateState | null): void {
 export function useDesktopUpdateState(): DesktopUpdateState | null {
   const state = useAtomValue(desktopUpdateStateAtom);
 
-  useEffect(() => {
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
-
-    let cancelled = false;
-    if (typeof bridge.getUpdateState === "function") {
-      void bridge
-        .getUpdateState()
-        .then((nextState) => {
-          if (!cancelled) {
-            setDesktopUpdateState(nextState);
-          }
-        })
-        .catch(() => undefined);
-    }
-
-    const unsubscribe =
-      typeof bridge.onUpdateState === "function"
-        ? bridge.onUpdateState((nextState) => {
-            setDesktopUpdateState(nextState);
-          })
-        : undefined;
-
-    return () => {
-      cancelled = true;
-      unsubscribe?.();
-    };
-  }, []);
+  useEffect(() => followDesktopUpdateState(), []);
 
   return state;
 }

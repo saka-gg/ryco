@@ -100,6 +100,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       usageLimitRecovery: true,
       worktreeNotes: true,
       localTasks: true,
+      nodeSelfUpdate: true,
       threadFork: true,
       providerSessionPrewarm: true,
       providerProjectCommands: true,

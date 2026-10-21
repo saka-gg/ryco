@@ -4,6 +4,7 @@ import {
   ActivityIcon,
   AppWindowIcon,
   ArchiveIcon,
+  ArrowUpCircleIcon,
   ArrowUpRightIcon,
   BarChart3Icon,
   BlocksIcon,
@@ -167,6 +168,12 @@ const NAV_ITEMS: ReadonlyArray<NavItem> = [
     description: "The devices this app can reach and how it reaches them.",
   },
   {
+    id: "updates",
+    label: "Updates",
+    icon: ArrowUpCircleIcon,
+    description: "Ryco and its providers on every device this app reaches, in one click.",
+  },
+  {
     id: "security",
     label: "Security",
     icon: ShieldIcon,
@@ -273,6 +280,9 @@ const LazySourceControlSettingsPanel = preloadableLazy(() =>
 const LazyConnectionsSettings = preloadableLazy(() =>
   import("./ConnectionsSettings").then((module) => module.ConnectionsSettings),
 );
+const LazyUpdatesSettings = preloadableLazy(() =>
+  import("./UpdatesSettings").then((module) => module.UpdatesSettings),
+);
 const LazyNodeSecuritySettings = preloadableLazy(() =>
   import("./NodeSecuritySettings").then((module) => module.NodeSecuritySettings),
 );
@@ -291,6 +301,7 @@ const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>>
   keybindings: LazyKeybindingsSettingsPanel,
   "source-control": LazySourceControlSettingsPanel,
   connections: LazyConnectionsSettings,
+  updates: LazyUpdatesSettings,
   security: LazyNodeSecuritySettings,
   diagnostics: LazyDiagnosticsSettings,
 };
@@ -334,6 +345,8 @@ function SectionPanel({
       return <LazySourceControlSettingsPanel />;
     case "connections":
       return <LazyConnectionsSettings />;
+    case "updates":
+      return <LazyUpdatesSettings />;
     case "security":
       return <LazyNodeSecuritySettings />;
     case "diagnostics":

@@ -70,8 +70,9 @@ describe("the frozen phone surface keeps its existing section inventory", () => 
     // the latter is what let it through.
     expect([...PHONE_SETTINGS_SECTION_IDS].toSorted()).toEqual(
       SETTINGS_SECTION_IDS.filter(
-        // Integrations is a new desktop/web page; the phone tier remains frozen.
-        (id) => id !== "integrations" && !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
+        // Integrations and Updates are new desktop/web pages; the phone tier remains frozen.
+        (id) =>
+          id !== "integrations" && id !== "updates" && !DESKTOP_ONLY_SETTINGS_SECTIONS.has(id),
       ).toSorted(),
     );
   });
