@@ -50,6 +50,7 @@ describe("pre-auth server environment descriptor", () => {
       "environmentIcon",
       "fileAttachments",
       "localTasks",
+      "nodeAutoSettlement",
       "projectIcons",
       "projectPreferences",
       "projectSearchEmptyQuery",
