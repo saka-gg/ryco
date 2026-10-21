@@ -26,15 +26,29 @@ import {
 } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  makeLazyProviderMaintenanceCapabilities,
+  makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
+} from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("grok");
-// Grok updates are manual, so capability resolution never needs PATH or realpath probing.
-const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
+
+/** The install script puts the CLI in `~/.grok/bin`. */
+function isGrokNativeCommandPath(commandPath: string): boolean {
+  return normalizeCommandPath(commandPath).includes("/.grok/bin/");
+}
+
+// Script installs update themselves (`grok update`); the `grok-build` cask is found from its keg.
+const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
-  packageName: null,
+  npmPackageName: "@xai-official/grok",
+  nativeUpdate: {
+    args: ["update"],
+    isCommandPath: isGrokNativeCommandPath,
+  },
 });
 
 export type GrokDriverEnv =
@@ -88,6 +102,10 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies GrokSettings;
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
+      });
       const probeFingerprint = yield* makeProviderProbeFingerprint({
         driverKind: DRIVER_KIND,
         binaryPaths: [effectiveConfig.binaryPath],
@@ -108,7 +126,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
       );
 
       const snapshot = yield* makeManagedServerProvider<GrokSettings>({
-        maintenanceCapabilities: Effect.succeed(MAINTENANCE_CAPABILITIES),
+        maintenanceCapabilities,
         probeFingerprint,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
@@ -116,13 +134,17 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         initialSnapshot: (settings) => stampIdentity(buildInitialGrokProviderSnapshot(settings)),
         checkProvider,
         enrichSnapshot: ({ snapshot: currentSnapshot, publishSnapshot }) =>
-          enrichGrokSnapshot({
-            snapshot: currentSnapshot,
-            maintenanceCapabilities: MAINTENANCE_CAPABILITIES,
-            publishSnapshot,
-            httpClient,
-            serverSettings,
-          }),
+          maintenanceCapabilities.pipe(
+            Effect.flatMap((capabilities) =>
+              enrichGrokSnapshot({
+                snapshot: currentSnapshot,
+                maintenanceCapabilities: capabilities,
+                publishSnapshot,
+                httpClient,
+                serverSettings,
+              }),
+            ),
+          ),
         // Like every other driver, probe on demand only (client revalidation of a stale
         // snapshot, explicit refresh, settings change); no idle background polling.
         refreshInterval: null,

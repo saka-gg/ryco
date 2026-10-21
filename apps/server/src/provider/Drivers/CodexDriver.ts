@@ -46,6 +46,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -56,12 +57,47 @@ import {
 } from "./CodexHomeLayout.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: DRIVER_KIND,
-  npmPackageName: "@openai/codex",
-  homebrewFormula: "codex",
-  nativeUpdate: null,
-});
+const CODEX_STANDALONE_SEGMENT = "/packages/standalone/";
+const CODEX_STANDALONE_PATTERN = /[\\/]packages[\\/]standalone[\\/]/gi;
+
+/**
+ * The standalone installer links `~/.local/bin/codex` (Windows:
+ * `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, a junction) into
+ * `$CODEX_HOME/packages/standalone/…`, which the real path shows.
+ */
+function isCodexStandaloneCommandPath(commandPath: string): boolean {
+  return normalizeCommandPath(commandPath).includes(CODEX_STANDALONE_SEGMENT);
+}
+
+/** The `CODEX_HOME` a standalone install lives in, read from its real path. */
+export function codexHomeFromStandaloneCommandPath(realCommandPath: string): string | null {
+  let index = -1;
+  for (const match of realCommandPath.matchAll(CODEX_STANDALONE_PATTERN)) {
+    index = match.index;
+  }
+  return index > 0 ? realCommandPath.slice(0, index) : null;
+}
+
+/**
+ * `codex update` replaces the standalone tree under `CODEX_HOME`, so it runs against the home
+ * that tree lives in. Without a standalone path it gets the instance's explicitly selected shared
+ * home (an auth-overlay shadow home only carries auth), or Codex's own default.
+ */
+export function makeCodexMaintenanceResolver(explicitSharedHomePath: string | undefined) {
+  return makePackageManagedProviderMaintenanceResolver({
+    provider: DRIVER_KIND,
+    npmPackageName: "@openai/codex",
+    nativeUpdate: {
+      args: ["update"],
+      isCommandPath: isCodexStandaloneCommandPath,
+      env: (context) => {
+        const codexHome =
+          codexHomeFromStandaloneCommandPath(context.realCommandPath) ?? explicitSharedHomePath;
+        return codexHome ? { CODEX_HOME: codexHome } : undefined;
+      },
+    },
+  });
+}
 
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
@@ -141,10 +177,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
       } satisfies CodexSettings;
-      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
+      const maintenanceCapabilities = yield* makeLazyProviderMaintenanceCapabilities(
+        makeCodexMaintenanceResolver(
+          homeLayout.effectiveHomePath === undefined ? undefined : homeLayout.sharedHomePath,
+        ),
+        {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        },
+      );
       const probeFingerprint = yield* makeProviderProbeFingerprint({
         driverKind: DRIVER_KIND,
         binaryPaths: [effectiveConfig.binaryPath],

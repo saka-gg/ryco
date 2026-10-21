@@ -10,15 +10,20 @@ import {
 import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
 import { Cause, Context, DateTime, Duration, Effect, Layer, Option, Ref, Schema } from "effect";
 import { HttpClient } from "effect/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
+  makeMaintenanceChildProcess,
+  resolveLatestProviderUpdateAction,
   resolveLatestProviderVersion,
 } from "./providerMaintenance.ts";
-import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import type {
+  ProviderMaintenanceCapabilities,
+  ProviderMaintenanceCommandAction,
+} from "./providerMaintenance.ts";
 import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "./ModelManifest.ts";
 import { rateProviderVersion } from "./providerCompatibility.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -64,11 +69,19 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
     readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
     readonly command: string;
     readonly args: ReadonlyArray<string>;
+    readonly env: NodeJS.ProcessEnv | undefined;
   }) {
     const collectCommandResult = Effect.fn("ProviderMaintenanceRunner.collectCommandResult")(
       function* () {
+        // Windows package managers are `.cmd` shims that only start through `cmd.exe`.
         const child = yield* input.spawner
-          .spawn(ChildProcess.make(input.command, [...input.args]))
+          .spawn(
+            makeMaintenanceChildProcess({
+              command: input.command,
+              args: input.args,
+              env: input.env,
+            }),
+          )
           .pipe(
             Effect.mapError(
               (cause) =>
@@ -186,11 +199,12 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
     onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
     onSome: (service) => service.current,
   });
-  const runMaintenanceCommand = (command: string, args: ReadonlyArray<string>) =>
+  const runMaintenanceCommand = (action: ProviderMaintenanceCommandAction) =>
     runProviderMaintenanceCommandWithSpawner({
       spawner,
-      command,
-      args,
+      command: action.executable,
+      args: action.args,
+      env: action.env,
     });
   const commandCoordinator = yield* makeProviderMaintenanceCommandCoordinator({
     makeAlreadyRunningError: () =>
@@ -313,11 +327,12 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
           function* () {
             // Compatibility gate, inside the command lock so a queued update re-checks after
-            // its wait. It rates the version `<pkg>@latest` installs right now (a fresh fetch,
-            // never the snapshot's cached rating) against the current manifest, bundled
-            // policies and code-owned floors. The fetch runs even with provider update checks
-            // disabled: the user asked for this update, and the install contacts the registry
-            // anyway. An unknown latest version (no package, offline) is not blocked.
+            // its wait. It rates the version the installer would install right now (a fresh
+            // lookup through the installer's own channel, e.g. `brew info` or `pnpm outdated`,
+            // else npm; never the snapshot's cached rating) against the current manifest,
+            // bundled policies and code-owned floors. The lookup runs even with provider update
+            // checks disabled: the user asked for this update, and the install contacts the
+            // registry anyway. An unknown latest version (no package, offline) is not blocked.
             const latestVersion = yield* resolveLatestProviderVersion(capabilities, {
               fresh: true,
             }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
@@ -351,7 +366,9 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               }),
             );
 
-            const result = yield* runMaintenanceCommand(update.executable, update.args);
+            // pnpm installs the exact version that was rated, not whatever `@latest` resolves to.
+            const action = resolveLatestProviderUpdateAction(capabilities, latestVersion) ?? update;
+            const result = yield* runMaintenanceCommand(action);
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
               return yield* finish(

@@ -37,7 +37,7 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import {
   cursorAgentCommandCandidates,
-  makeCursorMaintenanceCapabilities,
+  resolveCursorMaintenanceCapabilities,
   resolveCursorAgentCommand,
 } from "../acp/CursorAgentCommand.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -120,7 +120,12 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
         effectiveConfig.binaryPath,
         processEnv,
         { fresh: true },
-      ).pipe(Effect.map(makeCursorMaintenanceCapabilities));
+      ).pipe(
+        Effect.flatMap((command) => resolveCursorMaintenanceCapabilities(command, processEnv)),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
 
       const checkProvider = checkCursorProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),

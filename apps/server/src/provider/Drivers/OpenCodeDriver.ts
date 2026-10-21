@@ -43,6 +43,7 @@ import {
   makeLazyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
+  type HomebrewInstall,
 } from "../providerMaintenance.ts";
 import { makeProviderProbeFingerprint } from "../providerProbeFingerprint.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -57,16 +58,23 @@ function isOpenCodeNativeCommandPath(commandPath: string): boolean {
   );
 }
 
+/**
+ * Ryco runs OpenCode 1.x (`opencode-ai`), whose formula lives in the `anomalyco/tap` tap.
+ * homebrew-core's `opencode` is OpenCode 2.x (`@opencode/cli`), a different package Ryco does not
+ * support; `brew upgrade` on it would never install 1.x, so that keg stays manual.
+ */
+function isSupportedOpenCodeHomebrewInstall(install: HomebrewInstall): boolean {
+  return install.kind === "formula" && install.tap !== null && install.tap !== "homebrew/core";
+}
+
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "opencode-ai",
-  homebrewFormula: "anomalyco/tap/opencode",
   nativeUpdate: {
-    executable: "opencode",
     args: ["upgrade"],
-    lockKey: "opencode-native",
     isCommandPath: isOpenCodeNativeCommandPath,
   },
+  supportsHomebrewInstall: isSupportedOpenCodeHomebrewInstall,
 });
 
 export type OpenCodeDriverEnv =
