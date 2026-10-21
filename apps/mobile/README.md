@@ -26,8 +26,12 @@ These run without driving the Simulator:
 bun install --frozen-lockfile
 bun run --cwd apps/mobile typecheck        # tsc --noEmit
 bun run --cwd apps/mobile test             # vp test run (NEVER `bun test`)
+bun run --cwd apps/mobile bundle:check     # production iOS + Android bundles (CI's Mobile bundle job)
 cd apps/mobile && APP_VARIANT=development ./node_modules/.bin/expo config  # config resolves
 ```
+
+`bundle:check` is the only gate that runs Metro, so it is the one that catches a
+patch, Babel, Hermes or workspace-resolution failure.
 
 A native `expo prebuild` / EAS `--local` build additionally needs Xcode + the
 CocoaPods toolchain (see the runbook below); it cannot be validated in a
@@ -49,6 +53,9 @@ routes; the custom scheme remains for verified-email and reset links.
    `ryco-dev://hosted/complete`; no paid Apple Developer membership is required
    for development.
 3. **Start Metro** (if not already running): `bun run --cwd apps/mobile dev:client`.
+   Metro keeps its transform cache between starts and starts cold by itself
+   when `bun.lock` or `patches/` change; `dev:client:clean` (or `dev:clean`)
+   clears it explicitly.
 4. **Start a Ryco node** on the LAN/tailnet and open its pairing screen to
    produce a pairing URL (`ryco://pair?host=…#token=…`, or an
    `https://…/pair` link). The token is single-use.
