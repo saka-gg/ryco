@@ -22,7 +22,7 @@ export function cuaBuildCacheKey(release, platform, arch) {
       "./provision-cua-driver.mjs",
       "./cua-artifact-provenance.mjs",
       "./cua-build-cache.mjs",
-      "./native-build-cache.mjs",
+      "../../../scripts/lib/native-build-cache.ts",
     ].map((path) => readFileSync(fileURLToPath(new URL(path, import.meta.url)))),
   );
 }
