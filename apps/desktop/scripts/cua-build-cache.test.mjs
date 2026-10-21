@@ -31,7 +31,7 @@ describe("Cua artifact cache", () => {
   it("accepts only matching provenance, architecture, and checksum", () => {
     fixture();
     expect(usableCuaArtifact(root, release, "darwin", "arm64")).toBe(true);
-    expect(usableCuaArtifact(root, release, "darwin", "universal")).toBe(false);
+    expect(usableCuaArtifact(root, release, "darwin", "x64")).toBe(false);
     expect(usableCuaArtifact(root, release, "linux", "arm64")).toBe(false);
     writeFileSync(join(root, "cua-driver"), "tampered");
     expect(usableCuaArtifact(root, release, "darwin", "arm64")).toBe(false);

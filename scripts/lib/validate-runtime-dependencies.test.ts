@@ -180,12 +180,12 @@ describe("staged native payload presence (not loadability)", () => {
   });
 
   it("rejects empty binaries and prebuilds for a different architecture", () => {
-    const stage = nativeFixture("darwin", "x64");
-    expect(() => validateStagedNativePayloads(stage, "darwin", "arm64")).toThrow(
+    const stage = nativeFixture("linux", "x64");
+    expect(() => validateStagedNativePayloads(stage, "linux", "arm64")).toThrow(
       "Missing staged native payload",
     );
-    write(stage, "node_modules/node-pty/prebuilds/darwin-x64/pty.node", "");
-    expect(() => validateStagedNativePayloads(stage, "darwin", "x64")).toThrow(
+    write(stage, "node_modules/node-pty/prebuilds/linux-x64/pty.node", "");
+    expect(() => validateStagedNativePayloads(stage, "linux", "x64")).toThrow(
       "Missing staged native payload",
     );
   });

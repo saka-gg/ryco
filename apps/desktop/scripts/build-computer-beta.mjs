@@ -9,12 +9,13 @@ import {
   usableCuaArtifact,
 } from "./cua-build-cache.mjs";
 
-import { publishNativeCacheDirectory } from "./native-build-cache.mjs";
+import { desktopBuildArch, publishNativeCacheDirectory } from "./native-build-cache.mjs";
 
 // Native beta is macOS-only. Other platforms keep the existing controller.
 if (process.platform === "darwin") {
   const resources = fileURLToPath(new URL("../resources/cua-driver", import.meta.url));
-  const arch = process.env.RYCO_DESKTOP_ARCH ?? process.arch;
+  // arm64 only: the Mac app is Apple Silicon only, so x64/universal requests are refused.
+  const arch = desktopBuildArch();
   const run = (script, args = []) => {
     const result = spawnSync(
       process.execPath,

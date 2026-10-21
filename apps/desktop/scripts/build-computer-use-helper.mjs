@@ -16,10 +16,8 @@ import {
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export function buildComputerUseHelper(desktopDirectory = desktop, { development = false } = {}) {
   const source = join(desktopDirectory, "native/computer-use-helper");
-  const arch = desktopBuildArch({
-    development,
-    defaultArch: process.platform === "darwin" ? "universal" : process.arch,
-  });
+  // arm64 on macOS (the Mac app is Apple Silicon only); the host's x64 or arm64 elsewhere.
+  const arch = desktopBuildArch({ development });
   const inputs = sourceTreeFingerprint(
     source,
     process.env.CARGO_TARGET_DIR ? [resolve(source, process.env.CARGO_TARGET_DIR)] : [],
@@ -76,17 +74,10 @@ export function buildComputerUseHelper(desktopDirectory = desktop, { development
     validate: handshake,
     build(binary) {
       if (process.platform === "darwin") {
-        const targets =
-          arch === "universal"
-            ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]
-            : [arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin"];
-        run(join(bin, "rustup"), ["target", "add", "--toolchain", "1.98.1", ...targets]);
-        for (const target of targets) run(cargo, [...buildArguments, "--target", target]);
-        const binaries = targets.map((target) =>
-          join(targetDirectory, target, "release/ryco-computer-use"),
-        );
-        if (binaries.length === 1) copyFileSync(binaries[0], binary);
-        else run("xcrun", ["lipo", "-create", ...binaries, "-output", binary]);
+        const target = "aarch64-apple-darwin";
+        run(join(bin, "rustup"), ["target", "add", "--toolchain", "1.98.1", target]);
+        run(cargo, [...buildArguments, "--target", target]);
+        copyFileSync(join(targetDirectory, target, "release/ryco-computer-use"), binary);
       } else {
         run(cargo, buildArguments);
         copyFileSync(join(targetDirectory, "release", `ryco-computer-use${suffix}`), binary);

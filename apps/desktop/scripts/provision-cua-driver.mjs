@@ -16,7 +16,7 @@ import {
   LINUX_CUA_SIDECAR_PATHS,
 } from "./cua-artifact-provenance.mjs";
 import { cuaBuildCacheKey } from "./cua-build-cache.mjs";
-import { nativeBuildCacheDirectory } from "./native-build-cache.mjs";
+import { assertDesktopBuildArch, nativeBuildCacheDirectory } from "./native-build-cache.mjs";
 const release = JSON.parse(
   await readFile(
     new URL("../../../packages/shared/src/cuaDriverRelease.json", import.meta.url),
@@ -32,8 +32,9 @@ const destination = resolve(
 );
 const platform = option("--platform") ?? process.platform;
 const arch = option("--arch") ?? process.arch;
+// The Mac app is Apple Silicon only, so macOS provisions arm64 alone.
 const targets = {
-  darwin: { arm64: "aarch64-apple-darwin", x64: "x86_64-apple-darwin" },
+  darwin: { arm64: "aarch64-apple-darwin" },
   win32: { arm64: "windows-arm64", x64: "windows-x86_64" },
   linux: { arm64: "linux-arm64", x64: "linux-x86_64" },
 };
@@ -47,7 +48,7 @@ const upstreamAsset = {
   win32: { binary: "cua-driver.exe", suffix: "zip" },
   linux: { binary: "cua-driver", suffix: "tar.gz" },
 }[platform];
-const architectures = arch === "universal" ? ["arm64", "x64"] : [arch];
+const architectures = [arch];
 const artifact = option("--artifact-dir") ?? process.env.RYCO_CUA_ARTIFACT_DIR;
 const signIdentity = option("--sign-identity") ?? process.env.RYCO_CUA_SIGN_IDENTITY;
 /** Stable signing identifier so macOS TCC remembers the driver across rebuilds. */
@@ -60,17 +61,14 @@ const patch = await readFile(patchPath);
 const linuxPatchPath = fileURLToPath(
   new URL("../patches/cua-driver/0002-synara-linux-browser.patch", import.meta.url),
 );
-if (
-  !targets[platform] ||
-  architectures.some((value) => !targets[platform][value]) ||
-  (platform === "darwin" && process.platform !== "darwin") ||
-  (platform !== "darwin" && arch === "universal")
-)
+if (!targets[platform] || (platform === "darwin" && process.platform !== "darwin"))
   throw new Error(
     platform === "darwin"
-      ? "Native Cua provisioning requires macOS and --arch arm64, x64 or universal."
-      : `Cua provisioning for ${platform} requires --platform win32|linux and --arch arm64 or x64.`,
+      ? "Native Cua provisioning requires macOS."
+      : `Cua provisioning for ${platform} requires --platform darwin, win32 or linux.`,
   );
+// macOS refuses Intel (x64) and universal; Windows and Linux take arm64 or x64.
+assertDesktopBuildArch(arch, platform);
 if (option("--archive"))
   throw new Error(
     "The upstream binary lacks Synara's native patch. Use --source-checkout or --artifact-dir instead.",
@@ -245,33 +243,27 @@ try {
           cuaBuildCacheKey(release, platform, arch),
         ),
     );
-    const binaries = [];
-    for (const architecture of architectures) {
-      const target = sourceTargets[platform][architecture];
-      run(
-        "cargo",
-        [
-          "build",
-          "--release",
-          "--locked",
-          "--target-dir",
-          targetDir,
-          "--target",
-          target,
-          "-p",
-          "cua-driver",
-          ...(platform === "linux" ? ["-p", "cursor-theme-cli"] : []),
-          ...(process.argv.includes("--offline") ? ["--offline"] : []),
-        ],
-        rust,
-      );
-      binaries.push(join(targetDir, target, "release/cua-driver"));
-    }
+    const target = sourceTargets[platform][arch];
+    run(
+      "cargo",
+      [
+        "build",
+        "--release",
+        "--locked",
+        "--target-dir",
+        targetDir,
+        "--target",
+        target,
+        "-p",
+        "cua-driver",
+        ...(platform === "linux" ? ["-p", "cursor-theme-cli"] : []),
+        ...(process.argv.includes("--offline") ? ["--offline"] : []),
+      ],
+      rust,
+    );
     binary = join(temporary, "cua-driver");
-    if (binaries.length > 1) run("lipo", ["-create", ...binaries, "-output", binary]);
-    else await copyFile(binaries[0], binary);
+    await copyFile(join(targetDir, target, "release/cua-driver"), binary);
     if (platform === "linux") {
-      const target = sourceTargets.linux[architectures[0]];
       linuxSidecars = Object.fromEntries(
         await Promise.all(
           LINUX_CUA_SIDECAR_PATHS.map(async (path) => [
@@ -312,11 +304,10 @@ try {
     };
   }
   if (platform === "darwin") {
-    // Validate a foreign architecture without requiring Rosetta. The GUI also
+    // Check the Mach-O carries the arm64 slice without executing it. The GUI also
     // verifies version, native revision, embedded mode and PID before dispatch.
     const present = output("lipo", ["-archs", binary]).split(/\s+/);
-    if (architectures.some((value) => !present.includes(value === "x64" ? "x86_64" : "arm64")))
-      throw new Error("Cua Mach-O is missing a requested architecture.");
+    if (!present.includes("arm64")) throw new Error("Cua Mach-O is missing the arm64 slice.");
   } else if (platform === "linux") {
     assertLinuxCuaBinaryIdentity(await readFile(binary), architectures);
     if (linuxSidecars) {

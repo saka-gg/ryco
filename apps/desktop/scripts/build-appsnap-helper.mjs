@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import {
+  assertDesktopBuildArch,
   buildCachedNativeBinary,
   fingerprint,
   nativeBuildEnvironment,
@@ -42,20 +43,9 @@ const frameworkArguments = [
   "ScreenCaptureKit",
 ];
 
-export function swiftTargetsForArch(arch) {
-  switch (arch) {
-    case "arm64":
-      return [{ arch: "arm64", target: "arm64-apple-macos12.3" }];
-    case "x64":
-      return [{ arch: "x64", target: "x86_64-apple-macos12.3" }];
-    case "universal":
-      return [
-        { arch: "arm64", target: "arm64-apple-macos12.3" },
-        { arch: "x64", target: "x86_64-apple-macos12.3" },
-      ];
-    default:
-      throw new Error(`Unsupported AppSnap helper architecture: ${arch}`);
-  }
+/** The Mac app is Apple Silicon only; Intel (x64) and universal requests are refused. */
+export function swiftTargetForArch(arch) {
+  return `${assertDesktopBuildArch(arch, "darwin")}-apple-macos12.3`;
 }
 
 function run(command, arguments_, options = {}) {
@@ -88,7 +78,7 @@ export function buildAppSnapHelper({
     throw new Error("The AppSnap helper can only be built on macOS.");
   }
 
-  const targets = swiftTargetsForArch(arch);
+  const target = swiftTargetForArch(arch);
   const sources = readdirSync(sourceDirectory)
     .filter((name) => name.endsWith(".swift"))
     .sort()
@@ -103,7 +93,7 @@ export function buildAppSnapHelper({
     "appsnap-v2",
     arch,
     release,
-    targets,
+    target,
     frameworkArguments,
     toolchain,
     nativeBuildEnvironment(),
@@ -122,37 +112,26 @@ export function buildAppSnapHelper({
     output: resolvedOutputPath,
     validate: (binary) =>
       spawnSync("codesign", ["--verify", "--strict", binary], { encoding: "utf8" }).status === 0,
-    build(unsignedBinary, temporaryDirectory) {
-      const thinBinaries = [];
-      for (const target of targets) {
-        const thinBinary = join(temporaryDirectory, `synara-appsnap-helper-${target.arch}`);
-        const optimizationArguments = release
-          ? ["-O", "-whole-module-optimization"]
-          : ["-Onone", "-g"];
-        run(
-          "xcrun",
-          [
-            "swiftc",
-            ...optimizationArguments,
-            "-module-name",
-            "SynaraAppSnapHelper",
-            "-target",
-            target.target,
-            ...frameworkArguments,
-            ...sources,
-            "-o",
-            thinBinary,
-          ],
-          { env: buildEnvironment },
-        );
-        thinBinaries.push(thinBinary);
-      }
-
-      if (thinBinaries.length === 1) {
-        copyFileSync(thinBinaries[0], unsignedBinary);
-      } else {
-        run("xcrun", ["lipo", "-create", ...thinBinaries, "-output", unsignedBinary]);
-      }
+    build(unsignedBinary) {
+      const optimizationArguments = release
+        ? ["-O", "-whole-module-optimization"]
+        : ["-Onone", "-g"];
+      run(
+        "xcrun",
+        [
+          "swiftc",
+          ...optimizationArguments,
+          "-module-name",
+          "SynaraAppSnapHelper",
+          "-target",
+          target,
+          ...frameworkArguments,
+          ...sources,
+          "-o",
+          unsignedBinary,
+        ],
+        { env: buildEnvironment },
+      );
 
       // Dev helpers are ad-hoc signed. electron-builder replaces this signature
       // with the release identity because the packaged path is listed in mac.binaries.
@@ -174,7 +153,9 @@ function parseCommandLine(arguments_) {
       case "--arch":
         index += 1;
         if (index >= arguments_.length) {
-          throw new Error("--arch requires arm64, x64, or universal.");
+          throw new Error(
+            "--arch requires arm64 (the Mac app is Apple Silicon only; x64 and universal are not supported).",
+          );
         }
         arch = arguments_[index];
         break;
