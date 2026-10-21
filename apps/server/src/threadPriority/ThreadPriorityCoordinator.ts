@@ -12,6 +12,7 @@ import {
 } from "@ryco/contracts";
 import { Context, Effect, Layer, Option, PubSub, Ref, Schema, Semaphore, Stream } from "effect";
 
+import { nodeAutoSettleAfterDays } from "../orchestration/threadSettlementInput.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { TextGeneration, type TextGenerationShape } from "../textGeneration/TextGeneration.ts";
 import { ThreadPriorityCandidateQuery } from "./ThreadPriorityCandidateQuery.ts";
@@ -47,7 +48,7 @@ export class ThreadPriorityCoordinator extends Context.Service<
 interface ThreadPriorityCoordinatorDependencies {
   readonly listCandidates: Effect.Effect<
     ReadonlyArray<ThreadPriorityCandidateInput>,
-    PersistenceSqlError
+    PersistenceSqlError | ServerSettingsError
   >;
   readonly repository: ThreadPriorityRepositoryShape;
   readonly textGeneration: TextGenerationShape;
@@ -228,7 +229,14 @@ export const ThreadPriorityCoordinatorLive = Layer.effect(
     const textGeneration = yield* TextGeneration;
     const settings = yield* ServerSettingsService;
     return yield* makeThreadPriorityCoordinator({
-      listCandidates: query.listActive,
+      listCandidates: settings.getSettings.pipe(
+        Effect.flatMap((current) =>
+          query.listActive({
+            autoSettleAfterDays: nodeAutoSettleAfterDays(current),
+            nowMs: Date.now(),
+          }),
+        ),
+      ),
       repository,
       textGeneration,
       getModelSelection: settings.getSettings.pipe(

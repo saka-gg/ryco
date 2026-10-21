@@ -1,4 +1,7 @@
-import { OrchestrationShellSnapshot } from "@ryco/contracts";
+import {
+  OrchestrationShellSnapshot,
+  type OrchestrationShellSettlementPolicy,
+} from "@ryco/contracts";
 import { Effect, Schema } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -13,7 +16,11 @@ const time = "2026-10-04T00:00:00.000Z";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const stops: Array<() => Promise<void>> = [];
 
-function harness() {
+function harness(
+  options: {
+    readonly readSettlementPolicy?: () => Promise<OrchestrationShellSettlementPolicy | undefined>;
+  } = {},
+) {
   let online = true;
   let proofIndex = 0;
   const shell = Schema.decodeUnknownSync(OrchestrationShellSnapshot)({
@@ -74,12 +81,14 @@ function harness() {
     identity: identity as unknown as HubIdentityRuntimeShape,
     connector: connector as unknown as HubConnector,
     query: query as unknown as ProjectionSnapshotQueryShape,
+    ...options,
     reportFailure,
   });
   stops.push(stop);
   return {
     stop,
     notifyChanged: stop.notifyChanged,
+    notifySettlementPolicyChanged: stop.notifySettlementPolicyChanged,
     shell,
     identity,
     proof,
@@ -128,6 +137,29 @@ describe("cloud thread history sync adapter", () => {
     await h.stop();
     h.notifyChanged();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("publishes the node's settlement rule with the shell and republishes it when it changes", async () => {
+    let policy: OrchestrationShellSettlementPolicy = { autoSettleAfterDays: 7 };
+    const h = harness({ readSettlementPolicy: async () => policy });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.http).toHaveBeenCalledTimes(2);
+    const shellItem = (call: [string, (RequestInit | undefined)?]) =>
+      (body(call).items as Array<{ kind: string; snapshot: OrchestrationShellSnapshot }>).find(
+        (item) => item.kind === "shell",
+      );
+    expect(shellItem(h.http.mock.calls[1]!)?.snapshot.settlementPolicy).toEqual({
+      autoSettleAfterDays: 7,
+    });
+
+    policy = { autoSettleAfterDays: null };
+    h.notifySettlementPolicyChanged();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.http).toHaveBeenCalledTimes(3);
+    expect(shellItem(h.http.mock.calls[2]!)?.snapshot).toMatchObject({
+      snapshotSequence: 1,
+      settlementPolicy: { autoSettleAfterDays: null },
+    });
   });
 
   it("remembers changes during an upload without overlapping it", async () => {

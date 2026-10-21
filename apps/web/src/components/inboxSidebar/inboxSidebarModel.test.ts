@@ -3,6 +3,8 @@ import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connecti
 import {
   forgetEnvironmentServerConfig,
   getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
+  recordEnvironmentShellSettlementPolicy,
   resetEnvironmentServerConfigsForTests,
   writeEnvironmentServerConfig,
 } from "@ryco/client-runtime/rpc";
@@ -917,6 +919,7 @@ describe("hosted inbox capability resolution", () => {
       savedEnvironmentRuntimeById: {},
       cacheHydratedEnvironmentIds: new Set(),
       reportedThreadCapabilities: getReportedThreadCapabilitiesSnapshot(),
+      shellSettlementRules: getShellSettlementRulesSnapshot(),
     });
   }
 
@@ -1071,6 +1074,48 @@ describe("hosted inbox capability resolution", () => {
   it("leaves an environment as it is when no node config has arrived", () => {
     const initial = environment(ENV_A, { threadSettlementSupported: false });
     expect(applyInboxServerConfig(initial, null)).toBe(initial);
+  });
+
+  it("lists each node's threads by that node's own auto-settle rule", () => {
+    const withRule = (environmentId: EnvironmentId, threadAutoSettleAfterDays?: 3 | 30) => {
+      const config = liveConfig(environmentId);
+      return {
+        ...config,
+        environment: {
+          ...config.environment,
+          capabilities: { ...config.environment.capabilities, nodeAutoSettlement: true },
+        },
+        settings: threadAutoSettleAfterDays === undefined ? {} : { threadAutoSettleAfterDays },
+      } as unknown as ServerConfig;
+    };
+    writeEnvironmentServerConfig(ENV_A, withRule(ENV_A, 30));
+    writeEnvironmentServerConfig(ENV_B, withRule(ENV_B, 3));
+    // A cold node known only from a cached snapshot.
+    const ENV_C = EnvironmentId.make("machine-c");
+    recordEnvironmentShellSettlementPolicy(ENV_C, { autoSettleAfterDays: 3 });
+    const environments = hostedEnvironments(ENV_A, [
+      machine(ENV_A),
+      machine(ENV_B),
+      machine(ENV_C, { connectionState: "disconnected" }),
+    ]);
+    expect(environments.map((entry) => entry.autoSettleAfterDays)).toEqual([30, 3, 3]);
+
+    const lastActive = { latestUserMessageAt: "2026-09-01T10:00:00.000Z" };
+    const settledKeys = build({
+      threads: [
+        thread("a-idle", lastActive),
+        thread("b-idle", { ...lastActive, environmentId: ENV_B }),
+        thread("c-idle", { ...lastActive, environmentId: ENV_C }),
+      ],
+      environments,
+      // This client's own rule no longer decides for nodes that keep theirs.
+      autoSettleAfterDays: 90,
+      nowMs: Date.parse("2026-09-11T10:00:00Z"),
+    })
+      .find((section) => section.key === "settled")
+      ?.rows.map((row) => row.key)
+      .toSorted();
+    expect(settledKeys).toEqual(["machine-b:b-idle", "machine-c:c-idle"]);
   });
 });
 

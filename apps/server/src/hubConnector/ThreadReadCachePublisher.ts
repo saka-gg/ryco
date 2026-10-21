@@ -162,6 +162,13 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
    * this the content behind it never fit until activity stopped.
    */
   let shellCrowdedOutContent = false;
+  /**
+   * Something the shell carries besides its rows (the node's settlement rule)
+   * changed: the next batch reads and uploads the shell again, though its
+   * sequence has not moved. Otherwise the cloud index would keep the old value
+   * until the daily refresh.
+   */
+  let shellInvalidated = false;
   let stopped = false;
   let running: Promise<void> | null = null;
 
@@ -192,9 +199,19 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
       const sequence = await deps.readSequence();
       if (!isCurrent(currentNode)) return;
       const refresh = deps.now() - refreshedAt >= REFRESH_MS;
-      if (shell === null || shell.snapshotSequence !== sequence || refresh) {
-        shell = checkThreadReadCacheShellLimits(await deps.readShell());
+      if (shell === null || shell.snapshotSequence !== sequence || refresh || shellInvalidated) {
+        // Cleared before the read, so a change that lands during it is uploaded
+        // by the next batch; a failed read keeps it for the retry.
+        const republish = shellInvalidated;
+        shellInvalidated = false;
+        try {
+          shell = checkThreadReadCacheShellLimits(await deps.readShell());
+        } catch (error) {
+          shellInvalidated ||= republish;
+          throw error;
+        }
         if (!isCurrent(currentNode)) return;
+        if (republish) publishedSequence = -1;
         if (refresh) {
           uploadedVersions.clear();
           publishedSequence = -1;
@@ -289,6 +306,10 @@ export function createThreadReadCachePublisher(deps: ThreadReadCachePublisherDep
     },
     /** A generation conflict means another authorized publisher superseded us. */
     reset,
+    /** The next batch uploads the shell again, though its sequence has not moved. */
+    invalidateShell: () => {
+      shellInvalidated = true;
+    },
     stop: () => {
       stopped = true;
     },

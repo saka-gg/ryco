@@ -27,6 +27,11 @@ import {
 } from "./model.ts";
 import { AgentTokenMode, DEFAULT_AGENT_TOKEN_MODE, ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import {
+  DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
+  SidebarAutoSettleAfterDays,
+} from "./threadAutoSettlement.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -42,12 +47,11 @@ export const SidebarThreadSortOrder = Schema.Literals(["updated_at", "created_at
 export type SidebarThreadSortOrder = typeof SidebarThreadSortOrder.Type;
 export const DEFAULT_SIDEBAR_THREAD_SORT_ORDER: SidebarThreadSortOrder = "updated_at";
 
-export const SIDEBAR_AUTO_SETTLE_DAY_OPTIONS = [1, 3, 7, 14, 30, 90] as const;
-export const SidebarAutoSettleAfterDays = Schema.NullOr(
-  Schema.Literals(SIDEBAR_AUTO_SETTLE_DAY_OPTIONS),
-);
-export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
-export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 7;
+export {
+  DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
+  SidebarAutoSettleAfterDays,
+};
 
 /**
  * How long a chat without a project stays idle before its folder is removed while still empty.
@@ -708,6 +712,10 @@ export const ServerSettings = Schema.Struct({
   inboxPriorityModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  // The node's automatic settlement rule, the same on every client that lists its threads.
+  // Absent until someone sets it (the shared default applies); null turns it off. Named apart
+  // from the client's `sidebarAutoSettleAfterDays`, which older nodes still leave to clients.
+  threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
 
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
@@ -871,6 +879,14 @@ export const ServerSettingsPatch = Schema.Struct({
   commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
   pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
   inboxPriorityModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelectionPatch)),
+  threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
+  /**
+   * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of
+   * two clients handing a node their rule at once, the first one's stands.
+   */
+  expectedThreadAutoSettleAfterDays: Schema.optionalKey(
+    Schema.Union([Schema.Literal("absent"), SidebarAutoSettleAfterDays]),
+  ),
   providerEventLogs: Schema.optionalKey(Schema.NullOr(ProviderEventLogMode)),
   observability: Schema.optionalKey(
     Schema.Struct({

@@ -57,6 +57,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * The node keeps the automatic settlement rule (`threadAutoSettleAfterDays`) and
+   * carries it in its shell snapshot; absent on older servers, whose threads follow
+   * each client's own rule and which drop the key from settings patches.
+   */
+  nodeAutoSettlement: Schema.optionalKey(Schema.Boolean),
   threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */

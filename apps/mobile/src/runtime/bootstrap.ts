@@ -19,6 +19,8 @@ import {
 import { mobileHostedConnectionScopes } from "../connection/hostedConnectionScopes";
 import { hostedHubStore, type HostedAccountStatus } from "@ryco/client-runtime/authorization";
 import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
+import { forgetEnvironmentsServerState } from "@ryco/client-runtime/rpc";
+import type { EnvironmentId } from "@ryco/contracts";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
 
 type Catalog = ReturnType<typeof createMobileSavedEnvironmentCatalog>;
@@ -164,6 +166,11 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
     });
     let previousHostedState = hostedHubStore.getState();
     let artworkAccountId = previousHostedState.account?.id ?? null;
+    // Every Hub node the account listed, so what they reported (capabilities,
+    // auto-settle rules) leaves memory with the account. Direct environments stay.
+    const accountEnvironmentIds = new Set<EnvironmentId>(
+      previousHostedState.nodes.map((node) => node.environmentId),
+    );
     stopHostedAccountWatch = hostedHubStore.subscribe(() => {
       const currentHostedState = hostedHubStore.getState();
       if (
@@ -176,10 +183,10 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         // released after that.
         void Promise.resolve().then(() => hostedCoordinator.releaseAll());
       }
-      // Project artwork is keyed by node and outlives a connection, not an
-      // account: it is dropped when the account session ends (sign-out,
-      // expiry, a Hub domain change) or another account signs in, never on an
-      // access check that only could not reach the Hub.
+      // Project artwork and what each Hub node reported are keyed by node and
+      // outlive a connection, not an account: they are dropped when the account
+      // session ends (sign-out, expiry, a Hub domain change) or another account
+      // signs in, never on an access check that only could not reach the Hub.
       const currentAccountId = currentHostedState.account?.id ?? null;
       if (
         (isHostedAccountTeardown(currentHostedState.accountStatus) &&
@@ -189,7 +196,14 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
           currentAccountId !== artworkAccountId)
       ) {
         clearAllProjectIconCaches();
+        forgetEnvironmentsServerState(
+          [...accountEnvironmentIds].filter(
+            (environmentId) => registry.catalog.get(environmentId) === null,
+          ),
+        );
+        accountEnvironmentIds.clear();
       }
+      for (const node of currentHostedState.nodes) accountEnvironmentIds.add(node.environmentId);
       if (currentAccountId !== null) artworkAccountId = currentAccountId;
       previousHostedState = currentHostedState;
     });

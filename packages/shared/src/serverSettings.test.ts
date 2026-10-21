@@ -203,6 +203,64 @@ describe("serverSettings helpers", () => {
   });
 });
 
+describe("node auto-settle rule patches", () => {
+  it("sets the rule, Off included, and keeps it absent until then", () => {
+    expect(Object.hasOwn(DEFAULT_SERVER_SETTINGS, "threadAutoSettleAfterDays")).toBe(false);
+    const off = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      threadAutoSettleAfterDays: null,
+    });
+    expect(off.threadAutoSettleAfterDays).toBeNull();
+    expect(
+      applyServerSettingsPatch(off, { threadAutoSettleAfterDays: 30 }).threadAutoSettleAfterDays,
+    ).toBe(30);
+  });
+
+  it("lets only the first of two hand-overs to an unset node stand", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      threadAutoSettleAfterDays: 30,
+      expectedThreadAutoSettleAfterDays: "absent",
+    });
+    expect(first.threadAutoSettleAfterDays).toBe(30);
+    expect(Object.hasOwn(first, "expectedThreadAutoSettleAfterDays")).toBe(false);
+    expect(() =>
+      applyServerSettingsPatch(first, {
+        threadAutoSettleAfterDays: 3,
+        expectedThreadAutoSettleAfterDays: "absent",
+      }),
+    ).toThrow("changed elsewhere");
+    expect(
+      applyServerSettingsPatch(first, {
+        threadAutoSettleAfterDays: 3,
+        expectedThreadAutoSettleAfterDays: 30,
+      }).threadAutoSettleAfterDays,
+    ).toBe(3);
+  });
+
+  it("treats a node set to Off as set, not as never set", () => {
+    const off = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      threadAutoSettleAfterDays: null,
+    });
+    expect(() =>
+      applyServerSettingsPatch(off, {
+        threadAutoSettleAfterDays: 30,
+        expectedThreadAutoSettleAfterDays: "absent",
+      }),
+    ).toThrow("changed elsewhere");
+    expect(
+      applyServerSettingsPatch(off, {
+        threadAutoSettleAfterDays: 30,
+        expectedThreadAutoSettleAfterDays: null,
+      }).threadAutoSettleAfterDays,
+    ).toBe(30);
+    expect(() =>
+      applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+        threadAutoSettleAfterDays: 30,
+        expectedThreadAutoSettleAfterDays: null,
+      }),
+    ).toThrow("changed elsewhere");
+  });
+});
+
 describe("worktree root override patches", () => {
   it("treats project IDs as data, including object prototype property names", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {

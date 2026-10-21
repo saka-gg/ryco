@@ -41,6 +41,31 @@ describe("Inbox auto-settle settings", () => {
   });
 });
 
+describe("ServerSettings.threadAutoSettleAfterDays", () => {
+  it("stays absent until a node sets it, and keeps Off apart from absent", () => {
+    expect(Object.hasOwn(decodeServerSettings({}), "threadAutoSettleAfterDays")).toBe(false);
+    expect(Object.hasOwn(DEFAULT_SERVER_SETTINGS, "threadAutoSettleAfterDays")).toBe(false);
+    expect(
+      decodeServerSettings({ threadAutoSettleAfterDays: null }).threadAutoSettleAfterDays,
+    ).toBe(null);
+    expect(decodeServerSettings({ threadAutoSettleAfterDays: 30 }).threadAutoSettleAfterDays).toBe(
+      30,
+    );
+    expect(() => decodeServerSettings({ threadAutoSettleAfterDays: 2 })).toThrow();
+  });
+
+  it("patches the node rule, Off included, without touching the client key", () => {
+    expect(decodeServerSettingsPatch({ threadAutoSettleAfterDays: 14 })).toEqual({
+      threadAutoSettleAfterDays: 14,
+    });
+    expect(decodeServerSettingsPatch({ threadAutoSettleAfterDays: null })).toEqual({
+      threadAutoSettleAfterDays: null,
+    });
+    expect(Object.hasOwn(decodeServerSettingsPatch({}), "threadAutoSettleAfterDays")).toBe(false);
+    expect(Object.keys(ServerSettings.fields)).not.toContain("sidebarAutoSettleAfterDays");
+  });
+});
+
 describe("AI Focus settings", () => {
   it("decodes historical client settings as disabled with a ten-minute interval", () => {
     const decoded = decodeClientSettings({});

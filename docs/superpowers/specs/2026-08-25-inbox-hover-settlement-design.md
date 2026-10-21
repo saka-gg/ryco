@@ -205,6 +205,10 @@ Native modules remain dynamically imported inside functions when required.
 - An environment whose capability the client has not learned yet (cold, cached, or still
   connecting) is not treated as unsupported: its threads keep the classification its recorded state
   gives them, and settlement changes stay disabled until it answers.
+- The inactivity rule is node-owned where the node advertises `nodeAutoSettlement`: each
+  environment's threads are classified by its own node's rule (live config, else its shell
+  snapshot's `settlementPolicy`, else its last known rule). An older node's threads follow the
+  client's own rule.
 - A disconnected environment retains its last known classification but cannot mutate until current
   readiness is restored.
 - A command rejected by the server leaves the thread in its projected section and reports the

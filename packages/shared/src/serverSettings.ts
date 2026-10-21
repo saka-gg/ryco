@@ -84,6 +84,15 @@ export function applyServerSettingsPatch(
     if (!Equal.equals(current[field as keyof typeof current] ?? null, value))
       throw new Error("Node preferences changed elsewhere. Reload before saving.");
   }
+  if (patch.expectedThreadAutoSettleAfterDays !== undefined) {
+    // Off (null) is a value someone chose, so only a missing key counts as never set.
+    const actual =
+      current.threadAutoSettleAfterDays === undefined
+        ? "absent"
+        : current.threadAutoSettleAfterDays;
+    if (actual !== patch.expectedThreadAutoSettleAfterDays)
+      throw new Error("The auto-settle rule changed elsewhere. Reload before saving.");
+  }
   for (const [projectId, expected] of Object.entries(patch.expectedProjectPreferences ?? {})) {
     const currentPreferences = current.projectPreferences[projectId] ?? {};
     for (const [field, value] of Object.entries(expected)) {
@@ -98,6 +107,7 @@ export function applyServerSettingsPatch(
   const {
     expectedProjectPreferences: _expected,
     expectedNodePreferences: _expectedNode,
+    expectedThreadAutoSettleAfterDays: _expectedAutoSettle,
     projectPreferences: _projects,
     cliProxyHubs: _cliProxyHubs,
     ...persistedPatch

@@ -85,7 +85,10 @@ layer("ThreadPriorityCandidateQuery", (it) => {
       `;
 
       const query = yield* ThreadPriorityCandidateQuery;
-      const candidates = yield* query.listActive;
+      const candidates = yield* query.listActive({
+        autoSettleAfterDays: 7,
+        nowMs: Date.parse("2026-08-25T03:00:00.000Z"),
+      });
       assert.equal(candidates.length, 1);
       assert.deepEqual(candidates[0], {
         threadId: ThreadId.make("priority-active"),
@@ -106,6 +109,69 @@ layer("ThreadPriorityCandidateQuery", (it) => {
       });
       assert.notInclude(JSON.stringify(candidates), "/secret/");
       assert.notInclude(JSON.stringify(candidates), "Private assistant response");
+    }),
+  );
+
+  it.effect("leaves out threads the node's own rule settled, and only those", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, project_metadata_dir, default_model_selection_json,
+          scripts_json, created_at, updated_at
+        ) VALUES (
+          'rule-project', 'Rule Project', '/rule/project', '.ryco', NULL, '[]',
+          '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'
+        )
+      `;
+      // Last activity ten days before "now" for all but the recent thread.
+      for (const [threadId, settledOverride, pendingUserInput, latestUserMessageAt] of [
+        ["rule-inactive", null, 0, "2026-08-15T00:00:00.000Z"],
+        ["rule-kept-active", "active", 0, "2026-08-15T00:00:00.000Z"],
+        ["rule-waiting-for-input", null, 1, "2026-08-15T00:00:00.000Z"],
+        ["rule-recent", null, 0, "2026-08-24T00:00:00.000Z"],
+      ] as const) {
+        yield* sql`
+          INSERT INTO projection_threads (
+            thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+            token_mode, branch, worktree_id, latest_turn_id, manual_position, created_at,
+            updated_at, archived_at, settled_override, settled_at, pending_approval_count,
+            pending_user_input_count, has_actionable_proposed_plan, deleted_at,
+            latest_user_message_at
+          ) VALUES (
+            ${threadId}, 'rule-project', ${threadId},
+            '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default', 'balanced',
+            NULL, NULL, NULL, 0, '2026-08-01T00:00:00.000Z', ${latestUserMessageAt}, NULL,
+            ${settledOverride}, NULL, 0, ${pendingUserInput}, 0, NULL, ${latestUserMessageAt}
+          )
+        `;
+      }
+
+      const query = yield* ThreadPriorityCandidateQuery;
+      const listed = (autoSettleAfterDays: 7 | 14 | null) =>
+        query
+          .listActive({ autoSettleAfterDays, nowMs: Date.parse("2026-08-25T00:00:00.000Z") })
+          .pipe(
+            Effect.map((candidates) =>
+              candidates
+                .map((candidate) => candidate.threadId)
+                .filter((threadId) => threadId.startsWith("rule-")),
+            ),
+          );
+
+      assert.deepEqual(
+        (yield* listed(7)).toSorted(),
+        ["rule-kept-active", "rule-recent", "rule-waiting-for-input"].map((id) =>
+          ThreadId.make(id),
+        ),
+      );
+      assert.deepEqual(
+        (yield* listed(14)).toSorted(),
+        ["rule-inactive", "rule-kept-active", "rule-recent", "rule-waiting-for-input"].map((id) =>
+          ThreadId.make(id),
+        ),
+      );
+      assert.deepEqual(yield* listed(null), yield* listed(14));
     }),
   );
 });

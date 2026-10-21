@@ -18,6 +18,7 @@ import {
   isUnsupportedRpcError,
   type SubscriptionFailureKind,
 } from "../rpc/wsTransport.ts";
+import { recordEnvironmentShellSettlementPolicy } from "../rpc/environmentServerConfigs.ts";
 import { scopedThreadKey, scopeThreadRef } from "../scoped.ts";
 import { createEnvironmentEventBatcher } from "../state/threads/eventBatching.ts";
 import type { ShellStoreUpdate } from "../state/threads/store.ts";
@@ -1327,6 +1328,10 @@ export function createEnvironmentConnectionSupervisor<
       current: projectionTracker.read(environmentId),
       next: snapshot,
     });
+    // The node's rule can change without moving the shell sequence.
+    if (snapshotClassification !== "stale") {
+      recordEnvironmentShellSettlementPolicy(environmentId, snapshot.settlementPolicy);
+    }
     if (snapshotClassification === "current") {
       input.onShellSnapshotCurrent(environmentId);
       callbacks?.onCurrent();

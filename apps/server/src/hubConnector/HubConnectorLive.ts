@@ -56,6 +56,11 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+import {
+  nodeAutoSettleAfterDays,
+  shellSettlementPolicy,
+} from "../orchestration/threadSettlementInput.ts";
 import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorService.ts";
 
 export {
@@ -765,6 +770,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     );
     if (cloudHistoryEnabled && connectorConfig.enabled && connectorConfig.origin) {
       if (Option.isSome(shellQuery)) {
+        const settings = yield* Effect.serviceOption(ServerSettingsService);
         const sync = yield* Effect.acquireRelease(
           Effect.sync(() =>
             startThreadReadCacheSync({
@@ -772,6 +778,17 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               identity,
               connector,
               query: shellQuery.value,
+              ...(Option.isSome(settings)
+                ? {
+                    readSettlementPolicy: () =>
+                      runPromise(
+                        settings.value.getSettings.pipe(
+                          Effect.map(shellSettlementPolicy),
+                          Effect.orElseSucceed(() => undefined),
+                        ),
+                      ),
+                  }
+                : {}),
               reportFailure: () => {
                 void runPromise(
                   Effect.logWarning("Cloud thread history synchronization is retrying."),
@@ -786,6 +803,25 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           const changes = yield* engine.value.subscribeDomainEvents;
           yield* Stream.fromSubscription(changes).pipe(
             Stream.runForEach((event) => Effect.sync(() => sync.notifyChanged(event))),
+            Effect.forkScoped,
+          );
+        }
+        if (Option.isSome(settings)) {
+          // A settings change moves no shell sequence, so the rule's own change
+          // republishes the cloud index; other settings leave it alone.
+          let publishedRule = yield* settings.value.getSettings.pipe(
+            Effect.map(nodeAutoSettleAfterDays),
+            Effect.option,
+          );
+          yield* settings.value.streamChanges.pipe(
+            Stream.map(nodeAutoSettleAfterDays),
+            Stream.runForEach((rule) =>
+              Effect.sync(() => {
+                if (Option.isSome(publishedRule) && publishedRule.value === rule) return;
+                publishedRule = Option.some(rule);
+                sync.notifySettlementPolicyChanged();
+              }),
+            ),
             Effect.forkScoped,
           );
         }

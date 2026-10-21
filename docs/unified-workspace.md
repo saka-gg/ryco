@@ -166,6 +166,17 @@ snooze state it recorded, with settlement and snooze changes disabled; a machine
 settlement support keeps every thread Active. Which machine is selected or connected does not change
 the result.
 
+The automatic settlement rule is the machine's too: a machine that advertises `nodeAutoSettlement`
+keeps "settle after N days" in its own settings and carries it in its shell snapshot, which its
+cloud history index publishes too, so a machine known only from that index is classified by its own
+rule as well. Every client applies each machine's rule to that machine's threads, from its live
+config, else its latest snapshot, else its last answer this session, and uses its own rule only for
+machines that keep none. A device's own startup cache keeps no rule, so rows painted from it follow
+that device's rule until one of those arrives. Inbox settings on Web, Desktop and Mobile change the rule on a machine
+(owners only) and can apply one rule to every connected machine. An owner's client hands its
+earlier choice to a machine that has never had a rule set, once; a value already on the machine is
+never overwritten.
+
 Machines is an administration surface. It can verify an exact machine, inspect identity and channel
 security, retry a connection, or perform role-appropriate account actions. There is no global
 selected-machine application mode.

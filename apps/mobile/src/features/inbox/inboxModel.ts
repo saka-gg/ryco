@@ -70,6 +70,8 @@ export interface InboxEnvironment {
   readonly deliveryUnknown?: boolean;
   readonly threadSettlementSupported?: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport;
+  /** The node's own auto-settle rule; absent lists its threads by this device's rule. */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly mutationReady?: boolean;
   readonly shellCurrent?: boolean;
 }
@@ -224,6 +226,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       label: environment.label,
       threadSettlementSupported: environment.threadSettlementSupported ?? false,
       threadSnoozeSupported: environment.threadSnoozeSupported ?? false,
+      autoSettleAfterDays: environment.autoSettleAfterDays,
       connected: environment.connectionState === "connected",
       mutationReady: environment.mutationReady ?? false,
       shellCurrent: environment.shellCurrent ?? false,

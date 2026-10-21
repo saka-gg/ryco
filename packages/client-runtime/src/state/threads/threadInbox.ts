@@ -56,6 +56,13 @@ export interface ThreadInboxEnvironment {
    */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /**
+   * The node's own automatic settlement rule, so every client lists its threads
+   * alike. Undefined for a node that leaves the rule to clients (an older one)
+   * or one this client knows no rule of: its threads follow the client's
+   * `autoSettleAfterDays`.
+   */
+  readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly connected: boolean;
   readonly mutationReady: boolean;
   readonly shellCurrent: boolean;
@@ -129,6 +136,7 @@ export interface BuildThreadInboxInput {
   readonly filters?: ThreadInboxFilters | undefined;
   readonly currentThreadKey?: string | null | undefined;
   readonly aiFocusEnabled?: boolean | undefined;
+  /** This client's rule, for environments whose node states none of its own. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly nowMs: number;
 }
@@ -451,6 +459,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     input.threads.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
 
+  const clientAutoSettleAfterDays = resolveAutoSettleAfterDays(input.autoSettleAfterDays);
   let excludedCount = 0;
   let nextSettlementEvaluationAtMs: number | null = null;
   const entries: ThreadInboxEntry[] = [];
@@ -480,7 +489,11 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       pinned,
       hasLocalQueuedMessage: localQueueKeys.has(key),
       deliveryUnknown: deliveryUnknownKeys.has(key),
-      autoSettleAfterDays: resolveAutoSettleAfterDays(input.autoSettleAfterDays),
+      // Each node's threads by its own rule; time boundaries use this client's clock.
+      autoSettleAfterDays:
+        environment.autoSettleAfterDays === undefined
+          ? clientAutoSettleAfterDays
+          : environment.autoSettleAfterDays,
       nowMs: input.nowMs,
     });
     const nextEvaluationAtMs = getNextThreadSettlementEvaluationAtMs(policyInput);

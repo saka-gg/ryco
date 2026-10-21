@@ -42,6 +42,7 @@ import {
 } from "@ryco/client-runtime/scoped";
 import {
   getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
   getWsConnectionUiState,
   subscribeReportedThreadCapabilities,
 } from "@ryco/client-runtime/rpc";
@@ -146,6 +147,7 @@ import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildSidebarProjectFolderTree } from "../sidebarProjectFolders";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 import { useHostedWorkspaceState } from "../hostedHub/hostedConnectionCoordinator";
+import { useAutoSettleRuleHandOver } from "../nodeAutoSettlement";
 import { useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { useMessageQueueStore } from "../messageQueueStore";
 import { useSidebarThreadPrewarm } from "./sidebar/hooks/useSidebarThreadPrewarm";
@@ -546,11 +548,16 @@ export default function Sidebar() {
     () => (inboxServerProviders ? { providers: inboxServerProviders } : null),
     [inboxServerProviders],
   );
-  // Changes only when a node's thread capabilities do, not on config pushes.
+  // Changes only when a node's thread capabilities or auto-settle rule do, not on config pushes.
   const reportedThreadCapabilities = useSyncExternalStore(
     subscribeReportedThreadCapabilities,
     getReportedThreadCapabilitiesSnapshot,
     getReportedThreadCapabilitiesSnapshot,
+  );
+  const shellSettlementRules = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getShellSettlementRulesSnapshot,
+    getShellSettlementRulesSnapshot,
   );
   const inboxEnvironments = useMemo<ReadonlyArray<InboxSidebarEnvironment>>(() => {
     const knownEnvironmentIds = new Set<EnvironmentId>();
@@ -584,6 +591,7 @@ export default function Sidebar() {
       savedEnvironmentRuntimeById,
       cacheHydratedEnvironmentIds,
       reportedThreadCapabilities,
+      shellSettlementRules,
     });
   }, [
     inboxServerConfig,
@@ -600,8 +608,12 @@ export default function Sidebar() {
     reportedThreadCapabilities,
     savedEnvironmentRegistry,
     savedEnvironmentRuntimeById,
+    shellSettlementRules,
     sidebarThreads,
   ]);
+  // A node that keeps the auto-settle rule but has none yet takes this client's
+  // own once (owner only).
+  useAutoSettleRuleHandOver(inboxEnvironments, sidebarAutoSettleAfterDays);
   // A republish rebuilds the thread lists but almost never changes which
   // threads are unknown: the set follows its content, not the lists' identity.
   const deliveryUnknownKeysJson = useMemo(() => {

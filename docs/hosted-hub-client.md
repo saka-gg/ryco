@@ -200,6 +200,21 @@ does not state the capability, is unknown: its threads are classified by what th
 until the node answers. Only a node's explicit `false` keeps every thread Active, as on nodes that
 predate settlement.
 
+The automatic settlement rule ("settle after N days without activity") belongs to each node, so every
+device lists a node's threads the same way. A node that advertises `nodeAutoSettlement` keeps the rule
+in its settings (`threadAutoSettleAfterDays`; absent means the shared default of seven days, `null`
+means off) and carries the resolved rule in its shell snapshot (`settlementPolicy`), which the cloud
+history index publishes too: the node republishes its index when the rule changes. Each environment's
+threads are classified with its own node's rule: from the node's live config, else the latest shell
+snapshot of it (a cold node's cached index), else the rule it last reported this session. Rows painted
+from this browser's own startup cache follow this browser's rule until one of those arrives, since
+that cache keeps no rule. Time boundaries are still evaluated with this tab's clock. A node that keeps no rule (an older one) follows
+this browser's own choice. When an owner first connects to a node that keeps the rule but has none
+set, a browser whose own choice differs from the default writes it to the node once; a node that
+already has a value keeps it, and of two clients doing so at once the first one's stands. Inbox
+settings edit the rule on the node they show, read-only without the owner role, and can apply it to
+every connected node, naming those it could not reach.
+
 Hosted Web keeps a warm set of up to three environments per tab, the shared absolute ceiling,
 qualified for browsers in the "Hosted Web warm set qualification (measured)" section of
 [relay-capacity-assessment-3b.md](relay-capacity-assessment-3b.md); a tab samples at most one device
@@ -848,7 +863,9 @@ does not establish a session or role; fresh snapshots reconcile the saved displa
 A separate, schema-validated inbox
 preference record stores only three finite user choices: the auto-settle interval, whether AI Focus
 is enabled, and its refresh interval. It contains no node identifiers, rankings, model/provider
-preferences, content, or authentication material. These browser-local choices survive reloads.
+preferences, content, or authentication material. These browser-local choices survive reloads. The
+auto-settle interval there applies only to nodes that keep no rule of their own, and is what a first
+connection hands to a node that keeps the rule but has none set.
 The hosted root installs a fail-closed
 console sink before authentication because older local-client feature paths may log caught values.
 Relay payloads are never persisted or sent to client analytics — which is not the same as the Hub

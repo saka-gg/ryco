@@ -14,11 +14,14 @@ import type { KnownEnvironment } from "../knownEnvironment.ts";
 import {
   clearEnvironmentServerConfigs,
   forgetEnvironmentServerConfig,
+  forgetEnvironmentsServerState,
   getEnvironmentServerConfigsSnapshot,
   getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
   isEnvironmentServerConfigShown,
   patchEnvironmentServerSettings,
   readEnvironmentServerConfig,
+  recordEnvironmentShellSettlementPolicy,
   resetEnvironmentServerConfigsForTests,
   resolveEnvironmentThreadCapabilities,
   startActiveEnvironmentServerConfigProjection,
@@ -275,6 +278,132 @@ describe("environment thread capabilities", () => {
     );
     expect(getReportedThreadCapabilitiesSnapshot()).not.toBe(snapshot);
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("environment auto-settle rule", () => {
+  function ruleConfig(
+    environmentId: EnvironmentId,
+    input: {
+      readonly nodeAutoSettlement?: boolean;
+      readonly threadAutoSettleAfterDays?: 1 | 3 | 7 | 14 | 30 | 90 | null;
+    },
+  ): ServerConfig {
+    const base = config(environmentId, ["codex"]);
+    return {
+      ...base,
+      environment: {
+        ...base.environment,
+        capabilities: {
+          threadSettlement: true,
+          ...(input.nodeAutoSettlement === undefined
+            ? {}
+            : { nodeAutoSettlement: input.nodeAutoSettlement }),
+        },
+      },
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        ...(input.threadAutoSettleAfterDays === undefined
+          ? {}
+          : { threadAutoSettleAfterDays: input.threadAutoSettleAfterDays }),
+      },
+    } as ServerConfig;
+  }
+
+  it("takes each node's own rule, the shared default until it sets one", () => {
+    writeEnvironmentServerConfig(
+      NODE_A,
+      ruleConfig(NODE_A, { nodeAutoSettlement: true, threadAutoSettleAfterDays: 30 }),
+    );
+    writeEnvironmentServerConfig(NODE_B, ruleConfig(NODE_B, { nodeAutoSettlement: true }));
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBe(30);
+    expect(resolveEnvironmentThreadCapabilities(NODE_B).autoSettleAfterDays).toBe(7);
+
+    writeEnvironmentServerConfig(
+      NODE_B,
+      ruleConfig(NODE_B, { nodeAutoSettlement: true, threadAutoSettleAfterDays: null }),
+      "settingsUpdated",
+    );
+    expect(resolveEnvironmentThreadCapabilities(NODE_B).autoSettleAfterDays).toBeNull();
+  });
+
+  it("states no rule for a node that leaves it to clients", () => {
+    writeEnvironmentServerConfig(NODE_A, ruleConfig(NODE_A, { threadAutoSettleAfterDays: 30 }));
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBeUndefined();
+    expect(resolveEnvironmentThreadCapabilities(NODE_B).autoSettleAfterDays).toBeUndefined();
+  });
+
+  it("follows a settings push and keeps the last rule after the config is forgotten", () => {
+    const listener = vi.fn();
+    subscribeReportedThreadCapabilities(listener);
+    writeEnvironmentServerConfig(NODE_A, ruleConfig(NODE_A, { nodeAutoSettlement: true }));
+    const snapshot = getReportedThreadCapabilitiesSnapshot();
+    patchEnvironmentServerSettings(NODE_A, { enableLegacyTokenStreaming: true });
+    expect(getReportedThreadCapabilitiesSnapshot()).toBe(snapshot);
+
+    patchEnvironmentServerSettings(NODE_A, { threadAutoSettleAfterDays: 3 });
+    expect(getReportedThreadCapabilitiesSnapshot()).not.toBe(snapshot);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    forgetEnvironmentServerConfig(NODE_A);
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBe(3);
+  });
+
+  it("uses a snapshot's rule only while no live config states one", () => {
+    recordEnvironmentShellSettlementPolicy(NODE_A, { autoSettleAfterDays: 14 });
+    expect(resolveEnvironmentThreadCapabilities(NODE_A)).toEqual({
+      threadSettlement: "unknown",
+      threadSnooze: "unknown",
+      autoSettleAfterDays: 14,
+    });
+
+    // The live config supersedes the snapshot, and a later snapshot does not override it.
+    writeEnvironmentServerConfig(
+      NODE_A,
+      ruleConfig(NODE_A, { nodeAutoSettlement: true, threadAutoSettleAfterDays: 30 }),
+    );
+    expect(getShellSettlementRulesSnapshot().has(NODE_A)).toBe(false);
+    recordEnvironmentShellSettlementPolicy(NODE_A, { autoSettleAfterDays: 1 });
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBe(30);
+
+    // Released: a newer snapshot (another device changed the rule) beats the last known one.
+    forgetEnvironmentServerConfig(NODE_A);
+    recordEnvironmentShellSettlementPolicy(NODE_A, { autoSettleAfterDays: null });
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBeNull();
+    // A snapshot from an older node states nothing.
+    recordEnvironmentShellSettlementPolicy(NODE_A, undefined);
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).autoSettleAfterDays).toBeNull();
+  });
+
+  it("forgets only the listed environments when an account's nodes go", () => {
+    writeEnvironmentServerConfig(NODE_A, ruleConfig(NODE_A, { nodeAutoSettlement: true }));
+    writeEnvironmentServerConfig(NODE_B, ruleConfig(NODE_B, { nodeAutoSettlement: true }));
+    const NODE_C = EnvironmentId.make("node-c");
+    recordEnvironmentShellSettlementPolicy(NODE_C, { autoSettleAfterDays: 14 });
+    const listener = vi.fn();
+    subscribeReportedThreadCapabilities(listener);
+
+    forgetEnvironmentsServerState([NODE_A, NODE_C]);
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(readEnvironmentServerConfig(NODE_A)).toBeNull();
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).threadSettlement).toBe("unknown");
+    expect(resolveEnvironmentThreadCapabilities(NODE_C).autoSettleAfterDays).toBeUndefined();
+    expect(readEnvironmentServerConfig(NODE_B)).not.toBeNull();
+    expect(resolveEnvironmentThreadCapabilities(NODE_B).autoSettleAfterDays).toBe(7);
+
+    forgetEnvironmentsServerState([NODE_A]);
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it("forgets snapshot rules with the account", () => {
+    recordEnvironmentShellSettlementPolicy(NODE_B, { autoSettleAfterDays: 14 });
+    const listener = vi.fn();
+    subscribeReportedThreadCapabilities(listener);
+    clearEnvironmentServerConfigs();
+    expect(listener).toHaveBeenCalledOnce();
+    expect(getShellSettlementRulesSnapshot().size).toBe(0);
+    expect(resolveEnvironmentThreadCapabilities(NODE_B).autoSettleAfterDays).toBeUndefined();
   });
 });
 

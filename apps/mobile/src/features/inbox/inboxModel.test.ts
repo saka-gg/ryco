@@ -545,6 +545,28 @@ describe("mobile settlement and attention policy", () => {
     expect(build({ autoSettleAfterDays: null })[0]?.key).toBe("active");
     expect(build({ autoSettleAfterDays: 14 })[0]?.key).toBe("active");
   });
+  it("settles each node's threads by that node's own rule", () => {
+    const otherNode: InboxEnvironment = { ...environment, environmentId: NODE_B, label: "Mini" };
+    const sections = build({
+      projects: [project(NODE_A, "p", "Ryco"), project(NODE_B, "p", "Ryco")],
+      environments: [
+        { ...environment, autoSettleAfterDays: 3 },
+        { ...otherNode, autoSettleAfterDays: 14 },
+      ],
+      threads: [
+        thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt }),
+        thread(NODE_B, "old", "p", { latestUserMessageAt: activityAt }),
+      ],
+      // This device's own rule decides only for nodes that keep none.
+      autoSettleAfterDays: null,
+    });
+    expect(
+      sections.find((section) => section.key === "settled")?.rows.map((row) => row.key),
+    ).toEqual(["node-a:old"]);
+    expect(
+      sections.find((section) => section.key === "active")?.rows.map((row) => row.key),
+    ).toEqual(["node-b:old"]);
+  });
   it("protects queued messages and environment-level unknown delivery", () => {
     expect(build({ localQueuedThreadIds: new Set(["node-a:old"]) })[0]?.rows[0]).toMatchObject({
       attentionState: "active",

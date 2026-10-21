@@ -1,5 +1,6 @@
 import {
   getReportedThreadCapabilitiesSnapshot,
+  getShellSettlementRulesSnapshot,
   subscribeReportedThreadCapabilities,
 } from "@ryco/client-runtime/rpc";
 import { useMemo, useSyncExternalStore } from "react";
@@ -40,11 +41,16 @@ export function useHomeEnvironments(options?: {
   const rosterNodes = useSyncExternalStore(subscribeCachedHubNodeRoster, getCachedHubNodeRoster);
   const cacheProvenanceEnvironmentIds = useStore(useShallow(selectCacheHydratedEnvironmentIds));
   const shellCurrentByEnvironmentId = useStore(useShallow(selectShellCurrentByEnvironmentId));
-  // Changes only when a node's thread capabilities do, not on config pushes.
+  // Changes only when a node's thread capabilities or auto-settle rule do, not on config pushes.
   const reportedThreadCapabilities = useSyncExternalStore(
     subscribeReportedThreadCapabilities,
     getReportedThreadCapabilitiesSnapshot,
     getReportedThreadCapabilitiesSnapshot,
+  );
+  const shellSettlementRules = useSyncExternalStore(
+    subscribeReportedThreadCapabilities,
+    getShellSettlementRulesSnapshot,
+    getShellSettlementRulesSnapshot,
   );
   // Wave 4: trust is keyed by the roster's Hub-minted node id, which is why the
   // roster records go in whole rather than the environment ids alone. The store
@@ -80,6 +86,7 @@ export function useHomeEnvironments(options?: {
     () =>
       buildHomeEnvironments({
         reportedThreadCapabilities,
+        shellSettlementRules,
         direct: directRows.map((row) => ({
           environmentId: row.record.environmentId,
           label: row.record.label,
@@ -125,6 +132,7 @@ export function useHomeEnvironments(options?: {
       reportedThreadCapabilities,
       rosterNodes,
       shellCurrentByEnvironmentId,
+      shellSettlementRules,
       trustByEnvironmentId,
     ],
   );

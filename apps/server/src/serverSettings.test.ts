@@ -838,6 +838,51 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("persists the node auto-settle rule, Off included, and refuses a late hand-over", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const config = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const persisted = () =>
+        fs
+          .readFileString(config.settingsPath)
+          .pipe(Effect.map((raw) => JSON.parse(raw).threadAutoSettleAfterDays));
+      assert.equal(Object.hasOwn(yield* settings.getSettings, "threadAutoSettleAfterDays"), false);
+
+      yield* settings.updateSettings({
+        threadAutoSettleAfterDays: 30,
+        expectedThreadAutoSettleAfterDays: "absent",
+      });
+      assert.equal(yield* persisted(), 30);
+      const late = yield* settings
+        .updateSettings({
+          threadAutoSettleAfterDays: 3,
+          expectedThreadAutoSettleAfterDays: "absent",
+        })
+        .pipe(Effect.flip);
+      assert.include(late.detail, "changed elsewhere");
+      assert.equal((yield* settings.getSettings).threadAutoSettleAfterDays, 30);
+
+      yield* settings.updateSettings({ threadAutoSettleAfterDays: null });
+      assert.equal((yield* settings.getSettings).threadAutoSettleAfterDays, null);
+      assert.equal(yield* persisted(), null);
+
+      const overOff = yield* settings
+        .updateSettings({
+          threadAutoSettleAfterDays: 30,
+          expectedThreadAutoSettleAfterDays: "absent",
+        })
+        .pipe(Effect.flip);
+      assert.include(overOff.detail, "changed elsewhere");
+      assert.equal((yield* settings.getSettings).threadAutoSettleAfterDays, null);
+      yield* settings.updateSettings({
+        threadAutoSettleAfterDays: 14,
+        expectedThreadAutoSettleAfterDays: null,
+      });
+      assert.equal(yield* persisted(), 14);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("writes only non-default server settings to disk", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsService;
