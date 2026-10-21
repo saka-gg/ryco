@@ -2923,37 +2923,37 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         sizeBytes: 30,
       });
       const cookie = yield* getAuthenticatedSessionCookieHeader();
-
-      const interrupted = yield* Effect.result(
-        postAttachmentUpload({
-          uploadToken: created.uploadToken,
-          cookie,
-          body: HttpBody.stream(
-            Stream.concat(
-              Stream.make(new TextEncoder().encode("partial-bytes")),
-              Stream.fail(new Error("client aborted")),
-            ),
-          ),
-        }),
+      const url = yield* getHttpServerUrl(
+        `/attachments/upload?token=${encodeURIComponent(created.uploadToken)}`,
       );
-      assert.isTrue(interrupted._tag === "Failure" || interrupted._tag === "Success");
 
-      const cleanupComplete = () =>
-        fileSystem
-          .readDirectory(config.attachmentsDir)
-          .pipe(
-            Effect.map(
-              (entries) => entries.filter((entry) => entry.endsWith(".part")).length === 0,
-            ),
-          );
-      const waitMillis = (millis: number) =>
-        Effect.promise(() => new Promise((resolve) => setTimeout(resolve, millis)));
-      let clean = yield* cleanupComplete();
-      for (let attempt = 0; attempt < 20 && !clean; attempt += 1) {
-        yield* waitMillis(50);
-        clean = yield* cleanupComplete();
-      }
-      assert.isTrue(clean);
+      const partFileCount = fileSystem
+        .readDirectory(config.attachmentsDir)
+        .pipe(Effect.map((entries) => entries.filter((entry) => entry.endsWith(".part")).length));
+      const waitForPartFiles = (count: number) =>
+        Effect.gen(function* () {
+          let current = yield* partFileCount;
+          for (let attempt = 0; attempt < 100 && current !== count; attempt += 1) {
+            yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+            current = yield* partFileCount;
+          }
+          assert.equal(current, count);
+        });
+
+      // node:http, not fetch: fetch fails a request whose body stream errors
+      // before sending it, so the server would never see the upload start.
+      const upload = NodeHttp.request(url, {
+        method: "POST",
+        agent: false,
+        headers: { cookie, "content-type": "application/octet-stream", "content-length": "30" },
+      });
+      upload.on("error", () => {});
+      upload.write("partial-bytes");
+      // The staging file exists once the server is streaming the body; then the
+      // client drops the connection mid-upload.
+      yield* waitForPartFiles(1).pipe(Effect.ensuring(Effect.sync(() => upload.destroy())));
+
+      yield* waitForPartFiles(0);
       assert.deepEqual(yield* fileSystem.readDirectory(config.attachmentsDir), []);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

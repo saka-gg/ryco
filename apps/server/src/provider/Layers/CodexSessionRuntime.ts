@@ -152,6 +152,10 @@ export interface CodexSessionRuntimeOptions {
   readonly resumeCursor?: CodexResumeCursor;
   /** Per-phase startup deadlines; unset phases use `DEFAULT_CODEX_STARTUP_PHASE_TIMEOUTS`. */
   readonly startupPhaseTimeouts?: Partial<Record<CodexStartupPhase, Duration.Input>>;
+  /** How often unsettled collab children are re-read from Codex. Default 5 s. */
+  readonly collabReconcileInterval?: Duration.Input;
+  /** How long Stop waits for each collab child's turn interrupt. Default 3 s. */
+  readonly collabChildInterruptTimeout?: Duration.Input;
 }
 
 /**
@@ -2152,7 +2156,10 @@ export const makeCodexSessionRuntime = (
         (id) => reconcileChild(id).pipe(Effect.ignore),
         { concurrency: 4, discard: true },
       ),
-    ).pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkIn(runtimeScope));
+    ).pipe(
+      Effect.repeat(Schedule.spaced(options.collabReconcileInterval ?? "5 seconds")),
+      Effect.forkIn(runtimeScope),
+    );
 
     const stderrRemainderRef = yield* Ref.make("");
     yield* child.stderr.pipe(
@@ -2405,7 +2412,7 @@ export const makeCodexSessionRuntime = (
                   turnId: childTurnId,
                 })
                 .pipe(
-                  Effect.timeout("3 seconds"),
+                  Effect.timeout(options.collabChildInterruptTimeout ?? "3 seconds"),
                   Effect.catchCause(() =>
                     Effect.sync(() => {
                       childInterruptFailed = true;

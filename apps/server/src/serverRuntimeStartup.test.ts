@@ -2038,26 +2038,34 @@ it.live("opens the command gate without hydrating the SQL command read model", (
   );
 });
 
-it.live(
-  "cuts a hanging shutdown-hint write off after two seconds",
-  () => {
-    const order: string[] = [];
-    return Effect.gen(function* () {
-      const startedAt = Date.now();
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const startup = yield* makeServerRuntimeStartup;
-          yield* startup.awaitCommandReady;
+it.effect("cuts a hanging shutdown-hint write off after two seconds", () => {
+  const order: string[] = [];
+  return Effect.gen(function* () {
+    const hintWriteStarted = yield* Deferred.make<void>();
+    const shutdown = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const startup = yield* makeServerRuntimeStartup;
+        yield* startup.awaitCommandReady;
+      }),
+    ).pipe(
+      Effect.provide(
+        shutdownOrderLayer({
+          order,
+          recordShutdownHints: () =>
+            Deferred.succeed(hintWriteStarted, undefined).pipe(Effect.andThen(Effect.never)),
         }),
-      );
-      const elapsedMs = Date.now() - startedAt;
-      assert.isAtLeast(elapsedMs, 1_900);
-      assert.isBelow(elapsedMs, 6_000);
-      assert.deepStrictEqual(order, ["reactors"]);
-    }).pipe(Effect.provide(shutdownOrderLayer({ order, recordShutdownHints: () => Effect.never })));
-  },
-  15_000,
-);
+      ),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(hintWriteStarted);
+    // The reactors stop only once the write is given up on.
+    yield* TestClock.adjust("1999 millis");
+    assert.deepStrictEqual(order, []);
+    yield* TestClock.adjust("1 millis");
+    yield* Fiber.join(shutdown);
+    assert.deepStrictEqual(order, ["reactors"]);
+  }).pipe(Effect.provide(TestClock.layer()));
+});
 
 it.live("releases deferred provider driver construction once the HTTP listener serves", () => {
   const released: string[] = [];

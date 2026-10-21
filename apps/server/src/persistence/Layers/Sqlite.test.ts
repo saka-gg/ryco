@@ -9,8 +9,13 @@ import { assert, it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import { MAIN_CONNECTION_BUSY_TIMEOUT_MS } from "../sqliteBusy.ts";
-import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+  SqlitePersistenceMemoryFresh,
+} from "./Sqlite.ts";
 
 const lockHolderSource = `
 const { DatabaseSync } = require("node:sqlite");
@@ -120,3 +125,38 @@ it.effect("applies the A/B-tested read tuning to file databases", () => {
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
+
+const schemaAndLedger = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const schema =
+    yield* sql`SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name`;
+  const ledger =
+    yield* sql`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
+  return { schema, ledger };
+});
+
+it.effect.runIf(NodeSqliteClient.supportsDatabaseImages)(
+  "starts in-memory databases from an image equal to a freshly migrated database",
+  () =>
+    Effect.gen(function* () {
+      const fresh = yield* schemaAndLedger.pipe(Effect.provide(SqlitePersistenceMemoryFresh));
+      const copied = yield* schemaAndLedger.pipe(Effect.provide(SqlitePersistenceMemory));
+      assert.isAbove(fresh.ledger.length, 0);
+      assert.deepEqual(copied, fresh);
+    }),
+);
+
+it.effect("gives every in-memory database a copy of its own", () =>
+  Effect.gen(function* () {
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE isolation_probe(id INTEGER PRIMARY KEY)`;
+      yield* sql`INSERT INTO isolation_probe(id) VALUES (${1})`;
+    }).pipe(Effect.provide(SqlitePersistenceMemory));
+    const probes = yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      return yield* sql`SELECT name FROM sqlite_master WHERE name = 'isolation_probe'`;
+    }).pipe(Effect.provide(SqlitePersistenceMemory));
+    assert.deepEqual([...probes], []);
+  }),
+);

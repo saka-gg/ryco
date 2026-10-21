@@ -31,10 +31,29 @@ export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
 
 export type TypeId = "~local/sqlite-node/SqliteClient";
 
+/** The sqlite SQL client, which can also write its database out as one image. */
+export interface SqliteClient extends Client.SqlClient {
+  /** The main database, serialized the way `sqlite3_serialize` writes it. */
+  readonly export: Effect.Effect<Uint8Array, SqlError>;
+}
+
 /**
  * SqliteClient - Effect service tag for the sqlite SQL client.
  */
-export const SqliteClient = Context.Service<Client.SqlClient>("ryco/persistence/NodeSqliteClient");
+export const SqliteClient = Context.Service<SqliteClient>("ryco/persistence/NodeSqliteClient");
+
+/** `node:sqlite`'s image methods, which the pinned `@types/node` does not declare yet. */
+interface DatabaseImages {
+  serialize(): Uint8Array;
+  deserialize(image: Uint8Array): void;
+}
+
+const databaseImages = (db: DatabaseSync) => db as DatabaseSync & DatabaseImages;
+
+/** Whether this `node:sqlite` can export a database image and open one (`image`). */
+export const supportsDatabaseImages =
+  typeof (DatabaseSync.prototype as Partial<DatabaseImages>).serialize === "function" &&
+  typeof (DatabaseSync.prototype as Partial<DatabaseImages>).deserialize === "function";
 
 export interface SqliteClientConfig {
   readonly filename: string;
@@ -47,6 +66,11 @@ export interface SqliteClientConfig {
   readonly transformQueryNames?: ((str: string) => string) | undefined;
   /** How long a busy statement keeps retrying asynchronously. Defaults to {@link BUSY_RETRY_BUDGET_MS}. */
   readonly busyRetryBudgetMs?: number | undefined;
+  /**
+   * Opens a private in-memory copy of this image (from `export`) in place of
+   * the file's contents. Requires {@link supportsDatabaseImages}.
+   */
+  readonly image?: Uint8Array | undefined;
 }
 
 export interface SqliteMemoryClientConfig extends Omit<
@@ -89,7 +113,7 @@ const wallClockSleep = (ms: number): Effect.Effect<void> =>
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
-): Effect.fn.Return<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> {
+): Effect.fn.Return<SqliteClient, never, Scope.Scope | Reactivity.Reactivity> {
   yield* checkNodeSqliteCompat();
 
   const compiler = Statement.makeCompilerSqlite(options.transformQueryNames);
@@ -106,6 +130,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       scope,
       Effect.sync(() => db.close()),
     );
+    if (options.image !== undefined) databaseImages(db).deserialize(options.image);
 
     const statementReaderCache = new WeakMap<StatementSync, boolean>();
     const hasRows = (statement: StatementSync): boolean => {
@@ -197,7 +222,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         execute(() => allValues(statement, params), "Failed to execute statement"),
       );
 
-    return identity<Connection>({
+    const connection = identity<Connection>({
       execute(sql, params, rowTransform) {
         return rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
       },
@@ -221,10 +246,21 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         return Stream.die("executeStream not implemented");
       },
     });
+    const serialize = Effect.try({
+      try: () => databaseImages(db).serialize(),
+      catch: (cause) =>
+        new SqlError({
+          reason: classifySqliteError(cause, {
+            message: "Failed to export database",
+            operation: "export",
+          }),
+        }),
+    });
+    return { connection, serialize };
   });
 
   const semaphore = yield* Semaphore.make(1);
-  const connection = yield* makeConnection;
+  const { connection, serialize } = yield* makeConnection;
 
   const acquirer = semaphore.withPermits(1)(Effect.succeed(connection));
   const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
@@ -236,7 +272,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
     );
   });
 
-  return yield* Client.make({
+  const client = yield* Client.make({
     acquirer,
     compiler,
     transactionAcquirer,
@@ -246,11 +282,13 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
     ],
     transformRows,
   });
+  // Under the connection's permit, so no statement or transaction is mid-flight.
+  return Object.assign(client, { export: semaphore.withPermits(1)(serialize) });
 });
 
 const make = (
   options: SqliteClientConfig,
-): Effect.Effect<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> =>
+): Effect.Effect<SqliteClient, never, Scope.Scope | Reactivity.Reactivity> =>
   makeWithDatabase(
     options,
     () =>
@@ -262,7 +300,7 @@ const make = (
 
 const makeMemory = (
   config: SqliteMemoryClientConfig = {},
-): Effect.Effect<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> =>
+): Effect.Effect<SqliteClient, never, Scope.Scope | Reactivity.Reactivity> =>
   makeWithDatabase(
     {
       ...config,

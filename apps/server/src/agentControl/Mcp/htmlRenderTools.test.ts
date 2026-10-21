@@ -669,8 +669,9 @@ describe("ryco_html_preview", () => {
     const release = await Effect.runPromise(Deferred.make<void>());
     dispatch.mockImplementationOnce(() => Deferred.await(release).pipe(Effect.as({ sequence: 1 })));
     const rendering = call("ryco_html_render", renderArgs);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(dispatch).toHaveBeenCalledTimes(1);
+    // The render holds the lock once it dispatches. Wait for that, not a fixed
+    // 20 ms: on a loaded machine the render takes longer to get there.
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1), { timeout: 10_000 });
     const preview = await call("ryco_html_preview", { html: page });
     expect(preview.isError).toBeUndefined();
     await Effect.runPromise(Deferred.succeed(release, undefined));
