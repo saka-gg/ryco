@@ -6,13 +6,12 @@ import {
   type TerminalOpenInput,
   type ThreadId,
 } from "@ryco/contracts";
-import { selectTerminalWriteRequireIdleSupported } from "@ryco/client-runtime/state/terminal";
 import { projectScriptRuntimeEnv } from "@ryco/shared/projectScripts";
 import { Schema } from "effect";
 import { randomUUID } from "~/lib/utils";
 import { readEnvironmentApi } from "../../environmentApi";
-import { readEnvironmentServerConfig } from "../../hooks/useChatsAvailability";
 import { useEvent } from "../../hooks/useEvent";
+import { readTerminalWriteRequireIdleSupported } from "../../terminalRequireIdle";
 import { DEFAULT_THREAD_TERMINAL_ID, type Project, type Thread } from "../../types";
 import { LastInvokedScriptByProjectSchema } from "../ChatView.logic";
 import { type NewProjectScriptInput } from "../ProjectScriptDialog";
@@ -117,9 +116,7 @@ export function useChatProjectScripts(
       const isBaseTerminalBusy = terminalState.runningTerminalIds.includes(baseTerminalId);
       // The base terminal is reused only where the node verifies its shell idle before typing
       // the command (the client's running state lags); elsewhere the script gets a new one.
-      const canReuseBaseTerminal = selectTerminalWriteRequireIdleSupported(
-        readEnvironmentServerConfig(environmentId),
-      );
+      const canReuseBaseTerminal = readTerminalWriteRequireIdleSupported(environmentId);
       const shouldCreateNewTerminal =
         Boolean(options?.preferNewTerminal) || isBaseTerminalBusy || !canReuseBaseTerminal;
       const targetTerminalId = shouldCreateNewTerminal

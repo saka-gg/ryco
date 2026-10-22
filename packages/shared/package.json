@@ -11,6 +11,7 @@
     },
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
     "./terminalPaste": "./src/terminalPaste.ts",
+    "./terminalReports": "./src/terminalReports.ts",
     "./cliProxyHubUrl": "./src/cliProxyHubUrl.ts",
     "./cliProxyHubCredentials": "./src/cliProxyHubCredentials.ts",
     "./retiredFeatures": "./src/retiredFeatures.ts",

@@ -1311,6 +1311,52 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("TerminalManager", (
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("does not count focus reports or query replies as input for requireIdle", () =>
+    Effect.gen(function* () {
+      const reads: Array<ReadonlyArray<number>> = [];
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        processTableSnapshotter: (shellPids) => {
+          reads.push(shellPids);
+          return Effect.succeed({ childrenByParent: new Map<number, number[]>() });
+        },
+        subprocessPollIntervalMs: 60_000,
+        subprocessIdlePollIntervalMs: 60_000,
+      });
+      const write = (data: string, requireIdle?: true) =>
+        manager.write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data,
+          ...(requireIdle ? { requireIdle } : {}),
+        });
+
+      yield* manager.open(openInput());
+      const process = ptyAdapter.processes[0]!;
+      const readsBefore = reads.length;
+      // A fresh fish answers its DA1 query and reports focus: still a shell without input.
+      yield* write("\u001b[?1;2c");
+      yield* write("\u001b[I");
+      yield* write("first\r", true);
+      assert.equal(reads.length, readsBefore);
+
+      // Running a script blurs and refocuses the terminal right before its write.
+      yield* TestClock.adjust("500 millis");
+      yield* write("\u001b[O");
+      yield* write("\u001b[I\u001b[?2026;2$y");
+      yield* write("second\r", true);
+      assert.deepEqual(reads.slice(readsBefore), [[9000]]);
+
+      expect(process.writes).toEqual([
+        "\u001b[?1;2c",
+        "\u001b[I",
+        "first\r",
+        "\u001b[O",
+        "\u001b[I\u001b[?2026;2$y",
+        "second\r",
+      ]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("holds other input to the thread until a requireIdle write is done", () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();

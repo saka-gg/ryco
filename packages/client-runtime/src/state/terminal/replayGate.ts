@@ -1,18 +1,4 @@
-/**
- * Reports a terminal emulator sends to the host on its own, never as typed input: device
- * attributes (`…c`), status and cursor position reports (`…n`, `…R`), mode reports (`…$y`),
- * window reports (`…t`), kitty keyboard flags (`?…u`), and any OSC or DCS string (colour,
- * DECRQSS, XTVERSION and XTGETTCAP replies). Only Shift/Ctrl+F3 (`CSI 1;<mod>R`) shares a
- * shape with them.
- */
-const TERMINAL_REPLY_PATTERN =
-  // eslint-disable-next-line no-control-regex -- Terminal reports are control sequences.
-  /^(?:(?:\u001b\[|\u009b)(?:[?>]?[0-9;]*[cnRt]|\??[0-9;]*\$y|\?[0-9;]*u)|(?:\u001b[P\]]|[\u0090\u009d])[\s\S]*(?:\u0007|\u001b\\|\u009c))$/;
-
-/** Whether `data` an emulator emitted is a reply to a terminal query rather than user input. */
-export function isTerminalReplyData(data: string): boolean {
-  return TERMINAL_REPLY_PATTERN.test(data);
-}
+import { isTerminalReplyData } from "@ryco/shared/terminalReports";
 
 /** The emulator a surface writes to: `callback` runs once everything written before it is parsed. */
 export interface TerminalReplayWriter {

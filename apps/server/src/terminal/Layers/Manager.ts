@@ -23,6 +23,7 @@ import {
 import { makeKeyedCoalescingWorker } from "@ryco/shared/KeyedCoalescingWorker";
 import { latestStateQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { bracketedTerminalSnippet } from "@ryco/shared/terminalPaste";
+import { isTerminalReportData } from "@ryco/shared/terminalReports";
 import {
   Clock,
   Effect,
@@ -187,8 +188,11 @@ interface TerminalStartInput {
 interface TerminalSessionState {
   inputEpoch: string;
   hasReceivedInput: boolean;
-  /** Clock time of the last write; meaningful only once `hasReceivedInput` is set. */
-  lastInputAtMs: number;
+  /**
+   * Clock time of the last input that could start a command, null when none came since the
+   * shell started. Focus reports and query replies the emulator sends on its own do not count.
+   */
+  lastInputAtMs: number | null;
   threadId: string;
   terminalId: string;
   cwd: string;
@@ -2182,6 +2186,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
         session.status = "starting";
         session.inputEpoch = randomUUID();
         session.hasReceivedInput = false;
+        session.lastInputAtMs = null;
         session.cwd = input.cwd;
         session.worktreePath = input.worktreePath ?? null;
         session.cols = input.cols;
@@ -2594,7 +2599,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
             const session: TerminalSessionState = {
               inputEpoch: randomUUID(),
               hasReceivedInput: false,
-              lastInputAtMs: 0,
+              lastInputAtMs: null,
               threadId: input.threadId,
               terminalId,
               cwd: input.cwd,
@@ -2719,10 +2724,11 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
 
     /**
      * Fails with {@link TerminalBusyError} unless the shell is idle now; the caller holds the
-     * thread lock. A shell without input since it started runs only its startup files, as a
-     * fresh terminal does. Any other shell needs a process-table read requested now: every
-     * input to the thread takes the same lock, so none can land between the read and the
-     * write, and input from just before may not show in the read yet, so it is refused.
+     * thread lock. A shell without input that could start a command since it started runs only
+     * its startup files, as a fresh terminal does. Any other shell needs a process-table read
+     * requested now: every input to the thread takes the same lock, so none can land between
+     * the read and the write, and input from just before may not show in the read yet, so it
+     * is refused.
      */
     const verifySessionIdle = Effect.fn("terminal.verifySessionIdle")(function* (
       session: TerminalSessionState,
@@ -2742,9 +2748,10 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
       ) {
         return yield* busy("unverified");
       }
-      if (!session.hasReceivedInput) return;
+      const lastInputAtMs = session.lastInputAtMs;
+      if (lastInputAtMs === null) return;
       const checkStartedAtMs = yield* Clock.currentTimeMillis;
-      if (checkStartedAtMs - session.lastInputAtMs < REQUIRE_IDLE_INPUT_SETTLE_MS) {
+      if (checkStartedAtMs - lastInputAtMs < REQUIRE_IDLE_INPUT_SETTLE_MS) {
         return yield* busy("inputRaced");
       }
       // A foreground process other than the one the shell showed while idle is a command.
@@ -2833,7 +2840,9 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 );
               }
               session.hasReceivedInput = true;
-              session.lastInputAtMs = inputAtMs;
+              // Focusing a terminal or answering its queries starts nothing. A script run moves
+              // focus right before its write, so counting those reports would refuse that write.
+              if (!isTerminalReportData(input.data)) session.lastInputAtMs = inputAtMs;
               process.write(input.data);
               noteTerminalIo();
               return Effect.void;
@@ -2898,7 +2907,7 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
                 session = {
                   inputEpoch: randomUUID(),
                   hasReceivedInput: false,
-                  lastInputAtMs: 0,
+                  lastInputAtMs: null,
                   threadId: input.threadId,
                   terminalId,
                   cwd: input.cwd,

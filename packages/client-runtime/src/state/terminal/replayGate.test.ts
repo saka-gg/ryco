@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { createTerminalReplayGate, isTerminalReplyData } from "./replayGate.ts";
+import { createTerminalReplayGate } from "./replayGate.ts";
 
 /** Parses writes in order when told to, like an emulator's asynchronous write buffer. */
 function createQueuedWriter(onParse: (data: string) => void) {
@@ -16,52 +16,6 @@ function createQueuedWriter(onParse: (data: string) => void) {
     },
   };
 }
-
-describe("isTerminalReplyData", () => {
-  it("recognizes the reports xterm sends for queries", () => {
-    for (const reply of [
-      "\u001b[?1;2c",
-      "\u001b[>0;276;0c",
-      "\u001b[0n",
-      "\u001b[12;1R",
-      "\u001b[?12;1R",
-      "\u001b[?2026;2$y",
-      "\u001b[4;2$y",
-      "\u001b[8;24;80t",
-      "\u001b[?31u",
-      "\u001b]11;rgb:0000/0000/0000\u001b\\",
-      "\u001b]10;rgb:ffff/ffff/ffff\u0007",
-      "\u001bP1$r0m\u001b\\",
-      "\u001bP0$r\u001b\\",
-      "\u001bP>|xterm.js(6.0.0)\u001b\\",
-      "\u009b?1;2c",
-      "\u00901+r544e=1b\u009c",
-    ]) {
-      expect(isTerminalReplyData(reply), JSON.stringify(reply)).toBe(true);
-    }
-  });
-
-  it("leaves typed, pasted and pointer input alone", () => {
-    for (const input of [
-      "l",
-      "ls -la\r",
-      "\u0003",
-      "\u001b",
-      "\u001b[A",
-      "\u001b[1;5D",
-      "\u001bOR",
-      "\u001b[15~",
-      "\u001b[I",
-      "\u001b[O",
-      "\u001b[<0;10;5M",
-      "\u001b[200~echo \u001b[6n\u001b[201~",
-      "\u001b[12;1Rls",
-      "\u001b]11;?",
-    ]) {
-      expect(isTerminalReplyData(input), JSON.stringify(input)).toBe(false);
-    }
-  });
-});
 
 describe("createTerminalReplayGate", () => {
   it("drops replies to replayed queries until the replay has been parsed", () => {

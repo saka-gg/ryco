@@ -1,14 +1,10 @@
 import type { ScopedThreadRef } from "@ryco/contracts";
 
 import { readEnvironmentApi } from "./environmentApi";
-import { readEnvironmentServerConfig } from "./hooks/useChatsAvailability";
 import { readLocalApi } from "./localApi";
+import { readTerminalWriteRequireIdleSupported } from "./terminalRequireIdle";
 import { terminalSnippetBroker } from "./terminalSnippetInsertion";
-import {
-  selectTerminalWriteRequireIdleSupported,
-  selectThreadTerminalState,
-  useTerminalStateStore,
-} from "./terminalStateStore";
+import { selectThreadTerminalState, useTerminalStateStore } from "./terminalStateStore";
 
 export const RUNNING_TERMINAL_CLOSE_CONFIRMATION = [
   "Close terminal?",
@@ -49,9 +45,7 @@ export function closeThreadTerminal(input: {
         { threadRef, terminalId },
         api.terminal,
         input.isFinalTerminal,
-        selectTerminalWriteRequireIdleSupported(
-          readEnvironmentServerConfig(threadRef.environmentId),
-        ),
+        readTerminalWriteRequireIdleSupported(threadRef.environmentId),
       )
       .catch(() => undefined);
     input.onClosed();
