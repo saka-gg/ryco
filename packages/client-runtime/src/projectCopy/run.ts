@@ -1305,7 +1305,7 @@ const ARTIFACT_ORDER: ReadonlyArray<ProjectExportArtifactKind> = [
 ];
 
 const ignoredFilesLeftOutWarning = (nodeLabel: string) =>
-  `The ignored files were not copied: the connection to ${nodeLabel} through the Hub is not end-to-end encrypted.`;
+  `The ignored files were not copied: the Hub can read the connection to ${nodeLabel}.`;
 
 const SKIPPED_WARNINGS: Record<ProjectExportArtifactKind, (reason: string) => string> = {
   "commits-bundle": (reason) => `Unpushed commits were not copied (${reason}).`,

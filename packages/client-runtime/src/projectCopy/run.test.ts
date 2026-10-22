@@ -884,10 +884,46 @@ describe("startProjectCopy", () => {
         .filter((input) => input.purpose === "changes-patch");
       expect(patchBegins.map(carries)).toEqual([true, false]);
       expect(outcome.project?.warnings).toContain(
-        `The ignored files were not copied: the connection to ${refusing === "target" ? "Mac mini" : "MacBook"} through the Hub is not end-to-end encrypted.`,
+        `The ignored files were not copied: the Hub can read the connection to ${refusing === "target" ? "Mac mini" : "MacBook"}.`,
       );
       expectReleased(io);
     }
+  });
+
+  it("drops the refused patch's transfer when the export made without the ignored files has no patch", async () => {
+    const { source, target, io } = setup();
+    target.before = (method, input) => {
+      if (
+        method === "transferBegin" &&
+        (input as { readonly carriesIgnoredFiles?: boolean }).carriesIgnoredFiles === true
+      ) {
+        // Only the ignored files differ from the commit: without them there is no patch.
+        source.artifacts.delete("changes-patch");
+        throw rpcError("access-denied", "Ignored files never travel over an unencrypted relay.");
+      }
+    };
+    const outcome = await startProjectCopy({
+      io,
+      plan: plan({ choices: { ...plan().choices, ignoredPaths: [".env"] } }),
+    }).done;
+
+    expect(outcome.progress).toMatchObject({ phase: "done", error: null });
+    const refusedPatch = target
+      .inputs<{ readonly purpose: string; readonly transferId: string }>("transferBegin")
+      .find((input) => input.purpose === "changes-patch");
+    // The refused patch's transfer left the record and the target; the import carries no patch.
+    expect(outcome.record.transfers.map((transfer) => transfer.purpose)).toEqual([
+      "commits-bundle",
+      "avatar",
+    ]);
+    expect(target.aborted).toEqual([refusedPatch!.transferId]);
+    expect(target.inputs<ProjectImportStartInput>("importStart")[0]).toMatchObject({
+      changes: null,
+    });
+    expect(outcome.project?.warnings).toContain(
+      "The ignored files were not copied: the Hub can read the connection to Mac mini.",
+    );
+    expectReleased(io);
   });
 
   it("stops before uploading more than a relayed node may carry (A7)", async () => {
