@@ -1,5 +1,10 @@
 import { create } from "zustand";
 
+import {
+  addProjectDialogAvailable,
+  openAddProject as openAddProjectDialog,
+} from "./components/projectNodes/projectNodesDialogStore";
+
 type CommandPaletteOpenIntent =
   | { kind: "add-project" | "split-thread"; requestId: number }
   /** Opens with `query` already typed, e.g. the sidebar field's "Search everywhere". */
@@ -10,6 +15,11 @@ interface CommandPaletteStore {
   openIntent: CommandPaletteOpenIntent | null;
   setOpen: (open: boolean) => void;
   toggleOpen: () => void;
+  /**
+   * Every "Add project" entry point: opens `AddProjectDialog` where it is
+   * available (`addProjectDialogAvailable`), else the palette's add-project
+   * views (the frozen phone tier, and every tier until the dialog is on).
+   */
   openAddProject: () => void;
   /** Opens straight into the thread picker for a new split pane. */
   openSplitThread: () => void;
@@ -23,14 +33,19 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
   setOpen: (open) => set({ open, ...(open ? {} : { openIntent: null }) }),
   toggleOpen: () =>
     set((state) => ({ open: !state.open, ...(state.open ? { openIntent: null } : {}) })),
-  openAddProject: () =>
+  openAddProject: () => {
+    if (addProjectDialogAvailable()) {
+      openAddProjectDialog();
+      return;
+    }
     set((state) => ({
       open: true,
       openIntent: {
         kind: "add-project",
         requestId: (state.openIntent?.requestId ?? 0) + 1,
       },
-    })),
+    }));
+  },
   openSplitThread: () =>
     set((state) => ({
       open: true,

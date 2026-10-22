@@ -17,6 +17,10 @@ import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
+import {
+  hasStoredProjectCopyRecords,
+  useProjectNodesDialogStore,
+} from "./projectNodes/projectNodesDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
@@ -31,6 +35,7 @@ import {
   scheduleShellIdlePreloads,
   SHELL_IDLE_PRELOAD_PRIMARY_START_CAP_MS,
 } from "../lib/shellIdlePreload";
+import { scheduleIdleTask } from "../lib/idleTask";
 import { prewarmThreadDetailSubscription } from "../lib/threadDetailPrewarm";
 import { preloadSettingsPage } from "../settingsRoute";
 import { useSettings } from "../hooks/useSettings";
@@ -51,6 +56,7 @@ import {
   useSavedEnvironmentRegistryStore,
 } from "../environments/runtime";
 import { startDesktopWorkspaceBridge } from "../platform/desktopWorkspace";
+import { useNodeDirectoryPublisher } from "../environments/useNodeDirectoryPublisher";
 import {
   configureClientTracing,
   disableClientTracing,
@@ -112,6 +118,10 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
   // to saved environments; readiness is per environment.
   const chatAvailable = primaryEnvironmentAuthenticated || authGateState.status === "hosted-static";
   const localTracingAllowed = authGateState.status === "authenticated";
+  // Project copies: Agent Control's node directory and the copies a previous
+  // session left unfinished. Both load their code on demand.
+  useNodeDirectoryPublisher(chatAvailable);
+  useResumeProjectCopies(chatAvailable);
   // The presentation-tier seam lives inside `AppSidebarLayout`: the provider
   // and the route subtree stay mounted identically for both tiers (a tier
   // flip must not remount the workspace); only the sidebar chrome forks.
@@ -143,6 +153,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <AutomationsDialogMount /> : null}
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
+        {chatAvailable ? <ProjectNodesDialogsMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
         {primaryEnvironmentAuthenticated ? (
@@ -203,6 +214,44 @@ function ForkThreadDialogMount() {
   if (!hasOpened || !ready) return null;
   return <ForkThreadDialog />;
 }
+
+const ProjectNodesDialogs = preloadableLazy(() =>
+  import("./projectNodes/ProjectNodesDialogs").then((module) => module.ProjectNodesDialogs),
+);
+
+/**
+ * "Add project" and "Copy to another node" load the first time one opens, or
+ * a copy starts (its toasts open the copied project through this surface),
+ * then stay mounted.
+ */
+function ProjectNodesDialogsMount() {
+  const wanted = useProjectNodesDialogStore(
+    (state) => state.addProject.open || state.copyProject.open || state.copiesActive,
+  );
+  const [hasOpened, setHasOpened] = useState(wanted);
+  if (wanted && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(ProjectNodesDialogs, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <ProjectNodesDialogs />;
+}
+
+/**
+ * Picks up the copies a previous session left unfinished, once the app is
+ * idle. The copy runtime loads only when there are stored records.
+ */
+function useResumeProjectCopies(enabled: boolean): void {
+  useEffect(() => {
+    if (!enabled) return;
+    return scheduleIdleTask(() => {
+      if (!hasStoredProjectCopyRecords()) return;
+      void import("./projectNodes/copyRuntime/copyManager")
+        .then((module) => module.resumeProjectCopies())
+        .catch((error: unknown) => console.warn("Resuming project copies failed.", error));
+    }, PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS);
+  }, [enabled]);
+}
+
+const PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS = 5_000;
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";
 const DRAFT_ROUTE_ID = "/_chat/draft/$draftId";

@@ -478,13 +478,21 @@ export function waitForHostedNodeMutationLease(
  * lease. Writes wait for the node's mutation lease, and the check handed back
  * revalidates that lease at the instant of each call: a relay renewal or a
  * new snapshot generation invalidates it, and the copy then re-acquires.
+ *
+ * `follow` (an import that runs on the node by itself) retains an interactive
+ * scope instead: background demand a routed environment may displace, since
+ * the import goes on without this client.
  */
 export function hostedNodeAcquisition(
   environmentId: EnvironmentId,
+  purpose: "copy" | "follow" = "copy",
 ): Pick<NodeAcquirePorts, "retain" | "awaitMutationLease"> {
   return {
     retain: (scope) => ({
-      release: hostedWebConnectionScopes.retain(environmentId, scope),
+      release: hostedWebConnectionScopes.retain(
+        environmentId,
+        purpose === "follow" ? { type: "interactive" } : scope,
+      ),
       renew: () => activeCoordinator?.handleReconcileRequest({ reason: "resume" }),
     }),
     awaitMutationLease: async (signal) => {

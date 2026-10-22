@@ -13,6 +13,7 @@ import { hostedNodeAcquisition } from "../hostedHub/hostedConnectionCoordinator"
 import { randomUUID } from "../lib/utils";
 import {
   readDesktopWorkspaceState,
+  retainDesktopWorkspaceInteractiveScope,
   retainDesktopWorkspaceProjectCopyScope,
 } from "../platform/desktopWorkspace";
 import { readNodeCatalogSnapshot } from "./nodeCatalog";
@@ -26,6 +27,15 @@ import {
 } from "./runtime";
 
 export type { AcquiredNode } from "@ryco/client-runtime/state/nodes";
+
+/**
+ * Why a copy holds a node. `copy` retains the non-preemptible `project-copy`
+ * scope and, through the Hub, waits for the mutation lease. `follow` watches
+ * an import that runs on the node by itself: a view's (preemptible) scope,
+ * and the lease only where this client is the node's owner (cancelling the
+ * import is a write).
+ */
+export type AcquireNodePurpose = "copy" | "follow";
 
 /**
  * Acquiring a node for a cross-node project copy, on this client: the shared
@@ -103,7 +113,7 @@ function timeoutMessageFor(environmentId: EnvironmentId): () => string {
   };
 }
 
-function directPorts(environmentId: EnvironmentId): NodeAcquirePorts {
+function directPorts(environmentId: EnvironmentId, purpose: AcquireNodePurpose): NodeAcquirePorts {
   const timeoutMessage = timeoutMessageFor(environmentId);
   if (environmentId === readPrimaryEnvironmentDescriptor()?.environmentId) {
     return {
@@ -138,7 +148,10 @@ function directPorts(environmentId: EnvironmentId): NodeAcquirePorts {
     return {
       transport: "relay",
       retain: (scope) => ({
-        release: retainDesktopWorkspaceProjectCopyScope(environmentId, scope.copyId),
+        release:
+          purpose === "follow"
+            ? retainDesktopWorkspaceInteractiveScope(environmentId)
+            : retainDesktopWorkspaceProjectCopyScope(environmentId, scope.copyId),
       }),
       connect: (signal) => awaitBootstrappedConnection(environmentId, signal),
       timeoutMessage,
@@ -156,29 +169,46 @@ function directPorts(environmentId: EnvironmentId): NodeAcquirePorts {
  */
 export async function acquireNode(
   environmentId: EnvironmentId,
-  options?: { readonly copyId?: string; readonly signal?: AbortSignal },
+  options?: {
+    readonly copyId?: string;
+    readonly signal?: AbortSignal;
+    /** `copy` by default. */
+    readonly purpose?: AcquireNodePurpose;
+  },
 ): Promise<AcquiredNode> {
+  const purpose = options?.purpose ?? "copy";
   const catalog = readNodeCatalogSnapshot();
   const node = catalog.nodes.find((entry) => entry.environmentId === environmentId);
   // An id this client does not know is refused, never guessed at.
   if (!node) throw new Error("This device is not one Ryco knows here.");
-  // A reachable node that refuses changes stays refused once connected; an
-  // offline or connecting one is worth connecting to find out.
-  if (!node.canMutate && node.presence === "online") {
-    throw new Error(node.mutateBlockedReason ?? `${node.label} is not available right now`);
+  const owner = catalog.ownerEnvironmentIds.has(environmentId);
+  // Following only reads; the checks below guard the copy's writes.
+  if (purpose === "copy") {
+    // A reachable node that refuses changes stays refused once connected; an
+    // offline or connecting one is worth connecting to find out.
+    if (!node.canMutate && node.presence === "online") {
+      throw new Error(node.mutateBlockedReason ?? `${node.label} is not available right now`);
+    }
+    // Through the Hub, writes need the node's mutation lease, which only an owner gets.
+    if (isHostedHubMode() && !owner) {
+      throw new Error(`Copying projects with ${node.label} needs owner access to it`);
+    }
   }
-  // Through the Hub, writes need the node's mutation lease, which only an owner gets.
-  if (isHostedHubMode() && !catalog.ownerEnvironmentIds.has(environmentId)) {
-    throw new Error(`Copying projects with ${node.label} needs owner access to it`);
+  let ports: NodeAcquirePorts;
+  if (isHostedHubMode()) {
+    const hosted = hostedNodeAcquisition(environmentId, purpose);
+    ports = {
+      transport: "relay",
+      retain: hosted.retain,
+      ...(hosted.awaitMutationLease && (purpose === "copy" || owner)
+        ? { awaitMutationLease: hosted.awaitMutationLease }
+        : {}),
+      connect: (signal) => awaitBootstrappedConnection(environmentId, signal),
+      timeoutMessage: timeoutMessageFor(environmentId),
+    };
+  } else {
+    ports = directPorts(environmentId, purpose);
   }
-  const ports: NodeAcquirePorts = isHostedHubMode()
-    ? {
-        transport: "relay",
-        ...hostedNodeAcquisition(environmentId),
-        connect: (signal) => awaitBootstrappedConnection(environmentId, signal),
-        timeoutMessage: timeoutMessageFor(environmentId),
-      }
-    : directPorts(environmentId);
   return acquireNodeConnection({
     environmentId,
     copyId: options?.copyId ?? randomUUID(),

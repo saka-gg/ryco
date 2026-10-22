@@ -210,6 +210,24 @@ describe("standard build static import graph", () => {
     ).toEqual([]);
   });
 
+  it("keeps the project-nodes dialogs, the copy runtime and the coordinator on demand", () => {
+    // The shell imports only the dialogs' store, which boot already carries
+    // through the command palette's store. The dialogs, the copy runtime (its
+    // toasts, node IO and manager), the coordinator and the Agent Control copy
+    // executor load when a dialog opens, a copy runs or a card asks.
+    const forbidden = [
+      /^packages\/client-runtime\/src\/projectCopy\//u,
+      /^apps\/web\/src\/components\/projectNodes\/(?:ProjectNodesDialogs|AddProjectDialog|CopyProjectDialog)\.tsx$/u,
+      /^apps\/web\/src\/components\/projectNodes\/agentControlCopyExecutor\.ts$/u,
+      /^apps\/web\/src\/components\/projectNodes\/copyRuntime\//u,
+    ];
+    expect(forbiddenChains("main.tsx", forbidden)).toEqual([]);
+    expect(forbiddenChains("components/RootAppShell.tsx", forbidden)).toEqual([]);
+    for (const route of ["ChatThreadRouteView.tsx", "DraftChatThreadRouteView.tsx"]) {
+      expect(forbiddenChains(`components/routeViews/${route}`, forbidden)).toEqual([]);
+    }
+  });
+
   it("keeps the diff renderer out of the pull requests page until the Files tab", () => {
     expect(
       forbiddenChains("components/pullRequests/PullRequestsPage.tsx", [

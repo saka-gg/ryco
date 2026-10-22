@@ -357,9 +357,14 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       // The boot code-splitting group keeps shell-only @base-ui and lucide
       // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
-      // 103 files on 2026-10-15.
+      // 103 files on 2026-10-15; 115 files / 414.2 KiB on 2026-10-22 before
+      // cross-node project copy. 116 / 415.2 KiB with it: its shell pieces add
+      // no file (the dialog store joins boot through the palette's store), but
+      // the copy runtime's node catalog is the first lazy importer of
+      // `@ryco/shared/environmentIcon` without `EnvironmentMachineIcon`, so
+      // automatic chunking splits their shared chunk in two.
       maxGzipBytes: 420 * KIB,
-      maxFiles: 115,
+      maxFiles: 116,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

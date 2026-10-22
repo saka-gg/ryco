@@ -223,6 +223,10 @@ describe("acquireNodeConnection", () => {
     expect(error).toMatchObject({ environmentId, message: "Reconnecting to Mac mini" });
     expect(call).toHaveBeenCalledTimes(1);
     expect(acquired.isCurrent()).toBe(false);
+    // Reads need no lease: the connection itself is still the acquired one.
+    expect(acquired.isConnected()).toBe(true);
+    acquired.release();
+    expect(acquired.isConnected()).toBe(false);
   });
 
   it("never calls through a connection that was replaced", async () => {
@@ -237,7 +241,9 @@ describe("acquireNodeConnection", () => {
         connect: async () => connection(() => current),
       },
     });
+    expect(acquired.isConnected()).toBe(true);
     current = false;
+    expect(acquired.isConnected()).toBe(false);
     const call = vi.fn(async () => "sent");
     await expect(acquired.withLease(call)).rejects.toSatisfy(isNodeLeaseLostError);
     expect(call).not.toHaveBeenCalled();

@@ -121,6 +121,11 @@ export interface AcquiredNode {
   /** Whether the acquired connection and lease are still current and the hold is not released. */
   readonly isCurrent: () => boolean;
   /**
+   * Whether the acquired connection is still current and the hold is not
+   * released, whatever its lease: reads and subscriptions need no lease.
+   */
+  readonly isConnected: () => boolean;
+  /**
    * Runs `call` only while the acquired connection and lease are current;
    * otherwise fails with {@link NodeLeaseLostError} without calling.
    */
@@ -224,12 +229,14 @@ export async function acquireNodeConnection(input: {
         : () => true;
       // The connection may have been replaced while the lease was awaited.
       if (connection.isCurrent() && leaseIsCurrent()) {
-        const isCurrent = () => !released && connection.isCurrent() && leaseIsCurrent();
+        const isConnected = () => !released && connection.isCurrent();
+        const isCurrent = () => isConnected() && leaseIsCurrent();
         return {
           environmentId,
           api: connection.api,
           transport: ports.transport,
           isCurrent,
+          isConnected,
           withLease: (call) =>
             isCurrent()
               ? call(connection.api)

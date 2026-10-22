@@ -72,9 +72,14 @@ export const ProjectCopyJobRecord = Schema.Struct({
   stage: ProjectCopyJobStage,
   /** Set once `stage` is `finished`. */
   outcome: Schema.NullOr(ProjectCopyJobOutcome),
-  /** For a copy an Agent Control proposal asked for: what the executor reports with. */
+  /**
+   * For a copy an Agent Control proposal asked for: what the executor reports
+   * with, and the node the proposal lives on (the agent's node), which a resumed
+   * copy reports to.
+   */
   agentControl: Schema.NullOr(
     Schema.Struct({
+      environmentId: EnvironmentId,
       proposalId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
       executorId: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
     }),
