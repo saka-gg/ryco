@@ -57,7 +57,7 @@ export function AgentControlThreadActivity({
 
   return (
     <div
-      className="mx-auto mb-2 w-full min-w-0 max-w-208"
+      className="mx-auto mb-2 w-full min-w-0 max-w-(--chat-composer-max-width)"
       data-testid="agent-control-external-approvals"
     >
       {pending.length > 0 ? (

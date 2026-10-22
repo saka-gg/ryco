@@ -107,7 +107,7 @@ export function NewThreadHero({
         <RycoLetterMark className="h-10 text-foreground sm:h-12" />
       )}
       <div className="flex flex-col items-center gap-2">
-        <h1 className="max-w-208 text-balance text-center font-medium text-2xl text-foreground tracking-tight sm:text-3xl">
+        <h1 className="max-w-(--chat-composer-max-width) text-balance text-center font-medium text-2xl text-foreground tracking-tight sm:text-3xl">
           {headline.projectName === null ? (
             headline.text
           ) : (

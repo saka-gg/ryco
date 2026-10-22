@@ -73,6 +73,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { ChatWidthSetting } from "./ChatWidthSetting";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
@@ -634,6 +635,7 @@ export function AppearanceSettingsPanel({
             />
           </SettingsRow>
         )}
+        {isHub ? null : <ChatWidthSetting />}
         <SettingsRow
           title="Primary color"
           description="Theme palettes control buttons by default; enable a custom color to pin one app accent."

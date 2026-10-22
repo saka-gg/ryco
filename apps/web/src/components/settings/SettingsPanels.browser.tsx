@@ -35,6 +35,9 @@ import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
 import { SourceControlPreferences } from "./SourceControlPreferences";
+import { ComposerSettings } from "./ComposerSettings";
+import { ChatWidthSetting } from "./ChatWidthSetting";
+import { isMacPlatform } from "../../lib/utils";
 import { useState } from "react";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
@@ -1474,6 +1477,51 @@ describe("GeneralSettingsPanel observability", () => {
         ...DEFAULT_CLIENT_SETTINGS,
         diffWordWrap: true,
         diffIgnoreWhitespace: false,
+      });
+    });
+  });
+
+  it("persists the send shortcut and chat width and names the follow-up shortcut left", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+    const mac = isMacPlatform(navigator.platform);
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ComposerSettings />
+        <ChatWidthSetting />
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect
+      .element(page.getByText(`${mac ? "⌘↵" : "Ctrl+Enter"} does the opposite.`, { exact: false }))
+      .toBeVisible();
+    await page.getByRole("combobox", { name: "Send shortcut" }).click();
+    await page
+      .getByRole("option", { name: `Always ${mac ? "⌘↵" : "Ctrl+Enter"}`, exact: true })
+      .click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        sendShortcut: "mod-enter",
+      });
+    });
+    await expect
+      .element(
+        page.getByText(`${mac ? "⇧⌘↵" : "Ctrl+Shift+Enter"} does the opposite.`, { exact: false }),
+      )
+      .toBeVisible();
+
+    await page.getByRole("combobox", { name: "Chat width" }).click();
+    await page.getByRole("option", { name: "Wide", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        sendShortcut: "mod-enter",
+        chatWidth: "wide",
       });
     });
   });

@@ -46,7 +46,7 @@ export function OptionalQuestionCard({
     }
   };
   return (
-    <details className="mx-auto mb-2 w-full max-w-208 rounded-lg border border-border bg-background px-4 py-3">
+    <details className="mx-auto mb-2 w-full max-w-(--chat-composer-max-width) rounded-lg border border-border bg-background px-4 py-3">
       <summary className="cursor-pointer text-sm font-medium">
         Optional question · agent continues working
       </summary>

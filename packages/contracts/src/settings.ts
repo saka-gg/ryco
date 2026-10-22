@@ -95,6 +95,20 @@ export const FollowUpBehavior = Schema.Literals(["queue", "steer"]);
 export type FollowUpBehavior = typeof FollowUpBehavior.Type;
 export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = "queue";
 
+/**
+ * When Enter sends from the web and desktop composer: `enter` always, `mod-enter-multiline` only
+ * while the prompt is one line (Mod+Enter sends a multiline prompt), `mod-enter` never (Mod+Enter
+ * sends). Where sending needs Mod+Enter, the follow-up inversion moves to Mod+Shift+Enter.
+ */
+export const SendShortcut = Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"]);
+export type SendShortcut = typeof SendShortcut.Type;
+export const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
+
+/** How wide the chat timeline and composer grow on large screens. */
+export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
+export type ChatWidth = typeof ChatWidth.Type;
+export const DEFAULT_CHAT_WIDTH: ChatWidth = "comfortable";
+
 /** Missing effort is a legacy model-only preset; provider remains the stable instance id. */
 export const ModelFavorite = Schema.Struct({
   provider: ProviderInstanceId,
@@ -121,6 +135,10 @@ export const ClientSettingsSchema = Schema.Struct({
   followUpBehavior: FollowUpBehavior.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_FOLLOW_UP_BEHAVIOR)),
   ),
+  sendShortcut: SendShortcut.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SEND_SHORTCUT)),
+  ),
+  chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_WIDTH))),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -931,6 +949,8 @@ export const ClientSettingsPatch = Schema.Struct({
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
   followUpBehavior: Schema.optionalKey(FollowUpBehavior),
+  sendShortcut: Schema.optionalKey(SendShortcut),
+  chatWidth: Schema.optionalKey(ChatWidth),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

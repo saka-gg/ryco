@@ -62,7 +62,7 @@ export function NewThreadContextBar({
 
   return (
     <div
-      className="mx-auto mb-2 flex w-full max-w-208 items-center justify-between gap-2 px-1"
+      className="mx-auto mb-2 flex w-full max-w-(--chat-composer-max-width) items-center justify-between gap-2 px-1"
       data-testid="new-thread-context-bar"
     >
       {canToggle ? (

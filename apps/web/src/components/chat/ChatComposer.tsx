@@ -130,7 +130,7 @@ import type { ModelPickMeta } from "./modelPickerTuningBridge";
 import { type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerPromptShell } from "./ComposerPromptShell";
 import { ComposerTaskChip } from "../tasks/ComposerTaskChip";
-import { describeRunningFollowUp, isFollowUpInvertModifier } from "./composerFollowUp";
+import { describeRunningFollowUp, resolveComposerEnter } from "./composerFollowUp";
 import type { PhoneThreadDockProps } from "../shell/phone/PhoneThreadDock";
 import { LazyPhoneThreadDock } from "../shell/phone/lazyPhoneThreadSurfaces";
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
@@ -1014,6 +1014,8 @@ export const ChatComposer = memo(
     // old <640 px query), so 640-767 px viewports and coarse-pointer
     // landscape phones collapse consistently with the rest of the phone UI.
     const isMobileViewport = presentationTier === "phone";
+    // The Send shortcut setting is for hardware keyboards; the frozen phone tier keeps Enter.
+    const composerSendShortcut = isMobileViewport ? "enter" : settings.sendShortcut;
     const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
     const phoneThreadDockReady = usePhoneThreadSurfaceReady(
       LazyPhoneThreadDock,
@@ -2101,10 +2103,17 @@ export const ChatComposer = memo(
           return true;
         }
       }
-      if (key === "Enter" && !event.shiftKey) {
-        // Mod+Enter does the opposite of the follow-up setting while a turn runs; when no turn
-        // runs the flag is ignored and Enter sends.
-        submitComposer(undefined, { invertFollowUp: isFollowUpInvertModifier(event) });
+      if (key === "Enter") {
+        // The Send shortcut setting decides whether Enter sends or adds a line, and which
+        // shortcut does the opposite of the follow-up setting while a turn runs; when no turn
+        // runs that flag is ignored. The frozen phone tier keeps Enter sending.
+        const send = resolveComposerEnter({
+          event,
+          sendShortcut: composerSendShortcut,
+          prompt: composerEditorRef.current?.readSnapshot().value ?? promptRef.current,
+        });
+        if (send === null) return false;
+        submitComposer(undefined, { invertFollowUp: send.invertFollowUp });
         return true;
       }
       if (key === "ArrowUp" || key === "ArrowDown") {
@@ -2127,6 +2136,7 @@ export const ChatComposer = memo(
         followUpBehavior: settings.followUpBehavior,
         steerUnavailableReason,
         surfaceAllowsSteer: followUpSurfaceAllowsSteer,
+        sendShortcut: composerSendShortcut,
         // The same decision the send makes, from the same inputs.
         approvalRedirect: resolveApprovalRedirect({
           approvals: pendingApprovals,
@@ -2143,6 +2153,7 @@ export const ChatComposer = memo(
       activeRuntimeSessionId,
       activeTurnId,
       approvalRedirectedTurnId,
+      composerSendShortcut,
       followUpSurfaceAllowsSteer,
       getFollowUpSteerUnavailableReason,
       interactionMode,
@@ -2873,7 +2884,7 @@ export const ChatComposer = memo(
       <form
         ref={composerFormRef}
         onSubmit={submitComposer}
-        className="relative mx-auto w-full min-w-0 max-w-208"
+        className="relative mx-auto w-full min-w-0 max-w-(--chat-composer-max-width)"
         data-chat-composer-form="true"
       >
         <input

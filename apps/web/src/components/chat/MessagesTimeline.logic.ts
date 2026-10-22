@@ -49,7 +49,6 @@ const MIN_COLLAPSIBLE_WORK_LOG_ENTRIES = 2;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
 export const TIMELINE_MINIMAP_MIN_ITEMS = 2;
 export const TIMELINE_MINIMAP_MAX_HEIGHT_CSS = "calc(100vh - 18rem)";
-export const TIMELINE_CONTENT_MAX_WIDTH = 768;
 export const TIMELINE_MINIMAP_PERSISTENT_GUTTER = 48;
 export const TIMELINE_MINIMAP_HIT_STRIP_LEFT = 12;
 export const TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH = 40;
@@ -92,14 +91,22 @@ export function resolveTimelineMinimapIndexFromPointer(input: {
   return Math.max(0, Math.min(input.itemCount - 1, Math.round(progress * (input.itemCount - 1))));
 }
 
-export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number): boolean {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return false;
+/**
+ * The space beside the centered timeline column: `contentWidth` is the column's width, the
+ * viewport width capped at the Chat width setting's maximum.
+ */
+function timelineSideGutter(viewportWidth: number, contentWidth: number): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0 || !Number.isFinite(contentWidth)) {
+    return 0;
   }
+  return Math.max(0, (viewportWidth - Math.min(viewportWidth, contentWidth)) / 2);
+}
 
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
-  return sideGutter >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
+export function resolveTimelineMinimapHasPersistentGutter(
+  viewportWidth: number,
+  contentWidth: number,
+): boolean {
+  return timelineSideGutter(viewportWidth, contentWidth) >= TIMELINE_MINIMAP_PERSISTENT_GUTTER;
 }
 
 /**
@@ -107,13 +114,11 @@ export function resolveTimelineMinimapHasPersistentGutter(viewportWidth: number)
  * centered. Cap the collapsed hover strip to the side gutter so it cannot
  * intercept pointer events over message text under zoom or in a narrow pane.
  */
-export function resolveTimelineMinimapHitStripWidth(viewportWidth: number): number {
-  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
-    return 0;
-  }
-
-  const contentWidth = Math.min(viewportWidth, TIMELINE_CONTENT_MAX_WIDTH);
-  const sideGutter = Math.max(0, (viewportWidth - contentWidth) / 2);
+export function resolveTimelineMinimapHitStripWidth(
+  viewportWidth: number,
+  contentWidth: number,
+): number {
+  const sideGutter = timelineSideGutter(viewportWidth, contentWidth);
   return Math.max(
     0,
     Math.min(
