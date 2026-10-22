@@ -190,9 +190,6 @@ export const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
 /** @deprecated Use `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`. */
 export const IMAGE_ONLY_BOOTSTRAP_PROMPT = ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
 
-/** Starts the prompt that "Implement plan" sends, followed by the plan's markdown. */
-export const PLAN_IMPLEMENTATION_PROMPT_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n";
-
 /**
  * Resolves the model selection recorded on a freshly created thread's
  * bootstrap: the composer's selection with its slug backfilled from the

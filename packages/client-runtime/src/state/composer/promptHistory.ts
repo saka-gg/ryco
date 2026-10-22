@@ -1,11 +1,9 @@
 import { stripAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { CLAUDE_PROMPT_EFFORT_PREFIX_PATTERN } from "@ryco/shared/model";
 
+import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./planImplementationPrompt.ts";
 import { stripSelectionQuotes } from "./selectionQuote.ts";
-import {
-  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
-} from "./sendEngine.ts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "./sendEngine.ts";
 import { stripSentTerminalContexts } from "./terminalContext.ts";
 
 // Prompt recall: ArrowUp in an empty composer brings back the prompts sent
