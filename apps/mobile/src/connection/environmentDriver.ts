@@ -471,6 +471,8 @@ export function createMobileEnvironmentDriver(
       // primary below always takes a fresh snapshot.
       readShellResumeSequence: (environmentId) =>
         getSupervisor().readShellProjectionSequence(environmentId),
+      skipShellEvent: (sequence, environmentId) =>
+        getSupervisor().skipShellEvent(sequence, environmentId),
       applyShellEvent: (event, environmentId) =>
         getSupervisor().applyShellEvent(event, environmentId),
       applyThreadPriorities: (item, environmentId) =>

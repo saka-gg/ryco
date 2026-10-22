@@ -4,10 +4,12 @@ import {
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@ryco/contracts";
+import { UnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { ShellSubscriptionOptions, WsRpcClient } from "../rpc/index.ts";
+import { isEnvironmentNodeNewer, resetNewerNodeStateForTests } from "../rpc/newerNodeState.ts";
 import {
   recordWsConnectionAttempt,
   recordWsConnectionClosed,
@@ -501,5 +503,88 @@ describe("live config", () => {
     stopSecondObserver();
     expect(primary.openStreams()).toBe(0);
     expect(primaryConnection.config.read()).toBeNull();
+  });
+});
+
+describe("content from a newer node", () => {
+  beforeEach(() => resetNewerNodeStateForTests());
+  afterEach(() => {
+    resetNewerNodeStateForTests();
+    vi.restoreAllMocks();
+  });
+
+  it("skips what this build cannot read, passes its shell sequence and keeps applying", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let shellListener: ((item: unknown) => void) | undefined;
+    let terminalListener: ((event: unknown) => void) | undefined;
+    let configListener: ((event: unknown) => void) | undefined;
+    const client = {
+      server: {
+        subscribeLifecycle: () => () => undefined,
+        subscribeConfig: (next: (event: unknown) => void) => {
+          configListener = next;
+          return () => undefined;
+        },
+      },
+      orchestration: {
+        subscribeShell: (next: (item: unknown) => void) => {
+          shellListener = next;
+          return () => undefined;
+        },
+      },
+      terminal: {
+        onEvent: (next: (event: unknown) => void) => {
+          terminalListener = next;
+          return () => undefined;
+        },
+      },
+      dispose: async () => undefined,
+      reconnect: async () => undefined,
+    } as unknown as WsRpcClient;
+    const calls: string[] = [];
+    const connection = createEnvironmentConnection({
+      kind: "saved",
+      knownEnvironment: { environmentId, label: "Remote Mac" } as unknown as KnownEnvironment,
+      client,
+      pushSequenceMonitor: {
+        recordEvent: (_environmentId, sequence) => calls.push(`monitor:${sequence}`),
+        recordSnapshot: () => undefined,
+      },
+      resetShellProjection: () => undefined,
+      applyShellEvent: (event) => calls.push(`event:${event.sequence}`),
+      syncShellSnapshot: (next) => calls.push(`snapshot:${next.snapshotSequence}`),
+      applyTerminalEvent: (event) => calls.push(`terminal:${event.type}`),
+      readShellResumeSequence: () => null,
+      skipShellEvent: (sequence) => calls.push(`skip:${sequence}`),
+      onConfigUpdated: (_config, source) => calls.push(`config:${source}`),
+    });
+
+    shellListener?.(snapshot(40));
+    shellListener?.(
+      Object.assign(new UnknownUnionMember("kind", "thread-teleported"), { sequence: 41 }),
+    );
+    shellListener?.(new UnknownUnionMember("kind", "shell-hint"));
+    shellListener?.({ kind: "thread-removed", sequence: 42, threadId: "thread-1" });
+    terminalListener?.(new UnknownUnionMember("type", "bell"));
+    terminalListener?.({ threadId: "thread-1", terminalId: "default", type: "cleared" });
+    configListener?.(new UnknownUnionMember("type", "pluginsUpdated"));
+    configListener?.({
+      version: 1,
+      type: "snapshot",
+      config: { environment: { environmentId, label: "Remote Mac" }, providers: [] },
+    });
+    await connection.ensureBootstrapped();
+
+    expect(calls).toEqual([
+      "snapshot:40",
+      "monitor:41",
+      "skip:41",
+      "monitor:42",
+      "event:42",
+      "terminal:cleared",
+      "config:snapshot",
+    ]);
+    expect(isEnvironmentNodeNewer(environmentId)).toBe(true);
+    expect(warn).toHaveBeenCalledOnce();
   });
 });

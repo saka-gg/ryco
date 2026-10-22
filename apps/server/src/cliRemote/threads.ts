@@ -12,6 +12,7 @@ import {
   type OrchestrationThreadShell,
   ThreadId,
 } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import { isRestartReleasedSession } from "@ryco/shared/restartContinuation";
 import { Deferred, Effect, Fiber, Option, Stream } from "effect";
 
@@ -19,11 +20,12 @@ import { CliRemoteError, type CliRemoteRpcClient as RemoteRpcClient } from "./re
 
 export const loadRemoteShell = (client: RemoteRpcClient) =>
   client[ORCHESTRATION_WS_METHODS.subscribeShell]({}).pipe(
-    Stream.filter((item) => item.kind === "snapshot"),
+    // A kind a remote newer than this CLI added is skipped.
+    Stream.filter((item) => !isUnknownUnionMember(item) && item.kind === "snapshot"),
     Stream.take(1),
     Stream.runHead,
     Effect.flatMap((item) =>
-      Option.isSome(item) && item.value.kind === "snapshot"
+      Option.isSome(item) && !isUnknownUnionMember(item.value) && item.value.kind === "snapshot"
         ? Effect.succeed(item.value.snapshot)
         : Effect.fail(
             new CliRemoteError({
@@ -136,7 +138,14 @@ const followTurn = (
     const printed = new Set<string>();
     yield* client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }).pipe(
       Stream.tap(() => Deferred.succeed(subscribed, undefined)),
-      Stream.filter((item) => item.kind === "event" && item.event.sequence > afterSequence),
+      // Item kinds and event types a remote newer than this CLI added are skipped.
+      Stream.filter(
+        (item) =>
+          !isUnknownUnionMember(item) &&
+          item.kind === "event" &&
+          !isUnknownUnionMember(item.event) &&
+          item.event.sequence > afterSequence,
+      ),
       Stream.map((item) => (item as { readonly event: OrchestrationEvent }).event),
       Stream.takeUntil((event) => {
         if (event.type === "thread.message-sent" && event.payload.role === "assistant") {

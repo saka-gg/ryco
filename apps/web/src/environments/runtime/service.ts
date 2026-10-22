@@ -803,6 +803,8 @@ function createEnvironmentConnectionHandlers(
       ? {
           readShellResumeSequence: (environmentId: EnvironmentId) =>
             getEnvironmentSupervisor().readShellProjectionSequence(environmentId),
+          skipShellEvent: (sequence: number, environmentId: EnvironmentId) =>
+            getEnvironmentSupervisor().skipShellEvent(sequence, environmentId),
           onShellResumed: (environmentId: EnvironmentId) => {
             completeQueryRefresh(environmentId);
           },

@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { ServerAuthDescriptor } from "./auth.ts";
 import {
+  ForwardCompatibleUnion,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -519,6 +520,17 @@ export const ServerConfigStreamEvent = Schema.Union([
   ServerConfigStreamProviderStatusesDeltaEvent,
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
+
+/**
+ * A config stream event as a client decodes it: an event type a newer node
+ * adds decodes to an `UnknownUnionMember` the client skips, instead of ending
+ * the config stream.
+ */
+export const ServerConfigStreamWireEvent = ForwardCompatibleUnion(
+  ServerConfigStreamEvent.members,
+  "type",
+);
+export type ServerConfigStreamWireEvent = typeof ServerConfigStreamWireEvent.Type;
 
 export const ServerSubscribeConfigInput = Schema.Struct({
   /**

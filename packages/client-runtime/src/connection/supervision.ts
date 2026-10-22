@@ -9,10 +9,13 @@ import type {
   OrchestrationThreadHistoryPage,
   OrchestrationThreadHistoryPageInfo,
   OrchestrationThreadWindowSnapshot,
+  OrchestrationWireEvent,
   ScopedThreadRef,
   ThreadId,
 } from "@ryco/contracts";
+import { isUnknownUnionMember, type UnknownUnionMember } from "@ryco/contracts/base-schemas";
 
+import { recordNewerNodeContent } from "../rpc/newerNodeState.ts";
 import {
   isResponseTooLargeError,
   isUnsupportedRpcError,
@@ -46,6 +49,12 @@ import {
 import { createThreadHistoryPaginationController } from "./threadHistoryPagination.ts";
 
 const NOOP = () => undefined;
+/** A shell event of a kind a newer node added, queued in order with the rest. */
+const SKIPPED_SHELL_EVENT = Symbol("skipped-shell-event");
+interface SkippedShellEvent {
+  readonly kind: typeof SKIPPED_SHELL_EVENT;
+  readonly sequence: number;
+}
 /** Runs after the current task's synchronous work, e.g. after a delivered chunk. */
 const afterCurrentChunk = (callback: () => void) => {
   void Promise.resolve().then(callback);
@@ -323,6 +332,12 @@ export interface EnvironmentConnectionSupervisor {
     event: OrchestrationShellStreamEvent,
     environmentId: EnvironmentId,
   ) => void;
+  /**
+   * Buffers a shell event of a kind a newer node added, at `sequence`: nothing
+   * is applied, but the shell's sequence moves past it in order with the
+   * events around it, so a resume does not replay it.
+   */
+  readonly skipShellEvent: (sequence: number, environmentId: EnvironmentId) => void;
   /** Buffers a thread-priority ranking behind the shell events before it. */
   readonly applyThreadPriorities: (
     item: OrchestrationShellThreadPrioritiesItem,
@@ -644,8 +659,16 @@ export function createEnvironmentConnectionSupervisor<
       ...(resumable ? { resumeFromSequence: () => appliedSequence } : {}),
       historyRecovery: () => historyRecoveryMode(entry),
     };
-    const applyEvent = (event: { readonly sequence: number }) => {
+    /** An item kind a newer node added: nothing to apply. */
+    const skipUnknownItem = (item: object): item is UnknownUnionMember => {
+      if (!isUnknownUnionMember(item)) return false;
+      recordNewerNodeContent(entry.environmentId, item);
+      return true;
+    };
+    const applyEvent = (event: OrchestrationWireEvent) => {
       appliedSequence = Math.max(appliedSequence ?? 0, event.sequence);
+      // An event type a newer node added: skipped, but a resume starts after it.
+      if (skipUnknownItem(event)) return;
       recordRetainedEvent(entry, event);
       scheduleEvictToCapacity();
       input.applyThreadDetailEvent(entry.environmentId, event);
@@ -658,7 +681,7 @@ export function createEnvironmentConnectionSupervisor<
       unsubscribeCurrent = connection.client.orchestration.subscribeThread(
         { threadId: entry.threadId },
         (item) => {
-          if (item.kind === "resumed") return;
+          if (skipUnknownItem(item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
@@ -737,7 +760,7 @@ export function createEnvironmentConnectionSupervisor<
         (item) => {
           // Any item, a resume included, means the server served this window.
           failedWindowAttempts = 0;
-          if (item.kind === "resumed") return;
+          if (skipUnknownItem(item) || item.kind === "resumed") return;
           if (item.kind === "snapshot") {
             appliedSequence = item.snapshot.snapshotSequence;
             historyPagination.beginSnapshot(scope);
@@ -1263,10 +1286,14 @@ export function createEnvironmentConnectionSupervisor<
    */
   const applyShellBatch = (
     environmentId: EnvironmentId,
-    updates: ReadonlyArray<ShellStoreUpdate>,
+    updates: ReadonlyArray<ShellStoreUpdate | SkippedShellEvent>,
   ) => {
     const accepted: ShellStoreUpdate[] = [];
     for (const update of updates) {
+      if (update.kind === SKIPPED_SHELL_EVENT) {
+        projectionTracker.markEvent(environmentId, update.sequence);
+        continue;
+      }
       if (update.kind !== "thread-priorities") {
         if (
           !shouldApplyProjectionEvent({
@@ -1302,13 +1329,15 @@ export function createEnvironmentConnectionSupervisor<
   // per environment. The batcher is a store mutation barrier, so any other
   // store write applies them first; snapshots, resets and resume reads flush
   // them explicitly, since those consult the projection tracker first.
-  const shellBatcher = createEnvironmentEventBatcher<ShellStoreUpdate>({
+  const shellBatcher = createEnvironmentEventBatcher<ShellStoreUpdate | SkippedShellEvent>({
     apply: applyShellBatch,
     ...(input.scheduleShellFrame === undefined ? {} : { scheduleFrame: input.scheduleShellFrame }),
   });
   const flushShellEvents = () => shellBatcher.flush();
   const applyShellEvent = (event: OrchestrationShellStreamEvent, environmentId: EnvironmentId) =>
     shellBatcher.enqueue(environmentId, event);
+  const skipShellEvent = (sequence: number, environmentId: EnvironmentId) =>
+    shellBatcher.enqueue(environmentId, { kind: SKIPPED_SHELL_EVENT, sequence });
   const applyThreadPriorities = (
     item: OrchestrationShellThreadPrioritiesItem,
     environmentId: EnvironmentId,
@@ -1543,6 +1572,7 @@ export function createEnvironmentConnectionSupervisor<
     ensureSavedEnvironmentConnection,
     cancelPendingSavedEnvironmentConnection,
     applyShellEvent,
+    skipShellEvent,
     applyThreadPriorities,
     flushShellEvents,
     resetShellProjection: (environmentId) => {

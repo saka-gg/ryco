@@ -13,6 +13,7 @@ import {
   CommandId,
   ContextHandoffId,
   EventId,
+  ForwardCompatibleUnion,
   IsoDateTime,
   MessageId,
   NonNegativeInt,
@@ -23,6 +24,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
+  type UnknownUnionMember,
 } from "./baseSchemas.ts";
 import {
   ThreadPriorityBatchId,
@@ -1392,7 +1394,7 @@ export const OrchestrationShellSnapshotPageItem = Schema.Union([
 ]);
 export type OrchestrationShellSnapshotPageItem = typeof OrchestrationShellSnapshotPageItem.Type;
 
-export const OrchestrationShellStreamItem = Schema.Union([
+const OrchestrationShellStreamItemMembers = [
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     snapshot: OrchestrationShellSnapshot,
@@ -1413,9 +1415,30 @@ export const OrchestrationShellStreamItem = Schema.Union([
     kind: Schema.Literal("resumed"),
     fromSequence: NonNegativeInt,
   }),
-  OrchestrationShellStreamEvent,
-]);
+  ...OrchestrationShellStreamEvent.members,
+] as const;
+
+/** A shell stream item as the server builds it. */
+export const OrchestrationShellStreamItem = Schema.Union(OrchestrationShellStreamItemMembers);
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
+
+/**
+ * A shell stream item as a client decodes it. A newer node may send a kind
+ * this build does not know (a new shell event, sent to every client); it
+ * decodes to an `UnknownOrchestrationShellStreamItem` the client skips. A
+ * shell event's `sequence` is kept, so the client's shell cursor still passes
+ * it.
+ */
+export const OrchestrationShellStreamWireItem = ForwardCompatibleUnion(
+  OrchestrationShellStreamItemMembers,
+  "kind",
+  { sequence: Schema.optionalKey(NonNegativeInt) },
+);
+export type OrchestrationShellStreamWireItem = typeof OrchestrationShellStreamWireItem.Type;
+export type UnknownOrchestrationShellStreamItem = Extract<
+  OrchestrationShellStreamWireItem,
+  UnknownUnionMember
+>;
 
 /**
  * A shell stream item as subscribers see it: a client that takes paged
@@ -1424,7 +1447,7 @@ export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.T
  */
 export type OrchestrationShellSubscriptionItem =
   | Exclude<
-      OrchestrationShellStreamItem,
+      OrchestrationShellStreamWireItem,
       OrchestrationShellSnapshotPageItem | { readonly kind: "snapshot" }
     >
   | { readonly kind: "snapshot"; readonly snapshot: OrchestrationStubbedShellSnapshot };
@@ -3472,46 +3495,77 @@ export const OrchestrationEvent = Schema.Union([
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;
 
-export const OrchestrationThreadStreamItem = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("snapshot"),
-    snapshot: OrchestrationThreadDetailSnapshot,
-  }),
-  /**
-   * The server accepted `resumeFromSequence`: no snapshot follows, only the
-   * thread's events after `fromSequence`, applied on top of what the client
-   * already holds. Only ever sent to a client that asked to resume.
-   */
-  Schema.Struct({
-    kind: Schema.Literal("resumed"),
-    fromSequence: NonNegativeInt,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("event"),
-    event: OrchestrationEvent,
-  }),
-]);
+/**
+ * An orchestration event as a client decodes it from a node's streams and
+ * replays. A newer node adds event types; one this build does not know
+ * decodes to an `UnknownOrchestrationEvent` that keeps the event's place in
+ * the sequence and the aggregate it belongs to, so the client skips it and
+ * still resumes after it instead of failing the subscription. A known type
+ * whose payload does not decode still fails. The event store, the decider and
+ * the projections keep the strict `OrchestrationEvent`.
+ */
+export const OrchestrationWireEvent = ForwardCompatibleUnion(OrchestrationEvent.members, "type", {
+  sequence: NonNegativeInt,
+  // Plain strings: an event type a newer node adds may belong to a new aggregate.
+  aggregateKind: Schema.String,
+  aggregateId: Schema.String,
+});
+export type OrchestrationWireEvent = typeof OrchestrationWireEvent.Type;
+export type UnknownOrchestrationEvent = Extract<OrchestrationWireEvent, UnknownUnionMember>;
+
+/**
+ * Wire-only, so a client decodes it forward-compatibly: an item kind this
+ * build does not know decodes to an `UnknownUnionMember` (new kinds are sent
+ * only to clients that ask for them, so this is a backstop), and so does an
+ * event type it does not know (see `OrchestrationWireEvent`).
+ */
+export const OrchestrationThreadStreamItem = ForwardCompatibleUnion(
+  [
+    Schema.Struct({
+      kind: Schema.Literal("snapshot"),
+      snapshot: OrchestrationThreadDetailSnapshot,
+    }),
+    /**
+     * The server accepted `resumeFromSequence`: no snapshot follows, only the
+     * thread's events after `fromSequence`, applied on top of what the client
+     * already holds. Only ever sent to a client that asked to resume.
+     */
+    Schema.Struct({
+      kind: Schema.Literal("resumed"),
+      fromSequence: NonNegativeInt,
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("event"),
+      event: OrchestrationWireEvent,
+    }),
+  ],
+  "kind",
+);
 export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem.Type;
 
-export const OrchestrationThreadWindowStreamItem = Schema.Union([
-  Schema.Struct({
-    kind: Schema.Literal("snapshot"),
-    snapshot: OrchestrationThreadWindowSnapshot,
-  }),
-  /**
-   * The server accepted `resumeFromSequence`: no snapshot follows, only the
-   * thread's events after `fromSequence`, applied on top of what the client
-   * already holds. Only ever sent to a client that asked to resume.
-   */
-  Schema.Struct({
-    kind: Schema.Literal("resumed"),
-    fromSequence: NonNegativeInt,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("event"),
-    event: OrchestrationEvent,
-  }),
-]);
+/** Wire-only and forward-compatible, like `OrchestrationThreadStreamItem`. */
+export const OrchestrationThreadWindowStreamItem = ForwardCompatibleUnion(
+  [
+    Schema.Struct({
+      kind: Schema.Literal("snapshot"),
+      snapshot: OrchestrationThreadWindowSnapshot,
+    }),
+    /**
+     * The server accepted `resumeFromSequence`: no snapshot follows, only the
+     * thread's events after `fromSequence`, applied on top of what the client
+     * already holds. Only ever sent to a client that asked to resume.
+     */
+    Schema.Struct({
+      kind: Schema.Literal("resumed"),
+      fromSequence: NonNegativeInt,
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("event"),
+      event: OrchestrationWireEvent,
+    }),
+  ],
+  "kind",
+);
 export type OrchestrationThreadWindowStreamItem = typeof OrchestrationThreadWindowStreamItem.Type;
 
 export const OrchestrationCommandReceiptStatus = Schema.Literals(["accepted", "rejected"]);
@@ -3631,7 +3685,8 @@ export const OrchestrationReplayEventsInput = Schema.Struct({
 });
 export type OrchestrationReplayEventsInput = typeof OrchestrationReplayEventsInput.Type;
 
-const OrchestrationReplayEventsResult = Schema.Array(OrchestrationEvent);
+/** Wire-only: an event type this build does not know stays in place, its sequence included. */
+const OrchestrationReplayEventsResult = Schema.Array(OrchestrationWireEvent);
 export type OrchestrationReplayEventsResult = typeof OrchestrationReplayEventsResult.Type;
 
 export const OrchestrationReplayEventsPageInput = Schema.Struct({
@@ -3641,7 +3696,7 @@ export const OrchestrationReplayEventsPageInput = Schema.Struct({
 export type OrchestrationReplayEventsPageInput = typeof OrchestrationReplayEventsPageInput.Type;
 
 export const OrchestrationReplayEventsPageResult = Schema.Struct({
-  events: Schema.Array(OrchestrationEvent),
+  events: Schema.Array(OrchestrationWireEvent),
   nextSequence: NonNegativeInt,
   hasMore: Schema.Boolean,
 });
@@ -3857,7 +3912,7 @@ export const OrchestrationRpcSchemas = {
   },
   subscribeShell: {
     input: OrchestrationSubscribeShellInput,
-    output: OrchestrationShellStreamItem,
+    output: OrchestrationShellStreamWireItem,
   },
 } as const;
 

@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
+import * as SchemaGetter from "effect/SchemaGetter";
 
 export const TrimmedString = Schema.Trim;
 export const TrimmedNonEmptyString = TrimmedString.check(Schema.isNonEmpty());
@@ -90,6 +91,113 @@ export const rejectExcessProperties = <S extends Schema.Top>(schema: S): S =>
 
 export const IsoDateTime = Schema.String;
 export type IsoDateTime = typeof IsoDateTime.Type;
+
+/**
+ * What a client decodes in place of a union member a newer node added: the
+ * union's tag key (`tag`) and the value this build does not know (`value`),
+ * plus the fields the union keeps from every member (see
+ * `ForwardCompatibleUnion`). A class, so no decoded payload, however it is
+ * shaped, is ever mistaken for one.
+ */
+export class UnknownUnionMember<Tag extends string = string> {
+  readonly tag: Tag;
+  readonly value: string;
+  constructor(tag: Tag, value: string) {
+    this.tag = tag;
+    this.value = value;
+  }
+}
+
+export const isUnknownUnionMember = <A>(value: A): value is Extract<A, UnknownUnionMember> =>
+  value instanceof UnknownUnionMember;
+
+const knownUnionTags = (
+  members: ReadonlyArray<Schema.Top & { readonly fields: object }>,
+  tag: string,
+): ReadonlySet<string> => {
+  const tags = new Set<string>();
+  for (const member of members) {
+    const field = (member.fields as Record<string, unknown>)[tag] as
+      | { readonly literal?: unknown; readonly literals?: ReadonlyArray<unknown> }
+      | undefined;
+    for (const literal of field?.literals ?? [field?.literal]) {
+      if (typeof literal !== "string") {
+        throw new Error(`Every ForwardCompatibleUnion member needs a string literal ${tag}.`);
+      }
+      tags.add(literal);
+    }
+  }
+  return tags;
+};
+
+/**
+ * A tagged union a client decodes from a newer node, which may send members
+ * this build does not know. A member whose tag is unknown decodes to an
+ * `UnknownUnionMember` that also carries the `kept` fields, which every member
+ * has (an event's `sequence`, so a client's resume cursor can pass it); the
+ * client skips it instead of failing the whole stream. A known tag whose
+ * payload does not decode still fails, so a real defect stays loud.
+ *
+ * The known members stay one union that dispatches on the tag, so a known
+ * member decodes once, on that union's own fast path; only a tag no member
+ * claims reaches the fallback. Unknown members are decode-only: encoding one
+ * fails. Only for what a node sends a client: persisted records and what a
+ * client sends stay strict.
+ */
+export const ForwardCompatibleUnion = <
+  const Members extends ReadonlyArray<Schema.Top & { readonly fields: object }>,
+  const Tag extends string,
+  const Kept extends Schema.Struct.Fields = {},
+>(
+  members: Members,
+  tag: Tag,
+  kept?: Kept,
+): ForwardCompatibleUnion<Members, Tag, Kept> => {
+  const known = knownUnionTags(members, tag);
+  const keptFields: Schema.Struct.Fields = kept ?? {};
+  const keptKeys = Object.keys(keptFields);
+  if (keptKeys.some((key) => key === tag || key === "tag" || key === "value")) {
+    throw new Error(`A ForwardCompatibleUnion cannot keep "${tag}", "tag" or "value".`);
+  }
+  const unknownMember = Schema.Struct({
+    // First, so a known tag with a broken payload fails here at once.
+    [tag]: Schema.String.check(
+      Schema.makeFilter(
+        (value: string) => !known.has(value) || `A known ${tag} must decode in full.`,
+      ),
+    ),
+    ...keptFields,
+  }).pipe(
+    Schema.decodeTo(Schema.instanceOf(UnknownUnionMember<Tag>), {
+      decode: SchemaGetter.transform((raw: Record<string, unknown>) => {
+        const member = new UnknownUnionMember(tag, raw[tag] as string);
+        for (const key of keptKeys) {
+          if (Object.hasOwn(raw, key)) Object.assign(member, { [key]: raw[key] });
+        }
+        return member;
+      }),
+      encode: SchemaGetter.forbidden(() => `Unknown ${tag} values are never sent.`),
+    }),
+  );
+  // Nested, not flat: in one flat union the fallback, which has no tag literal,
+  // would be a candidate beside the matched member on every decode and take
+  // the union off its single-candidate fast path.
+  return Schema.Union([Schema.Union(members), unknownMember]) as unknown as ForwardCompatibleUnion<
+    Members,
+    Tag,
+    Kept
+  >;
+};
+export type ForwardCompatibleUnion<
+  Members extends ReadonlyArray<Schema.Top>,
+  Tag extends string,
+  Kept extends Schema.Struct.Fields = {},
+> = Schema.Codec<
+  Members[number]["Type"] | (UnknownUnionMember<Tag> & Schema.Struct.Type<Kept>),
+  Members[number]["Encoded"],
+  Members[number]["DecodingServices"],
+  Members[number]["EncodingServices"]
+>;
 
 /**
  * Construct a branded identifier. Enforces non-empty trimmed strings

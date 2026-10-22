@@ -6,12 +6,15 @@ import type {
   OrchestrationShellThreadPrioritiesItem,
   ServerConfig,
   ServerConfigStreamEvent,
+  ServerConfigStreamWireEvent,
   ServerLifecycleWelcomePayload,
   TerminalEvent,
 } from "@ryco/contracts";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
 import type { WsRpcClient } from "../rpc/index.ts";
+import { recordNewerNodeContent } from "../rpc/newerNodeState.ts";
 import { projectServerConfigEvent } from "../rpc/serverConfigProjection.ts";
 import {
   getWsConnectionStatusForEnvironment,
@@ -117,6 +120,12 @@ export interface OrchestrationHandlers {
    * session must accept a current snapshot before it may mutate.
    */
   readonly readShellResumeSequence?: (environmentId: EnvironmentId) => number | null;
+  /**
+   * A shell event of a kind a newer node added arrived at `sequence`: nothing
+   * to apply, but the shell's sequence moves past it, so a resume does not
+   * replay it. Belongs with `readShellResumeSequence`.
+   */
+  readonly skipShellEvent?: (sequence: number, environmentId: EnvironmentId) => void;
   /** A replacement subscription resumed on top of the shell already held. */
   readonly onShellResumed?: (environmentId: EnvironmentId) => void;
 }
@@ -281,9 +290,13 @@ export function createEnvironmentConnection(
         input.onWelcome?.(payload);
       })
     : () => undefined;
-  const observeConfigEvent = (event: ServerConfigStreamEvent) => {
+  const observeConfigEvent = (event: ServerConfigStreamWireEvent) => {
     // A stale hosted generation never publishes config, not even a snapshot.
     if (disposed || !isCurrentGeneration()) return;
+    if (isUnknownUnionMember(event)) {
+      recordNewerNodeContent(environmentId, event);
+      return;
+    }
     const attempt = currentAttempt();
     // Incremental events apply only on top of this attempt's own snapshot.
     const base =
@@ -348,6 +361,15 @@ export function createEnvironmentConnection(
   const unsubShell = input.client.orchestration.subscribeShell(
     (item) => {
       if (disposed) return;
+      if (isUnknownUnionMember(item)) {
+        // A kind a newer node added: skipped, but a shell event's sequence
+        // still counts.
+        recordNewerNodeContent(environmentId, item);
+        if (item.sequence === undefined) return;
+        input.pushSequenceMonitor.recordEvent(environmentId, item.sequence);
+        input.skipShellEvent?.(item.sequence, environmentId);
+        return;
+      }
       if (item.kind === "resumed") {
         awaitingResubscribeBaseline = false;
         hasShellBaseline = true;
@@ -409,9 +431,13 @@ export function createEnvironmentConnection(
       },
     },
   );
-  const unsubTerminalEvent = input.client.terminal.onEvent((event) =>
-    input.applyTerminalEvent(event, environmentId),
-  );
+  const unsubTerminalEvent = input.client.terminal.onEvent((event) => {
+    if (isUnknownUnionMember(event)) {
+      recordNewerNodeContent(environmentId, event);
+      return;
+    }
+    input.applyTerminalEvent(event, environmentId);
+  });
   // The device event stream starts only while a device surface retains it.
   const deviceBinding = input.client.device
     ? registerDeviceConnection(environmentId, input.client.device)

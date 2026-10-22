@@ -11,6 +11,7 @@ import type {
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
+import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 import {
   CONTEXT_HANDOFF_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
@@ -1033,7 +1034,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
               });
             },
             (event) => {
-              if (event.type !== "snapshot") {
+              // An event type from a newer node goes to the listener, which skips it.
+              if (isUnknownUnionMember(event) || event.type !== "snapshot") {
                 listener(event);
                 return;
               }
