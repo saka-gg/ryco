@@ -665,6 +665,12 @@ export function runtimeEventToActivities(
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.reason
+              ? { reason: truncateDetail(event.payload.reason, 1_000) }
+              : {}),
+            ...(event.payload.acceptForSessionOffered === false
+              ? { acceptForSessionOffered: false }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

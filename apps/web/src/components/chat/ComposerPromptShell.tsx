@@ -45,7 +45,12 @@ export interface ComposerPromptShellProps {
 
   isComposerCollapsedMobile: boolean;
   hasComposerHeader: boolean;
-  isComposerApprovalState: boolean;
+  /**
+   * An approval waits and the editor gives way to it: on the frozen phone tier, or while a
+   * question waits too. Elsewhere the editor keeps the draft while an approval waits, and a
+   * send declines and redirects.
+   */
+  isApprovalLocked: boolean;
   resolvedTheme: "light" | "dark";
 
   // Command menu overlay
@@ -141,7 +146,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
     environmentId,
     isComposerCollapsedMobile,
     hasComposerHeader,
-    isComposerApprovalState,
+    isApprovalLocked,
     resolvedTheme,
     composerMenuOpen,
     composerMenuItems,
@@ -199,7 +204,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       )}
     >
       <ComposerCommandMenuOverlay
-        open={composerMenuOpen && !isComposerApprovalState}
+        open={composerMenuOpen && !isApprovalLocked}
         items={composerMenuItems}
         resolvedTheme={resolvedTheme}
         isLoading={isComposerMenuLoading}
@@ -214,7 +219,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
       />
 
       {!isComposerCollapsedMobile &&
-        !isComposerApprovalState &&
+        !isApprovalLocked &&
         pendingUserInputCount === 0 &&
         (leadingContextChips || composerSourceControlContexts.length > 0) && (
           <div className="mb-2 flex flex-wrap gap-1.5">
@@ -230,7 +235,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
         )}
 
       {!isComposerCollapsedMobile &&
-        !isComposerApprovalState &&
+        !isApprovalLocked &&
         pendingUserInputCount === 0 &&
         composerImages.length > 0 && (
           <div className="mb-3 flex flex-wrap gap-2">
@@ -315,7 +320,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             environmentId={environmentId}
             collapsed={isComposerCollapsedMobile}
             value={
-              isComposerApprovalState
+              isApprovalLocked
                 ? ""
                 : activePendingProgress
                   ? activePendingProgress.customAnswer
@@ -323,9 +328,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             }
             cursor={composerCursor}
             terminalContexts={
-              !isComposerApprovalState && pendingUserInputCount === 0
-                ? composerTerminalContexts
-                : []
+              !isApprovalLocked && pendingUserInputCount === 0 ? composerTerminalContexts : []
             }
             skills={skills}
             {...(showMobilePendingAnswerActions ? { className: "phone:pb-11" } : {})}
@@ -334,7 +337,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
             onCommandKeyDown={onComposerCommandKey}
             onPaste={onComposerPaste}
             placeholder={
-              isComposerApprovalState
+              isApprovalLocked
                 ? // The full approval detail renders as a scrollable block in the
                   // pending-approval panel; the clipped placeholder only carries
                   // the generic hint.

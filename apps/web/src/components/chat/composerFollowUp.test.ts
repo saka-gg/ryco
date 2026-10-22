@@ -65,4 +65,31 @@ describe("describeRunningFollowUp", () => {
       }),
     ).toEqual({ effective: "queue", placeholder: null });
   });
+
+  it("redirects while an approval waits, whatever the setting, when steering is available", () => {
+    for (const followUpBehavior of ["queue", "steer"] as const) {
+      expect(
+        describeRunningFollowUp({
+          followUpBehavior,
+          steerUnavailableReason: null,
+          surfaceAllowsSteer: true,
+          approvalPending: true,
+          platform: MAC,
+        }),
+      ).toEqual({
+        effective: "steer",
+        placeholder: "Send a message to decline and redirect · ⌘↵ to queue instead",
+        redirectsApproval: true,
+      });
+    }
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "steer",
+        steerUnavailableReason: "This provider cannot steer.",
+        surfaceAllowsSteer: true,
+        approvalPending: true,
+        platform: MAC,
+      }),
+    ).toEqual({ effective: "queue", placeholder: "Queue a follow-up · steering unavailable" });
+  });
 });

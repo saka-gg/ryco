@@ -191,6 +191,71 @@ describe("ApprovalCard", () => {
     expect(onRespondToApproval).toHaveBeenCalledWith("req-approval-card", "decline", undefined);
   });
 
+  it("leads with the explicit decisions and keeps the rest in a menu off the phone tier", async () => {
+    await page.viewport(1_280, 720);
+    const respond = vi.fn(async () => undefined);
+    mounted = await render(
+      <ApprovalCard
+        environmentId={null}
+        approval={approval()}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={respond}
+      />,
+    );
+    await expect.element(page.getByRole("button", { name: "Decline" })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Approve once" })).toBeVisible();
+    expect(page.getByRole("button", { name: "Cancel turn" }).elements()).toHaveLength(0);
+    expect(page.getByRole("button", { name: "Always allow this session" }).elements()).toHaveLength(
+      0,
+    );
+
+    await page.getByRole("button", { name: "More approval actions" }).click();
+    await expect.element(page.getByRole("menuitem", { name: "Cancel turn" })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Always allow this session" }).click();
+    expect(respond).toHaveBeenCalledWith("req-approval-card", "acceptForSession", undefined);
+  });
+
+  it("leaves out the session-wide grant when the provider refused it", async () => {
+    await page.viewport(1_280, 720);
+    mounted = await render(
+      <ApprovalCard
+        environmentId={null}
+        approval={approval({ acceptForSessionOffered: false })}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={vi.fn(async () => undefined)}
+      />,
+    );
+    await page.getByRole("button", { name: "More approval actions" }).click();
+    await expect.element(page.getByRole("menuitem", { name: "Cancel turn" })).toBeVisible();
+    expect(
+      page.getByRole("menuitem", { name: "Always allow this session" }).elements(),
+    ).toHaveLength(0);
+  });
+
+  it("says why the provider asked behind a disclosure", async () => {
+    await page.viewport(1_280, 720);
+    mounted = await render(
+      <ApprovalCard
+        environmentId={null}
+        approval={approval({ detail: "Bash: git push", reason: "Pushing needs your OK" })}
+        pendingCount={1}
+        isResponding={false}
+        onRespondToApproval={vi.fn(async () => undefined)}
+      />,
+    );
+    const disclosure = page.getByRole("button", { name: "Why am I being asked?" });
+    await expect.element(disclosure).toHaveAttribute("aria-expanded", "false");
+    const reason = page.getByText("Pushing needs your OK");
+    // Collapsed, the region stays in the tree but hidden from assistive technology.
+    expect(reason.element().closest('[aria-hidden="true"]')).not.toBeNull();
+    await disclosure.click();
+    await expect.element(disclosure).toHaveAttribute("aria-expanded", "true");
+    await vi.waitFor(() => expect(reason.element().closest('[aria-hidden="true"]')).toBeNull());
+    await expect.element(reason).toBeVisible();
+  });
+
   it("keeps the expand affordance off the desktop tier and renders a single inline action set", async () => {
     await page.viewport(1_280, 720);
     mounted = await render(

@@ -145,6 +145,36 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("carries the provider's reason and a refused session grant", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-reason",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Command approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-reason",
+          requestKind: "command",
+          detail: "Bash: git push",
+          reason: "Pushing needs your confirmation",
+          acceptForSessionOffered: false,
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-reason",
+        requestKind: "command",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "Bash: git push",
+        reason: "Pushing needs your confirmation",
+        acceptForSessionOffered: false,
+      },
+    ]);
+  });
+
   it("maps canonical requestType payloads into pending approvals", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

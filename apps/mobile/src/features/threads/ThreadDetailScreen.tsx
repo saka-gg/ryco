@@ -37,11 +37,17 @@ import {
   parseSideQuestionCommand,
 } from "@ryco/client-runtime/state/side-chat";
 import {
+  APPROVAL_REDIRECT_PLACEHOLDER,
+  declineApprovalsForRedirect,
   deriveProviderSelectionPolicy,
+  describeApprovalRedirectRefusal,
   getProviderInteractionModeToggle,
   getProviderSupportsAskMode,
   normalizeInteractionModeForProviderTarget,
+  pendingApprovalSourceFromStore,
+  planApprovalRedirect,
   selectionAllowedAtSendBoundary,
+  type ApprovalRedirectRefusal,
 } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import type { TimelineEntry } from "@ryco/client-runtime/state/session";
@@ -149,6 +155,7 @@ import { sendThreadTurn } from "./sendThreadTurn";
 import {
   interruptThreadTurn,
   renameThread,
+  respondToThreadApproval,
   setThreadArchived,
   setThreadSettled,
   setThreadInteractionMode,
@@ -419,6 +426,11 @@ export function ThreadDetailScreen(props: {
   const [stagedModelSelection, setStagedModelSelection] = useState<ModelSelection | null>(null);
   const [sendBusy, setSendBusy] = useState(false);
   const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerAttachment>>([]);
+  // The attachments as they are now, for a redirect that waited on its declines.
+  const attachmentsRef = useRef(attachments);
+  useLayoutEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
   const ownedUploadIds = useRef(new Set<string>());
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   // Live steer attempts by message id. Each is keyed by its request's commandId, so only that
@@ -1356,6 +1368,54 @@ export function ThreadDetailScreen(props: {
     const deliveryReconciled =
       selectEnvironmentHydratedFromCacheAt(useStore.getState(), environmentId) === null;
     const connected = connectionUiState === "connected" && deliveryReconciled;
+    // A message sent while approvals wait declines the ones on screen and steers the turn. A
+    // turn that also waits on a question could not take the steer, so it queues as before.
+    const approvalRedirect =
+      threadBusy && connected && pendingUserInputs.length === 0
+        ? planApprovalRedirect({
+            approvals: pendingApprovals,
+            runtimeSessionId: currentThread.session?.runtimeSessionId,
+          })
+        : ({ kind: "none" } as const);
+    const refuseRedirect = (refusal: ApprovalRedirectRefusal, error?: string | null) => {
+      const copy = describeApprovalRedirectRefusal(refusal, error);
+      setSendError(`${copy.title}. ${copy.description}`);
+      return "refuse" as const;
+    };
+    const redirectApprovals = async (message: QueuedThreadMessage) => {
+      // Only a message that can steer redirects; any other one queues behind the approvals.
+      if (approvalRedirect.kind === "none" || !getSteerEligibility(message).allowed) {
+        return "queue" as const;
+      }
+      if (approvalRedirect.kind === "blocked") return refuseRedirect("blocked");
+      const outcome = await declineApprovalsForRedirect({
+        plan: approvalRedirect,
+        decline: (approval) =>
+          respondToThreadApproval({
+            api: ensureEnvironmentApi(environmentId),
+            threadId,
+            requestId: approval.requestId,
+            decision: "decline",
+            approvalIdentity: approval.approvalIdentity,
+          }),
+        source: pendingApprovalSourceFromStore(
+          useStore,
+          (state) => selectThreadByRef(state, scopeThreadRef(environmentId, threadId))?.activities,
+        ),
+      });
+      if (outcome.kind !== "declined") {
+        return refuseRedirect(outcome.kind, outcome.kind === "refused" ? outcome.error : null);
+      }
+      // The editor is locked while sending, but an attachment can still be removed meanwhile.
+      const current = attachmentsRef.current;
+      if (
+        current.length !== attachments.length ||
+        current.some((attachment, index) => attachment.id !== attachments[index]?.id)
+      ) {
+        return refuseRedirect("draft-changed");
+      }
+      return "steer" as const;
+    };
 
     return runWhileBusy(setSendBusy, async () => {
       const sent = await sendThreadTurn(
@@ -1376,6 +1436,8 @@ export function ThreadDetailScreen(props: {
           newCommandId,
           now: () => new Date().toISOString(),
           enqueue: enqueueThreadOutboxMessage,
+          beforeEnqueue: redirectApprovals,
+          steer: (message) => void steerQueuedMessage(message),
           dispatch: () =>
             executeSendTurn({
               providerDriver: threadProviderDriver,
@@ -1585,6 +1647,19 @@ export function ThreadDetailScreen(props: {
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
     agentControlProposals.length > 0;
+  // While approvals wait on a turn that can steer, a send declines them and redirects it.
+  const sendRedirectsApprovals =
+    thread?.latestTurn?.state === "running" &&
+    pendingUserInputs.length === 0 &&
+    planApprovalRedirect({
+      approvals: pendingApprovals,
+      runtimeSessionId: thread.session?.runtimeSessionId,
+    }).kind !== "none" &&
+    providers.find(
+      (provider) =>
+        provider.instanceId ===
+        (thread.session?.providerInstanceId ?? thread.modelSelection?.instanceId),
+    )?.supportsTurnSteering === true;
 
   return (
     <KeyboardAvoidingView
@@ -1788,6 +1863,7 @@ export function ThreadDetailScreen(props: {
         sendBlock={sendBlock}
         fileUploadRecords={fileUploadRecords}
         disabled={cachedView.composerDisabled}
+        {...(sendRedirectsApprovals ? { placeholder: APPROVAL_REDIRECT_PLACEHOLDER } : {})}
         policyModel={policyModel}
         policyDisabled={policyBusy || cachedView.actionsDisabled}
         modelPicker={modelPicker}

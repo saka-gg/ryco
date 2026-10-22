@@ -44,6 +44,21 @@ carry both callback and attempt identity. A late qualified settlement can comple
 a stopped runtime, but cannot cross into a newer runtime. Duplicate source request
 activities and settlements cannot reopen or overwrite the current callback.
 
+## Redirecting sends
+
+A message sent while approvals wait declines them and steers the turn
+(`packages/client-runtime/src/state/composer/approvalRedirect.ts`, shared by web and
+mobile). It is the send path's last step, so local commands, queued-message edits and
+refused drafts never touch approvals, and it only runs when the message can steer;
+otherwise the message queues and the approvals stay. The response states are the
+guard: an approval that is `submitting` or `uncertain` stops the send, and so does a
+decline the node refuses, one that ends `retryable` or `uncertain`, one still in
+flight after 15 seconds, or an approval that arrived meanwhile. Approvals of an ended
+runtime are skipped. Responses and steers run on separate reactor lanes and adapters
+refuse a steer while an approval waits, so the client steers only after every decline
+left the pending list, and only if the draft is unchanged. The draft stays in every
+other case.
+
 ## Lifecycle integration boundary
 
 `apps/server/src/orchestration/approvalResponses.ts` owns `requireApprovalClaim`,

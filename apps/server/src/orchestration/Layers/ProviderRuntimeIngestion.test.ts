@@ -5042,6 +5042,8 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         requestType: "command_execution_approval",
         detail: "pwd",
+        reason: "pwd runs outside the allowed directories",
+        acceptForSessionOffered: false,
       },
     });
 
@@ -5087,6 +5089,8 @@ describe("ProviderRuntimeIngestion", () => {
     });
     expect(requestedPayload?.requestKind).toBe("command");
     expect(requestedPayload?.requestType).toBe("command_execution_approval");
+    expect(requestedPayload?.reason).toBe("pwd runs outside the allowed directories");
+    expect(requestedPayload?.acceptForSessionOffered).toBe(false);
 
     const resolved = thread?.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-request-resolved",

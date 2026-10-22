@@ -69,7 +69,11 @@ export function useChatSessionActions(input: {
     }
   }, [activeThreadId, environmentId]);
 
-  const respondToApproval = useCallback(
+  /**
+   * Submits an approval decision and rejects when the node refuses it. A redirecting send uses
+   * it directly: it must know the decline was taken before it steers.
+   */
+  const submitApprovalDecision = useCallback(
     async (
       requestId: ApprovalRequestId,
       decision: ProviderApprovalDecision,
@@ -77,7 +81,7 @@ export function useChatSessionActions(input: {
     ) => {
       const api = readEnvironmentApi(environmentId);
       if (!api || !activeThreadId) {
-        return;
+        throw new Error("This environment is not connected.");
       }
 
       setRespondingRequestIds((existing) =>
@@ -91,16 +95,32 @@ export function useChatSessionActions(input: {
           decision,
           approvalIdentity,
         });
+      } finally {
+        setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
+      }
+    },
+    [activeThreadId, environmentId],
+  );
+
+  const respondToApproval = useCallback(
+    async (
+      requestId: ApprovalRequestId,
+      decision: ProviderApprovalDecision,
+      approvalIdentity?: ApprovalResponseIdentity,
+    ) => {
+      if (!readEnvironmentApi(environmentId) || !activeThreadId) {
+        return;
+      }
+      try {
+        await submitApprovalDecision(requestId, decision, approvalIdentity);
       } catch (err: unknown) {
         setThreadError(
           activeThreadId,
           err instanceof Error ? err.message : "Failed to submit approval decision.",
         );
-      } finally {
-        setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
       }
     },
-    [activeThreadId, environmentId, setThreadError],
+    [activeThreadId, environmentId, setThreadError, submitApprovalDecision],
   );
 
   const respondToUserInput = useCallback(
@@ -195,6 +215,7 @@ export function useChatSessionActions(input: {
   return {
     interruptTurn,
     respondToApproval,
+    submitApprovalDecision,
     respondToUserInput,
     revertToTurnCount,
     respondingRequestIds,
