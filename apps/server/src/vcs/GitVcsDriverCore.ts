@@ -2003,7 +2003,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const stagedSummary = yield* runGitStdout(
       "GitVcsDriver.prepareCommitContext.stagedSummary",
       cwd,
-      ["diff", "--cached", "--name-status"],
+      [...GitVcsDriver.INTERNAL_DIFF_SUMMARY_ARGS, "--cached", "--name-status"],
     ).pipe(Effect.map((stdout) => stdout.trim()));
     if (stagedSummary.length === 0) {
       return null;
@@ -2315,7 +2315,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.log",
           cwd,
-          ["log", "--oneline", "--no-color", commitRange],
+          ["log", "--oneline", "--no-decorate", "--no-color", commitRange],
           {
             maxOutputBytes: RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES,
             truncateOutputAtMaxBytes: true,
@@ -2324,7 +2324,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.diffStat",
           cwd,
-          ["diff", "--stat", "--no-color", diffRange],
+          [...GitVcsDriver.INTERNAL_DIFF_SUMMARY_ARGS, "--stat", diffRange],
           {
             maxOutputBytes: RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES,
             truncateOutputAtMaxBytes: true,
