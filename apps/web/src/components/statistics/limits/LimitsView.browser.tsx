@@ -2,9 +2,12 @@ import "../../../index.css";
 
 import {
   EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type CliProxyAccount,
   type CliProxyApiKeyUsage,
   type CliProxyHubSnapshot,
+  type ServerProvider,
 } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -12,14 +15,14 @@ import { render } from "vitest-browser-react";
 
 import { parseStatisticsSearch, type StatisticsSearch } from "../statisticsSearch";
 import { LimitsView } from "./LimitsView";
-import type { UseCliProxyHubsResult } from "./useCliProxyHubs";
+import type { UseSubscriptionLimitsResult } from "./useSubscriptionLimits";
 
 const harness = vi.hoisted(() => ({
-  result: null as UseCliProxyHubsResult | null,
+  result: null as UseSubscriptionLimitsResult | null,
 }));
 
-vi.mock("./useCliProxyHubs", () => ({
-  useCliProxyHubs: () => harness.result,
+vi.mock("./useSubscriptionLimits", () => ({
+  useSubscriptionLimits: () => harness.result,
 }));
 
 const desktop = EnvironmentId.make("env-limits");
@@ -57,19 +60,58 @@ function loopbackHub(
   };
 }
 
+type EnvironmentInput = Omit<
+  UseSubscriptionLimitsResult["environments"][number],
+  "connected" | "providers"
+> &
+  Partial<Pick<UseSubscriptionLimitsResult["environments"][number], "connected" | "providers">>;
+
 function serve(
-  environments: UseCliProxyHubsResult["environments"],
-  availableEnvironments: UseCliProxyHubsResult["availableEnvironments"] = environments,
+  environments: ReadonlyArray<EnvironmentInput>,
+  availableEnvironments: UseSubscriptionLimitsResult["availableEnvironments"] = environments,
 ) {
   harness.result = {
     availableEnvironments,
-    environments,
+    environments: environments.map((environment) => ({
+      connected: true,
+      providers: [],
+      ...environment,
+    })),
     loading: false,
     refreshing: false,
     receivedAtMs: Date.now(),
     refresh: () => undefined,
   };
 }
+
+function provider(
+  overrides: Partial<ServerProvider> & Pick<ServerProvider, "instanceId">,
+): ServerProvider {
+  return {
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt,
+    models: [],
+    slashCommands: [],
+    skills: [],
+    ...overrides,
+  };
+}
+
+const codex = provider({
+  instanceId: ProviderInstanceId.make("codex"),
+  displayName: "Codex",
+  auth: { status: "authenticated", email: "direct.person@example.com" },
+  rateLimits: {
+    planType: "pro",
+    primary: { usedPercent: 23, windowDurationMins: 300 },
+    secondary: { usedPercent: 61, windowDurationMins: 10_080 },
+  },
+});
 
 const apiKey = (keyHint: string): CliProxyApiKeyUsage => ({
   provider: "claude",
@@ -223,5 +265,96 @@ describe("LimitsView", () => {
     await expect
       .element(page.getByText("Update Ryco on this node to read CLIProxyAPI hubs."))
       .toBeVisible();
+  });
+
+  it("shows direct accounts without a hub and offers to connect one", async () => {
+    serve([
+      { environmentId: desktop, label: "This machine", status: "ok", hubs: [], providers: [codex] },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("1 account · 1 direct", { exact: false })).toBeVisible();
+    await expect.element(page.getByText("Direct", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("23% used")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Connect a hub" })).toBeVisible();
+    expect(document.body.textContent).not.toContain("direct.person@example.com");
+    expect(page.getByRole("radiogroup", { name: "Limit source" }).query()).toBeNull();
+  });
+
+  it("mixes direct and hub accounts of a provider and filters them by source", async () => {
+    const routedClaude = provider({
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude proxied",
+      // A routed instance's own limits describe no account the hub uses.
+      rateLimits: { primary: { usedPercent: 99, windowDurationMins: 300 } },
+    });
+    const directClaude = provider({
+      instanceId: ProviderInstanceId.make("claude-personal"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude personal",
+      auth: { status: "authenticated", label: "Claude Max Subscription" },
+      rateLimits: { primary: { usedPercent: 40, windowDurationMins: 300 } },
+    });
+    serve([
+      {
+        environmentId: desktop,
+        label: "This machine",
+        status: "ok",
+        providers: [routedClaude, directClaude],
+        hubs: [
+          {
+            ...loopbackHub([
+              account({
+                quota: {
+                  status: "ok",
+                  checkedAt,
+                  windows: [{ id: "five_hour", usedPercent: 20, windowDurationMins: 300 }],
+                },
+              }),
+            ]),
+            routedInstanceIds: [routedClaude.instanceId],
+          },
+        ],
+      },
+    ]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("1 direct · 1 via hub")).toBeVisible();
+    // The pool averages the direct 40% and the hub's 20%.
+    await expect.element(page.getByText("70% left")).toBeVisible();
+    await expect.element(page.getByText("Claude proxied", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("99% used");
+
+    await page.getByRole("radio", { name: "CLIProxyAPI" }).click();
+    await expect.element(page.getByText("1 via hub", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Claude Max Subscription");
+    expect(document.body.textContent).not.toContain("Claude proxied");
+
+    await page.getByRole("radio", { name: "Direct" }).click();
+    await expect.element(page.getByText("1 direct", { exact: true })).toBeVisible();
+    expect(page.getByRole("heading", { name: "Hubs" }).query()).toBeNull();
+  });
+
+  it("offers the provider settings when nothing reports limits", async () => {
+    serve([{ environmentId: desktop, label: "This machine", status: "ok", hubs: [] }]);
+    mounted = await render(
+      <LimitsView
+        search={parseStatisticsSearch({ view: "limits" })}
+        onSearchChange={onSearchChange}
+      />,
+    );
+
+    await expect.element(page.getByText("No subscription limits to show")).toBeVisible();
   });
 });

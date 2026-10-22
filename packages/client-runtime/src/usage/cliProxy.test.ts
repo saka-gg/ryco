@@ -195,7 +195,7 @@ describe("groupCliProxyAccounts", () => {
     expect(claude.accounts.map((entry) => entry.account.authIndex)).toEqual(["a", "b", "f"]);
     expect(claude.pooled).toEqual([
       {
-        id: "five_hour",
+        id: "5h",
         label: "5h",
         windowDurationMins: 300,
         usedPercent: 40,

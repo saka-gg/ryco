@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
 import { UsageRequestGeneration } from "@ryco/client-runtime/usage";
-import type { CliProxyHubSnapshot, EnvironmentId } from "@ryco/contracts";
+import type { CliProxyHubSnapshot, EnvironmentId, ServerProvider } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePrimaryEnvironmentId } from "~/environments/primary";
@@ -19,7 +19,9 @@ const POLL_INTERVAL_MS = 5 * 60_000;
 
 const UNSUPPORTED_MESSAGE = "Update Ryco on this node to read CLIProxyAPI hubs.";
 
-export interface CliProxyEnvironmentResult {
+const NO_PROVIDERS: readonly ServerProvider[] = [];
+
+interface HubReadResult {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   /** `unsupported`: the node predates hubs, so it is not asked. */
@@ -28,13 +30,20 @@ export interface CliProxyEnvironmentResult {
   readonly message?: string;
 }
 
-export interface UseCliProxyHubsResult {
+/** One environment's hub read, with its provider snapshots as they are now. */
+export interface LimitsEnvironmentResult extends HubReadResult {
+  readonly connected: boolean;
+  /** Live provider snapshots; their `rateLimits` are the accounts the node signs in to itself. */
+  readonly providers: readonly ServerProvider[];
+}
+
+export interface UseSubscriptionLimitsResult {
   /** Every connected environment, whether or not the current filter selects it. */
   readonly availableEnvironments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly label: string;
   }>;
-  readonly environments: readonly CliProxyEnvironmentResult[];
+  readonly environments: readonly LimitsEnvironmentResult[];
   readonly loading: boolean;
   readonly refreshing: boolean;
   /** When the current results arrived; snapshot times are never later than this. */
@@ -43,9 +52,13 @@ export interface UseCliProxyHubsResult {
   readonly refresh: () => void;
 }
 
-export function useCliProxyHubs(input: {
+/**
+ * What the Limits view shows for the selected environments: their CLIProxyAPI hubs, polled, and
+ * their provider snapshots, live.
+ */
+export function useSubscriptionLimits(input: {
   readonly environmentIds?: readonly string[] | undefined;
-}): UseCliProxyHubsResult {
+}): UseSubscriptionLimitsResult {
   const queryClient = useQueryClient();
   const connections = useConnectedEnvironments();
   const selected = useMemo(
@@ -81,7 +94,7 @@ export function useCliProxyHubs(input: {
     () => new Set(unsupportedKey.split("\0").filter(Boolean)),
     [unsupportedKey],
   );
-  const [environments, setEnvironments] = useState<readonly CliProxyEnvironmentResult[]>([]);
+  const [hubResults, setHubResults] = useState<readonly HubReadResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [receivedAtMs, setReceivedAtMs] = useState(0);
@@ -95,7 +108,7 @@ export function useCliProxyHubs(input: {
     forceNextRef.current = false;
     setRefreshing(true);
     const results = await Promise.all(
-      selected.map(async (connection): Promise<CliProxyEnvironmentResult> => {
+      selected.map(async (connection): Promise<HubReadResult> => {
         const base = {
           environmentId: connection.environmentId,
           label: connection.knownEnvironment.label,
@@ -124,7 +137,7 @@ export function useCliProxyHubs(input: {
         queryClient.setQueryData(cliProxyHubsQueryKey(result.environmentId), result.hubs);
       }
     }
-    setEnvironments(results);
+    setHubResults(results);
     setReceivedAtMs(Date.now());
     setLoading(false);
     setRefreshing(false);
@@ -148,6 +161,21 @@ export function useCliProxyHubs(input: {
     forceNextRef.current = true;
     void pollerRef.current?.refresh();
   }, []);
+
+  const environments = useMemo(
+    () =>
+      hubResults.map((result): LimitsEnvironmentResult => {
+        const primary = result.environmentId === primaryEnvironmentId;
+        const runtime = savedRuntimeById[result.environmentId];
+        const config = primary ? primaryConfig : (runtime?.serverConfig ?? null);
+        return {
+          ...result,
+          connected: primary || runtime?.connectionState === "connected",
+          providers: config?.providers ?? NO_PROVIDERS,
+        };
+      }),
+    [hubResults, primaryConfig, primaryEnvironmentId, savedRuntimeById],
+  );
 
   return { availableEnvironments, environments, loading, refreshing, receivedAtMs, refresh };
 }

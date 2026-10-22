@@ -130,3 +130,59 @@ export function isRateLimitSnapshotAvailable(
     provider.auth.status === "authenticated"
   );
 }
+
+/** One window of an account, labelled the same way for both sources. */
+export interface LabelledLimitWindow {
+  readonly label: string;
+  readonly window: ServerProviderRateLimitWindow;
+}
+
+export interface PooledLimitWindow {
+  /** The shared window label (`5h`, `Weekly`, `Weekly · Opus`); stable within a pool list. */
+  readonly id: string;
+  readonly label: string;
+  readonly windowDurationMins: number | undefined;
+  /** Mean used percent across accounts reporting this window. */
+  readonly usedPercent: number;
+  readonly accountCount: number;
+  /** The soonest reset among the pooled accounts, epoch seconds. */
+  readonly nextResetsAt: number | undefined;
+}
+
+/**
+ * Averages each window label over the given accounts. Windows pool by label, so a direct
+ * account's 5h window and a hub account's 5h window share one pool; an account counts once per
+ * label.
+ */
+export function poolLimitWindows(
+  accounts: ReadonlyArray<ReadonlyArray<LabelledLimitWindow>>,
+): PooledLimitWindow[] {
+  const pools = new Map<
+    string,
+    { durationMins: number | undefined; used: number[]; resets: number[] }
+  >();
+  for (const windows of accounts) {
+    const counted = new Set<string>();
+    for (const { label, window } of windows) {
+      const used = clampUsedPercent(window.usedPercent);
+      if (used === null || counted.has(label)) continue;
+      counted.add(label);
+      const pool = pools.get(label) ?? {
+        durationMins: window.windowDurationMins,
+        used: [],
+        resets: [],
+      };
+      pool.used.push(used);
+      if (window.resetsAt !== undefined) pool.resets.push(window.resetsAt);
+      pools.set(label, pool);
+    }
+  }
+  return [...pools.entries()].map(([label, { durationMins, used, resets }]) => ({
+    id: label,
+    label,
+    windowDurationMins: durationMins,
+    usedPercent: Math.round((used.reduce((sum, value) => sum + value, 0) / used.length) * 10) / 10,
+    accountCount: used.length,
+    nextResetsAt: resets.length > 0 ? Math.min(...resets) : undefined,
+  }));
+}
