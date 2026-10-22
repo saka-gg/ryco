@@ -15,6 +15,7 @@ import {
   ProjectCopyDirectoryName,
   ProjectCopyError,
   ProjectCopyRelativePath,
+  ProjectCopyRelativeRoot,
   ProjectCopyRemoteUrl,
   ProjectDestinationPreview,
   ProjectExportReadChunkInput,
@@ -270,6 +271,13 @@ describe("input hygiene", () => {
       "https://:ghp_token@github.com/example/ryco.git",
       "ssh://git:secret@github.com/example/ryco.git",
       "user:secret@github.com:example/ryco.git",
+      // git hands these to curl, which skips the extra slashes and sends the password.
+      "https:///deploy:ghp_secret@github.com/example/ryco.git",
+      "http:///user:secret@intranet.local/repo.git",
+      "ssh:///git:secret@github.com/example/ryco.git",
+      // WHATWG URL (the server's clone check) reads user info after any slashes or backslashes.
+      "https:/user:secret@github.com/example/ryco.git",
+      "https:\\\\user:secret@github.com/example/ryco.git",
       "--upload-pack=touch /tmp/x",
       "https://github.com/example/ryco.git\nurl=evil",
       `https://github.com/${"a".repeat(2_048)}`,
@@ -305,8 +313,39 @@ describe("input hygiene", () => {
       "bracket[",
       "back\\slash",
       "",
+      // A line separator must not hide what follows it from the checks.
+      "main ..x",
+      "a ..b",
+      "a /.hidden",
+      "x /y.lock",
+      "a //b",
+      "end .",
+      "trail /",
     ]) {
-      expect(() => decode(branch)).toThrow();
+      expect(() => decode(branch), JSON.stringify(branch)).toThrow();
+    }
+  });
+
+  it("refuses traversal and .git in relative paths, whatever characters precede it", () => {
+    const decode = Schema.decodeUnknownSync(ProjectCopyRelativePath);
+    const decodeRoot = Schema.decodeUnknownSync(ProjectCopyRelativeRoot);
+    for (const relative of ["packages/app", "apps/web/.env.local", "a b/c"]) {
+      expect(decode(relative)).toBe(relative);
+    }
+    expect(decodeRoot("")).toBe("");
+    for (const relative of [
+      "a/../etc",
+      "a /../../etc",
+      "pkg /../../../tmp/x",
+      "a /.git",
+      "a /.git/config",
+      "a /./b",
+      "a //b",
+      "a /",
+      "a\u007f/b",
+    ]) {
+      expect(() => decode(relative), JSON.stringify(relative)).toThrow();
+      expect(() => decodeRoot(relative), JSON.stringify(relative)).toThrow();
     }
   });
 

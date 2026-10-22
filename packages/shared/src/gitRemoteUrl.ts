@@ -8,6 +8,7 @@
  *
  * @module gitRemoteUrl
  */
+import { REMOTE_URL_PASSWORD_PATTERN } from "@ryco/contracts/project-copy";
 
 /**
  * The remote a repository's identity comes from (`RepositoryIdentity.locator`, and so its
@@ -46,10 +47,21 @@ export type GitRemoteUrlKind = "https" | "http" | "ssh" | "scp" | "file" | "loca
 
 const SCHEME_PREFIX = /^([a-z][a-z0-9+.-]*):\/\//i;
 const WINDOWS_DRIVE_PATH = /^[a-z]:[\\/]/i;
-/** The same rule as the contract's `ProjectCopyRemoteUrl`: `scheme://user:password@` or `user:password@host:`. */
-const URL_PASSWORD = /^(?:[a-z][a-z0-9+.-]*:\/\/[^/?#@]*:[^/?#@]*@|[^/\\@:]+:[^/\\@]*@)/i;
-/** `scheme://userinfo@` anywhere in free text; the userinfo runs to the last `@` of the authority. */
-const TEXT_URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/?#'"]+)@/gi;
+/**
+ * Where a URL's user info starts, as `REMOTE_URL_PASSWORD_PATTERN` reads it: after `scheme:` and
+ * any run of slashes or backslashes, since git hands `https:///user:token@host` to curl (which
+ * skips up to three slashes and sends the token) and WHATWG `URL` skips any number of either. At
+ * least one: `user:password@host:path` without slashes is scp-style. The user info never starts
+ * with a slash, so the slash run is taken whole and the match stays linear.
+ */
+const SCHEME_AND_SLASHES = String.raw`([a-z][a-z0-9+.-]*):[\\/]+`;
+/** The user info runs to the authority's last `@`. */
+const URL_USERINFO = new RegExp(String.raw`^${SCHEME_AND_SLASHES}([^/\\?#][^/?#]*)?@`, "i");
+/** `scheme://userinfo@` anywhere in free text. */
+const TEXT_URL_USERINFO = new RegExp(
+  String.raw`\b${SCHEME_AND_SLASHES}([^\s/\\?#'"][^\s/?#'"]*)@`,
+  "gi",
+);
 const REPOSITORY_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const SCP_HOST = /^[A-Za-z0-9.-]+$/;
 
@@ -93,9 +105,12 @@ export const isCloneableRemoteKind = (kind: GitRemoteUrlKind): boolean =>
 export const isRecreatableRemoteKind = (kind: GitRemoteUrlKind): boolean =>
   isCloneableRemoteKind(kind) || kind === "http";
 
-/** Whether the URL carries a password (`scheme://user:password@…` or `user:password@host:…`). */
+/**
+ * Whether the URL carries a password (`scheme://user:password@…`, however many slashes, or
+ * `user:password@host:…`): the rule the contract's `ProjectCopyRemoteUrl` refuses.
+ */
 export function remoteUrlHasPassword(remoteUrl: string): boolean {
-  return URL_PASSWORD.test(remoteUrl.trim());
+  return REMOTE_URL_PASSWORD_PATTERN.test(remoteUrl.trim());
 }
 
 /**
@@ -104,10 +119,12 @@ export function remoteUrlHasPassword(remoteUrl: string): boolean {
  */
 export function sanitizeRemoteUrl(remoteUrl: string): string {
   const url = remoteUrl.trim();
-  const authority = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)@(.*)$/is.exec(url);
+  const authority = URL_USERINFO.exec(url);
   if (authority) {
-    const [, prefix = "", userinfo = "", rest = ""] = authority;
-    if (isHttpScheme(prefix.slice(0, -3).toLowerCase())) return `${prefix}${rest}`;
+    const [prefixAndUserinfo, scheme = "", userinfo = ""] = authority;
+    const prefix = prefixAndUserinfo.slice(0, prefixAndUserinfo.length - userinfo.length - 1);
+    const rest = url.slice(prefixAndUserinfo.length);
+    if (isHttpScheme(scheme.toLowerCase())) return `${prefix}${rest}`;
     const colon = userinfo.indexOf(":");
     return colon === -1 ? url : `${prefix}${userinfo.slice(0, colon)}@${rest}`;
   }
@@ -203,8 +220,9 @@ export function sshHostOfRemoteUrl(remoteUrl: string): string | null {
  */
 export function redactGitCredentials(text: string): string {
   if (!text.includes("@")) return text;
-  return text.replace(TEXT_URL_USERINFO, (match, prefix: string, userinfo: string) => {
-    if (isHttpScheme(prefix.slice(0, -3).toLowerCase())) return `${prefix}***@`;
+  return text.replace(TEXT_URL_USERINFO, (match, scheme: string, userinfo: string) => {
+    const prefix = match.slice(0, match.length - userinfo.length - 1);
+    if (isHttpScheme(scheme.toLowerCase())) return `${prefix}***@`;
     const colon = userinfo.indexOf(":");
     return colon === -1 ? match : `${prefix}${userinfo.slice(0, colon)}:***@`;
   });
@@ -232,7 +250,8 @@ export function repositoryFolderName(remoteUrl: string): string | null {
  */
 export function displayRemoteUrl(remoteUrl: string): string {
   const trimmed = remoteUrl.trim();
-  const scp = /^[^@/\s]+@([^:/\s]+):(.+?)(?:\.git)?\/?$/u.exec(trimmed);
+  const scp = /^[^@/\s]+@([^:/\s]+):\/*(.+?)(?:\.git)?\/?$/u.exec(trimmed);
+  // A server-absolute path (`host:/srv/repo.git`) reads like its `ssh://host/srv/repo.git` form.
   if (scp) return `${scp[1]}/${scp[2]}`;
   try {
     const url = new URL(trimmed);

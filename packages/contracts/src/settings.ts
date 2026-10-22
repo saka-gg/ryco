@@ -531,9 +531,10 @@ export const DEFAULT_WORKTREE_BRANCH_PREFIX = "ryco";
 export const WorktreeBranchPrefix = TrimmedString.check(
   Schema.isMaxLength(128),
   Schema.isPattern(
-    // Git refs cannot contain ASCII controls, including DEL.
+    // Git refs cannot contain ASCII controls, including DEL. `s`: the lookaheads see past
+    // U+2028/U+2029, which the body accepts.
     // eslint-disable-next-line no-control-regex
-    /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/,
+    /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/s,
   ),
 );
 

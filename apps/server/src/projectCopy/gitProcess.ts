@@ -30,6 +30,24 @@ const MAX_PENDING_STDERR_CHARS = 64 * 1024;
 /** Bound for `detail` and messages built from git's output (`ProjectCopyError.message` cap). */
 export const GIT_DETAIL_MAX_CHARS = 2_000;
 
+/**
+ * `-c` options that switch git-lfs's filter off for one command: LFS files stay pointers, git-lfs
+ * never runs, and a configured but missing git-lfs (`filter.lfs.required=true`, as `git lfs
+ * install` writes it) cannot fail the command. `GIT_LFS_SKIP_SMUDGE` alone does not do this: only
+ * git-lfs reads it. Export commands that read the working tree use it, so do the import's
+ * checkout and patch; the import's `lfs` step brings the large files.
+ */
+export const GIT_LFS_FILTER_OFF_ARGS: ReadonlyArray<string> = [
+  "-c",
+  "filter.lfs.process=",
+  "-c",
+  "filter.lfs.clean=",
+  "-c",
+  "filter.lfs.smudge=",
+  "-c",
+  "filter.lfs.required=false",
+];
+
 /** At most `maxChars` of `text`, trimmed, keeping its end (where git puts the reason). */
 export function tailOfText(text: string, maxChars: number): string {
   const trimmed = text.trim();

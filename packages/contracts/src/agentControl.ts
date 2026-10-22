@@ -780,8 +780,9 @@ export type AgentControlDeviceRiskClass = typeof AgentControlDeviceRiskClass.Typ
 
 export const AgentControlDeviceArtifactPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(AGENT_CONTROL_DEVICE_ARTIFACT_PATH_MAX_CHARS),
+  // `s`: the lookaheads see past line terminators, which the body accepts.
   Schema.isPattern(
-    /^(?!\/)(?!~)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)[^\0]+\.(?:app|apk)$/u,
+    /^(?!\/)(?!~)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)[^\0]+\.(?:app|apk)$/su,
   ),
 );
 export type AgentControlDeviceArtifactPath = typeof AgentControlDeviceArtifactPath.Type;

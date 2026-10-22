@@ -126,12 +126,16 @@ export type GitObjectId = typeof GitObjectId.Type;
 /**
  * The shape `git check-ref-format --branch` accepts, minus a leading `-`. The
  * destination still runs `check-ref-format` before using it.
+ *
+ * Its lookaheads (and those of `ProjectCopyRelativePath`) run with the `s` flag:
+ * without it `.` stops at U+2028/U+2029, which the body accepts, and a line
+ * separator would hide every later `..`, `/.` or `.lock` from them.
  */
 export const GitBranchName = Schema.String.check(
   Schema.isMaxLength(256),
   Schema.isPattern(
     // oxlint-disable-next-line no-control-regex -- control characters are exactly what git rejects
-    /^(?!-)(?!\/)(?!.*\/$)(?!.*\/\/)(?!.*\.\.)(?!.*@\{)(?!@$)(?!.*\.$)(?!(?:.*\/)?\.)(?!.*\.lock(?:\/|$))[^\x00-\x20\x7f~^:?*[\\]+$/,
+    /^(?!-)(?!\/)(?!.*\/$)(?!.*\/\/)(?!.*\.\.)(?!.*@\{)(?!@$)(?!.*\.$)(?!(?:.*\/)?\.)(?!.*\.lock(?:\/|$))[^\x00-\x20\x7f~^:?*[\\]+$/s,
     { message: "Expected a valid git branch name" },
   ),
 );
@@ -145,9 +149,28 @@ export const GitRemoteName = Schema.String.check(
 export type GitRemoteName = typeof GitRemoteName.Type;
 
 /**
+ * A password in a remote URL, unanchored. Either `user:password@` after `scheme:`
+ * and any run of slashes or backslashes, or scp-style `user:password@host:path`.
+ * The slash count matters: git hands `https:///…` to curl, which skips up to three
+ * slashes before the authority and sends its credentials, and WHATWG `URL` (the
+ * server's clone check) skips any number of slashes and backslashes. The user info
+ * runs to the authority's last `@`; it has a password when its first `:` comes
+ * before that `@`. The slash run is always taken whole (`(?![\\/])`), so a long
+ * run cannot make the match quadratic.
+ */
+const REMOTE_URL_PASSWORD_SOURCE = String.raw`(?:[a-z][a-z0-9+.-]*:[\\/]+(?![\\/])[^/?#:]*:[^/?#]*@|[^/\\@:]+:[^/\\@]*@)`;
+
+/**
+ * Matches a remote URL that carries a password: what `ProjectCopyRemoteUrl` refuses,
+ * and the rule `@ryco/shared/gitRemoteUrl` checks URLs with.
+ */
+export const REMOTE_URL_PASSWORD_PATTERN = new RegExp(`^${REMOTE_URL_PASSWORD_SOURCE}`, "i");
+
+/**
  * A remote URL a client may hand to a node: bounded, no control characters, no
- * leading `-`, and never a password — neither `scheme://user:password@host` nor
- * scp-style `user:password@host:path`. Usernames (`git@…`, `ssh://git@…`) stay.
+ * leading `-`, and never a password (`REMOTE_URL_PASSWORD_PATTERN`): neither
+ * `scheme://user:password@host` (however many slashes) nor scp-style
+ * `user:password@host:path`. Usernames (`git@…`, `ssh://git@…`) stay.
  */
 export const ProjectCopyRemoteUrl = TrimmedNonEmptyString.check(
   Schema.isMaxLength(PROJECT_COPY_REMOTE_URL_MAX_CHARS),
@@ -155,7 +178,7 @@ export const ProjectCopyRemoteUrl = TrimmedNonEmptyString.check(
   Schema.isPattern(/^(?!-)(?![\s\S]*[\x00-\x1f\x7f])/, {
     message: "Remote URLs must not start with '-' or contain control characters",
   }),
-  Schema.isPattern(/^(?![a-z][a-z0-9+.-]*:\/\/[^/?#@]*:[^/?#@]*@)(?![^/\\@:]+:[^/\\@]*@)/i, {
+  Schema.isPattern(new RegExp(`^(?!${REMOTE_URL_PASSWORD_SOURCE})`, "i"), {
     message: "Remote URLs must not contain a password",
   }),
 );
@@ -164,13 +187,14 @@ export type ProjectCopyRemoteUrl = typeof ProjectCopyRemoteUrl.Type;
 /**
  * A relative, slash-separated path inside a repository: no `.`, `..`, `.git` or
  * empty segment; no leading `/`, `~`, `:` or drive letter; no backslash or
- * control character.
+ * control character. The `s` flag lets the lookaheads see past U+2028/U+2029
+ * (see `GitBranchName`).
  */
 export const ProjectCopyRelativePath = Schema.String.check(
   Schema.isMaxLength(PROJECT_COPY_RELATIVE_PATH_MAX_CHARS),
   Schema.isPattern(
     // oxlint-disable-next-line no-control-regex -- control characters are what it refuses
-    /^(?![/~:])(?![a-z]:)(?!.*\/\/)(?!.*\/$)(?!(?:.*\/)?(?:\.\.?|\.git)(?:\/|$))[^\\\x00-\x1f]+$/i,
+    /^(?![/~:])(?![a-z]:)(?!.*\/\/)(?!.*\/$)(?!(?:.*\/)?(?:\.\.?|\.git)(?:\/|$))[^\\\x00-\x1f\x7f]+$/is,
     { message: "Expected a relative path inside the repository" },
   ),
 );

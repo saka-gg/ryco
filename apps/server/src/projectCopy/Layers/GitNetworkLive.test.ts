@@ -95,6 +95,14 @@ describe("GitNetworkLive", () => {
         yield* reasonOf("https://user:token@example.invalid/o/r.git"),
         "invalid-url",
       );
+      // curl skips the third slash and would send the token.
+      assert.strictEqual(
+        yield* reasonOf("https:///user:token@example.invalid/o/r.git"),
+        "invalid-url",
+      );
+      // WHATWG URL reads https here, git an ssh host named `https`: neither clones it.
+      assert.strictEqual(yield* reasonOf("https:\\\\example.invalid/o/r.git"), "invalid-url");
+      assert.strictEqual(yield* reasonOf("ssh:example.invalid/o/r.git"), "invalid-url");
       assert.strictEqual(network.classifyRemoteUrl("http://example.invalid/o/r.git"), "http");
     }).pipe(Effect.provide(TestLayer)),
   );

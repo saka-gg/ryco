@@ -30,11 +30,14 @@ import {
   ProjectAvatarStore,
   type ProjectAvatarStoreShape,
 } from "../../project/Services/ProjectAvatarStore.ts";
+import { SourceControlProviderRegistry } from "../../sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "../Errors.ts";
 import { PROJECT_EXPORT_SKIP_REASON } from "../exportGit.ts";
+import { withProcessEnv, writeFakeSsh } from "../projectCopyGit.fixtures.ts";
 import { GitNetwork, type GitNetworkShape, type GitRemoteRef } from "../Services/GitNetwork.ts";
 import { ProjectExport, type ProjectCopyCallerChannel } from "../Services/ProjectExport.ts";
+import { GitNetworkLive } from "./GitNetworkLive.ts";
 import { makeProjectExportLive } from "./ProjectExportLive.ts";
 
 const execFileAsync = promisify(execFile);
@@ -138,8 +141,11 @@ const runLsRemote = async (url: string): Promise<ReadonlyArray<GitRemoteRef>> =>
     });
 };
 
-/** Fakes for everything but git: projects, worktrees, avatars and the network service. */
-const makeHarness = () => {
+/**
+ * Fakes for everything but git: projects, worktrees, avatars and (unless `realNetwork`) the
+ * network service.
+ */
+const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
   const projects = new Map<string, OrchestrationProjectShell>();
   const worktrees: OrchestrationWorktreeShell[] = [];
   const avatarBytes = new Map<string, Buffer>();
@@ -200,10 +206,18 @@ const makeHarness = () => {
     classifyRemoteUrl: () => "other",
   };
 
+  const networkLayer = options.realNetwork
+    ? GitNetworkLive.pipe(
+        Layer.provide(
+          Layer.mock(SourceControlProviderRegistry)({ detectProviderFromRemoteUrl: () => null }),
+        ),
+        Layer.provide(NodeServices.layer),
+      )
+    : Layer.succeed(GitNetwork, gitNetwork);
   const layer = makeProjectExportLive({ disablePeriodicSweep: true }).pipe(
     Layer.provide(Layer.succeed(ProjectionSnapshotQuery, projections)),
     Layer.provide(Layer.succeed(ProjectAvatarStore, avatars)),
-    Layer.provide(Layer.succeed(GitNetwork, gitNetwork)),
+    Layer.provide(networkLayer),
     Layer.provide(GitVcsDriver.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-export-test-" })),
     Layer.provideMerge(NodeServices.layer),
@@ -544,6 +558,53 @@ describe("ProjectExportLive", () => {
         const inspection = yield* exporter.inspect({ projectId: stale.id });
         expect(inspection.repository.cloneRemoteName).toBe("origin");
         expect(inspection.pushedState.unpushedCommitCount).toBe(1);
+      }),
+    ).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("reads the clone remote with the repository's own ssh setup, not stale refs", () => {
+    const harness = makeHarness({ realNetwork: true });
+    return withFixtureRoot((root) =>
+      Effect.gen(function* () {
+        const { source, bare } = makeRemoteAndClone(root);
+        // The origin answers only through this repository's own `core.sshCommand` (a per-repo
+        // key, as with `includeIf "gitdir:"`); the default ssh's key is refused.
+        git(root, "clone", "-q", "--bare", bare, path.join(root, "o", "r.git"));
+        const fakeSsh = writeFakeSsh(root);
+        git(source, "remote", "set-url", "origin", "git@fakehost:o/r.git");
+        git(source, "config", "core.sshCommand", fakeSsh.path);
+        const denyBin = path.join(root, "deny-bin");
+        write(
+          path.join(denyBin, "ssh"),
+          '#!/bin/sh\necho "git@fakehost: Permission denied (publickey)." >&2\nexit 255\n',
+        );
+        fs.chmodSync(path.join(denyBin, "ssh"), 0o755);
+        const emptyGlobalConfig = path.join(root, "empty.gitconfig");
+        write(emptyGlobalConfig, "");
+        // `feature` was merged and deleted on the remote; its tracking ref was never pruned.
+        git(source, "checkout", "-q", "-b", "feature");
+        const head = commitFile(source, "feature.txt", "feature\n");
+        git(source, "update-ref", "refs/remotes/origin/feature", head);
+        const project = harness.addProject(source);
+        const exporter = yield* ProjectExport;
+
+        const inspection = yield* exporter.inspect({ projectId: project.id }).pipe(
+          withProcessEnv({
+            PATH: `${denyBin}${path.delimiter}${process.env.PATH ?? ""}`,
+            GIT_SSH: undefined,
+            GIT_SSH_COMMAND: undefined,
+            GIT_CONFIG_GLOBAL: emptyGlobalConfig,
+            GIT_CONFIG_NOSYSTEM: "1",
+            FAKE_SSH_ROOT: root,
+            FAKE_SSH_MODE: undefined,
+          }),
+        );
+        // The remote has no `feature` and not its commit, whatever the tracking ref claims.
+        expect(inspection.pushedState).toEqual({
+          headOnRemote: false,
+          upstreamBranch: null,
+          unpushedCommitCount: 1,
+        });
       }),
     ).pipe(Effect.provide(harness.layer));
   });

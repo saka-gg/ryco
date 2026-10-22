@@ -23,6 +23,7 @@ import {
   alternateRemoteUrl,
   classifyRemoteUrl,
   type GitRemoteUrlKind,
+  isCloneableRemoteKind,
   redactGitCredentials,
   remoteUrlHasPassword,
   sanitizeRemoteUrl,
@@ -32,6 +33,7 @@ import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
+  CLONE_REMOTE_URL_SYNTAX_DETAIL,
   resolveCloneCredentials,
   validateCloneRemoteUrl,
   withCloneAskpass,
@@ -169,7 +171,12 @@ export const makeGitNetwork = Effect.gen(function* () {
         ),
       );
     }
-    return Result.match(validateCloneRemoteUrl(remoteUrl), {
+    // WHATWG `URL` (in `validateCloneRemoteUrl`) also reads `https:\\host/x` or `ssh:host/x` as
+    // https or ssh, where git sees an ssh host named `https`: only what both accept is cloned.
+    const validated = isCloneableRemoteKind(kind)
+      ? validateCloneRemoteUrl(remoteUrl)
+      : Result.fail(CLONE_REMOTE_URL_SYNTAX_DETAIL);
+    return Result.match(validated, {
       onFailure: (detail) => Effect.fail(failure(operation, "invalid-url", detail)),
       onSuccess: (url) =>
         !allowLocalRemote && remoteUrlHasPassword(url)

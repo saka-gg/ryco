@@ -112,6 +112,57 @@ describe("remoteUrlHasPassword", () => {
   });
 });
 
+/**
+ * git hands `https:///user:token@host/…` to curl, which skips up to three slashes and sends the
+ * token; WHATWG `URL` reads user info after any run of slashes or backslashes. Every rule must
+ * find the credentials wherever those readers do.
+ */
+describe("credentials after extra slashes", () => {
+  const cases = [
+    { url: "https:///deploy:ghp_SECRET@github.com/acme/private.git", secret: "ghp_SECRET" },
+    { url: "http:///u:SECRET@h/x", secret: "SECRET" },
+    { url: "ssh:///u:SECRET@h/x", secret: "SECRET" },
+    { url: "https:/u:SECRET@h/x", secret: "SECRET" },
+    { url: "https:\\\\u:SECRET@h/x", secret: "SECRET" },
+    { url: "HTTPS:////u:SECRET@h/x", secret: "SECRET" },
+  ];
+
+  it("finds the password", () => {
+    for (const { url } of cases) expect(remoteUrlHasPassword(url), url).toBe(true);
+  });
+
+  it("strips it when sanitizing, and the user name too for http(s)", () => {
+    expect(sanitizeRemoteUrl("https:///deploy:ghp_SECRET@github.com/acme/private.git")).toBe(
+      "https:///github.com/acme/private.git",
+    );
+    expect(sanitizeRemoteUrl("https:///ghp_TOKEN@github.com/acme/private.git")).toBe(
+      "https:///github.com/acme/private.git",
+    );
+    expect(sanitizeRemoteUrl("ssh:///u:SECRET@h/x")).toBe("ssh:///u@h/x");
+    for (const { url, secret } of cases) {
+      const sanitized = sanitizeRemoteUrl(url);
+      expect(sanitized, url).not.toContain(secret);
+      expect(remoteUrlHasPassword(sanitized), url).toBe(false);
+    }
+  });
+
+  it("redacts it in free text", () => {
+    expect(
+      redactGitCredentials(
+        "fatal: unable to access 'https:///deploy:ghp_SECRET@github.com/acme/private.git/': 404",
+      ),
+    ).toBe("fatal: unable to access 'https:///***@github.com/acme/private.git/': 404");
+    for (const { url, secret } of cases) {
+      expect(redactGitCredentials(`fatal: '${url}' failed`), url).not.toContain(secret);
+    }
+  });
+
+  it("still reads a file:// URL's empty authority as a path", () => {
+    expect(remoteUrlHasPassword("file:///srv/git/a:b@c.git")).toBe(false);
+    expect(sanitizeRemoteUrl("file:///srv/git/r.git")).toBe("file:///srv/git/r.git");
+  });
+});
+
 describe("alternateRemoteUrl", () => {
   it("maps https to scp-ssh and back from host, owner and repository", () => {
     expect(alternateRemoteUrl("https://github.com/octocat/ryco.git")).toBe(
@@ -197,6 +248,21 @@ describe("displayRemoteUrl", () => {
     expect(displayRemoteUrl("git@github.com:sak0a/ryco.git")).toBe("github.com/sak0a/ryco");
     expect(displayRemoteUrl("https://github.com/sak0a/Ryco.git")).toBe("github.com/sak0a/Ryco");
     expect(displayRemoteUrl("ssh://git@gitlab.example/x/y")).toBe("gitlab.example/x/y");
+    expect(displayRemoteUrl("ssh://git@gitlab.example:2222/x/y.git")).toBe(
+      "gitlab.example:2222/x/y",
+    );
+  });
+
+  it("joins an scp remote's server-absolute path to its host with one slash", () => {
+    expect(displayRemoteUrl("git@fixture.test:/private/tmp/ui/git/demo.git")).toBe(
+      "fixture.test/private/tmp/ui/git/demo",
+    );
+    expect(displayRemoteUrl("git@fixture.test://srv/demo.git/")).toBe("fixture.test/srv/demo");
+    // The ssh:// spelling of the same repository reads the same.
+    expect(displayRemoteUrl("ssh://git@fixture.test/private/tmp/ui/git/demo.git")).toBe(
+      "fixture.test/private/tmp/ui/git/demo",
+    );
+    expect(displayRemoteUrl("git@example.com:~user/r.git")).toBe("example.com/~user/r");
   });
 
   it("never shows user info", () => {

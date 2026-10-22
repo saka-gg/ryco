@@ -50,7 +50,11 @@ export interface GitNetworkCommandInput {
   readonly allowLocalRemote?: boolean | undefined;
   /** Overall limit (ls-remote 30 s, clone 30 min, submodules 10 min). */
   readonly timeoutMs: number;
-  /** Fails `stalled` after this long without any output (clone: 5 min). */
+  /**
+   * Fails `stalled` after this long without any output (clone: 5 min). git prints no progress
+   * to a pipe unless asked (`--progress`, `GIT_LFS_FORCE_PROGRESS=1`): without it a long but
+   * healthy transfer reads as a stall.
+   */
   readonly stallTimeoutMs?: number | undefined;
   /** Added to the non-interactive environment, e.g. `GIT_LFS_SKIP_SMUDGE=1`. */
   readonly env?: Readonly<Record<string, string>> | undefined;

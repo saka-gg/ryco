@@ -386,6 +386,8 @@ describe("ProjectImportGitLive", () => {
           { name: "origin", url: "https://x-token@github.com/octocat/ryco.git" },
           { name: "fork", url: "git@github.com:me/ryco.git" },
           { name: "mirror", url: "/srv/git/ryco.git" },
+          // curl would skip the third slash and send the token.
+          { name: "deploy", url: "https:///ghp_token@github.com/octocat/ryco.git" },
         ],
         keepRemoteName: null,
       });
@@ -396,6 +398,10 @@ describe("ProjectImportGitLive", () => {
         "https://github.com/octocat/ryco.git",
       );
       assert.strictEqual(git(staging, "remote", "get-url", "fork"), "git@github.com:me/ryco.git");
+      assert.strictEqual(
+        git(staging, "remote", "get-url", "deploy"),
+        "https:///github.com/octocat/ryco.git",
+      );
 
       const checkedOut = yield* importGit.checkout({
         repositoryRoot: staging,
@@ -622,7 +628,7 @@ describe("ProjectImportGitLive", () => {
     }).pipe(Effect.provide(TestLayer)),
   );
 
-  it.live("updates submodules over the user's ssh without clone credentials", () =>
+  it.live("updates submodules over the user's ssh, with progress, without clone credentials", () =>
     Effect.gen(function* () {
       const importGit = yield* ProjectImportGit;
       const origin = makeOrigin({ "README.md": "one\n" });
@@ -649,6 +655,7 @@ describe("ProjectImportGitLive", () => {
       git(origin.work, "push", "--quiet", "origin", "main");
 
       const staging = stagingDirectory(origin);
+      const output: Array<string> = [];
       yield* Effect.gen(function* () {
         yield* importGit.cloneNoCheckout({
           repositoryRoot: staging,
@@ -662,9 +669,124 @@ describe("ProjectImportGitLive", () => {
           checkout: { branch: "main", headOid: head },
           relativeRootInRepository: "",
         });
-        yield* importGit.updateSubmodules({ repositoryRoot: staging });
+        yield* importGit.updateSubmodules({
+          repositoryRoot: staging,
+          observer: { onOutput: (chunk) => Effect.sync(() => output.push(chunk)) },
+        });
       }).pipe(servedBy(origin));
       assert.strictEqual(readFileSync(path.join(staging, "lib", "lib.txt"), "utf8"), "library\n");
+      // A long submodule clone keeps printing, so the no-output stall limit never ends it early.
+      assert.include(output.join(""), "Receiving objects");
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.live("checks out and patches LFS pointers when a required git-lfs filter cannot run", () =>
+    Effect.gen(function* () {
+      const importGit = yield* ProjectImportGit;
+      const pointer = (oid: string) =>
+        `version https://git-lfs.github.com/spec/v1\noid sha256:${oid.repeat(64)}\nsize 1\n`;
+      // The fixture's own git never runs an LFS filter (the machine may configure a missing one).
+      const noLfs = [
+        "-c",
+        "filter.lfs.process=",
+        "-c",
+        "filter.lfs.clean=",
+        "-c",
+        "filter.lfs.smudge=",
+        "-c",
+        "filter.lfs.required=false",
+      ];
+      const origin = makeOrigin({ "README.md": "one\n" });
+      writeFileSync(
+        path.join(origin.work, ".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+      );
+      writeFileSync(path.join(origin.work, "large.bin"), pointer("a"));
+      git(origin.work, ...noLfs, "add", "-A");
+      git(origin.work, ...noLfs, "commit", "--quiet", "-m", "lfs");
+      const head = git(origin.work, "rev-parse", "HEAD");
+      git(origin.work, "push", "--quiet", "origin", "main");
+      // Uncommitted changes to a plain file and to the pointer itself.
+      writeFileSync(path.join(origin.work, "README.md"), "one, edited\n");
+      writeFileSync(path.join(origin.work, "large.bin"), pointer("b"));
+      const patch = path.join(origin.root, "changes.patch");
+      git(origin.work, ...noLfs, "diff", "--binary", "--no-color", `--output=${patch}`, "HEAD");
+
+      const staging = stagingDirectory(origin);
+      yield* importGit
+        .cloneNoCheckout({ repositoryRoot: staging, remoteUrl: ORIGIN_URL, remoteName: "origin" })
+        .pipe(servedBy(origin));
+      // What `git lfs install` writes, naming a git-lfs this node does not have.
+      git(staging, "config", "filter.lfs.process", "ryco-missing-git-lfs filter-process");
+      git(staging, "config", "filter.lfs.smudge", "ryco-missing-git-lfs smudge -- %f");
+      git(staging, "config", "filter.lfs.clean", "ryco-missing-git-lfs clean -- %f");
+      git(staging, "config", "filter.lfs.required", "true");
+      assert.notStrictEqual(
+        gitStatus(staging, "checkout", "--quiet", "-f", "--detach", head, "--"),
+        0,
+        "a plain checkout fails on the missing filter",
+      );
+
+      const checkedOut = yield* importGit.checkout({
+        repositoryRoot: staging,
+        importId,
+        remoteName: "origin",
+        checkout: { branch: "main", headOid: head },
+        relativeRootInRepository: "",
+      });
+      assert.deepStrictEqual(checkedOut, {
+        branch: "main",
+        headOid: head,
+        upstream: "origin/main",
+      });
+      assert.strictEqual(readFileSync(path.join(staging, "large.bin"), "utf8"), pointer("a"));
+
+      const applied = yield* importGit.applyChanges({
+        repositoryRoot: staging,
+        importId,
+        patchPath: patch,
+        baseOid: head,
+        ignoredPaths: [],
+      });
+      assert.deepStrictEqual(applied, { status: "applied" });
+      assert.strictEqual(readFileSync(path.join(staging, "README.md"), "utf8"), "one, edited\n");
+      assert.strictEqual(readFileSync(path.join(staging, "large.bin"), "utf8"), pointer("b"));
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.live("pulls LFS files with progress forced on, so a long download is never a stall", () =>
+    Effect.gen(function* () {
+      const importGit = yield* ProjectImportGit;
+      const root = roots.make("ryco-import-lfs-progress-");
+      const repository = initRepository(path.join(root, "repo"));
+      writeFileSync(path.join(repository, ".gitattributes"), "*.bin filter=lfs -text\n");
+      writeFileSync(path.join(repository, "large.bin"), "pointer\n");
+      const noLfs = ["-c", "filter.lfs.process=", "-c", "filter.lfs.clean="];
+      git(repository, ...noLfs, "-c", "filter.lfs.required=false", "add", "-A");
+      git(
+        repository,
+        ...noLfs,
+        "-c",
+        "filter.lfs.required=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "lfs",
+      );
+      // A stand-in git-lfs that records what `git lfs pull` was run with.
+      const binDir = path.join(root, "bin");
+      mkdirSync(binDir);
+      const record = path.join(root, "lfs-pull.env");
+      writeFileSync(
+        path.join(binDir, "git-lfs"),
+        `#!/bin/sh\ncase "$1" in\n  version) echo "git-lfs/3.6.0" ;;\n  pull) printf '%s %s' "$GIT_LFS_FORCE_PROGRESS" "$*" > "${record}" ;;\nesac\n`,
+        { mode: 0o755 },
+      );
+      const result = yield* importGit
+        .lfsPull({ repositoryRoot: repository, remoteName: "origin" })
+        .pipe(withProcessEnv({ PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` }));
+      assert.deepStrictEqual(result, { status: "pulled" });
+      assert.strictEqual(readFileSync(record, "utf8"), "1 pull -- origin");
     }).pipe(Effect.provide(TestLayer)),
   );
 

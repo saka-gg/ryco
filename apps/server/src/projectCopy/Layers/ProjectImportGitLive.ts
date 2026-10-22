@@ -16,6 +16,7 @@ import { lstat } from "node:fs/promises";
 import type { GitObjectId, GitRemoteName } from "@ryco/contracts/project-copy";
 import {
   classifyRemoteUrl,
+  isRecreatableRemoteKind,
   redactGitCredentials,
   sanitizeRemoteUrl,
 } from "@ryco/shared/gitRemoteUrl";
@@ -26,6 +27,7 @@ import { WorkspacePaths } from "../../workspace/Services/WorkspacePaths.ts";
 import { type GitNetworkError, ProjectImportStepError } from "../Errors.ts";
 import {
   GIT_DETAIL_MAX_CHARS,
+  GIT_LFS_FILTER_OFF_ARGS,
   runProjectCopyGit,
   tailOfText,
   type ProjectCopyGitOutput,
@@ -54,6 +56,11 @@ const OUTPUT_DETAIL_MAX_CHARS = 4_000;
 /** Hooks never run during an import: nothing is installed at this path. */
 const NO_HOOKS = ["-c", "core.hooksPath=/dev/null"] as const;
 const LFS_SKIP_SMUDGE = { GIT_LFS_SKIP_SMUDGE: "1" } as const;
+/**
+ * git-lfs prints no progress when its output is not a terminal; forced on, a download keeps the
+ * no-output stall limit fed for as long as bytes arrive.
+ */
+const LFS_FORCE_PROGRESS = { GIT_LFS_FORCE_PROGRESS: "1" } as const;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const PREREQUISITES_MISSING = /lacks these prerequisite commits/i;
 
@@ -136,6 +143,8 @@ export const makeProjectImportGit = Effect.gen(function* () {
     input: {
       readonly operation: string;
       readonly repositoryRoot: string;
+      /** `-c` options before the subcommand, e.g. `GIT_LFS_FILTER_OFF_ARGS`. */
+      readonly config?: ReadonlyArray<string>;
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
       readonly env?: Readonly<Record<string, string>>;
@@ -146,7 +155,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
     runProjectCopyGit({
       operation: `ProjectImportGit.${input.operation}`,
       cwd: input.repositoryRoot,
-      args: [...NO_HOOKS, ...input.args],
+      args: [...NO_HOOKS, ...(input.config ?? []), ...input.args],
       env: { ...gitNetwork.env, ...input.env },
       timeoutMs: input.timeoutMs ?? LOCAL_SHORT_TIMEOUT_MS,
       maxOutputBytes: input.maxOutputBytes,
@@ -521,12 +530,12 @@ export const makeProjectImportGit = Effect.gen(function* () {
       yield* gitOk("checkout-failed", "git checkout", {
         operation: "checkout.checkout",
         repositoryRoot,
+        // LFS files stay pointers until the `lfs` step; a missing git-lfs must not fail this.
+        config: GIT_LFS_FILTER_OFF_ARGS,
         args:
           target.branch === null
             ? ["checkout", "-f", "--detach", target.oid, "--"]
             : ["checkout", "-f", "-B", target.branch, target.oid, "--"],
-        // Large files arrive in the `lfs` step; a missing git-lfs must not fail the checkout.
-        env: LFS_SKIP_SMUDGE,
         timeoutMs: LOCAL_LONG_TIMEOUT_MS,
         observer,
       });
@@ -571,8 +580,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
     for (const remote of input.remotes) {
       // The clone remote keeps the URL that was actually used.
       if (remote.name === input.keepRemoteName) continue;
-      const kind = classifyRemoteUrl(remote.url);
-      if (kind !== "https" && kind !== "http" && kind !== "ssh" && kind !== "scp") {
+      if (!isRecreatableRemoteKind(classifyRemoteUrl(remote.url))) {
         warnings.push(
           `Remote ${remote.name} was not recreated: its URL only works on the node it came from.`,
         );
@@ -656,11 +664,13 @@ export const makeProjectImportGit = Effect.gen(function* () {
         `The changes were made on ${input.baseOid.slice(0, 12)}, but this checkout is at ${head?.slice(0, 12) ?? "no commit"}.`,
       );
     }
-    // Both are atomic and leave the index alone; no three-way fallback.
+    // Both are atomic and leave the index alone; no three-way fallback. Reading a preimage runs
+    // its clean filter, so the LFS filter is off here as in the checkout.
     const applyArgs = ["apply", "--binary", "--whitespace=nowarn"];
     const check = yield* git("changes-conflict", {
       operation: "applyChanges.check",
       repositoryRoot,
+      config: GIT_LFS_FILTER_OFF_ARGS,
       args: [...applyArgs, "--check", "--", patchPath],
       timeoutMs: LOCAL_LONG_TIMEOUT_MS,
       observer,
@@ -669,6 +679,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
     const apply = yield* git("changes-conflict", {
       operation: "applyChanges.apply",
       repositoryRoot,
+      config: GIT_LFS_FILTER_OFF_ARGS,
       args: [...applyArgs, "--", patchPath],
       timeoutMs: LOCAL_LONG_TIMEOUT_MS,
       observer,
@@ -694,7 +705,9 @@ export const makeProjectImportGit = Effect.gen(function* () {
       .runGitNetworkCommand({
         operation: "ProjectImportGit.updateSubmodules",
         cwd: input.repositoryRoot,
-        args: [...NO_HOOKS, "submodule", "update", "--init", "--recursive", "--"],
+        // Without `--progress` a submodule's clone prints nothing to a pipe until it is done, and
+        // the no-output stall limit would end a long one.
+        args: [...NO_HOOKS, "submodule", "update", "--init", "--recursive", "--progress", "--"],
         remoteUrl: null,
         timeoutMs: SUBMODULES_TIMEOUT_MS,
         stallTimeoutMs: CLONE_STALL_TIMEOUT_MS,
@@ -742,6 +755,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
           ...(input.remoteName === null ? [] : ["--", input.remoteName]),
         ],
         remoteUrl: null,
+        env: LFS_FORCE_PROGRESS,
         timeoutMs: LFS_TIMEOUT_MS,
         stallTimeoutMs: CLONE_STALL_TIMEOUT_MS,
         observer: input.observer,

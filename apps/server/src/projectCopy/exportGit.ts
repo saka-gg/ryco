@@ -32,6 +32,7 @@ import {
 } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { PORTABLE_PATCH_DIFF_ARGS } from "../vcs/GitIndexReview.ts";
 import { seedIndexFromCheckout } from "../vcs/GitTemporaryIndex.ts";
+import { GIT_LFS_FILTER_OFF_ARGS } from "./gitProcess.ts";
 import type { GitNetworkShape } from "./Services/GitNetwork.ts";
 
 /** Bundles, the patch's `add` and `diff`: long, but never unbounded. */
@@ -75,9 +76,9 @@ export const PROJECT_EXPORT_SKIPPED_PATH_PREFIX = {
 
 /**
  * `-c` options of every export git command that reads the working tree: no hooks, no split
- * index, no fsmonitor daemon, and no LFS filter process. LFS paths never enter the patch, so
- * git-lfs never needs to run (and a configured-but-missing git-lfs with `required=true` cannot
- * fail the export).
+ * index, no fsmonitor daemon, and no LFS filter. LFS paths never enter the patch, so git-lfs
+ * never needs to run (and a configured-but-missing git-lfs with `required=true` cannot fail the
+ * export).
  */
 const EXPORT_GIT_CONFIG_ARGS: ReadonlyArray<string> = [
   "-c",
@@ -86,14 +87,7 @@ const EXPORT_GIT_CONFIG_ARGS: ReadonlyArray<string> = [
   "core.splitIndex=false",
   "-c",
   "core.fsmonitor=false",
-  "-c",
-  "filter.lfs.process=",
-  "-c",
-  "filter.lfs.clean=",
-  "-c",
-  "filter.lfs.smudge=",
-  "-c",
-  "filter.lfs.required=false",
+  ...GIT_LFS_FILTER_OFF_ARGS,
 ];
 
 export interface ExportGitCommand {
@@ -413,11 +407,16 @@ export const readPushedState = (
         heads: true,
         tags: true,
         timeoutMs: EXPORT_LS_REMOTE_TIMEOUT_MS,
+        // In the checkout, so its own config applies as when the user fetches: a per-repository
+        // or `includeIf "gitdir:"` `core.sshCommand`, `url.*.insteadOf`, credential helpers, and
+        // a relative remote path.
+        cwd,
       })
       .pipe(
         Effect.map((refs) => ({ ok: true as const, refs })),
+        // The tracking refs then stand in, and they can be stale: what gets copied may change.
         Effect.catch((error) =>
-          Effect.logDebug("project export: ls-remote of the clone remote failed", {
+          Effect.logWarning("project export: ls-remote of the clone remote failed", {
             reason: error.reason,
           }).pipe(Effect.as({ ok: false as const })),
         ),
