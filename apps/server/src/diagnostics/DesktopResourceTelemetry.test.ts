@@ -67,25 +67,21 @@ describe("desktop resource telemetry receiver", () => {
     expect((await stale)?.processes).toEqual([]);
     pipe.destroy();
   });
-  it("tells a pipe it dropped for a protocol violation from one the app closed", () => {
-    const pipe = () =>
-      new Duplex({
-        read() {},
-        write(_chunk, _encoding, callback) {
-          callback();
-        },
-      });
-    const closedByApp = pipe();
-    const appReceiver = makeDesktopResourceTelemetry(closedByApp);
-    closedByApp.push(null);
-    closedByApp.destroy();
-    expect(appReceiver.closedByBackend()).toBe(false);
-
-    const violated = pipe();
-    const backendReceiver = makeDesktopResourceTelemetry(violated);
-    violated.emit("data", "not json\n");
-    expect(violated.destroyed).toBe(true);
-    expect(backendReceiver.closedByBackend()).toBe(true);
+  it("keeps the pipe open over malformed input: its close shuts the backend down", async () => {
+    const pipe = new Duplex({
+      read() {},
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const receiver = makeDesktopResourceTelemetry(pipe);
+    const read = receiver.read();
+    pipe.emit("data", `not json\n${JSON.stringify(snapshot)}\n`);
+    expect(pipe.destroyed).toBe(false);
+    expect((await read)?.processes).toHaveLength(1);
+    pipe.emit("data", "x".repeat(300 * 1024));
+    expect(pipe.destroyed).toBe(false);
+    pipe.destroy();
   });
   it("coalesces pending requests and closes cleanly", async () => {
     const pipe = new Duplex({

@@ -43,11 +43,8 @@ process.on("exit", (code) => record("exit-code", String(code)));
 if (mode === "hung") {
   const pipe = new Socket({ fd: 4, readable: true, writable: true });
   pipe.unref();
-  const receiver = makeDesktopResourceTelemetry(pipe);
-  watchDesktopParentPipe(pipe, {
-    closedByBackend: receiver.closedByBackend,
-    shutdownTimeoutMs: Number(shutdownTimeoutMs),
-  });
+  makeDesktopResourceTelemetry(pipe);
+  watchDesktopParentPipe(pipe, { shutdownTimeoutMs: Number(shutdownTimeoutMs) });
 } else {
   initializeDesktopResourceTelemetry(4);
 }

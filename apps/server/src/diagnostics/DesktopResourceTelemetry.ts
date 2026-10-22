@@ -25,9 +25,6 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
   let processReceivedAt = 0;
   let pending: Promise<DesktopResourceTelemetrySnapshot | null> | undefined;
   let complete: ((snapshot: DesktopResourceTelemetrySnapshot | null) => void) | undefined;
-  // Set before the reader drops a pipe that broke the protocol, so that close
-  // is not taken for the app's exit.
-  let closedByBackend = false;
   const current = () => {
     if (!latest || Date.now() - powerReceivedAt >= DESKTOP_TELEMETRY_STALE_MS) return null;
     return Date.now() - processReceivedAt < 10_000
@@ -63,10 +60,10 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
           latest = latest ? { ...latest, power: snapshot.power } : snapshot;
         }
       },
-      () => {
-        closedByBackend = true;
-        connection.destroy();
-      },
+      // A malformed line is dropped. Closing the pipe over it would cut this
+      // backend's tie to the app: it shuts down when the pipe closes
+      // (desktopParentLifetime.ts), so it must stay open while the app runs.
+      () => undefined,
     ),
   );
   connection.on("error", () => connection.destroy());
@@ -78,7 +75,6 @@ export function makeDesktopResourceTelemetry(connection: Duplex) {
     complete?.(null);
   });
   return {
-    closedByBackend: () => closedByBackend,
     read(): Promise<DesktopResourceTelemetrySnapshot | null> {
       if (connection.destroyed) return Promise.resolve(null);
       if (pending) return pending;
@@ -111,7 +107,7 @@ export function initializeDesktopResourceTelemetry(fd: number): void {
     receiver = makeDesktopResourceTelemetry(connection);
     attachDesktopLifecycleChannel(connection);
     attachDesktopAppUpdateChannel(connection);
-    watchDesktopParentPipe(connection, { closedByBackend: receiver.closedByBackend });
+    watchDesktopParentPipe(connection);
   } catch {
     // Optional diagnostics must never prevent backend startup.
   }

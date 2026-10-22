@@ -12,6 +12,7 @@ import {
   watchDesktopParentPipe,
   withDesktopParentLifetime,
 } from "./desktopParentLifetime.ts";
+import { makeDesktopResourceTelemetry } from "./diagnostics/DesktopResourceTelemetry.ts";
 
 const desktopPipe = () =>
   new Duplex({
@@ -47,7 +48,7 @@ describe("desktop parent lifetime", () => {
 
   it("interrupts the program, finalizers included, once the app closes its end", async () => {
     const pipe = desktopPipe();
-    watchDesktopParentPipe(pipe, { closedByBackend: () => false });
+    watchDesktopParentPipe(pipe);
     pipe.resume();
     let finalized = false;
     const running = Effect.runPromiseExit(
@@ -69,7 +70,7 @@ describe("desktop parent lifetime", () => {
 
   it("names the app's loss in the shutdown log only when it caused the shutdown", async () => {
     const pipe = desktopPipe();
-    watchDesktopParentPipe(pipe, { closedByBackend: () => false });
+    watchDesktopParentPipe(pipe);
     pipe.resume();
     expect(await shutdownLog()).toEqual([]);
     const ended = new Promise((resolve) => pipe.once("end", resolve));
@@ -78,12 +79,16 @@ describe("desktop parent lifetime", () => {
     expect(await shutdownLog()).toEqual(["desktop app is gone; shutting the backend down"]);
   });
 
-  it("ignores a close the backend made itself", async () => {
+  it("keeps the backend running over malformed input from the app", async () => {
     const pipe = desktopPipe();
-    watchDesktopParentPipe(pipe, { closedByBackend: () => true });
-    const closed = new Promise((resolve) => pipe.once("close", resolve));
-    pipe.destroy();
-    await closed;
+    // The production wiring: the telemetry reader reads the pipe the watch observes.
+    makeDesktopResourceTelemetry(pipe);
+    watchDesktopParentPipe(pipe);
+    pipe.push("not json\n");
+    pipe.push("x".repeat(300 * 1024));
+    // Lets the pushed chunks reach the reader before the program starts.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(pipe.destroyed).toBe(false);
     await expect(Effect.runPromise(withDesktopParentLifetime(shortProgram))).resolves.toBe("done");
   });
 });

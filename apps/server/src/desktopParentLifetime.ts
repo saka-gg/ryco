@@ -7,8 +7,8 @@
  * quitting, updating and restarting stop the backend first and wait for its
  * exit. Only the app holds that end (libuv creates it close-on-exec), so it
  * closes exactly when the app exits or crashes, whatever children either
- * process started. When the pipe ends, fails or closes and the backend did not
- * close it itself, nobody is left to stop the backend, which would keep its
+ * process started. The backend keeps its end open too. When the pipe ends,
+ * fails or closes, nobody is left to stop the backend, which would keep its
  * port, its provider children and its database. It shuts down the way SIGTERM
  * does instead: the main program is interrupted, so the usual scoped
  * finalizers run (restart hints, provider stops, SQLite close), and an unref'd
@@ -35,21 +35,24 @@ let appGone: Deferred.Deferred<void> | null = null;
 let shutdownWatchdog: ReturnType<typeof setTimeout> | undefined;
 const ignoreStdioWriteError = () => {};
 
-export interface DesktopParentPipeWatch {
-  /** Whether the backend closed the pipe itself; that close says nothing about the app. */
-  readonly closedByBackend: () => boolean;
+export interface DesktopParentPipeWatchOptions {
   /** Overrides {@link DESKTOP_PARENT_LOSS_SHUTDOWN_TIMEOUT_MS}. */
   readonly shutdownTimeoutMs?: number;
 }
 
 /**
- * Takes the end, failure or close of the desktop pipe for the app's exit,
- * unless the backend closed it itself. The watchdog is armed right then, so a
- * backend stuck before or outside {@link withDesktopParentLifetime} still ends.
- * Its end is only seen while the pipe is read (the telemetry reader does).
- * Only the first pipe of a process is watched.
+ * Takes the end, failure or close of the desktop pipe for the app's exit. The
+ * backend closes the pipe only once it has failed (its telemetry reader drops
+ * malformed input instead), so any close means the app is gone. The watchdog
+ * is armed right then, so a backend stuck before or outside
+ * {@link withDesktopParentLifetime} still ends. Its end is only seen while the
+ * pipe is read (the telemetry reader does). Only the first pipe of a process
+ * is watched; start it before {@link withDesktopParentLifetime} runs.
  */
-export function watchDesktopParentPipe(pipe: Duplex, watch: DesktopParentPipeWatch): void {
+export function watchDesktopParentPipe(
+  pipe: Duplex,
+  options: DesktopParentPipeWatchOptions = {},
+): void {
   // Bun (the development backend) cannot adopt an inherited descriptor as a
   // socket: it never reads, and its first write fails with ERR_SOCKET_CLOSED,
   // so there the pipe's close says nothing about the app.
@@ -63,9 +66,9 @@ export function watchDesktopParentPipe(pipe: Duplex, watch: DesktopParentPipeWat
   process.stdout.on("error", ignoreStdioWriteError);
   process.stderr.on("error", ignoreStdioWriteError);
   const onPipeGone = () => {
-    if (Deferred.isDoneUnsafe(gone) || watch.closedByBackend()) return;
+    if (Deferred.isDoneUnsafe(gone)) return;
     Deferred.doneUnsafe(gone, Effect.void);
-    const timeoutMs = watch.shutdownTimeoutMs ?? DESKTOP_PARENT_LOSS_SHUTDOWN_TIMEOUT_MS;
+    const timeoutMs = options.shutdownTimeoutMs ?? DESKTOP_PARENT_LOSS_SHUTDOWN_TIMEOUT_MS;
     shutdownWatchdog = setTimeout(() => {
       try {
         process.stderr.write(

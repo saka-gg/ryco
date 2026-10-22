@@ -3312,6 +3312,8 @@ const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
+    // resolveServerConfig has started the desktop pipe watch this race reads
+    // (initializeDesktopResourceTelemetry), so it must stay ahead of it.
     return yield* runServer.pipe(
       Effect.provideService(ServerConfig, config),
       withDesktopParentLifetime,
